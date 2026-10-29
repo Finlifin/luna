@@ -5,7 +5,7 @@ pub(super) struct Inputs {
     pub head: DeclarationId,
     pub arguments: Vec<Term>,
     parameters: Vec<nir::DeclarationParameter>,
-    pub literal: Option<Value>,
+    pub prepared: BTreeMap<usize, Prepared>,
 }
 impl Inputs {
     pub fn new(head: DeclarationId) -> Self {
@@ -13,7 +13,7 @@ impl Inputs {
             head,
             arguments: vec![],
             parameters: vec![],
-            literal: None,
+            prepared: BTreeMap::new(),
         }
     }
 }
@@ -23,9 +23,9 @@ impl fmt::Display for Inputs {
         for argument in &self.arguments {
             write!(f, " {argument}")?;
         }
-        write!(f, ") (literal")?;
-        if let Some(value) = &self.literal {
-            write!(f, " {value}")?;
+        write!(f, ") (prepared")?;
+        for (slot, value) in &self.prepared {
+            write!(f, " (%{slot} {value})")?;
         }
         write!(f, "))")
     }
@@ -57,7 +57,7 @@ impl Interpreter<'_> {
         &mut self,
         inputs: &mut Inputs,
         index: usize,
-        input: &comptime_compiler::normal_types::Input,
+        input: &comptime_compiler::normal_types::Shape,
         source: SourceRange,
     ) -> Result<(), Error> {
         let metadata = *self
@@ -73,19 +73,149 @@ impl Interpreter<'_> {
             &inputs.arguments,
             source,
         )?;
-        use comptime_compiler::normal_types::Input;
-        let literal = match input {
-            Input::Value(ty) => {
-                self.prepare_normal_value_type(ty, &expected, source)?;
-                None
+        inputs.prepared.clear();
+        self.prepare_normal_shape(input, &expected, &mut inputs.prepared, 0)
+    }
+    pub(super) fn normal_list_domain(
+        &mut self,
+        expected: &Term,
+        count: usize,
+        source: SourceRange,
+    ) -> Result<Term, Error> {
+        if count > 100_000 {
+            return Err(self.failure(ErrorKind::RepresentationSizeLimit, Some(source)));
+        }
+        self.integer_operation(Some(source), |budget| {
+            let before = budget.steps;
+            let mut fuel = before;
+            if nir::type_computations::charge_term(expected, &mut fuel).is_err() {
+                return budget.consume(before.saturating_add(1));
             }
-            Input::Unit => Some(self.normal_unit_value(&expected, source)?),
-            Input::Integer { spelling, negative } => {
-                Some(self.normal_integer_value(&expected, spelling, *negative, source)?)
-            }
-        };
-        inputs.literal = literal;
+            budget.consume(before - fuel)
+        })?;
+        let element = self
+            .list_element(expected)
+            .cloned()
+            .or_else(|| {
+                self.is_type_list_input(expected)
+                    .then_some(Term::Primitive(Primitive::Type))
+            })
+            .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
+        self.integer_operation(Some(source), |budget| budget.consume(count))?;
+        Ok(element)
+    }
+    fn prepare_normal_shape(
+        &mut self,
+        shape: &comptime_compiler::normal_types::Shape,
+        expected: &Term,
+        prepared: &mut BTreeMap<usize, Prepared>,
+        depth: usize,
+    ) -> Result<(), Error> {
+        use comptime_compiler::normal_types::{Input, ShapeKind};
+        let source = shape.source;
+        if depth >= 128 {
+            return Err(self.failure(ErrorKind::DepthExhausted, Some(source)));
+        }
+        self.tick(Some(source))?;
+        let value =
+            match &shape.kind {
+                ShapeKind::Scalar(Input::Value(ty)) => {
+                    self.prepare_normal_value_type(ty, expected, source)?;
+                    return Ok(());
+                }
+                ShapeKind::Scalar(Input::Unit) => {
+                    Prepared::Literal(self.normal_unit_value(expected, source)?)
+                }
+                ShapeKind::Scalar(Input::Integer { spelling, negative }) => Prepared::Literal(
+                    self.normal_integer_value(expected, spelling, *negative, source)?,
+                ),
+                ShapeKind::List(items) => {
+                    let element = self.normal_list_domain(expected, items.len(), source)?;
+                    for (spread, child) in items {
+                        self.prepare_normal_shape(
+                            child,
+                            if *spread { expected } else { &element },
+                            prepared,
+                            depth + 1,
+                        )?;
+                    }
+                    Prepared::List {
+                        ty: expected.clone(),
+                        types: vec![],
+                        values: vec![],
+                    }
+                }
+                ShapeKind::Tuple { head, items } => {
+                    let type_tuple = *expected == Term::Primitive(Primitive::Type);
+                    if type_tuple {
+                        for child in items {
+                            self.prepare_normal_shape(child, expected, prepared, depth + 1)?;
+                        }
+                        if let Some(head) = head {
+                            if !self.normal_forms.get(head).is_some_and(|metadata| {
+                                metadata.role == nir::normal_forms::Role::Tuple
+                            }) {
+                                return Err(self.failure(ErrorKind::Type, Some(source)));
+                            }
+                        }
+                    } else {
+                        let types = self
+                            .tuple_input_elements(expected)
+                            .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
+                        if types.len() != items.len() {
+                            return Err(self.failure(ErrorKind::Arity, Some(source)));
+                        }
+                        for (child, ty) in items.iter().zip(types) {
+                            self.prepare_normal_shape(child, ty, prepared, depth + 1)?;
+                        }
+                    }
+                    Prepared::Tuple {
+                        head: type_tuple.then_some(*head),
+                        values: vec![],
+                    }
+                }
+            };
+        prepared.insert(shape.slot, value);
         Ok(())
+    }
+    pub(super) fn append_compiled_normal_container(
+        &mut self,
+        container: &mut Prepared,
+        value: Value,
+        spread: bool,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        match container {
+            Prepared::List { ty, types, values } => {
+                self.append_normal_list_item(ty, types, values, spread, value, source)
+            }
+            Prepared::Tuple { values, .. } => {
+                values.push(value);
+                Ok(())
+            }
+            _ => Err(self.failure(ErrorKind::Type, Some(source))),
+        }
+    }
+    pub(super) fn finish_compiled_normal_container(
+        &mut self,
+        container: Prepared,
+        source: SourceRange,
+    ) -> Result<Value, Error> {
+        match container {
+            Prepared::List { ty, types, values } => self.finish_normal_list(ty, types, values),
+            Prepared::Tuple {
+                head: Some(head),
+                values,
+            } => {
+                let types = values
+                    .into_iter()
+                    .map(|value| self.type_description_term(value, source))
+                    .collect::<Result<_, _>>()?;
+                self.contextual_tuple_type(head, types, source)
+            }
+            Prepared::Tuple { head: None, values } => Ok(Value::Tuple(values)),
+            _ => Err(self.failure(ErrorKind::Type, Some(source))),
+        }
     }
     pub(super) fn normal_unit_value(
         &mut self,
@@ -182,5 +312,47 @@ impl Interpreter<'_> {
         inputs.parameters.push(parameter);
         inputs.arguments.push(term);
         Ok(())
+    }
+}
+
+/// Prepared domains and accumulators are invocation-local, never code-cache data.
+pub(super) enum Prepared {
+    Literal(Value),
+    List {
+        ty: Term,
+        types: Vec<Term>,
+        values: Vec<Value>,
+    },
+    Tuple {
+        head: Option<Option<DeclarationId>>,
+        values: Vec<Value>,
+    },
+}
+impl fmt::Display for Prepared {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (kind, values) = match self {
+            Self::Literal(value) => return write!(f, "(literal {value})"),
+            Self::List { ty, types, values } => {
+                write!(f, "(list (type {ty}) (types")?;
+                for ty in types {
+                    write!(f, " {ty}")?;
+                }
+                write!(f, ")")?;
+                ("values", values)
+            }
+            Self::Tuple { head, values } => {
+                write!(f, "(tuple (type-tuple {}) (head", head.is_some())?;
+                if let Some(Some(head)) = head {
+                    write!(f, " {head}")?;
+                }
+                write!(f, ")")?;
+                ("values", values)
+            }
+        };
+        write!(f, " ({kind}")?;
+        for value in values {
+            write!(f, " {value}")?;
+        }
+        write!(f, "))")
     }
 }

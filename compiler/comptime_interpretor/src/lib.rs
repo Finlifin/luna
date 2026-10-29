@@ -4020,26 +4020,7 @@ impl<'a> Interpreter<'a> {
                 self.prepare_normal_argument(else_input, expected, literals, depth + 1)?;
             }
             A::TypeList { source, items } => {
-                if items.len() > 100_000 {
-                    return Err(self.failure(ErrorKind::RepresentationSizeLimit, Some(*source)));
-                }
-                self.integer_operation(Some(*source), |budget| {
-                    let before = budget.steps;
-                    let mut fuel = before;
-                    if nir::type_computations::charge_term(expected, &mut fuel).is_err() {
-                        return budget.consume(before.saturating_add(1));
-                    }
-                    budget.consume(before - fuel)
-                })?;
-                let element = self
-                    .list_element(expected)
-                    .cloned()
-                    .or_else(|| {
-                        self.is_type_list_input(expected)
-                            .then_some(Term::Primitive(Primitive::Type))
-                    })
-                    .ok_or_else(|| self.failure(ErrorKind::Type, Some(*source)))?;
-                self.integer_operation(Some(*source), |budget| budget.consume(items.len()))?;
+                let element = self.normal_list_domain(expected, items.len(), *source)?;
                 literals.insert(
                     input as *const A as usize,
                     PreparedNormalInput::ListType(expected.clone()),

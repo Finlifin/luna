@@ -559,6 +559,40 @@ impl<'a> Interpreter<'a> {
                         .ok_or_else(missing)?;
                     self.prepare_compiled_normal_input(state, *index, input, source)?;
                 }
+                Op::AppendNormalContainer {
+                    constructor,
+                    parent,
+                    value,
+                    spread,
+                    diverges,
+                } => {
+                    if *diverges {
+                        return Err(self.failure(ErrorKind::Type, Some(source)));
+                    }
+                    let value = frame.slots[*value].take().ok_or_else(missing)?;
+                    let input = frame
+                        .normal_types
+                        .get_mut(constructor)
+                        .ok_or_else(missing)?;
+                    let parent = input.prepared.get_mut(parent).ok_or_else(missing)?;
+                    self.append_compiled_normal_container(parent, value, *spread, source)?;
+                }
+                Op::FinishNormalContainer {
+                    constructor,
+                    value,
+                    diverges,
+                } => {
+                    if *diverges {
+                        return Err(self.failure(ErrorKind::Type, Some(source)));
+                    }
+                    let input = frame
+                        .normal_types
+                        .get_mut(constructor)
+                        .ok_or_else(missing)?;
+                    let container = input.prepared.remove(value).ok_or_else(missing)?;
+                    frame.slots[*value] =
+                        Some(self.finish_compiled_normal_container(container, source)?);
+                }
                 Op::NormalLiteral {
                     constructor,
                     destination,
@@ -567,7 +601,12 @@ impl<'a> Interpreter<'a> {
                         .normal_types
                         .get_mut(constructor)
                         .ok_or_else(missing)?;
-                    frame.slots[*destination] = Some(input.literal.take().ok_or_else(missing)?);
+                    let Some(super::normal_types::Prepared::Literal(value)) =
+                        input.prepared.remove(destination)
+                    else {
+                        return Err(missing());
+                    };
+                    frame.slots[*destination] = Some(value);
                 }
                 Op::BindNormalInput {
                     destination,

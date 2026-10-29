@@ -2412,3 +2412,61 @@ Validation from `/home/fin/luna`, all exit 0:
 Contextual containers/control and explicit preparation/reordering plans remain
 on the preselected tree path. This stage extends scalar contextual inputs only;
 it does not claim complete normal-form plan compilation or a timing speedup.
+
+## Compile contextual normal-form containers
+
+Owned input-shape metadata now describes scalar, list and tuple nodes with stable
+registers and source locations. A bounded worklist builds the metadata and
+operand tasks without recursively compiling expressions. Invocation-local
+preparation checks the complete input against its instantiated domain before any
+operand runs; the existing list-domain helper is shared with tree preparation.
+
+Container append instructions follow each child immediately. Spread validation,
+Type-list conversion and size checks therefore precede later operand effects.
+Tuple type-description conversion remains after all children, matching tree
+ordering. Completion reuses existing list validation and contextual tuple
+construction, including the registered Tuple NF head. Preparation stores literals,
+domains and accumulators only in the current frame, never the code cache. Metadata
+and pending state retain S-expression dumps. Compilation accounts for shape width,
+node work, copied types and spelling; excessive contextual depth selects the tree
+path before execution, where the existing depth error applies.
+
+Validation from `/home/fin/luna`, successful runs exit 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib normal_type_tests`:
+  `/tmp/luna-tools-6rbc5vcj/result.json`. Nested lists, heterogeneous tuples,
+  registered tuple type heads, failed spreads before later effects and invalid
+  contextual literals before any effects agree between tree and bytecode in
+  comptime mode; existing scalar and failure/recovery cases remain covered.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-o47b_6lt/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler --lib normal_types::tests`:
+  `/tmp/luna-tools-weka7w_4/result.json`. Additional compiler test checks fuel
+  exhaustion, nested depth admission/rejection and escaped dump spelling.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_types`:
+  `/tmp/luna-tools-jmk9vo0u/result.json`, final source fixtures. Explicit expected
+  NF terms and execution counters cover nested list payloads, named whole Tuple
+  collection and a contextual list whose Integer/u8 element domain arrives only
+  during invocation.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_clause_inputs --test dependent_list_collectors --test builder_invocations --test execution`:
+  `/tmp/luna-tools-c7maikd_/result.json`.
+
+Initial source-fixture failures were corrected against the language contract:
+`named_arg -> .id = expr` requires a leading dot; ordinary anchored parameters
+are positional, unlike whole variadic supplies (`docs/functions/parameters.md`,
+explicit named supply). Tuple keeps `.Es=...`. Results containing ordinary
+meta.List values require comptime admission, so a runtime `Interpreter::new`
+was not a valid tree oracle. The source test now asserts complete expected NF
+payloads; differential container tests explicitly use comptime mode for both
+engines. Failure evidence: `/tmp/luna-tools-d9_vj3rl/result.json`,
+`/tmp/luna-tools-p5xc4un_/result.json`, `/tmp/luna-tools-be4u07g3/result.json`,
+`/tmp/luna-tools-5vmw_k1m/result.json`. No production grammar, admission rule or
+semantic expectation was weakened to make those fixtures pass.
+
+Contextual if/match/block arguments and explicit preparation/reordering plans
+still select tree execution before effects. Their staging and cleanup remain the
+next NF compilation work; this does not claim complete plan support or a measured
+performance gain.
+
+Final managed `cargo fmt --all -- --check` passed, exit 0,
+`/tmp/luna-tools-27rpqgl6/result.json`; `git diff --check` passed.

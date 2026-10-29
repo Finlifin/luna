@@ -41,7 +41,19 @@ pub enum Op {
     PrepareNormalInput {
         destination: Register,
         index: usize,
-        input: normal_types::Input,
+        input: Arc<normal_types::Shape>,
+    },
+    AppendNormalContainer {
+        constructor: Register,
+        parent: Register,
+        value: Register,
+        spread: bool,
+        diverges: bool,
+    },
+    FinishNormalContainer {
+        constructor: Register,
+        value: Register,
+        diverges: bool,
     },
     NormalLiteral {
         constructor: Register,
@@ -437,6 +449,24 @@ impl fmt::Display for Program {
                     index,
                     input,
                 } => write!(f, "(prepare-normal-input %{destination} {index} {input})")?,
+                Op::AppendNormalContainer {
+                    constructor,
+                    parent,
+                    value,
+                    spread,
+                    diverges,
+                } => write!(
+                    f,
+                    "(append-normal-container %{constructor} %{parent} %{value} (spread {spread}) (diverges {diverges}))"
+                )?,
+                Op::FinishNormalContainer {
+                    constructor,
+                    value,
+                    diverges,
+                } => write!(
+                    f,
+                    "(finish-normal-container %{constructor} %{value} (diverges {diverges}))"
+                )?,
                 Op::NormalLiteral {
                     constructor,
                     destination,
@@ -1088,72 +1118,38 @@ pub fn compile(body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
                         arguments,
                         plan: None,
                     } => {
-                        use nir::program::NormalFormArgument as A;
                         *fuel = fuel
                             .checked_sub(arguments.len())
                             .ok_or(Error::Budget(source))?;
                         let mut inputs = Vec::with_capacity(arguments.len());
                         for argument in arguments {
-                            let input = match argument {
-                                A::Value(value) | A::TypeListSpread(value) => {
-                                    normal_types::Input::Value(copy_term(
-                                        &value.ty,
-                                        fuel,
-                                        value.source,
-                                    )?)
-                                }
-                                A::Unit { .. } => normal_types::Input::Unit,
-                                A::Integer {
-                                    spelling, negative, ..
-                                } => {
-                                    *fuel = fuel
-                                        .checked_sub(spelling.len())
-                                        .ok_or(Error::Budget(argument.source()))?;
-                                    normal_types::Input::Integer {
-                                        spelling: spelling.clone(),
-                                        negative: *negative,
-                                    }
-                                }
-                                _ => return Err(Error::Unsupported(source)),
-                            };
-                            inputs.push(input);
+                            inputs.push(normal_types::compile_input(
+                                argument, dst, &mut fresh, fuel,
+                            )?);
                         }
                         let constructor = Arc::new(normal_types::Constructor {
                             head: *head,
                             ty: copy_term(&expr.ty, fuel, source)?,
                             count: inputs.len(),
-                            diverges: inputs.iter().any(normal_types::Input::diverges),
+                            diverges: inputs.iter().any(|(shape, _)| shape.diverges),
                         });
                         emit(&mut work, Op::FinishNormalType { destination: dst });
-                        for (index, (argument, input)) in
-                            arguments.iter().zip(inputs).enumerate().rev()
-                        {
-                            let value = fresh();
+                        for (index, (input, code)) in inputs.into_iter().enumerate().rev() {
                             work.push(Work::Emit(
-                                argument.source(),
+                                input.source,
                                 Op::BindNormalInput {
                                     destination: dst,
-                                    value,
-                                    diverges: input.diverges(),
+                                    value: input.slot,
+                                    diverges: input.diverges,
                                 },
                             ));
-                            if let Some(field) = argument.expression() {
-                                work.push(Work::Expression(field, value));
-                            } else {
-                                work.push(Work::Emit(
-                                    argument.source(),
-                                    Op::NormalLiteral {
-                                        constructor: dst,
-                                        destination: value,
-                                    },
-                                ));
-                            }
+                            work.extend(code.into_iter().rev());
                             work.push(Work::Emit(
-                                argument.source(),
+                                input.source,
                                 Op::PrepareNormalInput {
                                     destination: dst,
                                     index,
-                                    input,
+                                    input: Arc::new(input),
                                 },
                             ));
                         }

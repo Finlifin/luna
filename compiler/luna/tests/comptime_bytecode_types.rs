@@ -247,3 +247,100 @@ fn contextual_integer_normal_inputs_execute_as_bytecode() {
         assert_eq!(vm.bytecode_invocations() - before, 1);
     }
 }
+
+#[test]
+fn contextual_normal_containers_execute_with_ordinary_list_identity() {
+    let package = support::compile_with_tuple(
+        "typealias Type = .Type'builtin;
+        typealias Integer = .Integer'builtin;
+        typealias List<T> = TupleElements<T>;
+        pure comptime fn Shape<T, values: List<List<Integer>>> -> Type { T }
+        comptime fn NestedLists(input: Type) -> Type {
+            Shape<input, [[17], [23, 29]]>
+        }
+        comptime fn Pair(input: Type) -> Type { Tuple<.Es=[input, bool]> }
+        pure comptime fn Payload<T, value: T> -> Type { T }
+        comptime fn WithList(element: Type) -> Type { Payload<List<element>, [17, 23]> }",
+    );
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    for name in ["NestedLists", "Pair"] {
+        for primitive in [Primitive::Bool, Primitive::Char] {
+            let arguments = vec![Value::Type(Term::Primitive(primitive))];
+            let id = support::id(&package, name);
+            let before = vm.bytecode_invocations();
+            let actual = vm.invoke(id, arguments.clone()).unwrap();
+            let list_head = support::id(&package, "TupleElements");
+            let list_type = |element| Term::NormalForm {
+                head: list_head,
+                sort: nir::Sort::Type,
+                arguments: vec![element],
+            };
+            let integer_list = list_type(Term::Primitive(Primitive::Integer));
+            let row = |numbers: &[u128]| Term::NominalValue {
+                ty: Box::new(integer_list.clone()),
+                variant: None,
+                fields: numbers
+                    .iter()
+                    .map(|number| Term::Integer(comptime_runtime::Integer::from_u128(*number)))
+                    .collect(),
+            };
+            let arguments = if name == "Pair" {
+                vec![Term::TypeListValue(vec![
+                    Term::Primitive(primitive),
+                    Term::Primitive(Primitive::Bool),
+                ])]
+            } else {
+                vec![
+                    Term::Primitive(primitive),
+                    Term::NominalValue {
+                        ty: Box::new(list_type(integer_list.clone())),
+                        variant: None,
+                        fields: vec![row(&[17]), row(&[23, 29])],
+                    },
+                ]
+            };
+            assert_eq!(
+                actual,
+                Value::Type(Term::NormalForm {
+                    head: support::id(&package, if name == "Pair" { "Tuple" } else { "Shape" }),
+                    sort: nir::Sort::Type,
+                    arguments,
+                })
+            );
+            assert_eq!(vm.bytecode_invocations() - before, 1, "{name}");
+        }
+    }
+    for element in [Primitive::U8, Primitive::Integer] {
+        let before = vm.bytecode_invocations();
+        let actual = vm
+            .invoke(
+                support::id(&package, "WithList"),
+                vec![Value::Type(Term::Primitive(element))],
+            )
+            .unwrap();
+        let list = Term::NormalForm {
+            head: support::id(&package, "TupleElements"),
+            sort: nir::Sort::Type,
+            arguments: vec![Term::Primitive(element)],
+        };
+        assert_eq!(
+            actual,
+            Value::Type(Term::NormalForm {
+                head: support::id(&package, "Payload"),
+                sort: nir::Sort::Type,
+                arguments: vec![
+                    list.clone(),
+                    Term::NominalValue {
+                        ty: Box::new(list),
+                        variant: None,
+                        fields: vec![
+                            Term::Integer(comptime_runtime::Integer::from_u128(17)),
+                            Term::Integer(comptime_runtime::Integer::from_u128(23))
+                        ],
+                    }
+                ],
+            })
+        );
+        assert_eq!(vm.bytecode_invocations() - before, 1);
+    }
+}
