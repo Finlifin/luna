@@ -84,6 +84,7 @@ fn tuple_pack_inference_preserves_head_proofs_and_transaction_isolation() {
     let package = nir::program::Package {
         normal_forms: vec![
             Head {
+                collector: None,
                 declaration: head,
                 role: Role::Tuple,
                 requirements: vec![],
@@ -105,6 +106,7 @@ fn tuple_pack_inference_preserves_head_proofs_and_transaction_isolation() {
                 }],
             },
             Head {
+                collector: None,
                 declaration: nir::DeclarationId {
                     package: 55,
                     local: 3,

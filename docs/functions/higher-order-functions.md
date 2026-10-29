@@ -36,8 +36,10 @@ pub const Tuple: pure comptime fn<...Es: meta.List<Type>> -> Type = .Tuple'built
 类型建立自己的参数作用域。当前实现已接通语法、HIR 与 NIR 类型表示，支持
 依赖参数替换、类型身份比较，以及将该类型作为 comptime Type 值返回和传输。
 范式 callable 类型不能作为 runtime 参数或 quote 上下文中的 runtime 绑定。
-callable 值本身的取得、应用和上述 builtin 绑定的执行路径仍待接通；Tuple
-尚未迁移到该绑定。
+当前实现也支持取得源码范式头的 callable 值，经 comptime 函数返回并保存到
+常量，再通过常量别名应用。别名保留原始头身份、形成约束和变参收集位置；
+普通圆括号调用不能执行范式头的函数体。任意局部或动态 callee 的范式应用
+仍待接通；Tuple 也尚未迁移到上述 builtin 绑定。
 
 ## 正式定义
 

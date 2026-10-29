@@ -37,6 +37,8 @@ impl fmt::Display for Role {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Head {
+    /// Position collected at the source call boundary, independent of domain.
+    pub collector: Option<usize>,
     /// Trusted language-item contract, independent of the definition body.
     pub role: Role,
     pub declaration: DeclarationId,
@@ -69,6 +71,11 @@ impl fmt::Display for Head {
         )?;
         for parameter in &self.parameters {
             write!(f, " {parameter}")?;
+        }
+        f.write_str(") (collector ")?;
+        match self.collector {
+            Some(index) => write!(f, "{index}")?,
+            None => f.write_str("none")?,
         }
         f.write_str(") (requires")?;
         for requirement in &self.requirements {
@@ -303,6 +310,12 @@ pub fn validate(package: &Package) -> Result<(), &'static str> {
                 "meta.List binding has an invalid constructor signature: expected exactly one Type input",
             );
         }
+        if head
+            .collector
+            .is_some_and(|index| index.checked_add(1) != Some(head.parameters.len()))
+        {
+            return Err("normal-form collector must be the final input");
+        }
         let function = functions.get(&head.declaration);
         if function.is_some_and(|f| f.phase != FunctionPhase::NormalForm || !f.pure) {
             return Err("normal-form metadata requires a pure opaque definition");
@@ -435,6 +448,35 @@ impl fmt::Display for ApplicationError {
     }
 }
 impl Head {
+    /// Reconstruct the callable's dependent input frame without unfolding the head.
+    pub fn callable_type(&self) -> Result<Term, crate::TypeError> {
+        let mut binders = Vec::new();
+        let mut parameters = Vec::new();
+        for input in &self.parameters {
+            let sort = if input.kind == Kind::Type {
+                Sort::Type
+            } else {
+                Sort::ComptimeValue
+            };
+            parameters.push(crate::Parameter {
+                sort,
+                ty: input.ty.abstract_parameters(&binders)?,
+            });
+            binders.push(crate::DeclarationParameter {
+                declaration: input.declaration,
+                sort,
+            });
+        }
+        let ty = Term::NormalFormFunction(
+            Box::new(Term::Function {
+                parameters,
+                result: Box::new(Term::Primitive(Primitive::Type)),
+            }),
+            self.collector,
+        );
+        ty.check_scope(&[])?;
+        Ok(ty)
+    }
     /// Inspect the trusted list representation without unfolding its opaque head.
     pub fn list_element<'a>(&self, ty: &'a Term) -> Option<&'a Term> {
         if self.role != Role::TypeList

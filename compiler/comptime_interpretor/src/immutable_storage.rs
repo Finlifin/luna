@@ -233,6 +233,7 @@ mod tests {
         };
         let package = Package {
             normal_forms: vec![Head {
+                collector: None,
                 role: Role::TypeList,
                 declaration: head,
                 requirements: vec![],

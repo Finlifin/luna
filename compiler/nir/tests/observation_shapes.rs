@@ -54,6 +54,7 @@ fn normal_tuple_observations_require_registered_layout_and_scalar_fields() {
         &nested
     ));
     package.normal_forms.push(Head {
+        collector: None,
         declaration: head,
         role: Role::Opaque,
         parameters: vec![],

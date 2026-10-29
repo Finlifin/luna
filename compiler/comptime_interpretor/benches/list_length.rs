@@ -73,6 +73,7 @@ fn package(element: Primitive, reads: usize, mode: &str) -> Package {
     };
     Package {
         normal_forms: vec![Head {
+            collector: None,
             role: Role::TypeList,
             declaration: id(2),
             requirements: vec![],

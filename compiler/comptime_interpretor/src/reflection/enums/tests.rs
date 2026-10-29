@@ -187,6 +187,7 @@ fn concrete_iir_payloads_agree_with_declaration_reflection() {
 fn opaque_payload_types_keep_their_heads() {
     let mut package = package();
     package.normal_forms.push(nir::normal_forms::Head {
+        collector: None,
         declaration: id(3),
         role: nir::normal_forms::Role::Opaque,
         parameters: vec![],

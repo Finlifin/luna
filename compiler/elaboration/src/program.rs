@@ -3841,6 +3841,15 @@ impl Checker<'_, '_> {
                         return Ok(p(P::BitVec(width)));
                     }
                 }
+                if let Some(owner) = self.normal_form_constant_target(head)? {
+                    let definition = self.package.owner_definition(owner).ok_or_else(|| error(expr.span, "normal-form callable has no declaration identity"))?;
+                    let target = Expr {
+                        kind: H::ResolvedDef { name: self.package.item(owner).unwrap().ident.name, has_clause_param: true, def_id: definition },
+                        ..(*head).clone()
+                    };
+                    let application = Expr { kind: H::NFApplication(&target, args), ..expr.clone() };
+                    return self.type_expr(&application);
+                }
                 let H::ResolvedDef { def_id, .. } = head.kind else {
                     return Err(error(
                         expr.span,
@@ -6765,6 +6774,12 @@ impl Checker<'_, '_> {
         expected: Option<&Term>,
         partial: Option<&crate::calls::CallableContext>,
     ) -> Result<n::Expr, Error> {
+        if callee.ty.is_normal_form_callable() {
+            return Err(error(
+                expr.span,
+                "normal-form heads cannot be invoked as ordinary functions",
+            ));
+        }
         // Selected trait methods and stored comptime callables use this same
         // boundary. The synthesized splice method itself remains runtime.
         if callee.ty.is_comptime_callable()

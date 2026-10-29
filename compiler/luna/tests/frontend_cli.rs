@@ -264,6 +264,84 @@ fn normal_form_callable_types_cannot_enter_runtime_or_quote_contexts() {
 }
 
 #[test]
+fn normal_form_callable_constants_preserve_original_heads() {
+    let sandbox = Sandbox::new();
+    let prefix = "
+        typealias Type = .Type'builtin;
+        pure comptime fn Identity<T> -> Type { T }
+        comptime fn Get() -> pure comptime fn<Type> -> Type { Identity }
+        const Alias: pure comptime fn<Type> -> Type = Get();
+        const Again = Alias;
+        typealias ThroughAlias = Again<bool>;
+        comptime fn Direct() -> Type { Identity<bool> }
+        comptime fn Indirect() -> Type { Again<bool> }
+        comptime fn Annotation() -> Type { ThroughAlias }
+    ";
+    sandbox.write("input.fl", prefix);
+    let direct = sandbox.run(&["input.fl", "--invoke-comptime", "Direct"]);
+    let expected = success(&direct);
+    assert!(expected.contains("normal-form"), "{expected}");
+    for entry in ["Indirect", "Annotation"] {
+        let output = sandbox.run(&["input.fl", "--invoke-comptime", entry]);
+        assert_eq!(success(&output), expected);
+    }
+    let output = sandbox.run(&["input.fl", "--invoke-comptime", "Get"]);
+    assert!(success(&output).starts_with("(function "));
+    for invalid in [
+        "comptime fn Bad() -> Type { Alias(bool) }",
+        "comptime fn Bad() -> Type { Alias(...(bool,)) }",
+        "const Bad: comptime fn(Type) -> Type = Identity;",
+        "pure comptime fn Limited<T> -> Type where requires T == bool {T}
+         const LimitedAlias = Limited; typealias Bad = LimitedAlias<Type>;",
+    ] {
+        sandbox.write("input.fl", &format!("{prefix}\n{invalid}"));
+        let output = sandbox.run(&["input.fl", "--emit", "nir"]);
+        failure(&output, 1);
+        assert!(
+            !details(&output).contains("panicked"),
+            "{}",
+            details(&output)
+        );
+    }
+}
+
+#[test]
+fn normal_form_callable_aliases_preserve_collected_inputs() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "input.fl",
+        "
+        typealias Type = .Type'builtin;
+        pure comptime fn List<T> -> Type { T }
+        pure comptime fn Bundle<...Es:List<Type>> -> Type { bool }
+        comptime fn Get() -> pure comptime fn<...Es:List<Type>> -> Type { Bundle }
+        const Alias = Get();
+        comptime fn Direct() -> Type { Bundle<.Es = [bool, Type]> }
+        comptime fn Named() -> Type { Alias<.Es = [bool, Type]> }
+        comptime fn Collected() -> Type { Alias<bool, Type> }
+    ",
+    );
+    let direct = sandbox.run(&[
+        "input.fl",
+        "--meta-list-type",
+        "input.List",
+        "--invoke-comptime",
+        "Direct",
+    ]);
+    let expected = success(&direct);
+    for entry in ["Named", "Collected"] {
+        let output = sandbox.run(&[
+            "input.fl",
+            "--meta-list-type",
+            "input.List",
+            "--invoke-comptime",
+            entry,
+        ]);
+        assert_eq!(success(&output), expected);
+    }
+}
+
+#[test]
 fn function_type_telescope_bindings_are_ordered_nested_and_scoped() {
     let sandbox = Sandbox::new();
     sandbox.write(

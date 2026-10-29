@@ -43,6 +43,7 @@ fn owned_package_context_restores_only_valid_declaration_theory() {
     };
     let mut package = Package::default();
     package.normal_forms.push(Head {
+        collector: None,
         role: nir::normal_forms::Role::Opaque,
         declaration,
         parameters: vec![Parameter {

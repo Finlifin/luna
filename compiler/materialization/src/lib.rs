@@ -2867,6 +2867,24 @@ impl Builder<'_> {
                     }
                 }
             }
+            K::Function(id) if expr.ty.is_normal_form_callable() => {
+                if self.instances.is_some() {
+                    return Err("normal-form callable cannot enter executable IIR".into());
+                }
+                let descriptor = self
+                    .package
+                    .normal_forms
+                    .iter()
+                    .find(|head| head.declaration == *id)
+                    .ok_or("normal-form callable declaration is missing")?;
+                if descriptor
+                    .callable_type()
+                    .map_err(|error| error.to_string())?
+                    != expr.ty
+                {
+                    return Err("normal-form callable type disagrees with its declaration".into());
+                }
+            }
             // Stored runtime template identities have no executable body in
             // IIR. Calls must specialize independently; the final graph checks
             // that no runtime call retains staged inputs and validates every

@@ -3415,6 +3415,7 @@ mod tests {
         };
         let mut heads = vec![
             Head {
+                collector: None,
                 declaration: id,
                 role: Role::Tuple,
                 requirements: vec![],
@@ -3436,6 +3437,7 @@ mod tests {
                 }],
             },
             Head {
+                collector: None,
                 declaration: nir::DeclarationId {
                     package: 3,
                     local: 2,

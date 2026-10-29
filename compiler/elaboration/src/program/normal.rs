@@ -708,52 +708,126 @@ impl Checker<'_, '_> {
             .collect()
     }
 
+    pub(super) fn normal_form_head_metadata(
+        &self,
+        owner: OwnerId,
+    ) -> Option<nir::normal_forms::Head> {
+        let parameters = self.normal_parameters.get(&owner)?;
+        Some(nir::normal_forms::Head {
+            collector: self
+                .normal_type_list_tail(owner)
+                .then(|| parameters.len() - 1),
+            role: if Some(declaration(self.package, &self.package_identities, owner))
+                == self.protocols.tuple
+            {
+                nir::normal_forms::Role::Tuple
+            } else if Some(declaration(self.package, &self.package_identities, owner))
+                == self.protocols.meta_list
+            {
+                nir::normal_forms::Role::TypeList
+            } else {
+                nir::normal_forms::Role::Opaque
+            },
+            declaration: declaration(self.package, &self.package_identities, owner),
+            requirements: self
+                .requirements
+                .get(&owner)
+                .into_iter()
+                .flatten()
+                .cloned()
+                .chain(
+                    self.capabilities
+                        .get(&owner)
+                        .into_iter()
+                        .flatten()
+                        .cloned()
+                        .map(n::TypePredicate::Trait),
+                )
+                .collect(),
+            parameters: parameters
+                .iter()
+                .map(|(declaration, binding, ty)| nir::normal_forms::Parameter {
+                    declaration: *declaration,
+                    binding: *binding,
+                    ty: ty.clone(),
+                    kind: if *ty == p(P::Type) {
+                        nir::normal_forms::Kind::Type
+                    } else {
+                        nir::normal_forms::Kind::Value
+                    },
+                })
+                .collect(),
+        })
+    }
+
     pub(super) fn normal_form_metadata(&self) -> Vec<nir::normal_forms::Head> {
         self.normal_parameters
-            .iter()
-            .map(|(owner, parameters)| nir::normal_forms::Head {
-                role: if Some(declaration(self.package, &self.package_identities, *owner))
-                    == self.protocols.tuple
-                {
-                    nir::normal_forms::Role::Tuple
-                } else if Some(declaration(self.package, &self.package_identities, *owner))
-                    == self.protocols.meta_list
-                {
-                    nir::normal_forms::Role::TypeList
-                } else {
-                    nir::normal_forms::Role::Opaque
-                },
-                declaration: declaration(self.package, &self.package_identities, *owner),
-                requirements: self
-                    .requirements
-                    .get(owner)
-                    .into_iter()
-                    .flatten()
-                    .cloned()
-                    .chain(
-                        self.capabilities
-                            .get(owner)
-                            .into_iter()
-                            .flatten()
-                            .cloned()
-                            .map(n::TypePredicate::Trait),
-                    )
-                    .collect(),
-                parameters: parameters
-                    .iter()
-                    .map(|(declaration, binding, ty)| nir::normal_forms::Parameter {
-                        declaration: *declaration,
-                        binding: *binding,
-                        ty: ty.clone(),
-                        kind: if *ty == p(P::Type) {
-                            nir::normal_forms::Kind::Type
-                        } else {
-                            nir::normal_forms::Kind::Value
-                        },
-                    })
-                    .collect(),
-            })
+            .keys()
+            .filter_map(|owner| self.normal_form_head_metadata(*owner))
             .collect()
+    }
+
+    pub(super) fn normal_form_value(
+        &mut self,
+        expr: &Expr<'_>,
+        owner: OwnerId,
+        expected: Option<&Term>,
+    ) -> Result<n::Expr, Error> {
+        self.ensure_signature(owner, expr.span)?;
+        self.ensure_contract(owner, expr.span)?;
+        let head = self.normal_form_head_metadata(owner).ok_or_else(|| {
+            error(
+                expr.span,
+                "normal-form callable is missing declaration metadata",
+            )
+        })?;
+        let ty = head
+            .callable_type()
+            .map_err(|reason| error(expr.span, reason.to_string()))?;
+        if let Some(expected) = expected {
+            self.require_expression(&ty, expected, expr.span)?;
+        }
+        Ok(n::Expr {
+            source: source(expr.span),
+            ty,
+            kind: K::Function(head.declaration),
+        })
+    }
+
+    pub(super) fn normal_form_constant_target(
+        &mut self,
+        head: &Expr<'_>,
+    ) -> Result<Option<OwnerId>, Error> {
+        let H::ResolvedDef { def_id, .. } = head.kind else {
+            return Ok(None);
+        };
+        let Some(owner) = self.package.definition_owner(def_id) else {
+            return Ok(None);
+        };
+        if !matches!(
+            self.package.item(owner).map(|item| &item.kind),
+            Some(ItemKind::Const(..))
+        ) {
+            return Ok(None);
+        }
+        let value = self.constant_value(owner, head.span)?;
+        if !value.ty.is_normal_form_callable() {
+            return Ok(None);
+        }
+        let K::Function(identity) = value.kind else {
+            return Err(error(
+                head.span,
+                "normal-form constant has no completed declaration identity",
+            ));
+        };
+        self.package
+            .owners()
+            .find_map(|(owner, _)| {
+                matches_declaration(self.package, &self.package_identities, owner, identity)
+                    .then_some(owner)
+            })
+            .map(Some)
+            .ok_or_else(|| error(head.span, "normal-form callable declaration is unavailable"))
     }
 
     pub(super) fn normal_type_expression(

@@ -1337,6 +1337,7 @@ mod tuple_layout_tests {
         let mut package = Package {
             normal_forms: vec![
                 Head {
+                    collector: None,
                     declaration: id,
                     role: Role::Tuple,
                     parameters: vec![nir::normal_forms::Parameter {
@@ -1358,6 +1359,7 @@ mod tuple_layout_tests {
                     requirements: vec![],
                 },
                 Head {
+                    collector: None,
                     declaration: nir::DeclarationId {
                         package: 9,
                         local: 2,

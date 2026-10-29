@@ -269,6 +269,7 @@ fn tuple_head_registration_requires_explicit_package_qualified_identity() {
         local: 8,
     };
     let make = |declaration| nir::normal_forms::Head {
+        collector: None,
         role: nir::normal_forms::Role::Opaque,
         declaration,
         parameters: vec![],
@@ -311,6 +312,7 @@ fn normal_form_registration_rolls_back_missing_duplicate_and_wrong_kind_heads() 
         local: 8,
     };
     let metadata = nir::normal_forms::Head {
+        collector: None,
         role: nir::normal_forms::Role::Opaque,
         declaration: id,
         parameters: vec![],
@@ -393,6 +395,7 @@ fn a_function_named_tuple_does_not_supply_a_pure_normal_form_head() {
             .is_err()
     );
     package.normal_forms.push(nir::normal_forms::Head {
+        collector: None,
         role: nir::normal_forms::Role::Opaque,
         declaration: id,
         parameters: vec![],

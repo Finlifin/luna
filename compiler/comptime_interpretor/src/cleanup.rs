@@ -1838,6 +1838,7 @@ mod tuple_context_tests {
         let mut package = Package {
             normal_forms: vec![
                 Head {
+                    collector: None,
                     declaration: id(1),
                     role: Role::Tuple,
                     requirements: vec![],
@@ -1853,6 +1854,7 @@ mod tuple_context_tests {
                     }],
                 },
                 Head {
+                    collector: None,
                     declaration: id(3),
                     role: nir::normal_forms::Role::TypeList,
                     requirements: vec![],
@@ -2459,6 +2461,7 @@ mod borrowed_checkpoint_tests {
         };
         let package = Package {
             normal_forms: vec![Head {
+                collector: None,
                 declaration: id,
                 role: Role::TypeList,
                 requirements: vec![],

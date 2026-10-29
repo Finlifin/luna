@@ -2165,10 +2165,7 @@ impl<'a> Interpreter<'a> {
             Value::Closure(closure) => closure.origin,
             _ => None,
         };
-        if origin
-            .and_then(|id| self.functions.get(&id))
-            .is_some_and(|f| f.phase == nir::program::FunctionPhase::NormalForm)
-        {
+        if origin.is_some_and(|id| self.normal_forms.contains_key(&id)) {
             return Err(self.failure(ErrorKind::PhaseMismatch, None));
         }
         if self.comptime_only {
@@ -2989,6 +2986,9 @@ impl<'a> Interpreter<'a> {
                     })
                 })
             }
+            (Value::Function(id), ty @ Term::NormalFormFunction(..)) => self.normal_forms.get(id)
+                .is_some_and(|head| head.callable_type().ok().as_ref().is_some_and(|actual|
+                    selected_types::same(actual, ty, &self.associated_values))),
             (Value::Function(id), ty @ (Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_))) => {
                 self.functions.get(id).is_some_and(|f| {
                     f.type_parameters.is_empty()
@@ -6208,6 +6208,7 @@ impl<'a> Interpreter<'a> {
                 // as normal-form inputs; this descriptor is only a checker,
                 // never a new declaration or a type identity.
                 let contract = nir::normal_forms::Head {
+                    collector: None,
                     declaration: binder.declaration,
                     role: nir::normal_forms::Role::Opaque,
                     requirements: vec![],
@@ -9748,6 +9749,46 @@ mod computation_type_tests {
     use super::*;
 
     #[test]
+    fn normal_form_values_need_no_body_but_cannot_be_invoked() {
+        let id = DeclarationId {
+            package: 9,
+            local: 1,
+        };
+        let metadata = nir::normal_forms::Head {
+            collector: None,
+            role: Default::default(),
+            declaration: id,
+            requirements: vec![],
+            parameters: vec![],
+        };
+        let ty = metadata.callable_type().unwrap();
+        let package = Package {
+            normal_forms: vec![metadata],
+            ..Default::default()
+        };
+        let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+        assert!(vm.has_type(&Value::Function(id), &ty));
+        assert!(!vm.has_type(
+            &Value::Function(id),
+            &ty.callable_signature().clone().with_comptime_phase(true)
+        ));
+        assert!(!vm.has_type(
+            &Value::Function(DeclarationId {
+                package: 9,
+                local: 2
+            }),
+            &ty
+        ));
+        assert!(matches!(
+            vm.invoke_value(Value::Function(id), vec![])
+                .unwrap_err()
+                .kind,
+            ErrorKind::PhaseMismatch
+        ));
+        assert!(vm.has_type(&Value::Function(id), &ty));
+    }
+
+    #[test]
     fn callable_bound_value_domains_are_checked_without_admitting_foreign_or_later_inputs() {
         use nir::{Parameter, Sort};
         let id = DeclarationId {
@@ -9755,6 +9796,7 @@ mod computation_type_tests {
             local: 1,
         };
         let metadata = nir::normal_forms::Head {
+            collector: None,
             role: Default::default(),
             declaration: id,
             requirements: vec![],

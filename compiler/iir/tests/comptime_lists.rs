@@ -9,6 +9,7 @@ fn id(local: u32) -> DeclarationId {
 }
 fn head() -> Head {
     Head {
+        collector: None,
         declaration: id(1),
         role: Role::TypeList,
         requirements: vec![],

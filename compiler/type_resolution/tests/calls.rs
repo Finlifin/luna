@@ -1070,6 +1070,7 @@ fn bound_tuple_inference_proposes_fields_and_preserves_context_identity() {
     let mut package = nir::program::Package {
         normal_forms: vec![
             Head {
+                collector: None,
                 declaration: head,
                 role: Role::Tuple,
                 requirements: vec![],
@@ -1091,6 +1092,7 @@ fn bound_tuple_inference_proposes_fields_and_preserves_context_identity() {
                 }],
             },
             Head {
+                collector: None,
                 declaration: DeclarationId {
                     package: 55,
                     local: 3,
@@ -2434,6 +2436,7 @@ fn bound_list_head_proposes_element_types_without_an_inverse_equality_rule() {
     };
     let mut package = nir::program::Package {
         normal_forms: vec![Head {
+            collector: None,
             declaration: head,
             role: Role::TypeList,
             requirements: vec![],

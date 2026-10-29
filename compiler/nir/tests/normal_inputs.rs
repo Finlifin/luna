@@ -18,6 +18,7 @@ fn parameter(index: u32, kind: Kind, ty: Term) -> Parameter {
 }
 fn head(ty: Term) -> Head {
     Head {
+        collector: None,
         role: nir::normal_forms::Role::Opaque,
         declaration: id(0),
         parameters: vec![parameter(1, Kind::Value, ty)],
@@ -32,6 +33,51 @@ fn value(name: &str, value: Term) -> Term {
 }
 
 #[test]
+fn callable_metadata_abstracts_dependent_domains_and_checks_collectors() {
+    let mut descriptor = Head {
+        collector: Some(1),
+        role: nir::normal_forms::Role::Opaque,
+        declaration: id(0),
+        parameters: vec![
+            parameter(1, Kind::Type, primitive(P::Type)),
+            parameter(
+                2,
+                Kind::Value,
+                Term::Rigid {
+                    declaration: id(1),
+                    sort: Sort::Type,
+                },
+            ),
+        ],
+        requirements: vec![],
+    };
+    let callable = descriptor.callable_type().unwrap();
+    let specialized = callable
+        .bind_function_inputs(&[Some(primitive(P::Bool)), None])
+        .unwrap();
+    assert_eq!(
+        specialized,
+        Term::NormalFormFunction(
+            Box::new(Term::Function {
+                parameters: vec![nir::Parameter {
+                    sort: Sort::ComptimeValue,
+                    ty: primitive(P::Bool)
+                }],
+                result: Box::new(primitive(P::Type)),
+            }),
+            Some(0)
+        )
+    );
+    assert!(descriptor.to_string().contains("(collector 1)"));
+    for invalid in [0, 2, usize::MAX] {
+        descriptor.collector = Some(invalid);
+        assert!(descriptor.callable_type().is_err());
+    }
+    descriptor.collector = None;
+    assert!(descriptor.callable_type().is_ok());
+}
+
+#[test]
 fn dependent_list_parameters_use_the_same_value_contract_for_types_and_bools() {
     let list = |element| Term::NormalForm {
         head: id(90),
@@ -39,6 +85,7 @@ fn dependent_list_parameters_use_the_same_value_contract_for_types_and_bools() {
         arguments: vec![element],
     };
     let descriptor = Head {
+        collector: None,
         role: nir::normal_forms::Role::Opaque,
         declaration: id(0),
         parameters: vec![
@@ -285,6 +332,7 @@ fn nominal_domains_require_metadata_and_prior_type_inputs() {
         |declaration| declaration == id(7)
     ));
     let descriptor = Head {
+        collector: None,
         role: nir::normal_forms::Role::Opaque,
         declaration: id(0),
         parameters: vec![
@@ -352,6 +400,7 @@ fn nominal_domains_require_metadata_and_prior_type_inputs() {
 #[test]
 fn normal_form_input_budget_is_shared_across_the_telescope() {
     let descriptor = Head {
+        collector: None,
         role: nir::normal_forms::Role::Opaque,
         declaration: id(0),
         parameters: (1..=100)
@@ -423,6 +472,7 @@ fn record_normal_inputs_resolve_prior_type_arguments() {
     assert!(!supported_input_type(&shape, &[]));
     assert!(supported_input_type(&shape, &[id(1)]));
     let descriptor = Head {
+        collector: None,
         role: nir::normal_forms::Role::Opaque,
         declaration: id(0),
         parameters: vec![
@@ -642,6 +692,7 @@ fn nominal_domains_preserve_value_prefix_sorts_and_instances() {
         sort: Sort::ComptimeValue
     }]));
     let descriptor = Head {
+        collector: None,
         role: nir::normal_forms::Role::Opaque,
         declaration: id(0),
         requirements: vec![],
@@ -680,6 +731,7 @@ fn residual_normal_inputs_require_exact_domains_without_weakening_closed_admissi
         sort: Sort::ComptimeValue,
     };
     let descriptor = Head {
+        collector: None,
         role: nir::normal_forms::Role::Opaque,
         declaration: id(0),
         requirements: vec![],

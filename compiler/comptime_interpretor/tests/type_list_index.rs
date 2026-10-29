@@ -25,6 +25,7 @@ fn package() -> Package {
     Package {
         normal_forms: vec![
             Head {
+                collector: None,
                 role: nir::normal_forms::Role::TypeList,
                 declaration: id(1),
                 requirements: vec![],
@@ -36,6 +37,7 @@ fn package() -> Package {
                 }],
             },
             Head {
+                collector: None,
                 role: nir::normal_forms::Role::Opaque,
                 declaration: id(2),
                 requirements: vec![],

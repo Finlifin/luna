@@ -104,6 +104,7 @@ fn wrong_arity_values_unknown_types_and_runtime_phase_are_rejected() {
 fn opaque_heads_are_preserved_inside_fields_and_not_unfolded_as_structs() {
     let mut package = package();
     package.normal_forms.push(nir::normal_forms::Head {
+        collector: None,
         declaration: id(3),
         role: nir::normal_forms::Role::Opaque,
         parameters: vec![],
@@ -338,6 +339,7 @@ fn selected_field_queries_are_admitted_after_substitution() {
 fn source_struct_field_nodes_validate_domains_meter_work_and_recover() {
     let mut package = package();
     package.normal_forms.push(nir::normal_forms::Head {
+        collector: None,
         declaration: id(10),
         role: nir::normal_forms::Role::TypeList,
         requirements: vec![],

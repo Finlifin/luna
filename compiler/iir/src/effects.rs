@@ -912,6 +912,7 @@ mod tuple_tests {
         };
         let mut package = Package {
             normal_forms: vec![Head {
+                collector: None,
                 declaration: id,
                 role: Role::Tuple,
                 parameters: vec![Parameter {

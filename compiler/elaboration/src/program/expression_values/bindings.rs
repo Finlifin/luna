@@ -230,6 +230,11 @@ impl Checker<'_, '_> {
                     }
                     return Ok(value);
                 }
+                if matches!(&self.package.item(owner).unwrap().kind,
+                    ItemKind::Fn(signature, _) if signature.modifiers.is_normal_form_head)
+                {
+                    return self.normal_form_value(expr, owner, expected);
+                }
                 self.require_non_trait_body_reference(owner, expr.span)?;
                 self.ensure_signature(owner, expr.span)?;
                 if self

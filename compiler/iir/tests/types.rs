@@ -17,6 +17,7 @@ fn staged_type_list_index_preserves_identity_and_checks_bounds_and_depth() {
         arguments: vec![type_ty.clone()],
     };
     let heads = [Head {
+        collector: None,
         declaration: id,
         role: Role::TypeList,
         requirements: vec![],
@@ -271,6 +272,7 @@ fn type_list_constants_validate_embedded_types_and_domain_authority() {
         roots: vec![key.clone()],
         normal_forms: vec![
             Head {
+                collector: None,
                 declaration: id(1),
                 role: Role::TypeList,
                 requirements: vec![],
@@ -282,6 +284,7 @@ fn type_list_constants_validate_embedded_types_and_domain_authority() {
                 }],
             },
             Head {
+                collector: None,
                 declaration: id(2),
                 role: Role::Tuple,
                 requirements: vec![],

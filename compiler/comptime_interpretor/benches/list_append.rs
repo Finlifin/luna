@@ -51,6 +51,7 @@ fn base_package(element: Primitive) -> Package {
     }];
     Package {
         normal_forms: vec![Head {
+            collector: None,
             role: Role::TypeList,
             declaration: id(2),
             requirements: vec![],

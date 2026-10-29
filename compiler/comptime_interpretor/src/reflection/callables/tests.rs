@@ -222,6 +222,7 @@ fn associated_callable_view_preserves_the_original_query() {
 fn normal_form_heads_are_preserved_in_signatures_and_never_unfolded() {
     let mut package = Package::default();
     package.normal_forms.push(nir::normal_forms::Head {
+        collector: None,
         declaration: id(8),
         role: nir::normal_forms::Role::Opaque,
         parameters: vec![],

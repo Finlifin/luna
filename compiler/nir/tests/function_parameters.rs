@@ -96,6 +96,7 @@ fn callable_list_inputs_require_unique_representation_evidence_and_recover() {
         arguments: vec![Term::Primitive(Primitive::Type)],
     };
     let head = Head {
+        collector: None,
         declaration: id(20),
         role: Role::TypeList,
         parameters: vec![Parameter {
@@ -122,6 +123,7 @@ fn callable_list_inputs_require_unique_representation_evidence_and_recover() {
     for heads in [
         vec![],
         vec![Head {
+            collector: None,
             role: Role::Opaque,
             ..head.clone()
         }],

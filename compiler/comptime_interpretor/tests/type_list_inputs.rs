@@ -31,6 +31,7 @@ fn package() -> Package {
     Package {
         normal_forms: vec![
             Head {
+                collector: None,
                 role: nir::normal_forms::Role::TypeList,
                 declaration: id(1),
                 requirements: vec![],
@@ -42,6 +43,7 @@ fn package() -> Package {
                 }],
             },
             Head {
+                collector: None,
                 role: nir::normal_forms::Role::Opaque,
                 declaration: id(2),
                 requirements: vec![],
@@ -354,6 +356,7 @@ fn contextual_tuple_types_preserve_the_head_before_and_after_their_context_arriv
     let mut package = package();
     package.normal_forms[1].role = nir::normal_forms::Role::Tuple;
     package.normal_forms.push(Head {
+        collector: None,
         role: nir::normal_forms::Role::Opaque,
         declaration: id(4),
         requirements: vec![],

@@ -235,6 +235,7 @@ fn typed_objects_roundtrip_through_comptime_parameters_and_results() {
         local: 9,
     };
     package.normal_forms.push(nir::normal_forms::Head {
+        collector: None,
         role: nir::normal_forms::Role::Opaque,
         declaration: head,
         parameters: vec![],
@@ -450,6 +451,7 @@ fn property_lookup_keeps_opaque_type_identity_and_type_payloads() {
     };
     let mut package = Package::default();
     package.normal_forms.push(nir::normal_forms::Head {
+        collector: None,
         role: nir::normal_forms::Role::Opaque,
         declaration: head,
         parameters: vec![],

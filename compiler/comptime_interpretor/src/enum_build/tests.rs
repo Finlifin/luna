@@ -17,6 +17,7 @@ fn list(element: Term) -> Term {
 fn world() -> nir::program::Package {
     nir::program::Package {
         normal_forms: vec![nir::normal_forms::Head {
+            collector: None,
             role: nir::normal_forms::Role::TypeList,
             declaration: id(1),
             requirements: vec![],

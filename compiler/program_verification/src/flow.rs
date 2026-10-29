@@ -7620,6 +7620,7 @@ mod tuple_storage_tests {
         };
         let package = nir::program::Package {
             normal_forms: vec![nir::normal_forms::Head {
+                collector: None,
                 role: nir::normal_forms::Role::Tuple,
                 declaration: head,
                 parameters: vec![],

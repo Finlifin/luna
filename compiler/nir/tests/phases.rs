@@ -50,6 +50,57 @@ fn function(local: u32, phase: Phase, inputs: &[Sort]) -> Function {
 }
 
 #[test]
+fn normal_form_values_require_matching_metadata_and_comptime_storage() {
+    let head = nir::normal_forms::Head {
+        collector: None,
+        role: nir::normal_forms::Role::Opaque,
+        declaration: DeclarationId {
+            package: 1,
+            local: 50,
+        },
+        parameters: vec![],
+        requirements: vec![],
+    };
+    let ty = head.callable_type().unwrap();
+    let mut f = function(1, Phase::Comptime, &[]);
+    f.signature = Term::Function {
+        parameters: vec![],
+        result: Box::new(ty.clone()),
+    };
+    f.body.ty = ty;
+    f.body.kind = K::Function(head.declaration);
+    let package = Package {
+        functions: vec![f],
+        normal_forms: vec![head],
+        ..Default::default()
+    };
+    nir::phases::validate(&package).unwrap();
+    let mut bad = package.clone();
+    bad.normal_forms.clear();
+    assert!(nir::phases::validate(&bad).is_err());
+    let mut bad = package.clone();
+    bad.functions[0].phase = Phase::Runtime;
+    assert!(nir::phases::validate(&bad).is_err());
+    let mut bad = package.clone();
+    bad.normal_forms[0]
+        .parameters
+        .push(nir::normal_forms::Parameter {
+            declaration: DeclarationId {
+                package: 1,
+                local: 51,
+            },
+            binding: LocalId {
+                owner: 50,
+                index: 0,
+            },
+            kind: nir::normal_forms::Kind::Type,
+            ty: Term::Primitive(Primitive::Type),
+        });
+    assert!(nir::phases::validate(&bad).is_err());
+    nir::phases::validate(&package).unwrap();
+}
+
+#[test]
 fn comptime_integer_conversion_checks_phase_and_both_domains() {
     let mut f = function(1, Phase::Comptime, &[]);
     f.signature = Term::Function {

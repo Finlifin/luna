@@ -309,6 +309,11 @@ impl Checker<'_, '_> {
             }
         }
         if let H::NFApplication(head, arguments) = &expr.kind {
+            if let Some(owner) = self.normal_form_constant_target(head)? {
+                return self
+                    .normal_type_expression(expr, owner, arguments, expected)
+                    .map(Some);
+            }
             if let H::ResolvedDef { def_id, .. } = head.kind {
                 if let Some(owner) = self.package.definition_owner(def_id) {
                     if (self.has_optional_type_clauses(owner)

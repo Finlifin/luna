@@ -215,6 +215,7 @@ fn bound_tuple_preparation_uses_only_the_declared_layout_role() {
         local: 40,
     };
     let head = Head {
+        collector: None,
         role: Role::Tuple,
         declaration: id,
         requirements: vec![],

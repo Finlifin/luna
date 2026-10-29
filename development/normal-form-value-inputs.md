@@ -80,3 +80,39 @@ phase-preservation and inference checks were added, the source/metadata group
 passed 4 tests and the specialization/matching group passed 4 tests. These
 include collector mismatch isolation, dependent input specialization, runtime
 and quote-context rejection, and metadata round trips.
+
+## Callable values and constant aliases
+
+Source normal-form heads now yield ordinary function identities carrying their
+normal-form callable types. Required comptime evaluation and dispatch preparation
+carry declaration contracts without demanding or executing head bodies. Constant
+aliases, including identities returned by comptime functions, apply the original
+head with its formation constraints and argument collection. Metadata carries
+the collector position independently of parameter domains. Runtime storage,
+ordinary invocation, and forged callable annotations remain rejected.
+
+This stage supports resolved constant aliases, not arbitrary local or dynamic
+normal-form callees. Tuple's builtin constant registration remains pending.
+
+Validation from `/home/fin/luna`, all commands below exited 0:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p luna --test frontend_cli normal_form_callable
+python3 -B development/check.py --timeout 900 -- test -p nir --test normal_inputs --test phases --test normal_form_callables
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor -p materialization -p iir -p program_verification --lib normal_form
+python3 -B development/check.py --timeout 900 -- check -p comptime_interpretor -p elaboration -p iir -p intrinsic -p program_verification -p type_resolution --all-targets
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+```
+
+The source group passed 5 tests, NIR groups 60, and filtered library groups 3
+(the IIR and materialization library filters selected no tests). Checks include
+named versus collected alias inputs, dependent domains, metadata mismatch,
+bodyless callable values, ordinary-call rejection, and recovery after rejection.
+Reports: `/tmp/luna-tools-zib6o8jm`, `/tmp/luna-tools-wlnrir2_`,
+`/tmp/luna-tools-8pn0qyof`, `/tmp/luna-tools-vve6zs9z`, and
+`/tmp/luna-tools-xdfbk2kj` respectively.
+
+An earlier multi-package `test ... normal_form --no-fail-fast` attempt including
+all luna test binaries failed during linking with a disk quota error; logging
+also hit quota (`/tmp/luna-tools-r398kete/result.json`). It is not a passing
+test run. Validation was split into the explicit entries above.

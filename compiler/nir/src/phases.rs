@@ -602,6 +602,26 @@ pub fn machine_arithmetic_functions(
                                     ));
                                 }
                             }
+                            if expr.ty.is_normal_form_callable() {
+                                let descriptor = package
+                                    .normal_forms
+                                    .iter()
+                                    .find(|head| head.declaration == *id)
+                                    .ok_or_else(|| {
+                                        error("normal-form callable declaration is missing")
+                                    })?;
+                                if !ct || _callee || !matches!(expr.kind, K::Function(_)) {
+                                    return Err(error(
+                                        "normal-form heads cannot be invoked as ordinary functions or stored at runtime",
+                                    ));
+                                }
+                                if descriptor.callable_type().ok().as_ref() != Some(&expr.ty) {
+                                    return Err(error(
+                                        "normal-form callable type disagrees with its declaration",
+                                    ));
+                                }
+                                continue;
+                            }
                             let target = functions
                                 .get(id)
                                 .ok_or_else(|| error("function phase declaration is missing"))?;

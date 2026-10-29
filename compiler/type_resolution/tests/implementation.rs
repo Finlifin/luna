@@ -951,6 +951,7 @@ fn tuple_kind_conflict_excludes_uninferable_generic_candidates() {
     let mut package = nir::program::Package {
         normal_forms: vec![
             Head {
+                collector: None,
                 declaration: id(990),
                 role: Role::Tuple,
                 requirements: vec![],
@@ -969,6 +970,7 @@ fn tuple_kind_conflict_excludes_uninferable_generic_candidates() {
                 }],
             },
             Head {
+                collector: None,
                 declaration: id(992),
                 role: nir::normal_forms::Role::TypeList,
                 requirements: vec![],
@@ -1051,6 +1053,7 @@ fn tuple_subject_eligibility_requires_trusted_metadata_at_selection_and_replay()
     let mut package = nir::program::Package {
         normal_forms: vec![
             Head {
+                collector: None,
                 declaration: id(990),
                 role: Role::Tuple,
                 requirements: vec![],
@@ -1069,6 +1072,7 @@ fn tuple_subject_eligibility_requires_trusted_metadata_at_selection_and_replay()
                 }],
             },
             Head {
+                collector: None,
                 declaration: id(992),
                 role: nir::normal_forms::Role::TypeList,
                 requirements: vec![],
@@ -3240,6 +3244,7 @@ fn list_subject_eligibility_requires_trusted_metadata_at_selection_and_replay() 
     use type_resolution::{implementation::TypeAssessment, ptc::Context};
     let mut package = nir::program::Package {
         normal_forms: vec![Head {
+            collector: None,
             declaration: id(990),
             role: Role::TypeList,
             requirements: vec![],
