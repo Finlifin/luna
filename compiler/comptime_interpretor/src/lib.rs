@@ -2229,11 +2229,15 @@ impl<'a> Interpreter<'a> {
                 continue;
             }
             let representation = match &argument {
-                Value::Storage(storage) => self.read_owned_value(storage)?,
+                Value::Storage(storage) => std::borrow::Cow::Owned(self.read_owned_value(storage)?),
                 Value::ComptimeReference(reference) => {
-                    self.read_value_reference(reference, source)?
+                    std::borrow::Cow::Owned(self.read_value_reference(reference, source)?)
                 }
-                value => self.checkpoint_representation(value, source)?,
+                value if self.comptime_only => {
+                    self.check_borrowed_representation(value, source, 0)?;
+                    std::borrow::Cow::Borrowed(value)
+                }
+                value => std::borrow::Cow::Owned(self.checkpoint_representation(value, source)?),
             };
             let expected = match &type_scope {
                 Some(scope) => scope.rebind(&parameter.ty),
@@ -2253,7 +2257,7 @@ impl<'a> Interpreter<'a> {
                 || (parameter.sort == nir::Sort::ComptimeValue
                     && expected == Term::Primitive(Primitive::Type))
             {
-                let ty = match &representation {
+                let ty = match representation.as_ref() {
                     Value::Type(ty) => ty.clone(),
                     Value::TypeParameter(declaration)
                         if self.abstract_type_parameters.contains(declaration) =>
@@ -2277,7 +2281,12 @@ impl<'a> Interpreter<'a> {
                 // Checked data inputs may remain symbolic in a generic
                 // invocation. Preserve their authorized declaration identity
                 // in dependent inputs, results and body annotations.
-                type_inputs[index] = Some(self.residual_input_term(representation, source)?);
+                type_inputs[index] = Some(match representation {
+                    std::borrow::Cow::Borrowed(value) => {
+                        self.borrowed_residual_input_term(value, source)?
+                    }
+                    std::borrow::Cow::Owned(value) => self.residual_input_term(value, source)?,
+                });
                 type_scope = Some(
                     signature
                         .prepare_function_inputs(&type_inputs)
@@ -3847,6 +3856,26 @@ impl<'a> Interpreter<'a> {
             &mut budget,
             &self.abstract_type_parameters,
             &self.abstract_value_parameters,
+        );
+        self.budget.steps -= (steps - budget.steps) as u64;
+        term.map_err(|kind| self.failure(kind, Some(source)))
+    }
+
+    fn borrowed_residual_input_term(
+        &mut self,
+        value: &Value,
+        source: SourceRange,
+    ) -> Result<Term, Error> {
+        let steps = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+        let mut budget = comptime_runtime::Budget {
+            steps,
+            max_limbs: 4096,
+        };
+        let term = value.to_scoped_term(
+            &mut budget,
+            &self.abstract_type_parameters,
+            &self.abstract_value_parameters,
+            true,
         );
         self.budget.steps -= (steps - budget.steps) as u64;
         term.map_err(|kind| self.failure(kind, Some(source)))

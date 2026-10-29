@@ -2220,3 +2220,56 @@ active inference state.
 
 - Final managed `cargo fmt --all -- --check` passed, exit 0:
   `/tmp/luna-tools-r6ezrx36/result.json`; `git diff --check` passed.
+
+## Export owned comptime inputs without an intermediate Value copy
+
+Input binding formerly checkpoint-copied every staged argument before forming a
+dependent Term. The consuming exporter itself traversed that copy by reference
+and cloned its payloads into the resulting Term, so immutable owned arguments
+paid for an avoidable intermediate Value representation.
+
+Owned comptime inputs now use the existing borrowed checkpoint validation and
+export directly into an independent Term. Type inputs likewise avoid copying the
+Value wrapper and its entire type payload before the actual binding. This is a
+general representation path, not a List/Type-list head rule. Storage and projected
+reference inputs retain checked snapshots; runtime input handling is unchanged.
+
+`normal_terms` has one borrowed conversion core. Consuming export still wraps it
+with the original iterative release, including on failure for deeply nested host
+data. Owned storage snapshots use that consuming path. Abstract declaration-domain
+authority, shape checks, depth/size limits and spent-budget accounting are shared;
+a borrowed value does not authorize a storage handle or unknown abstract input as
+a normal term. No invocation result is cached.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --tests`:
+  all 457 existing tests passed, exit 0, `/tmp/luna-tools-lzavjd5t/result.json`.
+  This preceded the two new tests and the explicit consuming path for owned
+  snapshots, which restores their original iterative-release behavior.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib normal_terms::borrowed_input_tests`:
+  two tests passed on the final implementation, exit 0,
+  `/tmp/luna-tools-t2139asp/result.json`. Budget sweeps compare borrowed/consuming
+  outcomes and work while preserving the input, reject unauthorized abstract
+  inputs and storage export, and verify that subsequent owned/shared/projected
+  writes cannot change already-bound substitution terms.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_clause_inputs --test function_type_dependencies --test comptime_list_operations --test builder_invocations --test execution`:
+  clause inputs 43, function dependencies 37, list operations 54, builders 73
+  and execution 1365 passed, exit 0, `/tmp/luna-tools-6lm2hkeb/result.json`.
+- `LUNA_BENCH_ITERATIONS=10 python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --bench type_list_index`:
+  exit 0, `/tmp/luna-tools-bbnsxm8h/result.json`. Unchanged development-profile
+  benchmark, five warmups and ten measurements. The 4096-element, 64-literal-read
+  case allocates 730,336 bytes/invocation versus 959,840 in the immediately prior
+  recorded revision (`/tmp/luna-tools-c4ccr8z8/result.json`); both charge 21,644
+  steps. This is a reduction in allocated bytes without removing validation
+  charges, not a controlled release timing result. Benchmark input clones and
+  remaining telescope/substitution copies are still included.
+- An initial extraction incorrectly left consuming cleanup in the borrowed
+  method; Rust rejected it before tests ran, `/tmp/luna-tools-ylufke1p/result.json`.
+  Cleanup was restored to the consuming wrapper before the successful runs.
+- Managed `cargo fmt --all -- --check` passed, exit 0,
+  `/tmp/luna-tools-yyz6pi3r/result.json`; `git diff --check` passed.
+
+Repeated telescope preparation, substitution-term copies, dependent-body code
+reuse and normal-form plan bytecode remain separate work. This change removes
+one intermediate immutable representation, not all input copying.

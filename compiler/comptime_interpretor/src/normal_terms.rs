@@ -10,6 +10,83 @@ impl Value {
         value_parameters: &BTreeMap<DeclarationId, Term>,
         invocation: bool,
     ) -> Result<Term, ErrorKind> {
+        let result = self.to_scoped_term(budget, parameters, value_parameters, invocation);
+        // Even rejected host data must be released without recursively dropping
+        // a potentially unbounded aggregate tail. Cleanup is not fuel-limited.
+        let mut pending = vec![self];
+        while let Some(value) = pending.pop() {
+            match value {
+                Value::Tuple(values) => pending.extend(values),
+                Value::List { ty, values } => {
+                    ty.drop_iteratively();
+                    pending.extend(values);
+                }
+                Value::Record {
+                    fields, arguments, ..
+                }
+                | Value::Variant {
+                    fields, arguments, ..
+                } => {
+                    pending.extend(fields);
+                    for argument in arguments {
+                        argument.drop_iteratively();
+                    }
+                }
+                Value::AnonymousRecord(fields) => {
+                    pending.extend(fields.into_iter().map(|(_, value)| value))
+                }
+                Value::Object(object) => {
+                    for entry in object.into_entries() {
+                        let typed = entry.into_value();
+                        typed.ty.drop_iteratively();
+                        pending.push(typed.value);
+                    }
+                }
+                Value::Type(ty) => ty.drop_iteratively(),
+                Value::Optional { ty, value } => {
+                    ty.drop_iteratively();
+                    if let Some(value) = value {
+                        pending.push(*value);
+                    }
+                }
+                Value::ErrorResult { ty, value, .. } | Value::Newtype { ty, value } => {
+                    ty.drop_iteratively();
+                    pending.push(*value);
+                }
+                Value::TypeList(types)
+                | Value::RuntimeFunction {
+                    arguments: types, ..
+                } => {
+                    for ty in types {
+                        ty.drop_iteratively();
+                    }
+                }
+                Value::RuntimeTraitMethod(method) => {
+                    method.subject.drop_iteratively();
+                    for ty in method
+                        .interface
+                        .arguments
+                        .into_iter()
+                        .chain(method.method_arguments)
+                    {
+                        ty.drop_iteratively();
+                    }
+                }
+                _ => {}
+            }
+        }
+        result
+    }
+
+    /// Build an independent term directly from an admitted borrowed value.
+    /// The caller retains ownership; storage handles remain ineligible exports.
+    pub(super) fn to_scoped_term(
+        &self,
+        budget: &mut comptime_runtime::Budget,
+        parameters: &BTreeSet<DeclarationId>,
+        value_parameters: &BTreeMap<DeclarationId, Term>,
+        invocation: bool,
+    ) -> Result<Term, ErrorKind> {
         fn charge(budget: &mut comptime_runtime::Budget, work: usize) -> Result<(), ErrorKind> {
             budget.consume(work).map_err(|_| ErrorKind::StepsExhausted)
         }
@@ -691,71 +768,131 @@ impl Value {
                 _ => return Err(ErrorKind::Unsupported),
             })
         }
-        let result = visit(&self, 0, budget, parameters, value_parameters, invocation);
-        // Even rejected host data must be released without recursively dropping
-        // a potentially unbounded aggregate tail. Cleanup is not fuel-limited.
-        let mut pending = vec![self];
-        while let Some(value) = pending.pop() {
-            match value {
-                Value::Tuple(values) => pending.extend(values),
-                Value::List { ty, values } => {
-                    ty.drop_iteratively();
-                    pending.extend(values);
+        visit(self, 0, budget, parameters, value_parameters, invocation)
+    }
+}
+
+#[cfg(test)]
+mod borrowed_input_tests {
+    use super::*;
+    const SOURCE: SourceRange = SourceRange { start: 1, end: 2 };
+
+    #[test]
+    fn borrowed_exports_retain_scope_checks_and_leave_input_intact_on_failure() {
+        let parameter = DeclarationId {
+            package: 1,
+            local: 7,
+        };
+        let value = Value::Tuple(vec![Value::Bool(true), Value::TypeParameter(parameter)]);
+        let original = value.clone();
+        let parameters = BTreeSet::from([parameter]);
+        let mut failures = 0;
+        let mut successes = 0;
+        for steps in 0..40 {
+            let mut borrowed = comptime_runtime::Budget {
+                steps,
+                max_limbs: 4096,
+            };
+            let mut owned = comptime_runtime::Budget {
+                steps,
+                max_limbs: 4096,
+            };
+            let result = value.to_scoped_term(&mut borrowed, &parameters, &BTreeMap::new(), true);
+            assert_eq!(
+                result,
+                value
+                    .clone()
+                    .into_scoped_term(&mut owned, &parameters, &BTreeMap::new(), true)
+            );
+            assert_eq!(borrowed.steps, owned.steps);
+            assert_eq!(value, original);
+            match result {
+                Ok(term) => {
+                    successes += 1;
+                    assert_eq!(
+                        term,
+                        Term::TupleValue(vec![
+                            Term::Bool(true),
+                            Term::Rigid {
+                                declaration: parameter,
+                                sort: nir::Sort::Type
+                            }
+                        ])
+                    );
                 }
-                Value::Record {
-                    fields, arguments, ..
+                Err(error) => {
+                    failures += 1;
+                    assert_eq!(error, ErrorKind::StepsExhausted);
                 }
-                | Value::Variant {
-                    fields, arguments, ..
-                } => {
-                    pending.extend(fields);
-                    for argument in arguments {
-                        argument.drop_iteratively();
-                    }
-                }
-                Value::AnonymousRecord(fields) => {
-                    pending.extend(fields.into_iter().map(|(_, value)| value))
-                }
-                Value::Object(object) => {
-                    for entry in object.into_entries() {
-                        let typed = entry.into_value();
-                        typed.ty.drop_iteratively();
-                        pending.push(typed.value);
-                    }
-                }
-                Value::Type(ty) => ty.drop_iteratively(),
-                Value::Optional { ty, value } => {
-                    ty.drop_iteratively();
-                    if let Some(value) = value {
-                        pending.push(*value);
-                    }
-                }
-                Value::ErrorResult { ty, value, .. } | Value::Newtype { ty, value } => {
-                    ty.drop_iteratively();
-                    pending.push(*value);
-                }
-                Value::TypeList(types)
-                | Value::RuntimeFunction {
-                    arguments: types, ..
-                } => {
-                    for ty in types {
-                        ty.drop_iteratively();
-                    }
-                }
-                Value::RuntimeTraitMethod(method) => {
-                    method.subject.drop_iteratively();
-                    for ty in method
-                        .interface
-                        .arguments
-                        .into_iter()
-                        .chain(method.method_arguments)
-                    {
-                        ty.drop_iteratively();
-                    }
-                }
-                _ => {}
             }
         }
-        result
+        assert!(successes > 0 && failures > 0);
+        let mut budget = comptime_runtime::Budget {
+            steps: 1000,
+            max_limbs: 4096,
+        };
+        assert!(
+            value
+                .to_scoped_term(&mut budget, &BTreeSet::new(), &BTreeMap::new(), true)
+                .is_err()
+        );
+        let storage = Value::Storage(Storage::new(Value::Bool(true)));
+        assert!(
+            storage
+                .to_scoped_term(&mut budget, &BTreeSet::new(), &BTreeMap::new(), true)
+                .is_err()
+        );
+        assert_eq!(value, original);
+    }
+
+    #[test]
+    fn bound_terms_keep_the_original_input_after_owned_and_shared_writes() {
+        let package = Package::default();
+        let binding = LocalId { owner: 1, index: 0 };
+        let signature = Term::Function {
+            parameters: vec![nir::Parameter {
+                sort: nir::Sort::ComptimeValue,
+                ty: Term::Tuple(vec![Term::Primitive(Primitive::Bool); 2]),
+            }],
+            result: Box::new(Term::Primitive(Primitive::Bool)),
+        };
+        let old = Value::Tuple(vec![Value::Bool(true), Value::Bool(false)]);
+        let new = Value::Tuple(vec![Value::Bool(false), Value::Bool(true)]);
+        for carrier in 0..3 {
+            let storage = Storage::new(old.clone());
+            let argument = match carrier {
+                0 => old.clone(),
+                1 => Value::Storage(storage.clone()),
+                _ => {
+                    Value::ComptimeReference(value_reference::ValueReference::root(storage.clone()))
+                }
+            };
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            let mut env = Environment::new();
+            let scope = vm
+                .bind_invocation_inputs(&[binding], vec![argument], &signature, &mut env, SOURCE)
+                .unwrap()
+                .unwrap();
+            vm.write_comptime_place(env.get_mut(&binding).unwrap(), &[], new.clone(), SOURCE)
+                .unwrap();
+            assert_eq!(
+                vm.invocation_slot_value(&env[&binding], Some(SOURCE))
+                    .unwrap(),
+                new
+            );
+            assert_eq!(
+                scope
+                    .rebind(&Term::Bound {
+                        depth: 0,
+                        index: 0,
+                        sort: nir::Sort::ComptimeValue
+                    })
+                    .unwrap(),
+                Term::TupleValue(vec![Term::Bool(true), Term::Bool(false)])
+            );
+            if carrier != 0 {
+                assert_eq!(*storage.0.lock().unwrap(), new);
+            }
+        }
     }
 }
