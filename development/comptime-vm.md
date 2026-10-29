@@ -573,3 +573,63 @@ using `development/reproduce.py --timeout 120 --binary
 --sysroot library --test-native`. Reports respectively:
 `/tmp/luna-tools-ii5j9ekx/result.json`, `/tmp/luna-tools-5fsy39sf/result.json`,
 `/tmp/luna-tools-izvznfdb/result.json` (all exit 0).
+
+## Borrowed aggregate admission (2026-10-29)
+
+Ordinary comptime reference inputs now walk tuples, anonymous/nominal records,
+variants, optional/error/newtype wrappers and nested Type descriptions without
+constructing a discarded checkpoint value. Instance-argument work checking is
+shared with the copying path. Resource representations retain their existing
+checkpoint behavior. Input-domain and embedded-type admission still execute on
+every invocation; this change adds no result or validation cache.
+
+The differential checkpoint test covers valid and malformed nested values,
+nominal arguments, multibyte field names, both phase settings, fuel 0–99 and
+depth limits 1, 2 and 128. It compares error kind, source location and remaining
+fuel against actual checkpoint copying. All 196 VM unit tests passed:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor --lib
+```
+
+Report: `/tmp/luna-tools-ooclq9t5/result.json` (exit 0).
+
+A new invocation-only benchmark performs 16 reference calls per invocation on
+an aggregate containing N four-boolean tuples. It includes ordinary input
+cloning, binding and execution, but excludes parsing, elaboration and VM setup.
+Its structural tuples exercise internal representation, not source Tuple type
+identity. Run from `/home/fin/luna`:
+
+```sh
+python3 -B development/comptime_bench.py --bench borrowed_aggregate --repeat 3 --iterations 100
+```
+
+Baseline is `b86a30af` plus the benchmark; after is the same benchmark with the
+borrowed aggregate walker. Each process runs five warmups. Times below are
+medians of three processes; allocations are allocator calls, not retained bytes.
+
+| Width | Before ms | After ms | Before allocations | After allocations | VM steps |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 0.0113 | 0.0099 | 189.04 | 157.04 | 421 |
+| 64 | 0.2528 | 0.1946 | 2530.04 | 1426.04 | 16486 |
+| 1024 | 4.2260 | 2.9110 | 36266.04 | 19738.04 | 261286 |
+
+Step counts are identical before and after. The largest case requests about
+46% fewer allocations and takes about 31% less time in these samples. Full
+validation remains linear in aggregate size on every call; these numbers do
+not establish a general compiler speedup or remove repeated admission work.
+
+Baseline measurement reports: `/tmp/luna-tools-mi33o5r4/result.json`,
+`/tmp/luna-tools-uugzo08p/result.json`, `/tmp/luna-tools-wk7lu39g/result.json`.
+Optimized reports: `/tmp/luna-tools-0och76or/result.json`,
+`/tmp/luna-tools-9vn8jd1x/result.json`, `/tmp/luna-tools-3vxmcnc9/result.json`.
+All six exited 0.
+
+Source integration also passed all 26 tests (17 memory, 9 receivers):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test comptime_receivers --test comptime_memory
+```
+
+Report: `/tmp/luna-tools-sq896ebw/result.json` (exit 0). Workspace format check
+and `git diff --check` passed; no full workspace test run was performed.

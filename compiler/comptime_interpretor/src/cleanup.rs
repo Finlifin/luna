@@ -502,6 +502,15 @@ impl<'a> Interpreter<'a> {
         arguments: &[Term],
         source: SourceRange,
     ) -> Result<Vec<Term>, Error> {
+        self.check_instance_arguments(arguments, source)?;
+        Ok(arguments.to_vec())
+    }
+
+    fn check_instance_arguments(
+        &mut self,
+        arguments: &[Term],
+        source: SourceRange,
+    ) -> Result<(), Error> {
         self.copy_work(arguments.len(), source)?;
         for argument in arguments {
             let work = scoped_term_value_work_with_evidence_in(
@@ -515,7 +524,7 @@ impl<'a> Interpreter<'a> {
             .ok_or_else(|| self.failure(ErrorKind::RepresentationSizeLimit, Some(source)))?;
             self.copy_work(work, source)?;
         }
-        Ok(arguments.to_vec())
+        Ok(())
     }
     pub(super) fn copy_representation(
         &mut self,
@@ -534,8 +543,8 @@ impl<'a> Interpreter<'a> {
         self.clone_representation(value, source, 0, true)
     }
 
-    /// Observe a checkpoint without retaining its snapshot. Object entries, list
-    /// buffers and Type-list elements are checked in place; other representations keep
+    /// Observe a checkpoint without retaining its snapshot. Immutable aggregates
+    /// and type descriptions are walked in place; resource representations retain
     /// the existing checkpoint path. No source code runs while borrowed.
     pub(super) fn check_borrowed_representation(
         &mut self,
@@ -545,7 +554,18 @@ impl<'a> Interpreter<'a> {
     ) -> Result<(), Error> {
         if !matches!(
             value,
-            Value::Object(_) | Value::TypeList(_) | Value::List { .. }
+            Value::Object(_)
+                | Value::TypeList(_)
+                | Value::List { .. }
+                | Value::Tuple(_)
+                | Value::AnonymousRecord(_)
+                | Value::Record { .. }
+                | Value::Variant { .. }
+                | Value::Optional { .. }
+                | Value::ErrorResult { .. }
+                | Value::Newtype { .. }
+                | Value::Type(_)
+                | Value::AbstractValue { .. }
         ) {
             return self
                 .clone_representation(value, source, depth, true)
@@ -576,6 +596,44 @@ impl<'a> Interpreter<'a> {
                 for value in values {
                     self.check_borrowed_representation(value, source, depth + 1)?;
                 }
+            }
+            Value::Type(ty) | Value::AbstractValue { ty, .. } => {
+                self.copy_invocation_type_work(ty, source, true)?;
+            }
+            Value::Tuple(values) => {
+                self.copy_work(values.len(), source)?;
+                for value in values {
+                    self.check_borrowed_representation(value, source, depth + 1)?;
+                }
+            }
+            Value::AnonymousRecord(fields) => {
+                self.copy_work(fields.len(), source)?;
+                for (name, value) in fields {
+                    self.copy_work(name.len(), source)?;
+                    self.check_borrowed_representation(value, source, depth + 1)?;
+                }
+            }
+            Value::Record {
+                arguments, fields, ..
+            }
+            | Value::Variant {
+                arguments, fields, ..
+            } => {
+                self.copy_work(fields.len(), source)?;
+                self.check_instance_arguments(arguments, source)?;
+                for field in fields {
+                    self.check_borrowed_representation(field, source, depth + 1)?;
+                }
+            }
+            Value::Optional { ty, value } => {
+                self.copy_invocation_type_work(ty, source, true)?;
+                if let Some(value) = value {
+                    self.check_borrowed_representation(value, source, depth + 1)?;
+                }
+            }
+            Value::ErrorResult { ty, value, .. } | Value::Newtype { ty, value } => {
+                self.copy_invocation_type_work(ty, source, true)?;
+                self.check_borrowed_representation(value, source, depth + 1)?;
             }
             _ => unreachable!(),
         }
@@ -2499,7 +2557,7 @@ mod borrowed_checkpoint_tests {
                 value: ObjectValue { ty, value },
             }]))
         };
-        let cases = [
+        let mut cases = vec![
             object(Value::Bool(true), Term::Primitive(Primitive::Bool)),
             object(Value::Bool(true), Term::Bool(false)),
             object(
@@ -2528,6 +2586,61 @@ mod borrowed_checkpoint_tests {
                 sort: nir::Sort::Type,
             }]),
         ];
+        let declaration = DeclarationId {
+            package: 1,
+            local: 9,
+        };
+        for payload in [
+            Value::Bool(true),
+            Value::Type(Term::Tuple(vec![Term::Primitive(Primitive::Bool); 4])),
+            Value::Type(Term::Bool(false)),
+            list(vec![Value::Bool(false); 4]),
+        ] {
+            cases.push(Value::Tuple(vec![payload.clone(); 3]));
+            cases.push(Value::AnonymousRecord(vec![(
+                "字段".into(),
+                payload.clone(),
+            )]));
+            for arguments in [
+                vec![],
+                vec![Term::Bool(true)],
+                vec![Term::Rigid {
+                    declaration,
+                    sort: nir::Sort::Type,
+                }],
+            ] {
+                cases.push(Value::Record {
+                    declaration,
+                    arguments: arguments.clone(),
+                    fields: vec![payload.clone()],
+                });
+                cases.push(Value::Variant {
+                    declaration,
+                    arguments,
+                    index: 2,
+                    fields: vec![payload.clone()],
+                });
+            }
+            for ty in [Term::Primitive(Primitive::Bool), Term::Bool(false)] {
+                cases.push(Value::Optional {
+                    ty: ty.clone(),
+                    value: None,
+                });
+                cases.push(Value::Optional {
+                    ty: ty.clone(),
+                    value: Some(Box::new(payload.clone())),
+                });
+                cases.push(Value::Newtype {
+                    ty: ty.clone(),
+                    value: Box::new(payload.clone()),
+                });
+                cases.push(Value::ErrorResult {
+                    ty,
+                    error: Some(0),
+                    value: Box::new(payload.clone()),
+                });
+            }
+        }
         for value in &cases {
             for depth in [1, 2, 128] {
                 for steps in 0..100 {
