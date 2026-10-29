@@ -41,6 +41,22 @@ impl StructBuilder {
     }
 
     {-
+        Batch operations keep reflected names and Types aligned. A mismatched
+        input or invalid range leaves the draft unchanged; publication still
+        validates field names and storage Types.
+    -}
+    pub comptime fn add_fields(self, names: List<Symbol>, types: List<Type>) -> bool {
+        let end = self.field_names.length();
+        self.replace_fields(end, end, names, types)
+    }
+
+    pub comptime fn replace_fields(self, start: Integer, end: Integer,
+        names: List<Symbol>, types: List<Type>) -> bool {
+        if names.length() != types.length() { return false; };
+        self.edit_fields(start, end, names, types)
+    }
+
+    {-
         Edit by declaration-order index. Invalid bounds leave both snapshots
         unchanged. Names and Types are prepared together before either write;
         Build remains responsible for duplicate names and layout admission.

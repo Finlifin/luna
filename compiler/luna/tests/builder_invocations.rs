@@ -2053,6 +2053,60 @@ fn public_builder_uses_invocation_ranges_for_distinct_reflected_subjects() {
 }
 
 #[test]
+fn struct_builder_batches_preserve_order_snapshots_and_type_identity() {
+    let fixture = Fixture::new(
+        "typealias Type = .Type'builtin;
+        pure comptime fn Identity<T> -> Type { T }
+        struct Source { first: bool, second: bool }
+        comptime fn inspect() -> bool {
+            var builder = meta.StructBuilder.new();
+            let added = builder.add_fields(meta.struct_field_names(Source),
+                meta.struct_field_types(Source));
+            let snapshot = builder;
+            let changed = builder.replace_fields(0, 1, [.head, .wrapped],
+                [bool, Identity<bool>]);
+            let appended = builder.add_fields([.tail], [bool]);
+            let result = builder.Build();
+            let names = meta.struct_field_names(result);
+            let types = meta.struct_field_types(result);
+            let original = meta.struct_field_names(snapshot.Build());
+            added and changed and appended and names.length() == 4
+                and names[0] == .head and names[1] == .wrapped
+                and names[2] == .second and names[3] == .tail
+                and types[1] == Identity<bool> and original.length() == 2
+                and original[0] == .first and original[1] == .second
+        }",
+    );
+    assert_eq!(fixture.invoke_meta("inspect").unwrap().1, Value::Bool(true));
+}
+
+#[test]
+fn struct_builder_batches_reject_invalid_ranges_and_lengths_without_mutation() {
+    let fixture = Fixture::new(
+        "struct Source { first: bool, second: bool }
+        comptime fn inspect() -> bool {
+            var builder = meta.StructBuilder.from_type(Source);
+            let short = builder.add_fields([.wrong], []);
+            let long = builder.replace_fields(0, 2, [], [bool]);
+            let negative = builder.replace_fields(-1, 1, [.wrong], [bool]);
+            let reversed = builder.replace_fields(2, 1, [], []);
+            let far = builder.replace_fields(0, 3, [], []);
+            let unchanged = meta.struct_field_names(builder.Build());
+            let empty_append = builder.add_fields([], []);
+            let removed = builder.replace_fields(0, 2, [], []);
+            let empty = meta.struct_field_names(builder.Build());
+            let restored = builder.add_fields([.restored], [bool]);
+            not short and not long and not negative and not reversed and not far
+                and unchanged.length() == 2 and unchanged[0] == .first
+                and unchanged[1] == .second and empty_append and removed
+                and empty.length() == 0 and restored
+                and meta.struct_field_names(builder.Build())[0] == .restored
+        }",
+    );
+    assert_eq!(fixture.invoke_meta("inspect").unwrap().1, Value::Bool(true));
+}
+
+#[test]
 fn struct_builder_edits_preserve_order_snapshots_and_failed_bounds() {
     let fixture = Fixture::new(
         "typealias Type=.Type'builtin;
@@ -2109,6 +2163,7 @@ fn struct_builder_can_edit_empty_drafts_and_remove_every_field() {
 fn struct_builder_edits_do_not_bypass_duplicate_field_validation() {
     for edit in [
         "builder.insert_field(1,.first,bool)",
+        "builder.replace_fields(0, 2, [.first, .first], [bool, bool])",
         "builder.replace_field(1,.first,bool)",
     ] {
         let fixture = Fixture::new(&format!(

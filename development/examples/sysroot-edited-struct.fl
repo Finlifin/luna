@@ -37,3 +37,21 @@ comptime fn inspect() -> bool {
 test edited_reflection {
     inline if inspect() { assumes true; } else { assumes false; };
 }
+
+{- Batch composition consumes reflection lists through the public sysroot API. -}
+comptime fn Combined() -> Type {
+    var builder = meta.StructBuilder.new(.name = .Combined);
+    let reflected = builder.add_fields(meta.struct_field_names(Source),
+        meta.struct_field_types(Source));
+    let replaced = builder.replace_fields(0, 2, [.enabled, .count], [bool, u8]);
+    let rejected = builder.add_fields([.invalid], []);
+    assumes reflected and replaced and not rejected;
+    builder.Build()
+}
+
+typealias BatchRecord = Combined();
+
+test batch_fields {
+    let record = BatchRecord { enabled: true, count: 7 };
+    assumes record.enabled and record.count == 7;
+}

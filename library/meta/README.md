@@ -257,13 +257,16 @@ fn example() -> bool {
 
 | 方法 | 行为 |
 | --- | --- |
+| `add_fields(names, types)` | 按列表顺序追加整批字段，名称与类型数量必须相同 |
+| `replace_fields(start, end, names, types)` | 将半开区间 `[start, end)` 替换为整批字段；允许空区间插入和空列表删除 |
 | `insert_field(index, name, field_type)` | 在 index 前插入；允许在字段数处追加 |
 | `replace_field(index, name, field_type)` | 同时替换已有字段的名称和 Type |
 | `remove_field(index)` | 删除已有字段，后面的字段保持顺序向前移动 |
 
 合法位置返回 true；负数或越界返回 false，草稿不变。空草稿只允许在 0 插入。
 字段名和 Type 的新列表都准备好后才写回；此前保存的草稿快照不受后续编辑影响。
-这些方法只检查编辑位置，重名、不可存储 Type 等仍由 `Build` 检查，编辑成功不
+批量接口还检查名称与 Type 数量相等，不匹配时返回 false，草稿不变。
+这些方法检查编辑位置和列表数量，重名、不可存储 Type 等仍由 `Build` 检查，编辑成功不
 代表定义已经合法。接口不复制或编辑尚未接通的字段默认表达式和属性。
 
 ```flurry
