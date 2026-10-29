@@ -129,3 +129,47 @@ identities, comptime storage rejection, and pending-body preservation. All 527
 CMTT tests and three phase-boundary tests passed
 (`/tmp/luna-tools-zxvjy0yw/result.json`). Formatting completed successfully
 (`/tmp/luna-tools-nkavxnfy/result.json`); diff whitespace checks passed.
+
+## Invocation-owned VM code storage
+
+The VM now carries `Value::Code(CodeValue)` with distinct expression and pattern
+variants referencing the shared NIR witnesses. Owned reads, explicit owned
+copies and rollback checkpoints retain the same immutable code identity,
+context/default mappings and success bindings. They do not evaluate quoted
+bodies; a nonterminating runtime body is valid to transport.
+
+Transport charges interface names, domains and body traversal. Missing bodies,
+nested unresolved pattern-code markers, malformed expression port/default
+sources, exhausted budgets and excessive body nesting are rejected before a
+copy is returned. Failure leaves the original owner intact; a later operation
+with adequate budget can succeed. Raw Rust construction remains untrusted:
+these representation checks do not certify body typing, scope substitution or
+runtime resource obligations.
+
+Code has no ordinary Term data domain. Typed immutable input admission and
+normal-term/cache-key export reject it, also inside aggregates. Runtime VM
+copies reject code with PhaseMismatch. Ordinary constant materialization has an
+explicit code rejection rather than treating a quote as its runtime result.
+The internal Value comparison uses shared witness identity; it does not provide
+a source Eq protocol or claim equivalence of separately constructed programs.
+
+This delivers invocation-owned transport only. Source quotation still uses the
+elaborator's code-value path. Ordinary callable contextual domains, typed code
+containers, Any transport and source builder default/method publication remain
+to be connected; no library API is advertised as supporting those paths yet.
+
+Validation from `/home/fin/luna` (dev/test profile):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib
+python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --test cmtt_phase_boundaries --test comptime_memory
+python3 -B development/check.py --timeout 900 -- test -p luna --test execution --test nominal_value_parameters memoized
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+All 208 VM tests passed, including six code-transfer tests
+(`/tmp/luna-tools-vu_lm4tw/result.json`). The CMTT/phase/memory groups passed 547
+tests (`/tmp/luna-tools-59p4z5mr/result.json`); the result-cache groups passed 14
+(`/tmp/luna-tools-qc71fxts/result.json`). The earlier dev-stack failure and its
+independent freezing repair are recorded in `development/comptime-vm.md`.

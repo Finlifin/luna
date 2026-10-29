@@ -666,6 +666,7 @@ impl<'a> Interpreter<'a> {
     ) -> Result<Value, Error> {
         self.check_representation_depth(source, depth)?;
         Ok(match value {
+            Value::Code(code) => self.copy_code_value(code, source)?,
             Value::Object(object) => {
                 if !self.comptime_only {
                     return Err(self.failure(ErrorKind::Unsupported, Some(source)));

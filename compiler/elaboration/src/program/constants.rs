@@ -3254,6 +3254,12 @@ impl Checker<'_, '_> {
         }
         self.required_steps -= 1;
         let kind = match value {
+            Value::Code(_) => {
+                return Err(error(
+                    span,
+                    "contextual code cannot be materialized as ordinary data",
+                ));
+            }
             Value::List { ty: actual, values } => {
                 if actual != ty {
                     return Err(error(span, "constant list identity mismatch"));

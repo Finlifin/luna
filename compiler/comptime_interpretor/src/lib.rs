@@ -9,6 +9,8 @@
 //! not yet admitted. Limits are resource outcomes, not language type errors.
 mod admission;
 mod cleanup;
+mod code_values;
+pub use code_values::CodeValue;
 mod dynamic_instances;
 mod environment;
 mod field_access;
@@ -95,6 +97,9 @@ pub fn validate_snapshot_term(
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
+    /// Completed contextual code, retained only in invocation-local storage.
+    /// It has no ordinary Term data domain or normal-term export.
+    Code(CodeValue),
     /// One optional layer. An absent outer value is distinct from a present absent payload.
     Optional {
         ty: Term,
@@ -417,7 +422,8 @@ impl Value {
                         (total <= 100_000).then_some(total)
                     })?
                 }
-                Value::Pointer(_)
+                Value::Code(_)
+                | Value::Pointer(_)
                 | Value::Storage(_)
                 | Value::ComptimeReference(_)
                 | Value::Closure(_)
@@ -8383,6 +8389,7 @@ impl<'a> Interpreter<'a> {
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Code(code) => code.fmt(f),
             Self::Optional { ty, value } => {
                 write!(f, "(optional-value (type {ty}) ")?;
                 match value {
