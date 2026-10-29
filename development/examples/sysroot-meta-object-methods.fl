@@ -11,4 +11,29 @@ comptime fn run() -> bool {
         and changed.EntryType(1) == bool
         and (changed.value<bool>(1) matches false?)
         and (result.get<bool>(.tail) matches true?)
+        and mutable_entries()
+}
+
+
+struct Draft { entries: Object }
+
+impl Draft {
+    comptime fn reset(self) -> bool {
+        self.entries = {fresh: false};
+        true
+    }
+}
+
+comptime fn mutable_entries() -> bool {
+    var draft: Object = {flag: false, flag: false};
+    let saved = draft;
+    draft.set(0, true);
+    draft.set(1, 'x');
+    let holder = Draft { entries: draft };
+    holder.entries.set(0, holder.reset());
+    (saved.value<bool>(0) matches false?)
+        and (draft.value<bool>(0) matches true?)
+        and (draft.get<char>(.flag) matches 'x'?)
+        and holder.entries.length() == 1
+        and (holder.entries.get<bool>(.fresh) matches true?)
 }

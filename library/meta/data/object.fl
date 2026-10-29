@@ -50,6 +50,14 @@ impl Object {
         bindings.object_replace<T>(self, index, value)
     }
 
+    {-
+        Replace one entry through the receiver's value reference. The checked
+        replacement is prepared before writeback; saved Objects stay unchanged.
+    -}
+    pub comptime fn set(self, index: Integer, value: T) where T {
+        self = bindings.object_replace<T>(self, index, value);
+    }
+
     pub pure comptime fn remove(self, index: Integer) -> Object {
         bindings.object_remove(self, index)
     }

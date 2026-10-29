@@ -2,7 +2,7 @@
 
 Object 的查询与编辑定义在固有 `impl Object` 中，可以通过接收者或 `meta.Object` 调用；旧的 `meta.object_*` 自由函数不再导出。编辑方法返回新 Object，保留输入快照。
 
-数据与 definition builder 模块通过 `builtin` 的公开绑定引用 `Type`、`Integer`、`Symbol` 和 `usize`，不在签名或方法体中重复访问原始类型符号。`bindings.fl` 集中定义 Object 类型与操作 intrinsic 的具名绑定；数据及 builder 模块通过调用或再导出复用它们。List、StructBuilder 与 EnumBuilder 接收者已使用值引用；旧式 pattern view 等 comptime 指针接口迁移仍待完成。
+数据与 definition builder 模块通过 `builtin` 的公开绑定引用 `Type`、`Integer`、`Symbol` 和 `usize`，不在签名或方法体中重复访问原始类型符号。`bindings.fl` 集中定义 Object 类型与操作 intrinsic 的具名绑定；数据及 builder 模块通过调用或再导出复用它们。List、StructBuilder 与 EnumBuilder 接收者已使用值引用；其他历史 comptime 指针用例仍待迁移。
 
 源码目录与待实现领域见 [六包结构](../STRUCTURE.md)。
 
@@ -136,33 +136,30 @@ comptime fn configured() -> bool {
 
 查询检查所有条目的类型和值，包括被重复键遮住的条目；非法数据导致 invocation
 失败，不能伪装成 key 缺失。返回值保留原始 Type 身份与 optional 层，不做隐式
-转换或 normal-form 展开。Object 和 key 依次求值一次，key 的计算即使替换调用者
-保存的 Object，也不改变已经求值的输入快照。查询和结果复制计入预算。
+转换或 normal-form 展开。Object 接收者和 key 依次求值一次。接收者为位置时保留值引用；key 的计算若
+替换该位置，方法读取更新后的 Object。需要固定旧输入时先保存独立快照，再对
+快照调用查询。计算得到的临时 Object 只求值一次。查询和结果复制计入预算。
 该实现一次扫描 Object，仍沿用普通参数复制路径，不承诺常数时间查找。
 
-编译期可以通过 `*Object` 读取或替换由不可变数据构成的快照，适合将可编辑草稿
-传给辅助函数。新旧条目都必须通过表示与域检查；名义资源仍需 Copy 且无 Drop
-的证据。缺失 optional 和空 List 也检查其声明的 payload 域，不能隐藏非 Copy
-资源。活动指针、存储和 callable 不通过这条不可变数据传送路径。
+`Object.set(index, value)` 通过 comptime 值引用修改接收者，保留该项的 key 和位置，
+允许替换为不同域的值。`replace` 仍返回新 Object，不修改原值。直接修改 Object
+绑定需使用 `var`；已有快照保持原值。越界索引使 invocation 失败，不插入条目。
 
 ```flurry
-comptime fn set_enabled(output: *meta.Object, enabled: bool) {
-    output.* = meta.Object.replace(output.*, 0, enabled);
-}
-
 comptime fn configured() -> bool {
     var draft = {enabled: false};
-    let saved = draft.ref.*;
-    set_enabled(draft.ref, true);
-    (meta.Object.get<bool>(saved, .enabled) matches false?)
-        and (meta.Object.get<bool>(draft, .enabled) matches true?)
+    let saved = draft;
+    draft.set(0, true);
+    (saved.get<bool>(.enabled) matches false?)
+        and (draft.get<bool>(.enabled) matches true?)
 }
 ```
 
-读取产生独立快照；写回前检查旧值与新值，校验或预算失败时不提交本次写入。
-这不回滚实参求值中已经发生的副作用，也不将整个 invocation 变成事务。
-这不授予 Object 全局 Copy 实现或 runtime 表示，带活动引用的 Object 也不会
-因此获得复制或常量逃逸权限。真实 sysroot 用例已纳入 `sysroot-meta` 检查。
+嵌套接收者支持 `holder.entries.set(index, value)`。实参按调用规则求值一次；
+如果实参计算更换了 `holder.entries`，方法读取并更新更换后的 Object，不覆盖回
+旧快照。替换完成检查后才写回，失败不回滚此前实参求值的副作用。内部值引用不
+成为源码指针，也不授予 Object runtime 表示或全局 Copy。真实 sysroot 用例已
+纳入 `sysroot-meta-object` 检查。
 
 `List.append` 通过内部值引用更新接收者，不要求 runtime Copy／Clone。
 读取列表值产生独立快照，字段路径在写入时重新检查；预算或路径失败不提交该次写入。

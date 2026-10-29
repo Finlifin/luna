@@ -53,19 +53,30 @@ fn named_object_reads_use_the_last_domain_and_preserve_optional_layers() {
 fn named_object_reads_keep_argument_order_early_return_and_snapshot() {
     let value = invoke(
         "
-        comptime fn make(state:*.Integer'builtin)->meta.Object {
-            state.* = state.* * 10 + 1; let object={flag:true}; object
+        typealias Integer = .Integer'builtin;
+        typealias Symbol = .Symbol'builtin;
+        struct Trace { visits: Integer }
+        impl Trace {
+            comptime fn make(self) -> meta.Object {
+                self.visits = self.visits * 10 + 1;
+                let object = {flag: true};
+                object
+            }
+            comptime fn key(self) -> Symbol {
+                self.visits = self.visits * 10 + 2;
+                .flag
+            }
         }
-        comptime fn key(state:*.Integer'builtin)->.Symbol'builtin {
-            state.* = state.* * 10 + 2; .flag
-        }
-        comptime fn run()->bool {
-            var state:.Integer'builtin=0;
-            let value=meta.Object.get<bool>(make(state.ref),key(state.ref));
-            var original={flag:true};
-            let saved=meta.Object.get<bool>(original,do {original = {flag:false}; .flag});
-            state==12 and (value matches true?) and (saved matches true?)
-                and (meta.Object.get<bool>(original,.flag) matches false?)
+        comptime fn run() -> bool {
+            let state = Trace {visits: 0};
+            let value = meta.Object.get<bool>(state.make(), state.key());
+            var original = {flag: true};
+            let snapshot = original;
+            let current = meta.Object.get<bool>(original,
+                do {original = {flag: false}; .flag});
+            state.visits == 12 and (value matches true?) and (current matches false?)
+                and (snapshot.get<bool>(.flag) matches true?)
+                and (original.get<bool>(.flag) matches false?)
         }
     ",
     )
@@ -667,4 +678,61 @@ fn inherent_object_methods_evaluate_receiver_and_arguments_once() {
             "{source}"
         );
     }
+}
+
+#[test]
+fn object_set_updates_value_receivers_and_preserves_saved_snapshots() {
+    assert_eq!(
+        invoke(
+            "struct Draft { entries: meta.Object }
+        impl Draft {
+            comptime fn reset(self) -> bool {
+                self.entries = {fresh: false};
+                true
+            }
+        }
+        comptime fn run() -> bool {
+            var object = {flag: false, flag: false};
+            let saved = object;
+            object.set(0, true);
+            object.set(1, 'x');
+            let draft = Draft { entries: object };
+            draft.entries.set(0, draft.reset());
+            (saved.value<bool>(0) matches false?)
+                and (object.value<bool>(0) matches true?)
+                and (object.get<bool>(.flag) matches null)
+                and (object.key(1) matches .flag?)
+                and draft.entries.length() == 1
+                and (draft.entries.get<bool>(.fresh) matches true?)
+        }"
+        )
+        .unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn object_set_rejects_bad_indices_and_immutable_rebinding() {
+    for body in [
+        "var object = {flag: false}; object.set(-1, true);",
+        "var object = {flag: false}; object.set(1, true);",
+        "var object = {}; object.set(0, true);",
+        "let object = {flag: false}; object.set(0, true);",
+    ] {
+        assert!(
+            invoke(&format!("comptime fn run() -> bool {{ {body} true }}")).is_err(),
+            "{body}"
+        );
+    }
+    // A fresh invocation still accepts a valid edit after rejected programs.
+    assert_eq!(
+        invoke(
+            "comptime fn run() -> bool {
+        var object = {flag: false}; object.set(0, true);
+        object.get<bool>(.flag) matches true?
+    }"
+        )
+        .unwrap(),
+        Value::Bool(true)
+    );
 }
