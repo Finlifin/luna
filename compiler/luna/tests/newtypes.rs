@@ -1549,8 +1549,21 @@ fn installed_effects_do_not_revive_wrapped_pointer_targets() {
         .unwrap_err();
         assert!(
             error.contains("unavailable")
-                || error.contains("handler pointer requires a live local Copy scalar target"),
+                || error.contains("handler pointer requires a live local Copy scalar target")
+                || error.contains("handler pointer owner is not fully initialized"),
             "{invocation}: {error}"
+        );
+        let live_source = source.replace("consume(item);", "");
+        let Artifact::Nir(live) = compile(&live_source, Emit::Nir).unwrap() else {
+            panic!("wrong stage")
+        };
+        assert_eq!(
+            luna::execution::interpret_with_protocols(
+                &live, "run", "Duplicate", "Retire", 100_000,
+            )
+            .unwrap(),
+            comptime_interpretor::Value::Bool(true),
+            "{invocation}: live owner must remain readable"
         );
     }
 }

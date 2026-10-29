@@ -702,7 +702,10 @@ impl Checker<'_, '_> {
                     .iter()
                     .any(|domain| member_captures.iter().any(|id| domain.mentions_rigid(*id)));
             let mut member_statements = Vec::new();
-            let member_inputs = if contextual_alias {
+            // Constants capture their container inputs but have no clause
+            // telescope of their own. Explicit member inputs were rejected
+            // above; do not route them through nominal parameter metadata.
+            let member_inputs = if constant || contextual_alias {
                 Vec::new()
             } else {
                 self.prepared_nominal_inputs_in_domains(
@@ -1242,6 +1245,41 @@ impl Checker<'_, '_> {
         expected: Option<&Term>,
         partial: Option<&crate::calls::CallableContext>,
     ) -> Result<n::Expr, Error> {
+        // Type members preserve invocation-time inputs in their prepared
+        // receiver. Classify them before probing enum namespaces, whose type
+        // identity must already be complete.
+        let type_member = |definition| {
+            self.package
+                .definition_owner(definition)
+                .and_then(|owner| self.package.item(owner))
+                .is_some_and(|item| {
+                    matches!(
+                        item.kind,
+                        ItemKind::TypeAlias(..)
+                            | ItemKind::Newtype(..)
+                            | ItemKind::Struct(_)
+                            | ItemKind::Enum(_)
+                            | ItemKind::Const(..)
+                    )
+                })
+        };
+        let known_type_member = self
+            .package
+            .member_projections
+            .get(&expr.hir_id)
+            .is_some_and(|member| type_member(*member))
+            || self
+                .package
+                .deferred_member_projections
+                .get(&expr.hir_id)
+                .is_some_and(|candidates| {
+                    candidates.iter().any(|(_, member)| type_member(*member))
+                });
+        if known_type_member
+            && let Some(value) = self.projected_member_expression(expr, expected)?
+        {
+            return Ok(value);
+        }
         // Group prefixes are namespaces in an enum, not values. Resolve their
         // complete path before member and place probes can evaluate the prefix.
         if matches!(value.kind, H::Projection(..))
@@ -1262,7 +1300,9 @@ impl Checker<'_, '_> {
             }
             return Ok(variant);
         }
-        if let Some(value) = self.projected_member_expression(expr, expected)? {
+        if !known_type_member
+            && let Some(value) = self.projected_member_expression(expr, expected)?
+        {
             return Ok(value);
         }
         if let Some(value) = self.associated_projection(value, field.name.as_str(), expr.span)? {
