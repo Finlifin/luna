@@ -8,6 +8,50 @@ in [builder-publication-performance.md](builder-publication-performance.md).
 The comparison isolates retained checking state versus a freshly rebuilt world;
 it is not a whole-compiler or historical-version speedup claim.
 
+## Type receiver reflection methods
+
+`meta.reflection.structure` now owns the seven public struct/enum observations
+and exposes them as inherent comptime methods on builtin Type. The existing
+root free-function exports remain available. StructBuilder and EnumBuilder
+`from_type` use the methods; builder modules no longer own reflection exports.
+The isolated meta fixture includes the same reflection source.
+
+Receiver resolution first considers methods of a statically named subject, then
+permits methods on the Type value itself. This fixes named enum receivers such
+as `Event.enum_group_paths()` being rejected as unknown variants. Existing
+variant construction and enum-group namespace behavior remain covered. A
+subject's own same-named method retains priority; storing its Type in a local
+permits ordinary Type receiver lookup. No special reflection spelling is built
+into method dispatch.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test builder_invocations --test enum_groups --test newtypes
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test source_reflection --test library_protocols --test normal_form_methods --test comptime_list_operations
+python3 -B development/reproduce.py --timeout 120 --binary /tmp/luna-dev-002/target/release/luna -- development/examples/sysroot-edited-struct.fl --sysroot library --test-native
+python3 -B development/reproduce.py --timeout 120 --binary /tmp/luna-dev-002/target/release/luna -- development/examples/sysroot-edited-enum.fl --sysroot library --test-native
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+All commands exited 0. The first suite passed 72 builder, seven enum-group and
+211 newtype tests (`/tmp/luna-tools-6m_0mu6z/result.json`). The second passed
+12 reflection, 27 library protocol, four normal-form method and 54 list tests
+(`/tmp/luna-tools-ma7ad2cp/result.json`). Native sysroot tests passed four struct
+and three enum cases (`/tmp/luna-tools-6t5bw_k9/result.json` and
+`/tmp/luna-tools-cz_nnmsx/result.json`), covering all seven reflection methods,
+generated and generic types, same-named static method priority and runtime
+construction/access. Rejection tests cover wrong structural kinds and runtime
+observation. Formatting passed at `/tmp/luna-tools-ekeevw8n/result.json`.
+
+The original enum method reproduction failed with `unknown enum variant
+ enum_group_paths` in `/tmp/luna-tools-no4odx5t/result.json`. The first module
+name also collided with the existing meta/types directory; the final module
+is reflection/structure. These methods retain existing reflection permissions,
+nominal identities and phase checks. They do not transport field-default code
+or copy generated methods, attributes or implementations.
+
 ## CMTT and builder integration boundary
 
 ### Ordered Object observation from source

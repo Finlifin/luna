@@ -54,13 +54,20 @@ fn exercise_enum() -> bool {
         and read_event(Event.remote.packet(true))
 }
 
+{- A subject's own associated method retains priority over Type methods. -}
+enum OwnReflection { item }
+impl OwnReflection {
+    pub pure comptime fn enum_variant_paths() -> bool { true }
+}
+
 comptime fn inspect_enum() -> bool {
-    let groups = meta.enum_group_paths(Event);
-    let paths = meta.enum_variant_paths(Event);
-    let shapes = meta.enum_variant_shapes(Event);
-    let names = meta.enum_variant_field_names(Event);
-    let types = meta.enum_variant_field_types(Event);
-    let original = meta.enum_variant_paths(Source);
+    let type_value: Type = OwnReflection;
+    let groups = Event.enum_group_paths();
+    let paths = Event.enum_variant_paths();
+    let shapes = Event.enum_variant_shapes();
+    let names = Event.enum_variant_field_names();
+    let types = Event.enum_variant_field_types();
+    let original = Source.enum_variant_paths();
     groups.length() == 2 and groups[0][0] == .net and groups[1][0] == .remote
         and paths.length() == 4 and paths[0][0] == .waiting
         and paths[1][0] == .net and paths[1][1] == .data
@@ -70,7 +77,9 @@ comptime fn inspect_enum() -> bool {
         and (names[1]).length() == 0 and names[2][0] == .flag
         and types[1][0] == u8 and types[2][0] == bool and types[3][0] == bool
         and original.length() == 2 and original[0][1] == .old
-        and original[1][1] == .dead and (meta.enum_group_paths(Source)).length() == 2
+        and original[1][1] == .dead and (Source.enum_group_paths()).length() == 2
+        and OwnReflection.enum_variant_paths()
+        and type_value.enum_variant_paths()[0][0] == .item
 }
 
 test edited_enum_values {
@@ -85,11 +94,11 @@ test edited_enum_reflection {
 {- Batch composition keeps group paths and payload Types in declaration order. -}
 comptime fn ComposedEnum() -> Type {
     let builder = meta.EnumBuilder.new(.name = .Composed);
-    let groups_added = builder.add_groups(meta.enum_group_paths(Source));
+    let groups_added = builder.add_groups(Source.enum_group_paths());
     assumes groups_added;
-    let variants_added = builder.add_variants(meta.enum_variant_paths(Source),
-        meta.enum_variant_shapes(Source), meta.enum_variant_field_names(Source),
-        meta.enum_variant_field_types(Source));
+    let variants_added = builder.add_variants(Source.enum_variant_paths(),
+        Source.enum_variant_shapes(), Source.enum_variant_field_names(),
+        Source.enum_variant_field_types());
     assumes variants_added;
     let saved = builder;
     let bad_shapes = not builder.add_variants([[.bad]], [], [[]], [[]]);
@@ -107,9 +116,9 @@ comptime fn ComposedEnum() -> Type {
     let past_groups = not builder.replace_groups(0, 3, []);
     assumes past_groups;
     let intact = builder.Build();
-    let path_intact = meta.enum_variant_paths(intact)[0][1] == .old;
+    let path_intact = intact.enum_variant_paths()[0][1] == .old;
     assumes path_intact;
-    let count_intact = meta.enum_variant_paths(intact).length() == 2;
+    let count_intact = intact.enum_variant_paths().length() == 2;
     assumes count_intact;
     let groups_replaced = builder.replace_groups(1, 2, [[.io]]);
     assumes groups_replaced;
@@ -123,9 +132,9 @@ comptime fn ComposedEnum() -> Type {
     let empty_groups = builder.add_groups([]);
     assumes empty_groups;
     let original = saved.Build();
-    let saved_path = meta.enum_variant_paths(original)[0][1] == .old;
+    let saved_path = original.enum_variant_paths()[0][1] == .old;
     assumes saved_path;
-    let saved_group = meta.enum_group_paths(original)[1][0] == .spare;
+    let saved_group = original.enum_group_paths()[1][0] == .spare;
     assumes saved_group;
     builder.Build()
 }

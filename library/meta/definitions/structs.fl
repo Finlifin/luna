@@ -4,14 +4,6 @@ use builtin.{Integer, Symbol, Type};
 use List;
 
 {-
-  Observe an applied struct in declaration order. Reflection grants neither
-  field access nor layout permission, and never unfolds opaque type factories.
--}
-pub use bindings.struct_field_types;
-
-pub use bindings.struct_field_names;
-
-{-
   Private construction data for a concrete struct. Fields retain their supplied
   Type identities and declaration order. Build validates and publishes through
   the compiler's checked definition service; drafts are not observable Types.
@@ -30,8 +22,8 @@ impl StructBuilder {
     pub comptime fn from_type(subject: Type, .name: Symbol = .Generated) -> Self {
         Self {
             name: name,
-            field_names: struct_field_names(subject),
-            field_types: struct_field_types(subject),
+            field_names: subject.struct_field_names(),
+            field_types: subject.struct_field_types(),
         }
     }
 

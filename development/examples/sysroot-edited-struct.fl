@@ -26,12 +26,13 @@ test edited_fields {
 }
 
 comptime fn inspect() -> bool {
-    let names = meta.struct_field_names(Record);
-    let types = meta.struct_field_types(Record);
-    let original = meta.struct_field_names(Source);
+    let names = Record.struct_field_names();
+    let types = Record.struct_field_types();
+    let original = Source.struct_field_names();
     names.length() == 3 and names[0] == .ready and names[1] == .value
         and names[2] == .tail and types[0] == bool and types[1] == u8
         and types[2] == bool and original[0] == .old and original[1] == .removed
+        and Column<bool>.struct_field_types()[0] == bool
 }
 
 test edited_reflection {
@@ -41,8 +42,8 @@ test edited_reflection {
 {- Batch composition consumes reflection lists through the public sysroot API. -}
 comptime fn Combined() -> Type {
     var builder = meta.StructBuilder.new(.name = .Combined);
-    let reflected = builder.add_fields(meta.struct_field_names(Source),
-        meta.struct_field_types(Source));
+    let reflected = builder.add_fields(Source.struct_field_names(),
+        Source.struct_field_types());
     let replaced = builder.replace_fields(0, 2, [.enabled, .count], [bool, u8]);
     let rejected = builder.add_fields([.invalid], []);
     assumes reflected and replaced and not rejected;
@@ -65,8 +66,8 @@ struct Row { active: bool, count: u8 }
 struct Column where T { first: T, second: T }
 
 comptime fn Columns(subject: Type) -> Type {
-    let names = meta.struct_field_names(subject);
-    let types = meta.struct_field_types(subject).map(|field| Column<field>);
+    let names = subject.struct_field_names();
+    let types = subject.struct_field_types().map(|field| Column<field>);
     var builder = meta.StructBuilder.new(.name = .Columns);
     let added = builder.add_fields(names, types);
     assumes added;

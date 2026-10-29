@@ -259,6 +259,11 @@ fn example() -> bool {
 }
 ```
 
+结构反射也作为 `Type` 的固有方法提供，例如 `Source.struct_field_names()`、
+`subject.struct_field_types()` 和 `Event.enum_variant_paths()`。七项方法的返回值及
+边界见 [reflection](reflection/README.md)。已有 `meta.struct_field_names(subject)`
+等自由函数保留相同语义；builder 的 `from_type` 统一复用这些固有方法。
+
 草稿也支持按声明顺序编辑字段，索引为 comptime `Integer`：
 
 | 方法 | 行为 |

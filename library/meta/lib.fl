@@ -9,9 +9,11 @@ pub pure comptime fn List<T> -> Type {
 use data.{object, integer, list};
 use definitions.{structs, enums};
 use numeric.scalar_math;
+use reflection.structure;
 
 pub use object.*;
 pub use integer.*;
+pub use structure.*;
 pub use structs.*;
 pub use enums.*;
 

@@ -4,20 +4,6 @@ use builtin.{Integer, Symbol, Type};
 use List;
 
 {-
-  Logical enum structure in declaration order. Paths are lists of Symbol
-  segments; indices do not describe discriminant values or storage encoding.
--}
-pub use bindings.enum_group_paths;
-
-pub use bindings.enum_variant_paths;
-
-pub use bindings.enum_variant_shapes;
-
-pub use bindings.enum_variant_field_names;
-
-pub use bindings.enum_variant_field_types;
-
-{-
   A concrete enum draft. Variant paths and groups retain declaration order;
   Build checks payload Types and publishes one fresh nominal identity.
 -}
@@ -38,11 +24,11 @@ impl EnumBuilder {
     pub comptime fn from_type(subject: Type, .name: Symbol = .Generated) -> Self {
         Self {
             name: name,
-            groups: enum_group_paths(subject),
-            variant_names: enum_variant_paths(subject),
-            shapes: enum_variant_shapes(subject),
-            field_names: enum_variant_field_names(subject),
-            field_types: enum_variant_field_types(subject),
+            groups: subject.enum_group_paths(),
+            variant_names: subject.enum_variant_paths(),
+            shapes: subject.enum_variant_shapes(),
+            field_names: subject.enum_variant_field_names(),
+            field_types: subject.enum_variant_field_types(),
         }
     }
 

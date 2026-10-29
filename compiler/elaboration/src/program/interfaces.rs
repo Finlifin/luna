@@ -2229,7 +2229,10 @@ impl Checker<'_, '_> {
             H::Cast(base, _) => computed_subject(&base.kind),
             kind => computed_subject(kind),
         };
-        if projected_subject {
+        // A named Type first exposes methods of the represented subject.
+        // When none matches, the Type value itself may have an inherent
+        // receiver method (for example checked structural reflection).
+        if projected_subject || self.is_static_method_subject(view) {
             if let Some(method) =
                 self.static_method(view, name.name.as_str(), callee.span, callee.hir_id)?
             {
@@ -2246,21 +2249,20 @@ impl Checker<'_, '_> {
             H::Cast(base, interface) if !self.is_static_method_subject(base) => {
                 (base, Some(interface))
             }
-            _ if !self.is_static_method_subject(view)
-                && (self.default_interface().is_some()
-                    || (self.in_required_comptime
-                        && !self.interfaces_ready
-                        && self.early_inherent_name_available(name.name.as_str()))
-                    || self
-                        .signature_owner
-                        .and_then(|owner| self.capabilities.get(&owner))
-                        .is_some_and(|requirements| !requirements.is_empty())
-                    || self.checked_implementations.iter().any(|i| {
-                        i.interface.is_none()
-                            && i.methods
-                                .iter()
-                                .any(|(method, _)| method == name.name.as_str())
-                    })) =>
+            _ if self.default_interface().is_some()
+                || (self.in_required_comptime
+                    && !self.interfaces_ready
+                    && self.early_inherent_name_available(name.name.as_str()))
+                || self
+                    .signature_owner
+                    .and_then(|owner| self.capabilities.get(&owner))
+                    .is_some_and(|requirements| !requirements.is_empty())
+                || self.checked_implementations.iter().any(|i| {
+                    i.interface.is_none()
+                        && i.methods
+                            .iter()
+                            .any(|(method, _)| method == name.name.as_str())
+                }) =>
             {
                 (view, None)
             }

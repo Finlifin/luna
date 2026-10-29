@@ -2642,3 +2642,29 @@ fn enum_builder_batch_edits_keep_publication_validation_and_allow_repair() {
         );
     }
 }
+
+#[test]
+fn reflected_type_methods_reject_wrong_shapes_and_runtime_observation() {
+    for body in [
+        "bool.struct_field_names()",
+        "Source.enum_variant_paths()",
+        "Event.struct_field_types()",
+    ] {
+        let fixture = Fixture::new(&format!(
+            "struct Source {{flag:bool}} enum Event {{ready}} comptime fn run()->bool {{{body};true}}"
+        ));
+        let failure = fixture
+            .invoke_meta("run")
+            .err()
+            .expect("wrong reflected shape");
+        assert!(!failure.contains("unknown member"), "{body}: {failure}");
+    }
+    let fixture = Fixture::new(
+        "struct Source {flag:bool} fn bad()->bool {Source.struct_field_names();true} comptime fn run()->bool {true}",
+    );
+    let failure = fixture
+        .invoke_meta("run")
+        .err()
+        .expect("runtime reflection");
+    assert!(failure.contains("comptime"), "{failure}");
+}
