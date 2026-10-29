@@ -3045,6 +3045,34 @@ impl<'a> Interpreter<'a> {
         for (index, ((binding, argument), parameter)) in
             parameters.iter().zip(arguments).zip(types).enumerate()
         {
+            if self.comptime_only
+                && parameter.sort == nir::Sort::Runtime
+                && let Value::ComptimeReference(reference) = &argument
+            {
+                // Ordinary receiver domains do not materialize dependent input
+                // terms. Validate under a short borrow, then retain the handle
+                // for the body; no invocation result is reused.
+                let contents = reference
+                    .borrow(&mut self.budget.steps)
+                    .map_err(|kind| self.failure(kind, Some(source)))?;
+                let representation = contents.value();
+                self.check_borrowed_representation(representation, source, 0)?;
+                let expected = match &type_scope {
+                    Some(scope) => scope.rebind(&parameter.ty),
+                    None => parameter.ty.substitute_partial(&type_inputs),
+                }
+                .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
+                expected
+                    .check_scope(&[])
+                    .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
+                if !self.has_type(representation, &expected) {
+                    return Err(self.failure(ErrorKind::Type, Some(source)));
+                }
+                self.admit_embedded_type_descriptions(representation, 0)?;
+                drop(contents);
+                environment.insert(*binding, argument);
+                continue;
+            }
             let representation = match &argument {
                 Value::Storage(storage) => self.read_owned_value(storage)?,
                 Value::ComptimeReference(reference) => {

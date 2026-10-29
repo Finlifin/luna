@@ -515,3 +515,61 @@ python3 -B development/check.py --timeout 900 -- test --release -p luna --test e
 `/tmp/luna-tools-ju14y54l/result.json` exited 0 (one selected test). It rejects
 impure and runtime functions at preparation and checks failure publication;
 it is not evidence of an automatic cost-based cache admission policy.
+
+## Borrowed receiver admission without list snapshots (2026-10-29)
+
+Following the measurement above, ordinary (`Sort::Runtime`) comptime
+value-reference arguments now retain a short storage borrow while checking the
+parameter domain and embedded type descriptions. Their List/TypeList checkpoint
+work is traversed without allocating a new list buffer. This is not cached
+admission: every call still validates its current contents. Type and comptime
+value inputs that materialize dependent terms retain the original snapshot
+path, as do explicit program-contract snapshots. Other representations retain
+the existing checkpoint implementation as a fallback.
+
+The borrowed walker shares checkpoint depth checking and charges the same work
+as copying. Differential unit tests sweep fuel and depth limits across plain,
+nested, malformed and symbolic lists; they compare error kind, source and
+remaining fuel. A separate input-binding regression verifies that an incorrect
+payload is rejected without changing the receiver's storage.
+
+Baseline: `0566877b`. Optimized: that revision plus this receiver-binding change.
+The same benchmark command, three processes, three timed iterations and five
+warmups were used; entries below are medians, not a general performance promise.
+All 24 workload VM step counts are unchanged. Requested MB remains cumulative
+allocation, not peak resident memory.
+
+| 1024 elements | Calls | Path | Before ms | After ms | Before MB | After MB |
+|---|---|---|---:|---:|---:|---:|
+| Bool | Batch | Fused | 10.746 | 10.324 | 7.730 | 7.730 |
+| Bool | Per append | Fused | 22.393 | 18.762 | 189.264 | 11.034 |
+| Bool | Per append | General | 26.039 | 23.032 | 366.527 | 188.297 |
+| Type | Batch | Fused | 27.963 | 28.158 | 4.689 | 4.689 |
+| Type | Per append | Fused | 42.659 | 40.279 | 36.211 | 6.880 |
+| Type | Per append | General | 38.510 | 36.237 | 123.141 | 93.810 |
+
+Repeated Bool append requests about 94% fewer allocated bytes in the fused
+case. Full validation still scales with list length, and the Type fused path
+remains slower than general evaluation in these samples. No invocation result
+cache, purity inference, or automatic cache admission policy was added.
+
+Build: `/tmp/luna-tools-chvplrr3/result.json`; measurements:
+`/tmp/luna-tools-85os5wg0/result.json`, `/tmp/luna-tools-acroitmj/result.json`,
+`/tmp/luna-tools-5wtxkuo5/result.json` (all exit 0). VM unit tests:
+`/tmp/luna-tools-39tlx1i7/result.json` (195 passed).
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor --lib
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test comptime_receivers --test comptime_list_operations --test comptime_clause_inputs --test builder_invocations
+```
+
+The second command passed 164 tests, report
+`/tmp/luna-tools-f05rd9tw/result.json`. The rebuilt release CLI also passed
+`sysroot-meta-lists.fl`, `sysroot-edited-struct.fl`, and `sysroot-edited-enum.fl`
+using `development/reproduce.py --timeout 120 --binary
+/tmp/luna-dev-002/target/release/luna -- development/examples/<name>.fl
+--sysroot library --test-native`. Reports respectively:
+`/tmp/luna-tools-ii5j9ekx/result.json`, `/tmp/luna-tools-5fsy39sf/result.json`,
+`/tmp/luna-tools-izvznfdb/result.json` (all exit 0).

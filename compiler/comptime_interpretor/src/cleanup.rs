@@ -534,13 +534,45 @@ impl<'a> Interpreter<'a> {
         self.clone_representation(value, source, 0, true)
     }
 
-    fn clone_representation(
+    /// Observe a checkpoint without retaining its snapshot. List buffers and
+    /// Type-list elements can be checked in place; other representations keep
+    /// the existing checkpoint path. No source code runs while borrowed.
+    pub(super) fn check_borrowed_representation(
         &mut self,
         value: &Value,
         source: SourceRange,
         depth: usize,
-        preserve_identity: bool,
-    ) -> Result<Value, Error> {
+    ) -> Result<(), Error> {
+        if !matches!(value, Value::TypeList(_) | Value::List { .. }) {
+            return self
+                .clone_representation(value, source, depth, true)
+                .map(drop);
+        }
+        self.check_representation_depth(source, depth)?;
+        match value {
+            Value::TypeList(types) => {
+                self.copy_work(types.len(), source)?;
+                for ty in types {
+                    self.copy_invocation_type_work(ty, source, true)?;
+                }
+            }
+            Value::List { ty, values } => {
+                self.copy_invocation_type_work(ty, source, true)?;
+                self.copy_work(values.len(), source)?;
+                for value in values {
+                    self.check_borrowed_representation(value, source, depth + 1)?;
+                }
+            }
+            _ => unreachable!(),
+        }
+        Ok(())
+    }
+
+    fn check_representation_depth(
+        &mut self,
+        source: SourceRange,
+        depth: usize,
+    ) -> Result<(), Error> {
         self.tick(Some(source))?;
         if depth >= 128
             || self
@@ -550,6 +582,17 @@ impl<'a> Interpreter<'a> {
         {
             return Err(self.failure(ErrorKind::DepthExhausted, Some(source)));
         }
+        Ok(())
+    }
+
+    fn clone_representation(
+        &mut self,
+        value: &Value,
+        source: SourceRange,
+        depth: usize,
+        preserve_identity: bool,
+    ) -> Result<Value, Error> {
+        self.check_representation_depth(source, depth)?;
         Ok(match value {
             Value::Object(object) => {
                 if !self.comptime_only {
@@ -2307,5 +2350,129 @@ impl Interpreter<'_> {
         }
         self.transfer_prepared();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod borrowed_checkpoint_tests {
+    use super::*;
+
+    #[test]
+    fn borrowed_input_admission_rejects_wrong_list_payloads_without_mutation() {
+        use nir::normal_forms::{Head, Kind, Parameter as Input, Role};
+        let id = DeclarationId {
+            package: 1,
+            local: 1,
+        };
+        let binding = LocalId { owner: 1, index: 0 };
+        let ty = Term::NormalForm {
+            head: id,
+            sort: nir::Sort::Type,
+            arguments: vec![Term::Primitive(Primitive::Bool)],
+        };
+        let package = Package {
+            normal_forms: vec![Head {
+                declaration: id,
+                role: Role::TypeList,
+                requirements: vec![],
+                parameters: vec![Input {
+                    declaration: DeclarationId {
+                        package: 1,
+                        local: 2,
+                    },
+                    binding,
+                    kind: Kind::Type,
+                    ty: Term::Primitive(Primitive::Type),
+                }],
+            }],
+            ..Default::default()
+        };
+        let signature = Term::Function {
+            parameters: vec![nir::Parameter {
+                sort: nir::Sort::Runtime,
+                ty: ty.clone(),
+            }],
+            result: Box::new(Term::Primitive(Primitive::Void)),
+        };
+        let source = SourceRange { start: 1, end: 2 };
+        for (payload, valid) in [(Value::Bool(true), true), (Value::Char('x'), false)] {
+            let original = Value::List {
+                ty: ty.clone(),
+                values: vec![payload],
+            };
+            let storage = Storage::new(original.clone());
+            for by_reference in [false, true] {
+                let argument = if by_reference {
+                    Value::ComptimeReference(value_reference::ValueReference::root(storage.clone()))
+                } else {
+                    original.clone()
+                };
+                let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+                let result = vm.bind_invocation_inputs(
+                    &[binding],
+                    vec![argument],
+                    &signature,
+                    &mut Environment::new(),
+                    source,
+                );
+                if valid {
+                    assert!(result.is_ok());
+                } else {
+                    assert_eq!(result.unwrap_err().kind, ErrorKind::Type);
+                }
+                assert_eq!(storage.read().unwrap(), original);
+            }
+        }
+    }
+
+    #[test]
+    fn borrowed_lists_preserve_checkpoint_failures_depth_and_work() {
+        let source = SourceRange { start: 3, end: 7 };
+        let package = Package::default();
+        let list = |values| Value::List {
+            ty: Term::Primitive(Primitive::Bool),
+            values,
+        };
+        // Checkpointing checks representation work, not the list's declared
+        // element domain. Invocation admission separately rejects bad domains.
+        let cases = [
+            Value::TypeList(vec![Term::Primitive(Primitive::Bool); 8]),
+            Value::TypeList(vec![Term::Bool(true)]),
+            list(vec![Value::Bool(true); 16]),
+            list(vec![list(vec![Value::Bool(false); 4]); 4]),
+            list(vec![Value::Tuple(vec![Value::Bool(true)])]),
+            Value::TypeList(vec![Term::Rigid {
+                declaration: DeclarationId {
+                    package: 1,
+                    local: 99,
+                },
+                sort: nir::Sort::Type,
+            }]),
+        ];
+        for value in &cases {
+            for depth in [1, 2, 128] {
+                for steps in 0..100 {
+                    let budget = Budget { steps, depth };
+                    let mut copied =
+                        Interpreter::for_comptime(&package, Budget::default()).unwrap();
+                    let mut borrowed =
+                        Interpreter::for_comptime(&package, Budget::default()).unwrap();
+                    copied.budget = budget;
+                    borrowed.budget = budget;
+                    let expected = copied
+                        .checkpoint_representation(value, source)
+                        .map(drop)
+                        .map_err(|error| (error.kind, error.source));
+                    let actual = borrowed
+                        .check_borrowed_representation(value, source, 0)
+                        .map_err(|error| (error.kind, error.source));
+                    assert_eq!(
+                        actual, expected,
+                        "depth={depth} steps={steps} value={value:?}"
+                    );
+                    assert_eq!(borrowed.remaining_steps(), copied.remaining_steps());
+                }
+            }
+        }
     }
 }
