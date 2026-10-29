@@ -1,5 +1,6 @@
 //! Linear invocation code. Unsupported operations are detected before execution.
 //! Constants and default templates own bounded typed NIR copies; opcodes never evaluate trees.
+mod patterns;
 pub mod scalar;
 use nir::program::{ArgumentPassing, Expr, ExprKind as K, FieldOwner, LocalId, SourceRange};
 use nir::{Primitive, Term};
@@ -28,6 +29,14 @@ impl fmt::Display for ErrorConversion {
 
 #[derive(Debug)]
 pub enum Op {
+    MatchPattern {
+        destination: Register,
+        value: Register,
+        pattern: Arc<nir::program::Pattern>,
+        bindings: Vec<(LocalId, Register)>,
+    },
+    NonExhaustiveMatch,
+
     PrepareOptional {
         ty: Arc<Term>,
         input: Option<(Arc<Term>, SourceRange)>,
@@ -216,6 +225,22 @@ impl fmt::Display for Program {
                 instruction.source.start, instruction.source.end
             )?;
             match &instruction.op {
+                Op::MatchPattern {
+                    destination,
+                    value,
+                    pattern,
+                    bindings,
+                } => {
+                    write!(
+                        f,
+                        "(match-pattern {destination} {value} {pattern} (bindings"
+                    )?;
+                    for (id, slot) in bindings {
+                        write!(f, " (binding {id} {slot})")?;
+                    }
+                    write!(f, "))")?;
+                }
+                Op::NonExhaustiveMatch => write!(f, "(non-exhaustive-match)")?,
                 Op::PrepareOptional { ty, input } => {
                     write!(f, "(prepare-optional {ty} (input")?;
                     if let Some((ty, at)) = input {
@@ -458,6 +483,7 @@ enum Work<'a> {
     Emit(SourceRange, Op),
     Label(usize),
     EndLoop(LocalId),
+    BeginScope(SourceRange),
     EndScope(SourceRange),
 }
 
@@ -488,6 +514,13 @@ pub fn compile(body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
             Work::Label(label) => labels[label] = Some(instructions.len()),
             Work::EndLoop(id) => {
                 loops.remove(&id);
+            }
+            Work::BeginScope(source) => {
+                scope_depth += 1;
+                instructions.push(Instruction {
+                    source,
+                    op: Op::EnterScope,
+                });
             }
             Work::EndScope(source) => {
                 scope_depth -= 1;
@@ -736,6 +769,70 @@ pub fn compile(body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
                         for (field, slot) in fields.iter().zip(slots).rev() {
                             work.push(Work::Expression(field, slot));
                         }
+                    }
+                    K::Match { value, arms } => {
+                        let subject = fresh();
+                        let condition = fresh();
+                        let done = labels.len();
+                        labels.push(None);
+                        let mut sequence = vec![Work::Expression(value, subject)];
+                        for arm in arms {
+                            // A guard tests a completed inner candidate before the arm body.
+                            // Nested guard wrappers run from the innermost outward.
+                            let mut candidate = &arm.pattern;
+                            let mut guards = Vec::new();
+                            while let nir::program::Pattern::Guard { pattern, condition } =
+                                candidate
+                            {
+                                *fuel = fuel.checked_sub(1).ok_or(Error::Budget(source))?;
+                                guards.push(condition.as_ref());
+                                candidate = pattern;
+                            }
+                            let (pattern, ids) = patterns::copy(candidate, fuel, source)?;
+                            let bindings = ids
+                                .into_iter()
+                                .map(|id| (id, *locals.entry(id).or_insert_with(&mut fresh)))
+                                .collect();
+                            let next = labels.len();
+                            labels.push(None);
+                            sequence.push(Work::BeginScope(source));
+                            sequence.push(Work::Emit(
+                                source,
+                                Op::MatchPattern {
+                                    destination: condition,
+                                    value: subject,
+                                    pattern,
+                                    bindings,
+                                },
+                            ));
+                            sequence.push(Work::Emit(
+                                source,
+                                Op::Branch {
+                                    condition,
+                                    when: false,
+                                    target: next,
+                                },
+                            ));
+                            for guard in guards.into_iter().rev().chain(arm.guard.iter()) {
+                                sequence.push(Work::Expression(guard, condition));
+                                sequence.push(Work::Emit(
+                                    guard.source,
+                                    Op::Branch {
+                                        condition,
+                                        when: false,
+                                        target: next,
+                                    },
+                                ));
+                            }
+                            sequence.push(Work::Expression(&arm.body, dst));
+                            sequence.push(Work::Emit(source, Op::LeaveScope));
+                            sequence.push(Work::Emit(source, Op::Jump(done)));
+                            sequence.push(Work::Label(next));
+                            sequence.push(Work::EndScope(source));
+                        }
+                        sequence.push(Work::Emit(source, Op::NonExhaustiveMatch));
+                        sequence.push(Work::Label(done));
+                        work.extend(sequence.into_iter().rev());
                     }
                     K::OptionalPresent(_) | K::OptionalAbsent => {
                         let operand = match &expr.kind {

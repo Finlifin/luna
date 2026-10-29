@@ -1475,3 +1475,47 @@ Validation from `/home/fin/luna`:
   report `/tmp/luna-tools-apf6xs6e/result.json`.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
   exit 0; report `/tmp/luna-tools-f6h587sg/result.json`.
+
+## Compiled structural matching and error propagation (2026-10-30)
+
+NIR error propagation is ordinary matching followed by a return, so the VM now
+compiles general match control flow rather than adding an error-only evaluator.
+The subject is evaluated once. Structural candidate matching shares the existing
+pattern journal, including alternative rollback, binding remapping, nominal and
+normal-form head identity, optional layers and error labels. Candidate bindings
+are published to registers only after the whole structural pattern succeeds.
+Each arm has a lexical scope. Guard failure removes its new bindings while
+retaining already completed outer mutations; return, break and continue use the
+existing control-transfer machinery.
+
+Outer pattern guard wrappers execute from the innermost outward, followed by an
+explicit arm guard, using normal compiled expressions. Their calls can suspend
+and return through the VM's invocation stack. Pattern-local computation within a
+structural child or alternative (`Then` or nested `Guard`) still selects the tree
+carrier before execution starts. This is an implementation boundary, not a
+restriction on source-language patterns. Scheduled cleanup and active effects
+also retain their existing tree carrier.
+
+Owned structural pattern copies are bounded before cloning. Exceeding the
+representation's safe clone depth selects the tree carrier; it must not be
+reported as exhaustion of execution steps. The existing small-host-stack depth
+regression exposed that distinction during this change, and its original
+`DepthExhausted` expectation is preserved. Actual compilation fuel exhaustion
+remains a separate failure. Matching instructions, bindings, branches and the
+non-exhaustive trap all have stable S-expression dumps.
+
+Validation from `/home/fin/luna`, all final commands exited 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  230 tests passed, including invalid guard/exhaustion diagnostics, binding
+  cleanup and subsequent recovery; report `/tmp/luna-tools-chm57pwr/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_matching --test execution --test builder_invocations`:
+  four matching/propagation source tests, 1,365 execution cases and 73 builders
+  passed; report `/tmp/luna-tools-m8n3fj2u/result.json`. Source tests assert actual
+  bytecode invocation counts as well as results and tree-carrier agreement.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler --test control`:
+  11 tests passed, including guard branches, binding dumps, bounded copies and
+  refusal of unsupported pattern computations before execution;
+  report `/tmp/luna-tools-so1ami_d/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  report `/tmp/luna-tools-twh07q9f/result.json`.

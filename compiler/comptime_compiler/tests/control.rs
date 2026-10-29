@@ -25,10 +25,18 @@ fn unsupported_work_and_invalid_transfers_never_publish_partial_code() {
     let body = expr(K::If {
         condition: Box::new(expr(K::Unit)),
         then_branch: Box::new(expr(K::Unit)),
-        // Optional construction is compiled now; matching remains migration-only.
+        // Pattern-local executable code still needs suspended continuations.
         else_branch: Some(Box::new(expr(K::Match {
             value: Box::new(expr(K::Unit)),
-            arms: vec![],
+            arms: vec![nir::program::MatchArm {
+                pattern: nir::program::Pattern::Then {
+                    first: Box::new(nir::program::Pattern::Wild),
+                    value: Box::new(expr(K::Unit)),
+                    next: Box::new(nir::program::Pattern::Wild),
+                },
+                guard: None,
+                body: expr(K::Unit),
+            }],
         }))),
     });
     assert!(matches!(
@@ -270,4 +278,50 @@ fn variant_dump_retains_nested_heads_and_selected_members() {
     assert!(dump.contains("(index 2)"));
     assert!(dump.contains("(index 0)"));
     assert_eq!(dump, compile(&body, &mut 1000).unwrap().to_string());
+}
+
+#[test]
+fn match_dump_keeps_pattern_bindings_guards_and_exhaustion_explicit() {
+    use nir::program::{MatchArm, Pattern};
+    let binding = LocalId { owner: 1, index: 3 };
+    let body = expr(K::Match {
+        value: Box::new(expr(K::Unit)),
+        arms: vec![MatchArm {
+            pattern: Pattern::Binding {
+                binding,
+                inner: Box::new(Pattern::Unit),
+            },
+            guard: Some(expr(K::Literal(nir::program::Literal::Bool(true)))),
+            body: expr(K::Local(binding)),
+        }],
+    });
+    let dump = compile(&body, &mut 1000).unwrap().to_string();
+    assert!(dump.contains("(match-pattern "));
+    assert!(dump.contains("(bindings (binding "));
+    assert!(dump.contains("(non-exhaustive-match)"));
+    assert_eq!(dump.matches("(branch ").count(), 2);
+    assert_eq!(dump, compile(&body, &mut 1000).unwrap().to_string());
+    assert!(matches!(compile(&body, &mut 5), Err(Error::Budget(_))));
+}
+
+#[test]
+fn deep_owned_patterns_refuse_the_carrier_without_misreporting_fuel() {
+    use nir::program::{MatchArm, Pattern};
+    let mut pattern = Pattern::Wild;
+    for _ in 0..200 {
+        pattern = Pattern::Or(vec![pattern]);
+    }
+    let body = expr(K::Match {
+        value: Box::new(expr(K::Unit)),
+        arms: vec![MatchArm {
+            pattern,
+            guard: None,
+            body: expr(K::Unit),
+        }],
+    });
+    assert!(matches!(
+        compile(&body, &mut 10000),
+        Err(Error::Unsupported(_))
+    ));
+    assert!(matches!(compile(&body, &mut 5), Err(Error::Budget(_))));
 }

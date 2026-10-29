@@ -335,6 +335,44 @@ impl<'a> Interpreter<'a> {
                 source: Some(source),
             };
             match &instruction.op {
+                Op::MatchPattern {
+                    destination,
+                    value,
+                    pattern,
+                    bindings,
+                } => {
+                    // Only structural patterns are admitted by the compiler.
+                    // Keep candidate bindings private until the complete pattern succeeds.
+                    let mut candidate = Environment::new();
+                    for (id, slot) in bindings {
+                        if let Some(value) = &frame.slots[*slot] {
+                            candidate.insert(*id, self.checkpoint_representation(value, source)?);
+                        }
+                    }
+                    let subject = frame.slots[*value].as_ref().ok_or_else(missing)?;
+                    let (matched, _) =
+                        self.match_pattern_with_bindings(pattern, subject, &mut candidate)?;
+                    let Flow::Value(Value::Bool(matched)) = matched else {
+                        return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source)));
+                    };
+                    if matched {
+                        for (id, slot) in bindings {
+                            if let Some(value) = candidate.remove(id) {
+                                if frame.slots[*slot].is_none() {
+                                    frame.scopes.last_mut().ok_or_else(missing)?.push(*slot);
+                                }
+                                frame.slots[*slot] = Some(value);
+                            } else {
+                                frame.slots[*slot] = None;
+                            }
+                        }
+                    }
+                    frame.slots[*destination] = Some(Value::Bool(matched));
+                }
+                Op::NonExhaustiveMatch => {
+                    return Err(self.failure(ErrorKind::NonExhaustiveMatch, Some(source)));
+                }
+
                 Op::PrepareOptional { ty, input } => {
                     self.prepare_optional(
                         ty,
@@ -757,6 +795,82 @@ impl<'a> Interpreter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compiled_match_rejects_missing_arms_and_bad_guards_then_recovers() {
+        use nir::program::{MatchArm, Pattern};
+        let package = Package::default();
+        let source = SourceRange { start: 7, end: 9 };
+        let boolean = Term::Primitive(Primitive::Bool);
+        let literal = Expr {
+            source,
+            ty: boolean.clone(),
+            kind: K::Literal(Literal::Bool(true)),
+        };
+        let binding = LocalId { owner: 1, index: 0 };
+        let mut body = Expr {
+            source,
+            ty: boolean.clone(),
+            kind: K::Match {
+                value: Box::new(literal.clone()),
+                arms: vec![],
+            },
+        };
+        for compiled in [false, true] {
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            let mut environment = Environment::new();
+            let run = |vm: &mut Interpreter<'_>, body: &Expr, environment: &mut Environment| {
+                if compiled {
+                    let code = Arc::new(comptime_compiler::compile(body, &mut 1000).unwrap());
+                    vm.execute_code(&code, environment)
+                } else {
+                    vm.eval(body, environment)
+                }
+            };
+            assert!(matches!(
+                run(&mut vm, &body, &mut environment),
+                Err(Error {
+                    kind: ErrorKind::NonExhaustiveMatch,
+                    ..
+                })
+            ));
+            let K::Match { arms, .. } = &mut body.kind else {
+                unreachable!()
+            };
+            arms.push(MatchArm {
+                pattern: Pattern::Binding {
+                    binding,
+                    inner: Box::new(Pattern::Wild),
+                },
+                guard: Some(Expr {
+                    source,
+                    ty: boolean.clone(),
+                    kind: K::Unit,
+                }),
+                body: Expr {
+                    source,
+                    ty: boolean.clone(),
+                    kind: K::Local(binding),
+                },
+            });
+            assert!(matches!(run(&mut vm, &body, &mut environment),
+                Err(Error { kind: ErrorKind::Type, source: Some(at) }) if at == source));
+            assert!(!environment.contains_key(&binding));
+            let K::Match { arms, .. } = &mut body.kind else {
+                unreachable!()
+            };
+            arms[0].guard = None;
+            assert!(matches!(
+                run(&mut vm, &body, &mut environment).unwrap(),
+                Flow::Value(Value::Bool(true))
+            ));
+            assert!(!environment.contains_key(&binding));
+            let K::Match { arms, .. } = &mut body.kind else {
+                unreachable!()
+            };
+            arms.clear();
+        }
+    }
 
     #[test]
     fn qualified_construction_checks_plans_before_effects_and_payloads_afterward() {
