@@ -769,3 +769,32 @@ on failure and successful retry. Existing source tests cover saved snapshots,
 projected receiver updates, optional/nested/Type lists, incompatible domains,
 readonly rebinding and effectful suffix ordering. Formatting passed at
 `/tmp/luna-tools-ad5qnvyj/result.json`; whitespace checks passed.
+
+## Bounded normal-term freezing on the dev test stack
+
+During contextual code transport work, the unoptimized VM regression run
+aborted in `normal_input_data_tests::invocation_aggregates_retain_named_callables_without_exporting_them_as_data`
+while freezing the existing 130-level tuple input. The host stack overflowed
+before the depth guard returned (`/tmp/luna-tools-8lrj794o/result.json`). This
+run did not establish whether the overflow predated the transport changes.
+
+Normal-term export now lives in `normal_terms.rs`. Its small recursive
+dispatcher selects separate, non-inlined aggregate handlers; scalar temporary
+storage no longer occupies every aggregate recursion frame. The depth-128
+boundary, node/payload charging, traversal order, callable identity handling,
+and iterative release of rejected data remain unchanged. No stack-size override
+or release-profile workaround was used.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib
+python3 -B development/reproduce.py --timeout 120 --binary /tmp/luna-dev-002/target/debug/build/comptime_interpretor/574bc1b682d8916e/out/comptime_interpretor-574bc1b682d8916e -- normal_input_data_tests
+```
+
+The full VM target passed in the working tree (208 tests, including the code
+transport work committed separately; `/tmp/luna-tools-vu_lm4tw/result.json`).
+The focused existing normal-input group also passed independently through the
+same built harness (`/tmp/luna-tools-5yw5t_ey/result.json`). The source CMTT,
+phase-boundary and comptime-memory groups passed all 547 tests
+(`/tmp/luna-tools-59p4z5mr/result.json`).
