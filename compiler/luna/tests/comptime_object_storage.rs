@@ -1,135 +1,132 @@
-//! Transient Object slots retain snapshots and check payload resource evidence.
+//! Comptime value receivers preserve snapshots without runtime Copy evidence.
 #[path = "support/execution.rs"]
 #[allow(dead_code)]
 mod support;
 use comptime_interpretor::Value;
 
-fn compile(source: &str) -> nir::program::Package {
-    support::compile_with_source_bindings(
+fn invoke(source: &str) -> Result<Value, String> {
+    let package = support::compile_with_source_bindings(
         &format!(
             "mod meta {{ {} }}
-            trait Duplicate {{}} trait Retire {{fn drop(*self);}}
+            typealias Type = .Type'builtin;
             {source}",
             include!("support/meta_source.rs")
         ),
         &support::meta_fixture_protocols(),
         luna::protocols::type_constructors::Selectors {
             meta_list: Some("input.meta.List"),
-            copy: Some("input.Duplicate"),
-            drop: Some("input.Retire"),
             ..Default::default()
         },
-    )
-    .unwrap()
-}
-
-fn invoke(package: &nir::program::Package) -> Result<Value, String> {
-    luna::invocation::invoke_with_protocols(package, "run", "Duplicate", "Retire", 1_000_000)
+    )?;
+    luna::invocation::invoke(&package, "run", 1_000_000)
 }
 
 #[test]
-fn object_pointer_reads_and_writes_preserve_nested_snapshots() {
-    let package = compile("
-        pure comptime fn Identity<T>->.Type'builtin {T}
-        comptime fn run()->bool {
-            let absent:?bool=null;
-            let types:meta.List<.Type'builtin> = [Identity<bool>,bool];
-            var object={flag:true, flag:false, absent:absent, nested:{flag:true}, types:types};
-            let pointer=object.ref;
-            let saved=pointer.*;
-            let earlier=meta.Object.get<bool>(object,do {pointer.* = {flag:true}; .flag});
-            let read_back=pointer.*;
-            pointer.* = {};
-            (earlier matches false?) and meta.Object.length(object)==0
-                and (meta.Object.get<bool>(read_back,.flag) matches true?)
-                and meta.Object.length(saved)==5
-                and (meta.Object.get<?bool>(saved,.absent) match {v?=>v matches null,null=>false})
-                and (meta.Object.get<meta.Object>(saved,.nested) match {v?=>meta.Object.get<bool>(v,.flag) matches true?,null=>false})
-                and (meta.Object.get<meta.List<.Type'builtin>>(saved,.types) match {v?=>v[0]==Identity<bool>,null=>false})
-        }
-    ");
-    assert_eq!(invoke(&package).unwrap(), Value::Bool(true));
-}
-
-#[test]
-fn nominal_object_payloads_require_copy_without_drop() {
-    let source = "struct Item {flag:bool} IMPL
-        comptime fn run()->bool {
-            let item=Item {flag:true};
-            var object={item:item};
-            let pointer=object.ref;
-            let saved=pointer.*;
-            pointer.* = {flag:false};
-            meta.Object.get<Item>(saved,.item) match {value?=>value.flag,null=>false}
-        }";
-    let package = compile(&source.replace("IMPL", "impl Duplicate for Item {}"));
-    assert_eq!(invoke(&package).unwrap(), Value::Bool(true));
-    for implementation in [
-        "",
-        "impl Duplicate for Item {} impl Retire for Item {fn drop(*self) {}}",
-    ] {
-        let package = compile(&source.replace("IMPL", implementation));
-        let error = invoke(&package).unwrap_err();
-        assert!(error.contains("Unsupported"), "{error}");
-    }
-}
-
-#[test]
-fn writes_check_old_new_and_inactive_payload_domains() {
-    for body in [
-        "var object={item:Item {flag:true}}; object.ref.* = {flag:false};",
-        "var object={flag:false}; object.ref.* = {item:Item {flag:true}};",
-        "let absent:?Item=null; var object={item:absent}; object.ref.* = {};",
-        "let absent:?Item=null; var object={}; object.ref.* = {nested:{item:absent}};",
-        "let empty:meta.List<Item> = []; var object={items:empty}; object.ref.* = {};",
-    ] {
-        let package = compile(&format!(
-            "struct Item {{flag:bool}} comptime fn run()->bool {{{body} true}}"
-        ));
-        let error = invoke(&package).unwrap_err();
-        assert!(error.contains("Unsupported"), "{body}: {error}");
-    }
-}
-
-#[test]
-fn list_storage_cannot_bypass_object_payload_permissions() {
-    for body in [
-        "var values:meta.List<Item> = [Item {flag:true}]; let copied=values.ref.*;",
-        "var values:meta.List<Item> = [Item {flag:true}]; values.ref.* = [];",
-        "var values:meta.List<Item> = []; values.ref.* = [Item {flag:true}];",
-        "var values:meta.List<Item> = []; values.append(Item {flag:true});",
-        "var values:meta.List<meta.Object> = [{item:Item {flag:true}}]; let copied=values.ref.*;",
-        "var values:meta.List<meta.Object> = []; let item={item:Item {flag:true}}; values.append(item);",
-        "let absent:?Item=null; var values:meta.List<?Item> = [absent]; let copied=values.ref.*;",
-    ] {
-        let package = compile(&format!(
-            "struct Item {{flag:bool}} comptime fn run()->bool {{{body} true}}"
-        ));
-        let error = invoke(&package).unwrap_err();
-        assert!(error.contains("Unsupported"), "{body}: {error}");
-    }
-}
-
-#[test]
-fn list_storage_copy_payloads_preserve_snapshots_and_reject_drop() {
-    let source = "struct Item {flag:bool} impl Duplicate for Item {} DROP
-        comptime fn run()->bool {
-            var items:meta.List<Item> = [Item {flag:true}];
-            let pointer=items.ref;
-            let saved=pointer.*;
-            pointer.*.append(Item {flag:false});
-            let extended=pointer.*;
-            pointer.* = [];
-            items.length()==0 and saved.length()==1 and saved[0].flag
-                and extended.length()==2 and not extended[1].flag
-        }";
+fn object_value_receivers_preserve_nested_snapshots() {
     assert_eq!(
-        invoke(&compile(&source.replace("DROP", ""))).unwrap(),
+        invoke(
+            "
+        pure comptime fn Identity<T> -> Type { T }
+        comptime fn run() -> bool {
+            let absent: ?bool = null;
+            let types: meta.List<Type> = [Identity<bool>, bool];
+            var object = {flag: true, flag: false, absent: absent,
+                nested: {flag: true}, types: types};
+            let saved = object;
+            object.set(1, true);
+            let changed = object;
+            object = {};
+            object.length() == 0 and (changed.get<bool>(.flag) matches true?)
+                and saved.length() == 5 and (saved.get<bool>(.flag) matches false?)
+                and (saved.get<?bool>(.absent) match {v? => v matches null, null => false})
+                and (saved.get<meta.Object>(.nested) match {
+                    v? => v.get<bool>(.flag) matches true?, null => false})
+                and (saved.get<meta.List<Type>>(.types) match {
+                    v? => v[0] == Identity<bool>, null => false})
+        }
+    "
+        )
+        .unwrap(),
         Value::Bool(true)
     );
-    let error = invoke(&compile(
-        &source.replace("DROP", "impl Retire for Item {fn drop(*self) {}}"),
-    ))
-    .unwrap_err();
-    assert!(error.contains("Unsupported"), "{error}");
+}
+
+#[test]
+fn nominal_object_payloads_do_not_require_runtime_copy() {
+    assert_eq!(
+        invoke(
+            "
+        struct Item { flag: bool }
+        comptime fn run() -> bool {
+            var object = {item: Item {flag: true}};
+            let saved = object;
+            object.set(0, Item {flag: false});
+            (saved.get<Item>(.item) match {v? => v.flag, null => false})
+                and (object.get<Item>(.item) match {v? => not v.flag, null => false})
+        }
+    "
+        )
+        .unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn inactive_nominal_domains_are_valid_comptime_storage() {
+    assert_eq!(
+        invoke(
+            "
+        struct Item { flag: bool }
+        comptime fn run() -> bool {
+            let absent: ?Item = null;
+            let empty: meta.List<Item> = [];
+            var object = {item: absent, nested: {items: empty}};
+            let saved = object;
+            object.set(0, Item {flag: true});
+            object.set(1, empty);
+            (saved.get<?Item>(.item) match {v? => v matches null, null => false})
+                and (saved.get<meta.Object>(.nested) match {
+                    v? => v.get<meta.List<Item>>(.items) match {
+                        items? => items.length() == 0, null => false}, null => false})
+                and (object.get<Item>(.item) match {v? => v.flag, null => false})
+                and (object.get<meta.List<Item>>(.nested) match {
+                    v? => v.length() == 0, null => false})
+        }
+    "
+        )
+        .unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn lists_of_nominal_and_object_payloads_preserve_snapshots_without_copy() {
+    assert_eq!(
+        invoke(
+            "
+        struct Item { flag: bool }
+        struct Holder { items: meta.List<Item> }
+        comptime fn run() -> bool {
+            let holder = Holder {items: [Item {flag: true}]};
+            let saved = holder.items;
+            holder.items.append(Item {flag: false});
+            holder.items.append_all(saved);
+            var objects: meta.List<meta.Object> = [{item: Item {flag: true}}];
+            let old_objects = objects;
+            objects.append({item: Item {flag: false}});
+            let absent: ?Item = null;
+            var optional_items: meta.List<?Item> = [];
+            optional_items.append(absent);
+            saved.length() == 1 and saved[0].flag
+                and holder.items.length() == 3 and not holder.items[1].flag
+                and holder.items[2].flag and old_objects.length() == 1
+                and objects.length() == 2
+                and (objects[1].get<Item>(.item) match {v? => not v.flag, null => false})
+                and (optional_items[0] matches null)
+        }
+    "
+        )
+        .unwrap(),
+        Value::Bool(true)
+    );
 }

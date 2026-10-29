@@ -11,7 +11,7 @@ comptime fn run() -> bool {
         and changed.EntryType(1) == bool
         and (changed.value<bool>(1) matches false?)
         and (result.get<bool>(.tail) matches true?)
-        and mutable_entries()
+        and mutable_entries() and nominal_storage()
 }
 
 
@@ -36,4 +36,18 @@ comptime fn mutable_entries() -> bool {
         and (draft.get<char>(.flag) matches 'x'?)
         and holder.entries.length() == 1
         and (holder.entries.get<bool>(.fresh) matches true?)
+}
+
+struct Item { flag: bool }
+comptime fn nominal_storage() -> bool {
+    var items: meta.List<Item> = [Item {flag: true}];
+    let old_items = items;
+    items.append(Item {flag: false});
+    let absent: ?Item = null;
+    var object = {item: Item {flag: true}, absent: absent, items: items};
+    let saved = object;
+    object.set(0, Item {flag: false});
+    (saved.get<Item>(.item) match {v? => v.flag, null => false})
+        and (object.get<Item>(.item) match {v? => not v.flag, null => false})
+        and old_items.length() == 1 and items.length() == 2
 }

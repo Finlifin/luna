@@ -160,6 +160,10 @@ comptime fn configured() -> bool {
 旧快照。替换完成检查后才写回，失败不回滚此前实参求值的副作用。内部值引用不
 成为源码指针，也不授予 Object runtime 表示或全局 Copy。真实 sysroot 用例已
 纳入 `sysroot-meta-object` 检查。
+Object 和 List 的值引用路径支持普通名义结构体、空 optional 与空 List 的
+comptime 快照，不要求这些 payload 实现 runtime Copy／Clone。源码回归
+`comptime_object_storage` 与 sysroot 用例覆盖这些域；旧指针兼容路径的资源
+限制不构成 comptime 值引用的契约。
 
 `List.append` 通过内部值引用更新接收者，不要求 runtime Copy／Clone。
 读取列表值产生独立快照，字段路径在写入时重新检查；预算或路径失败不提交该次写入。
