@@ -157,7 +157,7 @@ fn tuple_pack_inference_preserves_head_proofs_and_transaction_isolation() {
         assert_eq!(engine.freeze(&I::Meta(pack)), Ok(input.clone()));
         assert_eq!(engine.freeze(&template), Ok(tuple(input)));
     }
-    // No Tuple role means no pack inference through an opaque normal-form head.
+    // Proposal formation does not require a privileged Tuple or List role.
     let mut engine = Engine::default();
     let pack = engine.fresh(Sort::ComptimeValue);
     let template = I::Instantiate {
@@ -176,11 +176,9 @@ fn tuple_pack_inference_preserves_head_proofs_and_transaction_isolation() {
         )
         .unwrap();
     finish(&mut candidate);
-    assert!(!candidate.state(id).unwrap().is_proven());
-    assert_eq!(engine.commit(candidate), Err(Error::Unsettled(id)));
-    engine
-        .assign(pack, I::Stable(Term::TypeListValue(vec![])))
-        .unwrap();
+    assert!(candidate.state(id).unwrap().is_proven());
+    assert!(engine.freeze(&I::Meta(pack)).is_err());
+    engine.commit(candidate).unwrap();
     assert_eq!(
         engine.freeze(&I::Meta(pack)),
         Ok(Term::TypeListValue(vec![]))
@@ -273,7 +271,7 @@ fn repeated_slot_conflict_rolls_back_all_proposals() {
 }
 
 #[test]
-fn opaque_heads_never_infer_their_arguments_by_injectivity() {
+fn opaque_heads_propose_inputs_without_granting_nominal_injectivity() {
     let mut engine = Engine::default();
     let a = engine.fresh(Sort::Type);
     let head = nir::DeclarationId {
@@ -302,8 +300,15 @@ fn opaque_heads_never_infer_their_arguments_by_injectivity() {
         let right = I::Stable(build(Term::Primitive(P::Bool)));
         let (mut candidate, id) = engine.match_types(left, right, Budget::default()).unwrap();
         finish(&mut candidate);
-        assert!(matches!(candidate.state(id), Some(State::Waiting(ids)) if ids.contains(&a)));
-        assert_eq!(engine.commit(candidate), Err(Error::Unsettled(id)));
+        if nominal {
+            assert!(matches!(candidate.state(id), Some(State::Waiting(ids)) if ids.contains(&a)));
+            assert_eq!(engine.commit(candidate), Err(Error::Unsettled(id)));
+        } else {
+            assert!(candidate.state(id).unwrap().is_proven());
+            assert_eq!(candidate.freeze(&I::Meta(a)), Ok(Term::Primitive(P::Bool)));
+            // Dropping a successful proposal still leaves the root untouched.
+            assert!(engine.freeze(&I::Meta(a)).is_err());
+        }
     }
     engine.assign(a, stable(P::U32)).unwrap();
 }
@@ -496,7 +501,7 @@ fn open_structural_conflicts_cannot_commit_inference_proposals() {
 }
 
 #[test]
-fn two_open_opaque_heads_do_not_gain_injectivity() {
+fn two_open_normal_forms_share_candidate_inputs_without_leaking_assignments() {
     for nominal in [false, true] {
         let mut root = Engine::default();
         let a = root.fresh(Sort::Type);
@@ -532,8 +537,14 @@ fn two_open_opaque_heads_do_not_gain_injectivity() {
             .unwrap();
         candidate.assign(b, stable(P::Bool)).unwrap();
         finish(&mut candidate);
-        assert!(matches!(candidate.state(id), Some(State::Waiting(ids)) if ids.contains(&a)));
-        assert_eq!(root.commit(candidate), Err(Error::Unsettled(id)));
+        if nominal {
+            assert!(matches!(candidate.state(id), Some(State::Waiting(ids)) if ids.contains(&a)));
+            assert_eq!(root.commit(candidate), Err(Error::Unsettled(id)));
+        } else {
+            assert!(candidate.state(id).unwrap().is_proven());
+            assert_eq!(candidate.freeze(&I::Meta(a)), Ok(Term::Primitive(P::Bool)));
+            assert!(root.freeze(&I::Meta(a)).is_err());
+        }
         root.assign(a, stable(P::Char)).unwrap();
     }
 }
@@ -748,4 +759,78 @@ fn bounded_assignment_does_not_publish_on_exhaustion_or_occurs_failure() {
         context.freeze(&I::Meta(first)).unwrap(),
         Term::Primitive(P::Bool)
     );
+}
+
+#[test]
+fn normal_form_proposals_are_multi_input_head_sensitive_and_conflict_checked() {
+    let head = nir::DeclarationId {
+        package: 91,
+        local: 1,
+    };
+    let other = nir::DeclarationId {
+        package: 91,
+        local: 2,
+    };
+    let build = |head, arguments| Term::NormalForm {
+        head,
+        arguments,
+        sort: Sort::Type,
+    };
+    for (actual_head, actual, accepted) in [
+        (
+            head,
+            vec![Term::Primitive(P::Bool), Term::Primitive(P::Char)],
+            true,
+        ),
+        (
+            other,
+            vec![Term::Primitive(P::Bool), Term::Primitive(P::Char)],
+            false,
+        ),
+        (head, vec![Term::Primitive(P::Bool)], false),
+    ] {
+        let mut root = Engine::default();
+        let a = root.fresh(Sort::Type);
+        let b = root.fresh(Sort::Type);
+        let (mut candidate, obligation) = root
+            .match_types(
+                I::Instantiate {
+                    template: build(head, vec![slot(0), slot(1)]),
+                    arguments: vec![I::Meta(a), I::Meta(b)],
+                },
+                I::Stable(build(actual_head, actual)),
+                Budget::default(),
+            )
+            .unwrap();
+        finish(&mut candidate);
+        assert_eq!(candidate.state(obligation).unwrap().is_proven(), accepted);
+        assert!(root.freeze(&I::Meta(a)).is_err());
+        if accepted {
+            root.commit(candidate).unwrap();
+            assert_eq!(root.freeze(&I::Meta(a)), Ok(Term::Primitive(P::Bool)));
+            assert_eq!(root.freeze(&I::Meta(b)), Ok(Term::Primitive(P::Char)));
+        } else {
+            assert!(root.commit(candidate).is_err());
+        }
+    }
+    let mut root = Engine::default();
+    let a = root.fresh(Sort::Type);
+    let attempt = root.match_types(
+        I::Instantiate {
+            template: build(head, vec![slot(0), slot(0)]),
+            arguments: vec![I::Meta(a)],
+        },
+        I::Stable(build(
+            head,
+            vec![Term::Primitive(P::Bool), Term::Primitive(P::Char)],
+        )),
+        Budget::default(),
+    );
+    if let Ok((mut candidate, obligation)) = attempt {
+        finish(&mut candidate);
+        assert!(!candidate.state(obligation).unwrap().is_proven());
+        assert!(root.commit(candidate).is_err());
+    }
+    assert!(root.freeze(&I::Meta(a)).is_err());
+    root.assign(a, stable(P::U32)).unwrap();
 }

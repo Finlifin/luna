@@ -1181,12 +1181,12 @@ fn bound_tuple_inference_proposes_fields_and_preserves_context_identity() {
     );
     package.normal_forms[0].role = Role::Opaque;
     let opaque = Context::from_package(&package).unwrap();
-    assert!(
-        definition
-            .infer_partial_types_in_context(&[Some(actual)], None, &opaque, Budget::default())
-            .and_then(|candidate| candidate.finish())
-            .is_err()
-    );
+    // Removing builtin classification changes no ordinary inference proposal.
+    let instance = definition
+        .infer_partial_types_in_context(&[Some(actual)], None, &opaque, Budget::default())
+        .and_then(|candidate| candidate.finish())
+        .unwrap();
+    assert_eq!(instance.type_arguments, vec![primitive(P::Bool)]);
 }
 
 #[test]
@@ -1383,7 +1383,7 @@ fn partial_callable_nominal_results_survive_forwarding_and_reject_conflicts() {
 }
 
 #[test]
-fn candidate_type_equations_are_transactional_and_do_not_invert_opaque_heads() {
+fn candidate_type_equations_are_transactional_for_ordinary_normal_forms() {
     let template = scheme(vec![], generic(0), 1);
     let bound = Term::Bound {
         depth: 0,
@@ -1421,7 +1421,7 @@ fn candidate_type_equations_are_transactional_and_do_not_invert_opaque_heads() {
             Budget::default(),
         )
         .unwrap();
-    assert!(candidate.finish().is_err());
+    assert_eq!(candidate.finish().unwrap().result, primitive(P::Bool));
 }
 
 #[test]
@@ -2498,10 +2498,10 @@ fn bound_list_head_proposes_element_types_without_an_inverse_equality_rule() {
     ));
     package.normal_forms[0].role = Role::Opaque;
     let opaque = Context::from_package(&package).unwrap();
-    assert!(
-        definition
-            .infer_partial_types_in_context(&[Some(actual)], None, &opaque, Budget::default())
-            .and_then(|candidate| candidate.finish())
-            .is_err()
-    );
+    // Removing builtin classification changes no ordinary inference proposal.
+    let instance = definition
+        .infer_partial_types_in_context(&[Some(actual)], None, &opaque, Budget::default())
+        .and_then(|candidate| candidate.finish())
+        .unwrap();
+    assert_eq!(instance.type_arguments, vec![primitive(P::Bool)]);
 }

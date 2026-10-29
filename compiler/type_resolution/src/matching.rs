@@ -532,10 +532,10 @@ fn decompose(
                 arguments: right,
                 sort: Sort::Type,
             },
-        ) if a == b && (context.is_tuple_head(*a) || context.is_list_inference_head(*a)) => {
+        ) if a == b && left.len() == right.len() => {
             // Syntactic candidate substitutions only. The original application
             // equality remains an obligation; no inverse theorem is asserted.
-            if let ([left], [right]) = (left.as_slice(), right.as_slice()) {
+            for (left, right) in left.iter().zip(right) {
                 decompose(
                     left,
                     right,

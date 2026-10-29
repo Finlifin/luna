@@ -1307,7 +1307,7 @@ fn type_evidence_replay_checks_query_substitution_contracts_and_scope() {
 }
 
 #[test]
-fn opaque_factories_are_not_inverted_by_candidate_matching() {
+fn ordinary_normal_form_proposals_validate_original_implementation_evidence() {
     use type_resolution::implementation::TypeAssessment;
     let opaque = |arg| Term::NormalForm {
         head: id(500),
@@ -1316,15 +1316,21 @@ fn opaque_factories_are_not_inverted_by_candidate_matching() {
     };
     let mut h = generic(200, node(10, vec![opaque(var(1))]), vec![id(1)]);
     let query = node(10, vec![opaque(ty(P::Bool))]);
-    assert!(matches!(
-        h.assess_types(&query, &[], &context(), Budget::default()),
-        TypeAssessment::Pending(_)
-    ));
-    // An independent interface position may fix T; full original equality is
-    // still proved, rather than extracting T from the opaque type factory.
+    let evidence = match h.assess_types(&query, &[], &context(), Budget::default()) {
+        TypeAssessment::Applicable(evidence) => evidence,
+        other => panic!("ordinary head proposal failed: {other}"),
+    };
+    h.verify_type_evidence(&evidence, &query, &[], &context(), Budget::default())
+        .unwrap();
+    // Independent constraints must still agree with the candidate substitution.
     h.interface_arguments = vec![var(1)];
     let good = h.assess_types(&query, &[ty(P::Bool)], &context(), Budget::default());
     assert!(matches!(good, TypeAssessment::Applicable(_)), "{good}");
+    let conflict = h.assess_types(&query, &[ty(P::Char)], &context(), Budget::default());
+    assert!(
+        !matches!(conflict, TypeAssessment::Applicable(_)),
+        "{conflict}"
+    );
 }
 
 #[test]
