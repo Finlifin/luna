@@ -296,3 +296,88 @@ fn concatenation_evidence_keeps_failures_and_opaque_type_identity() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn nested_concat_type_observation_is_sound_for_all_branch_choices() {
+    // Independent semantic oracle: enumerate actual list values, rather than
+    // reproducing the compiler's partial-evidence merge algorithm. Conservative
+    // rejection is allowed; every accepted annotation must hold on every path.
+    let choices: &[&[bool]] = &[&[], &[true], &[false, true]];
+    let spell = |values: &[bool]| {
+        format!(
+            "[{}]",
+            values
+                .iter()
+                .map(|v| if *v { "bool" } else { "Byte" })
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    };
+    let mut accepted = 0;
+    let mut rejected = 0;
+    for a in choices {
+        for b in choices {
+            for c in choices {
+                for d in choices {
+                    for index in [0, 1, 2, 4] {
+                        let source = format!(
+                            "typealias Type=.Type'builtin;typealias Byte=.u8'builtin;
+                            pure comptime fn List<T>->Type {{T}}
+                            comptime fn run(first:bool,second:bool)->bool {{
+                                let prefix:List<Type> = [bool];
+                                let left:List<Type> = if first {{{a}}} else {{{b}}};
+                                let right:List<Type> = if second {{{c}}} else {{{d}}};
+                                let suffix:List<Type> = [bool];
+                                let joined=.list_concat'builtin(.list_concat'builtin(.list_concat'builtin(prefix,left),right),suffix);
+                                let Selected=joined[{index}];let value:Selected=true;value
+                            }}", a=spell(a),b=spell(b),c=spell(c),d=spell(d)
+                        );
+                        let result = support::compile_with_source_bindings(
+                            &source,
+                            &Default::default(),
+                            luna::protocols::type_constructors::Selectors {
+                                meta_list: Some("input.List"),
+                                ..Default::default()
+                            },
+                        );
+                        let Ok(package) = result else {
+                            assert_ne!(index, 0, "lost the unconditional bool prefix: {source}");
+                            rejected += 1;
+                            continue;
+                        };
+                        accepted += 1;
+                        let mut vm =
+                            Interpreter::for_comptime(&package, Default::default()).unwrap();
+                        for (first, left) in [(true, *a), (false, *b)] {
+                            for (second, right) in [(true, *c), (false, *d)] {
+                                let actual = std::iter::once(true)
+                                    .chain(left.iter().copied())
+                                    .chain(right.iter().copied())
+                                    .chain(std::iter::once(true))
+                                    .collect::<Vec<_>>();
+                                assert_eq!(
+                                    actual.get(index),
+                                    Some(&true),
+                                    "unsound annotation: first={first} second={second}: {source}"
+                                );
+                                assert_eq!(
+                                    vm.invoke(
+                                        support::id(&package, "run"),
+                                        vec![Value::Bool(first), Value::Bool(second)]
+                                    )
+                                    .unwrap(),
+                                    Value::Bool(true)
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(accepted > 81, "non-prefix cases must also be usable");
+    assert!(
+        rejected > 0,
+        "invalid or unknown positions must not all be accepted"
+    );
+}
