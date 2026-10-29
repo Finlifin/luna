@@ -771,7 +771,7 @@ fn memoized_keys_use_resource_evidence_in_source_eq_and_hash() {
             let packet=Packet {flag:self};let saved=packet.ref.*;
             if saved.flag {0} else {0}
         }}
-        pure comptime fn inspect(flag:bool)->bool {flag}";
+        typealias Type=.Type'builtin;pure comptime fn Inspect(flag:bool)->Type {if flag {bool} else {.u8'builtin}}";
     let package = compile(source);
     let prepare = |resources: bool| {
         let mut items = intrinsic::LangItems::new();
@@ -797,7 +797,7 @@ fn memoized_keys_use_resource_evidence_in_source_eq_and_hash() {
         luna::memoization::Invocation::prepare(
             &package,
             &items,
-            id(&package, "inspect"),
+            id(&package, "Inspect"),
             vec![],
             4,
             Default::default(),
@@ -812,7 +812,14 @@ fn memoized_keys_use_resource_evidence_in_source_eq_and_hash() {
                 &mut comptime_executor::Context::new(100_000),
             )
             .unwrap();
-        assert_eq!(*outcome.value, Value::Bool(value));
+        assert_eq!(
+            *outcome.value,
+            Value::Type(nir::Term::Primitive(if value {
+                nir::Primitive::Bool
+            } else {
+                nir::Primitive::U8
+            }))
+        );
         assert_eq!(outcome.reused, reused);
     }
     let mut denied = prepare(false);

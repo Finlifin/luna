@@ -336,7 +336,7 @@ fn memoized_value_indexed_keys_keep_declaration_and_value_arguments() {
             )
             .unwrap();
             let mut context = comptime_executor::Context::new(100_000);
-            for (value, reused) in [(false, false), (true, false), (false, true), (true, true)] {
+            for (value, reused) in [(false, false), (true, false), (false, false), (true, false)] {
                 let input = Value::Record {
                     declaration: package.structs[0].declaration,
                     arguments: vec![nir::Term::Bool(tag)],
@@ -362,7 +362,7 @@ fn memoized_value_indexed_keys_keep_declaration_and_value_arguments() {
                 vec![foreign]
             };
             assert!(invocation.invoke(inputs, &mut context).is_err());
-            assert_eq!(invocation.cached_results(), 2);
+            assert_eq!(invocation.cached_results(), 0);
         }
     }
 }

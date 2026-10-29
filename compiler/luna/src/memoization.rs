@@ -1,5 +1,7 @@
 //! Reusable invocation of one concrete pure comptime function in an owned
-//! compilation snapshot. Callers supply fully prepared arguments; defaults and
+//! compilation snapshot. Result caching is temporarily limited to calls whose
+//! bound output type is Type; other calls bypass key preparation and lookup.
+//! Callers supply fully prepared arguments; defaults and
 //! input evaluation are outside this cache. Optional paired source Copy/Drop
 //! bindings authorize pointer transfers in this immutable compilation snapshot.
 use crate::comptime_keys::{Protocol, Snapshot};
@@ -192,7 +194,8 @@ impl Invocation {
                 return Err("memoized function type contract is not established".into());
             }
         }
-        let protocols = if closed {
+        let cacheable = closed && **result == Term::Primitive(nir::Primitive::Type);
+        let protocols = if cacheable {
             parameters
                 .iter()
                 .map(|p| Protocol::prepare(package, items, &p.ty, budget))
@@ -200,7 +203,7 @@ impl Invocation {
         } else {
             vec![]
         };
-        let schemas = if closed {
+        let schemas = if cacheable {
             vec![Schema {
                 inputs: parameters.iter().map(|p| p.ty.clone()).collect(),
                 result: (**result).clone(),
@@ -259,6 +262,34 @@ impl Invocation {
         context: &mut Context,
     ) -> Result<Outcome<Value>, Error<String>> {
         let (types, result_type) = self.bind_inputs(&values, context)?;
+        // Gate before preparing Eq/Hash, snapshots or cache keys. A dependent
+        // result is classified only after binding this invocation's inputs.
+        if result_type != Term::Primitive(nir::Primitive::Type) {
+            let world = World {
+                index: &self.index,
+                context: &self.context,
+                traits: &self.package.traits,
+                implementations: &self.package.implementations,
+                assumptions: &[],
+            };
+            let (value, _) = evaluate(
+                &self.package,
+                &world,
+                self.resources,
+                self.budget,
+                self.declaration,
+                &self.arguments,
+                &result_type,
+                values,
+                context,
+                false,
+            )
+            .map_err(Error::Evaluation)?;
+            return Ok(Outcome {
+                value: std::sync::Arc::new(value),
+                reused: false,
+            });
+        }
         let mut transient = None;
         let (operation, inputs) = if let Some(index) = self
             .schemas
@@ -487,9 +518,6 @@ fn execute(
     inputs: Vec<Snapshot>,
     context: &mut Context,
 ) -> Result<Outcome<Value>, Error<String>> {
-    let solver = |predicate: &TypePredicate, remaining: &mut u64| {
-        crate::implementation_world::solve_metered(world, predicate, budget, remaining)
-    };
     cache.query_pure_admitted(
         QueryId {
             package: declaration.package,
@@ -508,90 +536,119 @@ fn execute(
                 context.spend::<String>(work).map_err(|e| e.to_string())?;
             }
             let values = inputs.iter().map(|input| input.value().clone()).collect();
-            let (prepared, graph, entry, type_arguments, values) =
-                prepare_bound_entry(package, declaration, arguments, values, budget, context)?;
-            let steps = u64::try_from(context.remaining()).unwrap_or(u64::MAX);
-            let mut vm_budget = Budget { steps, depth: 128 };
-            let prepared_vm = match &graph {
-                Some(graph) => Interpreter::from_iir_for_comptime_metered(graph, &mut vm_budget),
-                None => Interpreter::for_comptime(prepared.as_ref(), vm_budget),
-            };
-            let copy_failure = std::cell::RefCell::new(None::<String>);
-            let pointer_copy = |ty: &Term, remaining: &mut u64| {
-                let Some((copy, drop)) = resources else {
-                    return false;
-                };
-                let mut fuel = usize::try_from(*remaining).unwrap_or(usize::MAX);
-                let before = fuel;
-                let evidence = elaboration::verification::copy::acquire(
-                    package,
-                    world,
-                    copy,
-                    drop,
-                    ty,
-                    ptc::Budget {
-                        steps: fuel,
-                        ..budget
-                    },
-                    &mut fuel,
-                );
-                *remaining = remaining.saturating_sub((before - fuel) as u64);
-                let allowed = evidence.is_ok();
-                *copy_failure.borrow_mut() = evidence.err();
-                allowed
-            };
-            let mut vm = match prepared_vm {
-                Ok(vm) => vm
-                    .with_budgeted_type_solver(&solver)
-                    .with_budgeted_pointer_copy_permission(&pointer_copy),
-                Err(error) => {
-                    context
-                        .spend::<String>((steps - vm_budget.steps) as usize)
-                        .map_err(|e| e.to_string())?;
-                    return Err(error.to_string());
-                }
-            };
-            let mut admission_work = 0;
-            let result = (|| {
-                let value = vm.invoke_instantiated(entry, type_arguments, values)?;
-                let publish = if value.immutable_copy_work().is_none() {
-                    false
-                } else {
-                    let validation = if graph.is_some() {
-                        // IIR intentionally lacks source formation metadata.
-                        // Admit the result against the same owned source world.
-                        let before = vm.remaining_steps();
-                        let mut admission = Interpreter::for_comptime(
-                            prepared.as_ref(),
-                            Budget {
-                                steps: before,
-                                depth: 128,
-                            },
-                        )?
-                        .with_budgeted_type_solver(&solver);
-                        let result = admission.validate_immutable_input(&value, result_type);
-                        admission_work = before - admission.remaining_steps();
-                        result
-                    } else {
-                        vm.validate_immutable_input(&value, result_type)
-                    };
-                    match validation {
-                        Ok(()) => true,
-                        Err(error) if error.kind == comptime_interpretor::ErrorKind::Type => false,
-                        Err(error) => return Err(error),
-                    }
-                };
-                Ok((value, publish))
-            })();
-            context
-                .spend::<String>((steps - vm.remaining_steps() + admission_work) as usize)
-                .map_err(|e| e.to_string())?;
-            result.map_err(
-                |e: comptime_interpretor::Error| match copy_failure.borrow().as_ref() {
-                    Some(reason) => format!("{e}; pointer Copy evidence: {reason}"),
-                    None => e.to_string(),
-                },
+            evaluate(
+                package,
+                world,
+                resources,
+                budget,
+                declaration,
+                arguments,
+                result_type,
+                values,
+                context,
+                true,
             )
+        },
+    )
+}
+
+fn evaluate(
+    package: &Package,
+    world: &World<'_>,
+    resources: Option<(DeclarationId, DeclarationId)>,
+    budget: ptc::Budget,
+    declaration: DeclarationId,
+    arguments: &[Term],
+    result_type: &Term,
+    values: Vec<Value>,
+    context: &mut Context,
+    cache_result: bool,
+) -> Result<(Value, bool), String> {
+    let solver = |predicate: &TypePredicate, remaining: &mut u64| {
+        crate::implementation_world::solve_metered(world, predicate, budget, remaining)
+    };
+    let (prepared, graph, entry, type_arguments, values) =
+        prepare_bound_entry(package, declaration, arguments, values, budget, context)?;
+    let steps = u64::try_from(context.remaining()).unwrap_or(u64::MAX);
+    let mut vm_budget = Budget { steps, depth: 128 };
+    let prepared_vm = match &graph {
+        Some(graph) => Interpreter::from_iir_for_comptime_metered(graph, &mut vm_budget),
+        None => Interpreter::for_comptime(prepared.as_ref(), vm_budget),
+    };
+    let copy_failure = std::cell::RefCell::new(None::<String>);
+    let pointer_copy = |ty: &Term, remaining: &mut u64| {
+        let Some((copy, drop)) = resources else {
+            return false;
+        };
+        let mut fuel = usize::try_from(*remaining).unwrap_or(usize::MAX);
+        let before = fuel;
+        let evidence = elaboration::verification::copy::acquire(
+            package,
+            world,
+            copy,
+            drop,
+            ty,
+            ptc::Budget {
+                steps: fuel,
+                ..budget
+            },
+            &mut fuel,
+        );
+        *remaining = remaining.saturating_sub((before - fuel) as u64);
+        let allowed = evidence.is_ok();
+        *copy_failure.borrow_mut() = evidence.err();
+        allowed
+    };
+    let mut vm = match prepared_vm {
+        Ok(vm) => vm
+            .with_budgeted_type_solver(&solver)
+            .with_budgeted_pointer_copy_permission(&pointer_copy),
+        Err(error) => {
+            context
+                .spend::<String>((steps - vm_budget.steps) as usize)
+                .map_err(|e| e.to_string())?;
+            return Err(error.to_string());
+        }
+    };
+    let mut admission_work = 0;
+    let result = (|| {
+        let value = vm.invoke_instantiated(entry, type_arguments, values)?;
+        let publish = if !cache_result || value.immutable_copy_work().is_none() {
+            false
+        } else {
+            let validation = if graph.is_some() {
+                // IIR intentionally lacks source formation metadata.
+                // Admit the result against the same owned source world.
+                let before = vm.remaining_steps();
+                let mut admission = Interpreter::for_comptime(
+                    prepared.as_ref(),
+                    Budget {
+                        steps: before,
+                        depth: 128,
+                    },
+                )?
+                .with_budgeted_type_solver(&solver);
+                let result = admission.validate_immutable_input(&value, result_type);
+                admission_work = before - admission.remaining_steps();
+                result
+            } else {
+                vm.validate_immutable_input(&value, result_type)
+            };
+            match validation {
+                Ok(()) => true,
+                Err(error) if error.kind == comptime_interpretor::ErrorKind::Type => false,
+                Err(error) => return Err(error),
+            }
+        };
+        Ok((value, publish))
+    })();
+    context
+        .spend::<String>((steps - vm.remaining_steps() + admission_work) as usize)
+        .map_err(|e| e.to_string())?;
+    result.map_err(
+        |e: comptime_interpretor::Error| match copy_failure.borrow().as_ref() {
+            Some(reason) => format!("{e}; pointer Copy evidence: {reason}"),
+            None => e.to_string(),
         },
     )
 }

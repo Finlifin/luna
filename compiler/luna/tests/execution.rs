@@ -1131,9 +1131,9 @@ const MEMO_BOOL: &str = "const eq_key_phase={comptime_phase:true}; trait Eq {^eq
 fn memoized_invocation_keeps_fields_ignored_by_source_eq_observable() {
     use comptime_executor::Context;
     let package = compile(
-        "const eq_key_phase={comptime_phase:true}; trait Eq {^eq_key_phase comptime fn eq(self,other:Self)->bool;} const hash_key_phase={comptime_phase:true}; trait Hash {^hash_key_phase comptime fn hash(self)->.u8'builtin;} struct Key {tag:bool,noise:bool,} comptime impl Eq for Key {comptime fn eq(self,other:Key)->bool {self.tag == other.tag}} comptime impl Hash for Key {comptime fn hash(self)->.u8'builtin {0}} pure comptime fn inspect(value:Key)->bool {value.noise}",
+        "const eq_key_phase={comptime_phase:true}; trait Eq {^eq_key_phase comptime fn eq(self,other:Self)->bool;} const hash_key_phase={comptime_phase:true}; trait Hash {^hash_key_phase comptime fn hash(self)->.u8'builtin;} struct Key {tag:bool,noise:bool,} comptime impl Eq for Key {comptime fn eq(self,other:Key)->bool {self.tag == other.tag}} comptime impl Hash for Key {comptime fn hash(self)->.u8'builtin {0}} typealias Type=.Type'builtin; pure comptime fn Inspect(value:Key)->Type {if value.noise {bool} else {.u8'builtin}}",
     );
-    let mut invocation = memoized(&package, "inspect", vec![], 10).unwrap();
+    let mut invocation = memoized(&package, "Inspect", vec![], 10).unwrap();
     let mut context = Context::new(100_000);
     for (tag, noise, reused) in [
         (true, false, false),
@@ -1148,7 +1148,14 @@ fn memoized_invocation_keeps_fields_ignored_by_source_eq_observable() {
             fields: vec![Value::Bool(tag), Value::Bool(noise)],
         };
         let outcome = invocation.invoke(vec![input], &mut context).unwrap();
-        assert_eq!(*outcome.value, Value::Bool(noise));
+        assert_eq!(
+            *outcome.value,
+            Value::Type(nir::Term::Primitive(if noise {
+                nir::Primitive::Bool
+            } else {
+                nir::Primitive::U8
+            }))
+        );
         assert_eq!(outcome.reused, reused);
     }
     assert_eq!(invocation.cached_results(), 3);
@@ -1181,7 +1188,7 @@ fn memoized_invocation_prepares_generic_heterogeneous_arguments() {
     let mut context = comptime_executor::Context::new(100_000);
     for (left, right, reused) in [
         (true, 1, false),
-        (true, 1, true),
+        (true, 1, false),
         (false, 1, false),
         (true, 2, false),
     ] {
@@ -1212,7 +1219,7 @@ fn memoized_invocation_prepares_generic_heterogeneous_arguments() {
         assert!(!outcome.reused);
     }
     assert_eq!(disabled.cached_results(), 0);
-    assert_eq!(invocation.cached_results(), 3);
+    assert_eq!(invocation.cached_results(), 0);
     assert!(
         invocation
             .invoke(vec![Value::Bool(true)], &mut context)
@@ -1223,7 +1230,7 @@ fn memoized_invocation_prepares_generic_heterogeneous_arguments() {
             .invoke(vec![Value::Bool(true), Value::Bool(true)], &mut context)
             .is_err()
     );
-    assert_eq!(invocation.cached_results(), 3);
+    assert_eq!(invocation.cached_results(), 0);
 }
 
 #[test]
@@ -4064,7 +4071,7 @@ fn memoized_staged_invocation_preserves_program_contracts_and_old_inputs() {
         let result = call.invoke(args(true), &mut budget).unwrap();
         assert_eq!(*result.value, Value::Bool(true));
         assert!(!result.reused);
-        assert!(call.invoke(args(true), &mut budget).unwrap().reused);
+        assert!(!call.invoke(args(true), &mut budget).unwrap().reused);
     }
     let mut call = memoized(&package, "snapshot", vec![], 4).unwrap();
     let mut budget = comptime_executor::Context::new(1_000_000);
@@ -4072,7 +4079,7 @@ fn memoized_staged_invocation_preserves_program_contracts_and_old_inputs() {
         let result = call.invoke(args(value), &mut budget).unwrap();
         assert_eq!(*result.value, Value::Bool(value));
         assert!(!result.reused);
-        assert!(call.invoke(args(value), &mut budget).unwrap().reused);
+        assert!(!call.invoke(args(value), &mut budget).unwrap().reused);
     }
 }
 
@@ -4105,19 +4112,19 @@ fn memoized_invocation_specializes_nested_type_forwarding() {
     let result = call.invoke(args.clone(), &mut context).unwrap();
     assert_eq!(*result.value, Value::Tuple(vec![Value::Bool(true); 3]));
     assert!(!result.reused);
-    assert!(call.invoke(args.clone(), &mut context).unwrap().reused);
+    assert!(!call.invoke(args.clone(), &mut context).unwrap().reused);
     let mut concrete = memoized(&package, "concrete", vec![], 8).unwrap();
     assert_eq!(
         *concrete.invoke(vec![], &mut context).unwrap().value,
         Value::Bool(true)
     );
-    assert!(concrete.invoke(vec![], &mut context).unwrap().reused);
+    assert!(!concrete.invoke(vec![], &mut context).unwrap().reused);
     let mut boxed = memoized(&package, "boxed", vec![], 8).unwrap();
     let result = boxed.invoke(args.clone(), &mut context).unwrap();
     assert!(
         matches!(&*result.value,Value::Record {fields,..} if fields == &vec![Value::Bool(true)])
     );
-    assert!(boxed.invoke(args, &mut context).unwrap().reused);
+    assert!(!boxed.invoke(args, &mut context).unwrap().reused);
 }
 
 #[test]
@@ -4203,13 +4210,8 @@ fn memoized_invocation_dispatches_traits_after_ordinary_type_binding() {
         for (domain, value, expected, reused) in [
             (Primitive::Bool, Value::Bool(true), true, false),
             (Primitive::U8, Value::UnsignedInteger(7), false, false),
-            (Primitive::Bool, Value::Bool(true), true, capacity > 0),
-            (
-                Primitive::U8,
-                Value::UnsignedInteger(7),
-                false,
-                capacity > 1,
-            ),
+            (Primitive::Bool, Value::Bool(true), true, false),
+            (Primitive::U8, Value::UnsignedInteger(7), false, false),
         ] {
             let result = call
                 .invoke(
@@ -4220,7 +4222,7 @@ fn memoized_invocation_dispatches_traits_after_ordinary_type_binding() {
             assert_eq!(*result.value, Value::Bool(expected));
             assert_eq!(result.reused, reused);
         }
-        assert_eq!(call.cached_results(), capacity.min(2));
+        assert_eq!(call.cached_results(), 0);
         let invalid = vec![
             Value::Type(Term::Primitive(Primitive::Char)),
             Value::Char('x'),
@@ -4230,10 +4232,7 @@ fn memoized_invocation_dispatches_traits_after_ordinary_type_binding() {
             Value::Type(Term::Primitive(Primitive::Bool)),
             Value::Bool(true),
         ];
-        assert_eq!(
-            call.invoke(valid, &mut context).unwrap().reused,
-            capacity > 0
-        );
+        assert_eq!(call.invoke(valid, &mut context).unwrap().reused, false);
     }
 }
 
@@ -4275,17 +4274,17 @@ fn memoized_invocation_checks_dependent_type_contracts_before_caching() {
     assert_eq!(call.cached_results(), 0);
     assert!(!call.invoke(good.clone(), &mut context).unwrap().reused);
     assert!(call.invoke(bad, &mut context).is_err());
-    assert_eq!(call.cached_results(), 1);
-    assert!(call.invoke(good.clone(), &mut context).unwrap().reused);
+    assert_eq!(call.cached_results(), 0);
+    assert!(!call.invoke(good.clone(), &mut context).unwrap().reused);
     assert!(
         call.invoke(good.clone(), &mut comptime_executor::Context::new(0))
             .is_err()
     );
-    assert!(call.invoke(good, &mut context).unwrap().reused);
+    assert!(!call.invoke(good, &mut context).unwrap().reused);
     let mut call = memoized(&package, "only_bool", vec![], 8).unwrap();
     let args = vec![ty(Primitive::Bool), Value::Bool(false)];
     assert!(!call.invoke(args.clone(), &mut context).unwrap().reused);
-    assert!(call.invoke(args, &mut context).unwrap().reused);
+    assert!(!call.invoke(args, &mut context).unwrap().reused);
     // The contract fails before a missing u8 Eq/Hash can obscure the cause.
     let failure = call
         .invoke(
@@ -4295,14 +4294,16 @@ fn memoized_invocation_checks_dependent_type_contracts_before_caching() {
         .err()
         .unwrap();
     assert!(format!("{failure:?}").contains("bound type contract"));
-    assert_eq!(call.cached_results(), 1);
+    assert_eq!(call.cached_results(), 0);
     // A small nontrivial proof must leave budget for dispatch and execution.
     let mut call = memoized(&package, "nonbyte", vec![], 8).unwrap();
     let mut modest = comptime_executor::Context::new(150_000);
     let args = vec![ty(Primitive::Bool), Value::Bool(true)];
     assert!(!call.invoke(args.clone(), &mut modest).unwrap().reused);
     assert!(modest.remaining() > 0);
-    assert!(call.invoke(args, &mut modest).unwrap().reused);
+    let mut repeated = comptime_executor::Context::new(150_000);
+    assert!(!call.invoke(args, &mut repeated).unwrap().reused);
+    assert_eq!(repeated.remaining(), modest.remaining());
 }
 
 #[test]
@@ -4335,8 +4336,8 @@ fn memoized_invocation_binds_ordinary_type_inputs_before_selecting_protocols() {
             for (ty, value, reused) in [
                 (boolean.clone(), Value::Bool(true), false),
                 (byte.clone(), Value::UnsignedInteger(7), false),
-                (boolean.clone(), Value::Bool(true), capacity > 0),
-                (byte.clone(), Value::UnsignedInteger(7), capacity > 1),
+                (boolean.clone(), Value::Bool(true), false),
+                (byte.clone(), Value::UnsignedInteger(7), false),
             ] {
                 let result = invocation
                     .invoke(args(ty, value.clone()), &mut context)
@@ -4361,8 +4362,8 @@ fn memoized_invocation_binds_ordinary_type_inputs_before_selecting_protocols() {
                 .invoke(args(boolean.clone(), Value::Bool(true)), &mut context)
                 .unwrap();
             assert_eq!(*result.value, Value::Bool(true));
-            assert_eq!(result.reused, capacity > 0);
-            assert_eq!(count, capacity.min(2));
+            assert!(!result.reused);
+            assert_eq!(count, 0);
             assert!(invocation.to_string().contains("(bindings"));
         }
     }
@@ -4411,7 +4412,7 @@ fn memoized_invocation_failures_and_phase_checks_do_not_publish_results() {
             .reused
     );
     assert!(
-        invocation
+        !invocation
             .invoke(vec![Value::Bool(true)], &mut context)
             .unwrap()
             .reused
@@ -4440,7 +4441,7 @@ fn memoized_invocation_worlds_are_owned_and_unfreezable_results_stay_uncached() 
         *new.invoke(vec![], &mut context).unwrap().value,
         Value::Bool(false)
     );
-    assert!(old.invoke(vec![], &mut context).unwrap().reused);
+    assert!(!old.invoke(vec![], &mut context).unwrap().reused);
     let package =
         compile("fn callback()->bool {true} pure comptime fn make()->fn()->bool {callback}");
     let mut invocation = memoized(&package, "make", vec![], 10).unwrap();
@@ -46955,7 +46956,7 @@ fn memoized_nominal_value_index_keys_execute_protocols_and_preserve_type_identit
          comptime impl Hash for Key<config> where config:Config {
              comptime fn hash(self)->.u8'builtin {0}
          }
-         pure comptime fn inspect(value:Key<Config{enabled:true}>)->bool {value.value}",
+         typealias Type=.Type'builtin; pure comptime fn Inspect(value:Key<Config{enabled:true}>)->Type {if value.value {bool} else {.u8'builtin}}",
     );
     let config = package
         .structs
@@ -46981,13 +46982,20 @@ fn memoized_nominal_value_index_keys_execute_protocols_and_preserve_type_identit
         }],
         fields: vec![Value::Bool(value)],
     };
-    let mut invocation = memoized(&package, "inspect", vec![], 8).unwrap();
+    let mut invocation = memoized(&package, "Inspect", vec![], 8).unwrap();
     let mut context = Context::new(100_000);
     for (value, reused) in [(true, false), (false, false), (true, true), (false, true)] {
         let result = invocation
             .invoke(vec![make(true, value)], &mut context)
             .unwrap();
-        assert_eq!(*result.value, Value::Bool(value));
+        assert_eq!(
+            *result.value,
+            Value::Type(nir::Term::Primitive(if value {
+                nir::Primitive::Bool
+            } else {
+                nir::Primitive::U8
+            }))
+        );
         assert_eq!(result.reused, reused);
     }
     assert!(
@@ -47000,7 +47008,10 @@ fn memoized_nominal_value_index_keys_execute_protocols_and_preserve_type_identit
         .invoke(vec![make(true, true)], &mut context)
         .unwrap();
     assert!(recovered.reused);
-    assert_eq!(*recovered.value, Value::Bool(true));
+    assert_eq!(
+        *recovered.value,
+        Value::Type(nir::Term::Primitive(nir::Primitive::Bool))
+    );
     let mut exhausted = Context::new(0);
     assert!(
         invocation
@@ -47012,7 +47023,10 @@ fn memoized_nominal_value_index_keys_execute_protocols_and_preserve_type_identit
         .invoke(vec![make(true, false)], &mut context)
         .unwrap();
     assert!(result.reused);
-    assert_eq!(*result.value, Value::Bool(false));
+    assert_eq!(
+        *result.value,
+        Value::Type(nir::Term::Primitive(nir::Primitive::U8))
+    );
 }
 
 #[test]
@@ -47174,4 +47188,86 @@ fn comptime_key_selection_never_falls_back_to_a_broader_phase() {
         arguments: vec![nir::Term::Primitive(nir::Primitive::U8)],
     };
     assert!(key_method(&package, &other, "KeyCompare", Operation::Eq).is_ok());
+}
+
+#[test]
+fn memoized_invocation_non_type_results_skip_key_protocols() {
+    let package = compile(
+        "const eq_key_phase={comptime_phase:true};
+        trait Eq {^eq_key_phase comptime fn eq(self,other:Self)->bool;}
+        const hash_key_phase={comptime_phase:true};
+        trait Hash {^hash_key_phase comptime fn hash(self)->.u8'builtin;}
+        comptime impl Eq for bool {comptime fn eq(self,other:bool)->bool {assumes false;false}}
+        comptime impl Hash for bool {comptime fn hash(self)->.u8'builtin {assumes false;0}}
+        pure comptime fn negate(value:bool)->bool {not value}",
+    );
+    let mut call = memoized(&package, "negate", vec![], 8).unwrap();
+    let mut remaining = None;
+    for _ in 0..3 {
+        let mut context = comptime_executor::Context::new(100_000);
+        let result = call.invoke(vec![Value::Bool(true)], &mut context).unwrap();
+        assert_eq!(*result.value, Value::Bool(false));
+        assert!(!result.reused);
+        assert_eq!(call.cached_results(), 0);
+        if let Some(previous) = remaining {
+            assert_eq!(context.remaining(), previous);
+        }
+        remaining = Some(context.remaining());
+    }
+    let bare = compile("pure comptime fn negate(value:bool)->bool {not value}");
+    let mut call = memoized(&bare, "negate", vec![], 8).unwrap();
+    assert_eq!(
+        *call
+            .invoke(
+                vec![Value::Bool(true)],
+                &mut comptime_executor::Context::new(100_000)
+            )
+            .unwrap()
+            .value,
+        Value::Bool(false)
+    );
+}
+
+#[test]
+fn memoized_invocation_admits_only_bound_type_results() {
+    use nir::{Primitive, Term};
+    let package = compile(
+        "typealias Type=.Type'builtin;
+        const eq_key_phase={comptime_phase:true};
+        trait Eq {^eq_key_phase comptime fn eq(self,other:Self)->bool;}
+        const hash_key_phase={comptime_phase:true};
+        trait Hash {^hash_key_phase comptime fn hash(self)->.u8'builtin;}
+        comptime impl Eq for Type {comptime fn eq(self,other:Type)->bool {self == other}}
+        comptime impl Hash for Type {comptime fn hash(self)->.u8'builtin {0}}
+        pure comptime fn keep(comptime T:Type,value:T)->T {value}
+        pure comptime fn Make()->Type {bool}
+        comptime fn Impure()->Type {bool}",
+    );
+    assert!(memoized(&package, "Impure", vec![], 8).is_err());
+    let mut call = memoized(&package, "keep", vec![], 8).unwrap();
+    let ty = |p| Value::Type(Term::Primitive(p));
+    let mut context = comptime_executor::Context::new(1_000_000);
+    for reused in [false, true] {
+        let result = call
+            .invoke(vec![ty(Primitive::Type), ty(Primitive::Bool)], &mut context)
+            .unwrap();
+        assert_eq!(*result.value, ty(Primitive::Bool));
+        assert_eq!(result.reused, reused);
+    }
+    for _ in 0..2 {
+        let result = call
+            .invoke(vec![ty(Primitive::Bool), Value::Bool(true)], &mut context)
+            .unwrap();
+        assert_eq!(*result.value, Value::Bool(true));
+        assert!(!result.reused);
+        assert_eq!(call.cached_results(), 1);
+    }
+    assert!(
+        call.invoke(vec![ty(Primitive::Type), ty(Primitive::Bool)], &mut context)
+            .unwrap()
+            .reused
+    );
+    let mut make = memoized(&package, "Make", vec![], 8).unwrap();
+    assert!(!make.invoke(vec![], &mut context).unwrap().reused);
+    assert!(make.invoke(vec![], &mut context).unwrap().reused);
 }
