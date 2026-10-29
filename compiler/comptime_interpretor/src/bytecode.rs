@@ -335,6 +335,40 @@ impl<'a> Interpreter<'a> {
                 source: Some(source),
             };
             match &instruction.op {
+                Op::LocalObjectQuery {
+                    destination,
+                    access,
+                    receiver,
+                    receiver_source,
+                    selector,
+                } => {
+                    use comptime_compiler::objects::{ObjectOperation, Selector};
+                    use object_queries::LocalSelector;
+                    let ObjectOperation::Query(query) = access.operation else {
+                        return Err(self.failure(ErrorKind::Type, Some(source)));
+                    };
+                    let receiver = frame.slots[*receiver].as_ref().ok_or_else(|| {
+                        self.failure(ErrorKind::MissingBinding, Some(*receiver_source))
+                    })?;
+                    let selector = selector.as_ref().map(|selector| match selector {
+                        Selector::Local(slot, source) => {
+                            LocalSelector::Value(frame.slots[*slot].as_ref(), *source)
+                        }
+                        Selector::Literal(expr) => LocalSelector::Literal(expr),
+                    });
+                    let Flow::Value(value) = self.query_local_object(
+                        query,
+                        &access.ty,
+                        receiver,
+                        *receiver_source,
+                        selector,
+                        source,
+                    )?
+                    else {
+                        return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source)));
+                    };
+                    frame.slots[*destination] = Some(value);
+                }
                 Op::PrepareTypeConstructor(constructor) => {
                     let inputs: Vec<_> = constructor.inputs.iter().collect();
                     self.prepare_type_constructor(
@@ -1042,7 +1076,12 @@ mod tests {
         }
         for body in bodies {
             let code = Arc::new(comptime_compiler::compile(&body, &mut 10000).unwrap());
-            assert!(code.to_string().contains("(object-access "));
+            let instruction = if matches!(body.kind, K::ObjectQuery { .. }) {
+                "(local-object-query "
+            } else {
+                "(object-access "
+            };
+            assert!(code.to_string().contains(instruction));
             let mut tree = Interpreter::for_comptime(&package, Budget::default()).unwrap();
             let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
             // Invalid payloads, bounds, keys, and absence followed by valid inputs
@@ -2317,3 +2356,7 @@ mod type_equality_tests;
 #[cfg(test)]
 #[path = "bytecode_type_constructors.rs"]
 mod type_constructor_tests;
+
+#[cfg(test)]
+#[path = "bytecode_object_borrows.rs"]
+mod object_borrow_tests;

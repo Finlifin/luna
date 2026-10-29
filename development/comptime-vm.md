@@ -1886,3 +1886,56 @@ unfinished work. This stage does not claim wall-clock speedups or completion of
 all type factories.
 - Final `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
   passed, `/tmp/luna-tools-q4_06plr/result.json`; `git diff --check` passed.
+
+## Borrowed Object queries in bytecode
+
+Object queries with a local receiver and a local/literal selector now compile
+to a dedicated read instruction. Owned scalar selectors and literals can be
+read while observing the receiver; the entire Object representation is still
+checked, but no receiver snapshot is retained. Only the selected result is
+copied. Local selectors backed by storage/references take the snapshot path,
+releasing the receiver lock before reading a possibly aliased sibling. Computed
+receivers/selectors keep their ordinary operand code and snapshot semantics.
+
+This is a generic local-read optimization, independent of library names. Phase,
+output-domain, payload, last-key, bounds and representation checks remain in the
+shared Object helpers. The instruction carries bounded literal metadata and
+source locations and has an escaped, stable S-expression display.
+
+Validation from `/home/fin/luna`, final commands exited 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  239 passed, `/tmp/luna-tools-rx9mwe5e/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib bytecode::object_borrow_tests`:
+  sibling-reference reads, locked-receiver rejection and recovery passed;
+  `/tmp/luna-tools-2byjqe10/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler`:
+  16 passed, including local versus computed selector routing and escaped dumps;
+  `/tmp/luna-tools-3zmdsbyc/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test library_meta_objects --test comptime_object_storage --test comptime_bytecode_aggregates`:
+  Object library 25, storage 4 and aggregates 3 passed;
+  `/tmp/luna-tools-1bz9lodd/result.json`.
+- `LUNA_BENCH_ITERATIONS=10 python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --bench object_queries`:
+  all measured results matched expectations;
+  `/tmp/luna-tools-exo4haox/result.json`.
+
+The allocation-counting benchmark warms compilation before measurement. For a
+1024-entry Object read 32 times per invocation, measured requested bytes were:
+
+| Receiver / query | Snapshot path | Borrowed path |
+| --- | ---: | ---: |
+| Value / length | 7,902,890 | 242,026 |
+| Value / indexed value | 7,914,210 | 249,250 |
+| Reference / length | 7,907,994 | 247,130 |
+| Reference / indexed value | 7,919,370 | 254,410 |
+
+These totals include the benchmark's input cloning and invocation overhead.
+The control path wraps the receiver in a transparent block to force snapshots;
+this is a same-build path comparison, not a historical-version baseline.
+Timing came from the managed development profile and ten iterations; no release
+speedup claim is made. Representation validation still scales with Object size.
+An initial compile used the u64 rewrite-budget API with a usize compiler budget;
+it was corrected to the existing bounded substitution-copy API before testing
+(`/tmp/luna-tools-irgce4m_/result.json`).
+- Final managed `cargo fmt --all -- --check` passed:
+  `/tmp/luna-tools-_kn0wfr8/result.json`; `git diff --check` passed.

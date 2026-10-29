@@ -31,6 +31,13 @@ impl fmt::Display for ErrorConversion {
 
 #[derive(Debug)]
 pub enum Op {
+    LocalObjectQuery {
+        destination: Register,
+        access: Arc<objects::ObjectAccess>,
+        receiver: Register,
+        receiver_source: SourceRange,
+        selector: Option<objects::Selector>,
+    },
     PrepareTypeConstructor(Arc<type_constructors::Constructor>),
     CheckTypeConstructorInput {
         constructor: Arc<type_constructors::Constructor>,
@@ -271,6 +278,23 @@ impl fmt::Display for Program {
                 instruction.source.start, instruction.source.end
             )?;
             match &instruction.op {
+                Op::LocalObjectQuery {
+                    destination,
+                    access,
+                    receiver,
+                    receiver_source,
+                    selector,
+                } => {
+                    write!(
+                        f,
+                        "(local-object-query %{destination} {access} (receiver %{receiver} (source {} {})) (selector",
+                        receiver_source.start, receiver_source.end
+                    )?;
+                    if let Some(selector) = selector {
+                        write!(f, " {selector}")?;
+                    }
+                    write!(f, "))")?;
+                }
                 Op::PrepareTypeConstructor(constructor) => {
                     write!(f, "(prepare-type-constructor {constructor})")?
                 }
@@ -1018,16 +1042,70 @@ pub fn compile(body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
                             ty: copy_term(&expr.ty, fuel, source)?,
                             input: copy_term(&subject.ty, fuel, subject.source)?,
                         });
-                        let packet = fresh();
-                        emit(
-                            &mut work,
-                            Op::ObjectAccess {
-                                destination: dst,
-                                access: access.clone(),
-                                packet,
-                            },
-                        );
-                        work.push(Work::Expression(subject, packet));
+                        let local = match (&expr.kind, &subject.kind) {
+                            (K::ObjectQuery { query, .. }, K::Tuple(fields))
+                                if fields.len()
+                                    == if *query == nir::program::ObjectQueryKind::Length {
+                                        1
+                                    } else {
+                                        2
+                                    }
+                                    && matches!(fields[0].kind, K::Local(_))
+                                    && fields.get(1).is_none_or(|field| {
+                                        matches!(field.kind, K::Local(_) | K::Literal(_))
+                                    }) =>
+                            {
+                                Some(fields)
+                            }
+                            _ => None,
+                        };
+                        if let Some(fields) = local {
+                            let K::Local(binding) = fields[0].kind else {
+                                unreachable!()
+                            };
+                            let receiver = *locals.entry(binding).or_insert_with(&mut fresh);
+                            let selector = fields
+                                .get(1)
+                                .map(|field| match field.kind {
+                                    K::Local(binding) => Ok(objects::Selector::Local(
+                                        *locals.entry(binding).or_insert_with(&mut fresh),
+                                        field.source,
+                                    )),
+                                    K::Literal(_) => {
+                                        nir::copy_budget::charge_substitution(
+                                            field,
+                                            &[],
+                                            &[],
+                                            fuel,
+                                        )
+                                        .map_err(|error| copy_error(error, field.source))?;
+                                        Ok(objects::Selector::Literal(Arc::new(field.clone())))
+                                    }
+                                    _ => unreachable!(),
+                                })
+                                .transpose()?;
+                            emit(
+                                &mut work,
+                                Op::LocalObjectQuery {
+                                    destination: dst,
+                                    access: access.clone(),
+                                    receiver,
+                                    receiver_source: fields[0].source,
+                                    selector,
+                                },
+                            );
+                        } else {
+                            let packet = fresh();
+                            emit(
+                                &mut work,
+                                Op::ObjectAccess {
+                                    destination: dst,
+                                    access: access.clone(),
+                                    packet,
+                                },
+                            );
+                            work.push(Work::Expression(subject, packet));
+                        }
                         emit(&mut work, Op::PrepareObjectAccess(access));
                     }
                     K::Object { names, fields } => {

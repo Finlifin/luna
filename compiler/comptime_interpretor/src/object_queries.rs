@@ -1,7 +1,101 @@
 //! Ordered Object reads preserve entry domains instead of erasing them.
 use super::*;
 
+pub(super) enum LocalSelector<'a> {
+    Value(Option<&'a Value>, SourceRange),
+    Literal(&'a Expr),
+}
+
 impl Interpreter<'_> {
+    pub(super) fn query_local_object(
+        &mut self,
+        query: nir::program::ObjectQueryKind,
+        ty: &Term,
+        receiver: &Value,
+        receiver_source: SourceRange,
+        selector: Option<LocalSelector<'_>>,
+        source: SourceRange,
+    ) -> Result<Flow, Error> {
+        let independent = match &selector {
+            None | Some(LocalSelector::Literal(_)) => true,
+            Some(LocalSelector::Value(Some(Value::Integer(_) | Value::Symbol(_)), _)) => true,
+            _ => false,
+        };
+        self.tick(Some(receiver_source))?;
+        if independent
+            && self.cleanup_schedule.is_none()
+            && *ty != Term::Primitive(Primitive::Never)
+            && matches!(
+                receiver,
+                Value::Object(_) | Value::Storage(_) | Value::ComptimeReference(_)
+            )
+        {
+            let root;
+            let reference = match receiver {
+                Value::Storage(storage) => {
+                    root = value_reference::ValueReference::root(storage.clone());
+                    Some(&root)
+                }
+                Value::ComptimeReference(reference) => Some(reference),
+                _ => None,
+            };
+            let contents = reference
+                .map(|reference| {
+                    reference
+                        .borrow(&mut self.budget.steps)
+                        .map_err(|kind| Error {
+                            kind,
+                            source: Some(receiver_source),
+                        })
+                })
+                .transpose()?;
+            let value = contents
+                .as_ref()
+                .map_or(receiver, |contents| contents.value());
+            self.check_borrowed_representation(value, receiver_source, 0)?;
+            let selector = self.read_object_selector(selector)?;
+            // Account for packet construction even though this path retains no
+            // Object snapshot. No user computation runs under the receiver lock.
+            self.tick(Some(source))?;
+            let Value::Object(object) = value else {
+                return Err(self.failure(ErrorKind::Type, Some(source)));
+            };
+            return self.query_object(query, ty, object, selector, source);
+        }
+        // A selector can reference a sibling in the same storage. Snapshot the
+        // receiver and release its lock before reading that selector.
+        let receiver = self.invocation_slot_value(receiver, Some(receiver_source))?;
+        let selector = self.read_object_selector(selector)?;
+        self.tick(Some(source))?;
+        let mut packet = vec![receiver];
+        packet.extend(selector);
+        self.complete_object_query(query, ty, Value::Tuple(packet), source)
+    }
+
+    fn read_object_selector(
+        &mut self,
+        selector: Option<LocalSelector<'_>>,
+    ) -> Result<Option<Value>, Error> {
+        let Some(selector) = selector else {
+            return Ok(None);
+        };
+        match selector {
+            LocalSelector::Value(value, source) => {
+                self.tick(Some(source))?;
+                let value =
+                    value.ok_or_else(|| self.failure(ErrorKind::MissingBinding, Some(source)))?;
+                self.invocation_slot_value(value, Some(source)).map(Some)
+            }
+            LocalSelector::Literal(expr) => {
+                self.tick(Some(expr.source))?;
+                let Flow::Value(value) = self.eval_literal(expr, &mut Environment::new())? else {
+                    return Err(self.failure(ErrorKind::InvalidControlFlow, Some(expr.source)));
+                };
+                Ok(Some(value))
+            }
+        }
+    }
+
     pub(super) fn eval_object_query(
         &mut self,
         expr: &Expr,

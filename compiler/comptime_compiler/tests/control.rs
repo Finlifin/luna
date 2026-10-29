@@ -453,3 +453,52 @@ fn function_type_dump_retains_phase_and_parameter_staging() {
     );
     assert!(matches!(compile(&body, &mut 1), Err(Error::Budget(_))));
 }
+
+#[test]
+fn object_query_compilation_keeps_computed_selectors_on_the_snapshot_path() {
+    use nir::program::{Literal, ObjectQueryKind};
+    let source = SourceRange { start: 1, end: 3 };
+    let object = Expr {
+        source,
+        ty: Term::Primitive(Primitive::Object),
+        kind: K::Local(LocalId { owner: 1, index: 0 }),
+    };
+    let key = Expr {
+        source,
+        ty: Term::Primitive(Primitive::Symbol),
+        kind: K::Literal(Literal::Symbol("key\"\\\n".into())),
+    };
+    for computed in [false, true] {
+        let selector = if computed {
+            Expr {
+                source,
+                ty: key.ty.clone(),
+                kind: K::Block {
+                    statements: vec![],
+                    result: Some(Box::new(key.clone())),
+                },
+            }
+        } else {
+            key.clone()
+        };
+        let packet = Expr {
+            source,
+            ty: Term::Tuple(vec![object.ty.clone(), selector.ty.clone()]),
+            kind: K::Tuple(vec![object.clone(), selector]),
+        };
+        let body = Expr {
+            source,
+            ty: Term::Optional(Box::new(Term::Primitive(Primitive::Bool))),
+            kind: K::ObjectQuery {
+                query: ObjectQueryKind::NamedValue,
+                subject: Box::new(packet),
+            },
+        };
+        let dump = compile(&body, &mut 1000).unwrap().to_string();
+        assert_eq!(dump.contains("(local-object-query "), !computed, "{dump}");
+        assert_eq!(dump.contains("(object-access "), computed, "{dump}");
+        assert!(dump.contains("key\\\"\\\\\\n"), "{dump}");
+        assert_eq!(dump, compile(&body, &mut 1000).unwrap().to_string());
+        assert!(matches!(compile(&body, &mut 1), Err(Error::Budget(_))));
+    }
+}
