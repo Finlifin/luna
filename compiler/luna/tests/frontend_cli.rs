@@ -270,18 +270,23 @@ fn normal_form_callable_constants_preserve_original_heads() {
         typealias Type = .Type'builtin;
         pure comptime fn Identity<T> -> Type { T }
         comptime fn Get() -> pure comptime fn<Type> -> Type { Identity }
+        comptime fn Keep(factory: pure comptime fn<Type> -> Type) -> pure comptime fn<Type> -> Type {
+            factory
+        }
         const Alias: pure comptime fn<Type> -> Type = Get();
         const Again = Alias;
+        const Transported = Keep(Again);
         typealias ThroughAlias = Again<bool>;
         comptime fn Direct() -> Type { Identity<bool> }
         comptime fn Indirect() -> Type { Again<bool> }
         comptime fn Annotation() -> Type { ThroughAlias }
+        comptime fn Transport() -> Type { Transported<bool> }
     ";
     sandbox.write("input.fl", prefix);
     let direct = sandbox.run(&["input.fl", "--invoke-comptime", "Direct"]);
     let expected = success(&direct);
     assert!(expected.contains("normal-form"), "{expected}");
-    for entry in ["Indirect", "Annotation"] {
+    for entry in ["Indirect", "Annotation", "Transport"] {
         let output = sandbox.run(&["input.fl", "--invoke-comptime", entry]);
         assert_eq!(success(&output), expected);
     }

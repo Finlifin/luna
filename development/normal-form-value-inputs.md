@@ -116,3 +116,41 @@ An earlier multi-package `test ... normal_form --no-fail-fast` attempt including
 all luna test binaries failed during linking with a disk quota error; logging
 also hit quota (`/tmp/luna-tools-r398kete/result.json`). It is not a passing
 test run. Validation was split into the explicit entries above.
+
+## Callable snapshot transport
+
+Invocation snapshots already encode named callables as `FunctionValue`; decoding
+now accepts a normal-form callable domain too. The decoder checks the registered
+head's full callable type, rejects applied arguments and unknown identities, and
+does not require an executable body. The same path handles nested record fields.
+Ordinary callable annotations do not admit a normal-form head.
+
+Validation from `/home/fin/luna` (exit 0):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib normal_form
+python3 -B development/check.py --timeout 900 -- test -p luna --test frontend_cli normal_form_callable
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+```
+
+The VM filter passed 3 tests and the source filter 5. Reports are
+`/tmp/luna-tools-poqj6dve`, `/tmp/luna-tools-rl3dhlso`, and
+`/tmp/luna-tools-_zha49d3`. Snapshot checks cover record round trips, invalid
+identity/domain/arguments, exhausted budget, and recovery after rejection.
+Source coverage now also passes a head through an ordinary comptime parameter.
+
+Dynamic local application remains a separate IR gap. A local `const` inside a
+comptime body is evaluated by that invocation; evaluating its initializer during
+elaboration would change phase, ordering, and effects. The next implementation
+must retain the callee expression and form the opaque result at invocation time,
+using its declaration contract. A lookup in the elaborator's constant map cannot
+replace this operation.
+
+```sh
+python3 -B development/reproduce.py --timeout 60 -- development/repros/normal-form-local-application.fl --invoke-comptime Run
+```
+
+This reproduction exits 1 at `factory<bool>` with `explicit instantiation
+requires a resolved generic function` (`/tmp/luna-tools-4d3xbza9`). It selects a
+head using an invocation parameter and expects an opaque `Identity<bool>` result;
+this is an unsupported positive case, not a language rejection rule.

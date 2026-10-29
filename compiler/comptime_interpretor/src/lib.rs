@@ -9789,6 +9789,87 @@ mod computation_type_tests {
     }
 
     #[test]
+    fn normal_form_callable_snapshots_round_trip_and_validate_identity() {
+        let id = DeclarationId {
+            package: 9,
+            local: 1,
+        };
+        let head = nir::normal_forms::Head {
+            collector: None,
+            role: Default::default(),
+            declaration: id,
+            requirements: vec![],
+            parameters: vec![],
+        };
+        let ty = head.callable_type().unwrap();
+        let package = Package {
+            normal_forms: vec![head],
+            ..Default::default()
+        };
+        let frozen = Value::Function(id)
+            .into_scoped_invocation_term(&mut comptime_runtime::Budget::default(), &BTreeSet::new())
+            .unwrap();
+        let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+        assert_eq!(
+            vm.normal_pattern_value(&frozen, &ty).unwrap(),
+            Value::Function(id)
+        );
+        let record_type = Term::Record(vec![("factory".into(), ty.clone())]);
+        let record = Term::RecordValue(vec![("factory".into(), frozen.clone())]);
+        let value = vm.normal_pattern_value(&record, &record_type).unwrap();
+        assert_eq!(
+            value
+                .into_scoped_invocation_term(
+                    &mut comptime_runtime::Budget::default(),
+                    &BTreeSet::new()
+                )
+                .unwrap(),
+            record
+        );
+        for bad in [
+            Term::FunctionValue {
+                declaration: DeclarationId {
+                    package: 9,
+                    local: 2,
+                },
+                arguments: vec![],
+            },
+            Term::FunctionValue {
+                declaration: id,
+                arguments: vec![Term::Primitive(Primitive::Bool)],
+            },
+        ] {
+            assert!(vm.normal_pattern_value(&bad, &ty).is_err());
+        }
+        let ordinary = ty.callable_signature().clone().with_comptime_phase(true);
+        assert!(vm.normal_pattern_value(&frozen, &ordinary).is_err());
+        let mismatch = Term::NormalFormFunction(
+            Box::new(Term::Function {
+                parameters: vec![nir::Parameter {
+                    sort: nir::Sort::Type,
+                    ty: Term::Primitive(Primitive::Type),
+                }],
+                result: Box::new(Term::Primitive(Primitive::Type)),
+            }),
+            None,
+        );
+        assert!(vm.normal_pattern_value(&frozen, &mismatch).is_err());
+        assert_eq!(
+            vm.normal_pattern_value(&frozen, &ty).unwrap(),
+            Value::Function(id)
+        );
+        let mut exhausted = Interpreter::new(&package, Budget::default()).unwrap();
+        exhausted.budget.steps = 0;
+        assert!(matches!(
+            exhausted
+                .normal_pattern_value(&frozen, &ty)
+                .unwrap_err()
+                .kind,
+            ErrorKind::StepsExhausted
+        ));
+    }
+
+    #[test]
     fn callable_bound_value_domains_are_checked_without_admitting_foreign_or_later_inputs() {
         use nir::{Parameter, Sort};
         let id = DeclarationId {

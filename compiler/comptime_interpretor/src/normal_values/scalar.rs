@@ -69,6 +69,21 @@ impl Interpreter<'_> {
                     declaration,
                     arguments,
                 },
+                ty @ Term::NormalFormFunction(..),
+            ) => {
+                // A frozen head carries identity, not an executable body or
+                // applied generic arguments. Its telescope belongs to metadata.
+                let value = Value::Function(*declaration);
+                if !arguments.is_empty() || !self.has_type(&value, ty) {
+                    return Err(self.failure(ErrorKind::Type, None));
+                }
+                value
+            }
+            (
+                Term::FunctionValue {
+                    declaration,
+                    arguments,
+                },
                 ty,
             ) if matches!(
                 ty,
