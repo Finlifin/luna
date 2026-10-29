@@ -763,7 +763,7 @@ enum PointerCopyPermission<'a> {
 pub struct Interpreter<'a> {
     bytecode_invocations: usize,
     bytecode_compilations: usize,
-    bytecode_cache: bytecode::CodeCache<'a>,
+    bytecode_cache: bytecode::CodeCache,
     enum_builder:
         Option<&'a dyn Fn(&EnumBuildRequest, &mut u64) -> Result<PreparedEnumBuild<'a>, Error>>,
     struct_builder:

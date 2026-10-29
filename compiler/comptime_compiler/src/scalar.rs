@@ -86,3 +86,42 @@ impl fmt::Display for Scalar<'_> {
         write!(f, ") (result {}))", self.result)
     }
 }
+
+/// Owned descriptor; repeated validation/execution instructions share one copy.
+#[derive(Debug)]
+pub struct OwnedScalar {
+    kind: ScalarKind,
+    left: Term,
+    right: Option<Term>,
+    result: Term,
+}
+impl OwnedScalar {
+    pub(crate) fn copy(
+        scalar: Scalar<'_>,
+        fuel: &mut usize,
+        source: nir::program::SourceRange,
+    ) -> Result<Self, crate::Error> {
+        Ok(Self {
+            kind: scalar.kind,
+            left: crate::copy_term(scalar.left, fuel, source)?,
+            right: scalar
+                .right
+                .map(|ty| crate::copy_term(ty, fuel, source))
+                .transpose()?,
+            result: crate::copy_term(scalar.result, fuel, source)?,
+        })
+    }
+    pub fn descriptor(&self) -> Scalar<'_> {
+        Scalar {
+            kind: self.kind,
+            left: &self.left,
+            right: self.right.as_ref(),
+            result: &self.result,
+        }
+    }
+}
+impl fmt::Display for OwnedScalar {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.descriptor().fmt(f)
+    }
+}

@@ -3,8 +3,8 @@
 use super::*;
 use comptime_compiler::{Op, Program};
 
-struct Frame<'code, 'nir> {
-    code: &'code Program<'nir>,
+struct Frame {
+    code: Arc<Program>,
     environment: Environment,
     imported: Vec<(LocalId, usize)>,
     terminal: bool,
@@ -19,7 +19,7 @@ enum Progress {
     Complete(Flow),
 }
 
-impl fmt::Display for Frame<'_, '_> {
+impl fmt::Display for Frame {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -47,7 +47,7 @@ impl fmt::Display for Frame<'_, '_> {
     }
 }
 
-impl Frame<'_, '_> {
+impl Frame {
     fn restore_environment(mut self) -> Environment {
         for (binding, slot) in self.imported {
             if let Some(value) = self.slots[slot].take() {
@@ -62,16 +62,16 @@ impl Frame<'_, '_> {
 /// captured environments are stored here. A missing program records unsupported
 /// lowering, so repeated calls do not repeatedly traverse a migration body.
 #[derive(Default)]
-pub(super) struct CodeCache<'a> {
-    entries: BTreeMap<DeclarationId, Option<Arc<Program<'a>>>>,
+pub(super) struct CodeCache {
+    entries: BTreeMap<DeclarationId, Option<Arc<Program>>>,
     weight: usize,
 }
 
-impl<'a> CodeCache<'a> {
-    fn insert(&mut self, id: DeclarationId, program: Option<Arc<Program<'a>>>) {
+impl CodeCache {
+    fn insert(&mut self, id: DeclarationId, program: Option<Arc<Program>>) {
         const LIMIT: usize = 100_000;
         let weight = program.as_ref().map_or(1, |code| {
-            1 + code.instructions().len() + code.locals().len() + code.registers()
+            1 + code.storage_work() + code.locals().len() + code.registers()
         });
         if weight > LIMIT {
             return;
@@ -94,7 +94,7 @@ impl<'a> Interpreter<'a> {
         self.bytecode_compilations
     }
 
-    fn compile_body<'b>(&mut self, body: &'b Expr) -> Result<Option<Program<'b>>, Error> {
+    fn compile_body(&mut self, body: &Expr) -> Result<Option<Program>, Error> {
         self.bytecode_compilations += 1;
         match comptime_compiler::compile(body, &mut 100_000) {
             Ok(program) => Ok(Some(program)),
@@ -142,12 +142,12 @@ impl<'a> Interpreter<'a> {
             return self.eval(body, environment);
         };
         self.bytecode_invocations += 1;
-        self.execute_code(&program, environment)
+        self.execute_code(&Arc::new(program), environment)
     }
 
     fn execute_code(
         &mut self,
-        code: &Program<'_>,
+        code: &Arc<Program>,
         environment: &mut Environment,
     ) -> Result<Flow, Error> {
         let mut frame = self.start_frame(code, environment)?;
@@ -163,17 +163,17 @@ impl<'a> Interpreter<'a> {
         result
     }
 
-    fn start_frame<'code, 'nir>(
+    fn start_frame(
         &mut self,
-        code: &'code Program<'nir>,
+        code: &Arc<Program>,
         environment: &mut Environment,
-    ) -> Result<Frame<'code, 'nir>, Error> {
+    ) -> Result<Frame, Error> {
         self.effect_charge(
             code.registers(),
             code.instructions().first().map(|i| i.source),
         )?;
         let mut frame = Frame {
-            code,
+            code: code.clone(),
             environment: std::mem::take(environment),
             imported: Vec::new(),
             terminal: false,
@@ -190,11 +190,7 @@ impl<'a> Interpreter<'a> {
         Ok(frame)
     }
 
-    fn resume_frame(
-        &mut self,
-        frame: &mut Frame<'_, '_>,
-        quantum: usize,
-    ) -> Result<Progress, Error> {
+    fn resume_frame(&mut self, frame: &mut Frame, quantum: usize) -> Result<Progress, Error> {
         if frame.terminal {
             return Err(self.failure(ErrorKind::InvalidControlFlow, None));
         }
@@ -207,8 +203,8 @@ impl<'a> Interpreter<'a> {
         result
     }
 
-    fn run_frame(&mut self, frame: &mut Frame<'_, '_>, quantum: usize) -> Result<Progress, Error> {
-        let code = frame.code;
+    fn run_frame(&mut self, frame: &mut Frame, quantum: usize) -> Result<Progress, Error> {
+        let code = frame.code.clone();
         for _ in 0..quantum {
             let instruction = code
                 .instructions()
@@ -229,10 +225,11 @@ impl<'a> Interpreter<'a> {
                     output,
                 } => {
                     let binding = binding
+                        .as_deref()
                         .filter(|binding| binding.is_comptime())
                         .ok_or_else(|| self.failure(ErrorKind::Unsupported, Some(source)))?;
                     binding
-                        .validate_types(*tag, inputs.iter().copied(), output)
+                        .validate_types(*tag, inputs.iter(), output)
                         .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
                 }
                 Op::Intrinsic {
@@ -241,6 +238,7 @@ impl<'a> Interpreter<'a> {
                     inputs,
                 } => {
                     let binding = binding
+                        .as_deref()
                         .ok_or_else(|| self.failure(ErrorKind::Unsupported, Some(source)))?;
                     let values: Vec<_> = inputs
                         .iter()
@@ -280,10 +278,10 @@ impl<'a> Interpreter<'a> {
                     }
                 }
                 Op::PrepareScalar(scalar) => {
-                    self.prepare_scalar(*scalar, source)?;
+                    self.prepare_scalar(scalar.descriptor(), source)?;
                 }
                 Op::CheckScalarOperand { scalar, value } => {
-                    let plan = self.prepare_scalar(*scalar, source)?;
+                    let plan = self.prepare_scalar(scalar.descriptor(), source)?;
                     self.scalar_operand(
                         plan,
                         frame.slots[*value].as_ref().ok_or_else(missing)?,
@@ -296,13 +294,13 @@ impl<'a> Interpreter<'a> {
                     left,
                     right,
                 } => {
-                    let plan = self.prepare_scalar(*scalar, source)?;
+                    let plan = self.prepare_scalar(scalar.descriptor(), source)?;
                     let a = frame.slots[*left].take().ok_or_else(missing)?;
                     let b = right
                         .map(|slot| frame.slots[slot].take().ok_or_else(missing))
                         .transpose()?;
                     frame.slots[*destination] =
-                        Some(self.scalar_values(*scalar, plan, a, b, source)?);
+                        Some(self.scalar_values(scalar.descriptor(), plan, a, b, source)?);
                 }
                 Op::Unit(dst) => frame.slots[*dst] = Some(Value::Unit),
                 Op::Read { destination, local } => {
@@ -350,7 +348,7 @@ impl<'a> Interpreter<'a> {
                     let result = match value {
                         Value::Bool(value) => Value::Bool(!value),
                         Value::BitVec(value)
-                            if **ty == Term::Primitive(Primitive::BitVec(value.width())) =>
+                            if *ty == Term::Primitive(Primitive::BitVec(value.width())) =>
                         {
                             Value::BitVec(self.bit_operation(source, |budget| value.not(budget))?)
                         }
@@ -393,6 +391,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn suspended_frame_owns_code_after_source_and_cache_are_released() {
+        let package = Package::default();
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let mut environment = Environment::new();
+        let mut frame = {
+            let body = Expr {
+                source: SourceRange { start: 1, end: 2 },
+                ty: Term::Primitive(Primitive::Bool),
+                kind: K::Not(Box::new(Expr {
+                    source: SourceRange { start: 1, end: 2 },
+                    ty: Term::Primitive(Primitive::Bool),
+                    kind: K::Literal(Literal::Bool(false)),
+                })),
+            };
+            let code = Arc::new(comptime_compiler::compile(&body, &mut 100).unwrap());
+            vm.bytecode_cache.insert(
+                DeclarationId {
+                    package: 1,
+                    local: 0,
+                },
+                Some(code.clone()),
+            );
+            let mut frame = vm.start_frame(&code, &mut environment).unwrap();
+            assert!(matches!(
+                vm.resume_frame(&mut frame, 1).unwrap(),
+                Progress::Suspended
+            ));
+            frame
+        };
+        vm.bytecode_cache = CodeCache::default();
+        assert!(matches!(
+            vm.resume_frame(&mut frame, 100).unwrap(),
+            Progress::Complete(Flow::Value(Value::Bool(true)))
+        ));
+        assert!(frame.restore_environment().is_empty());
+    }
+
+    #[test]
     fn execution_slices_preserve_values_scopes_and_work_charges() {
         let package = Package::default();
         let input = LocalId { owner: 1, index: 0 };
@@ -432,7 +468,7 @@ mod tests {
                 result: Some(Box::new(expr(Primitive::Bool, K::Local(input)))),
             },
         );
-        let code = comptime_compiler::compile(&body, &mut 1000).unwrap();
+        let code = Arc::new(comptime_compiler::compile(&body, &mut 1000).unwrap());
         let mut remaining = None;
         for quantum in [1, 2, 7, 1024] {
             let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
@@ -509,7 +545,7 @@ mod tests {
                 }],
             },
         };
-        let code = comptime_compiler::compile(&body, &mut 100).unwrap();
+        let code = Arc::new(comptime_compiler::compile(&body, &mut 100).unwrap());
         let dump = code.to_string();
         assert!(dump.contains("(prepare-intrinsic (intrinsic-tag"));
         assert!(dump.contains("(inputs (primitive void)) (output (primitive void))"));
@@ -600,7 +636,7 @@ mod tests {
                     }
                 },
             );
-            let code = comptime_compiler::compile(&body, &mut 1000).unwrap();
+            let code = Arc::new(comptime_compiler::compile(&body, &mut 1000).unwrap());
             for compiled in [false, true] {
                 let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
                 let mut environment = Environment::new();
@@ -668,7 +704,7 @@ mod tests {
                 ))),
             },
         );
-        let code = comptime_compiler::compile(&body, &mut 100).unwrap();
+        let code = Arc::new(comptime_compiler::compile(&body, &mut 100).unwrap());
         assert!(
             code.registers() < 16,
             "sparse identities must not size the frame"
@@ -694,7 +730,7 @@ mod tests {
         assert_eq!(environment.get(&input), Some(&Value::Bool(false)));
         assert!(!environment.contains_key(&temporary));
         let recovered = expr(boolean, K::Local(input));
-        let code = comptime_compiler::compile(&recovered, &mut 100).unwrap();
+        let code = Arc::new(comptime_compiler::compile(&recovered, &mut 100).unwrap());
         assert!(matches!(
             vm.execute_code(&code, &mut environment).unwrap(),
             Flow::Value(Value::Bool(false))

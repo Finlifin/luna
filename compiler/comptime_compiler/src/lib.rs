@@ -1,39 +1,40 @@
 //! Linear invocation code. Unsupported operations are detected before execution.
-//! Constants borrow immutable typed NIR leaves; no instruction evaluates a tree.
+//! Constants own bounded copies of immutable typed NIR leaves; no instruction evaluates a tree.
 pub mod scalar;
 use nir::program::{Expr, ExprKind as K, LocalId, SourceRange};
 use nir::{Primitive, Term};
-use scalar::Scalar;
+use scalar::{OwnedScalar, Scalar};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 
 pub type Register = usize;
 
 #[derive(Debug)]
-pub enum Op<'a> {
+pub enum Op {
     PrepareIntrinsic {
         tag: nir::intrinsics::Tag,
-        binding: Option<&'a nir::intrinsics::Checked>,
-        inputs: Vec<&'a Term>,
-        output: &'a Term,
+        binding: Option<Arc<nir::intrinsics::Checked>>,
+        inputs: Vec<Term>,
+        output: Term,
     },
     Intrinsic {
         destination: Register,
-        binding: Option<&'a nir::intrinsics::Checked>,
+        binding: Option<Arc<nir::intrinsics::Checked>>,
         inputs: Vec<Register>,
     },
     Constant {
         destination: Register,
-        value: &'a Expr,
+        value: Arc<Expr>,
     },
-    PrepareScalar(Scalar<'a>),
+    PrepareScalar(Arc<OwnedScalar>),
     CheckScalarOperand {
-        scalar: Scalar<'a>,
+        scalar: Arc<OwnedScalar>,
         value: Register,
     },
     Scalar {
         destination: Register,
-        scalar: Scalar<'a>,
+        scalar: Arc<OwnedScalar>,
         left: Register,
         right: Option<Register>,
     },
@@ -53,7 +54,7 @@ pub enum Op<'a> {
     Not {
         destination: Register,
         value: Register,
-        ty: &'a Term,
+        ty: Term,
     },
     Jump(usize),
     Branch {
@@ -67,22 +68,28 @@ pub enum Op<'a> {
     },
 }
 #[derive(Debug)]
-pub struct Instruction<'a> {
+pub struct Instruction {
     pub source: SourceRange,
-    pub op: Op<'a>,
+    pub op: Op,
 }
 #[derive(Debug)]
-pub struct Program<'a> {
-    instructions: Vec<Instruction<'a>>,
+pub struct Program {
+    instructions: Vec<Instruction>,
     locals: Vec<(LocalId, Register)>,
     registers: usize,
+    storage_work: usize,
 }
-impl<'a> Program<'a> {
-    pub fn instructions(&self) -> &[Instruction<'a>] {
+impl Program {
+    pub fn instructions(&self) -> &[Instruction] {
         &self.instructions
     }
     pub fn locals(&self) -> &[(LocalId, Register)] {
         &self.locals
+    }
+    /// Conservative retention charge, including copied payloads and lowering work.
+    /// These units bound storage; they are not a byte-size or timing measurement.
+    pub fn storage_work(&self) -> usize {
+        self.storage_work
     }
     pub fn registers(&self) -> usize {
         self.registers
@@ -95,7 +102,7 @@ pub enum Error {
     InvalidControl(SourceRange),
 }
 
-impl fmt::Display for Program<'_> {
+impl fmt::Display for Program {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(engine-code (registers {}) (locals", self.registers)?;
         for (local, slot) in &self.locals {
@@ -190,7 +197,7 @@ impl fmt::Display for Program<'_> {
 
 enum Work<'a> {
     Expression(&'a Expr, Register),
-    Emit(SourceRange, Op<'a>),
+    Emit(SourceRange, Op),
     Label(usize),
     EndLoop(LocalId),
     EndScope(SourceRange),
@@ -198,7 +205,8 @@ enum Work<'a> {
 
 /// Compile structured control using a heap worklist, not host recursion. Fuel
 /// bounds traversal and register/code allocation, including unreachable code.
-pub fn compile<'a>(body: &'a Expr, fuel: &mut usize) -> Result<Program<'a>, Error> {
+pub fn compile(body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
+    let initial_fuel = *fuel;
     let mut instructions = Vec::new();
     let mut locals = BTreeMap::new();
     let mut registers = 1;
@@ -239,22 +247,35 @@ pub fn compile<'a>(body: &'a Expr, fuel: &mut usize) -> Result<Program<'a>, Erro
                 };
                 let emit = |work: &mut Vec<_>, op| work.push(Work::Emit(source, op));
                 if let Some((scalar, left, right)) = Scalar::expression(expr) {
+                    let scalar = Arc::new(OwnedScalar::copy(scalar, fuel, source)?);
                     let a = fresh();
                     let b = right.map(|_| fresh());
                     emit(
                         &mut work,
                         Op::Scalar {
                             destination: dst,
-                            scalar,
+                            scalar: scalar.clone(),
                             left: a,
                             right: b,
                         },
                     );
                     if let Some((right, b)) = right.zip(b) {
-                        emit(&mut work, Op::CheckScalarOperand { scalar, value: b });
+                        emit(
+                            &mut work,
+                            Op::CheckScalarOperand {
+                                scalar: scalar.clone(),
+                                value: b,
+                            },
+                        );
                         work.push(Work::Expression(right, b));
                     }
-                    emit(&mut work, Op::CheckScalarOperand { scalar, value: a });
+                    emit(
+                        &mut work,
+                        Op::CheckScalarOperand {
+                            scalar: scalar.clone(),
+                            value: a,
+                        },
+                    );
                     work.push(Work::Expression(left, a));
                     emit(&mut work, Op::PrepareScalar(scalar));
                     continue;
@@ -269,12 +290,21 @@ pub fn compile<'a>(body: &'a Expr, fuel: &mut usize) -> Result<Program<'a>, Erro
                         *fuel = fuel
                             .checked_sub(inputs.len())
                             .ok_or(Error::Budget(source))?;
+                        let binding = binding
+                            .as_ref()
+                            .map(|binding| {
+                                binding
+                                    .charge_copy(fuel)
+                                    .map_err(|error| copy_error(error, source))?;
+                                Ok::<_, Error>(Arc::new(binding.clone()))
+                            })
+                            .transpose()?;
                         let slots: Vec<_> = inputs.iter().map(|_| fresh()).collect();
                         emit(
                             &mut work,
                             Op::Intrinsic {
                                 destination: dst,
-                                binding: binding.as_ref(),
+                                binding: binding.clone(),
                                 inputs: slots.clone(),
                             },
                         );
@@ -285,19 +315,24 @@ pub fn compile<'a>(body: &'a Expr, fuel: &mut usize) -> Result<Program<'a>, Erro
                             &mut work,
                             Op::PrepareIntrinsic {
                                 tag: *tag,
-                                binding: binding.as_ref(),
-                                inputs: inputs.iter().map(|input| &input.ty).collect(),
-                                output: &expr.ty,
+                                binding: binding.clone(),
+                                inputs: inputs
+                                    .iter()
+                                    .map(|input| copy_term(&input.ty, fuel, source))
+                                    .collect::<Result<_, _>>()?,
+                                output: copy_term(&expr.ty, fuel, source)?,
                             },
                         );
                     }
                     K::Unit => emit(&mut work, Op::Unit(dst)),
                     K::Literal(_) | K::TypeValue(_) | K::ComptimeValue(_) | K::TypeListValue(_) => {
+                        nir::copy_budget::charge_substitution(expr, &[], &[], fuel)
+                            .map_err(|error| copy_error(error, source))?;
                         emit(
                             &mut work,
                             Op::Constant {
                                 destination: dst,
-                                value: expr,
+                                value: Arc::new(expr.clone()),
                             },
                         )
                     }
@@ -371,7 +406,7 @@ pub fn compile<'a>(body: &'a Expr, fuel: &mut usize) -> Result<Program<'a>, Erro
                             Op::Not {
                                 destination: dst,
                                 value: src,
-                                ty: &expr.ty,
+                                ty: copy_term(&expr.ty, fuel, source)?,
                             },
                         );
                         work.push(Work::Expression(value, src));
@@ -483,5 +518,18 @@ pub fn compile<'a>(body: &'a Expr, fuel: &mut usize) -> Result<Program<'a>, Erro
         instructions,
         locals: locals.into_iter().collect(),
         registers,
+        storage_work: initial_fuel - *fuel,
     })
+}
+
+fn copy_error(error: nir::copy_budget::CopyBudgetExhausted, source: SourceRange) -> Error {
+    match error {
+        nir::copy_budget::CopyBudgetExhausted::Steps => Error::Budget(source),
+        nir::copy_budget::CopyBudgetExhausted::Depth => Error::Budget(source),
+    }
+}
+fn copy_term(ty: &Term, fuel: &mut usize, source: SourceRange) -> Result<Term, Error> {
+    nir::copy_budget::charge_type_substitution(ty, &[], &[], fuel)
+        .map_err(|error| copy_error(error, source))?;
+    Ok(ty.clone())
 }

@@ -555,6 +555,19 @@ fn parameter(ty: &Term) -> bool {
     )
 }
 impl Checked {
+    /// Bound ownership transfer of checked evidence, including pending types.
+    pub fn charge_copy(
+        &self,
+        fuel: &mut usize,
+    ) -> Result<(), crate::copy_budget::CopyBudgetExhausted> {
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or(crate::copy_budget::CopyBudgetExhausted::Steps)?;
+        if let Signature::Pending(ty) = &self.signature {
+            crate::copy_budget::charge_type_substitution(ty, &[], &[], fuel)?;
+        }
+        Ok(())
+    }
     pub fn for_comptime(mut self) -> Self {
         self.comptime = true;
         self

@@ -61,3 +61,41 @@ fn compiler_control_nesting_does_not_use_the_host_stack() {
         }
     }
 }
+
+#[test]
+fn compiled_constants_outlive_their_source_and_charge_payload_copying() {
+    let code = {
+        let body = Expr {
+            source: SourceRange { start: 1, end: 2 },
+            ty: Term::Primitive(Primitive::Str),
+            kind: K::Literal(nir::program::Literal::String("x".repeat(4096))),
+        };
+        assert!(matches!(compile(&body, &mut 100), Err(Error::Budget(_))));
+        compile(&body, &mut 20_000).unwrap()
+    };
+    assert!(code.storage_work() >= 4096);
+    let comptime_compiler::Op::Constant { value, .. } = &code.instructions()[0].op else {
+        panic!("missing owned constant")
+    };
+    assert_eq!(
+        value.kind,
+        K::Literal(nir::program::Literal::String("x".repeat(4096)))
+    );
+}
+
+#[test]
+fn deeply_nested_constant_types_fail_before_recursive_copying() {
+    let mut ty = Term::Primitive(Primitive::Bool);
+    for _ in 0..192 {
+        ty = Term::Pointer(Box::new(ty));
+    }
+    let body = Expr {
+        source: SourceRange { start: 1, end: 2 },
+        ty: Term::Primitive(Primitive::Type),
+        kind: K::TypeValue(ty),
+    };
+    assert!(matches!(
+        compile(&body, &mut 100_000),
+        Err(Error::Budget(_))
+    ));
+}

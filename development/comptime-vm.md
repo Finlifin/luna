@@ -12,9 +12,10 @@ specialized-code caching and the unified value representation remain outstanding
 
 Compilation traverses control with a bounded heap worklist, including untaken
 branches. Unsupported operations select the old body path before any bytecode
-instruction executes; execution errors never trigger fallback. Constants borrow
-immutable typed NIR leaves for this invocation; they are not frozen query-cache
-artifacts. Immutable package-body code can be reused within one interpreter.
+instruction executes; execution errors never trigger fallback. Constants and
+type descriptors own bounded copies of immutable NIR data; active frames retain
+the code through Arc. These are not frozen query-cache artifacts. Immutable
+package-body code can be reused within one interpreter.
 No opcode delegates a child expression tree back to `eval`.
 
 Supported bodies include existing literal/frozen-value/Type leaves, reads,
@@ -1106,3 +1107,34 @@ Validation from `/home/fin/luna` (all exit 0):
 - `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`: 220 passed, `/tmp/luna-tools-gchzklmu/result.json`.
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode --test library_meta_math --test comptime_receivers --test comptime_local_types`: passed, `/tmp/luna-tools-avfhkxz7/result.json`.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: passed, `/tmp/luna-tools-vas6rugn/result.json`; `git diff --check` passed.
+
+## Independent compiled-code ownership (2026-10-30)
+
+Compiled programs no longer borrow the original function expression. Constants
+own copies of their NIR leaves; scalar descriptors and intrinsic binding evidence
+are shared between the instructions that validate and execute them. Execution
+frames retain the whole immutable program through Arc, so removing its cache
+entry or releasing the temporary source body cannot invalidate a suspended PC.
+This removes the self-reference obstacle to storing invocation and execution
+frames together in an explicit call stack. No unsafe lifetime extension is used.
+
+Every owned payload is preflighted through the existing NIR copy-work and depth
+checks. Pending intrinsic evidence includes its signature type in that charge.
+The code cache uses a conservative retention charge that includes copied payloads
+and lowering work, rather than counting only instruction slots. These units are
+not byte sizes or wall-time measurements. Type-depth exhaustion retains the
+shared preflight's resource-budget error classification. Compilation still has
+the existing 100,000-work limit, which now also covers the owned copies.
+
+Tests compile a 4 KiB constant, reject insufficient copy fuel, release the input
+and inspect retained code. Deep type constants are rejected before recursive
+copying. A suspended frame resumes successfully after releasing both source NIR
+and the code cache. The current declaration-keyed cache policy is unchanged;
+closure/specialization reuse and CALL/RETURN dispatch remain separate work.
+
+Validation from `/home/fin/luna` (final checks exit 0):
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor -p comptime_compiler -p nir --lib --test control`: `/tmp/luna-tools-ax_aqnnv/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test builder_invocations`: all 73 passed, `/tmp/luna-tools-d9d9nd4p/result.json`. The first run exposed 40 fixture-loading errors because real meta code used `attrs.comptime_phase` but the fixture omitted the attrs package. Commit `20d53dc2` supplies the real package and dependency edges, without changing compiler checks or builder expectations.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode --test library_meta_math --test comptime_local_types`: `/tmp/luna-tools-y0j2xnnx/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: `/tmp/luna-tools-u3qd42ae/result.json`; `git diff --check` passed.
