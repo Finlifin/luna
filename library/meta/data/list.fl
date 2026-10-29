@@ -27,6 +27,14 @@ impl List<T> where T {
     }
 
     {-
+        Append a complete list without changing the supplied snapshot. Ordinary
+        argument evaluation finishes before replacement, including self-extension.
+    -}
+    pub comptime fn append_all(self, values: List<T>) {
+        self = bindings.list_concat(self, values);
+    }
+
+    {-
       Traverse a fixed input snapshot in index order. The callback retains its
       comptime closure environment between calls; an empty input never calls it.
       Cache the length once, independently of callback effects.
@@ -163,7 +171,7 @@ impl List<T> where T {
         var output: List<U> = [];
         inline for index in 0..count {
             let inner = transform(input[index]);
-            output = output.concat(inner);
+            output.append_all(inner);
         }
         output
     }

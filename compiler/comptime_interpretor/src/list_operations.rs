@@ -112,7 +112,7 @@ impl Interpreter<'_> {
             K::TypeList(fields) => fields
                 .iter()
                 .all(|field| matches!(field.kind, K::Local(_) | K::TypeValue(_) | K::Literal(_))),
-            K::TypeListValue(_) => true,
+            K::TypeListValue(_) | K::Local(_) => true,
             _ => false,
         };
         if !simple {

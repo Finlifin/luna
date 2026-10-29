@@ -46,7 +46,7 @@ comptime fn run() -> bool {
         and (nested[0] match { null => true, _? => false })
         and unused.length() == 0 and unused_filter.length() == 0
         and reducers_and_searches() and named_metadata() and stable_sorting()
-        and exact_integer_division() and value_receivers() and indexed_pairing()
+        and exact_integer_division() and value_receivers() and indexed_pairing() and bulk_extension()
 }
 
 comptime fn exact_integer_division() -> bool {
@@ -177,4 +177,16 @@ comptime fn indexed_pairing() -> bool {
         and paired.length() == 2 and paired[0] == 8 and paired[1] == 0
         and (found match { index? => index == 1, null => false })
         and (missing match { null => true, _? => false })
+}
+
+comptime fn bulk_extension() -> bool {
+    var values: meta.List<Integer> = [1, 2];
+    let saved = values;
+    values.append_all(values);
+    values.append_all([]);
+    let holder = ListHolder {items: [true], tag: false};
+    holder.items.append_all([false, true]);
+    values.length() == 4 and values[0] == 1 and values[2] == 1
+        and values[3] == 2 and saved.length() == 2
+        and holder.items.length() == 3 and not holder.items[1] and holder.items[2]
 }

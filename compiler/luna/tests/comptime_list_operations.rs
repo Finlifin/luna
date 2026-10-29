@@ -1541,3 +1541,62 @@ fn indexed_pairing_and_position_stop_on_failure_and_allow_retry() {
         );
     }
 }
+
+#[test]
+fn list_append_all_preserves_sources_aliases_and_projected_receivers() {
+    let package = compile(
+        r#"
+        typealias Type=.Type'builtin;
+        pure comptime fn Identity<T> -> Type {T}
+        struct Holder {values:meta.List<bool>, marker:bool}
+        impl Holder {
+            comptime fn reset(self)->meta.List<bool> {self.values=[];[true]}
+        }
+        comptime fn run()->bool {
+            var values:meta.List<bool> = [true,false];
+            let saved=values;
+            values.append_all(values);
+            let twice=values;
+            let empty:meta.List<bool> = [];
+            values.append_all(empty);
+            let holder=Holder {values:values, marker:true};
+            holder.values.append_all([false]);
+            var types:meta.List<Type> = [Identity<bool>];
+            types.append_all([bool]);
+            types.append_all(types);
+            var nested:meta.List<meta.List<bool>> = [];
+            nested.append_all([saved,empty]);
+            let modified=Holder {values:values, marker:false};
+            modified.values.append_all(modified.reset());
+            values.length()==4 and values[0] and not values[1]
+                and values[2] and not values[3] and saved.length()==2
+                and twice.length()==4 and holder.values.length()==5
+                and not holder.values[4] and holder.marker
+                and types.length()==4 and types[0]==Identity<bool>
+                and types[2]==Identity<bool> and types[3]==bool
+                and nested.length()==2 and nested[0].length()==2
+                and nested[1].length()==0
+                and modified.values.length()==1 and modified.values[0]
+        }
+    "#,
+    )
+    .unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 1_000_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn list_append_all_rejects_incompatible_domains_and_readonly_rebinding() {
+    for source in [
+        "comptime fn bad() {var xs:meta.List<bool> = [];xs.append_all(['x']);}",
+        "fn bad() {var xs:meta.List<bool> = [];xs.append_all([true]);}",
+    ] {
+        assert!(compile(source).is_err(), "accepted {source}");
+    }
+    let package =
+        compile("comptime fn run() {let xs:meta.List<bool> = [true];xs.append_all([false]);}")
+            .unwrap();
+    assert!(luna::invocation::invoke(&package, "run", 100_000).is_err());
+}

@@ -308,7 +308,7 @@ mod tests {
                 value: reference_value,
             },
         };
-        for mode in 0..3 {
+        for mode in 0..5 {
             let wrap = |value| {
                 if mode == 2 {
                     Value::AnonymousRecord(vec![
@@ -319,8 +319,28 @@ mod tests {
                     value
                 }
             };
+            let mut reference_expr = reference_expr.clone();
+            if mode >= 3 {
+                let K::Assign { value, .. } = &mut reference_expr.kind else {
+                    unreachable!()
+                };
+                let K::ListConcat(_, right) = &mut value.kind else {
+                    unreachable!()
+                };
+                right.kind = K::Local(LocalId {
+                    owner: 1,
+                    index: if mode == 4 { 0 } else { 1 },
+                });
+            }
             let original = wrap(original.clone());
-            let expected = wrap(expected.clone());
+            let expected = wrap(if mode == 4 {
+                Value::List {
+                    ty: ty.clone(),
+                    values: vec![Value::Bool(false); 2],
+                }
+            } else {
+                expected.clone()
+            });
             let mut failures = 0;
             let mut successes = 0;
             for steps in 1..200 {
@@ -342,6 +362,13 @@ mod tests {
                     Value::ComptimeReference(reference)
                 };
                 env.insert(LocalId { owner: 1, index: 0 }, receiver);
+                env.insert(
+                    LocalId { owner: 1, index: 1 },
+                    Value::List {
+                        ty: ty.clone(),
+                        values: vec![Value::Bool(true)],
+                    },
+                );
                 let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
                 vm.budget.steps = steps;
                 let mut append = |vm: &mut Interpreter<'_>| {
