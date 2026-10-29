@@ -60,6 +60,20 @@ fn binding(value: &Expr<'_>) -> Result<n::LocalId, Error> {
 }
 
 impl Checker<'_, '_> {
+    // Phase checks inspect representation storage without equating nominal
+    // identities or unfolding normal-form heads. Keep every nominal family in
+    // this snapshot so a wrapper cannot hide comptime-only data in code ports.
+    fn code_storage_metadata(&self) -> n::Package {
+        n::Package {
+            target: self.target,
+            structs: self.structs.values().cloned().collect(),
+            enums: self.enums.values().cloned().collect(),
+            newtypes: self.newtypes.values().cloned().collect(),
+            normal_forms: self.normal_form_metadata(),
+            ..Default::default()
+        }
+    }
+
     pub(super) fn freshen_constant_graph(
         &mut self,
         value: &mut n::Expr,
@@ -597,13 +611,7 @@ impl Checker<'_, '_> {
                 return Err(error(entry.port.span, "duplicate quote interface name"));
             }
         }
-        let metadata = n::Package {
-            target: self.target,
-            structs: self.structs.values().cloned().collect(),
-            enums: self.enums.values().cloned().collect(),
-            normal_forms: self.normal_form_metadata(),
-            ..Default::default()
-        };
+        let metadata = self.code_storage_metadata();
         let scope = self.call_inference_scope();
         let frames = vec![scope.iter().map(|parameter| parameter.sort).collect()];
         for ty in context.values().chain(std::iter::once(&body.ty)) {

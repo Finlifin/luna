@@ -463,13 +463,7 @@ impl Checker<'_, '_> {
         }
         // Even an unused identity generator must not admit comptime-only
         // storage through a composite runtime context or result type.
-        let metadata = n::Package {
-            target: self.target,
-            structs: self.structs.values().cloned().collect(),
-            enums: self.enums.values().cloned().collect(),
-            normal_forms: self.normal_form_metadata(),
-            ..Default::default()
-        };
+        let metadata = self.code_storage_metadata();
         for interface in definition
             .inputs
             .iter()

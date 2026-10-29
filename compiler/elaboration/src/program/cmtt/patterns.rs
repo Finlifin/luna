@@ -260,13 +260,7 @@ impl Checker<'_, '_> {
         code: &PatternCode,
         span: Span,
     ) -> Result<(), Error> {
-        let metadata = n::Package {
-            target: self.target,
-            structs: self.structs.values().cloned().collect(),
-            enums: self.enums.values().cloned().collect(),
-            normal_forms: self.normal_form_metadata(),
-            ..Default::default()
-        };
+        let metadata = self.code_storage_metadata();
         let frames = vec![
             self.call_inference_scope()
                 .iter()

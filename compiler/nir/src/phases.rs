@@ -1774,7 +1774,9 @@ fn comptime_storage_resolved(
         T::Computation { result, .. } => vec![(**result).clone()],
         T::Tuple(items) => items.clone(),
         T::Record(fields) => fields.iter().map(|(_, ty)| ty.clone()).collect(),
-        T::Pointer(inner) | T::UnsafeFunction(inner) => vec![(**inner).clone()],
+        T::Optional(inner) | T::Pointer(inner) | T::UnsafeFunction(inner) => {
+            vec![(**inner).clone()]
+        }
         T::Function { parameters, result } => {
             let mut nested = frames.to_vec();
             nested.push(parameters.iter().map(|p| p.sort).collect());

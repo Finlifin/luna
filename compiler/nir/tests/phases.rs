@@ -1658,3 +1658,42 @@ fn value_reference_transport_preserves_phase_and_receiver_identity() {
         assert!(nir::phases::validate(&invalid).is_err());
     }
 }
+
+#[test]
+fn optional_storage_checks_payload_phase_at_every_layer() {
+    let package = Package::default();
+    let forbidden = [
+        Term::Primitive(Primitive::Type),
+        Term::Primitive(Primitive::Integer),
+        Term::Primitive(Primitive::Float),
+        Term::Primitive(Primitive::Object),
+        Term::ComptimeFunction(Box::new(Term::Function {
+            parameters: vec![],
+            result: Box::new(Term::Primitive(Primitive::Bool)),
+        })),
+    ];
+    for mut ty in forbidden {
+        for _ in 0..4 {
+            ty = Term::Optional(Box::new(ty));
+            assert!(nir::phases::validate_runtime_storage(&ty, &package, &[]).is_err());
+            let mut f = function(1, Phase::Runtime, &[Sort::Runtime]);
+            let Term::Function { parameters, .. } = &mut f.signature else {
+                unreachable!()
+            };
+            parameters[0].ty = ty.clone();
+            let package = Package {
+                functions: vec![f],
+                ..Default::default()
+            };
+            assert!(nir::phases::validate(&package).is_err());
+            let mut comptime = package;
+            comptime.functions[0].phase = Phase::Comptime;
+            nir::phases::validate(&comptime).unwrap();
+        }
+    }
+    let mut legal = Term::Primitive(Primitive::Bool);
+    for _ in 0..4 {
+        legal = Term::Optional(Box::new(legal));
+        nir::phases::validate_runtime_storage(&legal, &package, &[]).unwrap();
+    }
+}
