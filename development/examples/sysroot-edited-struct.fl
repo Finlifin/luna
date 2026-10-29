@@ -55,3 +55,36 @@ test batch_fields {
     let record = BatchRecord { enabled: true, count: 7 };
     assumes record.enabled and record.count == 7;
 }
+
+{-
+    Transform reflected field Types into concrete column storage. The builder
+    preserves the generic normal-form heads; runtime layout and field access
+    must still resolve the applied Column definitions.
+-}
+struct Row { active: bool, count: u8 }
+struct Column where T { first: T, second: T }
+
+comptime fn Columns(subject: Type) -> Type {
+    let names = meta.struct_field_names(subject);
+    let types = meta.struct_field_types(subject).map(|field| Column<field>);
+    var builder = meta.StructBuilder.new(.name = .Columns);
+    let added = builder.add_fields(names, types);
+    assumes added;
+    builder.Build()
+}
+
+typealias ColumnStore = Columns(Row);
+
+impl ColumnStore {
+    fn second_count(self) -> u8 { self.count.second }
+}
+
+test transformed_fields {
+    let columns = ColumnStore {
+        active: Column<bool> { first: true, second: false },
+        count: Column<u8> { first: 10, second: 20 },
+    };
+    assumes columns.active.first and not columns.active.second;
+    let second = columns.second_count();
+    assumes second == 20;
+}

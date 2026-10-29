@@ -320,6 +320,29 @@ typealias Record = Edited();
 可运行的泛型源类型示例见
 [host-generated-nested-struct.fl](../../development/examples/host-generated-nested-struct.fl)。
 默认类型参数不为任意 `T: Type` 提供字段证据，泛型函数体仍须满足其声明约束。
+已可组合反射、List 映射与批量字段构造，将每个字段 `T` 转换为已声明的泛型
+容器 `Column<T>`。生成类型保持这些应用的 normal-form 头，运行时展开存储布局，
+支持嵌套字段访问及显式固有 impl：
+
+```flurry
+struct Column where T { first: T, second: T }
+
+comptime fn Columns(subject: Type) -> Type {
+    let names = meta.struct_field_names(subject);
+    let types = meta.struct_field_types(subject).map(|field| Column<field>);
+    var builder = meta.StructBuilder.new(.name = .Columns);
+    let added = builder.add_fields(names, types);
+    assumes added;
+    builder.Build()
+}
+
+struct Row { active: bool, count: u8 }
+typealias ColumnStore = Columns(Row);
+```
+
+完整原生用例见 `development/examples/sysroot-edited-struct.fl` 的
+`transformed_fields`；`sysroot-builders` 检查入口同时覆盖字段编辑、反射、批量构造
+和类型转换后的运行时访问。这里的 Column 是两元素示例容器，不是完整动态列库。
 字段默认代码、属性、泛型子句、方法和 impl
 的构造尚未接入；这里还不是完整 SoA 示例所需的全部 builder 能力。
 
