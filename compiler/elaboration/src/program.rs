@@ -827,7 +827,11 @@ fn elaborate_candidate<'a, 'h>(
                 info.node.expect_item().kind,
                 ItemKind::Fn(..) | ItemKind::FnDeclaration(_)
             ) {
-                checker.ensure_signature(owner, info.node.expect_item().span)?;
+                if checker.is_data_consumer(owner) {
+                    checker.ensure_data_consumer(owner, info.node.expect_item().span)?;
+                } else {
+                    checker.ensure_signature(owner, info.node.expect_item().span)?;
+                }
             }
         }
     }

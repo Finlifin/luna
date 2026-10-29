@@ -40,14 +40,27 @@ impl Checker<'_, '_> {
                 .map(|output| this.type_expr(output))
                 .unwrap_or_else(|| Ok(p(P::Void)))
         })?;
-        if self.self_containers.contains_key(&owner) || definition.body.is_none() {
-            return Err(error(
-                span,
-                "contextual data methods require contextual method dispatch, not an ordinary callable signature",
-            ));
-        }
         self.data_consumers.insert(owner, definition);
         Ok(())
+    }
+
+    pub(in crate::program) fn data_method_contract(
+        &mut self,
+        owner: OwnerId,
+        span: Span,
+    ) -> Result<(CodeFunctionSignature<Term>, nir::contracts::ProgramContract), Error> {
+        self.ensure_data_consumer(owner, span)?;
+        let definition = self.copy_data_consumer(owner, span)?;
+        let program =
+            self.contextual_method_contract(owner, &definition, Some(&definition.output), span)?;
+        Ok((definition.signature, program))
+    }
+
+    fn copy_data_consumer(&mut self, owner: OwnerId, span: Span) -> Result<Generator<Term>, Error> {
+        let definition = &self.data_consumers[&owner];
+        Self::charge_code_generator(definition, &mut self.required_steps, span)?;
+        let definition = definition.clone();
+        self.apply_generator_captures(owner, definition, span)
     }
 
     pub(in crate::program) fn check_data_consumer(&mut self, owner: OwnerId) -> Result<(), Error> {
@@ -105,7 +118,7 @@ impl Checker<'_, '_> {
         Ok(())
     }
 
-    pub(in crate::program) fn data_consumer_call(&self, value: &Expr<'_>) -> Option<OwnerId> {
+    pub(in crate::program) fn data_consumer_call(&mut self, value: &Expr<'_>) -> Option<OwnerId> {
         let (H::Application(callee, _) | H::ExtendedApplication(callee, _)) = value.kind else {
             return None;
         };
@@ -114,12 +127,21 @@ impl Checker<'_, '_> {
             _ => callee,
         };
         let definition = match callee.kind {
-            H::ResolvedDef { def_id, .. } => def_id,
-            H::Projection(..) => *self.package.member_projections.get(&callee.hir_id)?,
-            _ => return None,
+            H::ResolvedDef { def_id, .. } => Some(def_id),
+            H::Projection(..) => self.package.member_projections.get(&callee.hir_id).copied(),
+            _ => None,
         };
-        let owner = self.package.definition_owner(definition)?;
-        self.is_data_consumer(owner).then_some(owner)
+        definition
+            .and_then(|id| self.package.definition_owner(id))
+            .filter(|owner| self.is_data_consumer(*owner))
+            .or_else(|| {
+                self.generic_code_method_hint(callee)
+                    .filter(|owner| self.is_data_consumer(*owner))
+            })
+            .or_else(|| {
+                self.static_code_method_hint(callee)
+                    .filter(|owner| self.is_data_consumer(*owner))
+            })
     }
 
     #[inline(never)]
@@ -150,7 +172,30 @@ impl Checker<'_, '_> {
             ));
         }
         self.data_consumer_depth += 1;
-        let result = self.prepare_and_invoke_data_consumer(site, expected);
+        let result = (|| {
+            let (H::Application(callee, arguments) | H::ExtendedApplication(callee, arguments)) =
+                site.kind
+            else {
+                return Err(error(site.span, "expected contextual data call"));
+            };
+            self.with_code_method_callee(callee, |this, callee, receiver| {
+                if receiver.is_some() {
+                    return Err(error(
+                        site.span,
+                        "contextual data receiver invocation requires value-reference dispatch not yet implemented",
+                    ));
+                }
+                let selected = Expr {
+                    kind: if matches!(site.kind, H::ExtendedApplication(..)) {
+                        H::ExtendedApplication(callee, arguments)
+                    } else {
+                        H::Application(callee, arguments)
+                    },
+                    ..site.clone()
+                };
+                this.prepare_and_invoke_data_consumer(&selected, expected)
+            })
+        })();
         self.data_consumer_depth -= 1;
         result
     }
@@ -168,9 +213,22 @@ impl Checker<'_, '_> {
             .data_consumer_call(site)
             .ok_or_else(|| error(site.span, "expected contextual data call"))?;
         self.ensure_data_consumer(owner, site.span)?;
-        let template = &self.data_consumers[&owner];
-        Self::charge_code_generator(template, &mut self.required_steps, site.span)?;
-        let template = template.clone();
+        let (ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) =
+            &self.package.item(owner).unwrap().kind
+        else {
+            unreachable!()
+        };
+        if sig
+            .params
+            .iter()
+            .any(|param| matches!(param.ty.kind, TyParamKind::Itself { .. }))
+        {
+            return Err(error(
+                site.span,
+                "contextual data receiver invocation requires value-reference dispatch not yet implemented",
+            ));
+        }
+        let template = self.copy_data_consumer(owner, site.span)?;
         let (H::Application(callee, arguments) | H::ExtendedApplication(callee, arguments)) =
             site.kind
         else {
@@ -290,8 +348,10 @@ impl Checker<'_, '_> {
     ) -> Result<Option<Value>, Error> {
         let owner = self.signature_owner.expect("contextual consumer frame");
         let item = self.package.item(owner).unwrap();
-        let ItemKind::Fn(sig, body) = &item.kind else {
-            return Err(error(item.span, "contextual data consumer has no body"));
+        let (sig, body) = match &item.kind {
+            ItemKind::Fn(sig, body) => (sig, Some(*body)),
+            ItemKind::FnDeclaration(sig) => (sig, None),
+            _ => unreachable!(),
         };
         self.install_generator_capture_values(&definition.captures, item.span)?;
         self.alias_substitution.extend(
@@ -353,7 +413,17 @@ impl Checker<'_, '_> {
                 result_binding.map(|binding| (binding, &definition.output)),
             )?;
         }
-        let value = self.package.body(*body).unwrap().value;
+        let Some(body) = body else {
+            return if self.checking_code_generator {
+                Ok(None)
+            } else {
+                Err(error(
+                    item.span,
+                    "contextual data consumer has no selected body",
+                ))
+            };
+        };
+        let value = self.package.body(body).unwrap().value;
         let control = self.consumer_result(value, &definition.output, 0)?;
         if self.checking_code_generator {
             let flow = control.flow();

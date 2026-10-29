@@ -161,6 +161,13 @@ impl Checker<'_, '_> {
                 code_signature = Some(nir::code_interfaces::MethodSignature::Generator(signature));
                 return Ok(program);
             }
+            if self.is_data_consumer(owner) {
+                let (signature, program) = self.data_method_contract(owner, item.span)?;
+                code_signature = Some(nir::code_interfaces::MethodSignature::DataConsumer(
+                    signature,
+                ));
+                return Ok(program);
+            }
             let ty = self
                 .signatures
                 .get(&owner)
@@ -1873,7 +1880,10 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<Option<n::Expr>, Error> {
         let body = declaration(self.package, &self.package_identities, owner);
-        if self.is_code_generator(owner) || self.is_pattern_generator(owner) {
+        if self.is_code_generator(owner)
+            || self.is_pattern_generator(owner)
+            || self.is_data_consumer(owner)
+        {
             return Err(error(
                 span,
                 "code generator method invocation requires code-method dispatch, which is not yet implemented",

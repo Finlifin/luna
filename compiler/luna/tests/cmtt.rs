@@ -10630,3 +10630,127 @@ fn contextual_type_clauses_do_not_guess_input_dependent_result_identities() {
         "{failure}"
     );
 }
+
+#[test]
+fn contextual_data_methods_form_trait_contracts_without_code_erasure() {
+    let source = "trait Inspect {
+            comptime fn inspect(code:<x:bool|-bool>, pat:<bool -| found:bool>)->bool;
+        }
+        struct Reader {}
+        impl Inspect for Reader {
+            comptime fn inspect(code:<x:bool|-bool>, pat:<bool -| found:bool>)->bool {true}
+        }
+        fn run()->bool {true}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    for wrong in [
+        source.replace("->bool {true}", "->.char'builtin {'a'}"),
+        source.replace(
+            "code:<x:bool|-bool>, pat:<bool -| found:bool>)->bool {true}",
+            "code:bool, pat:<bool -| found:bool>)->bool {true}",
+        ),
+        source.replace("found:bool>)->bool {true}", "other:bool>)->bool {true}"),
+    ] {
+        let failure = support::compile_with_protocols(&wrong, &Default::default()).unwrap_err();
+        assert!(!failure.contains("parsing failed"), "{failure}");
+    }
+}
+
+#[test]
+fn contextual_data_methods_invoke_static_inherent_bodies() {
+    let source = "struct Reader {}
+        impl Reader {
+            comptime fn inspect(code:<|-bool>, flag:bool)->result:bool
+            where ensures result == flag'old {flag}
+        }
+        fn run()->bool {const result=Reader.inspect('(true),true);result}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let wrong = source.replace("result == flag'old", "result != flag'old");
+    let failure = support::compile_with_protocols(&wrong, &Default::default()).unwrap_err();
+    assert!(!failure.contains("parsing failed"), "{failure}");
+}
+
+#[test]
+fn contextual_data_methods_specialize_container_captures() {
+    let source = "typealias Type=.Type'builtin;
+        struct Reader where T {}
+        impl Reader<T> where T {
+            comptime fn Inspect(code:<|-T>)->Type {T}
+        }
+        fn run()->bool {
+            const Result=Reader<bool>.Inspect('(true));
+            let result:Result=true;result
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn contextual_data_methods_forward_code_with_inferred_clauses_and_properties() {
+    let source = "struct Reader {}
+        impl Reader {
+            comptime fn take(code:<|-T>, flag:bool)->bool where T {flag}
+            comptime fn inspect(code:<|-T>, ...props:Props)->Props where T, Props {
+                const result=Reader.take(code,true);props
+            }
+        }
+        comptime fn forward(code:<|-bool>)->bool {
+            var flag=false;
+            const result=Reader.inspect {code,enabled:do {flag=not flag;flag}};
+            result.enabled and flag
+        }
+        fn run()->bool {const result=forward('(true));result}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn contextual_data_methods_check_unused_bodies_and_declaration_contracts() {
+    for source in [
+        "struct Reader {} impl Reader {comptime fn inspect(code:<|-bool>)->bool {'a'}}",
+        "trait Inspect {comptime fn inspect(code:<|-bool>)->result:bool where ensures result + true;}",
+        "trait Inspect {comptime fn inspect(code:<|-bool>)->bool where ensures missing;}",
+    ] {
+        let failure = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+        assert!(!failure.contains("parsing failed"), "{failure}");
+    }
+}
+
+#[test]
+fn contextual_data_methods_keep_receiver_and_ordinary_value_paths_closed() {
+    for (method, call) in [
+        (
+            "comptime fn inspect(code:<|-bool>)->bool {true}",
+            "const action=Reader.inspect;true",
+        ),
+        (
+            "comptime fn inspect(self,code:<|-bool>)->bool {true}",
+            "const r=Reader {};const result=r.inspect('(true));result",
+        ),
+        (
+            "comptime fn inspect(self,code:<|-bool>)->bool {true}",
+            "const result=Reader.inspect(Reader {},'(true));result",
+        ),
+    ] {
+        let source =
+            format!("struct Reader {{}} impl Reader {{{method}}} fn run()->bool {{{call}}}");
+        let failure = support::compile_with_protocols(&source, &Default::default()).unwrap_err();
+        assert!(
+            failure.contains("contextual data") || failure.contains("code generator method"),
+            "{failure}"
+        );
+    }
+}
+
+#[test]
+fn contextual_data_methods_preserve_pattern_inputs_at_static_calls() {
+    let source = "struct Reader {}
+        impl Reader {
+            comptime fn inspect(pat:<bool -| found:bool>)->bool {true}
+        }
+        fn run()->bool {const result=Reader.inspect('<found>);result}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let failure = support::compile_with_protocols(
+        &source.replace("'<found>", "'(true)"),
+        &Default::default(),
+    )
+    .unwrap_err();
+    assert!(!failure.contains("parsing failed"), "{failure}");
+}

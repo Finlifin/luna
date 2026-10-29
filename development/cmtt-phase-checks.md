@@ -596,3 +596,46 @@ of the data output, retained code input dependencies, atomic failed transforms,
 output/category mismatch, budget failure followed by successful comparison, dump
 category preservation and runtime-boundary rejection. Formatting completed at
 `/tmp/luna-tools-9wpnnma8/result.json`; whitespace checks passed.
+
+## Source contextual data methods and static inherent invocation
+
+Source trait declarations and implementations now retain contextual data method
+signatures, including quoted expression/pattern inputs and data result contracts.
+Their early preparation uses the contextual registry rather than demanding an
+ordinary callable signature. Declaration-only checking validates defaults and
+contracts without inventing or executing a body. Code-producing and data-producing
+methods share contract-frame construction; only data results supply an ordinary
+result binding for postconditions.
+
+Static inherent calls select the admitted implementation, check access, substitute
+container captures into the entire contextual signature, and run the existing
+construction interpreter. Named properties, clause inference and nested code
+forwarding use the same input preparation as free contextual data functions.
+Method classification distinguishes expr, pattern and data outputs, so recognizing
+a data method does not misclassify it as a code producer. No ordinary callable
+value or invocation-result cache is introduced.
+
+Seven source tests cover compatible and incompatible trait signatures, executed
+result/old-input contracts, captured generic container parameters, inferred clauses
+and property evaluation, definition-time rejection, receiver/value escape rejection,
+and pattern-input category checking. The complete-sysroot example now also builds
+`BooleanMethodSlot` via `CodeSchema<bool>.Build`, forwarding its quote to the public
+`meta.StructBuilder` construction path and checking the resulting field metadata.
+
+Trait invocation dispatch and receiver value-reference transport remain unfinished.
+Both instance syntax and an explicit receiver argument to a static selection are
+rejected rather than silently copying the receiver. Arbitrary ordinary expression
+scheduling and the existing contextual invocation depth bound are unchanged.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --test elaboration --test builder_invocations
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+git diff --check
+```
+
+All passed: 573 CMTT, 451 source elaboration and 73 builder integration tests
+(`/tmp/luna-tools-3fsftcz4/result.json`). The builder group includes the actual
+sysroot CLI invocation of the extended example and observes `(bool true)`.
+Formatting passed at `/tmp/luna-tools-sg9k2roq/result.json`; whitespace checks passed.

@@ -545,57 +545,93 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<(CodeFunctionSignature, nir::contracts::ProgramContract), Error> {
         let definition = self.copy_code_generator(owner, span)?;
+        let program = self.contextual_method_contract(owner, &definition, None, span)?;
+        Ok((definition.signature, program))
+    }
+
+    fn contextual_method_contract<O>(
+        &mut self,
+        owner: OwnerId,
+        definition: &Generator<O>,
+        result_type: Option<&Term>,
+        span: Span,
+    ) -> Result<nir::contracts::ProgramContract, Error> {
         let context = self.context.clone();
         let checking = std::mem::replace(&mut self.checking_code_generator, true);
         let result = self.generator_frame(owner, |this| {
             this.context = context;
-            this.install_generator_captures(&definition,span)?;
-            let (ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) = &this.package.item(owner).unwrap().kind else {unreachable!()};
-            if sig.return_binding.is_some() {
-                return Err(error(span, "code method result bindings require code-value contract evidence not yet implemented"));
+            this.install_generator_capture_values(&definition.captures, span)?;
+            let (ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) =
+                &this.package.item(owner).unwrap().kind
+            else {
+                unreachable!()
+            };
+            if sig.return_binding.is_some() && result_type.is_none() {
+                return Err(error(
+                    span,
+                    "code method result bindings require code-value contract evidence not yet implemented",
+                ));
             }
-            this.alias_substitution.extend(definition.types.iter().map(|(id,value)| (*id,Arc::new(value.clone()))));
-            for (((id,_),domain),clause) in definition.types.iter().zip(&definition.clause_domains).zip(sig.clause_params) {
+            this.alias_substitution.extend(
+                definition.types.iter().map(|(id, value)| (*id, Arc::new(value.clone()))),
+            );
+            for (((id, _), domain), clause) in definition.types.iter()
+                .zip(&definition.clause_domains).zip(sig.clause_params)
+            {
                 if *domain != p(P::Type) {
                     let binding = local(clause.hir_id);
-                    this.locals.insert(binding,domain.clone());
-                    this.generator_data.insert(binding,None);
-                    this.normal_default_bindings.insert(*id,(binding,domain.clone()));
+                    this.locals.insert(binding, domain.clone());
+                    this.generator_data.insert(binding, None);
+                    this.normal_default_bindings.insert(*id, (binding, domain.clone()));
                 }
             }
-            for (binding,input) in &definition.inputs {
+            for (binding, input) in &definition.inputs {
                 match input {
                     Input::Data(ty) => {
-                        this.locals.insert(*binding,ty.clone());
-                        this.generator_data.insert(*binding,None);
+                        this.locals.insert(*binding, ty.clone());
+                        this.generator_data.insert(*binding, None);
                     }
                     Input::Pattern(interface) => {
-                        let code=this.abstract_pattern_input(interface,span)?;
-                        this.pattern_codes.insert(*binding,code);
+                        let code = this.abstract_pattern_input(interface, span)?;
+                        this.pattern_codes.insert(*binding, code);
                     }
                     Input::Code(interface) => {
-                        this.code_values.insert(*binding,Arc::new(ExpressionCode {
-                            body:None,result:interface.result.clone(),context:interface.context.clone(),
-                            ports:interface.ports.clone(),defaults:BTreeMap::new(),
+                        this.code_values.insert(*binding, Arc::new(ExpressionCode {
+                            body: None,
+                            result: interface.result.clone(),
+                            context: interface.context.clone(),
+                            ports: interface.ports.clone(),
+                            defaults: BTreeMap::new(),
                         }));
                     }
                 }
             }
             let preconditions = this.program_preconditions(owner)?;
-            let (postconditions,entry_snapshots) = this.program_postconditions_with_result(owner,None)?;
+            let result_binding = sig.return_binding.map(local);
+            if let Some(binding) = result_binding {
+                this.generator_data.insert(binding, None);
+            }
+            let result = result_binding.zip(result_type);
+            let (postconditions, entry_snapshots) =
+                this.program_postconditions_with_result(owner, result)?;
             for snapshot in &entry_snapshots {
                 if !this.generator_data.contains_key(&snapshot.parameter) {
-                    return Err(error(span,"code method entry snapshot requires a data parameter"));
+                    return Err(error(span, "code method entry snapshot requires a data parameter"));
                 }
-                this.generator_data.insert(snapshot.binding,None);
+                this.generator_data.insert(snapshot.binding, None);
             }
             for predicate in preconditions.iter().chain(&postconditions) {
-                this.validate_generator_data(predicate,span)?;
+                this.validate_generator_data(predicate, span)?;
             }
-            Ok(nir::contracts::ProgramContract {preconditions,postconditions,entry_snapshots,result_binding:None})
+            Ok(nir::contracts::ProgramContract {
+                preconditions,
+                postconditions,
+                entry_snapshots,
+                result_binding,
+            })
         });
         self.checking_code_generator = checking;
-        Ok((definition.signature, result?))
+        result
     }
 
     fn charge_code_generator<O: nir::code_interfaces::SignatureOutput>(
@@ -646,7 +682,16 @@ impl Checker<'_, '_> {
     fn copy_code_generator(&mut self, owner: OwnerId, span: Span) -> Result<Generator, Error> {
         let definition = &self.code_generators[&owner];
         Self::charge_code_generator(definition, &mut self.required_steps, span)?;
-        let mut definition = definition.clone();
+        let definition = definition.clone();
+        self.apply_generator_captures(owner, definition, span)
+    }
+
+    fn apply_generator_captures<O: nir::code_interfaces::SignatureOutput + Clone>(
+        &mut self,
+        owner: OwnerId,
+        mut definition: Generator<O>,
+        span: Span,
+    ) -> Result<Generator<O>, Error> {
         if let Some(captures) = self.code_method_captures.get(&owner) {
             let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
             let charged = captures
@@ -701,7 +746,11 @@ impl Checker<'_, '_> {
             H::ResolvedDef { def_id, .. } => def_id,
             H::Projection(..) => match self.package.member_projections.get(&callee.hir_id) {
                 Some(definition) => *definition,
-                None => return self.static_code_method_hint(callee),
+                None => {
+                    return self
+                        .static_code_method_hint(callee)
+                        .filter(|owner| self.is_code_generator(*owner));
+                }
             },
             _ => return None,
         };
@@ -1545,7 +1594,9 @@ impl Checker<'_, '_> {
             }
             H::Application(callee, _) | H::ExtendedApplication(callee, _) => {
                 self.generator_owner(callee).is_some()
-                    || self.generic_code_method_hint(callee).is_some()
+                    || self
+                        .generic_code_method_hint(callee)
+                        .is_some_and(|owner| self.is_code_generator(owner))
             }
             H::Let(decl) => {
                 if decl

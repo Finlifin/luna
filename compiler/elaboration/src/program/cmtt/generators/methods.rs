@@ -237,14 +237,19 @@ impl Checker<'_, '_> {
                 }
             }
             let owner = self.package.definition_owner(selected?)?;
-            let pattern = self.is_pattern_generator(owner);
-            if !pattern && !self.is_code_generator(owner) {
+            let current_category = if self.is_pattern_generator(owner) {
+                0
+            } else if self.is_code_generator(owner) {
+                1
+            } else if self.is_data_consumer(owner) {
+                2
+            } else {
+                return None;
+            };
+            if category.is_some_and(|previous| previous != current_category) {
                 return None;
             }
-            if category.is_some_and(|previous| previous != pattern) {
-                return None;
-            }
-            category = Some(pattern);
+            category = Some(current_category);
             found.get_or_insert(owner);
         }
         found
@@ -302,7 +307,9 @@ impl Checker<'_, '_> {
             let member = *members.iter().next()?;
             return self.package.owners().find_map(|(owner, _)| {
                 (matches_declaration(self.package, &self.package_identities, owner, member)
-                    && (self.is_code_generator(owner) || self.is_pattern_generator(owner)))
+                    && (self.is_code_generator(owner)
+                        || self.is_pattern_generator(owner)
+                        || self.is_data_consumer(owner)))
                 .then_some(owner)
             });
         }
@@ -331,7 +338,9 @@ impl Checker<'_, '_> {
             .find(|(member, _)| member == name.name.as_str())?;
         self.package.owners().find_map(|(owner, _)| {
             (matches_declaration(self.package, &self.package_identities, owner, *body)
-                && (self.is_code_generator(owner) || self.is_pattern_generator(owner)))
+                && (self.is_code_generator(owner)
+                    || self.is_pattern_generator(owner)
+                    || self.is_data_consumer(owner)))
             .then_some(owner)
         })
     }
@@ -378,7 +387,9 @@ impl Checker<'_, '_> {
             .find(|(member, _)| member == name.name.as_str())?;
         self.package.owners().find_map(|(owner, _)| {
             (matches_declaration(self.package, &self.package_identities, owner, *body)
-                && (self.is_code_generator(owner) || self.is_pattern_generator(owner)))
+                && (self.is_code_generator(owner)
+                    || self.is_pattern_generator(owner)
+                    || self.is_data_consumer(owner)))
             .then_some(owner)
         })
     }
@@ -484,7 +495,10 @@ impl Checker<'_, '_> {
                         "resolved code member disagrees with implementation selection",
                     ));
                 }
-                if !self.is_code_generator(owner) && !self.is_pattern_generator(owner) {
+                if !self.is_code_generator(owner)
+                    && !self.is_pattern_generator(owner)
+                    && !self.is_data_consumer(owner)
+                {
                     return Err(error(
                         head.span,
                         "code position requires a code-producing method",
