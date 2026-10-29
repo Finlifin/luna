@@ -1008,3 +1008,51 @@ Validation from `/home/fin/luna` (final checks exit 0):
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test library_meta_math intrinsic_operands_execute_in_order_inside_one_bytecode_frame -- --exact`: `/tmp/luna-tools-k2ncikzd/result.json`.
 - `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor -p nir -p comptime_compiler --lib --test control`: `/tmp/luna-tools-i3kjfibs/result.json`.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: `/tmp/luna-tools-bf4pnhex/result.json`; `git diff --check` passed.
+
+## Owned invocation activations (2026-10-30)
+
+Invocation lifecycle now lives in `comptime_interpretor::invocation`. Admission,
+entry, input/contract preparation, result delivery and caller restoration are
+separate operations. `begin_invocation` returns a heap-owned activation holding
+the callable, input environment, body ownership, instantiated return type, input
+substitution and saved caller state. `complete_invocation` performs delivery and
+restores the caller after either success or failure. Preparation failures also
+restore an already-entered activation.
+
+Immutable package bodies remain borrowed. Closure bodies retain their existing
+Arc; specialized bodies acquire owned storage, with no reference into a temporary
+preparation stack frame. Effect identity allocation remains monotonic across
+restoration; transfer state remains engine-owned. Runtime cleanup, call context,
+phase admission, pre/postconditions and result validation remain in their original
+order. The recursive call driver and its existing depth limit are unchanged.
+This creates the owned lifecycle boundary needed for explicit call-stack work;
+it does not yet claim stack-independent invocation.
+
+New tests suspend a prepared closure activation, reject a child's wrong return
+type, then resume the parent with its captured environment intact. Other tests
+cover nested context restoration, monotonic effect identities, failed entry and
+failed preparation.
+
+The broad execution suite exposed five elaboration failures in generic method
+values. An isolated archive of HEAD `0ddcb2ba` at
+`/tmp/luna-invocation-baseline-ey2lstdq` reproduced the same five failures and
+1,360 passes (`/tmp/luna-tools-jxz9y5db/result.json`), using
+`python3 -B development/check.py --timeout 900 -- test -p luna --test execution`.
+No fixture or expected result was relaxed. The affected cases are:
+
+- `associated_callable_values_retain_interface_and_method_type_arguments`
+- `computed_associated_trait_method_values_preserve_origins_and_generic_arguments`
+- `generic_associated_method_values_infer_remaining_parameters_from_context`
+- `generic_method_values_accept_explicit_method_type_arguments`
+- `generic_trait_method_values_use_context_or_explicit_arguments`
+
+They fail before execution with the diagnostic that a generic function value
+requires instantiation through a call or function type context. This remains an
+open frontend issue, not evidence that the execution suite fully passes.
+
+Final targeted validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --test instance_budget --test function_types --test environment_types --test abstract_values`: exit 0, `/tmp/luna-tools-d4k05lki/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test effect_contracts --test snapshot_contracts --test comptime_bytecode --test comptime_receivers --test comptime_local_types`: exit 0, `/tmp/luna-tools-h78_9lan/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: exit 0, `/tmp/luna-tools-p0glcb66/result.json`; `git diff --check` passed.
+- Final `python3 -B development/check.py --timeout 900 -- test -p luna --test execution`: exit 101, 1,360 passed and the same five baseline failures, `/tmp/luna-tools-lqej_gyj/result.json`.
