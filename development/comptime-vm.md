@@ -7,13 +7,15 @@ interpreter. `comptime_compiler` lowers supported closed function bodies before
 execution; `comptime_interpretor::bytecode` runs a program counter, fixed dense
 registers and explicit lexical scope records. Mixed-stage interpretation and
 scheduled runtime cleanup continue to use the existing interpreter. This is not
-yet a complete bytecode VM: default/reference/trait calls, general primitives, effect/query suspension,
+yet a complete bytecode VM: reference/trait calls, general primitives, effect/query suspension,
 specialized-code caching and the unified value representation remain outstanding.
 
 Compilation traverses control with a bounded heap worklist, including untaken
-branches. Unsupported operations select the old body path before any bytecode
-instruction executes; execution errors never trigger fallback. Constants and
-type descriptors own bounded copies of immutable NIR data; active frames retain
+branches. A function body or default expression selects its carrier before that
+execution unit starts. A suspended caller is never replayed when a default or
+callee needs tree interpretation; execution errors never trigger fallback.
+Constants, type descriptors and default templates own bounded copies of immutable
+NIR data; active frames retain
 the code through Arc. These are not frozen query-cache artifacts. Immutable
 package-body code can be reused within one interpreter.
 No opcode delegates a child expression tree back to `eval`.
@@ -1165,7 +1167,7 @@ body starts; no already-executed parent work is replayed. The native recursion
 limit remains because contracts and migration boundaries still use native calls.
 This does not establish unrestricted-depth execution or a performance speedup.
 
-Default and reference arguments, trait-method call plans, effect environments,
+Reference arguments, trait-method call plans, effect environments,
 and IIR/scheduled cleanup remain on the migration path. In particular an active
 effect environment selects tree evaluation before body execution: scope-targeted
 control transfer has not yet been implemented for suspended bytecode frames.
@@ -1201,3 +1203,61 @@ boundary without weakening source verification. The deep-recursion comparison
 also exposed the existing tree expression-depth limit; shallow inputs still
 compare both carriers, while deeper inputs check the explicit frame path and
 recovery after its own invocation-depth limit.
+
+## Suspended default-expression evaluation (2026-10-30)
+
+Default arguments now participate in compiled call preparation. Their checked
+NIR templates are retained by the code with bounded copying; the invocation
+driver selects and runs each default in its own environment and execution frame.
+That environment contains prepared declaration-parameter bindings, not the
+caller's locals. Returning a default value restores the environment for later
+defaults before resuming the caller. A default can invoke functions and nested
+defaults without adding native call frames on supported compiled paths.
+
+The shared driver distinguishes invocation completion (which checks function
+contracts and restores activation state) from default completion (which retains
+the enclosing invocation identity). Default errors and control flow propagate
+through suspended frames without entering the pending callee or repeating
+explicit argument effects. Unsupported default expressions select tree execution
+independently; the enclosing compiled caller remains suspended.
+
+The call plan still requires all explicit arguments before defaults and defaults
+in increasing parameter order, with unique valid slots and the matching
+parameter-binding list. Package phase validation rejects malformed plans; the
+executor also checks each step before evaluating its expression. Calls without
+defaults do not copy argument values into an unused default environment.
+
+A local selected generic instance substitutes its declaration inputs into the
+default through the same budgeted helper used by tree evaluation. This supports
+the existing dynamic-instance preparation carrier; it does not add new source
+function-value default protocols. Trait-interface defaults and reference
+arguments remain on the tree path with their existing semantics.
+
+The separate `bytecode_default_evaluations()` counter records actual compiled
+default executions; `bytecode_invocations()` continues to count function bodies
+only. Default code is currently compiled per evaluation, not persistently cached.
+No invocation result cache eligibility changes, and no speedup claim, follow
+from this migration.
+
+Validation from `/home/fin/luna`, all commands exited 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  223 tests passed, including defensive default-order checks before evaluating
+  the next expression; report `/tmp/luna-tools-6brxjbe6/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler --test control`:
+  seven tests passed, including bounded owned default templates and escaped
+  S-expression dumps; report `/tmp/luna-tools-9giivlgb/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_defaults --test comptime_bytecode --test comptime_clause_inputs --test execution --test builder_invocations --test library_meta_math`:
+  seven default-frame tests, six ordinary bytecode tests, 43 clause-input tests,
+  1,365 execution cases, 73 builder cases and nine shipped meta-math tests passed;
+  report `/tmp/luna-tools-psw1x2ev/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  report `/tmp/luna-tools-owjlk_2f/result.json`.
+
+The failure/recovery source test uses valid recursive default computation and
+checks that exhaustion prevents callee entry. Unproven machine arithmetic stays
+rejected by source verification. Malformed ordering is tested both at package
+admission and directly at the executor boundary; the latter is an internal test,
+not a new public validation bypass. Selected-instance substitution and early
+control-flow tests construct NIR carriers explicitly and do not claim new source
+syntax support.

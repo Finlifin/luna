@@ -43,6 +43,38 @@ struct Activation<'a> {
     saved: SavedInvocation,
 }
 
+enum Execution<'a> {
+    Invocation(Box<Activation<'a>>),
+    Default {
+        expression: Arc<Expr>,
+        environment: Environment,
+    },
+}
+
+impl Execution<'_> {
+    fn parts(&mut self) -> (&Expr, Option<DeclarationId>, &mut Environment) {
+        match self {
+            Self::Invocation(activation) => {
+                let frame = &mut activation.frame;
+                (
+                    frame.body.expression(),
+                    frame.stable_code,
+                    &mut frame.environment,
+                )
+            }
+            Self::Default {
+                expression,
+                environment,
+            } => (expression, None, environment),
+        }
+    }
+}
+
+struct Completion {
+    flow: Result<Flow, Error>,
+    defaults: Option<Environment>,
+}
+
 impl<'a> Interpreter<'a> {
     pub(super) fn invoke_value_scoped(
         &mut self,
@@ -56,66 +88,108 @@ impl<'a> Interpreter<'a> {
 
     // Native recursion is retained only at migration and contract boundaries.
     // Compiled caller/callee chains suspend their owned frames in this stack.
-    fn run_invocations(&mut self, mut activation: Box<Activation<'a>>) -> Result<Value, Error> {
-        let mut stack: Vec<(Box<Activation<'a>>, bytecode::Frame)> = Vec::new();
+    fn run_invocations(&mut self, activation: Box<Activation<'a>>) -> Result<Value, Error> {
+        let mut execution = Execution::Invocation(activation);
+        let mut stack: Vec<(Execution<'a>, bytecode::Frame)> = Vec::new();
         loop {
-            let frame = &mut activation.frame;
-            let code = self.invocation_code(frame.body.expression(), frame.stable_code);
+            let (expression, identity, environment) = execution.parts();
+            let code = self.invocation_code(expression, identity);
             let mut result = match code {
-                Ok(Some(code)) => match self.start_frame(&code, &mut frame.environment) {
+                Ok(Some(code)) => match self.start_frame(&code, environment) {
                     Ok(code_frame) => {
-                        stack.push((activation, code_frame));
+                        match &execution {
+                            Execution::Invocation(_) => self.bytecode_invocations += 1,
+                            Execution::Default { .. } => self.bytecode_default_evaluations += 1,
+                        }
+                        stack.push((execution, code_frame));
                         None
                     }
-                    Err(error) => Some(self.complete_invocation(activation, Err(error))),
+                    Err(error) => Some(self.complete_execution(execution, Err(error))),
                 },
                 Ok(None) => {
-                    let result = self.eval(frame.body.expression(), &mut frame.environment);
-                    Some(self.complete_invocation(activation, result))
+                    let result = self.eval(expression, environment);
+                    Some(self.complete_execution(execution, result))
                 }
-                Err(error) => Some(self.complete_invocation(activation, Err(error))),
+                Err(error) => Some(self.complete_execution(execution, Err(error))),
             };
             loop {
                 if let Some(delivered) = result.take() {
                     let Some((_, parent)) = stack.last_mut() else {
-                        return delivered;
+                        return match delivered.flow? {
+                            Flow::Value(value) => Ok(value),
+                            _ => Err(self.failure(ErrorKind::InvalidControlFlow, None)),
+                        };
                     };
-                    match delivered.and_then(|value| parent.deliver(value)) {
-                        Ok(()) => {}
-                        Err(error) => {
-                            // Every entered activation must restore its caller even
-                            // when preparation, execution or delivery failed.
-                            let (mut parent, code) = stack.pop().unwrap();
-                            parent.frame.environment = code.restore_environment();
-                            result = Some(self.complete_invocation(parent, Err(error)));
-                            continue;
-                        }
+                    let propagation = match parent.receive(delivered.flow, delivered.defaults) {
+                        Ok(None) => None,
+                        Ok(Some(flow)) => Some(Ok(flow)),
+                        Err(error) => Some(Err(error)),
+                    };
+                    if let Some(flow) = propagation {
+                        // Defaults can exit their enclosing invocation as well as
+                        // fail. Restore every suspended environment before delivery.
+                        let (mut parent, code) = stack.pop().unwrap();
+                        *parent.parts().2 = code.restore_environment();
+                        result = Some(self.complete_execution(parent, flow));
+                        continue;
                     }
                 }
-                let (_, code) = stack.last_mut().expect("active invocation");
+                let (_, code) = stack.last_mut().expect("active execution");
                 match self.resume_frame(code, 1024) {
                     Ok(bytecode::Progress::Suspended) => {}
+                    Ok(bytecode::Progress::Default {
+                        expression,
+                        environment,
+                    }) => {
+                        execution = Execution::Default {
+                            expression,
+                            environment,
+                        };
+                        break;
+                    }
                     Ok(bytecode::Progress::Call { callee, arguments }) => {
                         match self.begin_invocation(callee, arguments, None) {
                             Ok(child) => {
-                                activation = child;
+                                execution = Execution::Invocation(child);
                                 break;
                             }
-                            Err(error) => result = Some(Err(error)),
+                            Err(error) => {
+                                result = Some(Completion {
+                                    flow: Err(error),
+                                    defaults: None,
+                                })
+                            }
                         }
                     }
                     outcome => {
                         let (mut completed, code) = stack.pop().unwrap();
-                        completed.frame.environment = code.restore_environment();
+                        *completed.parts().2 = code.restore_environment();
                         let flow = match outcome {
                             Ok(bytecode::Progress::Complete(flow)) => Ok(flow),
                             Err(error) => Err(error),
                             _ => unreachable!("handled suspension"),
                         };
-                        result = Some(self.complete_invocation(completed, flow));
+                        result = Some(self.complete_execution(completed, flow));
                     }
                 }
             }
+        }
+    }
+
+    fn complete_execution(
+        &mut self,
+        execution: Execution<'a>,
+        flow: Result<Flow, Error>,
+    ) -> Completion {
+        match execution {
+            Execution::Invocation(activation) => Completion {
+                flow: self.complete_invocation(activation, flow).map(Flow::Value),
+                defaults: None,
+            },
+            Execution::Default { environment, .. } => Completion {
+                flow,
+                defaults: Some(environment),
+            },
         }
     }
 

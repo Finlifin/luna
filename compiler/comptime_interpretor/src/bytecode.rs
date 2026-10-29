@@ -8,20 +8,32 @@ pub(super) struct Frame {
     environment: Environment,
     imported: Vec<(LocalId, usize)>,
     terminal: bool,
-    waiting: Option<usize>,
+    waiting: Option<Waiting>,
     calls: BTreeMap<usize, PendingCall>,
     pc: usize,
     slots: Vec<Option<Value>>,
     scopes: Vec<Vec<usize>>,
 }
 
+enum Waiting {
+    Call(usize),
+    Default { call: usize, destination: usize },
+}
+
 struct PendingCall {
     callee: Value,
     arguments: Vec<Option<Value>>,
+    parameter_bindings: Vec<LocalId>,
+    defaults: Environment,
+    last_default: Option<usize>,
 }
 
 #[derive(Debug)]
 pub(super) enum Progress {
+    Default {
+        expression: Arc<Expr>,
+        environment: Environment,
+    },
     Call {
         callee: Value,
         arguments: Vec<Value>,
@@ -55,8 +67,12 @@ impl fmt::Display for Frame {
             write!(f, " ({binding} {slot})")?;
         }
         write!(f, ") (waiting")?;
-        if let Some(destination) = self.waiting {
-            write!(f, " {destination}")?;
+        match &self.waiting {
+            Some(Waiting::Call(destination)) => write!(f, " (call {destination})")?,
+            Some(Waiting::Default { call, destination }) => {
+                write!(f, " (default {call} {destination})")?
+            }
+            None => {}
         }
         write!(f, ") (calls")?;
         for (id, call) in &self.calls {
@@ -67,6 +83,14 @@ impl fmt::Display for Frame {
                     None => write!(f, " (pending)")?,
                 }
             }
+            write!(f, ") (defaults")?;
+            for (binding, value) in &call.defaults {
+                write!(f, " ({binding} {value})")?;
+            }
+            write!(f, ") (last-default")?;
+            if let Some(parameter) = call.last_default {
+                write!(f, " {parameter}")?;
+            }
             write!(f, "))")?;
         }
         write!(f, ") (environment-bindings {}))", self.environment.len())
@@ -75,12 +99,46 @@ impl fmt::Display for Frame {
 
 impl Frame {
     pub(super) fn deliver(&mut self, value: Value) -> Result<(), Error> {
-        let destination = self.waiting.take().ok_or(Error {
-            kind: ErrorKind::InvalidControlFlow,
-            source: None,
-        })?;
+        let Some(Waiting::Call(destination)) = self.waiting else {
+            return Err(Error {
+                kind: ErrorKind::InvalidControlFlow,
+                source: None,
+            });
+        };
+        self.waiting = None;
         self.slots[destination] = Some(value);
         Ok(())
+    }
+
+    pub(super) fn receive(
+        &mut self,
+        result: Result<Flow, Error>,
+        defaults: Option<Environment>,
+    ) -> Result<Option<Flow>, Error> {
+        if let Some(environment) = defaults {
+            let Some(Waiting::Default { call, destination }) = self.waiting else {
+                return Err(Error {
+                    kind: ErrorKind::InvalidControlFlow,
+                    source: None,
+                });
+            };
+            let pending = self.calls.get_mut(&call).ok_or(Error {
+                kind: ErrorKind::InvalidControlFlow,
+                source: None,
+            })?;
+            pending.defaults = environment;
+            self.waiting = Some(Waiting::Call(destination));
+        }
+        match result? {
+            Flow::Value(value) => {
+                self.deliver(value)?;
+                Ok(None)
+            }
+            flow => {
+                self.waiting = None;
+                Ok(Some(flow))
+            }
+        }
     }
 
     pub(super) fn restore_environment(mut self) -> Environment {
@@ -123,6 +181,10 @@ impl CodeCache {
 impl<'a> Interpreter<'a> {
     pub fn bytecode_invocations(&self) -> usize {
         self.bytecode_invocations
+    }
+
+    pub fn bytecode_default_evaluations(&self) -> usize {
+        self.bytecode_default_evaluations
     }
 
     pub fn bytecode_compilations(&self) -> usize {
@@ -192,6 +254,17 @@ impl<'a> Interpreter<'a> {
                         Err(error) => break Err(error),
                     }
                 }
+                Ok(Progress::Default {
+                    expression,
+                    mut environment,
+                }) => {
+                    let result = self.eval(&expression, &mut environment);
+                    match frame.receive(result, Some(environment)) {
+                        Ok(None) => {}
+                        Ok(Some(flow)) => break Ok(flow),
+                        Err(error) => break Err(error),
+                    }
+                }
                 Ok(Progress::Complete(flow)) => break Ok(flow),
                 Err(error) => break Err(error),
             }
@@ -210,7 +283,6 @@ impl<'a> Interpreter<'a> {
             code.registers(),
             code.instructions().first().map(|i| i.source),
         )?;
-        self.bytecode_invocations += 1;
         let mut frame = Frame {
             code: code.clone(),
             environment: std::mem::take(environment),
@@ -267,6 +339,7 @@ impl<'a> Interpreter<'a> {
                     call,
                     callee,
                     parameter_bindings,
+                    prepare_defaults,
                 } => {
                     let callee = frame.slots[*callee].take().ok_or_else(missing)?;
                     let parameters = self.call_parameters(&callee, source)?;
@@ -279,16 +352,66 @@ impl<'a> Interpreter<'a> {
                         PendingCall {
                             callee,
                             arguments: (0..parameters.len()).map(|_| None).collect(),
+                            parameter_bindings: if *prepare_defaults {
+                                parameter_bindings.clone()
+                            } else {
+                                vec![]
+                            },
+                            defaults: Environment::new(),
+                            last_default: None,
                         },
                     );
                 }
-                Op::CheckCallArgument { call, parameter } => {
-                    let pending = frame.calls.get(call).ok_or_else(missing)?;
+                Op::CheckCallArgument {
+                    call,
+                    parameter,
+                    is_default,
+                } => {
+                    let pending = frame.calls.get_mut(call).ok_or_else(missing)?;
                     if *parameter >= pending.arguments.len()
                         || pending.arguments[*parameter].is_some()
                     {
                         return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
                     }
+                    if *is_default {
+                        if pending.parameter_bindings.is_empty()
+                            || pending.last_default.is_some_and(|last| last >= *parameter)
+                        {
+                            return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
+                        }
+                        pending.last_default = Some(*parameter);
+                    } else if pending.last_default.is_some() {
+                        return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
+                    }
+                }
+                Op::DefaultArgument {
+                    call,
+                    destination,
+                    value,
+                    dynamic,
+                } => {
+                    let pending = frame.calls.get_mut(call).ok_or_else(missing)?;
+                    let expression = if *dynamic
+                        && matches!(&pending.callee,
+                        Value::Closure(closure) if closure.declaration_instance().is_some())
+                    {
+                        Arc::new(self.instance_default_expression(
+                            source,
+                            value,
+                            &pending.callee,
+                        )?)
+                    } else {
+                        value.clone()
+                    };
+                    let environment = std::mem::take(&mut pending.defaults);
+                    frame.waiting = Some(Waiting::Default {
+                        call: *call,
+                        destination: *destination,
+                    });
+                    return Ok(Progress::Default {
+                        expression,
+                        environment,
+                    });
                 }
                 Op::StoreCallArgument {
                     call,
@@ -298,7 +421,13 @@ impl<'a> Interpreter<'a> {
                     let value = frame.slots[*value].take().ok_or_else(missing)?;
                     let pending = frame.calls.get_mut(call).ok_or_else(missing)?;
                     let slot = pending.arguments.get_mut(*parameter).ok_or_else(missing)?;
-                    *slot = Some(self.prepare_argument(*parameter, source, value)?);
+                    let value = self.prepare_argument(*parameter, source, value)?;
+                    if !pending.parameter_bindings.is_empty() {
+                        pending
+                            .defaults
+                            .insert(pending.parameter_bindings[*parameter], value.clone());
+                    }
+                    *slot = Some(value);
                 }
                 Op::Invoke { call, destination } => {
                     let pending = frame.calls.remove(call).ok_or_else(missing)?;
@@ -307,7 +436,7 @@ impl<'a> Interpreter<'a> {
                         .into_iter()
                         .collect::<Option<Vec<_>>>()
                         .ok_or_else(|| self.failure(ErrorKind::Arity, Some(source)))?;
-                    frame.waiting = Some(*destination);
+                    frame.waiting = Some(Waiting::Call(*destination));
                     return Ok(Progress::Call {
                         callee: pending.callee,
                         arguments,
@@ -488,6 +617,86 @@ impl<'a> Interpreter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_default_order_is_checked_before_evaluating_the_next_expression() {
+        let package = Package::default();
+        let source = SourceRange { start: 1, end: 2 };
+        let boolean = Term::Primitive(Primitive::Bool);
+        let binding = LocalId { owner: 1, index: 0 };
+        let parameters = vec![
+            LocalId { owner: 2, index: 0 },
+            LocalId { owner: 2, index: 1 },
+        ];
+        let signature = Term::ComptimeFunction(Box::new(Term::Function {
+            parameters: parameters
+                .iter()
+                .map(|_| nir::Parameter {
+                    sort: nir::Sort::Runtime,
+                    ty: boolean.clone(),
+                })
+                .collect(),
+            result: Box::new(boolean.clone()),
+        }));
+        let literal = Expr {
+            source,
+            ty: boolean.clone(),
+            kind: K::Literal(Literal::Bool(true)),
+        };
+        let closure = Value::Closure(Arc::new(Closure {
+            definition_source: None,
+            origin: None,
+            instance_arguments: None,
+            parameters: parameters.clone(),
+            environment: Environment::new(),
+            capture_order: vec![],
+            body: Arc::new(literal.clone()),
+            ty: signature.clone(),
+        }));
+        for fault in 0..3 {
+            let mut arguments: Vec<_> = (0..2)
+                .map(|parameter| nir::program::CallArgument {
+                    passing: nir::program::ArgumentPassing::Value,
+                    parameter,
+                    is_default: true,
+                    value: literal.clone(),
+                })
+                .collect();
+            let mut parameter_bindings = parameters.clone();
+            match fault {
+                0 => arguments.reverse(),
+                1 => arguments[1].is_default = false,
+                2 => parameter_bindings.clear(),
+                _ => unreachable!(),
+            }
+            // This expression would fail with MissingBinding if evaluated.
+            arguments[1].value.kind = K::Local(LocalId {
+                owner: 99,
+                index: 0,
+            });
+            let body = Expr {
+                source,
+                ty: boolean.clone(),
+                kind: K::Call {
+                    callee: Box::new(Expr {
+                        source,
+                        ty: signature.clone(),
+                        kind: K::Local(binding),
+                    }),
+                    arguments,
+                    parameter_bindings,
+                },
+            };
+            let code = Arc::new(comptime_compiler::compile(&body, &mut 1000).unwrap());
+            let mut environment = Environment::new();
+            environment.insert(binding, closure.clone());
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            assert_eq!(
+                vm.execute_code(&code, &mut environment).unwrap_err().kind,
+                ErrorKind::InvalidCallPlan
+            );
+        }
+    }
 
     #[test]
     fn pending_call_requires_delivery_and_rejects_bad_slots_before_effects() {
@@ -911,7 +1120,7 @@ mod tests {
         let failure = loop {
             match vm.resume_frame(&mut frame, 1) {
                 Ok(Progress::Suspended) => continue,
-                Ok(Progress::Complete(_) | Progress::Call { .. }) => {
+                Ok(Progress::Complete(_) | Progress::Call { .. } | Progress::Default { .. }) => {
                     panic!("malformed operation completed")
                 }
                 Err(error) => break error,

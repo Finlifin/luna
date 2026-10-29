@@ -1,5 +1,5 @@
 //! Linear invocation code. Unsupported operations are detected before execution.
-//! Constants own bounded copies of immutable typed NIR leaves; no instruction evaluates a tree.
+//! Constants and default templates own bounded typed NIR copies; opcodes never evaluate trees.
 pub mod scalar;
 use nir::program::{Expr, ExprKind as K, LocalId, SourceRange};
 use nir::{Primitive, Term};
@@ -16,10 +16,18 @@ pub enum Op {
         call: Register,
         callee: Register,
         parameter_bindings: Vec<LocalId>,
+        prepare_defaults: bool,
     },
     CheckCallArgument {
         call: Register,
         parameter: usize,
+        is_default: bool,
+    },
+    DefaultArgument {
+        call: Register,
+        destination: Register,
+        value: Arc<Expr>,
+        dynamic: bool,
     },
     StoreCallArgument {
         call: Register,
@@ -138,16 +146,31 @@ impl fmt::Display for Program {
                     call,
                     callee,
                     parameter_bindings,
+                    prepare_defaults,
                 } => {
-                    write!(f, "(begin-call {call} {callee} (parameters")?;
+                    write!(
+                        f,
+                        "(begin-call {call} {callee} (prepare-defaults {prepare_defaults}) (parameters"
+                    )?;
                     for binding in parameter_bindings {
                         write!(f, " {binding}")?;
                     }
                     write!(f, "))")?;
                 }
-                Op::CheckCallArgument { call, parameter } => {
-                    write!(f, "(check-call-argument {call} {parameter})")?
-                }
+                Op::CheckCallArgument {
+                    call,
+                    parameter,
+                    is_default,
+                } => write!(f, "(check-call-argument {call} {parameter} {is_default})")?,
+                Op::DefaultArgument {
+                    call,
+                    destination,
+                    value,
+                    dynamic,
+                } => write!(
+                    f,
+                    "(default-argument {call} {destination} (dynamic {dynamic}) {value})"
+                )?,
                 Op::StoreCallArgument {
                     call,
                     parameter,
@@ -328,9 +351,9 @@ pub fn compile(body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
                             callee.kind,
                             K::Function(_) | K::FunctionInstance { .. } | K::Local(_)
                         )
-                        && arguments.iter().all(|a| {
-                            !a.is_default && a.passing == nir::program::ArgumentPassing::Value
-                        }) =>
+                        && arguments
+                            .iter()
+                            .all(|a| a.passing == nir::program::ArgumentPassing::Value) =>
                     {
                         *fuel = fuel
                             .checked_sub(arguments.len() + parameter_bindings.len())
@@ -354,12 +377,32 @@ pub fn compile(body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
                                     value,
                                 },
                             );
-                            work.push(Work::Expression(&argument.value, value));
+                            if argument.is_default {
+                                nir::copy_budget::charge_substitution(
+                                    &argument.value,
+                                    &[],
+                                    &[],
+                                    fuel,
+                                )
+                                .map_err(|error| copy_error(error, argument.value.source))?;
+                                emit(
+                                    &mut work,
+                                    Op::DefaultArgument {
+                                        call,
+                                        destination: value,
+                                        value: Arc::new(argument.value.clone()),
+                                        dynamic: matches!(callee.kind, K::Local(_)),
+                                    },
+                                );
+                            } else {
+                                work.push(Work::Expression(&argument.value, value));
+                            }
                             emit(
                                 &mut work,
                                 Op::CheckCallArgument {
                                     call,
                                     parameter: argument.parameter,
+                                    is_default: argument.is_default,
                                 },
                             );
                         }
@@ -369,6 +412,7 @@ pub fn compile(body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
                                 call,
                                 callee: target,
                                 parameter_bindings: parameter_bindings.clone(),
+                                prepare_defaults: arguments.iter().any(|a| a.is_default),
                             },
                         );
                         work.push(Work::Expression(callee, target));

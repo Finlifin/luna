@@ -112,6 +112,7 @@ impl<'a> Interpreter<'a> {
         })?;
         Ok(Self {
             bytecode_invocations: 0,
+            bytecode_default_evaluations: 0,
             bytecode_compilations: 0,
             bytecode_cache: Default::default(),
             declaration_world: None,

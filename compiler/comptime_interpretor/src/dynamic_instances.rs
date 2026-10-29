@@ -16,6 +16,22 @@ impl Interpreter<'_> {
         defaults: &mut Environment,
         caller: &mut Environment,
     ) -> Result<Flow, Error> {
+        let value = self.instance_default_expression(construction, &argument.value, callee)?;
+        let prepared = nir::program::CallArgument {
+            value,
+            passing: argument.passing,
+            parameter: argument.parameter,
+            is_default: true,
+        };
+        self.evaluate_default(construction, &prepared, defaults, caller)
+    }
+
+    pub(super) fn instance_default_expression(
+        &mut self,
+        construction: SourceRange,
+        expression: &Expr,
+        callee: &Value,
+    ) -> Result<Expr, Error> {
         let Value::Closure(closure) = callee else {
             return Err(self.failure(ErrorKind::InvalidCallPlan, Some(construction)));
         };
@@ -28,14 +44,21 @@ impl Interpreter<'_> {
             .copied()
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(construction)))?;
         let binders = self.input_binders(&definition.type_parameters);
-        self.evaluate_bound_default(
-            construction,
-            argument,
-            &binders,
-            arguments,
-            defaults,
-            caller,
-        )
+        self.bound_default_expression(expression, &binders, arguments)
+    }
+
+    fn bound_default_expression(
+        &mut self,
+        expression: &Expr,
+        binders: &[nir::DeclarationParameter],
+        arguments: &[Term],
+    ) -> Result<Expr, Error> {
+        self.charge_copy_work(Some(expression.source), |fuel| {
+            nir::copy_budget::charge_substitution(expression, binders, arguments, fuel)
+        })?;
+        expression
+            .instantiate_parameters(binders, arguments)
+            .map_err(|_| self.failure(ErrorKind::Type, Some(expression.source)))
     }
 
     pub(super) fn evaluate_bound_default(
@@ -47,13 +70,7 @@ impl Interpreter<'_> {
         defaults: &mut Environment,
         caller: &mut Environment,
     ) -> Result<Flow, Error> {
-        self.charge_copy_work(Some(argument.value.source), |fuel| {
-            nir::copy_budget::charge_substitution(&argument.value, binders, arguments, fuel)
-        })?;
-        let value = argument
-            .value
-            .instantiate_parameters(binders, arguments)
-            .map_err(|_| self.failure(ErrorKind::Type, Some(argument.value.source)))?;
+        let value = self.bound_default_expression(&argument.value, binders, arguments)?;
         let prepared = nir::program::CallArgument {
             passing: argument.passing,
             parameter: argument.parameter,

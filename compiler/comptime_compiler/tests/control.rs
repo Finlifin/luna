@@ -132,3 +132,46 @@ fn invocation_code_distinguishes_normal_form_application() {
         Err(Error::Unsupported(_))
     ));
 }
+
+#[test]
+fn default_templates_are_owned_and_copy_work_is_bounded() {
+    let code = {
+        let source = SourceRange { start: 1, end: 2 };
+        let ty = Term::Primitive(Primitive::Str);
+        let body = Expr {
+            source,
+            ty: ty.clone(),
+            kind: K::Call {
+                callee: Box::new(Expr {
+                    source,
+                    ty: Term::ComptimeFunction(Box::new(Term::Function {
+                        parameters: vec![nir::Parameter {
+                            sort: nir::Sort::Runtime,
+                            ty: ty.clone(),
+                        }],
+                        result: Box::new(ty.clone()),
+                    })),
+                    kind: K::Local(LocalId { owner: 1, index: 0 }),
+                }),
+                parameter_bindings: vec![LocalId { owner: 2, index: 0 }],
+                arguments: vec![nir::program::CallArgument {
+                    passing: nir::program::ArgumentPassing::Value,
+                    parameter: 0,
+                    is_default: true,
+                    value: Expr {
+                        source,
+                        ty,
+                        kind: K::Literal(nir::program::Literal::String("\"\n".repeat(2048))),
+                    },
+                }],
+            },
+        };
+        assert!(matches!(compile(&body, &mut 100), Err(Error::Budget(_))));
+        compile(&body, &mut 20_000).unwrap()
+    };
+    assert!(code.storage_work() >= 4096);
+    let dump = code.to_string();
+    assert!(dump.contains("(default-argument "));
+    assert!(dump.contains("(prepare-defaults true)"));
+    assert!(dump.contains("\\\"\\n"));
+}

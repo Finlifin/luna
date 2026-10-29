@@ -762,6 +762,7 @@ enum PointerCopyPermission<'a> {
 
 pub struct Interpreter<'a> {
     bytecode_invocations: usize,
+    bytecode_default_evaluations: usize,
     bytecode_compilations: usize,
     bytecode_cache: bytecode::CodeCache,
     enum_builder:
@@ -1621,6 +1622,7 @@ impl<'a> Interpreter<'a> {
             })?;
         Ok(Self {
             bytecode_invocations: 0,
+            bytecode_default_evaluations: 0,
             bytecode_compilations: 0,
             bytecode_cache: Default::default(),
             declaration_world: Some(package),
