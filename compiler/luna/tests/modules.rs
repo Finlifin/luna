@@ -1,4 +1,7 @@
 //! Source discovery, module identity, resolution and execution through the driver.
+#[path = "support/primitive_bindings.rs"]
+mod primitive_bindings;
+
 use comptime_interpretor::{Budget, Interpreter, Value};
 use luna::cli::{Emit, Options};
 use luna::frontend::{self, Artifact};
@@ -139,7 +142,7 @@ impl Project {
         for (name, text) in files {
             let path = root.join(name);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, text).unwrap();
+            std::fs::write(path, primitive_bindings::with_bool_binding(text)).unwrap();
         }
         Self(root, false)
     }

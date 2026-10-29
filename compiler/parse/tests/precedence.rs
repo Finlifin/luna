@@ -101,9 +101,11 @@ fn prefixes_include_postfix_chains_and_parentheses_override_scope() {
 }
 
 #[test]
-fn bool_type_keyword_is_not_a_boolean_literal_or_bindable_identifier() {
-    let (ast, node) = parse("bool");
-    assert_eq!(ast.get_node_kind(node), Some(NodeKind::BoolType));
+fn primitive_type_names_are_identifiers_and_boolean_literals_are_literals() {
+    for name in ["bool", "char", "void", "NoReturn", "u8", "Type"] {
+        let (ast, node) = parse(name);
+        assert_eq!(ast.get_node_kind(node), Some(NodeKind::Id), "{name}");
+    }
     for literal in ["true", "false"] {
         let (ast, node) = parse(literal);
         assert_eq!(ast.get_node_kind(node), Some(NodeKind::Bool));

@@ -2,6 +2,9 @@
 //! The fixtures use grammar/syntax function, block, literal, use and if forms.
 //! No fixture requires a standard-library API or completed type checking.
 
+#[path = "support/primitive_bindings.rs"]
+mod primitive_bindings;
+
 use std::ffi::OsStr;
 use std::fs;
 use std::io::Read;
@@ -614,7 +617,7 @@ impl Sandbox {
 
     fn write(&self, name: &str, content: impl AsRef<[u8]>) -> PathBuf {
         let path = self.path(name);
-        fs::write(&path, content).unwrap();
+        primitive_bindings::write_fixture(&path, content).unwrap();
         path
     }
 

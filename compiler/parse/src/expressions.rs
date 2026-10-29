@@ -278,7 +278,6 @@ impl Parser<'_> {
                 | TokenKind::Id
                 | TokenKind::False
                 | TokenKind::True
-                | TokenKind::Bool
                 | TokenKind::SelfCap
                 | TokenKind::SelfLower
                 | TokenKind::Underscore

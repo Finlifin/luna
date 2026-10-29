@@ -1,4 +1,7 @@
 //! Real LLVM assembly, native object emission, linking and execution.
+#[path = "support/primitive_bindings.rs"]
+mod primitive_bindings;
+
 use std::{
     fs,
     path::PathBuf,
@@ -15,7 +18,7 @@ impl Work {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&path).unwrap();
-        fs::write(path.join("source.fl"), source).unwrap();
+        primitive_bindings::write_fixture(path.join("source.fl"), source).unwrap();
         Self(path)
     }
     fn build(&self) -> Output {
@@ -4267,7 +4270,8 @@ fn native_source_test_cli_preserves_resource_cleanup() {
 #[test]
 fn native_source_test_packages_select_primary_identity() {
     let w = Work::new("test shared {}");
-    fs::write(w.0.join("dependency.fl"), "test shared {assumes false;}").unwrap();
+    primitive_bindings::write_fixture(w.0.join("dependency.fl"), "test shared {assumes false;}")
+        .unwrap();
     for (primary, expected) in [("1", true), ("2", false)] {
         let out = Command::new(env!("CARGO_BIN_EXE_luna"))
             .current_dir(&w.0)
@@ -7103,9 +7107,9 @@ fn shipped_inline_effect_cleanup_runs_as_native_test() {
 fn native_never_return_channels_preserve_control_flow() {
     for level in ["0", "3"] {
         for source in [
-            "fn stop()->.noreturn'builtin {while true {}}fn choose(flag:bool)->bool {if flag {true}else {stop()}}fn run()->bool {choose(true)}",
-            "fn stop()->.noreturn'builtin {while true {}}fn choose(f:fn()->.noreturn'builtin,flag:bool)->bool {if flag {true}else {f()}}fn run()->bool {choose(stop,true)}",
-            "fn choose(f:fn()->.noreturn'builtin,flag:bool)->bool {if flag {true}else {f()}}fn run()->bool {choose(|| {while true {}},true)}",
+            "fn stop()->.NoReturn'builtin {while true {}}fn choose(flag:bool)->bool {if flag {true}else {stop()}}fn run()->bool {choose(true)}",
+            "fn stop()->.NoReturn'builtin {while true {}}fn choose(f:fn()->.NoReturn'builtin,flag:bool)->bool {if flag {true}else {f()}}fn run()->bool {choose(stop,true)}",
+            "fn choose(f:fn()->.NoReturn'builtin,flag:bool)->bool {if flag {true}else {f()}}fn run()->bool {choose(|| {while true {}},true)}",
         ] {
             let w = Work::new(source);
             success(
@@ -7127,7 +7131,7 @@ fn native_never_return_channels_preserve_control_flow() {
         }
         for entry in ["run", "stop"] {
             let w = Work::new(
-                "trait Duplicate {}trait Retire {fn drop(*self);}impl Duplicate for bool {}fn stop()->.noreturn'builtin {assumes false;while true {}}fn run()->bool {stop()}",
+                "trait Duplicate {}trait Retire {fn drop(*self);}impl Duplicate for bool {}fn stop()->.NoReturn'builtin {assumes false;while true {}}fn run()->bool {stop()}",
             );
             success(
                 &w.command()
@@ -7992,7 +7996,7 @@ fn native_trait_aggregate_result_retains_contracts_and_rejects_local_escape() {
             b"previous output"
         );
         if reason == "precondition" {
-            fs::write(
+            primitive_bindings::write_fixture(
                 w.0.join("source.fl"),
                 format!(
                     "{RESOURCE_HEADER}{}",
@@ -8069,7 +8073,7 @@ fn native_staged_trait_contract_aligns_results_and_entry_snapshots() {
         let output = w.execute();
         success(&output);
         assert_eq!(output.stdout, b"(bool true)\n");
-        fs::write(
+        primitive_bindings::write_fixture(
             w.0.join("source.fl"),
             source.replace("keep(true,true)", "keep(false,true)"),
         )
@@ -9181,7 +9185,7 @@ fn native_symbol_closure_transfers_state_and_retires_environment() {
         "let valid = close(transition);",
         "let valid = close(transition);transition(.closed);",
     );
-    fs::write(w.0.join("source.fl"), invalid).unwrap();
+    primitive_bindings::write_fixture(w.0.join("source.fl"), invalid).unwrap();
     let rejected = resource_build(&w);
     assert!(!rejected.status.success());
     let diagnostic = String::from_utf8_lossy(&rejected.stderr);
@@ -9245,7 +9249,7 @@ fn native_generic_name_views_keep_symbol_and_enum_domains() {
             source.replace("T == Symbol", "T == Identity<Symbol>")
         ),
     ] {
-        fs::write(w.0.join("source.fl"), invalid).unwrap();
+        primitive_bindings::write_fixture(w.0.join("source.fl"), invalid).unwrap();
         let output = resource_build(&w);
         assert!(!output.status.success());
         let diagnostic = String::from_utf8_lossy(&output.stderr);
@@ -9331,7 +9335,7 @@ fn native_error_result_entries_print_only_the_active_payload() {
         ("!Symbol Void", "error .ready"),
     ] {
         let source = format!(
-            "typealias Symbol=.Symbol'builtin;typealias Char=.char'builtin;typealias Void=.void'builtin;typealias Never=.noreturn'builtin;fn run()->{signature} {{{body}}}"
+            "typealias Symbol=.Symbol'builtin;typealias Char=.char'builtin;typealias Void=.void'builtin;typealias Never=.NoReturn'builtin;fn run()->{signature} {{{body}}}"
         );
         let w = Work::new(&source);
         let reference = w.command().args(["--interpret", "run"]).output().unwrap();
@@ -10015,7 +10019,7 @@ fn native_object_can_be_delivered_without_a_linker_and_linked_later() {
         let object = luna::host::object(&ir, &toolchain).unwrap();
         assert!(!object.is_empty());
         let object_path = w.0.join("separate object.o");
-        fs::write(&object_path, object).unwrap();
+        primitive_bindings::write_fixture(&object_path, object).unwrap();
         let linked = Command::new(luna::host::Toolchain::default().linker)
             .arg(&object_path)
             .arg("-lm")
@@ -10037,7 +10041,7 @@ fn native_object_keeps_unresolved_symbols_for_the_link_step() {
     let toolchain = luna::host::Toolchain::default();
     let object = luna::host::object(ir, &toolchain).unwrap();
     fs::write(w.0.join("module.o"), object).unwrap();
-    fs::write(
+    primitive_bindings::write_fixture(
         w.0.join("support.c"),
         "int provided_later(void) { return 0; }\n",
     )
@@ -10183,7 +10187,8 @@ fn emit_object_cli_rejects_conflicts_and_preserves_existing_outputs() {
 #[test]
 fn emit_object_package_output_protects_dependency_sources() {
     let w = Work::new("fn run()->bool {true}");
-    fs::write(w.0.join("dependency.fl"), "fn other()->bool {false}").unwrap();
+    primitive_bindings::write_fixture(w.0.join("dependency.fl"), "fn other()->bool {false}")
+        .unwrap();
     let original = fs::read(w.0.join("dependency.fl")).unwrap();
     for output in ["dependency.fl", "module.o"] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_luna"));
@@ -11004,7 +11009,7 @@ fn native_direct_passing_owned_closure_cleans_invoked_and_uninvoked_captures() {
         "fn invoke(action:Action)->#ready bool {let first:bool=action();action()}",
     );
     assert_ne!(source, twice);
-    fs::write(w.0.join("source.fl"), twice).unwrap();
+    primitive_bindings::write_fixture(w.0.join("source.fl"), twice).unwrap();
     fs::write(w.0.join("native program"), b"previous").unwrap();
     let rejected = w
         .command()
@@ -11031,7 +11036,7 @@ fn native_direct_passing_owned_closure_cleans_invoked_and_uninvoked_captures() {
     // Both ABIs allow the closed invocation, with the same payload cleanup.
     // Neither permits invoking the consumed affine environment a second time.
     let ordinary = source.replace("^attrs.effects.direct_passing effect ready", "effect ready");
-    fs::write(w.0.join("source.fl"), &ordinary).unwrap();
+    primitive_bindings::write_fixture(w.0.join("source.fl"), &ordinary).unwrap();
     let accepted = w
         .command()
         .args([
@@ -11051,7 +11056,7 @@ fn native_direct_passing_owned_closure_cleans_invoked_and_uninvoked_captures() {
         "fn invoke(action:Action)->#ready bool {let first:bool=action();action()}",
     );
     assert_ne!(ordinary, twice);
-    fs::write(w.0.join("source.fl"), twice).unwrap();
+    primitive_bindings::write_fixture(w.0.join("source.fl"), twice).unwrap();
     let rejected = w
         .command()
         .args([
@@ -11141,7 +11146,7 @@ fn native_direct_passing_copy_aggregate_crosses_calls_and_overrides() {
     }
     // Identical machine layout does not provide Copy permission.
     let affine = source.replace("impl Duplicate for Config {}", "");
-    fs::write(w.0.join("source.fl"), affine).unwrap();
+    primitive_bindings::write_fixture(w.0.join("source.fl"), affine).unwrap();
     let rejected = w
         .command()
         .args([
@@ -11279,7 +11284,7 @@ fn native_direct_passing_copy_newtypes_preserve_nominal_delivery() {
         success(&output);
         assert_eq!(output.stdout, reference.stdout);
     }
-    fs::write(
+    primitive_bindings::write_fixture(
         w.0.join("source.fl"),
         source.replace("impl Duplicate for Outer {}", ""),
     )
@@ -11410,7 +11415,7 @@ fn native_direct_passing_error_results_preserve_success_and_error_payloads() {
         success(&output);
         assert_eq!(output.stdout, reference.stdout);
     }
-    fs::write(
+    primitive_bindings::write_fixture(
         w.0.join("source.fl"),
         source.replace("impl Duplicate for !Failure bool {}", ""),
     )
@@ -11864,7 +11869,7 @@ fn native_cross_function_direct_handlers_keep_aggregate_pointer_provenance() {
         assert_eq!(output.stdout, reference.stdout);
     }
     let invalid = source.replace("state.next=not state.next;", "state.target=state.target;");
-    fs::write(w.0.join("source.fl"), invalid).unwrap();
+    primitive_bindings::write_fixture(w.0.join("source.fl"), invalid).unwrap();
     fs::write(w.0.join("native program"), b"previous").unwrap();
     let rejected = w
         .command()
@@ -12149,7 +12154,7 @@ fn native_cross_function_direct_return_transfers_owned_result_to_caller() {
         success(&output);
         assert_eq!(output.stdout, reference.stdout);
     }
-    fs::write(
+    primitive_bindings::write_fixture(
         w.0.join("source.fl"),
         source.replace("make(true)", "make(false)"),
     )
@@ -13975,7 +13980,7 @@ fn native_pointer_effect_callbacks_preserve_ordered_nonlocal_cleanup() {
         returned,
         "            do {var local=false; local.ref}\n        },",
     ));
-    fs::write(invalid.0.join("native program"), b"previous").unwrap();
+    primitive_bindings::write_fixture(invalid.0.join("native program"), b"previous").unwrap();
     let rejected = invalid
         .command()
         .args([
@@ -14383,7 +14388,7 @@ fn native_scalar_newtype_entry_requires_ownership_adapter() {
         }
         for level in ["0", "3"] {
             for valid in [false, true] {
-                fs::write(
+                primitive_bindings::write_fixture(
                     w.0.join("source.fl"),
                     source.replace("assumes false", &format!("assumes {valid}")),
                 )
@@ -14593,7 +14598,8 @@ fn native_computed_newtype_candidates_retire_nested_payloads() {
                 {prefix}fn make()->Outer {{Item {{ready:true}}.as(Inner).as(Outer)}}
                 fn run()->bool {{let (_ and make() is (_ if {flag})) = true else {{return false;}};true}}");
             let rejected = Work::new(&source);
-            fs::write(rejected.0.join("native program"), b"previous").unwrap();
+            primitive_bindings::write_fixture(rejected.0.join("native program"), b"previous")
+                .unwrap();
             let refusal = resource_build(&rejected);
             assert!(!refusal.status.success());
             assert!(
@@ -14750,7 +14756,7 @@ fn native_linker_failure_reports_both_streams_and_preserves_artifact() {
     use std::os::unix::fs::PermissionsExt;
     let w = Work::new("fn run()->bool {true}");
     let linker = w.0.join("diagnostic linker");
-    fs::write(
+    primitive_bindings::write_fixture(
         &linker,
         "#!/bin/sh\nprintf 'link explanation\\033'\nprintf 'link failure\\n' >&2\nexit 7\n",
     )
@@ -15479,7 +15485,7 @@ fn invalid_llvm_tool_directory_preserves_artifact_and_recovers() {
             "is not a directory",
         ),
     ] {
-        fs::write(&config, format!("#!/bin/sh\n{body}\n")).unwrap();
+        primitive_bindings::write_fixture(&config, format!("#!/bin/sh\n{body}\n")).unwrap();
         fs::set_permissions(&config, fs::Permissions::from_mode(0o700)).unwrap();
         fs::write(w.0.join("native program"), b"previous executable").unwrap();
         let output = w
@@ -15524,7 +15530,7 @@ fn successful_linker_must_deliver_nonempty_regular_artifact() {
             "linked executable artifact is not a regular file",
         ),
     ] {
-        fs::write(
+        primitive_bindings::write_fixture(
             &linker,
             format!("#!/bin/sh\nfor destination in \"$@\"; do :; done\n{action}\n"),
         )
@@ -16677,7 +16683,8 @@ fn lexical_function_inputs_cannot_be_reinferred_or_overridden() {
     ] {
         let source = format!("typealias U=.u32'builtin; {body} fn run()->bool {{outer<U>()}}");
         let work = Work::new(&source);
-        fs::write(work.0.join("native program"), b"previous output").unwrap();
+        primitive_bindings::write_fixture(work.0.join("native program"), b"previous output")
+            .unwrap();
         let output = work.build();
         assert!(!output.status.success(), "accepted: {source}");
         let diagnostic = String::from_utf8_lossy(&output.stderr);
@@ -16758,7 +16765,8 @@ fn block_local_staging_keeps_phase_and_fixed_input_boundaries() {
         "fn outer(comptime flag:bool)->bool {fn local(value:flag)->bool {true} local(true)} fn run()->bool {outer(true)}",
     ] {
         let work = Work::new(source);
-        fs::write(work.0.join("native program"), b"previous output").unwrap();
+        primitive_bindings::write_fixture(work.0.join("native program"), b"previous output")
+            .unwrap();
         let output = work.build();
         assert!(!output.status.success(), "accepted: {source}");
         assert_eq!(
@@ -16829,7 +16837,8 @@ fn recursive_lexical_inputs_cannot_be_reinferred() {
             "typealias Type=.Type'builtin;typealias U=.u32'builtin;fn outer(comptime T:Type,value:T)->T {{{body}}} fn run()->bool {{outer(U,42)==42}}"
         );
         let work = Work::new(&source);
-        fs::write(work.0.join("native program"), b"previous output").unwrap();
+        primitive_bindings::write_fixture(work.0.join("native program"), b"previous output")
+            .unwrap();
         let output = work.build();
         assert!(!output.status.success(), "accepted {source}");
         let diagnostic = String::from_utf8_lossy(&output.stderr);
@@ -16857,7 +16866,8 @@ fn ordinary_comptime_lexical_capture_reports_missing_invocation_environment() {
         "comptime fn outer(flag:bool)->bool {comptime fn unused()->bool {flag} true} fn run()->bool {const value=outer(true);value}",
     ] {
         let work = Work::new(source);
-        fs::write(work.0.join("native program"), b"previous output").unwrap();
+        primitive_bindings::write_fixture(work.0.join("native program"), b"previous output")
+            .unwrap();
         let output = work.build();
         assert!(!output.status.success(), "accepted {source}");
         let diagnostic = String::from_utf8_lossy(&output.stderr);
@@ -16960,7 +16970,8 @@ fn conditional_local_constants_preserve_phase_and_failure_scope() {
         "fn run()->bool {const true=true else {return 42;};true}",
     ] {
         let work = Work::new(source);
-        fs::write(work.0.join("native program"), b"previous output").unwrap();
+        primitive_bindings::write_fixture(work.0.join("native program"), b"previous output")
+            .unwrap();
         let output = work.build();
         assert!(!output.status.success(), "accepted {source}");
         let diagnostic = String::from_utf8_lossy(&output.stderr);
@@ -17128,7 +17139,8 @@ fn constant_normal_form_patterns_require_matching_heads_and_domains() {
         let work = Work::new(&format!(
             "{prefix} fn configured(comptime flag:bool)->bool {{{body}}} fn run()->bool {{configured(true)}}"
         ));
-        fs::write(work.0.join("native program"), b"previous output").unwrap();
+        primitive_bindings::write_fixture(work.0.join("native program"), b"previous output")
+            .unwrap();
         let output = work.build();
         assert!(!output.status.success(), "accepted {body}");
         assert!(!String::from_utf8_lossy(&output.stderr).contains("panicked"));
@@ -17212,7 +17224,8 @@ fn staged_const_aliases_do_not_erase_nominal_or_normal_form_heads() {
         let work = Work::new(&format!(
             "{declaration} fn configured(comptime flag:bool)->bool {{const Alias=Wrapped<bool>;let wrong:Alias=true;flag}} fn run()->bool {{configured(true)}}"
         ));
-        fs::write(work.0.join("native program"), b"previous output").unwrap();
+        primitive_bindings::write_fixture(work.0.join("native program"), b"previous output")
+            .unwrap();
         let output = work.build();
         assert!(!output.status.success(), "accepted {declaration}");
         let diagnostic = String::from_utf8_lossy(&output.stderr);
@@ -17234,7 +17247,7 @@ fn local_type_aliases_preserve_member_visibility() {
     let work = Work::new(
         "mod hidden {pub struct Holder where T {private typealias Payload=T;}} fn configured(comptime flag:bool)->bool {const Container=hidden.Holder<bool>;let value:Container.Payload=flag;value} fn run()->bool {configured(true)}",
     );
-    fs::write(work.0.join("native program"), b"previous output").unwrap();
+    primitive_bindings::write_fixture(work.0.join("native program"), b"previous output").unwrap();
     let output = work.build();
     assert!(!output.status.success());
     assert!(!String::from_utf8_lossy(&output.stderr).contains("panicked"));
@@ -17251,7 +17264,8 @@ fn open_constant_formation_cannot_promote_runtime_inputs() {
             "struct Holder where flag:bool {{pub const FLAG=flag;}} fn configured(comptime mode:bool,flag:bool)->bool {{let copy=flag;const Container={initializer};const enabled=Container.FLAG;enabled}} fn run()->bool {{configured(true,true)}}"
         );
         let work = Work::new(&source);
-        fs::write(work.0.join("native program"), b"previous output").unwrap();
+        primitive_bindings::write_fixture(work.0.join("native program"), b"previous output")
+            .unwrap();
         let output = work.build();
         assert!(!output.status.success(), "accepted {source}");
         let diagnostic = String::from_utf8_lossy(&output.stderr);
@@ -17331,7 +17345,8 @@ fn nested_local_type_members_do_not_bypass_private_intermediates() {
         let work = Work::new(&format!(
             "mod hidden {{pub struct Outer where T {{{member}}}}} fn configured(comptime flag:bool)->bool {{const Container=hidden.Outer<bool>;let value:Container.Inner.Payload=flag;value}} fn run()->bool {{configured(true)}}"
         ));
-        fs::write(work.0.join("native program"), b"previous output").unwrap();
+        primitive_bindings::write_fixture(work.0.join("native program"), b"previous output")
+            .unwrap();
         let output = work.build();
         assert!(!output.status.success());
         assert!(!String::from_utf8_lossy(&output.stderr).contains("panicked"));
@@ -17483,7 +17498,8 @@ fn staged_type_factory_members_recheck_access_domains_and_phase() {
         "struct Holder where flag:bool {pub const FLAG=flag;} comptime fn Make(flag:bool)->.Type'builtin {Holder<flag>} fn configured(comptime mode:bool,flag:bool)->bool {const Container=Make(flag);const result=Container.FLAG;result} fn run()->bool {configured(true,true)}",
     ] {
         let work = Work::new(source);
-        fs::write(work.0.join("native program"), b"previous output").unwrap();
+        primitive_bindings::write_fixture(work.0.join("native program"), b"previous output")
+            .unwrap();
         let output = work.build();
         assert!(!output.status.success(), "{source}");
         assert!(!String::from_utf8_lossy(&output.stderr).contains("panicked"));
@@ -17562,7 +17578,8 @@ fn staged_member_annotations_recheck_type_identity_and_access() {
         let work = Work::new(&format!(
             "pure comptime fn Identity<T> ->.Type'builtin {{T}} mod hidden {{pub struct Holder where T {{{member}}}}} comptime fn Make(T:.Type'builtin)->.Type'builtin {{hidden.Holder<T>}} fn configured(comptime T:.Type'builtin,value:defer T)->defer T {{const Container=Make(T);let result:Container.Payload=value;result}} fn run()->bool {{configured(bool,true)}}"
         ));
-        fs::write(work.0.join("native program"), b"previous output").unwrap();
+        primitive_bindings::write_fixture(work.0.join("native program"), b"previous output")
+            .unwrap();
         let output = work.build();
         if member == "pub typealias Payload=T;" {
             success(&output);
@@ -17637,7 +17654,8 @@ fn staged_type_factory_aliases_reject_non_types_and_wrong_identities() {
                 source = source.replace("const Alias =", "const Alias: .Type'builtin =");
             }
             let work = Work::new(&source);
-            fs::write(work.0.join("native program"), b"previous output").unwrap();
+            primitive_bindings::write_fixture(work.0.join("native program"), b"previous output")
+                .unwrap();
             let output = work.build();
             assert!(!output.status.success(), "{source}");
             assert!(!String::from_utf8_lossy(&output.stderr).contains("panicked"));
@@ -17720,7 +17738,8 @@ fn staged_pointer_annotations_recheck_copy_and_domains() {
             "struct Owner {{flag:bool}} {implementation} {body} fn run()->bool {{let value=configured(Owner,Owner {{flag:true}});let {{flag:answer}}=value;answer}}"
         );
         let work = Work::new(&source);
-        fs::write(work.0.join("native program"), b"previous output").unwrap();
+        primitive_bindings::write_fixture(work.0.join("native program"), b"previous output")
+            .unwrap();
         let output = work
             .command()
             .args([
@@ -17809,7 +17828,8 @@ fn staged_parameter_member_instances_recheck_callbacks_and_stage_transfers() {
             "trait Duplicate {{}} trait Retire {{fn drop(*self);}} impl Duplicate for bool {{}} {body}"
         );
         let work = Work::new(&source);
-        fs::write(work.0.join("native program"), b"previous output").unwrap();
+        primitive_bindings::write_fixture(work.0.join("native program"), b"previous output")
+            .unwrap();
         let output = work
             .command()
             .args([
@@ -17883,7 +17903,8 @@ fn staged_generic_type_members_recheck_routing_formation_and_visibility() {
             .replace("configured(false)", "configured(true,false)"),
     ] {
         let work = Work::new(&source);
-        fs::write(work.0.join("native program"), b"previous output").unwrap();
+        primitive_bindings::write_fixture(work.0.join("native program"), b"previous output")
+            .unwrap();
         let output = work.build();
         assert!(!output.status.success(), "{source}");
         assert!(!String::from_utf8_lossy(&output.stderr).contains("panicked"));
@@ -17932,7 +17953,7 @@ fn inferred_member_provenance_does_not_grant_types_or_access() {
         base.replace("const Selected = Container.Inner<bool>;", "const Selected = true;"),
     ] {
         let work = Work::new(&source);
-        fs::write(work.0.join("native program"), b"previous output").unwrap();
+        primitive_bindings::write_fixture(work.0.join("native program"), b"previous output").unwrap();
         let output = work.build();
         assert!(!output.status.success(), "{source}");
         assert!(!String::from_utf8_lossy(&output.stderr).contains("panicked"));
@@ -18051,7 +18072,8 @@ fn conditional_member_aliases_do_not_invent_branch_evidence() {
             &format!("const Selected = {selection};"),
         );
         let work = Work::new(&source);
-        fs::write(work.0.join("native program"), b"previous output").unwrap();
+        primitive_bindings::write_fixture(work.0.join("native program"), b"previous output")
+            .unwrap();
         let output = work.build();
         assert!(!output.status.success(), "{source}");
         assert!(!String::from_utf8_lossy(&output.stderr).contains("panicked"));
@@ -18136,7 +18158,8 @@ fn staged_tuple_aliases_preserve_shape_domains_and_constructor_admission() {
         ),
     ] {
         let work = Work::new(&source);
-        fs::write(work.0.join("native program"), b"previous output").unwrap();
+        primitive_bindings::write_fixture(work.0.join("native program"), b"previous output")
+            .unwrap();
         let output = work
             .command()
             .args([
@@ -18201,7 +18224,8 @@ fn guarded_tuple_member_aliases_keep_guard_and_failure_checks() {
         ),
     ] {
         let work = Work::new(&source);
-        fs::write(work.0.join("native program"), b"previous output").unwrap();
+        primitive_bindings::write_fixture(work.0.join("native program"), b"previous output")
+            .unwrap();
         let output = work
             .command()
             .args([
@@ -18240,7 +18264,8 @@ fn required_comptime_return_boundaries_are_reported_without_publishing_output() 
         "fn run()->bool {const value=do {return false;true};value}".into(),
     ] {
         let work = Work::new(&source);
-        fs::write(work.0.join("native program"), b"previous output").unwrap();
+        primitive_bindings::write_fixture(work.0.join("native program"), b"previous output")
+            .unwrap();
         let mut command = work.command();
         if source == nested {
             command.args([
@@ -18362,7 +18387,8 @@ fn partial_comptime_tuple_evidence_does_not_invent_types_or_skip_checks() {
         .replace("(Outer, flag)", "(Outer, bool, flag)"),
     ] {
         let work = Work::new(&source);
-        fs::write(work.0.join("native program"), b"previous output").unwrap();
+        primitive_bindings::write_fixture(work.0.join("native program"), b"previous output")
+            .unwrap();
         let output = work
             .command()
             .args([
@@ -18446,7 +18472,7 @@ fn partial_comptime_records_preserve_candidate_and_field_checks() {
             .replace("const .pair(Selected, value)", "const Other.pair(Selected, value)"),
     ] {
         let work = Work::new(&source);
-        fs::write(work.0.join("native program"), b"previous output").unwrap();
+        primitive_bindings::write_fixture(work.0.join("native program"), b"previous output").unwrap();
         let output = work.build();
         let diagnostic = String::from_utf8_lossy(&output.stderr);
         assert!(!output.status.success(), "{source}");
@@ -18514,7 +18540,8 @@ fn partial_packet_aliases_keep_nominal_identity_and_scope_checks() {
         base.replace("const saved = packet;", "do {const saved=packet;};"),
     ] {
         let work = Work::new(&source);
-        fs::write(work.0.join("native program"), b"previous output").unwrap();
+        primitive_bindings::write_fixture(work.0.join("native program"), b"previous output")
+            .unwrap();
         let output = work
             .command()
             .args([
@@ -18649,7 +18676,7 @@ fn tuple_type_observations_preserve_storage_and_expire_on_escape() {
     );
     assert_ne!(bad, format!("{header}{base}"));
     let work = Work::new(&bad);
-    fs::write(work.0.join("native program"), b"previous output").unwrap();
+    primitive_bindings::write_fixture(work.0.join("native program"), b"previous output").unwrap();
     let output = work
         .command()
         .args(options)
@@ -18847,7 +18874,7 @@ fn partial_field_observations_preserve_storage_and_reject_stale_types() {
             .replace("Selected.Inner<bool>.Payload", "saved.packet.selected"),
     ] {
         let work = Work::new(&format!("{header}{bad}"));
-        fs::write(work.0.join("native program"), b"previous output").unwrap();
+        primitive_bindings::write_fixture(work.0.join("native program"), b"previous output").unwrap();
         let output = work.command().args(options).args(["--build", "run", "--output", "native program"]).output().unwrap();
         let diagnostic = String::from_utf8_lossy(&output.stderr);
         assert!(!output.status.success(), "{bad}");
@@ -18899,7 +18926,8 @@ fn record_metatype_field_names_do_not_bypass_type_checks() {
         .replace("Closure: bool", "Closure: Identity<bool>"),
     ] {
         let work = Work::new(&source);
-        fs::write(work.0.join("native program"), b"previous output").unwrap();
+        primitive_bindings::write_fixture(work.0.join("native program"), b"previous output")
+            .unwrap();
         let output = work
             .command()
             .args(["--build", "run", "--output", "native program"])
@@ -18966,7 +18994,8 @@ fn returned_type_fields_enforce_stage_and_identity() {
         .replace("selected: bool", "selected: Identity<bool>"),
     ] {
         let work = Work::new(&source);
-        fs::write(work.0.join("native program"), b"previous output").unwrap();
+        primitive_bindings::write_fixture(work.0.join("native program"), b"previous output")
+            .unwrap();
         let output = work
             .command()
             .args(["--build", "run", "--output", "native program"])
@@ -19023,7 +19052,7 @@ fn computed_metatype_paths_preserve_stage_and_type_identity_checks() {
         "pure comptime fn Identity<T> -> .Type'builtin {T} comptime fn Meta()->.Type'builtin {Identity<.Type'builtin>} fn invoke(f:%c fn()->bool)->bool where c:Meta().vars.Closure {f()} fn run()->bool {invoke(||true)}".into(),
     ] {
         let work=Work::new(&source);
-        fs::write(work.0.join("native program"),b"previous output").unwrap();
+        primitive_bindings::write_fixture(work.0.join("native program"),b"previous output").unwrap();
         let output=work.command().args(["--build","run","--output","native program"]).output().unwrap();
         let diagnostic=String::from_utf8_lossy(&output.stderr);
         assert!(!output.status.success(),"{source}");
@@ -19122,7 +19151,8 @@ fn returned_type_member_selection_preserves_domains_and_visibility() {
         .replace("selected: Outer", "selected: Identity<Outer>"),
     ] {
         let work = Work::new(&source);
-        fs::write(work.0.join("native program"), b"previous output").unwrap();
+        primitive_bindings::write_fixture(work.0.join("native program"), b"previous output")
+            .unwrap();
         let output = work
             .command()
             .args(["--build", "run", "--output", "native program"])
@@ -19186,7 +19216,8 @@ fn generic_returned_type_fields_reject_invalid_call_inputs_and_identities() {
         .replace("packet(Outer)", "packet(Identity<Outer>)"),
     ] {
         let work = Work::new(&source);
-        fs::write(work.0.join("native program"), b"previous output").unwrap();
+        primitive_bindings::write_fixture(work.0.join("native program"), b"previous output")
+            .unwrap();
         let output = work
             .command()
             .args(["--build", "run", "--output", "native program"])
@@ -19250,7 +19281,8 @@ fn composite_type_field_probes_do_not_relax_stage_or_member_checks() {
         .replace("selected: Outer", "selected: Identity<Outer>"),
     ] {
         let work = Work::new(&source);
-        fs::write(work.0.join("native program"), b"previous output").unwrap();
+        primitive_bindings::write_fixture(work.0.join("native program"), b"previous output")
+            .unwrap();
         let output = work
             .command()
             .args(["--build", "run", "--output", "native program"])
@@ -19360,7 +19392,8 @@ fn composite_type_receivers_preserve_stage_visibility_and_normal_form_heads() {
         let work = Work::new(&format!(
             "{RESOURCE_HEADER} trait Splice {{assoc RuntimeTarget:.Type'builtin;fn splice(comptime data:Self)->RuntimeTarget;}} impl Splice for bool {{assoc RuntimeTarget:.Type'builtin=bool;fn splice(comptime data:bool)->bool {{data}}}} {source}"
         ));
-        fs::write(work.0.join("native program"), b"previous output").unwrap();
+        primitive_bindings::write_fixture(work.0.join("native program"), b"previous output")
+            .unwrap();
         let output = work
             .command()
             .args([
@@ -19440,7 +19473,8 @@ fn computed_static_method_selection_checks_stage_access_and_arguments() {
         .replace("do {Ops}", "do {Identity<Ops>}"),
     ] {
         let work = Work::new(&source);
-        fs::write(work.0.join("native program"), b"previous output").unwrap();
+        primitive_bindings::write_fixture(work.0.join("native program"), b"previous output")
+            .unwrap();
         let output = work
             .command()
             .args(["--build", "run", "--output", "native program"])
@@ -19502,7 +19536,7 @@ fn computed_code_methods_preserve_access_stage_and_code_contracts() {
         "struct Ops {pub comptime fn pattern()-><bool -| value:bool> {'<value>}} fn run()->bool {const pat:<bool -| value:.str'builtin> = do {Ops}.pattern();let ~<pat> = true;true}".into(),
     ] {
         let work=Work::new(&source);
-        fs::write(work.0.join("native program"),b"previous output").unwrap();
+        primitive_bindings::write_fixture(work.0.join("native program"),b"previous output").unwrap();
         let output=work.command().args(["--build","run","--output","native program"]).output().unwrap();
         let diagnostic=String::from_utf8_lossy(&output.stderr);
         assert!(!output.status.success(),"{source}");
@@ -19595,7 +19629,7 @@ fn computed_pattern_output_names_do_not_grant_unrelated_contracts() {
         .replace("do {Ops}", "do {Identity<Ops>}"),
     ] {
         let work = Work::new(&source);
-        fs::write(work.0.join("native program"), b"previous output").unwrap();
+        primitive_bindings::write_fixture(work.0.join("native program"), b"previous output").unwrap();
         let output = work
             .command()
             .args(["--build", "run", "--output", "native program"])
@@ -19749,7 +19783,7 @@ fn wrapping_absolute_contracts_use_input_intervals_and_keep_minimum_exception() 
             let work = Work::new(&format!(
                 "{header} fn wrong(n:I)->r:I where ensures {contract} {{unsafe {{Ops.absolute'intrinsic(n).as(I)}}}} fn run()->bool {{true}}"
             ));
-            fs::write(work.0.join("native program"), b"previous").unwrap();
+            primitive_bindings::write_fixture(work.0.join("native program"), b"previous").unwrap();
             let result = work
                 .command()
                 .args([
@@ -23444,9 +23478,14 @@ fn quoted_tuple_contract_requires_explicit_copy_and_preserves_caller() {
             source.replace("impl Duplicate for Tuple<bool, bool> {}", "")
         };
         let w = Work::new(&source);
-        fs::write(w.0.join("tuple.fl"), include!("support/tuple_source.rs")).unwrap();
-        fs::write(w.0.join("meta.fl"), include!("support/meta_source.rs")).unwrap();
-        fs::write(
+        primitive_bindings::write_fixture(
+            w.0.join("tuple.fl"),
+            include!("support/tuple_source.rs"),
+        )
+        .unwrap();
+        primitive_bindings::write_fixture(w.0.join("meta.fl"), include!("support/meta_source.rs"))
+            .unwrap();
+        primitive_bindings::write_fixture(
             w.0.join("resources.fl"),
             include!("support/resources_source.rs"),
         )

@@ -2,6 +2,9 @@ use luna::{
     cli::{Emit, Options},
     frontend::{self, Artifact},
 };
+#[path = "support/primitive_bindings.rs"]
+mod primitive_bindings;
+
 use std::sync::atomic::{AtomicU64, Ordering};
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -11,7 +14,7 @@ fn compile(source: &str, emit: Emit) -> Result<Artifact, String> {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::write(&path, source).unwrap();
+    primitive_bindings::write_fixture(&path, source).unwrap();
     let result = frontend::compile(&Options {
         dispatch_fuel: None,
         comptime_intrinsics: Vec::new(),
@@ -2487,7 +2490,7 @@ fn void_success_injection_covers_implicit_and_explicit_delivery() {
             "(bool true)"
         );
     }
-    for target in ["bool", ".noreturn'builtin"] {
+    for target in ["bool", ".NoReturn'builtin"] {
         for body in ["", "do {}", "return;"] {
             let source = format!("fn run()->!bool {target} {{{body}}}");
             assert!(compile(&source, Emit::Nir).is_err(), "{source}");

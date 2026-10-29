@@ -585,11 +585,6 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     span,
                 }
             }
-            NodeKind::BoolType => Expr {
-                hir_id: self.next_hir_id(),
-                kind: ExprKind::Builtin(hir::Symbol::intern("bool")),
-                span,
-            },
             NodeKind::Bool => {
                 let text = self.source_text(node);
                 let val = text == "true";

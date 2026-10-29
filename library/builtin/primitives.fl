@@ -1,17 +1,16 @@
 -- Primitive names are ordinary public aliases. Importing this module or
--- reexporting it through builtin.prelude supplies the non-keyword names.
--- bool is a reserved type expression; Bool is an ordinary alias for it.
+-- reexporting it through builtin.prelude supplies these names.
 
+pub typealias bool = .bool'builtin;
 pub typealias Type = .Type'builtin;
 pub typealias Integer = .Integer'builtin;
 pub typealias Float = .Float'builtin;
 pub typealias BitVec<n: Integer> = .BitVec'builtin<n>;
-pub typealias Bool = bool;
 pub typealias char = .char'builtin;
 pub typealias str = .str'builtin;
 pub typealias Symbol = .Symbol'builtin;
 pub typealias void = .void'builtin;
-pub typealias noreturn = .noreturn'builtin;
+pub typealias NoReturn = .NoReturn'builtin;
 
 pub typealias u8 = .u8'builtin;
 pub typealias u16 = .u16'builtin;
@@ -29,9 +28,3 @@ pub typealias f16 = .f16'builtin;
 pub typealias bf16 = .bf16'builtin;
 pub typealias f32 = .f32'builtin;
 pub typealias f64 = .f64'builtin;
-
--- Existing library spelling aliases retain the same primitive identity.
-pub typealias Int = Integer;
-pub typealias Char = char;
-pub typealias Unit = void;
-pub typealias Never = noreturn;

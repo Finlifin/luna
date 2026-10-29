@@ -189,7 +189,6 @@ pub enum NodeKind {
     Char,
     Bool,
     /// The reserved bool type expression, distinct from true/false literals.
-    BoolType,
     Unit,
     Symbol,
     Wildcard, // _
@@ -663,7 +662,7 @@ impl NodeKind {
 
         match self {
             // No children
-            Invalid | Id | Str | Int | Real | Char | Bool | BoolType | Unit | Symbol | Wildcard
+            Invalid | Id | Str | Int | Real | Char | Bool | Unit | Symbol | Wildcard
             | SelfLower | SelfCap | Null | Undefined | SelfParam | SelfRefParam | ItselfParam
             | ItselfRefParam | RangeFull => NodeType::NoChild,
 

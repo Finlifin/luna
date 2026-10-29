@@ -18910,13 +18910,13 @@ fn checked_field_writes_update_only_the_target_path_after_evaluating_the_rhs() {
 fn checked_field_predicates_refine_paths_and_snapshot_copies() {
     let source = include_str!("../../../development/examples/checked-field-predicates.fl");
     let package = execution_support::compile_with_tuple(&format!("{source}
-        fn inputs(value: Byte, flag: Bool) -> Tuple<Byte, Byte, Byte, Byte, Byte, Byte, Byte, Byte, Byte> {{
+        fn inputs(value: Byte, flag: bool) -> Tuple<Byte, Byte, Byte, Byte, Byte, Byte, Byte, Byte, Byte> {{
             let pair = Pair {{ left: value, right: 255 }};
             let outer = Outer {{ inner: pair, tail: 255 }};
             (direct(pair), nested(outer), generic(Box<Byte> {{ value: value }}), sibling(pair,flag), nested_sibling(outer), copies(pair), capture(pair), match_scope(pair,flag), nested_capture(outer))
         }}
         fn boolean_inputs() -> Tuple<Byte, Byte, Byte> {{ (conjunction(Pair {{ left: 99, right: 99 }}), disjunction(Pair {{ left: 99, right: 255 }}), block_condition(Pair {{ left: 99, right: 99 }})) }}
-        fn branch_inputs(flag: Bool) -> Tuple<Byte, Byte> {{ (both_branches(Pair {{ left: 99, right: 255 }}, flag), both_replaced(Pair {{ left: 255, right: 255 }}, flag)) }}
+        fn branch_inputs(flag: bool) -> Tuple<Byte, Byte> {{ (both_branches(Pair {{ left: 99, right: 255 }}, flag), both_replaced(Pair {{ left: 255, right: 255 }}, flag)) }}
         fn guarded_input(value: Byte) -> Byte {{ guarded(Pair {{ left: value, right: 255 }}) }}"));
     let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
     for value in 0..255 {

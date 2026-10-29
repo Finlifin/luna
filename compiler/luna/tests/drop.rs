@@ -3089,6 +3089,9 @@ fn named_affine_field_is_cleaned_when_a_later_declared_field_returns() {
     );
 }
 
+#[path = "support/primitive_bindings.rs"]
+mod primitive_bindings;
+
 use luna::{
     cli::{Emit, Options},
     frontend::{self, Artifact},
@@ -3385,7 +3388,7 @@ fn compile_in(source: &str, identity: u64) -> nir::program::Package {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::write(&path, source).unwrap();
+    std::fs::write(&path, primitive_bindings::with_bool_binding(source)).unwrap();
     let artifact = frontend::compile_in_package(
         &Options {
             dispatch_fuel: None,
@@ -3795,7 +3798,7 @@ fn trait_implementation_receiver_modes_must_match() {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        std::fs::write(&path, source).unwrap();
+        std::fs::write(&path, primitive_bindings::with_bool_binding(source)).unwrap();
         let result = frontend::compile_in_package(
             &Options {
                 dispatch_fuel: None,

@@ -1,3 +1,5 @@
+#[path = "support/primitive_bindings.rs"]
+mod primitive_bindings;
 use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
@@ -126,7 +128,11 @@ impl Sandbox {
                 .join(format!("luna-elaboration-{}-{serial}", std::process::id()));
             match fs::create_dir(&path) {
                 Ok(()) => {
-                    fs::write(path.join("input.fl"), source).unwrap();
+                    fs::write(
+                        path.join("input.fl"),
+                        primitive_bindings::with_bool_binding(source),
+                    )
+                    .unwrap();
                     return Self(path);
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,

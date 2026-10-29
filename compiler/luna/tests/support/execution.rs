@@ -1,4 +1,6 @@
 //! Shared source compilation and interpreter assertions for execution suites.
+#[path = "primitive_bindings.rs"]
+mod primitive_bindings;
 use comptime_interpretor::{Event, Interpreter};
 use luna::cli::{Emit, Options};
 use luna::frontend::{self, Artifact};
@@ -59,7 +61,7 @@ pub(crate) fn compile_with_source_bindings_for_target(
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::write(&path, source).unwrap();
+    std::fs::write(&path, primitive_bindings::with_bool_binding(source)).unwrap();
     let result = frontend::compile_bound_for_target(
         &Options {
             dispatch_fuel: None,

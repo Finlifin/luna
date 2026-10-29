@@ -98,9 +98,6 @@ impl Parser<'_> {
                         .add_single_child(lo)
                         .build(&mut p.ast))
                 }
-                Bool => {
-                    Ok(NodeBuilder::new(NodeKind::BoolType, p.next_token_span()).build(&mut p.ast))
-                }
                 False => {
                     Ok(NodeBuilder::new(NodeKind::Bool, p.next_token_span()).build(&mut p.ast))
                 }

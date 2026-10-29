@@ -1,3 +1,5 @@
+#[path = "support/primitive_bindings.rs"]
+mod primitive_bindings;
 use comptime_interpretor::{Interpreter, Value};
 use luna::{
     frontend::Artifact,
@@ -19,7 +21,11 @@ impl Fixture {
             NEXT_FIXTURE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir(&path).unwrap();
-        std::fs::write(path.join("lib.fl"), source).unwrap();
+        std::fs::write(
+            path.join("lib.fl"),
+            primitive_bindings::with_bool_binding(source),
+        )
+        .unwrap();
         Self(path)
     }
     fn packages(&self) -> Vec<SourcePackage> {
@@ -284,7 +290,7 @@ fn builder_driver_preserves_dependency_types_preludes_and_primary_entry_identity
     std::fs::write(
         &dependency,
         "
-        pub struct Shared {flag:bool}
+        typealias bool=.bool'builtin; pub struct Shared {flag:bool}
         pub comptime fn Build() -> .Type'builtin {Shared}
         pub mod prelude {pub pure comptime fn enabled()->bool {true}}
     ",

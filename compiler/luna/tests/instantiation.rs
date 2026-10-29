@@ -1,7 +1,10 @@
 //! Source -> concrete high-level instance graph, without interpreting templates.
+#[path = "support/primitive_bindings.rs"]
+mod primitive_bindings;
 #[path = "support/execution.rs"]
 #[allow(dead_code)]
 mod support;
+
 use luna::{
     cli::{Emit, Options},
     frontend::{self, Artifact},
@@ -134,7 +137,7 @@ fn compile_in(source: &str, identity: u64) -> nir::program::Package {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::write(&path, source).unwrap();
+    std::fs::write(&path, primitive_bindings::with_bool_binding(source)).unwrap();
     let artifact = frontend::compile_in_package(
         &Options {
             dispatch_fuel: None,

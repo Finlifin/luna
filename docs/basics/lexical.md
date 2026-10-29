@@ -26,7 +26,7 @@ fn _internal_helper() { ... }
 | 绑定与参数 | catch、implicit、itself、Itself、lambda、let、quote、self、Self、var |
 | 控制与模式 | as、async、await、break、continue、do、else、error、for、handles、if、in、is、match、matches、ref、resume、return、when、while |
 | 阶段与检查方式 | atomic、comptime、defer、inline、pure、spec、unsafe、verified |
-| 类型与规格 | asserts、assumes、bool、decreases、dyn、ensures、exists、forall、invariant、lift、outcomes、predicate、refines、requires、where |
+| 类型与规格 | asserts、assumes、decreases、dyn、ensures、exists、forall、invariant、lift、outcomes、predicate、refines、requires、where |
 | 逻辑与固定值 | and、false、not、null、or、true、undefined |
 
 template 用于函数、quote 函数与测试模板；quote 也用于参数角色；defer 在编译时保留表达式；var 与 Itself 分别遵循绑定和反身名称规则。词法识别只确认拼写，不表示任意关键字都能出现在任意参数或定义位置。
@@ -91,3 +91,5 @@ fn main() {
     }                             -- if 语句以 '}' 结尾，省略分号
 }
 ```
+
+`bool`、`char`、`void`、`NoReturn` 与其他 primitive 的公开名称一样，是普通标识符，不是关键字。内置包通过 `'builtin` 绑定并由 prelude 导出；`true`、`false` 仍是布尔字面量关键字。

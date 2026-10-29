@@ -4272,7 +4272,7 @@ impl Checker<'_, '_> {
                     "Integer" => P::Integer,
                     "Float" => P::Float,
                     "void" => P::Void,
-                    "noreturn" => P::Never,
+                    "NoReturn" => P::Never,
                     "i8" => P::I8,
                     "i16" => P::I16,
                     "i32" => P::I32,

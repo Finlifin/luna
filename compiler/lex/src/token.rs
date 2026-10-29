@@ -84,7 +84,6 @@ pub enum TokenKind {
     Atomic,    // atomic
     Axiom,     // axiom
     Await,     // await
-    Bool,      // bool
     Break,     // break
     Case,      // case
     Catch,     // catch
@@ -256,7 +255,6 @@ impl TokenKind {
             TokenKind::Atomic => "atomic",
             TokenKind::Axiom => "axiom",
             TokenKind::Await => "await",
-            TokenKind::Bool => "bool",
             TokenKind::Break => "break",
             TokenKind::Case => "case",
             TokenKind::Catch => "catch",
@@ -373,7 +371,6 @@ impl Token {
         map.insert("atomic", TokenKind::Atomic);
         map.insert("axiom", TokenKind::Axiom);
         map.insert("await", TokenKind::Await);
-        map.insert("bool", TokenKind::Bool);
         map.insert("break", TokenKind::Break);
         map.insert("case", TokenKind::Case);
         map.insert("catch", TokenKind::Catch);

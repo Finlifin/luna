@@ -2,6 +2,10 @@ use luna::{
     frontend::Artifact,
     packages::{self, SourcePackage},
 };
+#[path = "support/primitive_bindings.rs"]
+mod primitive_bindings;
+use primitive_bindings::write_fixture;
+
 use resolve::DependencyEdge;
 use std::{
     path::PathBuf,
@@ -21,7 +25,7 @@ impl Inputs {
     }
     fn package(&self, id: u32, name: &str, source: &str) -> SourcePackage {
         let entry = self.0.join(format!("{name}.fl"));
-        std::fs::write(&entry, source).unwrap();
+        write_fixture(&entry, primitive_bindings::with_bool_binding(source)).unwrap();
         SourcePackage {
             resolution_id: id,
             identity: u64::from(id) + 1000,
@@ -143,7 +147,7 @@ fn imported_alias_guards_survive_required_invocation_snapshots() {
     };
     assert_eq!(head.package, 1002);
     assert_eq!(arguments, &[nir::Term::Primitive(nir::Primitive::Bool)]);
-    std::fs::write(
+    write_fixture(
         &packages[0].entry,
         source.replace("Build(bool)", "Build(.char'builtin)"),
     )
@@ -152,7 +156,7 @@ fn imported_alias_guards_survive_required_invocation_snapshots() {
         .err()
         .expect("unchecked imported alias");
     assert!(failure.contains("TypeContractUnresolved"), "{failure}");
-    std::fs::write(&packages[0].entry, source).unwrap();
+    write_fixture(&packages[0].entry, source).unwrap();
     assert!(packages::compile(&packages, &edges, 1).is_ok());
 }
 
@@ -179,7 +183,7 @@ fn aliases_to_imported_containers_preserve_member_visibility() {
     assert_eq!(parameters[0].ty, nir::Term::Primitive(nir::Primitive::Bool));
     assert_eq!(**result, parameters[0].ty);
     for member in ["Hidden", "Missing"] {
-        std::fs::write(&packages[0].entry, source.replace("Payload", member)).unwrap();
+        write_fixture(&packages[0].entry, source.replace("Payload", member)).unwrap();
         assert!(
             packages::compile(&packages, &edges, 1).is_err(),
             "alias exposed {member}"
@@ -197,7 +201,7 @@ fn completed_type_call_members_keep_provider_access_rules() {
     let edges = [dependency(1, "support", 2)];
     assert!(packages::compile(&packages, &edges, 1).is_ok());
     for member in ["Hidden", "Missing"] {
-        std::fs::write(&packages[0].entry, source.replace("Payload", member)).unwrap();
+        write_fixture(&packages[0].entry, source.replace("Payload", member)).unwrap();
         assert!(
             packages::compile(&packages, &edges, 1).is_err(),
             "computed Type exposed {member}"
@@ -221,7 +225,7 @@ fn deferred_type_members_respect_import_precedence_and_ambiguity() {
         ("pub use a.*;pub const Payload=true;", false),
     ];
     for (members, valid) in variants {
-        std::fs::write(&packages[1].entry, format!("pub mod a {{pub typealias Payload=bool;}}pub mod b {{pub typealias Payload=.char'builtin;}}pub struct Holder where T {{{members}}}pub typealias Alias<T> = Holder<T>;")).unwrap();
+        write_fixture(&packages[1].entry, format!("pub mod a {{pub typealias Payload=bool;}}pub mod b {{pub typealias Payload=.char'builtin;}}pub struct Holder where T {{{members}}}pub typealias Alias<T> = Holder<T>;")).unwrap();
         let result = packages::compile(&packages, &edges, 1);
         assert_eq!(result.is_ok(), valid, "{members}: {:?}", result.err());
     }
@@ -355,7 +359,7 @@ fn exported_quote_and_callback_keep_the_defining_modules_member_access() {
         luna::execution::interpret_in_package(&program, 1001, "entry", 100_000).unwrap(),
         comptime_interpretor::Value::Bool(true)
     );
-    std::fs::write(&packages[0].entry, "use support.Value;quote fn denied(value:Value)->bool {value.secret()}fn entry()->bool {denied(Value {})}").unwrap();
+    write_fixture(&packages[0].entry, "use support.Value;quote fn denied(value:Value)->bool {value.secret()}fn entry()->bool {denied(Value {})}").unwrap();
     let failure = packages::compile(&packages, &edges, 1)
         .err()
         .expect("caller quote gained provider access");
@@ -458,7 +462,7 @@ fn nested_member_constants_splice_all_parent_inputs_without_cross_instance_reuse
         luna::execution::interpret_in_package(&program, 1001, "entry", 100_000).unwrap(),
         comptime_interpretor::Value::Bool(true)
     );
-    std::fs::write(
+    write_fixture(
         &packages[0].entry,
         "use support.Outer;fn entry()->bool {Outer<.u8'builtin,false>.Middle<bool>.Leaf.FLAG}",
     )
@@ -499,7 +503,7 @@ fn automatic_splice_uses_provider_identity_across_package_boundaries() {
         .unwrap()
         .declaration;
     assert_eq!(id.package, 1009);
-    std::fs::write(
+    write_fixture(
         &inputs[0].entry,
         "use support.{FLAG, Tuple}; fn entry()->Tuple<bool,bool> {FLAG}",
     )
@@ -793,7 +797,7 @@ fn prelude_conflicts_and_private_sources_are_rejected() {
 #[test]
 fn actual_builtin_primitive_module_exports_intrinsic_types() {
     let inputs = Inputs::new();
-    let app=inputs.package(1,"app","use primitives.*; fn entry()->u8 {41} fn negate(value:bool)->Bool {not value} comptime fn Selected()->Type {u32} fn text(value:str)->str {value} fn character(value:char)->Char {value}");
+    let app=inputs.package(1,"app","use primitives.*; fn entry()->u8 {41} fn negate(value:bool)->bool {not value} comptime fn Selected()->Type {u32} fn text(value:str)->str {value} fn character(value:char)->char {value}");
     let primitives = SourcePackage {
         resolution_id: 2,
         identity: 1002,
@@ -835,15 +839,17 @@ fn actual_builtin_primitive_module_exports_intrinsic_types() {
 }
 
 #[test]
-fn bool_remains_reserved_in_binding_positions() {
+fn bool_is_available_as_an_ordinary_binding_name() {
     let inputs = Inputs::new();
     for source in [
         "fn bool() {}",
-        "typealias bool=bool;",
+        "typealias bool=.bool'builtin;",
         "fn entry(){let bool=true;}",
     ] {
         let app = inputs.package(1, "app", source);
-        assert!(packages::compile(&[app], &[], 1).is_err(), "{source}");
+        std::fs::write(&app.entry, source).unwrap();
+        let result = packages::compile(&[app], &[], 1);
+        assert!(result.is_ok(), "{source}: {:?}", result.err());
     }
 }
 
@@ -865,18 +871,14 @@ fn primitive_library_aliases_preserve_exact_type_identity() {
         ("isize", P::Isize),
         ("f32", P::F32),
         ("f64", P::F64),
-        ("Bool", P::Bool),
+        ("bool", P::Bool),
         ("char", P::Char),
-        ("Char", P::Char),
         ("str", P::Str),
         ("Symbol", P::Symbol),
         ("Integer", P::Integer),
-        ("Int", P::Integer),
         ("Float", P::Float),
         ("void", P::Void),
-        ("Unit", P::Void),
-        ("noreturn", P::Never),
-        ("Never", P::Never),
+        ("NoReturn", P::Never),
         ("Type", P::Type),
     ];
     let mut source = String::from("use primitives.*; ");
@@ -892,6 +894,7 @@ fn primitive_library_aliases_preserve_exact_type_identity() {
     }
     let inputs = Inputs::new();
     let app = inputs.package(1, "app", &source);
+    std::fs::write(&app.entry, &source).unwrap();
     let library = SourcePackage {
         resolution_id: 2,
         identity: 1002,
@@ -921,7 +924,7 @@ fn primitive_library_aliases_preserve_exact_type_identity() {
 #[test]
 fn imported_comptime_primitives_cannot_be_hidden_in_runtime_signatures() {
     let inputs = Inputs::new();
-    for name in ["Integer", "Int", "Float", "Type"] {
+    for name in ["Integer", "Float", "Type"] {
         let app = inputs.package(1, "app", &format!(
             "use primitives.*; typealias Hidden = {name}; fn Hold(value:Hidden)->Hidden {{value}}"
         ));
@@ -1011,8 +1014,8 @@ fn explicit_nested_package_roots_are_not_rediscovered_as_local_modules() {
     let inputs = Inputs::new();
     let nested = inputs.0.join("vendor");
     std::fs::create_dir(&nested).unwrap();
-    std::fs::write(nested.join("lib.fl"), "pub fn provided()->bool {true}").unwrap();
-    std::fs::write(
+    write_fixture(nested.join("lib.fl"), "pub fn provided()->bool {true}").unwrap();
+    write_fixture(
         inputs.0.join("main.fl"),
         "use support.provided; fn entry()->bool {provided()}",
     )
@@ -1047,7 +1050,7 @@ fn explicit_nested_package_roots_are_not_rediscovered_as_local_modules() {
         comptime_interpretor::Value::Bool(true)
     );
     // Removing the edge must not make a dependency reachable via filesystem layout.
-    std::fs::write(
+    write_fixture(
         inputs.0.join("main.fl"),
         "use vendor.lib.provided; fn entry()->bool {provided()}",
     )
@@ -1075,12 +1078,12 @@ fn explicit_single_file_dependency_is_excluded_without_hiding_sibling_modules() 
         name: "app".into(),
         entry: inputs.0.join("main.fl"),
     };
-    std::fs::write(
+    write_fixture(
         &app.entry,
         "use dep.provided; fn entry()->bool {provided() and helper.local()}",
     )
     .unwrap();
-    std::fs::write(inputs.0.join("helper.fl"), "pub fn local()->bool {true}").unwrap();
+    write_fixture(inputs.0.join("helper.fl"), "pub fn local()->bool {true}").unwrap();
     let library = inputs.package(2, "library", "pub fn provided()->bool {true}");
     let Artifact::Nir(program) =
         packages::compile(&[app, library], &[dependency(1, "dep", 2)], 1).unwrap()
@@ -1304,7 +1307,7 @@ fn source_tuple_selectors_bind_provider_identities_before_elaboration() {
             "{selector}"
         );
     }
-    std::fs::write(&packages[2].entry, "pub struct List {}").unwrap();
+    write_fixture(&packages[2].entry, "pub struct List {}").unwrap();
     let error = packages::compile_with_source_protocols(
         &packages,
         &dependencies,
@@ -1407,7 +1410,7 @@ fn source_tuple_selectors_walk_directory_only_modules() {
     let input = Inputs::new();
     let root = input.0.join("library");
     std::fs::create_dir_all(root.join("types")).unwrap();
-    std::fs::write(
+    write_fixture(
         root.join("lib.fl"),
         "typealias Type=.Type'builtin;
         mod meta {pure comptime fn List<T>->Type {T}}
@@ -1415,7 +1418,7 @@ fn source_tuple_selectors_walk_directory_only_modules() {
         fn check()->bool {let (a,b)=pair();a and not b}",
     )
     .unwrap();
-    std::fs::write(
+    write_fixture(
         root.join("types/tuples.fl"),
         "pub pure comptime fn Tuple<...Es:meta.List<Type>>->Type {bool}",
     )
@@ -1496,7 +1499,7 @@ fn module_qualified_splice_binding_selects_the_declared_provider_trait() {
         );
     }
     let source = std::fs::read_to_string(&inputs[1].entry).unwrap();
-    std::fs::write(
+    write_fixture(
         &inputs[1].entry,
         source.replace("mod decoy {trait Splice {}}", ""),
     )
@@ -1615,7 +1618,7 @@ fn dependency_errors_retain_provider_diagnostics_and_do_not_leak_to_retry() {
         assert!(error.contains("library.fl:1:"), "{error}");
         assert!(error.contains("error[E"), "{error}");
         assert!(!error.contains('\u{1b}'));
-        std::fs::write(&sources[1].entry, "pub fn broken() {}").unwrap();
+        write_fixture(&sources[1].entry, "pub fn broken() {}").unwrap();
         assert!(matches!(
             packages::compile(&sources, &dependencies, 7).unwrap(),
             Artifact::Nir(_)
@@ -1658,8 +1661,8 @@ fn parameterized_member_projection_obeys_provider_visibility() {
 #[test]
 fn compilation_inputs_preserve_consumed_text_and_single_file_scope() {
     let files = Inputs::new();
-    let package = files.package(7, "entry", "fn run()->bool {true}");
-    std::fs::write(files.0.join("unrelated.fl"), "invalid source").unwrap();
+    let package = files.package(7, "entry", "fn run(){true;}");
+    write_fixture(files.0.join("unrelated.fl"), "invalid source").unwrap();
     let (artifact, inputs) = packages::compile_with_inputs(
         std::slice::from_ref(&package),
         &[],
@@ -1675,9 +1678,9 @@ fn compilation_inputs_preserve_consumed_text_and_single_file_scope() {
     assert_eq!(inputs.sources[0].resolution_id, 7);
     assert_eq!(inputs.sources[0].identity, 1007);
     assert_eq!(inputs.sources[0].path, package.entry);
-    assert_eq!(&*inputs.sources[0].text, "fn run()->bool {true}");
+    assert_eq!(&*inputs.sources[0].text, "fn run(){true;}");
     let before = inputs.to_string();
-    std::fs::write(&package.entry, "fn run()->bool {false}").unwrap();
+    write_fixture(&package.entry, "fn run(){false;}").unwrap();
     assert_eq!(inputs.to_string(), before);
     let (_, fresh) = packages::compile_with_inputs(
         std::slice::from_ref(&package),
@@ -1688,9 +1691,9 @@ fn compilation_inputs_preserve_consumed_text_and_single_file_scope() {
         Default::default(),
     )
     .unwrap();
-    assert_eq!(&*fresh.sources[0].text, "fn run()->bool {false}");
+    assert_eq!(&*fresh.sources[0].text, "fn run(){false;}");
     assert_ne!(fresh.to_string(), before);
-    std::fs::write(&package.entry, "fn invalid()->bool {missing}").unwrap();
+    write_fixture(&package.entry, "fn invalid()->bool {missing}").unwrap();
     assert!(
         packages::compile_with_inputs(
             std::slice::from_ref(&package),
@@ -1702,7 +1705,7 @@ fn compilation_inputs_preserve_consumed_text_and_single_file_scope() {
         )
         .is_err()
     );
-    std::fs::write(&package.entry, "fn run()->bool {true}").unwrap();
+    write_fixture(&package.entry, "fn run(){true;}").unwrap();
     let (_, recovered) = packages::compile_with_inputs(
         &[package],
         &[],
@@ -1722,9 +1725,9 @@ fn compilation_inputs_track_directory_membership_and_package_boundaries() {
     let empty = files.0.join("empty");
     std::fs::create_dir(&dependency).unwrap();
     std::fs::create_dir(&empty).unwrap();
-    std::fs::write(files.0.join("lib.fl"), "fn run()->bool {true}").unwrap();
-    std::fs::write(files.0.join("extra.fl"), "fn extra()->bool {false}").unwrap();
-    std::fs::write(dependency.join("lib.fl"), "pub fn helper()->bool {true}").unwrap();
+    write_fixture(files.0.join("lib.fl"), "fn run()->bool {true}").unwrap();
+    write_fixture(files.0.join("extra.fl"), "fn extra()->bool {false}").unwrap();
+    write_fixture(dependency.join("lib.fl"), "pub fn helper()->bool {true}").unwrap();
     let packages = [
         SourcePackage {
             resolution_id: 1,
@@ -1774,7 +1777,7 @@ fn compilation_inputs_track_directory_membership_and_package_boundaries() {
         ]
     );
     assert_eq!(inputs.to_string(), compile().to_string());
-    std::fs::write(empty.join("new.fl"), "fn new_value()->bool {true}").unwrap();
+    write_fixture(empty.join("new.fl"), "fn new_value()->bool {true}").unwrap();
     let after = compile();
     assert_eq!(after.sources.len(), 4);
     assert!(
@@ -1798,9 +1801,9 @@ fn compilation_inputs_track_directory_membership_and_package_boundaries() {
     );
     assert_eq!(changes[0].added_files, vec![empty.join("new.fl")]);
     assert!(changes[0].removed_files.is_empty());
-    std::fs::write(files.0.join("notes.txt"), "unrelated").unwrap();
+    write_fixture(files.0.join("notes.txt"), "unrelated").unwrap();
     assert!(after.changed_discovery().unwrap().is_empty());
-    std::fs::write(dependency.join("spare.fl"), "pub fn spare()->bool {true}").unwrap();
+    write_fixture(dependency.join("spare.fl"), "pub fn spare()->bool {true}").unwrap();
     let changes = after.changed_discovery().unwrap();
     assert_eq!(changes.len(), 1);
     assert_eq!(changes[0].resolution_id, 2);
@@ -1870,8 +1873,8 @@ fn compilation_input_dump_escapes_text_and_preserves_native_path_bytes() {
 #[test]
 fn compilation_inputs_keep_raw_bytes_before_source_map_normalization() {
     let files = Inputs::new();
-    let raw = "\u{feff}fn run()->bool {\r\ntrue\r\n}\r\n";
-    let normalized = "fn run()->bool {\ntrue\n}\n";
+    let raw = "\u{feff}fn run(){\r\ntrue;\r\n}\r\n";
+    let normalized = "fn run(){\ntrue;\n}\n";
     let package = files.package(8, "entry", raw);
     let compile = || {
         packages::compile_with_inputs(
@@ -1894,7 +1897,7 @@ fn compilation_inputs_keep_raw_bytes_before_source_map_normalization() {
         std::fs::read(&package.entry).unwrap()
     );
     assert!(before.to_string().contains("(raw-text (string "));
-    std::fs::write(&package.entry, normalized).unwrap();
+    write_fixture(&package.entry, normalized).unwrap();
     let after = compile();
     assert_eq!(before.changed_sources().unwrap().len(), 1);
     assert!(after.changed_sources().unwrap().is_empty());
@@ -1902,11 +1905,11 @@ fn compilation_inputs_keep_raw_bytes_before_source_map_normalization() {
     assert_ne!(before.sources[0].raw_text, after.sources[0].raw_text);
     assert!(!after.to_string().contains("(raw-text "));
     assert_eq!(&*before.sources[0].raw_text, raw);
-    std::fs::write(&package.entry, raw).unwrap();
+    write_fixture(&package.entry, raw).unwrap();
     assert!(before.changed_sources().unwrap().is_empty());
     std::fs::remove_file(&package.entry).unwrap();
     assert_eq!(before.changed_sources().unwrap().len(), 1);
-    std::fs::write(&package.entry, [255, 254]).unwrap();
+    write_fixture(&package.entry, [255, 254]).unwrap();
     assert_eq!(before.changed_sources().unwrap().len(), 1);
     std::fs::remove_file(&package.entry).unwrap();
     std::fs::create_dir(&package.entry).unwrap();
@@ -1919,7 +1922,7 @@ fn compilation_discovery_rejects_retargeted_package_roots() {
     let files = Inputs::new();
     for name in ["first", "second"] {
         std::fs::create_dir(files.0.join(name)).unwrap();
-        std::fs::write(files.0.join(name).join("lib.fl"), "fn run()->bool {true}").unwrap();
+        write_fixture(files.0.join(name).join("lib.fl"), "fn run()->bool {true}").unwrap();
     }
     let root = files.0.join("current");
     std::os::unix::fs::symlink(files.0.join("first"), &root).unwrap();
@@ -1972,7 +1975,7 @@ fn invalid_dependency_graph_is_rejected_before_reading_sources_and_can_recover()
     );
     assert!(error.contains("provider package 9 is absent"), "{error}");
     assert!(!error.contains("InternalError"), "{error}");
-    std::fs::write(&app.entry, "fn run()->bool {true}").unwrap();
+    write_fixture(&app.entry, "fn run()->bool {true}").unwrap();
     assert!(packages::compile(&[app], &[], 1).is_ok());
 }
 
@@ -2013,4 +2016,63 @@ fn invalid_package_metadata_identifies_resolution_and_semantic_ids_separately() 
         error.contains("primary source package 99 is absent"),
         "{error}"
     );
+}
+
+#[test]
+fn primitive_names_require_bindings_and_allow_ordinary_shadowing() {
+    let inputs = Inputs::new();
+    for name in ["bool", "char", "void", "NoReturn"] {
+        let source = format!("fn identity(value:{name})->{name} {{value}}");
+        let app = inputs.package(1, "app", &source);
+        // This test deliberately omits the standalone fixture's bool binding.
+        std::fs::write(&app.entry, &source).unwrap();
+        let failure = packages::compile(&[app], &[], 1)
+            .err()
+            .expect("missing primitive binding");
+        assert!(
+            failure.contains("Unresolved identifier"),
+            "{name}: {failure}"
+        );
+    }
+    for name in ["bool", "char", "void", "NoReturn"] {
+        let source =
+            format!("typealias {name}=.u8'builtin; fn identity(value:{name})->{name} {{value}}");
+        let app = inputs.package(1, "app", &source);
+        std::fs::write(&app.entry, &source).unwrap();
+        let Artifact::Nir(package) = packages::compile(&[app], &[], 1).unwrap() else {
+            panic!("NIR")
+        };
+        let function = package
+            .functions
+            .iter()
+            .find(|function| function.name == "identity")
+            .unwrap();
+        let nir::Term::Function { result, .. } = &function.signature else {
+            panic!("signature")
+        };
+        assert_eq!(result.as_ref(), &nir::Term::Primitive(nir::Primitive::U8));
+    }
+}
+
+#[test]
+fn primitive_library_does_not_export_invented_aliases() {
+    let inputs = Inputs::new();
+    for name in ["Bool", "Int", "Char", "Unit", "Never", "noreturn"] {
+        let source = format!("use primitives.*; fn identity(value:{name})->{name} {{value}}");
+        let app = inputs.package(1, "app", &source);
+        let library = SourcePackage {
+            resolution_id: 2,
+            identity: 1002,
+            name: "primitives".into(),
+            entry: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../library/builtin/primitives.fl"),
+        };
+        let failure = packages::compile(&[app, library], &[dependency(1, "primitives", 2)], 1)
+            .err()
+            .expect("removed alias");
+        assert!(
+            failure.contains("Unresolved identifier"),
+            "{name}: {failure}"
+        );
+    }
 }
