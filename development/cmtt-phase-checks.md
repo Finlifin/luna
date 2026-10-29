@@ -89,3 +89,43 @@ All 211 newtype tests and seven enum-group tests passed (exit 0,
 `/tmp/luna-tools-1thfn6qg/result.json`); diff whitespace checks passed.
 These close all twelve failures recorded above, without claiming that the
 ordinary VM now transports quoted code or publishes source builder defaults.
+
+## Shared contextual code witnesses
+
+`nir::code_values::{ExpressionCode, PatternCode}` now owns the code witness
+representation previously private to the elaborator. Both expression and
+pattern generators, template consumers and splice expansion use these shared
+structures through the existing imports. The S-expression dumps retain their
+previous shape, including escaped port/output names and explicit pending-body
+markers.
+
+The shared interface validator checks runtime storage domains against the
+provided nominal metadata and scope. Expression ports and default source keys
+must refer to context identities; a default target may remain an external
+lexical identity. Fixed dependencies are retained independently of exposed
+ports. Quotation and pattern checking call this validator; body typing,
+substitution, resource checking and rejection of pending bodies at emission
+remain with their existing consumers. Public Rust construction is not proof
+that a body is well typed or ready for publication.
+
+This removes the elaboration-private representation dependency for future VM
+and definition-builder consumers. It does not add an ordinary VM Value variant,
+a contextual storage domain, Any transport, or source builder code defaults.
+Those paths must retain code category and interface evidence rather than using
+the quote's runtime result type as the type of the code value itself.
+
+Validation from `/home/fin/luna` (dev/test profile):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p nir --test code_values --test code_interfaces
+python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --test cmtt_phase_boundaries
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+git diff --check
+```
+
+All 17 NIR tests passed (`/tmp/luna-tools-uu8kd2lm/result.json`), including
+malformed interface rejection/recovery, fixed dependencies and external default
+identities, comptime storage rejection, and pending-body preservation. All 527
+CMTT tests and three phase-boundary tests passed
+(`/tmp/luna-tools-zxvjy0yw/result.json`). Formatting completed successfully
+(`/tmp/luna-tools-nkavxnfy/result.json`); diff whitespace checks passed.

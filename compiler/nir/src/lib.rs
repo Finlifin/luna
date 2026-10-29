@@ -51,6 +51,7 @@ pub mod newtypes;
 pub mod type_aliases;
 
 pub mod code_interfaces;
+pub mod code_values;
 
 pub use nominal_parameters::{
     AdmissionError as NominalAdmissionError, binders as declaration_parameters,

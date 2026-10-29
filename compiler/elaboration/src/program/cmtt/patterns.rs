@@ -4,27 +4,7 @@ use super::*;
 mod generators;
 pub(in crate::program) use generators::{PatternGenerator, PatternInterface};
 
-#[derive(Debug)]
-pub(in crate::program) struct PatternCode {
-    pub(super) subject: Term,
-    pub(super) outputs: BTreeMap<String, (n::LocalId, Term)>,
-    /// Definition-side data inputs may be unavailable. Such evidence carries
-    /// the checked interface, never an executable pattern with live captures.
-    pub(super) body: Option<n::Pattern>,
-}
-
-impl fmt::Display for PatternCode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "(pattern-code (subject {}) (outputs", self.subject)?;
-        for (name, (binding, ty)) in &self.outputs {
-            write!(f, " (output {name:?} {binding} {ty})")?;
-        }
-        match &self.body {
-            Some(body) => write!(f, ") (body {body}))"),
-            None => f.write_str(") (body pending-pattern-code))"),
-        }
-    }
-}
+pub(in crate::program) use nir::code_values::PatternCode;
 
 impl Checker<'_, '_> {
     pub(in crate::program::cmtt) fn pattern_input_interface(
@@ -267,11 +247,8 @@ impl Checker<'_, '_> {
                 .map(|binder| binder.sort)
                 .collect(),
         ];
-        for ty in std::iter::once(&code.subject).chain(code.outputs.values().map(|(_, ty)| ty)) {
-            nir::phases::validate_runtime_storage(ty, &metadata, &frames)
-                .map_err(|message| error(span, format!("pattern runtime interface: {message}")))?;
-        }
-        Ok(())
+        code.validate_runtime_interface(&metadata, &frames)
+            .map_err(|message| error(span, format!("pattern runtime interface: {message}")))
     }
 
     fn build_pattern_quote(

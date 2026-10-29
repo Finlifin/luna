@@ -11,43 +11,8 @@ pub(crate) use functions::{expand_bound_quote, expand_materialized_quotes, inlin
 pub(super) use generators::Generator;
 use std::{fmt, sync::Arc};
 
-#[derive(Debug)]
-pub(super) struct ExpressionCode {
-    body: Option<Arc<n::Expr>>,
-    result: Term,
-    /// All free runtime identities, including fixed dependencies.
-    context: BTreeMap<n::LocalId, Term>,
-    /// Only explicitly exposed ports may be redirected.
-    ports: BTreeMap<String, n::LocalId>,
-    defaults: BTreeMap<n::LocalId, n::LocalId>,
-}
-
 use nir::code_interfaces::ExpressionCodeInterface as Interface;
-
-impl fmt::Display for ExpressionCode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("(expression-code (context")?;
-        for (binding, ty) in &self.context {
-            write!(f, " (binding {binding} {ty})")?;
-        }
-        f.write_str(") (ports")?;
-        for (name, binding) in &self.ports {
-            write!(f, " (port {name:?} {binding})")?;
-        }
-        f.write_str(") (defaults")?;
-        for (port, actual) in &self.defaults {
-            write!(f, " (connect {port} {actual})")?;
-        }
-        match &self.body {
-            Some(body) => write!(f, ") (result {}) (body {}))", self.result, body),
-            None => write!(
-                f,
-                ") (result {}) (body pending-code-parameter))",
-                self.result
-            ),
-        }
-    }
-}
+pub(super) use nir::code_values::ExpressionCode;
 
 fn binding(value: &Expr<'_>) -> Result<n::LocalId, Error> {
     match value.kind {
@@ -614,20 +579,18 @@ impl Checker<'_, '_> {
         let metadata = self.code_storage_metadata();
         let scope = self.call_inference_scope();
         let frames = vec![scope.iter().map(|parameter| parameter.sort).collect()];
-        for ty in context.values().chain(std::iter::once(&body.ty)) {
-            nir::phases::validate_runtime_storage(ty, &metadata, &frames).map_err(|message| {
-                error(value.span, format!("quoted runtime interface: {message}"))
-            })?;
-        }
         let result = body.ty.clone();
         let body = (!self.checking_code_generator).then(|| Arc::new(body));
-        Ok(Arc::new(ExpressionCode {
+        let code = ExpressionCode {
             body,
             result,
             context,
             ports,
             defaults,
-        }))
+        };
+        code.validate_runtime_interface(&metadata, &frames)
+            .map_err(|message| error(value.span, format!("quoted runtime interface: {message}")))?;
+        Ok(Arc::new(code))
     }
 
     fn quoted_runtime_boundary<R>(
