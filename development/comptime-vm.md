@@ -798,3 +798,34 @@ The focused existing normal-input group also passed independently through the
 same built harness (`/tmp/luna-tools-5yw5t_ey/result.json`). The source CMTT,
 phase-boundary and comptime-memory groups passed all 547 tests
 (`/tmp/luna-tools-59p4z5mr/result.json`).
+
+## Bounded canonical-input decoding on the dev test stack
+
+The execution regression `canonical_comptime_arguments_validate_shapes_and_recover`
+previously overflowed the host stack while decoding a 140-level canonical tuple.
+The decoder's large recursive frame exhausted the stack before its depth guard.
+
+Decoding now uses a small shared dispatcher and separate non-inlined scalar and
+container handlers in `normal_values`. The depth-128 boundary, budget charging,
+field traversal, callable reconstruction and final type checks are preserved.
+This complements normal-term freezing above; no thread-stack override or release
+build is needed. Tests accept 127 nested tuples, reject 128 and 140 with
+`DepthExhausted`, and check budget exhaustion, malformed fields and subsequent
+successful decoding in the same interpreter.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib normal_values
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib
+python3 -B development/check.py --timeout 900 -- test -p luna --test execution --test builder_invocations
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+git diff --check
+```
+
+All completed successfully: two focused cases (`/tmp/luna-tools-lmo8ec2l/result.json`),
+210 VM tests (`/tmp/luna-tools-b15ta7rg/result.json`), 1365 execution and 73 builder
+cases (`/tmp/luna-tools-j401lu05/result.json`). The formerly aborting canonical-input
+case is included without a skip. Formatting passed at
+`/tmp/luna-tools-5hn11z7j/result.json`. These checks validate decoding and its
+consumers; they do not establish completion of the entire comptime subsystem.
