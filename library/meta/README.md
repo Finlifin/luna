@@ -139,7 +139,8 @@ comptime fn configured() -> bool {
 转换或 normal-form 展开。Object 接收者和 key 依次求值一次。接收者为位置时保留值引用；key 的计算若
 替换该位置，方法读取更新后的 Object。需要固定旧输入时先保存独立快照，再对
 快照调用查询。计算得到的临时 Object 只求值一次。查询和结果复制计入预算。
-该实现一次扫描 Object，仍沿用普通参数复制路径，不承诺常数时间查找。
+Object 值引用参数在入口借用检查条目、key 和域，不再仅为验证构造临时
+Object 快照；每次调用仍执行完整验证。查询本身仍需扫描，不承诺常数时间查找。
 
 `Object.set(index, value)` 通过 comptime 值引用修改接收者，保留该项的 key 和位置，
 允许替换为不同域的值。`replace` 仍返回新 Object，不修改原值。直接修改 Object

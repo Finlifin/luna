@@ -534,8 +534,8 @@ impl<'a> Interpreter<'a> {
         self.clone_representation(value, source, 0, true)
     }
 
-    /// Observe a checkpoint without retaining its snapshot. List buffers and
-    /// Type-list elements can be checked in place; other representations keep
+    /// Observe a checkpoint without retaining its snapshot. Object entries, list
+    /// buffers and Type-list elements are checked in place; other representations keep
     /// the existing checkpoint path. No source code runs while borrowed.
     pub(super) fn check_borrowed_representation(
         &mut self,
@@ -543,13 +543,27 @@ impl<'a> Interpreter<'a> {
         source: SourceRange,
         depth: usize,
     ) -> Result<(), Error> {
-        if !matches!(value, Value::TypeList(_) | Value::List { .. }) {
+        if !matches!(
+            value,
+            Value::Object(_) | Value::TypeList(_) | Value::List { .. }
+        ) {
             return self
                 .clone_representation(value, source, depth, true)
                 .map(drop);
         }
         self.check_representation_depth(source, depth)?;
         match value {
+            Value::Object(object) => {
+                if !self.comptime_only {
+                    return Err(self.failure(ErrorKind::Unsupported, Some(source)));
+                }
+                self.copy_work(object.entries().len(), source)?;
+                for entry in object.entries() {
+                    self.copy_work(entry.key().map_or(0, str::len), source)?;
+                    self.copy_invocation_type_work(&entry.value().ty, source, true)?;
+                    self.check_borrowed_representation(&entry.value().value, source, depth + 1)?;
+                }
+            }
             Value::TypeList(types) => {
                 self.copy_work(types.len(), source)?;
                 for ty in types {
@@ -2426,7 +2440,51 @@ mod borrowed_checkpoint_tests {
     }
 
     #[test]
-    fn borrowed_lists_preserve_checkpoint_failures_depth_and_work() {
+    fn borrowed_object_admission_rejects_forged_payloads_without_mutation() {
+        let package = Package::default();
+        let source = SourceRange { start: 2, end: 4 };
+        let binding = LocalId { owner: 1, index: 0 };
+        let signature = Term::Function {
+            parameters: vec![nir::Parameter {
+                sort: nir::Sort::Runtime,
+                ty: Term::Primitive(Primitive::Object),
+            }],
+            result: Box::new(Term::Primitive(Primitive::Void)),
+        };
+        for (payload, valid) in [(Value::Bool(true), true), (Value::Char('x'), false)] {
+            let original = Value::Object(Object::from_entries(vec![ObjectEntry::Value(
+                ObjectValue {
+                    ty: Term::Primitive(Primitive::Bool),
+                    value: payload,
+                },
+            )]));
+            let storage = Storage::new(original.clone());
+            for by_reference in [false, true] {
+                let argument = if by_reference {
+                    Value::ComptimeReference(value_reference::ValueReference::root(storage.clone()))
+                } else {
+                    original.clone()
+                };
+                let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+                let result = vm.bind_invocation_inputs(
+                    &[binding],
+                    vec![argument],
+                    &signature,
+                    &mut Environment::new(),
+                    source,
+                );
+                if valid {
+                    assert!(result.is_ok());
+                } else {
+                    assert_eq!(result.unwrap_err().kind, ErrorKind::Type);
+                }
+                assert_eq!(storage.read().unwrap(), original);
+            }
+        }
+    }
+
+    #[test]
+    fn borrowed_containers_preserve_checkpoint_failures_depth_and_work() {
         let source = SourceRange { start: 3, end: 7 };
         let package = Package::default();
         let list = |values| Value::List {
@@ -2435,7 +2493,28 @@ mod borrowed_checkpoint_tests {
         };
         // Checkpointing checks representation work, not the list's declared
         // element domain. Invocation admission separately rejects bad domains.
+        let object = |value, ty| {
+            Value::Object(Object::from_entries(vec![ObjectEntry::Property {
+                key: "payload_多字节".into(),
+                value: ObjectValue { ty, value },
+            }]))
+        };
         let cases = [
+            object(Value::Bool(true), Term::Primitive(Primitive::Bool)),
+            object(Value::Bool(true), Term::Bool(false)),
+            object(
+                object(Value::Bool(false), Term::Primitive(Primitive::Bool)),
+                Term::Primitive(Primitive::Object),
+            ),
+            list(vec![object(
+                Value::Bool(true),
+                Term::Primitive(Primitive::Bool),
+            )]),
+            object(
+                Value::TypeList(vec![Term::Primitive(Primitive::Bool); 4]),
+                Term::Primitive(Primitive::Type),
+            ),
+            Value::Object(Object::from_entries(vec![])),
             Value::TypeList(vec![Term::Primitive(Primitive::Bool); 8]),
             Value::TypeList(vec![Term::Bool(true)]),
             list(vec![Value::Bool(true); 16]),
@@ -2452,25 +2531,29 @@ mod borrowed_checkpoint_tests {
         for value in &cases {
             for depth in [1, 2, 128] {
                 for steps in 0..100 {
-                    let budget = Budget { steps, depth };
-                    let mut copied =
-                        Interpreter::for_comptime(&package, Budget::default()).unwrap();
-                    let mut borrowed =
-                        Interpreter::for_comptime(&package, Budget::default()).unwrap();
-                    copied.budget = budget;
-                    borrowed.budget = budget;
-                    let expected = copied
-                        .checkpoint_representation(value, source)
-                        .map(drop)
-                        .map_err(|error| (error.kind, error.source));
-                    let actual = borrowed
-                        .check_borrowed_representation(value, source, 0)
-                        .map_err(|error| (error.kind, error.source));
-                    assert_eq!(
-                        actual, expected,
-                        "depth={depth} steps={steps} value={value:?}"
-                    );
-                    assert_eq!(borrowed.remaining_steps(), copied.remaining_steps());
+                    for comptime in [false, true] {
+                        let budget = Budget { steps, depth };
+                        let mut copied =
+                            Interpreter::for_comptime(&package, Budget::default()).unwrap();
+                        let mut borrowed =
+                            Interpreter::for_comptime(&package, Budget::default()).unwrap();
+                        copied.comptime_only = comptime;
+                        borrowed.comptime_only = comptime;
+                        copied.budget = budget;
+                        borrowed.budget = budget;
+                        let expected = copied
+                            .checkpoint_representation(value, source)
+                            .map(drop)
+                            .map_err(|error| (error.kind, error.source));
+                        let actual = borrowed
+                            .check_borrowed_representation(value, source, 0)
+                            .map_err(|error| (error.kind, error.source));
+                        assert_eq!(
+                            actual, expected,
+                            "depth={depth} steps={steps} value={value:?}"
+                        );
+                        assert_eq!(borrowed.remaining_steps(), copied.remaining_steps());
+                    }
                 }
             }
         }
