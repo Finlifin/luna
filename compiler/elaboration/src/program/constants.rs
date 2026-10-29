@@ -1134,6 +1134,12 @@ impl Checker<'_, '_> {
     }
 
     pub(super) fn constant_value(&mut self, owner: OwnerId, span: Span) -> Result<n::Expr, Error> {
+        if self.compiler_operation_binding(owner, span)?.is_some() {
+            return Err(error(
+                span,
+                "compiler operation binding requires a direct call",
+            ));
+        }
         // A generic member is a computation in its container's environment,
         // not a completed module constant. Keep it residual until the enclosing
         // required invocation supplies those inputs; never cache it by owner.

@@ -1,3 +1,9 @@
+const hash_str_byte_length = .str_byte_length'builtin;
+const hash_str_byte = .str_byte'builtin;
+const hash_symbol_byte_length = .symbol_byte_length'builtin;
+const hash_symbol_byte = .symbol_byte'builtin;
+const hash_integer_representation = .integer_representation'builtin;
+
 -- ==========================================================================
 -- builtin/traits – fundamental traits
 -- ==========================================================================
@@ -167,11 +173,11 @@ comptime impl Hash for .char'builtin {
 impl Hash for .str'builtin {
     fn hash(self) -> u64 {
         let name = self;
-        let length = .str_byte_length'builtin(name);
+        let length = hash_str_byte_length(name);
         var index: u64 = 0;
         var state: u64 = 14695981039346656037;
         while index < length {
-            let byte = .str_byte'builtin(name, index) match {
+            let byte = hash_str_byte(name, index) match {
                 value? => value,
                 null => return state,
             };
@@ -191,11 +197,11 @@ impl Hash for .str'builtin {
 comptime impl Hash for .str'builtin {
     comptime fn comptime_hash(self) -> u64 {
         let name = self;
-        let length = .str_byte_length'builtin(name);
+        let length = hash_str_byte_length(name);
         var index: u64 = 0;
         var state: u64 = 14695981039346656037;
         while index < length {
-            let byte = .str_byte'builtin(name, index) match {
+            let byte = hash_str_byte(name, index) match {
                 value? => value,
                 null => return state,
             };
@@ -219,11 +225,11 @@ comptime impl Hash for .str'builtin {
 impl Hash for .Symbol'builtin {
     fn hash(self) -> u64 {
         let name = self;
-        let length = .symbol_byte_length'builtin(name);
+        let length = hash_symbol_byte_length(name);
         var index: u64 = 0;
         var state: u64 = 14695981039346656037;
         while index < length {
-            let byte = .symbol_byte'builtin(name, index) match {
+            let byte = hash_symbol_byte(name, index) match {
                 value? => value,
                 null => return state,
             };
@@ -243,11 +249,11 @@ impl Hash for .Symbol'builtin {
 comptime impl Hash for .Symbol'builtin {
     comptime fn comptime_hash(self) -> u64 {
         let name = self;
-        let length = .symbol_byte_length'builtin(name);
+        let length = hash_symbol_byte_length(name);
         var index: u64 = 0;
         var state: u64 = 14695981039346656037;
         while index < length {
-            let byte = .symbol_byte'builtin(name, index) match {
+            let byte = hash_symbol_byte(name, index) match {
                 value? => value,
                 null => return state,
             };
@@ -271,7 +277,7 @@ comptime impl Hash for .Symbol'builtin {
 -}
 impl Hash for .usize'builtin {
     fn hash(self) -> u64 {
-        let widened = .integer_representation'builtin(self);
+        let widened = hash_integer_representation(self);
         let bits = widened'bitvec;
         let low = bits[0..64];
         let high = bits[64..128];
@@ -281,7 +287,7 @@ impl Hash for .usize'builtin {
 
 comptime impl Hash for .usize'builtin {
     comptime fn comptime_hash(self) -> u64 {
-        let widened = .integer_representation'builtin(self);
+        let widened = hash_integer_representation(self);
         let bits = widened'bitvec;
         let low = bits[0..64];
         let high = bits[64..128];
@@ -291,7 +297,7 @@ comptime impl Hash for .usize'builtin {
 
 impl Hash for .isize'builtin {
     fn hash(self) -> u64 {
-        let widened = .integer_representation'builtin(self);
+        let widened = hash_integer_representation(self);
         let bits = widened'bitvec;
         let low = bits[0..64];
         let high = bits[64..128];
@@ -301,7 +307,7 @@ impl Hash for .isize'builtin {
 
 comptime impl Hash for .isize'builtin {
     comptime fn comptime_hash(self) -> u64 {
-        let widened = .integer_representation'builtin(self);
+        let widened = hash_integer_representation(self);
         let bits = widened'bitvec;
         let low = bits[0..64];
         let high = bits[64..128];

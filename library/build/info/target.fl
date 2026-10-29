@@ -1,3 +1,5 @@
+const target_object_get = .object_get'builtin;
+
 {-
     An immutable snapshot of the source package's host pipeline target. These
     values describe compilation, not the machine running the compiler.
@@ -16,7 +18,7 @@ pub struct TargetFeatures {
 impl TargetFeatures {
     -- Missing is null; an explicitly disabled feature is false?.
     pub pure comptime fn get(self, name: .Symbol'builtin) -> ?bool {
-        .object_get'builtin(bool, self.entries, name)
+        target_object_get(bool, self.entries, name)
     }
 }
 

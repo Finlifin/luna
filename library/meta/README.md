@@ -721,3 +721,9 @@ comptime fn MirrorEnum(source: Type) -> Type {
 非法形状、payload 域与布局仍由 Build 检查，BuildSymbol／BuildBits 的编码检查
 也不被批量编辑绕过。已有草稿快照保持独立。原生用例见
 [sysroot-edited-enum.fl](../../development/examples/sysroot-edited-enum.fl)。
+
+编译器操作在 `bindings.fl` 中先绑定为模块常量，再由公开函数封装调用，例如
+`const compiler_list_length = .list_length'builtin;`。这些常量可经模块导入、重命名和
+常量别名链引用；调用仍使用原操作的阶段、参数及类型检查。当前实现要求直接调用，
+不把操作绑定作为普通函数值放入局部变量或传给回调；需要函数值时使用公开包装函数。
+这不影响 `Type` 等普通内置值及其类型别名。

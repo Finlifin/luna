@@ -1,20 +1,23 @@
+const text_str_byte_length = .str_byte_length'builtin;
+const text_str_byte = .str_byte'builtin;
+
 {-
     Immutable UTF-8 byte observations. Indices count bytes, not characters.
     Lengths and indices use u64 independently of the compilation target.
     Byte reads outside the string return null, including index == length.
 -}
 pub pure fn byte_length(value: str) -> u64 {
-    .str_byte_length'builtin(value)
+    text_str_byte_length(value)
 }
 
 pub pure fn byte(value: str, index: u64) -> ?u8 {
-    .str_byte'builtin(value, index)
+    text_str_byte(value, index)
 }
 
 pub pure comptime fn comptime_byte_length(value: str) -> u64 {
-    .str_byte_length'builtin(value)
+    text_str_byte_length(value)
 }
 
 pub pure comptime fn comptime_byte(value: str, index: u64) -> ?u8 {
-    .str_byte'builtin(value, index)
+    text_str_byte(value, index)
 }

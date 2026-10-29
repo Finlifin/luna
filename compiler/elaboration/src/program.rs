@@ -22,6 +22,7 @@ mod tactics;
 use arguments::route_arguments;
 mod bit_indices;
 pub mod build_context;
+mod builtin_bindings;
 mod cmtt;
 mod constants;
 mod defaults;
@@ -1002,7 +1003,13 @@ fn elaborate_candidate<'a, 'h>(
                 }
             }
             ItemKind::Const(..) => {
-                if checker.is_build_context(owner) {
+                if checker
+                    .compiler_operation_binding(owner, item.span)?
+                    .is_some()
+                {
+                    // Calls use the binding's declaration identity; there is no
+                    // runtime function value to materialize for this operation.
+                } else if checker.is_build_context(owner) {
                     checker.validate_build_context(owner, item.span)?;
                 } else {
                     checker.constant_value(owner, item.span)?;
@@ -9533,6 +9540,23 @@ impl Checker<'_, '_> {
         expected: Option<&Term>,
         partial: Option<&crate::calls::CallableContext>,
     ) -> Result<n::Expr, Error> {
+        if let H::Application(callee, arguments) = &expr.kind
+            && let H::ResolvedDef { def_id, .. } = &callee.kind
+            && let Some(owner) = self.package.definition_owner(*def_id)
+            && let Some(name) = self.compiler_operation_binding(owner, callee.span)?
+        {
+            let bound = Expr {
+                hir_id: callee.hir_id,
+                span: callee.span,
+                kind: H::Builtin(name),
+            };
+            let call = Expr {
+                hir_id: expr.hir_id,
+                span: expr.span,
+                kind: H::Application(&bound, arguments),
+            };
+            return self.expr_context_general(&call, expected, partial);
+        }
         // Inline control retains the delivery position of its ordinary
         // control node. Conditions and unselected branches keep their existing
         // staged checking; only result-producing leaves inherit callee use.
