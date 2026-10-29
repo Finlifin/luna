@@ -153,14 +153,16 @@ fn main() -> ExitCode {
             }
         }),
         Command::Invoke {
+            definition_fuel,
             options,
             entry,
             fuel,
             protocols,
-        } => frontend::invoke_comptime(
+        } => frontend::invoke_comptime_with_definition_fuel(
             &options,
             &entry,
             fuel,
+            definition_fuel,
             protocols.as_ref().map(|(copy, _)| copy.as_str()),
             protocols.as_ref().map(|(_, drop)| drop.as_str()),
         )

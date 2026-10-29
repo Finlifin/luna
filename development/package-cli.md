@@ -447,3 +447,18 @@ more preparation work without changing their runtime or invocation allowance.
 The value is part of the complete request options and therefore distinguishes
 resident frontend cache entries. An exhausted preparation fails before publishing
 NIR; retrying with a larger allowance performs a fresh bounded compilation.
+
+### Explicit invocation definition allowance
+
+`--definition-fuel <positive steps>` sets the structural allowance for publishing
+new definitions during `--invoke-comptime` (default 1000000). Both ordinary source
+and `--packages-v1` invocations accept it. It is rejected for other actions rather
+than silently changing unrelated frontend work. `--fuel` still bounds VM work;
+`--dispatch-fuel` still bounds final frontend dispatch preparation. Raising one
+allowance cannot replenish another. In particular this option does not change
+required comptime evaluation while the source package itself is being elaborated.
+
+The existing `frontend::invoke_comptime` API retains its default; callers needing
+an explicit allowance can use `invoke_comptime_with_definition_fuel`. The lower
+level package API continues to expose its caller-owned remaining structural fuel.
+This option changes neither publication validation nor generated identity rules.

@@ -10684,3 +10684,69 @@ fn dispatch_fuel_is_independent_and_applies_to_single_and_package_frontends() {
         failure(&sandbox.run(&args), 2);
     }
 }
+
+#[test]
+fn definition_budget_is_independent_for_single_and_package_invocations() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "input.fl",
+        "typealias Type=.Type'builtin;
+        pure comptime fn List<T> -> Type {List<T>}
+        comptime fn Make()->Type {.build_struct'builtin(.Created,[.flag],[bool])}",
+    );
+    for packages in [false, true] {
+        let mut base = if packages {
+            vec![
+                "--packages-v1",
+                "--package",
+                "1",
+                "101",
+                "input",
+                "input.fl",
+                "--primary",
+                "1",
+            ]
+        } else {
+            vec!["input.fl"]
+        };
+        base.extend([
+            "--meta-list-type",
+            "input.List",
+            "--invoke-comptime",
+            "Make",
+        ]);
+        let run = |definition, invocation| {
+            sandbox.run(
+                &[
+                    base.as_slice(),
+                    &["--definition-fuel", definition, "--fuel", invocation],
+                ]
+                .concat(),
+            )
+        };
+        let low = run("1", "1000000");
+        failure(&low, 1);
+        assert!(
+            String::from_utf8_lossy(&low.stderr)
+                .contains("builder preparation structural budget exhausted")
+        );
+        success(&run("1000000", "1000000"));
+        failure(&run("1000000", "1"), 1);
+        success(&run("1000000", "1000000"));
+        for invalid in [
+            vec!["0"],
+            vec!["-1"],
+            vec!["bad"],
+            vec!["1", "--definition-fuel", "2"],
+        ] {
+            failure(
+                &sandbox.run(&[base.as_slice(), &["--definition-fuel"], &invalid].concat()),
+                2,
+            );
+        }
+    }
+    failure(
+        &sandbox.run(&["input.fl", "--emit", "nir", "--definition-fuel", "10"]),
+        2,
+    );
+}

@@ -121,3 +121,23 @@ These differ in workload and timing scope from the source benchmark and cannot
 be subtracted to attribute VM cost. Neither measurement covers field default
 code, attributes, generic declaration inputs or method publication, which still
 lack builder request and publication support.
+
+### Explicit definition allowance follow-up
+
+The CLI now exposes `--definition-fuel` for explicit comptime invocations, with
+the previous 1,000,000 default. The source benchmark forwards and records it.
+The following command completes the previously blocked workload:
+
+```sh
+python3 -B development/builder_source_bench.py --counts 65536 --samples 3 --definition-fuel 10000000 --fuel 1000000000
+```
+
+All four processes (warmup plus three samples) returned true. Measured times were
+2.889, 2.869 and 2.869 seconds, with a 2.869-second median including startup.
+Evidence: `/tmp/luna-builder-source-ccb1v4cw/summary.json` (compiler based on
+`5433dd55` plus the definition-budget patch). An intermediate run with the same
+structural allowance but `--fuel 100000000` exhausted invocation work in checked
+publication, `/tmp/luna-tools-405w74ix/result.json`; increasing the structural
+allowance does not erase VM charges. The earlier structural-limit result remains
+valid for the default allowance. Neither this option nor these measurements add
+invocation caching or change builder publication semantics.

@@ -96,10 +96,22 @@ pub fn invoke_comptime(
     copy: Option<&str>,
     drop: Option<&str>,
 ) -> Result<comptime_interpretor::Value, String> {
+    invoke_comptime_with_definition_fuel(options, entry, fuel, 1_000_000, copy, drop)
+}
+
+/// Execute with separate VM and generated-definition structural allowances.
+pub fn invoke_comptime_with_definition_fuel(
+    options: &Options,
+    entry: &str,
+    fuel: u64,
+    definition_fuel: usize,
+    copy: Option<&str>,
+    drop: Option<&str>,
+) -> Result<comptime_interpretor::Value, String> {
     let mut selectors = source_protocols(options);
     selectors.copy = copy;
     selectors.drop = drop;
-    let mut structural_fuel = 1_000_000;
+    let mut structural_fuel = definition_fuel;
     let mut invocation = crate::packages::BuilderInvocation {
         entry,
         structural_fuel: &mut structural_fuel,

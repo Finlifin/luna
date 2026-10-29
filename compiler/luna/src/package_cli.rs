@@ -66,6 +66,7 @@ pub enum Action {
         protocols: Option<(String, String)>,
     },
     Invoke {
+        definition_fuel: usize,
         protocols: Option<(String, String)>,
         entry: String,
         fuel: u64,
@@ -204,6 +205,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Request, String
                 | "--test-timeout-ms"
                 | "--fuel"
                 | "--dispatch-fuel"
+                | "--definition-fuel"
                 | "--build-feature"
                 | "--build-mode"
                 | "--package-build-mode"
@@ -259,6 +261,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Request, String
     let (options, action) = match cli::parse(ordinary)? {
         Command::Compile(options) => (options, Action::Compile),
         Command::Invoke {
+            definition_fuel,
             protocols,
             options,
             entry,
@@ -266,6 +269,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Request, String
         } => (
             options,
             Action::Invoke {
+                definition_fuel,
                 entry,
                 fuel,
                 protocols,
@@ -442,7 +446,12 @@ impl Request {
             return Err("native build returns bytes; use Request::build".into());
         }
         let mut inputs = crate::packages::CompilationInputs::default();
-        let mut structural_fuel = 1_000_000;
+        let mut structural_fuel = match self.action {
+            Action::Invoke {
+                definition_fuel, ..
+            } => definition_fuel,
+            _ => 1_000_000,
+        };
         let mut invocation = match &self.action {
             Action::Invoke { entry, fuel, .. } => Some(crate::packages::BuilderInvocation {
                 entry,
@@ -894,6 +903,7 @@ impl Action {
                 entry,
                 fuel,
                 protocols,
+                ..
             } => {
                 elaboration::verification::optimization::elide_proven_checks(
                     &mut package,

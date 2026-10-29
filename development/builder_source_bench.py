@@ -39,12 +39,13 @@ def main():
                         metavar=('ARCH', 'OS', 'POINTER_BITS'))
     parser.add_argument('--samples', type=int, default=3)
     parser.add_argument('--fuel', type=int, default=100000000)
+    parser.add_argument('--definition-fuel', type=int, default=1000000)
     args = parser.parse_args()
     try:
         counts = [int(value) for value in args.counts.split(',')]
     except ValueError:
         parser.error('--counts requires comma-separated positive integers')
-    if not counts or any(count < 1 for count in counts) or args.samples < 1 or args.fuel < 1:
+    if not counts or any(count < 1 for count in counts) or args.samples < 1 or args.fuel < 1 or args.definition_fuel < 1:
         parser.error('counts, samples and fuel must be positive')
     if not args.binary.is_file():
         parser.error('build luna first or supply --binary')
@@ -55,7 +56,8 @@ def main():
     summary = directory / 'summary.json'
     data = {'scope': 'frontend plus public builder invocation',
             'binary': str(args.binary.resolve()), 'binary_sha256': digest,
-            'target': args.target, 'fuel': args.fuel, 'measurements': measurements}
+            'target': args.target, 'fuel': args.fuel,
+            'definition_fuel': args.definition_fuel, 'measurements': measurements}
     for count in counts:
         source = directory / f'builder-{count}.fl'
         source.write_text(SOURCE.format(count=count))
@@ -65,7 +67,8 @@ def main():
             code, logs = run(
                 [str(args.binary.resolve()), str(source), '--sysroot', str(ROOT / 'library'),
                  '--build-target', *args.target,
-                 '--invoke-comptime', 'run', '--fuel', str(args.fuel)],
+                 '--invoke-comptime', 'run', '--fuel', str(args.fuel),
+                 '--definition-fuel', str(args.definition_fuel)],
                 cwd=ROOT, timeout=120, label=f'builder-source-{count}-{sample}')
             report = logs / 'result.json'
             reports.append(str(report))
