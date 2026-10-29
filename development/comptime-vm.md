@@ -1807,3 +1807,42 @@ Initial test-only failures were corrected: Rust enum/assignment field spelling
 count (`/tmp/luna-tools-dkz8upix/result.json`). No semantic checks were relaxed.
 - Final `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
   exit 0, `/tmp/luna-tools-xbf_o692/result.json`; `git diff --check` also passed.
+
+## Explicit continuations for delayed normal-form inputs
+
+Normal-form construction cannot be treated as eager untyped argument assembly:
+its source order can put a contextual value before the Type that checks it.
+`stage_normal_argument` and `finish_staged_normal_argument` now traverse those
+inputs with explicit work stacks. Staging handles lists, tuples, selected
+branches, blocks and matches; completion combines values after contextual
+preparation supplies the required domains. List traversal schedules one child
+at a time, avoiding a work queue proportional to the entire unevaluated width.
+
+Logical depth limits, per-node ticks, late-domain validation, literal identities
+and head opacity remain unchanged. Scopes unwind on error, return and exhausted
+fuel while preserving mutations of bindings that existed on entry. Type-list
+spread checks still run before advancing to the next item; tuple interpretation
+still follows the prepared contextual domain. No special Tuple head or package
+name was added to dispatch.
+
+This removes host recursion through staged input containers, not all recursion
+from comptime invocation: ordinary expressions and guards still use shared
+evaluation, and normal-form input plans are not yet bytecode. Pending values are
+invocation-local and are not eligible for freezing into code/result caches.
+
+Validation from `/home/fin/luna`, all commands exited 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  236 existing tests passed, `/tmp/luna-tools-akuikzah/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib normal_inputs::tests`:
+  2 new tests passed. A 512 KiB thread stack exercises nesting through the
+  128-node limit and subsequent recovery. A fuel sweep verifies nested scope
+  cleanup on values, errors and returns, retaining outer binding effects.
+  `/tmp/luna-tools-65dfw743/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test execution --test builder_invocations --test comptime_bytecode_types`:
+  execution 1365, builder invocations 73 and bytecode Type equality 1 passed;
+  `/tmp/luna-tools-5ib8arju/result.json`. Execution coverage includes late Type
+  inputs, checked unselected branches, tuple/match staging, list spreads,
+  source-order effects, defaults and early transfers.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed, `/tmp/luna-tools-qyx46qj7/result.json`; `git diff --check` passed.
