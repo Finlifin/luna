@@ -35,7 +35,7 @@ fn primitive(ty: Primitive) -> Term {
     Term::Primitive(ty)
 }
 
-fn base_package(element: Primitive, reads: usize, mode: &str) -> Package {
+fn base_package(element: Primitive) -> Package {
     use nir::normal_forms::{Head, Kind, Parameter as Input, Role};
     let source = SourceRange { start: 1, end: 2 };
     let list = Term::NormalForm {
@@ -49,28 +49,6 @@ fn base_package(element: Primitive, reads: usize, mode: &str) -> Package {
         sort: Sort::ComptimeValue,
         ty: list.clone(),
     }];
-    let local = Expr {
-        source,
-        ty: list.clone(),
-        kind: K::Local(list_binding),
-    };
-    let values = match mode {
-        "local" => local,
-        "general" => Expr {
-            source,
-            ty: list,
-            kind: K::Block {
-                statements: vec![],
-                result: Some(Box::new(local)),
-            },
-        },
-        _ => unreachable!(),
-    };
-    let read = Expr {
-        source,
-        ty: primitive(Primitive::Integer),
-        kind: K::ListLength(Box::new(values)),
-    };
     Package {
         normal_forms: vec![Head {
             role: Role::TypeList,
@@ -85,10 +63,10 @@ fn base_package(element: Primitive, reads: usize, mode: &str) -> Package {
         }],
         functions: vec![Function {
             declaration: id(1),
-            name: "length".into(),
+            name: "run".into(),
             phase: FunctionPhase::Comptime,
             inline: false,
-            pure: true,
+            pure: false,
             is_unsafe: false,
             type_parameters: vec![],
             requirements: vec![],
@@ -101,14 +79,14 @@ fn base_package(element: Primitive, reads: usize, mode: &str) -> Package {
             defaults: vec![],
             signature: Term::Function {
                 parameters: types,
-                result: Box::new(primitive(Primitive::Integer)),
+                result: Box::new(primitive(Primitive::Void)),
             },
             body: Expr {
                 source,
-                ty: primitive(Primitive::Integer),
+                ty: primitive(Primitive::Void),
                 kind: K::Block {
-                    statements: vec![read.clone(); reads - 1],
-                    result: Some(Box::new(read)),
+                    statements: vec![],
+                    result: None,
                 },
             },
         }],
@@ -116,36 +94,35 @@ fn base_package(element: Primitive, reads: usize, mode: &str) -> Package {
     }
 }
 
-fn package(element: Primitive, count: usize, general: bool) -> (Package, Term, Term) {
-    let mut package = base_package(element, 1, "local");
-    let constructor = &mut package.functions[0];
-    let Term::Function { parameters, .. } = &constructor.signature else {
+fn package(element: Primitive, count: usize, general: bool, per_call: bool) -> (Package, Term) {
+    use nir::program::{ArgumentPassing, CallArgument, Place};
+    let mut package = base_package(element);
+    let caller = &mut package.functions[0];
+    let Term::Function { parameters, .. } = &caller.signature else {
         unreachable!()
     };
     let list = parameters[0].ty.clone();
-    let pointer = Term::Pointer(Box::new(list.clone()));
-    let source = constructor.body.source;
-    let binding = constructor.parameters[0];
+    let source = caller.body.source;
+    let binding = caller.parameters[0];
+    let receiver = LocalId { owner: 4, index: 0 };
     let node = |ty, kind| Expr { source, ty, kind };
-    constructor.signature = Term::Function {
+    caller.name = "run".into();
+    caller.pure = false;
+    caller.signature = Term::Function {
         parameters: vec![Parameter {
             sort: Sort::Runtime,
             ty: list.clone(),
         }],
-        result: Box::new(pointer.clone()),
+        result: Box::new(list.clone()),
     };
-    constructor.body = node(
-        pointer.clone(),
-        K::AddressOf(Box::new(node(list.clone(), K::Local(binding)))),
-    );
-    let mut writer = constructor.clone();
+    let mut writer = caller.clone();
     writer.declaration = id(4);
     writer.name = "append".into();
-    writer.pure = false;
+    writer.parameters = vec![receiver];
     writer.signature = Term::Function {
         parameters: vec![Parameter {
             sort: Sort::Runtime,
-            ty: pointer.clone(),
+            ty: list.clone(),
         }],
         result: Box::new(primitive(Primitive::Void)),
     };
@@ -158,6 +135,7 @@ fn package(element: Primitive, count: usize, general: bool) -> (Package, Term, T
         list.clone(),
         K::TypeList(vec![node(primitive(element), item)]),
     );
+    // A block keeps the same result but selects the ordinary snapshot path.
     let suffix = if general {
         node(
             list.clone(),
@@ -169,15 +147,17 @@ fn package(element: Primitive, count: usize, general: bool) -> (Package, Term, T
     } else {
         suffix
     };
-    let local = node(pointer.clone(), K::Local(binding));
     let append = node(
         primitive(Primitive::Void),
-        K::WritePointer {
-            pointer: Box::new(local.clone()),
+        K::Assign {
+            place: Place {
+                root: receiver,
+                fields: vec![],
+            },
             value: Box::new(node(
                 list.clone(),
                 K::ListConcat(
-                    Box::new(node(list.clone(), K::ReadPointer(Box::new(local)))),
+                    Box::new(node(list.clone(), K::Local(receiver))),
                     Box::new(suffix),
                 ),
             )),
@@ -186,12 +166,35 @@ fn package(element: Primitive, count: usize, general: bool) -> (Package, Term, T
     writer.body = node(
         primitive(Primitive::Void),
         K::Block {
-            statements: vec![append; count],
+            statements: vec![append; if per_call { 1 } else { count }],
             result: None,
         },
     );
+    let call = node(
+        primitive(Primitive::Void),
+        K::Call {
+            callee: Box::new(node(
+                writer.callable_type(),
+                K::Function(writer.declaration),
+            )),
+            arguments: vec![CallArgument {
+                parameter: 0,
+                value: node(list.clone(), K::Local(binding)),
+                is_default: false,
+                passing: ArgumentPassing::ComptimeReference,
+            }],
+            parameter_bindings: writer.parameters.clone(),
+        },
+    );
+    caller.body = node(
+        list.clone(),
+        K::Block {
+            statements: vec![call; if per_call { count } else { 1 }],
+            result: Some(Box::new(node(list.clone(), K::Local(binding)))),
+        },
+    );
     package.functions.push(writer);
-    (package, list, pointer)
+    (package, list)
 }
 
 fn main() {
@@ -200,66 +203,61 @@ fn main() {
         .map(|v| v.parse().unwrap())
         .unwrap_or(20);
     assert!(iterations > 0);
-    println!("benchmark=list-append iterations={iterations} warmup=5");
+    println!(
+        "benchmark=list-append iterations={iterations} warmup=5 cache=none receiver=value-reference"
+    );
     for element in [Primitive::Bool, Primitive::Type] {
-        for count in [16, 256] {
-            for general in [false, true] {
-                let (package, list, pointer_ty) = package(element, count, general);
-                let mut vm = Interpreter::for_comptime(
-                    &package,
-                    Budget {
-                        steps: u64::MAX,
-                        depth: 128,
-                    },
-                )
-                .unwrap();
-                let invoke = |vm: &mut Interpreter<'_>| {
-                    let original = if element == Primitive::Type {
-                        Value::TypeList(vec![])
-                    } else {
-                        Value::List {
-                            ty: list.clone(),
-                            values: vec![],
+        for count in [16, 256, 1024] {
+            for per_call in [false, true] {
+                for general in [false, true] {
+                    let (package, list) = package(element, count, general, per_call);
+                    let mut vm = Interpreter::for_comptime(
+                        &package,
+                        Budget {
+                            steps: u64::MAX,
+                            depth: 128,
+                        },
+                    )
+                    .unwrap();
+                    let invoke = |vm: &mut Interpreter<'_>| {
+                        let original = if element == Primitive::Type {
+                            Value::TypeList(vec![])
+                        } else {
+                            Value::List {
+                                ty: list.clone(),
+                                values: vec![],
+                            }
+                        };
+                        let result = vm
+                            .invoke_with_typed_values(id(1), vec![(list.clone(), original)])
+                            .unwrap();
+                        match result {
+                            Value::TypeList(values) => assert_eq!(values.len(), count),
+                            Value::List { values, .. } => assert_eq!(values.len(), count),
+                            other => panic!("invalid result {other:?}"),
                         }
                     };
-                    let owner = comptime_interpretor::Storage::new(original);
-                    let pointer = vm
-                        .invoke_with_typed_values(
-                            id(1),
-                            vec![(list.clone(), Value::Storage(owner.clone()))],
-                        )
-                        .unwrap();
-                    assert_eq!(
-                        vm.invoke_with_typed_values(id(4), vec![(pointer_ty.clone(), pointer)])
-                            .unwrap(),
-                        Value::Unit
-                    );
-                    match owner.read().unwrap() {
-                        Value::TypeList(values) => assert_eq!(values.len(), count),
-                        Value::List { values, .. } => assert_eq!(values.len(), count),
-                        other => panic!("invalid result {other:?}"),
+                    for _ in 0..5 {
+                        invoke(&mut vm);
                     }
-                };
-                for _ in 0..5 {
-                    invoke(&mut vm);
+                    let steps = vm.remaining_steps();
+                    let allocations = ALLOCATIONS.load(Ordering::Relaxed);
+                    let bytes = BYTES.load(Ordering::Relaxed);
+                    let start = Instant::now();
+                    for _ in 0..iterations {
+                        invoke(&mut vm);
+                    }
+                    let elapsed = start.elapsed();
+                    let allocations = ALLOCATIONS.load(Ordering::Relaxed) - allocations;
+                    let bytes = BYTES.load(Ordering::Relaxed) - bytes;
+                    println!(
+                        "element={element:?} per-call={per_call} general={general} count={count} ns/invoke={} allocations/invoke={:.2} allocated-bytes/invoke={:.2} steps/invoke={}",
+                        elapsed.as_nanos() / iterations as u128,
+                        allocations as f64 / iterations as f64,
+                        bytes as f64 / iterations as f64,
+                        (steps - vm.remaining_steps()) / iterations
+                    );
                 }
-                let steps = vm.remaining_steps();
-                let allocations = ALLOCATIONS.load(Ordering::Relaxed);
-                let bytes = BYTES.load(Ordering::Relaxed);
-                let start = Instant::now();
-                for _ in 0..iterations {
-                    invoke(&mut vm);
-                }
-                let elapsed = start.elapsed();
-                let allocations = ALLOCATIONS.load(Ordering::Relaxed) - allocations;
-                let bytes = BYTES.load(Ordering::Relaxed) - bytes;
-                println!(
-                    "element={element:?} general={general} count={count} ns/invoke={} allocations/invoke={:.2} allocated-bytes/invoke={:.2} steps/invoke={}",
-                    elapsed.as_nanos() / iterations as u128,
-                    allocations as f64 / iterations as f64,
-                    bytes as f64 / iterations as f64,
-                    (steps - vm.remaining_steps()) / iterations
-                );
             }
         }
     }

@@ -439,3 +439,79 @@ Benchmark build: `/tmp/luna-tools-1gie_dyk/result.json`. All five runs exited 0:
 `/tmp/luna-tools-dlz4nte5/result.json`, `/tmp/luna-tools-yl5cph9d/result.json`,
 `/tmp/luna-tools-9dd42r38/result.json`, `/tmp/luna-tools-q0bap4rb/result.json`,
 `/tmp/luna-tools-v_77sh16/result.json`.
+
+## Value-reference append measurement (2026-10-29)
+
+The append benchmark now uses `ArgumentPassing::ComptimeReference` and ordinary
+assignment, matching the current receiver model. It no longer measures the
+legacy source-pointer path. This measurement adds no invocation result cache.
+`memoization::Invocation::prepare` is an explicit opt-in API requiring a pure
+comptime function; production callers do not automatically route every call
+through it. Purity alone is not an economic reason to cache cheap invocations.
+Validation of unchanged data and reuse of an entire invocation result are
+separate optimization questions.
+
+Command, run from `/home/fin/luna` against `7a739c9e` plus this benchmark change:
+
+```sh
+python3 -B development/comptime_bench.py --bench list_append --iterations 3 --repeat 3
+```
+
+Each process warms up five times per case, then measures three invocations.
+The table gives medians across three processes. Package construction, parser,
+elaboration and LLVM are outside the timer. Execution, final result reading,
+length assertions and VM event recording remain inside. Allocated MB means
+cumulative requested bytes divided by 1,000,000, not peak live memory. Small
+sample sizes support identifying allocation paths, not stable speedup promises.
+
+- **Batch** passes the receiver once, then performs all writes in that callee.
+- **Per append** makes a distinct value-reference call for every write.
+- **Fused** uses the simple suffix recognized by the in-place optimization.
+- **General** wraps the same suffix in a block to retain ordinary snapshot
+  evaluation. Both cases assert the final list length after every invocation.
+
+| Elements | Count | Calls | Path | ms/invocation | Allocated MB/invocation |
+|---|---:|---|---|---:|---:|
+| Bool | 256 | Batch | Fused | 1.118 | 1.937 |
+| Bool | 256 | Per append | Fused | 2.072 | 13.765 |
+| Bool | 1024 | Batch | Fused | 10.746 | 7.730 |
+| Bool | 1024 | Batch | General | 15.014 | 184.994 |
+| Bool | 1024 | Per append | Fused | 22.393 | 189.264 |
+| Bool | 1024 | Per append | General | 26.039 | 366.527 |
+| Type | 256 | Batch | Fused | 2.050 | 1.175 |
+| Type | 256 | Per append | Fused | 3.086 | 3.549 |
+| Type | 1024 | Batch | Fused | 27.963 | 4.689 |
+| Type | 1024 | Batch | General | 23.748 | 91.619 |
+| Type | 1024 | Per append | Fused | 42.659 | 36.211 |
+| Type | 1024 | Per append | General | 38.510 | 123.141 |
+
+In-place extension reduces allocated bytes but does not remove quadratic work.
+The Type workload is slower on the fused path in this sample, despite allocating
+less memory. There is also substantial allocation outside the extension itself:
+`Interpreter::bind_invocation_inputs` calls `read_value_reference`, which creates
+a checkpoint snapshot before checking the parameter domain. Repeating that
+operation for a growing list copies the prefix again at every call boundary.
+The batch/per-append comparison includes all call overhead, so it is not a
+precise attribution of every byte or nanosecond to that one function.
+
+The next implementation target is bounded borrowed input validation without
+an unnecessary full snapshot, retaining type admission, representation/depth
+limits and dependent-input materialization where needed. It should be measured
+against both element domains and both calling patterns. Neither skipping
+impure calls nor caching cheap results is required for this work.
+
+Build evidence: `/tmp/luna-tools-w1pu3ibm/result.json` (exit 0). Three final
+measurement runs exited 0: `/tmp/luna-tools-gnu74gr3/result.json`,
+`/tmp/luna-tools-4retdt5m/result.json`, `/tmp/luna-tools-ty4ftwkw/result.json`.
+All 24 cases per process completed; no global test-suite run was needed for a
+benchmark-only execution change.
+
+The existing memoization phase/failure regression was also rerun successfully:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test execution memoized_invocation_failures_and_phase_checks_do_not_publish_results
+```
+
+`/tmp/luna-tools-ju14y54l/result.json` exited 0 (one selected test). It rejects
+impure and runtime functions at preparation and checks failure publication;
+it is not evidence of an automatic cost-based cache admission policy.
