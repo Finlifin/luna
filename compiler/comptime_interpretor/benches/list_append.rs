@@ -94,7 +94,13 @@ fn base_package(element: Primitive) -> Package {
     }
 }
 
-fn package(element: Primitive, count: usize, general: bool, per_call: bool) -> (Package, Term) {
+fn package(
+    element: Primitive,
+    count: usize,
+    general: bool,
+    per_call: bool,
+    owned: bool,
+) -> (Package, Term) {
     use nir::program::{ArgumentPassing, CallArgument, Place};
     let mut package = base_package(element);
     let caller = &mut package.functions[0];
@@ -163,6 +169,25 @@ fn package(element: Primitive, count: usize, general: bool, per_call: bool) -> (
             )),
         },
     );
+    if owned {
+        let mut append = append;
+        let K::Assign { place, value } = &mut append.kind else {
+            unreachable!()
+        };
+        place.root = binding;
+        let K::ListConcat(left, _) = &mut value.kind else {
+            unreachable!()
+        };
+        left.kind = K::Local(binding);
+        caller.body = node(
+            list.clone(),
+            K::Block {
+                statements: vec![append; count],
+                result: Some(Box::new(node(list.clone(), K::Local(binding)))),
+            },
+        );
+        return (package, list);
+    }
     writer.body = node(
         primitive(Primitive::Void),
         K::Block {
@@ -204,59 +229,65 @@ fn main() {
         .unwrap_or(20);
     assert!(iterations > 0);
     println!(
-        "benchmark=list-append iterations={iterations} warmup=5 cache=none receiver=value-reference"
+        "benchmark=list-append iterations={iterations} warmup=5 cache=none receivers=value-reference,owned-local"
     );
-    for element in [Primitive::Bool, Primitive::Type] {
-        for count in [16, 256, 1024] {
-            for per_call in [false, true] {
-                for general in [false, true] {
-                    let (package, list) = package(element, count, general, per_call);
-                    let mut vm = Interpreter::for_comptime(
-                        &package,
-                        Budget {
-                            steps: u64::MAX,
-                            depth: 128,
-                        },
-                    )
-                    .unwrap();
-                    let invoke = |vm: &mut Interpreter<'_>| {
-                        let original = if element == Primitive::Type {
-                            Value::TypeList(vec![])
-                        } else {
-                            Value::List {
-                                ty: list.clone(),
-                                values: vec![],
+    for owned in [false, true] {
+        for element in [Primitive::Bool, Primitive::Type] {
+            for count in [16, 256, 1024] {
+                for per_call in [false, true] {
+                    if owned && per_call {
+                        continue;
+                    }
+
+                    for general in [false, true] {
+                        let (package, list) = package(element, count, general, per_call, owned);
+                        let mut vm = Interpreter::for_comptime(
+                            &package,
+                            Budget {
+                                steps: u64::MAX,
+                                depth: 128,
+                            },
+                        )
+                        .unwrap();
+                        let invoke = |vm: &mut Interpreter<'_>| {
+                            let original = if element == Primitive::Type {
+                                Value::TypeList(vec![])
+                            } else {
+                                Value::List {
+                                    ty: list.clone(),
+                                    values: vec![],
+                                }
+                            };
+                            let result = vm
+                                .invoke_with_typed_values(id(1), vec![(list.clone(), original)])
+                                .unwrap();
+                            match result {
+                                Value::TypeList(values) => assert_eq!(values.len(), count),
+                                Value::List { values, .. } => assert_eq!(values.len(), count),
+                                other => panic!("invalid result {other:?}"),
                             }
                         };
-                        let result = vm
-                            .invoke_with_typed_values(id(1), vec![(list.clone(), original)])
-                            .unwrap();
-                        match result {
-                            Value::TypeList(values) => assert_eq!(values.len(), count),
-                            Value::List { values, .. } => assert_eq!(values.len(), count),
-                            other => panic!("invalid result {other:?}"),
+                        for _ in 0..5 {
+                            invoke(&mut vm);
                         }
-                    };
-                    for _ in 0..5 {
-                        invoke(&mut vm);
+                        let steps = vm.remaining_steps();
+                        let allocations = ALLOCATIONS.load(Ordering::Relaxed);
+                        let bytes = BYTES.load(Ordering::Relaxed);
+                        let start = Instant::now();
+                        for _ in 0..iterations {
+                            invoke(&mut vm);
+                        }
+                        let elapsed = start.elapsed();
+                        let allocations = ALLOCATIONS.load(Ordering::Relaxed) - allocations;
+                        let bytes = BYTES.load(Ordering::Relaxed) - bytes;
+                        println!(
+                            "owned={owned} element={element:?} per-call={per_call} general={general} count={count} ns/invoke={} allocations/invoke={:.2} allocated-bytes/invoke={:.2} steps/invoke={}",
+                            elapsed.as_nanos() / iterations as u128,
+                            allocations as f64 / iterations as f64,
+                            bytes as f64 / iterations as f64,
+                            (steps - vm.remaining_steps()) / iterations
+                        );
                     }
-                    let steps = vm.remaining_steps();
-                    let allocations = ALLOCATIONS.load(Ordering::Relaxed);
-                    let bytes = BYTES.load(Ordering::Relaxed);
-                    let start = Instant::now();
-                    for _ in 0..iterations {
-                        invoke(&mut vm);
-                    }
-                    let elapsed = start.elapsed();
-                    let allocations = ALLOCATIONS.load(Ordering::Relaxed) - allocations;
-                    let bytes = BYTES.load(Ordering::Relaxed) - bytes;
-                    println!(
-                        "element={element:?} per-call={per_call} general={general} count={count} ns/invoke={} allocations/invoke={:.2} allocated-bytes/invoke={:.2} steps/invoke={}",
-                        elapsed.as_nanos() / iterations as u128,
-                        allocations as f64 / iterations as f64,
-                        bytes as f64 / iterations as f64,
-                        (steps - vm.remaining_steps()) / iterations
-                    );
                 }
             }
         }

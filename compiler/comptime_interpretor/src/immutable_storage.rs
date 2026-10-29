@@ -308,7 +308,7 @@ mod tests {
                 value: reference_value,
             },
         };
-        for mode in 0..5 {
+        for mode in 0..8 {
             let wrap = |value| {
                 if mode == 2 {
                     Value::AnonymousRecord(vec![
@@ -320,7 +320,7 @@ mod tests {
                 }
             };
             let mut reference_expr = reference_expr.clone();
-            if mode >= 3 {
+            if matches!(mode, 3 | 4 | 6 | 7) {
                 let K::Assign { value, .. } = &mut reference_expr.kind else {
                     unreachable!()
                 };
@@ -329,11 +329,11 @@ mod tests {
                 };
                 right.kind = K::Local(LocalId {
                     owner: 1,
-                    index: if mode == 4 { 0 } else { 1 },
+                    index: if matches!(mode, 4 | 7) { 0 } else { 1 },
                 });
             }
             let original = wrap(original.clone());
-            let expected = wrap(if mode == 4 {
+            let expected = wrap(if matches!(mode, 4 | 7) {
                 Value::List {
                     ty: ty.clone(),
                     values: vec![Value::Bool(false); 2],
@@ -346,7 +346,9 @@ mod tests {
             for steps in 1..200 {
                 let storage = Storage::new(original.clone());
                 let mut env = Environment::new();
-                let receiver = if mode == 0 {
+                let receiver = if mode >= 5 {
+                    original.clone()
+                } else if mode == 0 {
                     Value::Pointer(storage.pointer(ty.clone(), vec![]))
                 } else {
                     let reference = if mode == 2 {
@@ -371,27 +373,36 @@ mod tests {
                 );
                 let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
                 vm.budget.steps = steps;
-                let mut append = |vm: &mut Interpreter<'_>| {
+                let append = |vm: &mut Interpreter<'_>, env: &mut Environment| {
                     if mode == 0 {
-                        vm.eval_list_append(&expr, &mut env)
-                            .expect("pointer append")
+                        vm.eval_list_append(&expr, env).expect("pointer append")
+                    } else if mode >= 5 {
+                        vm.eval_owned_list_append(&reference_expr, env)
+                            .expect("owned append")
                     } else {
-                        vm.eval_reference_list_append(&reference_expr, &mut env)
+                        vm.eval_reference_list_append(&reference_expr, env)
                             .expect("reference append")
                     }
                 };
-                match append(&mut vm) {
+                let observe = |env: &Environment| {
+                    if mode >= 5 {
+                        env[&LocalId { owner: 1, index: 0 }].clone()
+                    } else {
+                        storage.read().unwrap()
+                    }
+                };
+                match append(&mut vm, &mut env) {
                     Ok(Flow::Value(Value::Unit)) => {
                         successes += 1;
-                        assert_eq!(storage.read().unwrap(), expected);
+                        assert_eq!(observe(&env), expected);
                     }
                     Err(error) => {
                         failures += 1;
                         assert_eq!(error.kind, ErrorKind::StepsExhausted);
-                        assert_eq!(storage.read().unwrap(), original);
+                        assert_eq!(observe(&env), original);
                         vm.budget.steps = 1000;
-                        append(&mut vm).unwrap();
-                        assert_eq!(storage.read().unwrap(), expected);
+                        append(&mut vm, &mut env).unwrap();
+                        assert_eq!(observe(&env), expected);
                     }
                     other => panic!("unexpected append: {other:?}"),
                 }

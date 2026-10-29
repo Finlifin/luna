@@ -4,7 +4,7 @@ use List;
 pub typealias Object = .Object'builtin;
 
 const compiler_list_length = .list_length'builtin;
-const compiler_list_concat = .list_concat'builtin;
+pub const compiler_list_concat = .list_concat'builtin;
 const compiler_comptime_integer_convert = .comptime_integer_convert'builtin;
 const compiler_comptime_integer_div_trunc = .comptime_integer_div_trunc'builtin;
 const compiler_comptime_integer_rem_trunc = .comptime_integer_rem_trunc'builtin;

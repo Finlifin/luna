@@ -14,7 +14,7 @@ impl List<T> where T {
     }
 
     pub pure comptime fn concat(self, right: List<T>) -> List<T> {
-        bindings.list_concat(self, right)
+        bindings.compiler_list_concat(self, right)
     }
 
     {-
@@ -23,7 +23,7 @@ impl List<T> where T {
       replacing the receiver; element and representation limits still apply.
     -}
     pub comptime fn append(self, value: T) {
-        self = bindings.list_concat(self, [value]);
+        self = bindings.compiler_list_concat(self, [value]);
     }
 
     {-
@@ -31,7 +31,7 @@ impl List<T> where T {
         argument evaluation finishes before replacement, including self-extension.
     -}
     pub comptime fn append_all(self, values: List<T>) {
-        self = bindings.list_concat(self, values);
+        self = bindings.compiler_list_concat(self, values);
     }
 
     {-

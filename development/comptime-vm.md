@@ -692,3 +692,80 @@ python3 -B development/check.py --timeout 900 -- test --release -p luna --test c
 
 Report: `/tmp/luna-tools-958d_d5e/result.json` (exit 0). Formatting check report:
 `/tmp/luna-tools-iic5b8mz/result.json` (exit 0); `git diff --check` passed.
+
+## Owned list append and direct library operation binding (2026-10-29)
+
+The VM can now fuse `Assign(local, ListConcat(Local(local), suffix))` for an
+owned List or TypeList. Eligibility requires comptime execution without a runtime
+cleanup schedule, an unprojected owned slot, matching list domains and a suffix
+made only of literals, Type values or local reads. Storage and value references
+retain their existing separate paths. A suffix that can call user code retains
+the general snapshot path, because it could replace the receiver after the left
+read. Self-append obtains its suffix snapshot before mutating the destination.
+
+The borrowed left inspection preserves representation validation and its work
+charge without allocating the discarded copy. RHS/local evaluation preserves
+depth boundaries. Combined size/work checks remain active; failed combined
+validation truncates the tentative append, retains spent budget and restores VM
+depth. This is not a linear-time list builder: repeated complete validation still
+costs work proportional to the growing value.
+
+The typed library methods concat, append and append_all now call the named
+compiler operation binding directly. The ordinary bindings.list_concat wrapper
+remains available, but no longer hides append's read/concatenate/write shape
+behind an additional function invocation. Raw builtin spelling remains only at
+the central binding declaration. This reconnects the existing value-reference
+fusion to real source library methods. The new owned-local benchmark measures
+direct NIR assignment, not automatic inlining of every source `xs.concat(...)`
+method call.
+
+Measurement from `/home/fin/luna`:
+
+```sh
+python3 -B development/comptime_bench.py --bench list_append --iterations 3 --repeat 3
+```
+
+Build report: `/tmp/luna-tools-8h3ok5yq/result.json`. Three process reports:
+`/tmp/luna-tools-2t8mix_7/result.json`, `/tmp/luna-tools-_dg7qj1_/result.json`,
+`/tmp/luna-tools-xviwhe5p/result.json`; all exit 0. Each process warms up five
+invocations per case, then measures three. Tables give process medians for 1024
+appends. General wraps the same suffix in a transparent block to select snapshot
+evaluation; it has two extra charged steps per append on these owned cases.
+These are paired paths in one build, not historical whole-compiler speedups.
+The timer includes invocation, final result reading, assertions and VM events;
+package construction/elaboration are excluded. No invocation result cache runs.
+Allocated MB means cumulative requested bytes, not peak live memory.
+
+| Owned element | Path | ms/invocation | Allocations/invocation | Allocated MB/invocation |
+| --- | --- | ---: | ---: | ---: |
+| Bool | Fused | 12.290 | 57389 | 6.597 |
+| Bool | General | 14.912 | 67624 | 184.990 |
+| Type | Fused | 21.050 | 31764 | 3.573 |
+| Type | General | 24.048 | 34826 | 91.617 |
+
+Reference-receiver batch cases remain in the benchmark. For Bool at 1024 items,
+fused/general medians were 10.755/14.864 ms and 7.730/184.993 allocated MB.
+Short sampling supports identifying the allocation path, not a stable speedup
+promise. Different fuel totals reflect the separately charged paths, not cache
+hits or elided user effects.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor --lib
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test comptime_list_operations --test builder_invocations --test compiler_operation_bindings
+python3 -B development/reproduce.py --timeout 120 --binary /tmp/luna-dev-002/target/release/luna -- development/examples/sysroot-edited-struct.fl --sysroot library --test-native
+python3 -B development/reproduce.py --timeout 120 --binary /tmp/luna-dev-002/target/release/luna -- development/examples/sysroot-meta-lists.fl --sysroot library --test-native
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+All exited 0: 201 VM tests (`/tmp/luna-tools-clkpmrjc/result.json`), 54 List,
+72 builder and five operation-binding tests (`/tmp/luna-tools-wfz3ncs3/result.json`),
+four native struct cases (`/tmp/luna-tools-o5m_wj4z/result.json`) and one native
+meta list case (`/tmp/luna-tools-deztbnu7/result.json`). The budget sweep now also
+covers owned literal/local suffixes and self-append, checking unchanged values
+on failure and successful retry. Existing source tests cover saved snapshots,
+projected receiver updates, optional/nested/Type lists, incompatible domains,
+readonly rebinding and effectful suffix ordering. Formatting passed at
+`/tmp/luna-tools-ad5qnvyj/result.json`; whitespace checks passed.

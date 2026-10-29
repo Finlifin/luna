@@ -163,6 +163,104 @@ impl Interpreter<'_> {
         })())
     }
 
+    /// Reuse an owned local list when the suffix cannot execute user code.
+    /// Aliased storage keeps its separate reference path; callbacks require the
+    /// ordinary left snapshot because they can replace the destination.
+    pub(super) fn eval_owned_list_append(
+        &mut self,
+        expr: &Expr,
+        environment: &mut Environment,
+    ) -> Option<Result<Flow, Error>> {
+        if !self.comptime_only || self.cleanup_schedule.is_some() {
+            return None;
+        }
+        let K::Assign { place, value } = &expr.kind else {
+            return None;
+        };
+        let K::ListConcat(left, right) = &value.kind else {
+            return None;
+        };
+        if !place.fields.is_empty()
+            || !matches!(left.kind, K::Local(binding) if binding == place.root)
+            || left.ty != value.ty
+            || right.ty != value.ty
+            || expr.ty != Term::Primitive(Primitive::Void)
+            || (self.list_element(&value.ty).is_none() && !self.is_type_list_input(&value.ty))
+        {
+            return None;
+        }
+        let simple = match &right.kind {
+            K::TypeList(fields) => fields
+                .iter()
+                .all(|field| matches!(field.kind, K::Local(_) | K::TypeValue(_) | K::Literal(_))),
+            K::TypeListValue(_) | K::Local(_) => true,
+            _ => false,
+        };
+        if !simple
+            || !matches!(
+                environment.get(&place.root)?,
+                Value::List { .. } | Value::TypeList(_)
+            )
+        {
+            return None;
+        }
+        let depth = self.depth;
+        let result = (|| {
+            // Match ordinary RHS/local evaluation and copy-validation charges,
+            // but do not allocate a snapshot that assignment would discard.
+            self.tick(Some(value.source))?;
+            self.depth += 1;
+            self.tick(Some(left.source))?;
+            self.depth += 1;
+            let original = &environment[&place.root];
+            self.check_borrowed_representation(original, left.source, 0)?;
+            self.depth -= 1;
+            self.validate_immutable_input(original, &left.ty)?;
+            let length = match original {
+                Value::List { values, .. } => values.len(),
+                Value::TypeList(values) => values.len(),
+                _ => unreachable!(),
+            };
+            let suffix = match self.eval(right, environment)? {
+                Flow::Value(value) => value,
+                flow => return Ok(flow),
+            };
+            self.validate_immutable_input(&suffix, &right.ty)?;
+            let suffix_length = match &suffix {
+                Value::List { values, .. } => values.len(),
+                Value::TypeList(values) => values.len(),
+                _ => return Err(self.failure(ErrorKind::Type, Some(value.source))),
+            };
+            let count = length
+                .checked_add(suffix_length)
+                .filter(|count| *count <= 100_000)
+                .ok_or_else(|| {
+                    self.failure(ErrorKind::RepresentationSizeLimit, Some(value.source))
+                })?;
+            self.integer_operation(Some(value.source), |budget| {
+                budget.consume(count.saturating_add(1))
+            })?;
+            memory::append_list_checked(
+                environment.get_mut(&place.root).unwrap(),
+                suffix,
+                |combined| {
+                    let work = combined
+                        .scoped_copy_work_with_evidence(
+                            &self.abstract_type_parameters,
+                            &self.abstract_value_parameters,
+                        )
+                        .ok_or(ErrorKind::RepresentationSizeLimit)?;
+                    self.integer_operation(Some(value.source), |budget| budget.consume(work))
+                        .map_err(|error| error.kind)
+                },
+            )
+            .map_err(|kind| self.failure(kind, Some(value.source)))?;
+            Ok(Flow::Value(Value::Unit))
+        })();
+        self.depth = depth;
+        Some(result)
+    }
+
     pub(super) fn eval_list_operation(
         &mut self,
         expr: &Expr,

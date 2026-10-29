@@ -7586,6 +7586,9 @@ impl<'a> Interpreter<'a> {
 
     #[inline(never)]
     fn eval_assign(&mut self, expr: &Expr, environment: &mut Environment) -> Result<Flow, Error> {
+        if let Some(result) = self.eval_owned_list_append(expr, environment) {
+            return result;
+        }
         if let Some(result) = self.eval_reference_list_append(expr, environment) {
             return result;
         }
