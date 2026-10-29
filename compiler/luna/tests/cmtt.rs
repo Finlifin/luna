@@ -10162,3 +10162,83 @@ fn contextual_data_consumers_bound_nested_argument_preparation() {
         }
     }
 }
+
+#[test]
+fn contextual_data_result_contracts_observe_early_and_tail_returns() {
+    for body in [
+        "flag",
+        "return flag;",
+        "if flag {return true;} else {false}",
+    ] {
+        let source = format!(
+            "
+            comptime fn inspect(code:<|-bool>, flag:bool)->result:bool
+            where ensures result == flag'old
+            {{{body}}}
+            fn run()->bool {{const result = inspect('(true), true); result}}"
+        );
+        assert_eq!(run(&source, "run", vec![]), Value::Bool(true));
+        let rejected = source.replace("ensures result == flag'old", "ensures result != flag'old");
+        let failure = support::compile_with_protocols(&rejected, &Default::default()).unwrap_err();
+        assert!(failure.contains("postcondition rejected"), "{failure}");
+    }
+}
+
+#[test]
+fn contextual_data_result_contracts_validate_unused_predicates() {
+    for predicate in ["result + true", "result'old", "code"] {
+        let source = format!(
+            "
+            comptime fn inspect(code:<|-bool>)->result:bool
+            where ensures {predicate}
+            {{true}}
+            fn run()->bool {{true}}"
+        );
+        let failure = support::compile_with_protocols(&source, &Default::default()).unwrap_err();
+        assert!(!failure.contains("parsing failed"), "{failure}");
+        assert!(
+            !failure.contains("result bindings are not yet supported"),
+            "{failure}"
+        );
+    }
+}
+
+#[test]
+fn contextual_data_result_contracts_preserve_nominal_fields_and_nested_calls() {
+    let source = "
+        struct Flags {enabled:bool}
+        comptime fn inspect(code:<|-bool>, flag:bool)->result:Flags
+        where ensures result.enabled == flag'old
+        {Flags {enabled:flag}}
+        comptime fn forward(code:<|-bool>)->result:bool
+        where ensures result
+        {const flags = inspect(code, true); flags.enabled}
+        fn run()->bool {const result = forward('(true)); result}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let rejected = source.replace("Flags {enabled:flag}", "Flags {enabled:not flag}");
+    let failure = support::compile_with_protocols(&rejected, &Default::default()).unwrap_err();
+    assert!(failure.contains("postcondition rejected"), "{failure}");
+}
+
+#[test]
+fn contextual_data_result_contracts_preserve_type_and_void_results() {
+    let source = "
+        typealias Type = .Type'builtin;
+        typealias void = .void'builtin;
+        comptime fn Inspect(code:<|-T>, allowed:bool)->result:Type where T, ensures allowed {T}
+        comptime fn consume(code:<|-bool>)->result:void where ensures true {return;}
+        comptime fn inspect(code:<|-bool>)->result:bool {
+            consume(code);
+            true
+        }
+        fn run()->bool {
+            const Selected = Inspect<bool>('(true), true);
+            let value:Selected = true;
+            const checked = inspect('(true));
+            value and checked
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let rejected = source.replace("ensures allowed", "ensures not allowed");
+    let failure = support::compile_with_protocols(&rejected, &Default::default()).unwrap_err();
+    assert!(failure.contains("postcondition rejected"), "{failure}");
+}

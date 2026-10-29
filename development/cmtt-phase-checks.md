@@ -322,3 +322,55 @@ The final complete-sysroot builder regression also passed after the depth guard
 extension: `python3 -B development/check.py --timeout 900 -- test -p luna --test
 builder_invocations contextual_data_consumer_publishes`
 (`/tmp/luna-tools-w7v_28ks/result.json`, one passed).
+
+
+## Result-bound contracts for contextual data consumers
+
+Contextual functions returning data now accept named results. Definition checking
+supplies the result Type to the ordinary postcondition checker and admits its
+binding only inside the predicate frame. Invocation installs the completed result
+in owned generator storage after the body returns, then checks postconditions
+before returning it to the caller. Early returns and tail results use the same
+path. Input `old` expressions still use the entry snapshot; a result has no entry
+value. Reading the checked result uses metered representation transport and
+preserves nested storage identities. A named result without postconditions does
+not allocate a postcondition cell.
+
+```flurry
+comptime fn inspect(code: <|- bool>, flag: bool) -> result: bool
+where ensures result == flag'old
+{
+    if flag { return true; }
+    false
+}
+
+fn run() -> bool {
+    const result = inspect('(true), true);
+    result
+}
+```
+
+This removes the result-binding limitation listed in the preceding stage. It
+does not change predicate admission: Type equality is still rejected by the
+program-predicate checker, so Type-returning functions can currently use supported
+data predicates but not `ensures result == T`. Another existing limitation is
+using a contextual call's unknown Type result as a local type while checking a
+consumer definition; completed calls at required boundaries remain supported.
+Neither limitation was changed to make these tests pass. Contextual methods,
+variadic collection, arbitrary expression scheduling and the invocation-depth
+limit are unchanged.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --test cmtt_phase_boundaries --test comptime_memory
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+git diff --check
+```
+
+All passed: 543 CMTT, three phase-boundary and 17 memory tests
+(`/tmp/luna-tools-etm46rby/result.json`). Four new source regressions exercise
+selected/early returns, false postcondition rejection, entry snapshots, invalid
+unused predicates, nominal fields, nested calls, Type results, void completion,
+and named results without predicates. Formatting passed at
+`/tmp/luna-tools-4xfkqn1z/result.json`; whitespace checks passed.

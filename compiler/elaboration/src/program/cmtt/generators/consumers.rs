@@ -40,20 +40,10 @@ impl Checker<'_, '_> {
                 .map(|output| this.type_expr(output))
                 .unwrap_or_else(|| Ok(p(P::Void)))
         })?;
-        let item = self.package.item(owner).unwrap();
-        let (ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) = &item.kind else {
-            unreachable!()
-        };
         if self.self_containers.contains_key(&owner) || definition.body.is_none() {
             return Err(error(
                 span,
                 "contextual data methods require contextual method dispatch, not an ordinary callable signature",
-            ));
-        }
-        if sig.return_binding.is_some() {
-            return Err(error(
-                span,
-                "contextual data result bindings are not yet supported in contracts",
             ));
         }
         if !definition.variadics.is_empty() {
@@ -334,8 +324,15 @@ impl Checker<'_, '_> {
         }
         self.generator_contracts(owner, false, sig.span, None)?;
         let entry = self.capture_generator_entry_data(owner, sig.span)?;
+        let result_binding = sig.return_binding.map(local);
         if self.checking_code_generator {
-            self.generator_contracts(owner, true, sig.span, Some(&entry))?;
+            self.generator_contracts_with_result(
+                owner,
+                true,
+                sig.span,
+                Some(&entry),
+                result_binding.map(|binding| (binding, &definition.output)),
+            )?;
         }
         let value = self.package.body(*body).unwrap().value;
         let control = self.consumer_result(value, &definition.output, 0)?;
@@ -355,8 +352,26 @@ impl Checker<'_, '_> {
                     "contextual data function did not return a value",
                 ));
             };
-            self.generator_contracts(owner, true, sig.span, Some(&entry))?;
-            Ok(Some(value))
+            if let Some(binding) =
+                result_binding.filter(|_| !self.program_postconditions[&owner].is_empty())
+            {
+                // Expose the completed result only to the postcondition frame.
+                // Owned storage retains nested identities; reading it back uses
+                // the same metered representation path as other generator cells.
+                self.install_live_generator_input(binding, &definition.output, value, sig.span);
+                self.generator_contracts_with_result(
+                    owner,
+                    true,
+                    sig.span,
+                    Some(&entry),
+                    Some((binding, &definition.output)),
+                )?;
+                let cell = self.generator_cells[&binding].1.clone();
+                Ok(Some(self.read_generator_cell(&cell, sig.span)?))
+            } else {
+                self.generator_contracts(owner, true, sig.span, Some(&entry))?;
+                Ok(Some(value))
+            }
         }
     }
 

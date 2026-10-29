@@ -2092,6 +2092,17 @@ impl Checker<'_, '_> {
         span: Span,
         entry: Option<&GeneratorEntryData>,
     ) -> Result<(), Error> {
+        self.generator_contracts_with_result(owner, post, span, entry, None)
+    }
+
+    fn generator_contracts_with_result(
+        &mut self,
+        owner: OwnerId,
+        post: bool,
+        span: Span,
+        entry: Option<&GeneratorEntryData>,
+        result: Option<(n::LocalId, &Term)>,
+    ) -> Result<(), Error> {
         if if post {
             self.program_postconditions[&owner].is_empty()
         } else {
@@ -2107,8 +2118,11 @@ impl Checker<'_, '_> {
         self.generator_data
             .extend(concrete.keys().map(|binding| (*binding, None)));
         let checked = (|| {
+            if let Some((binding, _)) = result {
+                self.generator_data.insert(binding, None);
+            }
             let (predicates, snapshots) = if post {
-                self.program_postconditions_with_result(owner, None)?
+                self.program_postconditions_with_result(owner, result)?
             } else {
                 (self.program_preconditions(owner)?, Vec::new())
             };
