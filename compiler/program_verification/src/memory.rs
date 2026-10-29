@@ -8381,7 +8381,29 @@ fn validate_code_premise(
             .map_err(|error| error.to_string())?;
         let signature = signature.with_unsafe_call_requirement(function.is_unsafe);
         if &signature != expected {
-            return Err("memory callable signature disagrees with parameter".into());
+            // A callable premise may retain an associated Item projection even
+            // after its named body has a concrete signature. Compare completed
+            // views from the immutable package, without unfolding normal heads.
+            let mut normalize = |ty: &Term| -> Result<Term, String> {
+                if let Some(value) = round.completed_types.get(ty) {
+                    bound_type(value, fuel)?;
+                    return Ok(value.clone());
+                }
+                let allowance = *fuel / 2;
+                *fuel -= allowance;
+                let mut remaining = allowance;
+                let value =
+                    type_resolution::dispatch::normalize_concrete_type(package, ty, &mut remaining);
+                *fuel += remaining;
+                let value = value?;
+                round.completed_types.insert(ty.clone(), value.clone());
+                Ok(value)
+            };
+            if normalize(&signature)? != normalize(expected)? {
+                return Err(format!(
+                    "memory callable signature disagrees with parameter: expected {expected}, found {signature}"
+                ));
+            }
         }
     }
     Ok(())

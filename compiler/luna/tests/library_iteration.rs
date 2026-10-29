@@ -1669,6 +1669,26 @@ fn intersperse_with_preserves_order_and_skips_empty_and_singleton_factories() {
 }
 
 #[test]
+fn named_optional_mapper_matches_completed_associated_signature() {
+    let source = format!(
+        "{}\n{}\n
+        fn present_null(value: bool) -> ??bool {{
+            let inner: ?bool = null;
+            if value {{inner}} else {{null}}
+        }}
+        fn run() -> bool {{
+            let source: ?bool = true;
+            let result = source.as(Iterator).filter_map(present_null).as(Iterator).last();
+            result match {{value? => value matches null, null => false}}
+        }}
+        fn verify() {{let passed = run(); assumes passed;}}",
+        &include!("support/iterator_source.rs"),
+        include_str!("../../../library/builtin/protocols/resources.fl"),
+    );
+    check_iteration_with_budget(&source, None, 4_000_000);
+}
+
+#[test]
 fn intersperse_with_rejects_factory_domain_and_arity_mismatches() {
     for factory in ["|| 'x'", "|value| value"] {
         let source = format!(
