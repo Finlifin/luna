@@ -46,12 +46,6 @@ impl Checker<'_, '_> {
                 "contextual data methods require contextual method dispatch, not an ordinary callable signature",
             ));
         }
-        if !definition.variadics.is_empty() {
-            return Err(error(
-                span,
-                "contextual data consumers do not yet collect variadic inputs",
-            ));
-        }
         self.data_consumers.insert(owner, definition);
         Ok(())
     }
@@ -180,18 +174,38 @@ impl Checker<'_, '_> {
         let H::Application(callee, arguments) = site.kind else {
             unreachable!()
         };
-        let (definition, values) = self.prepare_contextual_inputs(
-            owner,
-            template,
-            site,
-            callee,
-            arguments,
-            expected.cloned(),
-            Term::clone,
-            None,
-            &mut spreads::SpreadPlan::default(),
-            None,
-        )?;
+        let (definition, values) = if arguments
+            .iter()
+            .any(|argument| matches!(argument, Arg::Expand(_)))
+        {
+            self.with_generator_spreads(owner, site.span, arguments, |this, inputs, packets| {
+                this.prepare_contextual_inputs(
+                    owner,
+                    template,
+                    site,
+                    callee,
+                    inputs,
+                    expected.cloned(),
+                    Term::clone,
+                    None,
+                    packets,
+                    None,
+                )
+            })?
+        } else {
+            self.prepare_contextual_inputs(
+                owner,
+                template,
+                site,
+                callee,
+                arguments,
+                expected.cloned(),
+                Term::clone,
+                None,
+                &mut spreads::SpreadPlan::default(),
+                None,
+            )?
+        };
         if let Some(expected) = expected {
             self.require(&definition.output, expected, site.span)?;
         }

@@ -28,5 +28,32 @@ test contextual_data_builder {
 comptime fn inspect() -> bool {
     let names = BooleanSlot.struct_field_names();
     let types = BooleanSlot.struct_field_types();
+    let pair_names = BooleanPair.struct_field_names();
+    let pair_types = BooleanPair.struct_field_types();
     names.length() == 1 and names[0] == .value and types[0] == bool
+        and pair_names.length() == 2 and pair_names[0] == .left
+        and pair_names[1] == .right and pair_types[0] == bool
+        and pair_types[1] == bool
+}
+
+
+{-
+    Data collections retain their Tuple type while the code input remains a
+    separate contextual value. A computed packet can forward the field names.
+-}
+comptime fn PairFor(code: <|-T>, ...names: Tuple<Symbol, Symbol>) -> Type
+where T
+{
+    let (first, second) = names;
+    var builder = meta.StructBuilder.new(.name = .CodeResultPair);
+    builder.add_field(first, T);
+    builder.add_field(second, T);
+    builder.Build()
+}
+
+typealias BooleanPair = PairFor('(true), ...do { (.left, .right) });
+
+test contextual_data_variadic_builder {
+    let pair = BooleanPair { left: true, right: false };
+    assumes pair.left and not pair.right;
 }

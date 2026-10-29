@@ -420,3 +420,47 @@ regressions cover code/pattern evidence, generic forwarding, numeric target cont
 Type/value defaults, conflicting/absent evidence, formation constraints and
 source-ordered single evaluation of named inputs. Formatting completed at
 `/tmp/luna-tools-w9x04ln4/result.json`; whitespace checks passed.
+
+
+## Data-consumer variadics and argument expansion
+
+Contextual data consumers now admit ordinary data variadics and reuse the shared
+collection path. The declared domain describes the whole collected Tuple, not
+one element. Empty and heterogeneous collections retain the registered Tuple
+normal-form head; named supply delivers an already formed collection. Duplicate
+supply, incorrect element types and incorrect fixed widths remain errors.
+
+Calls with spread arguments use the existing spread planner. Width/type probing
+does not execute producers. Nonempty packets are prepared once at their source
+position, and empty packets still execute their effects at that position.
+Supplied code inputs and data elements retain their interleaved order. Parameter
+defaults and result contracts see the completed collection. `()` remains void;
+the empty-packet test obtains a real `Tuple<>` through empty collection instead
+of treating void as a tuple.
+
+The public `sysroot-contextual-data.fl` example now uses
+`PairFor('(true), ...do { (.left, .right) })` to generate a two-field struct via
+`meta.StructBuilder`. Its reflection check validates field order and Types; its
+native case constructs and reads both fields. The earlier data-variadics and
+ordinary packet restrictions are superseded. Quoted-code containers, contextual
+data methods, property-call routing and arbitrary expression scheduling are still
+separate unfinished work; this change does not make quoted code ordinary data.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --test builder_invocations contextual_data
+python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --test cmtt_phase_boundaries --test comptime_memory --test builder_invocations
+python3 -B development/check.py --timeout 900 -- run -p luna -- development/examples/sysroot-contextual-data.fl --sysroot library --test-native
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+git diff --check
+```
+
+All passed: the focused source/builder run (`/tmp/luna-tools-j65zac9j/result.json`),
+556 CMTT, 73 builder, three phase-boundary and 17 memory cases
+(`/tmp/luna-tools-e000rquv/result.json`), and two LLVM native cases
+(`/tmp/luna-tools-n_dlzd3f/result.json`). Seven new source regressions cover empty
+and heterogeneous collections, direct named supply, literal/computed packets,
+interleaved and empty-packet effects, forwarding, result contracts and rejection
+of duplicate/incorrect inputs. Formatting completed at
+`/tmp/luna-tools-oq8m9olu/result.json`; whitespace checks passed.

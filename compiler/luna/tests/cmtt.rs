@@ -10330,3 +10330,154 @@ fn contextual_data_inference_settles_type_defaults_without_inventing_evidence() 
     let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
     assert!(!failure.contains("parsing failed"), "{failure}");
 }
+
+#[test]
+fn contextual_data_variadics_collect_registered_heterogeneous_and_empty_tuples() {
+    let source = "
+        comptime fn pack(code:<|-bool>, ...items:T)->T where T {items}
+        fn run()->bool {
+            const pair = pack('(true), true, 'x');
+            const empty = pack('(true));
+            let checked:Tuple<> = empty;
+            let (flag, letter) = pair;
+            flag and letter == 'x'
+        }";
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
+    let supplied = source.replace(
+        "pack('(true), true, 'x')",
+        "pack('(true), .items=(true,'x'))",
+    );
+    assert_eq!(
+        support::run_iir_with_tuple(&supplied, "run", vec![]),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn contextual_data_variadics_preserve_interleaved_code_argument_effects() {
+    let source = "
+        comptime fn inspect(...items:Tuple<bool,bool>, .code:<|-bool> = '(true))->bool {
+            let (first, second) = items;
+            not first and second
+        }
+        comptime fn forward(code:<|-bool>)->bool {
+            var flag = false;
+            inspect(flag, .code=do {flag=true; code}, flag)
+        }
+        fn run()->bool {const result=forward('(true)); result}";
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn contextual_data_variadics_apply_defaults_and_result_contracts_after_collection() {
+    let source = "
+        comptime fn pack(code:<|-bool>, ...items:Tuple<bool,bool>, .enabled:bool=true)->result:bool
+        where ensures result == enabled'old
+        {
+            let (first, second) = items;
+            first and second and enabled
+        }
+        fn run()->bool {const result=pack('(true), true, true); result}";
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
+    let invalid = source.replace("pack('(true), true, true)", "pack('(true), true, false)");
+    let failure = support::compile_with_tuple_protocols(&invalid, &Default::default()).unwrap_err();
+    assert!(failure.contains("postcondition rejected"), "{failure}");
+}
+
+#[test]
+fn contextual_data_variadics_reject_wrong_shapes_and_duplicate_supply() {
+    for call in [
+        "pack('(true), true)",
+        "pack('(true), true, false, true)",
+        "pack('(true), true, 'x')",
+        "pack('(true), true, false, .items=(true,false))",
+    ] {
+        let source = format!(
+            "
+            comptime fn pack(code:<|-bool>, ...items:Tuple<bool,bool>)->bool {{true}}
+            fn run()->bool {{const result={call}; result}}"
+        );
+        let failure =
+            support::compile_with_tuple_protocols(&source, &Default::default()).unwrap_err();
+        assert!(
+            !failure.contains("parsing failed") && !failure.contains("HIR lowering failed"),
+            "{failure}"
+        );
+    }
+    let source = "comptime fn pack(code:<|-bool>, ...items:bool)->bool {true}
+        fn run()->bool {const result=pack('(true),true); result}";
+    assert!(support::compile_with_tuple_protocols(source, &Default::default()).is_err());
+}
+
+#[test]
+fn contextual_data_variadics_expand_computed_and_literal_packets_once() {
+    let source = "
+        comptime fn inspect(code:<|-bool>, ...items:Tuple<bool,bool,bool>)->bool {
+            let (first, second, third)=items;
+            not first and second and not third
+        }
+        comptime fn forward(code:<|-bool>)->bool {
+            var flag=false;
+            inspect(code, flag, ...do {flag=not flag; (flag,)},
+                ...do {flag=not flag; (flag,)})
+        }
+        fn run()->bool {const result=forward('(true)); result}";
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
+    let literals = source.replace(
+        "...do {flag=not flag; (flag,)}",
+        "...((do {flag=not flag; flag}),)",
+    );
+    assert_eq!(
+        support::run_iir_with_tuple(&literals, "run", vec![]),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn contextual_data_variadics_evaluate_empty_packets_at_their_source_position() {
+    let source = "
+        comptime fn empty(code:<|-bool>, ...items:T)->T where T {items}
+        comptime fn inspect(code:<|-bool>, ...items:Tuple<bool,bool>)->bool {
+            let (first, second)=items;
+            not first and second
+        }
+        comptime fn forward(code:<|-bool>)->bool {
+            const packet=empty(code);
+            var flag=false;
+            inspect(code, flag, ...do {flag=true; packet}, flag)
+        }
+        fn run()->bool {const result=forward('(true)); result}";
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn contextual_data_variadics_forward_collections_with_their_nominal_tuple_head() {
+    let source = "
+        comptime fn pack(code:<|-bool>, ...items:T)->T where T {items}
+        comptime fn forward(code:<|-bool>, ...items:Tuple<bool,bool>)->bool {
+            const pair=pack(code, ...items);
+            let checked:Tuple<bool,bool> = pair;
+            let (first, second)=checked;
+            first and not second
+        }
+        fn run()->bool {const result=forward('(true), true, false); result}";
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
+}
