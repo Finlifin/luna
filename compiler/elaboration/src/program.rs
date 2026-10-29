@@ -218,6 +218,8 @@ pub fn elaborate_packages(
 /// Source names never designate these protocols implicitly.
 #[derive(Clone, Debug, Default)]
 pub struct Protocols {
+    /// Independent limit for final package dispatch preparation.
+    pub dispatch_fuel: Option<usize>,
     /// Explicit authority to implement compiler builtin types, by semantic package ID.
     pub builtin_implementation_packages: BTreeSet<u64>,
     /// Explicit build modes by source semantic package identity. Empty means
@@ -1399,9 +1401,17 @@ fn elaborate_candidate<'a, 'h>(
         .iter()
         .any(|i| !i.type_parameters.is_empty() || !i.requirements.is_empty())
     {
-        output.dispatch_instances =
-            crate::materialization::dispatch_instances(&output, crate::ptc::Budget::default())
-                .map_err(|message| error(Span::default(), message))?;
+        output.dispatch_instances = crate::materialization::dispatch_instances(
+            &output,
+            crate::ptc::Budget {
+                steps: checker
+                    .protocols
+                    .dispatch_fuel
+                    .unwrap_or(crate::ptc::Budget::default().steps),
+                ..crate::ptc::Budget::default()
+            },
+        )
+        .map_err(|message| error(Span::default(), message))?;
     }
     // Ordinary behavior witnesses cover all inline branches but are not
     // executable artifacts: their comptime inputs remain abstract.

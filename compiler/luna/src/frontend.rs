@@ -508,6 +508,7 @@ pub(crate) fn source_protocols(
     options: &Options,
 ) -> crate::protocols::type_constructors::Selectors<'_> {
     crate::protocols::type_constructors::Selectors {
+        dispatch_fuel: options.dispatch_fuel,
         host_fma: None,
         host_sqrt: None,
         host_copysign: None,

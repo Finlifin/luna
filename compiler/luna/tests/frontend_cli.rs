@@ -547,6 +547,7 @@ fn splice_selector_api_rejects_conflicting_identity_and_nonsemantic_output() {
     };
     let sandbox = Sandbox::new();
     let mut options = Options {
+        dispatch_fuel: None,
         comptime_intrinsics: Vec::new(),
         input: sandbox.write(
             "input.fl",
@@ -10619,5 +10620,67 @@ fn sysroot_half_float_fma_rounds_once_even_across_wide_exponent_gaps() {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn dispatch_fuel_is_independent_and_applies_to_single_and_package_frontends() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "input.fl",
+        "trait Marker {} struct Cell where T {value: T}
+        impl Marker for Cell<T> where T {}
+        fn run() -> bool {true}",
+    );
+    for packages in [false, true] {
+        let base = if packages {
+            vec![
+                "--packages-v1",
+                "--package",
+                "1",
+                "101",
+                "app",
+                "input.fl",
+                "--primary",
+                "1",
+            ]
+        } else {
+            vec!["input.fl"]
+        };
+        let mut low = base.clone();
+        low.extend(["--emit", "nir", "--dispatch-fuel", "1"]);
+        let output = sandbox.run(&low);
+        failure(&output, 1);
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .to_ascii_lowercase()
+                .contains("budget"),
+            "{output:?}"
+        );
+        let mut high = base.clone();
+        high.extend(["--emit", "nir", "--dispatch-fuel", "100000"]);
+        let output = sandbox.run(&high);
+        assert!(output.status.success(), "{output:?}");
+        // Action fuel cannot replenish an independently exhausted frontend.
+        let mut separate = base;
+        separate.extend([
+            "--interpret",
+            "run",
+            "--fuel",
+            "1000000",
+            "--dispatch-fuel",
+            "1",
+        ]);
+        failure(&sandbox.run(&separate), 1);
+    }
+    for values in [
+        vec!["0"],
+        vec!["-1"],
+        vec!["bad"],
+        vec!["1", "--dispatch-fuel", "2"],
+    ] {
+        let mut args = vec!["input.fl", "--emit", "nir", "--dispatch-fuel"];
+        args.extend(values);
+        failure(&sandbox.run(&args), 2);
     }
 }

@@ -198,8 +198,17 @@ impl World<'_> {
         let resolution = resolve(&interface, subject, &mut allowance)?;
         fuel = allowance.steps;
         let Selection::Selected(selected) = resolution.types.selection else {
+            let pending = resolution
+                .qualifications
+                .iter()
+                .filter_map(|(id, qualification)| {
+                    matches!(qualification, Qualification::Pending(_))
+                        .then(|| format!("(candidate {id} {qualification})"))
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
             return Err(format!(
-                "associated Type implementation selection is unresolved: {}",
+                "associated Type implementation selection is unresolved: {} (remaining-steps {fuel}) (pending {pending})",
                 resolution.types.selection
             ));
         };

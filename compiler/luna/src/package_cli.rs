@@ -203,6 +203,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Request, String
                 | "--test-filter"
                 | "--test-timeout-ms"
                 | "--fuel"
+                | "--dispatch-fuel"
                 | "--build-feature"
                 | "--build-mode"
                 | "--package-build-mode"
@@ -688,6 +689,7 @@ impl Request {
             options.output.as_deref(),
             &configured,
             crate::protocols::type_constructors::Selectors {
+                dispatch_fuel: self.options.dispatch_fuel,
                 comptime_intrinsics: &options.comptime_intrinsics,
                 host_fma: match &self.action {
                     Action::Build { host_fma, .. }

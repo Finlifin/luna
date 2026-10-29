@@ -435,3 +435,15 @@ request-local IDs to semantic package identities. Names alone grant nothing.
 The authorization set participates in resident request equality/cache identity.
 `--builtin` still authorizes its designated package; sysroot loading supplies the
 six selected library identities automatically.
+
+### Dispatch preparation allowance
+
+`--dispatch-fuel <positive steps>` sets the independent frontend allowance for
+final package dispatch preparation (default 100000). It works for ordinary
+source compilation, sysroot loading, and explicit package sets, including
+`--emit nir`. It does not replace `--fuel`, grant type evidence, alter invocation
+purity, or change comptime execution budgets. Larger source packages can request
+more preparation work without changing their runtime or invocation allowance.
+The value is part of the complete request options and therefore distinguishes
+resident frontend cache entries. An exhausted preparation fails before publishing
+NIR; retrying with a larger allowance performs a fresh bounded compilation.

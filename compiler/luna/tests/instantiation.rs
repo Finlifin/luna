@@ -137,6 +137,7 @@ fn compile_in(source: &str, identity: u64) -> nir::program::Package {
     std::fs::write(&path, source).unwrap();
     let artifact = frontend::compile_in_package(
         &Options {
+            dispatch_fuel: None,
             comptime_intrinsics: Vec::new(),
             input: path.clone(),
             emit: Emit::Nir,

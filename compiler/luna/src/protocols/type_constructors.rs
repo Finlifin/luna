@@ -3,6 +3,7 @@ use elaboration::program::Protocols;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Selectors<'a> {
+    pub dispatch_fuel: Option<usize>,
     pub host_fma: Option<&'a str>,
     pub host_sqrt: Option<&'a str>,
     pub host_copysign: Option<&'a str>,
@@ -149,6 +150,7 @@ pub(crate) fn resolve_source(
 ) -> Result<Protocols, String> {
     let paths = super::source::ModulePaths::new(hir);
     let mut result = super::splice::resolve_source(hir, packages, selectors.splice, identities)?;
+    result.dispatch_fuel = selectors.dispatch_fuel.or(result.dispatch_fuel);
     for (label, selector, target) in [
         ("FMA", selectors.host_fma, &mut result.host_fma),
         ("sqrt", selectors.host_sqrt, &mut result.host_sqrt),
@@ -641,6 +643,7 @@ impl SysrootBindings {
         identities: &Protocols,
     ) -> Selectors<'a> {
         Selectors {
+            dispatch_fuel: explicit.dispatch_fuel,
             host_fma: explicit.host_fma,
             host_sqrt: explicit.host_sqrt,
             host_copysign: explicit.host_copysign,
@@ -994,6 +997,7 @@ mod stage_tests {
             },
         ];
         let options = crate::cli::Options {
+            dispatch_fuel: None,
             comptime_intrinsics: Vec::new(),
             input: "absent.fl".into(),
             emit: Emit::Hir,

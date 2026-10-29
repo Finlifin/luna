@@ -901,9 +901,9 @@ fn declaration_world_queries_keep_caches_private_and_failure_fuel_spent() {
         ty(P::U8)
     );
     let mut unknown = budget.steps;
-    assert!(
-        normalize_concrete_type(&first, &projection(ty(P::I32), vec![]), &mut unknown).is_err()
-    );
+    let error =
+        normalize_concrete_type(&first, &projection(ty(P::I32), vec![]), &mut unknown).unwrap_err();
+    assert!(error.contains("remaining-steps"), "{error}");
     assert_eq!(unknown, 0, "failed selection cannot replenish fuel");
 }
 
