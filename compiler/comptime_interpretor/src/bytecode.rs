@@ -551,12 +551,32 @@ impl<'a> Interpreter<'a> {
                 Op::PrepareNormalInput {
                     destination,
                     index,
-                    ty,
+                    input,
                 } => {
-                    let input = frame.normal_types.get(destination).ok_or_else(missing)?;
-                    self.prepare_compiled_normal_input(input, *index, ty, source)?;
+                    let state = frame
+                        .normal_types
+                        .get_mut(destination)
+                        .ok_or_else(missing)?;
+                    self.prepare_compiled_normal_input(state, *index, input, source)?;
                 }
-                Op::BindNormalInput { destination, value } => {
+                Op::NormalLiteral {
+                    constructor,
+                    destination,
+                } => {
+                    let input = frame
+                        .normal_types
+                        .get_mut(constructor)
+                        .ok_or_else(missing)?;
+                    frame.slots[*destination] = Some(input.literal.take().ok_or_else(missing)?);
+                }
+                Op::BindNormalInput {
+                    destination,
+                    value,
+                    diverges,
+                } => {
+                    if *diverges {
+                        return Err(self.failure(ErrorKind::Type, Some(source)));
+                    }
                     let value = frame.slots[*value].take().ok_or_else(missing)?;
                     let input = frame
                         .normal_types

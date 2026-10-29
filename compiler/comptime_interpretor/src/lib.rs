@@ -3984,21 +3984,7 @@ impl<'a> Interpreter<'a> {
         self.tick(Some(input.source()))?;
         match input {
             A::Unit { source } => {
-                let value = match expected {
-                    Term::Primitive(Primitive::Type) => {
-                        Value::Type(Term::Primitive(Primitive::Void))
-                    }
-                    _ => {
-                        self.check_type_contract(
-                            &nir::program::TypePredicate::Equal(
-                                Term::Primitive(Primitive::Void),
-                                expected.clone(),
-                            ),
-                            *source,
-                        )?;
-                        Value::Unit
-                    }
-                };
+                let value = self.normal_unit_value(expected, *source)?;
                 literals.insert(
                     input as *const A as usize,
                     PreparedNormalInput::Value(value),
@@ -4012,35 +3998,7 @@ impl<'a> Interpreter<'a> {
                 spelling,
                 negative,
             } => {
-                let integer = self.integer_literal(spelling, Some(*source))?;
-                let integer = if *negative {
-                    self.integer_operation(Some(*source), |budget| integer.negate(budget))?
-                } else {
-                    integer
-                };
-                let value = match expected {
-                    Term::Primitive(Primitive::Integer) => Value::Integer(integer),
-                    Term::Primitive(Primitive::BitVec(width)) => Value::BitVec(
-                        self.bit_operation(*source, |budget| integer.to_bitvec(*width, budget))?,
-                    ),
-                    Term::Primitive(primitive) if self.integer_layout(*primitive).is_some() => {
-                        let (signed, bits) = self.integer_layout(*primitive).unwrap();
-                        if signed {
-                            Value::SignedInteger(
-                                integer
-                                    .to_signed(bits)
-                                    .map_err(|_| self.failure(ErrorKind::Type, Some(*source)))?,
-                            )
-                        } else {
-                            Value::UnsignedInteger(
-                                integer
-                                    .to_unsigned(bits)
-                                    .map_err(|_| self.failure(ErrorKind::Type, Some(*source)))?,
-                            )
-                        }
-                    }
-                    _ => return Err(self.failure(ErrorKind::Type, Some(*source))),
-                };
+                let value = self.normal_integer_value(expected, spelling, *negative, *source)?;
                 literals.insert(
                     input as *const A as usize,
                     PreparedNormalInput::Value(value),

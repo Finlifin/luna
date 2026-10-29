@@ -5,6 +5,7 @@ pub(super) struct Inputs {
     pub head: DeclarationId,
     pub arguments: Vec<Term>,
     parameters: Vec<nir::DeclarationParameter>,
+    pub literal: Option<Value>,
 }
 impl Inputs {
     pub fn new(head: DeclarationId) -> Self {
@@ -12,6 +13,7 @@ impl Inputs {
             head,
             arguments: vec![],
             parameters: vec![],
+            literal: None,
         }
     }
 }
@@ -20,6 +22,10 @@ impl fmt::Display for Inputs {
         write!(f, "(normal-inputs (head {}) (arguments", self.head)?;
         for argument in &self.arguments {
             write!(f, " {argument}")?;
+        }
+        write!(f, ") (literal")?;
+        if let Some(value) = &self.literal {
+            write!(f, " {value}")?;
         }
         write!(f, "))")
     }
@@ -49,9 +55,9 @@ impl Interpreter<'_> {
     }
     pub(super) fn prepare_compiled_normal_input(
         &mut self,
-        inputs: &Inputs,
+        inputs: &mut Inputs,
         index: usize,
-        ty: &Term,
+        input: &comptime_compiler::normal_types::Input,
         source: SourceRange,
     ) -> Result<(), Error> {
         let metadata = *self
@@ -67,7 +73,77 @@ impl Interpreter<'_> {
             &inputs.arguments,
             source,
         )?;
-        self.prepare_normal_value_type(ty, &expected, source)
+        use comptime_compiler::normal_types::Input;
+        let literal = match input {
+            Input::Value(ty) => {
+                self.prepare_normal_value_type(ty, &expected, source)?;
+                None
+            }
+            Input::Unit => Some(self.normal_unit_value(&expected, source)?),
+            Input::Integer { spelling, negative } => {
+                Some(self.normal_integer_value(&expected, spelling, *negative, source)?)
+            }
+        };
+        inputs.literal = literal;
+        Ok(())
+    }
+    pub(super) fn normal_unit_value(
+        &mut self,
+        expected: &Term,
+        source: SourceRange,
+    ) -> Result<Value, Error> {
+        let value = match expected {
+            Term::Primitive(Primitive::Type) => Value::Type(Term::Primitive(Primitive::Void)),
+            _ => {
+                self.check_type_contract(
+                    &nir::program::TypePredicate::Equal(
+                        Term::Primitive(Primitive::Void),
+                        expected.clone(),
+                    ),
+                    source,
+                )?;
+                Value::Unit
+            }
+        };
+        Ok(value)
+    }
+    pub(super) fn normal_integer_value(
+        &mut self,
+        expected: &Term,
+        spelling: &str,
+        negative: bool,
+        source: SourceRange,
+    ) -> Result<Value, Error> {
+        let integer = self.integer_literal(spelling, Some(source))?;
+        let integer = if negative {
+            self.integer_operation(Some(source), |budget| integer.negate(budget))?
+        } else {
+            integer
+        };
+        let value = match expected {
+            Term::Primitive(Primitive::Integer) => Value::Integer(integer),
+            Term::Primitive(Primitive::BitVec(width)) => Value::BitVec(
+                self.bit_operation(source, |budget| integer.to_bitvec(*width, budget))?,
+            ),
+            Term::Primitive(primitive) if self.integer_layout(*primitive).is_some() => {
+                let (signed, bits) = self.integer_layout(*primitive).unwrap();
+                if signed {
+                    Value::SignedInteger(
+                        integer
+                            .to_signed(bits)
+                            .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?,
+                    )
+                } else {
+                    Value::UnsignedInteger(
+                        integer
+                            .to_unsigned(bits)
+                            .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?,
+                    )
+                }
+            }
+            _ => return Err(self.failure(ErrorKind::Type, Some(source))),
+        };
+        Ok(value)
     }
     pub(super) fn prepare_normal_value_type(
         &mut self,

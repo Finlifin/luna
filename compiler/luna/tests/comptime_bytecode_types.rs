@@ -219,3 +219,31 @@ fn opaque_type_applications_execute_as_bytecode_without_body_reduction() {
         assert_eq!(vm.bytecode_invocations() - before, 1);
     }
 }
+
+#[test]
+fn contextual_integer_normal_inputs_execute_as_bytecode() {
+    let package = support::compile(
+        "typealias Type = .Type'builtin;
+        typealias Integer = .Integer'builtin;
+        pure comptime fn Shape<T, count: Integer> -> Type { T }
+        comptime fn Sized(input: Type) -> Type { Shape<input, 17> }",
+    );
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let mut tree = Interpreter::new(&package, Budget::default()).unwrap();
+    for primitive in [Primitive::Bool, Primitive::Char] {
+        let before = vm.bytecode_invocations();
+        let arguments = vec![Value::Type(Term::Primitive(primitive))];
+        let id = support::id(&package, "Sized");
+        let result = vm.invoke(id, arguments.clone()).unwrap();
+        assert_eq!(result, tree.invoke(id, arguments).unwrap());
+        let Value::Type(Term::NormalForm {
+            head, arguments, ..
+        }) = result
+        else {
+            panic!("opaque type")
+        };
+        assert_eq!(head, support::id(&package, "Shape"));
+        assert_eq!(arguments[0], Term::Primitive(primitive));
+        assert_eq!(vm.bytecode_invocations() - before, 1);
+    }
+}

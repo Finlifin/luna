@@ -41,11 +41,16 @@ pub enum Op {
     PrepareNormalInput {
         destination: Register,
         index: usize,
-        ty: Term,
+        input: normal_types::Input,
+    },
+    NormalLiteral {
+        constructor: Register,
+        destination: Register,
     },
     BindNormalInput {
         destination: Register,
         value: Register,
+        diverges: bool,
     },
     FinishNormalType {
         destination: Register,
@@ -430,11 +435,20 @@ impl fmt::Display for Program {
                 Op::PrepareNormalInput {
                     destination,
                     index,
-                    ty,
-                } => write!(f, "(prepare-normal-input %{destination} {index} {ty})")?,
-                Op::BindNormalInput { destination, value } => {
-                    write!(f, "(bind-normal-input %{destination} %{value})")?
-                }
+                    input,
+                } => write!(f, "(prepare-normal-input %{destination} {index} {input})")?,
+                Op::NormalLiteral {
+                    constructor,
+                    destination,
+                } => write!(f, "(normal-literal %{destination} %{constructor})")?,
+                Op::BindNormalInput {
+                    destination,
+                    value,
+                    diverges,
+                } => write!(
+                    f,
+                    "(bind-normal-input %{destination} %{value} (diverges {diverges}))"
+                )?,
                 Op::FinishNormalType { destination } => {
                     write!(f, "(finish-normal-type %{destination})")?
                 }
@@ -1078,38 +1092,68 @@ pub fn compile(body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
                         *fuel = fuel
                             .checked_sub(arguments.len())
                             .ok_or(Error::Budget(source))?;
-                        let fields = arguments
-                            .iter()
-                            .map(|argument| match argument {
-                                A::Value(value) | A::TypeListSpread(value) => Ok(value),
-                                _ => Err(Error::Unsupported(source)),
-                            })
-                            .collect::<Result<Vec<_>, _>>()?;
+                        let mut inputs = Vec::with_capacity(arguments.len());
+                        for argument in arguments {
+                            let input = match argument {
+                                A::Value(value) | A::TypeListSpread(value) => {
+                                    normal_types::Input::Value(copy_term(
+                                        &value.ty,
+                                        fuel,
+                                        value.source,
+                                    )?)
+                                }
+                                A::Unit { .. } => normal_types::Input::Unit,
+                                A::Integer {
+                                    spelling, negative, ..
+                                } => {
+                                    *fuel = fuel
+                                        .checked_sub(spelling.len())
+                                        .ok_or(Error::Budget(argument.source()))?;
+                                    normal_types::Input::Integer {
+                                        spelling: spelling.clone(),
+                                        negative: *negative,
+                                    }
+                                }
+                                _ => return Err(Error::Unsupported(source)),
+                            };
+                            inputs.push(input);
+                        }
                         let constructor = Arc::new(normal_types::Constructor {
                             head: *head,
                             ty: copy_term(&expr.ty, fuel, source)?,
-                            count: fields.len(),
-                            diverges: fields
-                                .iter()
-                                .any(|field| field.ty == Term::Primitive(Primitive::Never)),
+                            count: inputs.len(),
+                            diverges: inputs.iter().any(normal_types::Input::diverges),
                         });
                         emit(&mut work, Op::FinishNormalType { destination: dst });
-                        for (index, field) in fields.into_iter().enumerate().rev() {
+                        for (index, (argument, input)) in
+                            arguments.iter().zip(inputs).enumerate().rev()
+                        {
                             let value = fresh();
                             work.push(Work::Emit(
-                                field.source,
+                                argument.source(),
                                 Op::BindNormalInput {
                                     destination: dst,
                                     value,
+                                    diverges: input.diverges(),
                                 },
                             ));
-                            work.push(Work::Expression(field, value));
+                            if let Some(field) = argument.expression() {
+                                work.push(Work::Expression(field, value));
+                            } else {
+                                work.push(Work::Emit(
+                                    argument.source(),
+                                    Op::NormalLiteral {
+                                        constructor: dst,
+                                        destination: value,
+                                    },
+                                ));
+                            }
                             work.push(Work::Emit(
-                                field.source,
+                                argument.source(),
                                 Op::PrepareNormalInput {
                                     destination: dst,
                                     index,
-                                    ty: copy_term(&field.ty, fuel, field.source)?,
+                                    input,
                                 },
                             ));
                         }

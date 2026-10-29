@@ -287,3 +287,158 @@ fn malformed_normal_constructor_rejects_before_operand_effects() {
         assert!(matches!(result.unwrap(), Flow::Return(Value::Bool(true))));
     }
 }
+
+#[test]
+fn contextual_scalars_use_the_preceding_type_input() {
+    let head = DeclarationId {
+        package: 8,
+        local: 1,
+    };
+    let parameter = DeclarationId {
+        package: 8,
+        local: 2,
+    };
+    let package = Package {
+        normal_forms: vec![Head {
+            declaration: head,
+            collector: None,
+            role: Role::Opaque,
+            requirements: vec![],
+            parameters: vec![
+                Parameter {
+                    declaration: parameter,
+                    binding: LocalId { owner: 1, index: 0 },
+                    kind: Kind::Type,
+                    ty: Term::Primitive(Primitive::Type),
+                },
+                Parameter {
+                    declaration: DeclarationId {
+                        package: 8,
+                        local: 3,
+                    },
+                    binding: LocalId { owner: 1, index: 1 },
+                    kind: Kind::Value,
+                    ty: Term::Rigid {
+                        declaration: parameter,
+                        sort: nir::Sort::Type,
+                    },
+                },
+            ],
+        }],
+        ..Default::default()
+    };
+    let integer = |spelling: &str, negative| A::Integer {
+        source: SOURCE,
+        spelling: spelling.into(),
+        negative,
+    };
+    for (ty, input, valid) in [
+        (
+            Primitive::Integer,
+            integer("123456789012345678901234567890", false),
+            true,
+        ),
+        (Primitive::I8, integer("128", true), true),
+        (Primitive::I8, integer("129", true), false),
+        (Primitive::U8, integer("255", false), true),
+        (Primitive::U8, integer("256", false), false),
+        (Primitive::U8, integer("1", true), false),
+        (Primitive::BitVec(9), integer("511", false), true),
+        (Primitive::Bool, integer("1", false), false),
+        (Primitive::Type, A::Unit { source: SOURCE }, true),
+        (Primitive::Void, A::Unit { source: SOURCE }, true),
+        (Primitive::Bool, A::Unit { source: SOURCE }, false),
+    ] {
+        let body = expr(
+            Primitive::Type,
+            K::NormalFormType {
+                head,
+                plan: None,
+                arguments: vec![
+                    A::Value(expr(Primitive::Type, K::TypeValue(Term::Primitive(ty)))),
+                    input,
+                ],
+            },
+        );
+        let code = Arc::new(comptime_compiler::compile(&body, &mut 10000).unwrap());
+        assert!(code.to_string().contains("(normal-literal "));
+        let mut tree = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let expected = tree.eval(&body, &mut Environment::new());
+        let actual = vm.execute_code(&code, &mut Environment::new());
+        assert_eq!(expected.is_ok(), valid, "{ty}");
+        match (expected, actual) {
+            (Ok(Flow::Value(expected)), Ok(Flow::Value(actual))) => {
+                assert_eq!(actual, expected);
+                if ty == Primitive::Type || ty == Primitive::Void {
+                    assert_eq!(
+                        actual,
+                        Value::Type(Term::NormalForm {
+                            head,
+                            sort: nir::Sort::Type,
+                            arguments: vec![
+                                Term::Primitive(ty),
+                                if ty == Primitive::Type {
+                                    Term::Primitive(Primitive::Void)
+                                } else {
+                                    Term::Unit
+                                }
+                            ],
+                        })
+                    );
+                }
+            }
+            (Err(expected), Err(actual)) => assert_eq!(actual.kind, expected.kind),
+            pair => panic!("tree/bytecode mismatch: {pair:?}"),
+        }
+    }
+}
+
+#[test]
+fn diverging_annotation_cannot_produce_a_normal_input_value() {
+    let head = DeclarationId {
+        package: 8,
+        local: 10,
+    };
+    let package = Package {
+        normal_forms: vec![Head {
+            declaration: head,
+            collector: None,
+            role: Role::Opaque,
+            requirements: vec![],
+            parameters: vec![Parameter {
+                declaration: DeclarationId {
+                    package: 8,
+                    local: 11,
+                },
+                binding: LocalId { owner: 1, index: 0 },
+                kind: Kind::Value,
+                ty: Term::Primitive(Primitive::Bool),
+            }],
+        }],
+        ..Default::default()
+    };
+    let body = expr(
+        Primitive::Never,
+        K::NormalFormType {
+            head,
+            plan: None,
+            arguments: vec![A::Value(expr(
+                Primitive::Never,
+                K::Literal(Literal::Bool(true)),
+            ))],
+        },
+    );
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let code = Arc::new(comptime_compiler::compile(&body, &mut 10000).unwrap());
+    assert_eq!(
+        vm.eval(&body, &mut Environment::new()).unwrap_err().kind,
+        ErrorKind::Type
+    );
+    assert_eq!(
+        vm.execute_code(&code, &mut Environment::new())
+            .unwrap_err()
+            .kind,
+        ErrorKind::Type
+    );
+}

@@ -17,3 +17,28 @@ impl fmt::Display for Constructor {
         )
     }
 }
+
+/// Contextual scalar inputs keep their spelling until the preceding inputs
+/// determine the domain. Expression code remains outside this metadata.
+#[derive(Debug)]
+pub enum Input {
+    Value(Term),
+    Unit,
+    Integer { spelling: String, negative: bool },
+}
+impl Input {
+    pub fn diverges(&self) -> bool {
+        matches!(self, Self::Value(Term::Primitive(Primitive::Never)))
+    }
+}
+impl fmt::Display for Input {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Value(ty) => write!(f, "(value {ty})"),
+            Self::Unit => write!(f, "(unit)"),
+            Self::Integer { spelling, negative } => {
+                write!(f, "(integer {spelling:?} (negative {negative}))")
+            }
+        }
+    }
+}

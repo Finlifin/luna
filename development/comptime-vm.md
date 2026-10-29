@@ -2374,3 +2374,41 @@ staging, late domain resolution and temporary binding cleanup remain required.
 
 Final managed `cargo fmt --all -- --check` passed, exit 0,
 `/tmp/luna-tools-zjt6k2op/result.json`; `git diff --check` passed.
+
+## Compile contextual scalar normal inputs
+
+Sequential normal-form inputs now retain integer spelling/sign and unit markers
+in bytecode metadata until preceding inputs establish their domain. The prepare
+instruction calls the same contextual literal conversion used by tree execution;
+a separate load moves the prepared value into its operand register. This supports
+arbitrary-precision integers, signed/unsigned fixed-width integers and BitVec
+conversion without treating any named type constructor as special. Unit retains
+its existing distinction between a Void type value and a void value. Owned
+spelling copies are charged during compilation; conversion remains budgeted.
+
+Inspection also found that a malformed ordinary input annotated Never could
+produce a value and reach bytecode NF completion. Binding now rejects that
+fallthrough, matching the tree argument boundary; genuine return/other transfer
+never reaches binding. A differential regression deliberately constructs such
+malformed NIR rather than relaxing its annotation or accepting the value.
+
+Validation from `/home/fin/luna`, all exit 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib normal_type_tests`:
+  `/tmp/luna-tools-v6gwqebh/result.json`, five tests. New cases cover dependent
+  scalar domains, signed/unsigned limits, a large Integer, BitVec, incompatible
+  domains, both unit interpretations and Never fallthrough rejection.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_types`:
+  `/tmp/luna-tools-xmb69zcm/result.json`. Source `Shape<input, 17>` agrees with
+  tree evaluation, preserves the opaque head and increments bytecode execution
+  counters for distinct type arguments.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-2vnt0uq2/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test normal_form_inference --test normal_form_methods --test builder_invocations --test execution`:
+  `/tmp/luna-tools-dobt0rah/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  `/tmp/luna-tools-tosgo9gt/result.json`; `git diff --check` passed.
+
+Contextual containers/control and explicit preparation/reordering plans remain
+on the preselected tree path. This stage extends scalar contextual inputs only;
+it does not claim complete normal-form plan compilation or a timing speedup.
