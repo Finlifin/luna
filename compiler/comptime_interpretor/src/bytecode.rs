@@ -369,6 +369,15 @@ impl<'a> Interpreter<'a> {
                     }
                     frame.slots[*destination] = Some(Value::Bool(matched));
                 }
+                Op::CommitScope => {
+                    let bindings = frame.scopes.pop().ok_or_else(missing)?;
+                    if let Some(parent) = frame.scopes.last_mut() {
+                        parent.extend(bindings);
+                    }
+                }
+                Op::InvalidControlFlow => {
+                    return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source)));
+                }
                 Op::NonExhaustiveMatch => {
                     return Err(self.failure(ErrorKind::NonExhaustiveMatch, Some(source)));
                 }
@@ -795,6 +804,53 @@ impl<'a> Interpreter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_declarations_reject_missing_or_fallthrough_else_without_publishing() {
+        use nir::program::Pattern;
+        let package = Package::default();
+        let source = SourceRange { start: 7, end: 9 };
+        let binding = LocalId { owner: 1, index: 0 };
+        let unit = Expr {
+            source,
+            ty: Term::Primitive(Primitive::Void),
+            kind: K::Unit,
+        };
+        for compiled in [false, true] {
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            let mut environment = Environment::new();
+            for (otherwise, expected) in [
+                (None, ErrorKind::NonExhaustiveMatch),
+                (Some(Box::new(unit.clone())), ErrorKind::InvalidControlFlow),
+            ] {
+                let body = Expr {
+                    source,
+                    ty: unit.ty.clone(),
+                    kind: K::LetPattern {
+                        pattern: Pattern::Binding {
+                            binding,
+                            inner: Box::new(Pattern::Wild),
+                        },
+                        value: Box::new(unit.clone()),
+                        guard: Some(Box::new(Expr {
+                            source,
+                            ty: Term::Primitive(Primitive::Bool),
+                            kind: K::Literal(Literal::Bool(false)),
+                        })),
+                        otherwise,
+                    },
+                };
+                let result = if compiled {
+                    let code = Arc::new(comptime_compiler::compile(&body, &mut 1000).unwrap());
+                    vm.execute_code(&code, &mut environment)
+                } else {
+                    vm.eval(&body, &mut environment)
+                };
+                assert_eq!(result.unwrap_err().kind, expected);
+                assert!(!environment.contains_key(&binding));
+            }
+        }
+    }
 
     #[test]
     fn compiled_match_rejects_missing_arms_and_bad_guards_then_recovers() {

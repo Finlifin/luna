@@ -1519,3 +1519,43 @@ Validation from `/home/fin/luna`, all final commands exited 0:
   report `/tmp/luna-tools-so1ami_d/result.json`.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
   report `/tmp/luna-tools-twh07q9f/result.json`.
+
+## Compiled destructuring declarations (2026-10-30)
+
+`LetPattern` now uses the same structural candidate and compiled guard preparation
+as match arms. Its initializer executes before the candidate scope is opened.
+Successful declarations commit new bindings into the enclosing lexical scope;
+failed candidates discard their new bindings before entering `else`, retaining
+writes to outer places. This permits mutable destructured bindings to be used
+and updated by subsequent statements and releases them at the enclosing exit.
+
+A rejected declaration without `else` reports non-exhaustive matching. A malformed
+NIR `else` which completes normally reports invalid control flow; valid return,
+break and continue transfers retain their existing semantics. Source tests cover
+enum/optional declarations, guard effects, early return and continue, with actual
+bytecode routing checked against the tree carrier. Internal tests cover both
+rejection diagnostics without weakening the front-end rule that `else` must exit.
+
+Pattern preparation is shared with match lowering. Nested executable pattern
+children, active effects and scheduled cleanup retain the same migration limits.
+An initial test also exposed the independent unsupported `TypedWith` AST lowering
+for `(null: ?bool)`; the declaration/continue test now supplies its type using a
+separate typed declaration. Type-ascription lowering remains unimplemented and
+is not claimed by this VM change.
+
+Default-template regression coverage now keeps both routes: a structural match
+is compiled, while sequential pattern computation uses the tree carrier. Both
+must preserve the caller's single evaluation of explicit arguments.
+
+Validation from `/home/fin/luna`, all final commands exited 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  231 tests passed; report `/tmp/luna-tools-2i80r44m/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_bindings --test comptime_bytecode_matching --test comptime_bytecode_defaults --test comptime_bytecode_references --test execution --test builder_invocations`:
+  two declaration, four matching, seven default, four reference, 1,365 execution
+  and 73 builder cases passed; report `/tmp/luna-tools-mh1w653f/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler --test control`:
+  12 tests passed, including declaration scope/diagnostic dumps;
+  report `/tmp/luna-tools-eavlxbuo/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  report `/tmp/luna-tools-eeoj3vol/result.json`.

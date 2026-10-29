@@ -4,6 +4,36 @@ use super::*;
 use nir::program::Pattern as P;
 use std::collections::BTreeSet;
 
+pub(super) struct Candidate<'a> {
+    pub pattern: Arc<P>,
+    pub bindings: Vec<LocalId>,
+    pub guards: Vec<&'a Expr>,
+}
+
+pub(super) fn prepare<'a>(
+    mut pattern: &'a P,
+    fuel: &mut usize,
+    source: SourceRange,
+) -> Result<Candidate<'a>, Error> {
+    let mut guards = Vec::new();
+    while let P::Guard {
+        pattern: inner,
+        condition,
+    } = pattern
+    {
+        *fuel = fuel.checked_sub(1).ok_or(Error::Budget(source))?;
+        guards.push(condition.as_ref());
+        pattern = inner;
+    }
+    guards.reverse();
+    let (pattern, bindings) = copy(pattern, fuel, source)?;
+    Ok(Candidate {
+        pattern,
+        bindings,
+        guards,
+    })
+}
+
 pub(super) fn copy(
     pattern: &P,
     fuel: &mut usize,

@@ -92,18 +92,24 @@ fn default_failure_prevents_entry_and_restores_the_caller() {
 }
 
 #[test]
-fn unsupported_default_selects_its_carrier_without_replaying_the_caller() {
-    let package = support::compile(
-        "comptime fn choose(value: bool, .result: bool = value match {true => false, false => true}) -> bool { result }
-        comptime fn run() -> bool { var value = false; choose(do { value = not value; value }) or not value }",
-    );
-    let id = support::id(&package, "run");
-    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
-    let mut tree = Interpreter::new(&package, Budget::default()).unwrap();
-    assert_eq!(vm.invoke(id, vec![]).unwrap(), Value::Bool(false));
-    assert_eq!(tree.invoke(id, vec![]).unwrap(), Value::Bool(false));
-    assert_eq!(vm.bytecode_invocations(), 2);
-    assert_eq!(vm.bytecode_default_evaluations(), 0);
+fn default_matches_select_their_carrier_without_replaying_the_caller() {
+    for (default, compiled_defaults) in [
+        ("value match { true => false, false => true }", 1),
+        // Sequential pattern computation still needs the tree carrier.
+        ("value match { _ and not value is output => output }", 0),
+    ] {
+        let package = support::compile(&format!(
+            "comptime fn choose(value: bool, .result: bool = {default}) -> bool {{ result }}
+            comptime fn run() -> bool {{ var value = false; choose(do {{ value = not value; value }}) or not value }}",
+        ));
+        let id = support::id(&package, "run");
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let mut tree = Interpreter::new(&package, Budget::default()).unwrap();
+        assert_eq!(vm.invoke(id, vec![]).unwrap(), Value::Bool(false));
+        assert_eq!(tree.invoke(id, vec![]).unwrap(), Value::Bool(false));
+        assert_eq!(vm.bytecode_invocations(), 2);
+        assert_eq!(vm.bytecode_default_evaluations(), compiled_defaults);
+    }
 }
 
 #[test]

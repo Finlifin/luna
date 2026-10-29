@@ -36,6 +36,8 @@ pub enum Op {
         bindings: Vec<(LocalId, Register)>,
     },
     NonExhaustiveMatch,
+    InvalidControlFlow,
+    CommitScope,
 
     PrepareOptional {
         ty: Arc<Term>,
@@ -241,6 +243,8 @@ impl fmt::Display for Program {
                     write!(f, "))")?;
                 }
                 Op::NonExhaustiveMatch => write!(f, "(non-exhaustive-match)")?,
+                Op::InvalidControlFlow => write!(f, "(invalid-control-flow)")?,
+                Op::CommitScope => write!(f, "(commit-scope)")?,
                 Op::PrepareOptional { ty, input } => {
                     write!(f, "(prepare-optional {ty} (input")?;
                     if let Some((ty, at)) = input {
@@ -777,19 +781,9 @@ pub fn compile(body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
                         labels.push(None);
                         let mut sequence = vec![Work::Expression(value, subject)];
                         for arm in arms {
-                            // A guard tests a completed inner candidate before the arm body.
-                            // Nested guard wrappers run from the innermost outward.
-                            let mut candidate = &arm.pattern;
-                            let mut guards = Vec::new();
-                            while let nir::program::Pattern::Guard { pattern, condition } =
-                                candidate
-                            {
-                                *fuel = fuel.checked_sub(1).ok_or(Error::Budget(source))?;
-                                guards.push(condition.as_ref());
-                                candidate = pattern;
-                            }
-                            let (pattern, ids) = patterns::copy(candidate, fuel, source)?;
-                            let bindings = ids
+                            let candidate = patterns::prepare(&arm.pattern, fuel, source)?;
+                            let bindings = candidate
+                                .bindings
                                 .into_iter()
                                 .map(|id| (id, *locals.entry(id).or_insert_with(&mut fresh)))
                                 .collect();
@@ -801,7 +795,7 @@ pub fn compile(body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
                                 Op::MatchPattern {
                                     destination: condition,
                                     value: subject,
-                                    pattern,
+                                    pattern: candidate.pattern,
                                     bindings,
                                 },
                             ));
@@ -813,7 +807,7 @@ pub fn compile(body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
                                     target: next,
                                 },
                             ));
-                            for guard in guards.into_iter().rev().chain(arm.guard.iter()) {
+                            for guard in candidate.guards.into_iter().chain(arm.guard.iter()) {
                                 sequence.push(Work::Expression(guard, condition));
                                 sequence.push(Work::Emit(
                                     guard.source,
@@ -950,6 +944,70 @@ pub fn compile(body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
                                 local: slot,
                             },
                         );
+                    }
+                    K::LetPattern {
+                        pattern,
+                        value,
+                        guard,
+                        otherwise,
+                    } => {
+                        let candidate = patterns::prepare(pattern, fuel, source)?;
+                        let bindings = candidate
+                            .bindings
+                            .into_iter()
+                            .map(|id| (id, *locals.entry(id).or_insert_with(&mut fresh)))
+                            .collect();
+                        let subject = fresh();
+                        let condition = fresh();
+                        let failed = labels.len();
+                        labels.push(None);
+                        let done = labels.len();
+                        labels.push(None);
+                        let mut sequence = vec![
+                            Work::Expression(value, subject),
+                            Work::BeginScope(source),
+                            Work::Emit(
+                                source,
+                                Op::MatchPattern {
+                                    destination: condition,
+                                    value: subject,
+                                    pattern: candidate.pattern,
+                                    bindings,
+                                },
+                            ),
+                            Work::Emit(
+                                source,
+                                Op::Branch {
+                                    condition,
+                                    when: false,
+                                    target: failed,
+                                },
+                            ),
+                        ];
+                        for guard in candidate.guards.into_iter().chain(guard.as_deref()) {
+                            sequence.push(Work::Expression(guard, condition));
+                            sequence.push(Work::Emit(
+                                guard.source,
+                                Op::Branch {
+                                    condition,
+                                    when: false,
+                                    target: failed,
+                                },
+                            ));
+                        }
+                        sequence.push(Work::Emit(source, Op::CommitScope));
+                        sequence.push(Work::Emit(source, Op::Unit(dst)));
+                        sequence.push(Work::Emit(source, Op::Jump(done)));
+                        sequence.push(Work::Label(failed));
+                        sequence.push(Work::EndScope(source));
+                        if let Some(otherwise) = otherwise {
+                            sequence.push(Work::Expression(otherwise, dst));
+                            sequence.push(Work::Emit(source, Op::InvalidControlFlow));
+                        } else {
+                            sequence.push(Work::Emit(source, Op::NonExhaustiveMatch));
+                        }
+                        sequence.push(Work::Label(done));
+                        work.extend(sequence.into_iter().rev());
                     }
                     K::Let { binding, value } => {
                         let slot = *locals.entry(*binding).or_insert_with(&mut fresh);

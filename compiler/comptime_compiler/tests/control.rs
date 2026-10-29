@@ -325,3 +325,22 @@ fn deep_owned_patterns_refuse_the_carrier_without_misreporting_fuel() {
     ));
     assert!(matches!(compile(&body, &mut 5), Err(Error::Budget(_))));
 }
+
+#[test]
+fn declaration_dump_distinguishes_scope_commit_and_invalid_else_completion() {
+    use nir::program::Pattern;
+    let body = expr(K::LetPattern {
+        pattern: Pattern::Binding {
+            binding: LocalId { owner: 1, index: 0 },
+            inner: Box::new(Pattern::Wild),
+        },
+        value: Box::new(expr(K::Unit)),
+        guard: None,
+        otherwise: Some(Box::new(expr(K::Unit))),
+    });
+    let dump = compile(&body, &mut 1000).unwrap().to_string();
+    assert!(dump.contains("(commit-scope)"));
+    assert!(dump.contains("(leave-scope)"));
+    assert!(dump.contains("(invalid-control-flow)"));
+    assert_eq!(dump, compile(&body, &mut 1000).unwrap().to_string());
+}
