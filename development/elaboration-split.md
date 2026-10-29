@@ -405,3 +405,64 @@ PTC 检查类型覆盖，P3/P4 的程序行为、终止性和资源义务仍由�
   退出 0，`/tmp/luna-library-sctw_o84/summary.json`。
 - 最终按 cargo fmt 调整 import 顺序；`git diff --check` 通过。
   未运行全 workspace 测试，也未以本次结果宣称所有纯度层级或内置包均已实现。
+
+## 降低值表达式检查的递归栈占用
+
+2026-10-29，原 `expr_context_inner` 将约 2,000 行特殊值处理和普通值分支放在
+同一函数。dev/test 的 x86-64 产物中，其入口分配 `0x2b000 + 0x960` 字节的
+局部栈空间，约 174 KiB（不含保存寄存器）。即使当前表达式只用一个分支，
+递归检查也会携带整块栈帧。此前已确认的列表索引提前返回、生成 enum 的
+嵌套反射用例因而在默认测试线程栈上溢出。
+
+将处理移至 `program/expression_values/`：特殊 contextual／Type 值检查先返回
+`Option<Expr>`，其临时栈帧结束后才分派普通值。字面量、错误／可选传播、绑定、
+位置更新、控制语句、聚合／分支、索引／view 分别使用独立处理函数；最终的
+expected-type 检查复用一个收尾函数。原先提前返回的分支仍提前返回，特殊值
+检查仍先于普通值分派，分支内执行顺序、活动 Checker 状态、预算扣减和 NIR
+结构保持原实现。没有扩大线程栈，也没有改用 release 掩盖溢出。
+
+本阶段在 `/home/fin/luna` 使用 dev/test 配置验证：
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p luna --test builder_invocations comptime_list_index_early_return_preserves_prior_effects
+python3 -B development/check.py --timeout 900 -- test -p luna --test builder_invocations --test execution --test cmtt --test resources --test elaboration
+python3 -B development/check.py --timeout 900 -- test -p luna --test execution --test resources --no-fail-fast
+python3 -B development/check.py --timeout 900 -- test -p luna --test execution -- --skip canonical_comptime_arguments_validate_shapes_and_recover
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+git diff --check
+```
+
+- 原列表索引溢出用例通过：`/tmp/luna-tools-8ahb79fr/result.json`。
+- builder 全组 73 项（包括两处原溢出用例）、CMTT 全组 539 项通过：
+  `/tmp/luna-tools-xuthhl51/result.json`。该命令整体失败于下述诊断期望差异，
+  不记为整条命令通过。
+- 资源组 365 项通过；执行组因 VM 输入还原的深度压力用例中止：
+  `/tmp/luna-tools-is1wt9ov/result.json`。
+- 明确跳过 `canonical_comptime_arguments_validate_shapes_and_recover` 后，
+  执行组其余 1,364 项通过：`/tmp/luna-tools-3_egaknr/result.json`。被跳过的
+  用例向 VM 传入 140 层 Tuple／TupleValue，预期得到 DepthExhausted 并能够继续
+  合法调用；实际发生宿主栈溢出。没有更改其输入、断言或栈大小，后续须修复
+  normal-input 解码路径。这不是已经解决的溢出。
+- 最终格式化完成：`/tmp/luna-tools-5j33x9oj/result.json`；空白检查通过。
+
+elaboration 组 446 项通过，以下 5 项失败于诊断文本期望。临时用 82c8126a 的
+`program.rs` 替换本阶段改动后，复现相同 5 项失败，再逐字节恢复修改；其他
+工作区改动始终保留。基线报告：`/tmp/luna-tools-qecq60a1/result.json`。
+
+- `float_runtime_proxies_reject_unsupported_targets_and_finite_overflow`
+- `interface_methods_require_matching_execution_phases`
+- `method_properties_require_a_collector_and_validate_declared_fields`
+- `unprocessed_stage_and_attribute_information_blocks_nir`
+- `unresolved_abi_attributes_cannot_publish_default_abi_functions`
+
+其中浮点诊断现已列出 f16／bf16，属性失败和 comptime 接收者失败也已有更早的
+诊断来源。本次保留这些测试原样，不将诊断期望维护混入表达式栈帧重构。
+可选 GDB 回溯因 ptrace 限制不可用（`/tmp/luna-tools-act_voks/result.json`）；
+栈帧大小依据可读产物的 nm／objdump，行为结论依据实际执行的回归测试。
+
+重构后同一 dev/test 配置的 `expr_context_inner` 局部栈分配为 `0x448`，即
+1,096 字节。该数字仅指通用分派器，分类处理函数仍有各自的栈帧，不能解释为
+整个递归检查只使用 1 KiB。测量从 elaboration rlib 用 `nm -A` 定位符号及
+所属对象，`ar p` 提取对象后用 `objdump -d -j .text.<符号>` 读取函数入口；
+无需运行 ptrace。对整个 rlib 的可选反汇编耗时过长，已中止并改为精确读取
+该函数 section；没有把被中止的观察当作编译或测试成功。
