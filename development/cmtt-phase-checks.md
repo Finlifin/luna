@@ -374,3 +374,49 @@ selected/early returns, false postcondition rejection, entry snapshots, invalid
 unused predicates, nominal fields, nested calls, Type results, void completion,
 and named results without predicates. Formatting passed at
 `/tmp/luna-tools-4xfkqn1z/result.json`; whitespace checks passed.
+
+
+## Shared input inference for contextual data calls
+
+Contextual data consumers now use the same source-ordered input preparation as
+expression-code generators. The shared `generators/inputs.rs` routine is generic
+over the result category; data outputs remain Terms, not synthetic quoted code.
+The existing code-generator inference, clause-default completion, partial input
+contexts, argument adaptation and final interface checks are retained. Internal
+inference products do not become Flurry Tuple types or erase code interfaces.
+
+Calls can infer clauses from quoted expr results, established pattern subject and
+output interfaces, ordinary data inputs and expected output types. They can also
+settle declared Type/value defaults. Insufficient evidence and conflicting explicit
+arguments still reject the call; formation requirements are checked after solving.
+Closed contextual data results can contribute type hints without treating the
+callee as an ordinary callable or executing its arguments/defaults/body during
+probing. Generic unresolved results remain unknown hints until actual preparation.
+The construction depth guard continues to include nested argument preparation.
+
+The public builder example now calls `SlotFor(code)` and `ForwardSlot('(true))`
+without explicit type clauses. Its generated nominal type, reflection and native
+field access are unchanged. This supersedes the explicit-clauses-only limit in
+the earlier source-consumer stage. Contextual methods, argument packets/variadic
+consumer collection, arbitrary nested expression scheduling and abstract Type
+results used as local types remain separate unfinished work. Memoization policy
+is unchanged.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --test cmtt_phase_boundaries --test comptime_memory --test builder_invocations
+python3 -B development/check.py --timeout 900 -- test -p luna --test builder_invocations contextual_data_consumer_publishes
+python3 -B development/check.py --timeout 900 -- run -p luna -- development/examples/sysroot-contextual-data.fl --sysroot library --test-native
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+git diff --check
+```
+
+All passed: 549 CMTT, 73 builder, three phase-boundary and 17 memory tests
+(`/tmp/luna-tools-dnszp099/result.json`). After editing the builder example, its
+complete-sysroot regression passed (`/tmp/luna-tools-asli6i8u/result.json`) and its
+native test passed (`/tmp/luna-tools-s7uf3vpv/result.json`, one case). Six new CMTT
+regressions cover code/pattern evidence, generic forwarding, numeric target context,
+Type/value defaults, conflicting/absent evidence, formation constraints and
+source-ordered single evaluation of named inputs. Formatting completed at
+`/tmp/luna-tools-w9x04ln4/result.json`; whitespace checks passed.

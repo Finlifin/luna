@@ -180,59 +180,20 @@ impl Checker<'_, '_> {
         let H::Application(callee, arguments) = site.kind else {
             unreachable!()
         };
-        let types = match callee.kind {
-            H::NFApplication(_, types) => {
-                self.type_clause_arguments(owner, types, None, site.span)?
-            }
-            _ if template.types.is_empty() => Vec::new(),
-            _ => {
-                return Err(error(
-                    site.span,
-                    "contextual data consumer clause arguments must currently be explicit",
-                ));
-            }
-        };
-        self.check_type_application(owner, &types, site.span)?;
-        let definition = self.instantiate_code_generator(&template, &types, site.span)?;
+        let (definition, values) = self.prepare_contextual_inputs(
+            owner,
+            template,
+            site,
+            callee,
+            arguments,
+            expected.cloned(),
+            Term::clone,
+            None,
+            &mut spreads::SpreadPlan::default(),
+            None,
+        )?;
         if let Some(expected) = expected {
             self.require(&definition.output, expected, site.span)?;
-        }
-        let (ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) =
-            &self.package.item(owner).unwrap().kind
-        else {
-            unreachable!()
-        };
-        let (routes, _) = route_arguments(
-            arguments,
-            Some(sig.params),
-            definition.inputs.len(),
-            site.span,
-        )?;
-        let mut values = (0..definition.inputs.len())
-            .map(|_| None)
-            .collect::<Vec<_>>();
-        for route in routes {
-            if route.is_collected() {
-                return Err(error(
-                    site.span,
-                    "contextual data argument packets are not yet implemented",
-                ));
-            }
-            let value = route.expression(site);
-            let input = &definition.inputs[route.parameter].1;
-            values[route.parameter] = Some(match input {
-                Input::Code(interface) => {
-                    let mut expected = interface.clone();
-                    expected.infer_context = true;
-                    let code = self.code_value(&value, Some(&expected), 0)?;
-                    Argument::Code(CodeValue::Expression(self.ascribe_code(
-                        code,
-                        Some(interface),
-                        value.span,
-                    )?))
-                }
-                _ => self.generator_default(&value, input)?,
-            });
         }
         if self.checking_code_generator {
             return Ok((None, definition.output.clone()));

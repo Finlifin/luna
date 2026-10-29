@@ -74,6 +74,26 @@ impl Checker<'_, '_> {
         if depth >= 64 {
             return Ok(None);
         }
+        if let Some(owner) = self.data_consumer_call(value) {
+            self.ensure_data_consumer(owner, value.span)?;
+            let definition = &self.data_consumers[&owner];
+            let output = &definition.output;
+            // Reading a closed result is safe evidence. Do not instantiate
+            // clause defaults or execute contextual arguments during probing.
+            if output.check_scope(&[]).is_err()
+                || definition
+                    .types
+                    .iter()
+                    .any(|(id, _)| output.mentions_rigid(*id))
+            {
+                return Ok(None);
+            }
+            let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+            let charged = nir::type_computations::charge_term(output, &mut fuel);
+            self.required_steps = fuel as u64;
+            charged.map_err(|failure| error(value.span, failure.to_string()))?;
+            return Ok(Some(output.clone()));
+        }
         let ty = match &value.kind {
             H::Block(block) => {
                 return self.generator_block_type_hint(block, depth + 1);

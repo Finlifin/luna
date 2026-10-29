@@ -248,12 +248,12 @@ impl Checker<'_, '_> {
         })
     }
 
-    pub(in crate::program::cmtt) fn generator_packet_context(
+    pub(in crate::program::cmtt) fn generator_packet_context<O>(
         &mut self,
         plan: &SpreadPlan<'_>,
         packet: usize,
         routes: &[arguments::RoutedArgument<'_>],
-        definition: &Generator,
+        definition: &Generator<O>,
         unresolved: &[DeclarationId],
         span: Span,
     ) -> Result<Option<Term>, Error> {

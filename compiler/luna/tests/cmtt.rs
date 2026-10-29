@@ -10242,3 +10242,91 @@ fn contextual_data_result_contracts_preserve_type_and_void_results() {
     let failure = support::compile_with_protocols(&rejected, &Default::default()).unwrap_err();
     assert!(failure.contains("postcondition rejected"), "{failure}");
 }
+
+#[test]
+fn contextual_data_inference_uses_quoted_results_and_pattern_interfaces() {
+    let source = "
+        typealias Type = .Type'builtin;
+        comptime fn Inspect(code:<|-T>)->Type where T {T}
+        comptime fn inspect_pattern(code:<T -| found:T>)->bool where T {true}
+        fn run()->bool {
+            const Selected = Inspect('(true));
+            let value:Selected = true;
+            const pattern:<bool -| found:bool> = '<found>;
+            const checked = inspect_pattern(pattern);
+            value and checked
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn contextual_data_inference_preserves_clause_defaults_and_constraints() {
+    let source = "
+        typealias Char = .char'builtin;
+        comptime fn inspect(code:<|-T>)->bool
+        where T, .enabled:bool=true, requires T == bool
+        {enabled}
+        fn run()->bool {const value = inspect('(true)); value}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    for invalid in [
+        source.replace("inspect('(true))", "inspect('( 'x'))"),
+        source.replace("inspect('(true))", "inspect<Char>('(true))"),
+    ] {
+        let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+        assert!(!failure.contains("parsing failed"), "{failure}");
+    }
+}
+
+#[test]
+fn contextual_data_inference_uses_expected_outputs_and_forwarded_inputs() {
+    let source = "
+        comptime fn keep(code:<|-bool>, value:T)->T where T {value}
+        comptime fn forward(code:<|-T>, value:T)->T where T {
+            const copy = keep('(true), value);
+            copy
+        }
+        fn run()->bool {const value:bool = forward('(true), true); value}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn contextual_data_inference_retains_named_input_evaluation_order() {
+    let source = "
+        comptime fn inspect(code:<|-T>, .first:bool=true, .second:bool=false)->bool
+        where T {not first and second}
+        comptime fn forward(code:<|-bool>)->bool {
+            var flag = false;
+            inspect(code, .second=do {flag=not flag; flag},
+                .first=do {flag=not flag; flag})
+        }
+        fn run()->bool {const result=forward('(true)); result}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn contextual_data_inference_uses_result_targets_before_numeric_defaults() {
+    let source = "
+        typealias Byte = .u8'builtin;
+        comptime fn keep(code:<|-bool>, value:T)->T where T {value}
+        fn run()->bool {const value:Byte = keep('(true), 255); value == 255}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let invalid = source.replace("255", "256");
+    let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+    assert!(!failure.contains("parsing failed"), "{failure}");
+}
+
+#[test]
+fn contextual_data_inference_settles_type_defaults_without_inventing_evidence() {
+    let source = "
+        typealias Type = .Type'builtin;
+        comptime fn Choose(code:<|-bool>)->Type where .T:Type=bool {T}
+        fn run()->bool {
+            const Selected = Choose('(true));
+            let value:Selected = true;
+            value
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let invalid = source.replace(".T:Type=bool", "T");
+    let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+    assert!(!failure.contains("parsing failed"), "{failure}");
+}

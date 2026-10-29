@@ -15,10 +15,10 @@ where T
 comptime fn ForwardSlot(code: <|-T>) -> Type
 where T
 {
-    SlotFor<T>(code)
+    SlotFor(code)
 }
 
-typealias BooleanSlot = ForwardSlot<bool>('(true));
+typealias BooleanSlot = ForwardSlot('(true));
 
 test contextual_data_builder {
     let slot = BooleanSlot { value: true };
