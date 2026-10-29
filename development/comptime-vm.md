@@ -2042,3 +2042,56 @@ and normal-form input-plan bytecode migration remain outstanding.
 
 - Final managed `cargo fmt --all -- --check` passed, exit 0:
   `/tmp/luna-tools-6ipfkx2u/result.json`; `git diff --check` passed.
+
+## Transactional list append in bytecode
+
+Root-local self-concatenating assignments now compile to a borrowed admission
+check, ordinary suffix code, and a transactional append. Fusion requires a local
+suffix, a constant list, or a list of local/type/literal leaves; that eligibility
+scan consumes compilation fuel. Computed suffixes retain concatenation snapshots.
+No library name, Type-list identity exception or recursive tree opcode is used.
+
+Owned locals retain their allocation. Shared root storage and projected comptime
+receivers resolve the target after the suffix has been copied and all read locks
+have been released. Checked extension rolls back its appended range on budget or
+representation failure. Input admission and combined structural work are still
+charged; avoiding copying does not remove repeated validation scans. Runtime
+pointer writes retain the existing tree path and are not covered by this change.
+
+Validation from `/home/fin/luna`:
+
+- Managed `test -p comptime_interpretor --lib bytecode::list_tests`: seven tests
+  passed after final additions, exit 0, `/tmp/luna-tools-esdc00ae/result.json`.
+  Coverage includes buffer reuse for Bool/Type lists, root/projected references,
+  aliased suffixes, malformed suffix domains/payloads, budget rollback and recovery.
+- Managed `test -p luna --test comptime_bytecode_lists --test comptime_list_operations --test type_lists --test execution`:
+  3, 54, 28 and 1365 passed, exit 0, `/tmp/luna-tools-xhelgubc/result.json`.
+  Source tests preserve saved copies and a callback that overwrites the receiver
+  during suffix evaluation. This preceded the final compiler eligibility fuel
+  charge and final unit-test additions; no source behavior was changed afterward.
+- Managed `test -p comptime_compiler -p comptime_interpretor --lib --tests`:
+  compiler 19 and interpreter unit 246 passed, along with earlier integration
+  groups, but the run exited 101 on
+  `type_list_inputs::local_list_length_still_charges_large_element_type_descriptions`;
+  `/tmp/luna-tools-biwn5zqs/result.json`. Do not describe the whole suite as passed.
+- A temporary diagnostic in that unchanged test compiled its body explicitly
+  with 100,000 fuel before invocation. Width 1 with 64/1 reads compiled; width
+  4096 with 64 reads returned `Error::Budget`, before executing a length read.
+  Managed `test -p comptime_interpretor --test type_list_inputs local_list_length_still_charges_large_element_type_descriptions -- --nocapture`
+  exited 101, `/tmp/luna-tools-mibhd7f4/result.json`. The diagnostic was removed;
+  the test has no diff. Repeated type metadata copies hit the fixed compiler
+  budget in the unchanged ListLength lowering. No baseline checkout run was
+  performed. This remains a follow-up, not a reason to raise the test budget or
+  omit representation checks.
+- `LUNA_BENCH_ITERATIONS=5 python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --bench list_append`:
+  exit 0, `/tmp/luna-tools-5wgaha8g/result.json`. Existing benchmark, five warmups,
+  five measured invocations, development profile, same-build snapshot control.
+  For 1024 owned Bool appends: fused 7,254,472 bytes/invocation versus snapshot
+  185,877,448; Type appends: 4,533,744 versus 92,807,200. This is allocation
+  evidence, not a historical/release speedup or linear-time construction claim.
+- Managed `cargo fmt --all -- --check`: exit 0,
+  `/tmp/luna-tools-ogrftw_k/result.json`; `git diff --check` passed.
+
+Remaining priorities include repeated-metadata compilation costs, normal-form
+plan bytecode, and eliminating redundant admission walks through sound reusable
+validation evidence rather than bypassing checks.

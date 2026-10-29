@@ -33,6 +33,15 @@ impl fmt::Display for ErrorConversion {
 
 #[derive(Debug)]
 pub enum Op {
+    CheckListAppend {
+        local: Register,
+        ty: Term,
+    },
+    ListAppend {
+        local: Register,
+        suffix: Register,
+        ty: Term,
+    },
     PrepareListIndex(Arc<lists::Index>),
     CheckIndexedList {
         value: Register,
@@ -320,6 +329,12 @@ impl fmt::Display for Program {
                 instruction.source.start, instruction.source.end
             )?;
             match &instruction.op {
+                Op::CheckListAppend { local, ty } => {
+                    write!(f, "(check-list-append %{local} {ty})")?
+                }
+                Op::ListAppend { local, suffix, ty } => {
+                    write!(f, "(list-append %{local} %{suffix} {ty})")?
+                }
                 Op::PrepareListIndex(contract) => write!(f, "(prepare-list-index {contract})")?,
                 Op::CheckIndexedList { value, contract } => {
                     write!(f, "(check-indexed-list %{value} {contract})")?
@@ -1647,6 +1662,34 @@ pub fn compile(body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
                             .ok_or(Error::Budget(source))?;
                         let slot = *locals.entry(place.root).or_insert_with(&mut fresh);
                         let src = fresh();
+                        if let K::ListConcat(left, right) = &value.kind
+                            && place.fields.is_empty()
+                            && matches!(left.kind, K::Local(binding) if binding == place.root)
+                            && expr.ty == Term::Primitive(Primitive::Void)
+                            && left.ty == value.ty
+                            && right.ty == value.ty
+                            && lists::inert_suffix(right, fuel)?
+                        {
+                            emit(&mut work, Op::Unit(dst));
+                            work.push(Work::Emit(
+                                value.source,
+                                Op::ListAppend {
+                                    local: slot,
+                                    suffix: src,
+                                    ty: copy_term(&value.ty, fuel, value.source)?,
+                                },
+                            ));
+                            work.push(Work::Expression(right, src));
+                            work.push(Work::Emit(
+                                left.source,
+                                Op::CheckListAppend {
+                                    local: slot,
+                                    ty: copy_term(&value.ty, fuel, value.source)?,
+                                },
+                            ));
+                            emit(&mut work, Op::CheckBinding(slot));
+                            continue;
+                        }
                         emit(&mut work, Op::Unit(dst));
                         emit(
                             &mut work,

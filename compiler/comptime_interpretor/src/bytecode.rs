@@ -335,6 +335,22 @@ impl<'a> Interpreter<'a> {
                 source: Some(source),
             };
             match &instruction.op {
+                Op::CheckListAppend { local, ty } => {
+                    self.check_list_append(
+                        frame.slots[*local].as_ref().ok_or_else(missing)?,
+                        ty,
+                        source,
+                    )?;
+                }
+                Op::ListAppend { local, suffix, ty } => {
+                    let suffix = frame.slots[*suffix].take().ok_or_else(missing)?;
+                    self.complete_list_append(
+                        frame.slots[*local].as_mut().ok_or_else(missing)?,
+                        suffix,
+                        ty,
+                        source,
+                    )?;
+                }
                 Op::PrepareListIndex(contract) => {
                     self.prepare_list_index(&contract.ty, &contract.list, &contract.index, source)?
                 }

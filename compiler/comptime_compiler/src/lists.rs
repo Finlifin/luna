@@ -49,3 +49,19 @@ impl fmt::Display for Index {
         )
     }
 }
+
+/// These operands cannot run a callback or mutate the destination between reads.
+pub(crate) fn inert_suffix(expr: &Expr, fuel: &mut usize) -> Result<bool, Error> {
+    Ok(match &expr.kind {
+        K::TypeList(fields) => {
+            *fuel = fuel
+                .checked_sub(fields.len())
+                .ok_or(Error::Budget(expr.source))?;
+            fields
+                .iter()
+                .all(|field| matches!(field.kind, K::Local(_) | K::TypeValue(_) | K::Literal(_)))
+        }
+        K::TypeListValue(_) | K::Local(_) => true,
+        _ => false,
+    })
+}

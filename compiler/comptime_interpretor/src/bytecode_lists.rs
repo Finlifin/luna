@@ -304,3 +304,221 @@ fn indexed_list_domains_are_checked_before_computed_index_effects() {
         assert_eq!(env.get(&trace), Some(&Value::Bool(true)));
     }
 }
+
+#[test]
+fn fused_append_preserves_aliases_and_reuses_owned_buffers() {
+    let package = package();
+    let input = LocalId { owner: 1, index: 0 };
+    let suffix = LocalId { owner: 1, index: 1 };
+    for element in [Primitive::Bool, Primitive::Type] {
+        let ty = list(element);
+        let body = expr(
+            Term::Primitive(Primitive::Void),
+            K::Assign {
+                place: Place {
+                    root: input,
+                    fields: vec![],
+                },
+                value: Box::new(expr(
+                    ty.clone(),
+                    K::ListConcat(
+                        Box::new(expr(ty.clone(), K::Local(input))),
+                        Box::new(expr(ty.clone(), K::Local(suffix))),
+                    ),
+                )),
+            },
+        );
+        let code = comptime_compiler::compile(&body, &mut 1000)
+            .unwrap()
+            .to_string();
+        assert!(code.contains("(list-append "));
+        assert_eq!(
+            code,
+            comptime_compiler::compile(&body, &mut 1000)
+                .unwrap()
+                .to_string()
+        );
+        for compiled in [false, true] {
+            for carrier in 0..3 {
+                let original = if element == Primitive::Type {
+                    let mut values = Vec::with_capacity(8);
+                    values.push(Term::Primitive(Primitive::Bool));
+                    Value::TypeList(values)
+                } else {
+                    let mut values = Vec::with_capacity(8);
+                    values.push(Value::Bool(true));
+                    Value::List {
+                        ty: ty.clone(),
+                        values,
+                    }
+                };
+                let buffer = match &original {
+                    Value::TypeList(v) => v.as_ptr() as usize,
+                    Value::List { values, .. } => values.as_ptr() as usize,
+                    _ => unreachable!(),
+                };
+                let mut env = Environment::new();
+                let storage = if carrier == 0 {
+                    env.insert(suffix, original.clone());
+                    env.insert(input, original);
+                    None
+                } else {
+                    let storage =
+                        Storage::new(Value::AnonymousRecord(vec![("items".into(), original)]));
+                    let reference = value_reference::ValueReference::projected(
+                        storage.clone(),
+                        &[(nir::program::FieldOwner::Anonymous, 0)],
+                        &mut 1000,
+                    )
+                    .unwrap();
+                    env.insert(input, Value::ComptimeReference(reference.clone()));
+                    env.insert(suffix, Value::ComptimeReference(reference));
+                    Some(storage)
+                };
+                // A root storage carrier uses the same append mechanism as a projected receiver.
+                if carrier == 2 {
+                    let value = match &env[&input] {
+                        Value::ComptimeReference(reference) => {
+                            reference.borrow(&mut 1000).unwrap().value().clone()
+                        }
+                        _ => unreachable!(),
+                    };
+                    let root = Storage::new(value);
+                    env.insert(input, Value::Storage(root.clone()));
+                    env.insert(suffix, Value::Storage(root));
+                }
+                let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+                assert!(matches!(
+                    run(&mut vm, &body, &mut env, compiled).unwrap(),
+                    Flow::Value(Value::Unit)
+                ));
+                let actual = vm
+                    .invocation_slot_value(&env[&input], Some(SOURCE))
+                    .unwrap();
+                match actual {
+                    Value::List { values, .. } => assert_eq!(values, vec![Value::Bool(true); 2]),
+                    Value::TypeList(values) => {
+                        assert_eq!(values, vec![Term::Primitive(Primitive::Bool); 2])
+                    }
+                    _ => panic!("list expected"),
+                }
+                if carrier == 0 {
+                    let after = match &env[&input] {
+                        Value::List { values, .. } => values.as_ptr() as usize,
+                        Value::TypeList(v) => v.as_ptr() as usize,
+                        _ => unreachable!(),
+                    };
+                    assert_eq!(
+                        after, buffer,
+                        "owned list must reuse its existing allocation"
+                    );
+                }
+                drop(storage);
+            }
+        }
+    }
+}
+
+#[test]
+fn fused_append_rolls_back_budget_failures_and_recovers() {
+    let package = package();
+    let ty = list(Primitive::Bool);
+    let original = Value::List {
+        ty: ty.clone(),
+        values: vec![Value::Bool(false)],
+    };
+    let suffix = Value::List {
+        ty: ty.clone(),
+        values: vec![Value::Bool(true)],
+    };
+    let mut failed = 0;
+    let mut succeeded = 0;
+    for steps in 0..100 {
+        for shared in [false, true] {
+            let mut target = if shared {
+                Value::Storage(Storage::new(original.clone()))
+            } else {
+                original.clone()
+            };
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            vm.budget.steps = steps;
+            let result = vm.complete_list_append(&mut target, suffix.clone(), &ty, SOURCE);
+            vm.budget = Budget::default();
+            let actual = vm.invocation_slot_value(&target, Some(SOURCE)).unwrap();
+            if let Err(error) = result {
+                assert_eq!(error.kind, ErrorKind::StepsExhausted);
+                failed += 1;
+                assert_eq!(actual, original);
+                vm.complete_list_append(&mut target, suffix.clone(), &ty, SOURCE)
+                    .unwrap();
+            } else {
+                succeeded += 1;
+            }
+            assert_eq!(
+                vm.invocation_slot_value(&target, Some(SOURCE)).unwrap(),
+                Value::List {
+                    ty: ty.clone(),
+                    values: vec![Value::Bool(false), Value::Bool(true)],
+                }
+            );
+        }
+    }
+    assert!(failed > 0 && succeeded > 0);
+}
+
+#[test]
+fn fused_append_rejects_invalid_suffix_without_replacing_receiver() {
+    let package = package();
+    let input = LocalId { owner: 1, index: 0 };
+    let suffix = LocalId { owner: 1, index: 1 };
+    let ty = list(Primitive::Bool);
+    let original = Value::List {
+        ty: ty.clone(),
+        values: vec![Value::Bool(false)],
+    };
+    let body = expr(
+        Term::Primitive(Primitive::Void),
+        K::Assign {
+            place: Place {
+                root: input,
+                fields: vec![],
+            },
+            value: Box::new(expr(
+                ty.clone(),
+                K::ListConcat(
+                    Box::new(expr(ty.clone(), K::Local(input))),
+                    Box::new(expr(ty.clone(), K::Local(suffix))),
+                ),
+            )),
+        },
+    );
+    for compiled in [false, true] {
+        for malformed in [
+            Value::List {
+                ty: list(Primitive::Char),
+                values: vec![Value::Char('x')],
+            },
+            Value::List {
+                ty: ty.clone(),
+                values: vec![Value::Char('x')],
+            },
+        ] {
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            let mut env = Environment::from([(input, original.clone()), (suffix, malformed)]);
+            assert_eq!(
+                run(&mut vm, &body, &mut env, compiled).unwrap_err().kind,
+                ErrorKind::Type
+            );
+            assert_eq!(env[&input], original);
+            env.insert(suffix, original.clone());
+            run(&mut vm, &body, &mut env, compiled).unwrap();
+            assert_eq!(
+                env[&input],
+                Value::List {
+                    ty: ty.clone(),
+                    values: vec![Value::Bool(false); 2]
+                }
+            );
+        }
+    }
+}

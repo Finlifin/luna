@@ -20,6 +20,7 @@ mod iir_execution;
 mod immutable_storage;
 mod invocation;
 mod invocation_contracts;
+mod list_append;
 mod list_index;
 mod list_operations;
 mod memory;

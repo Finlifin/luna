@@ -140,3 +140,53 @@ fn list_indices_preserve_bounds_snapshots_and_type_values() {
         assert_eq!(vm.bytecode_invocations() - before, 1);
     }
 }
+
+#[test]
+fn repeated_append_keeps_copies_and_callback_snapshots() {
+    let package = support::compile_with_tuple(
+        "typealias Type = .Type'builtin;
+        typealias Integer = .Integer'builtin;
+        typealias List<T> = TupleElements<T>;
+        const concat = .list_concat'builtin;
+        comptime fn copies() -> List<bool> {
+            var values: List<bool> = [true];
+            let saved = values;
+            values = concat(values, values);
+            values = concat(values, [false]);
+            concat(saved, values)
+        }
+        comptime fn snapshot() -> List<bool> {
+            var values: List<bool> = [true];
+            values = concat(values, do { values = [false]; [true] });
+            values
+        }
+        comptime fn types() -> List<Type> {
+            var values: List<Type> = [bool];
+            values = concat(values, [Integer]);
+            values
+        }",
+    );
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    for (name, expected) in [
+        ("copies", vec![true, true, true, false]),
+        ("snapshot", vec![true, true]),
+    ] {
+        let before = vm.bytecode_invocations();
+        let Value::List { values, .. } = vm.invoke(support::id(&package, name), vec![]).unwrap()
+        else {
+            panic!("list")
+        };
+        assert_eq!(
+            values,
+            expected.into_iter().map(Value::Bool).collect::<Vec<_>>()
+        );
+        assert_eq!(vm.bytecode_invocations() - before, 1);
+    }
+    assert_eq!(
+        vm.invoke(support::id(&package, "types"), vec![]).unwrap(),
+        Value::TypeList(vec![
+            Term::Primitive(Primitive::Bool),
+            Term::Primitive(Primitive::Integer)
+        ])
+    );
+}
