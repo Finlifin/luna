@@ -232,3 +232,67 @@ fn prefix_observation_does_not_truncate_actual_list_values() {
         );
     }
 }
+
+#[test]
+fn concatenated_list_evidence_preserves_exact_offsets_and_initializer_calls() {
+    for body in [
+        "let a:meta.List<Type> = [Other(),bool]; let b:meta.List<Type> = [Byte]; let combined=.list_concat'builtin(a,b); let T=combined[2]; let value:T=7; value == 7",
+        "let a:meta.List<Type> = [Byte]; let b:meta.List<Type> = [Other(),bool]; let combined=.list_concat'builtin(a,b); let T=combined[2]; let value:T=true; value",
+        "let a:meta.List<Type> = [Other(),bool]; let count=.list_length'builtin(a); let b:meta.List<Type> = [Byte]; let combined=.list_concat'builtin(a,b); let T=combined[count]; let value:T=7; value == 7",
+        "let a:meta.List<Type> = if choose() {[Other(),bool]} else {[Byte,bool]}; let count=.list_length'builtin(a); let b:meta.List<Type> = [Byte]; let combined=.list_concat'builtin(a,b); let T=combined[count]; let value:T=7; value == 7",
+    ] {
+        let package=compile(&format!("comptime fn Other()->Type {{Byte}} comptime fn choose()->bool {{true}} comptime fn run()->bool {{{body}}}")).unwrap();
+        let mut vm = Interpreter::for_comptime(&package, Default::default()).unwrap();
+        assert_eq!(
+            vm.invoke(support::id(&package, "run"), vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        let other = support::id(&package, "Other");
+        assert_eq!(
+            vm.events()
+                .iter()
+                .filter(|e| matches!(e,Event::EnterFunction(id) if *id==other))
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn concatenation_never_treats_a_joined_prefix_as_an_exact_length() {
+    let prefix = "comptime fn choose()->bool {false}";
+    for body in [
+        "let a:meta.List<Type> = if choose() {[bool]} else {[bool,Byte]}; let b:meta.List<Type> = [bool]; let combined=.list_concat'builtin(a,b); let T=combined[1]; let value:T=true; value",
+        "let a:meta.List<Type> = if choose() {[bool]} else {[bool,Byte]}; let n=.list_length'builtin(a); let types:meta.List<Type> = [Byte,bool,Byte]; let T=types[n]; let value:T=true; value",
+        "var a:meta.List<Type> = [bool]; let b:meta.List<Type> = [Byte]; let combined=.list_concat'builtin(a,b); let T=combined[1]; let value:T=7; true",
+    ] {
+        assert!(
+            compile(&format!("{prefix} comptime fn run()->bool {{{body}}}")).is_err(),
+            "accepted {body}"
+        );
+    }
+    let package=compile(&format!("{prefix} comptime fn run()->bool {{let a:meta.List<Type> = if choose() {{[bool]}} else {{[bool,Byte]}}; let b:meta.List<Type> = [Byte];let combined=.list_concat'builtin(a,b);let T=combined[0];let value:T=true;value}}")).unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn concatenation_evidence_keeps_failures_and_opaque_type_identity() {
+    let package=compile("comptime fn Fail()->Type {let types:meta.List<Type> = [];types[0]} comptime fn run()->bool {let a:meta.List<Type> = [bool];let b:meta.List<Type> = [Fail()];let combined=.list_concat'builtin(a,b);let T=combined[0];let value:T=true;value}").unwrap();
+    let mut vm = Interpreter::for_comptime(&package, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke(support::id(&package, "run"), vec![])
+            .unwrap_err()
+            .kind,
+        comptime_interpretor::ErrorKind::IndexOutOfBounds
+    );
+    let source = "pure comptime fn Identity<T>->Type {T} comptime fn run()->bool {let a:meta.List<Type> = [];let b:meta.List<Type> = [Identity<bool>];let combined=.list_concat'builtin(a,b);let T=combined[0];let value:T=true;value}";
+    assert!(compile(source).is_err());
+    let package=compile("comptime fn run()->bool {let a:meta.List<Type> = [];let b:meta.List<Type> = [bool];let combined=.list_concat'builtin(a,b);let T=combined[0];let value:T=true;value}").unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}

@@ -393,3 +393,36 @@ Before build/run reports: `/tmp/luna-tools-65lit6qd/result.json`,
 After build/run reports: `/tmp/luna-tools-ofe5im4z/result.json`,
 `/tmp/luna-tools-inx3l6rn/result.json`, `/tmp/luna-tools-7onc1ulv/result.json`,
 `/tmp/luna-tools-4m31ffbj/result.json`. All exited 0.
+
+## Exact list shape in partial type observation
+
+Partial initialization evidence now records whether list fields cover the whole
+list or only a guaranteed prefix. Literal lists retain exact arity even when
+some element values require invocation. Equal-length branch joins retain that
+arity; unequal-length joins retain only their common prefix.
+
+The compiler's list-concatenation node propagates the right operand's evidence
+only when the left operand has exact length. Otherwise it retains the left
+prefix without inventing a right-hand offset. List-length observation produces
+an Integer only for exact shapes. These values can feed a later immutable list
+index and local Type annotation. The S-expression evidence dump includes the
+`exact` flag. Traversal, term copies and branch intersections remain bounded.
+
+This is structural observation of checked list operations, not general function
+evaluation. It does not execute or inline arbitrary wrapper bodies to discover
+return values. Mutable bindings remain unknown, normal-form heads remain opaque,
+and every initializer stays in executable IR. Regression tests retain calls in
+unknown list elements and verify that an unused element's invocation failure
+still aborts the call.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test comptime_list_type_evidence --test comptime_local_types --test comptime_list_operations --test builder_invocations
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+```
+
+146 tests passed (11 list evidence, 10 local types, 54 list operations, 71 builder
+invocations), exit 0: `/tmp/luna-tools-wkvlxf5_/result.json`. Only explanatory
+comments changed afterward. Format check: `/tmp/luna-tools-e_dmhlkj/result.json`,
+exit 0; `git diff --check` passed.

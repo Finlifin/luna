@@ -26,13 +26,24 @@ impl PartialStagedValue {
         let Some((right_shape, right_fields)) = right.aggregate(meta_list) else {
             return Ok(Self::unknown());
         };
-        if left_shape != right_shape {
-            return Ok(Self::unknown());
-        }
-        // List fields describe a guaranteed prefix of evidence, not an exact
-        // runtime length. Other aggregate layouts still require equal arity.
+        let shape = match (&left_shape, &right_shape) {
+            (
+                PartialStagedShape::List { ty: left, exact: a },
+                PartialStagedShape::List {
+                    ty: right,
+                    exact: b,
+                },
+            ) if left == right => PartialStagedShape::List {
+                ty: left.clone(),
+                exact: *a && *b && left_fields.len() == right_fields.len(),
+            },
+            _ if left_shape == right_shape => left_shape.clone(),
+            _ => return Ok(Self::unknown()),
+        };
+        // Unequal list lengths lose exactness but retain their common prefix.
+        // Other aggregate layouts still require equal arity.
         if left_fields.len() != right_fields.len()
-            && !matches!(left_shape, PartialStagedShape::List(_))
+            && !matches!(left_shape, PartialStagedShape::List { .. })
         {
             return Ok(Self::unknown());
         }
@@ -48,12 +59,81 @@ impl PartialStagedValue {
         }
         Ok(Arc::new(Self {
             depth: height,
-            data: PartialStagedData::Aggregate(left_shape, fields),
+            data: PartialStagedData::Aggregate(shape, fields),
         }))
     }
 
+    pub(super) fn concat(
+        left: &Arc<Self>,
+        right: &Arc<Self>,
+        ty: &Term,
+        meta_list: Option<DeclarationId>,
+        fuel: &mut usize,
+    ) -> Result<Arc<Self>, String> {
+        left.charge(fuel)?;
+        right.charge(fuel)?;
+        let Some((PartialStagedShape::List { ty: left_ty, exact }, mut fields)) =
+            left.aggregate(meta_list)
+        else {
+            return Ok(Self::unknown());
+        };
+        if left_ty != *ty {
+            return Ok(Self::unknown());
+        }
+        // A prefix does not locate the right operand. Preserve only that prefix.
+        let mut complete = false;
+        if exact {
+            if let Some((
+                PartialStagedShape::List {
+                    ty: right_ty,
+                    exact,
+                },
+                right_fields,
+            )) = right.aggregate(meta_list)
+            {
+                if right_ty != *ty {
+                    return Ok(Self::unknown());
+                }
+                complete = exact;
+                fields.extend(right_fields);
+            }
+        }
+        let depth = fields
+            .iter()
+            .map(|field| field.depth + 1)
+            .max()
+            .unwrap_or(1);
+        if depth >= 128 {
+            return Ok(Self::unknown());
+        }
+        Ok(Arc::new(Self {
+            depth,
+            data: PartialStagedData::Aggregate(
+                PartialStagedShape::List {
+                    ty: left_ty,
+                    exact: complete,
+                },
+                fields,
+            ),
+        }))
+    }
+
+    pub(super) fn list_length(
+        &self,
+        meta_list: Option<DeclarationId>,
+        fuel: &mut usize,
+    ) -> Result<Arc<Self>, String> {
+        self.charge(fuel)?;
+        match self.aggregate(meta_list) {
+            Some((PartialStagedShape::List { exact: true, .. }, fields)) => Ok(Self::known(
+                Term::Integer(comptime_runtime::Integer::from_u128(fields.len() as u128)),
+            )),
+            _ => Ok(Self::unknown()),
+        }
+    }
+
     // The caller charges the complete evidence before cloning. Decompose only
-    // for comparison: fully known constants retain their normal representation.
+    // for observation: fully known constants retain their normal representation.
     fn aggregate(
         &self,
         meta_list: Option<DeclarationId>,
@@ -62,11 +142,14 @@ impl PartialStagedValue {
         Some(match &self.data {
             PartialStagedData::Aggregate(shape, fields) => (shape.clone(), fields.clone()),
             PartialStagedData::Known(Term::TypeListValue(fields)) => (
-                PartialStagedShape::List(Term::NormalForm {
-                    head: meta_list?,
-                    sort: Sort::Type,
-                    arguments: vec![Term::Primitive(nir::Primitive::Type)],
-                }),
+                PartialStagedShape::List {
+                    ty: Term::NormalForm {
+                        head: meta_list?,
+                        sort: Sort::Type,
+                        arguments: vec![Term::Primitive(nir::Primitive::Type)],
+                    },
+                    exact: true,
+                },
                 known_fields(fields),
             ),
             PartialStagedData::Known(Term::NominalValue {
@@ -77,7 +160,10 @@ impl PartialStagedValue {
                 if Some(*head) == meta_list && matches!(arguments.as_slice(), [element] if element.sort() == Sort::Type)) =>
             {
                 (
-                    PartialStagedShape::List(ty.as_ref().clone()),
+                    PartialStagedShape::List {
+                        ty: ty.as_ref().clone(),
+                        exact: true,
+                    },
                     known_fields(fields),
                 )
             }

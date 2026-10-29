@@ -41,8 +41,8 @@ enum PartialStagedData {
 #[derive(Clone, Debug, PartialEq)]
 enum PartialStagedShape {
     Tuple,
-    // Fields carry a guaranteed prefix; a branch join may forget the tail.
-    List(Term),
+    // Fields carry a guaranteed prefix. Exact means it also covers the tail.
+    List { ty: Term, exact: bool },
     Record(DeclarationId),
     Variant(DeclarationId, usize),
     AnonymousRecord(Vec<String>),
@@ -74,7 +74,7 @@ impl PartialStagedValue {
                     *fuel = fuel
                         .checked_sub(fields.len())
                         .ok_or("partial pattern evidence budget exhausted")?;
-                    if let PartialStagedShape::List(ty) = shape {
+                    if let PartialStagedShape::List { ty, .. } = shape {
                         nir::type_computations::charge_term(ty, fuel).map_err(|e| e.to_string())?;
                     }
                     if let PartialStagedShape::AnonymousRecord(names) = shape {
@@ -100,7 +100,9 @@ impl std::fmt::Display for PartialStagedValue {
             PartialStagedData::Aggregate(shape, fields) => {
                 match shape {
                     PartialStagedShape::Tuple => write!(f, "(tuple")?,
-                    PartialStagedShape::List(ty) => write!(f, "(list (type {ty})")?,
+                    PartialStagedShape::List { ty, exact } => {
+                        write!(f, "(list (type {ty}) (exact {exact})")?
+                    }
                     PartialStagedShape::Record(id) => {
                         write!(f, "(record (declaration {} {})", id.package, id.local)?
                     }
@@ -1342,6 +1344,27 @@ impl Checker<'_, '_> {
                 return Ok(value.clone());
             }
         }
+        if let K::ListConcat(left, right) = &value.kind {
+            if self.list_element_type(&value.ty).is_none()
+                || left.ty != value.ty
+                || right.ty != value.ty
+            {
+                return Ok(PartialStagedValue::unknown());
+            }
+            let left = self.partial_staged_value_in(left, depth + 1, fuel, scope)?;
+            let right = self.partial_staged_value_in(right, depth + 1, fuel, scope)?;
+            return PartialStagedValue::concat(
+                &left,
+                &right,
+                &value.ty,
+                self.protocols.meta_list,
+                fuel,
+            );
+        }
+        if let K::ListLength(input) = &value.kind {
+            let input = self.partial_staged_value_in(input, depth + 1, fuel, scope)?;
+            return input.list_length(self.protocols.meta_list, fuel);
+        }
         if let K::TypeListIndex(values, index) = &value.kind {
             if self.list_element_type(&values.ty) != Some(&value.ty) {
                 return Ok(PartialStagedValue::unknown());
@@ -1362,7 +1385,7 @@ impl Checker<'_, '_> {
                 return Ok(PartialStagedValue::unknown());
             };
             let known = match &sequence.data {
-                PartialStagedData::Aggregate(PartialStagedShape::List(ty), fields) => {
+                PartialStagedData::Aggregate(PartialStagedShape::List { ty, .. }, fields) => {
                     nir::type_computations::charge_term(ty, fuel).map_err(|e| e.to_string())?;
                     return Ok(if *ty == values.ty {
                         fields
@@ -1555,7 +1578,13 @@ impl Checker<'_, '_> {
             (K::Tuple(fields), _) => (PartialStagedShape::Tuple, fields),
             (K::TypeList(fields), ty) if self.list_element_type(ty).is_some() => {
                 nir::type_computations::charge_term(ty, fuel).map_err(|e| e.to_string())?;
-                (PartialStagedShape::List(ty.clone()), fields)
+                (
+                    PartialStagedShape::List {
+                        ty: ty.clone(),
+                        exact: true,
+                    },
+                    fields,
+                )
             }
             (
                 K::Record {
