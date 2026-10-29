@@ -335,6 +335,72 @@ impl<'a> Interpreter<'a> {
                 source: Some(source),
             };
             match &instruction.op {
+                Op::PrepareList(list) => {
+                    self.prepare_list_construction(&list.ty, list.inputs.iter(), source)?;
+                }
+                Op::List {
+                    destination,
+                    list,
+                    values,
+                } => {
+                    let values = values
+                        .iter()
+                        .map(|slot| frame.slots[*slot].take().ok_or_else(missing))
+                        .collect::<Result<_, _>>()?;
+                    frame.slots[*destination] =
+                        Some(self.complete_list_construction(&list.ty, values, source)?);
+                }
+                Op::PrepareListOperation(operation) => self.prepare_list_operation(
+                    &operation.ty,
+                    &operation.left,
+                    operation.right.as_ref(),
+                    source,
+                )?,
+                Op::CheckListOperand { value, ty } => {
+                    self.list_operand_length(
+                        frame.slots[*value].as_ref().ok_or_else(missing)?,
+                        ty,
+                        source,
+                    )?;
+                }
+                Op::ListLength {
+                    destination,
+                    value,
+                    ty,
+                    local,
+                    value_source,
+                } => {
+                    let value = frame.slots[*value].as_ref().ok_or_else(|| {
+                        self.failure(ErrorKind::MissingBinding, Some(*value_source))
+                    })?;
+                    let flow = if *local {
+                        self.tick(Some(*value_source))?;
+                        self.local_list_length(value, ty, *value_source, source)?
+                    } else {
+                        let length = self.list_value_length(value, source)?;
+                        self.list_length_value(length, source)?
+                    };
+                    let Flow::Value(value) = flow else {
+                        return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source)));
+                    };
+                    frame.slots[*destination] = Some(value);
+                }
+                Op::ListConcat {
+                    destination,
+                    left,
+                    right,
+                } => {
+                    let left = frame.slots[*left].take().ok_or_else(missing)?;
+                    let right = frame.slots[*right].take().ok_or_else(missing)?;
+                    let length = self.list_value_length(&left, source)?;
+                    let other_length = self.list_value_length(&right, source)?;
+                    let Flow::Value(value) =
+                        self.complete_list_concat(left, right, length, other_length, source)?
+                    else {
+                        return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source)));
+                    };
+                    frame.slots[*destination] = Some(value);
+                }
                 Op::LocalObjectQuery {
                     destination,
                     access,
@@ -2360,3 +2426,7 @@ mod type_constructor_tests;
 #[cfg(test)]
 #[path = "bytecode_object_borrows.rs"]
 mod object_borrow_tests;
+
+#[cfg(test)]
+#[path = "bytecode_lists.rs"]
+mod list_tests;

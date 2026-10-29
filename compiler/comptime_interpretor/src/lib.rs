@@ -4931,66 +4931,6 @@ impl<'a> Interpreter<'a> {
     }
 
     #[inline(never)]
-    fn eval_type_list(
-        &mut self,
-        expr: &Expr,
-        environment: &mut Environment,
-    ) -> Result<Flow, Error> {
-        let K::TypeList(fields) = &expr.kind else {
-            unreachable!()
-        };
-        if fields.len() > 100_000 {
-            return Err(self.failure(ErrorKind::RepresentationSizeLimit, Some(expr.source)));
-        }
-        let diverging = fields
-            .iter()
-            .any(|field| field.ty == Term::Primitive(Primitive::Never));
-        let element_type = self.list_element(&expr.ty).cloned().or_else(|| {
-            self.is_type_list_input(&expr.ty)
-                .then_some(Term::Primitive(Primitive::Type))
-        });
-        if (diverging && expr.ty != Term::Primitive(Primitive::Never))
-            || (!diverging && element_type.is_none())
-            || fields.iter().any(|field| {
-                field.ty != Term::Primitive(Primitive::Never)
-                    && !diverging
-                    && Some(&field.ty) != element_type.as_ref()
-            })
-        {
-            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-        }
-        self.integer_operation(Some(expr.source), |budget| {
-            budget.consume(fields.len().saturating_add(1))
-        })?;
-        if diverging {
-            for field in fields {
-                let _ = value!(self.eval(field, environment));
-            }
-            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-        }
-        if element_type != Some(Term::Primitive(Primitive::Type)) {
-            let mut values = Vec::with_capacity(fields.len());
-            for field in fields {
-                values.push(value!(self.eval(field, environment)));
-            }
-            let value = Value::List {
-                ty: expr.ty.clone(),
-                values,
-            };
-            self.validate_immutable_input(&value, &expr.ty)?;
-            return Ok(Flow::Value(value));
-        }
-        let mut types = Vec::with_capacity(fields.len());
-        for field in fields {
-            let value = value!(self.eval(field, environment));
-            types.push(self.type_description_term(value, field.source)?);
-        }
-        let value = Value::TypeList(types);
-        self.validate_immutable_input(&value, &expr.ty)?;
-        Ok(Flow::Value(value))
-    }
-
-    #[inline(never)]
     fn eval_tuple_type(
         &mut self,
         expr: &Expr,
@@ -9679,6 +9619,7 @@ mod pointer_copy_budget_tests {
 }
 
 mod error_results;
+mod list_construction;
 mod newtypes;
 mod optional;
 mod type_constructors;

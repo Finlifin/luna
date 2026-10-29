@@ -502,3 +502,57 @@ fn object_query_compilation_keeps_computed_selectors_on_the_snapshot_path() {
         assert!(matches!(compile(&body, &mut 1), Err(Error::Budget(_))));
     }
 }
+
+#[test]
+fn list_code_retains_declared_domains_and_checks_concat_before_right_input() {
+    use comptime_compiler::Op;
+    let source = SourceRange { start: 1, end: 8 };
+    let ty = Term::NormalForm {
+        head: nir::DeclarationId {
+            package: 3,
+            local: 91,
+        },
+        sort: nir::Sort::Type,
+        arguments: vec![Term::Primitive(Primitive::Bool)],
+    };
+    let empty = Expr {
+        source,
+        ty: ty.clone(),
+        kind: K::TypeList(vec![]),
+    };
+    let body = Expr {
+        source,
+        ty,
+        kind: K::ListConcat(Box::new(empty.clone()), Box::new(empty)),
+    };
+    let code = compile(&body, &mut 1000).unwrap();
+    let order = code
+        .instructions()
+        .iter()
+        .filter_map(|instruction| match instruction.op {
+            Op::PrepareListOperation(_) => Some("prepare-concat"),
+            Op::PrepareList(_) => Some("prepare-list"),
+            Op::List { .. } => Some("list"),
+            Op::CheckListOperand { .. } => Some("check"),
+            Op::ListConcat { .. } => Some("concat"),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        order,
+        [
+            "prepare-concat",
+            "prepare-list",
+            "list",
+            "check",
+            "prepare-list",
+            "list",
+            "check",
+            "concat"
+        ]
+    );
+    let dump = code.to_string();
+    assert!(dump.contains(&body.ty.to_string()), "{dump}");
+    assert_eq!(dump, compile(&body, &mut 1000).unwrap().to_string());
+    assert!(matches!(compile(&body, &mut 1), Err(Error::Budget(_))));
+}

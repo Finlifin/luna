@@ -271,24 +271,7 @@ impl Interpreter<'_> {
             K::ListConcat(left, right) => (left, Some(right)),
             _ => unreachable!(),
         };
-        let never = Term::Primitive(Primitive::Never);
-        let diverges = left.ty == never || right.is_some_and(|right| right.ty == never);
-        let expected = if diverges {
-            &never
-        } else if right.is_some() {
-            &left.ty
-        } else {
-            &Term::Primitive(Primitive::Integer)
-        };
-        if expr.ty != *expected
-            || (left.ty != never
-                && self.list_element(&left.ty).is_none()
-                && !self.is_type_list_input(&left.ty))
-            || right
-                .is_some_and(|right| right.ty != never && left.ty != never && right.ty != left.ty)
-        {
-            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-        }
+        self.prepare_list_operation(&expr.ty, &left.ty, right.map(|v| &v.ty), expr.source)?;
         if right.is_none()
             && self.comptime_only
             && self.cleanup_schedule.is_none()
@@ -302,50 +285,9 @@ impl Interpreter<'_> {
             let local = environment
                 .get(&binding)
                 .ok_or_else(|| self.failure(ErrorKind::MissingBinding, Some(left.source)))?;
-            let storage = if let Value::Storage(storage) = local {
-                Some(
-                    storage
-                        .0
-                        .try_lock()
-                        .map_err(|_| self.failure(ErrorKind::InvalidPointer, Some(left.source)))?,
-                )
-            } else {
-                None
-            };
-            let referenced = if let Value::ComptimeReference(reference) = local {
-                Some(
-                    reference
-                        .borrow(&mut self.budget.steps)
-                        .map_err(|kind| self.failure(kind, Some(left.source)))?,
-                )
-            } else {
-                None
-            };
-            let value = referenced
-                .as_ref()
-                .map(|value| value.value())
-                .unwrap_or_else(|| storage.as_deref().unwrap_or(local));
-            // Comparing the nominal List<T> identity can itself inspect a
-            // large T. Meter that description without walking list elements.
-            let work = self
-                .type_description_work(&left.ty)
-                .ok_or_else(|| self.failure(ErrorKind::Type, Some(left.source)))?;
-            self.integer_operation(Some(left.source), |budget| budget.consume(work))?;
-            let length = match value {
-                Value::TypeList(values) if self.is_type_list_input(&left.ty) => values.len(),
-                Value::List { ty, values }
-                    if *ty == left.ty
-                        && self.list_element(ty).is_some_and(|element| {
-                            *element != Term::Primitive(Primitive::Type)
-                        }) =>
-                {
-                    values.len()
-                }
-                _ => return Err(self.failure(ErrorKind::Type, Some(expr.source))),
-            };
-            return self.list_length_value(length, expr.source);
+            return self.local_list_length(local, &left.ty, left.source, expr.source);
         }
-        let mut value = match self.eval(left, environment)? {
+        let value = match self.eval(left, environment)? {
             Flow::Value(value) => value,
             flow => return Ok(flow),
         };
@@ -368,11 +310,122 @@ impl Interpreter<'_> {
             Value::List { values, .. } => values.len(),
             _ => return Err(self.failure(ErrorKind::Type, Some(expr.source))),
         };
+        self.complete_list_concat(value, other, length, other_length, expr.source)
+    }
+
+    pub(super) fn prepare_list_operation(
+        &self,
+        ty: &Term,
+        left: &Term,
+        right: Option<&Term>,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        let never = Term::Primitive(Primitive::Never);
+        let diverges = *left == never || right.is_some_and(|right| *right == never);
+        let expected = if diverges {
+            &never
+        } else if right.is_some() {
+            left
+        } else {
+            &Term::Primitive(Primitive::Integer)
+        };
+        if *ty != *expected
+            || (*left != never
+                && self.list_element(left).is_none()
+                && !self.is_type_list_input(left))
+            || right.is_some_and(|right| *right != never && *left != never && *right != *left)
+        {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        }
+        Ok(())
+    }
+
+    pub(super) fn local_list_length(
+        &mut self,
+        local: &Value,
+        ty: &Term,
+        value_source: SourceRange,
+        source: SourceRange,
+    ) -> Result<Flow, Error> {
+        let storage = if let Value::Storage(storage) = local {
+            Some(
+                storage
+                    .0
+                    .try_lock()
+                    .map_err(|_| self.failure(ErrorKind::InvalidPointer, Some(value_source)))?,
+            )
+        } else {
+            None
+        };
+        let referenced = if let Value::ComptimeReference(reference) = local {
+            Some(
+                reference
+                    .borrow(&mut self.budget.steps)
+                    .map_err(|kind| self.failure(kind, Some(value_source)))?,
+            )
+        } else {
+            None
+        };
+        let value = referenced
+            .as_ref()
+            .map(|value| value.value())
+            .unwrap_or_else(|| storage.as_deref().unwrap_or(local));
+        // Comparing the nominal List<T> identity can itself inspect a
+        // large T. Meter that description without walking list elements.
+        let work = self
+            .type_description_work(ty)
+            .ok_or_else(|| self.failure(ErrorKind::Type, Some(value_source)))?;
+        self.integer_operation(Some(value_source), |budget| budget.consume(work))?;
+        let length = match value {
+            Value::TypeList(values) if self.is_type_list_input(ty) => values.len(),
+            Value::List { ty: stored, values }
+                if stored == ty
+                    && self
+                        .list_element(stored)
+                        .is_some_and(|element| *element != Term::Primitive(Primitive::Type)) =>
+            {
+                values.len()
+            }
+            _ => return Err(self.failure(ErrorKind::Type, Some(source))),
+        };
+        return self.list_length_value(length, source);
+    }
+
+    pub(super) fn list_operand_length(
+        &mut self,
+        value: &Value,
+        ty: &Term,
+        source: SourceRange,
+    ) -> Result<usize, Error> {
+        self.validate_immutable_input(value, ty)?;
+        self.list_value_length(value, source)
+    }
+
+    pub(super) fn list_value_length(
+        &self,
+        value: &Value,
+        source: SourceRange,
+    ) -> Result<usize, Error> {
+        match value {
+            Value::TypeList(values) => Ok(values.len()),
+            Value::List { values, .. } => Ok(values.len()),
+            _ => Err(self.failure(ErrorKind::Type, Some(source))),
+        }
+    }
+
+    pub(super) fn complete_list_concat(
+        &mut self,
+        mut value: Value,
+        other: Value,
+        length: usize,
+        other_length: usize,
+        source: SourceRange,
+    ) -> Result<Flow, Error> {
         let count = length
             .checked_add(other_length)
             .filter(|count| *count <= 100_000)
-            .ok_or_else(|| self.failure(ErrorKind::RepresentationSizeLimit, Some(expr.source)))?;
-        self.integer_operation(Some(expr.source), |budget| {
+            .ok_or_else(|| self.failure(ErrorKind::RepresentationSizeLimit, Some(source)))?;
+        self.integer_operation(Some(source), |budget| {
             budget.consume(count.saturating_add(1))
         })?;
         match (&mut value, other) {
@@ -380,7 +433,7 @@ impl Interpreter<'_> {
             (Value::List { values: left, .. }, Value::List { values: right, .. }) => {
                 left.extend(right)
             }
-            _ => return Err(self.failure(ErrorKind::Type, Some(expr.source))),
+            _ => return Err(self.failure(ErrorKind::Type, Some(source))),
         }
         // Both inputs were admitted. A combined immutable description can
         // still exceed the shared structural work limit even below the element
@@ -390,12 +443,16 @@ impl Interpreter<'_> {
                 &self.abstract_type_parameters,
                 &self.abstract_value_parameters,
             )
-            .ok_or_else(|| self.failure(ErrorKind::RepresentationSizeLimit, Some(expr.source)))?;
-        self.integer_operation(Some(expr.source), |budget| budget.consume(work))?;
+            .ok_or_else(|| self.failure(ErrorKind::RepresentationSizeLimit, Some(source)))?;
+        self.integer_operation(Some(source), |budget| budget.consume(work))?;
         Ok(Flow::Value(value))
     }
 
-    fn list_length_value(&mut self, length: usize, source: SourceRange) -> Result<Flow, Error> {
+    pub(super) fn list_length_value(
+        &mut self,
+        length: usize,
+        source: SourceRange,
+    ) -> Result<Flow, Error> {
         let count = self.integer_operation(Some(source), |budget| {
             budget.consume(1)?;
             Ok(comptime_runtime::Integer::from_u128(length as u128))

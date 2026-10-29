@@ -418,7 +418,7 @@ fn ordinary_package_uses_public_list_operations_without_builtin_access() {
     let input = directory.join("input.fl");
     std::fs::write(
         &input,
-        "const size=(meta.List<bool>.concat([true], [false,true])).length(); comptime fn run()->bool {size == 3}",
+        "use builtin.bool; const size=(meta.List<bool>.concat([true], [false,true])).length(); comptime fn run()->bool {size == 3}",
     )
     .unwrap();
     let library =
@@ -435,6 +435,11 @@ fn ordinary_package_uses_public_list_operations_without_builtin_access() {
                 .join("../../library/builtin/primitives.fl"),
         )
         .args(["--dependency", "2", "builtin", "3"])
+        .args(["--dependency", "1", "builtin", "3"])
+        .args(["--package", "4", "404", "attrs"])
+        .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/attrs/lib.fl"))
+        .args(["--dependency", "2", "attrs", "4"])
+        .args(["--dependency", "4", "builtin", "3"])
         .args(nir::intrinsics::Operation::ALL.iter().flat_map(|op| {
             [
                 "--comptime-intrinsic".to_owned(),

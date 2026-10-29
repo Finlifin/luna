@@ -1,5 +1,6 @@
 //! Linear invocation code. Unsupported operations are detected before execution.
 //! Constants and default templates own bounded typed NIR copies; opcodes never evaluate trees.
+pub mod lists;
 pub mod objects;
 mod patterns;
 pub mod scalar;
@@ -31,6 +32,29 @@ impl fmt::Display for ErrorConversion {
 
 #[derive(Debug)]
 pub enum Op {
+    PrepareList(Arc<lists::Construction>),
+    List {
+        destination: Register,
+        list: Arc<lists::Construction>,
+        values: Vec<Register>,
+    },
+    PrepareListOperation(Arc<lists::Operation>),
+    CheckListOperand {
+        value: Register,
+        ty: Arc<Term>,
+    },
+    ListLength {
+        destination: Register,
+        value: Register,
+        ty: Arc<Term>,
+        local: bool,
+        value_source: SourceRange,
+    },
+    ListConcat {
+        destination: Register,
+        left: Register,
+        right: Register,
+    },
     LocalObjectQuery {
         destination: Register,
         access: Arc<objects::ObjectAccess>,
@@ -278,6 +302,40 @@ impl fmt::Display for Program {
                 instruction.source.start, instruction.source.end
             )?;
             match &instruction.op {
+                Op::PrepareList(list) => write!(f, "(prepare-list {list})")?,
+                Op::List {
+                    destination,
+                    list,
+                    values,
+                } => {
+                    write!(f, "(list %{destination} {list} (values")?;
+                    for value in values {
+                        write!(f, " %{value}")?;
+                    }
+                    write!(f, "))")?;
+                }
+                Op::PrepareListOperation(operation) => {
+                    write!(f, "(prepare-list-operation {operation})")?
+                }
+                Op::CheckListOperand { value, ty } => {
+                    write!(f, "(check-list-operand %{value} {ty})")?
+                }
+                Op::ListLength {
+                    destination,
+                    value,
+                    ty,
+                    local,
+                    value_source,
+                } => write!(
+                    f,
+                    "(list-length %{destination} %{value} (type {ty}) (local {local}) (source {} {}))",
+                    value_source.start, value_source.end
+                )?,
+                Op::ListConcat {
+                    destination,
+                    left,
+                    right,
+                } => write!(f, "(list-concat %{destination} %{left} %{right})")?,
                 Op::LocalObjectQuery {
                     destination,
                     access,
@@ -1002,6 +1060,101 @@ pub fn compile(body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
                             work.push(Work::Expression(field, value));
                         }
                         emit(&mut work, Op::PrepareTypeConstructor(constructor));
+                    }
+                    K::TypeList(fields) => {
+                        *fuel = fuel
+                            .checked_sub(fields.len())
+                            .ok_or(Error::Budget(source))?;
+                        let list = Arc::new(lists::Construction {
+                            ty: copy_term(&expr.ty, fuel, source)?,
+                            inputs: fields
+                                .iter()
+                                .map(|field| copy_term(&field.ty, fuel, field.source))
+                                .collect::<Result<_, _>>()?,
+                        });
+                        let values: Vec<_> = fields.iter().map(|_| fresh()).collect();
+                        emit(
+                            &mut work,
+                            Op::List {
+                                destination: dst,
+                                list: list.clone(),
+                                values: values.clone(),
+                            },
+                        );
+                        for (field, slot) in fields.iter().zip(values).rev() {
+                            if expr.ty != Term::Primitive(Primitive::Never)
+                                && field.ty == Term::Primitive(Primitive::Type)
+                            {
+                                work.push(Work::Emit(field.source, Op::TypeDescription(slot)));
+                            }
+                            work.push(Work::Expression(field, slot));
+                        }
+                        emit(&mut work, Op::PrepareList(list));
+                    }
+                    K::ListLength(left) | K::ListConcat(left, _) => {
+                        let right = if let K::ListConcat(_, right) = &expr.kind {
+                            Some(right.as_ref())
+                        } else {
+                            None
+                        };
+                        let operation = Arc::new(lists::Operation {
+                            ty: copy_term(&expr.ty, fuel, source)?,
+                            left: copy_term(&left.ty, fuel, left.source)?,
+                            right: right
+                                .map(|right| copy_term(&right.ty, fuel, right.source))
+                                .transpose()?,
+                        });
+                        let local = if right.is_none() {
+                            if let K::Local(binding) = left.kind {
+                                Some(*locals.entry(binding).or_insert_with(&mut fresh))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                        let left_slot = local.unwrap_or_else(&mut fresh);
+                        if let Some(right) = right {
+                            let right_slot = fresh();
+                            emit(
+                                &mut work,
+                                Op::ListConcat {
+                                    destination: dst,
+                                    left: left_slot,
+                                    right: right_slot,
+                                },
+                            );
+                            emit(
+                                &mut work,
+                                Op::CheckListOperand {
+                                    value: right_slot,
+                                    ty: Arc::new(operation.right.as_ref().unwrap().clone()),
+                                },
+                            );
+                            work.push(Work::Expression(right, right_slot));
+                        } else {
+                            emit(
+                                &mut work,
+                                Op::ListLength {
+                                    destination: dst,
+                                    value: left_slot,
+                                    ty: Arc::new(operation.left.clone()),
+                                    local: local.is_some(),
+                                    value_source: left.source,
+                                },
+                            );
+                        }
+                        if local.is_none() {
+                            emit(
+                                &mut work,
+                                Op::CheckListOperand {
+                                    value: left_slot,
+                                    ty: Arc::new(operation.left.clone()),
+                                },
+                            );
+                            work.push(Work::Expression(left, left_slot));
+                        }
+                        emit(&mut work, Op::PrepareListOperation(operation));
                     }
                     K::TypeEqual(left, right) => {
                         let left_slot = fresh();

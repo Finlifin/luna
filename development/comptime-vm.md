@@ -1939,3 +1939,55 @@ it was corrected to the existing bounded substitution-copy API before testing
 (`/tmp/luna-tools-irgce4m_/result.json`).
 - Final managed `cargo fmt --all -- --check` passed:
   `/tmp/luna-tools-_kn0wfr8/result.json`; `git diff --check` passed.
+
+## List construction, concatenation and length in bytecode
+
+TypeList (the existing NIR name for generic list construction), ListConcat and
+ListLength now compile into ordinary operand code with checked list descriptors.
+Construction retains the registered head and actual element domain. Type-valued
+inputs are converted immediately; ordinary payload validation remains at the
+completed aggregate boundary. Concatenation validates its left input before the
+right expression runs, retains both source snapshots and enforces element and
+structural work limits before returning a result. No List spelling or Tuple head
+is used for dispatch.
+
+Shared helpers in `list_construction.rs` and `list_operations.rs` serve both
+execution carriers. A local length observation reuses the existing borrowed
+length helper and exact declared-domain check; it does not copy or scan every
+element. Computed operands retain their ordinary evaluation path. Descriptors
+and operations have bounded copying and stable S-expression displays.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  240 existing tests passed, exit 0, `/tmp/luna-tools-vschfyxk/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib bytecode::list_tests`:
+  2 new two-carrier tests passed for domain rejection before suffix effects,
+  immutable input preservation, length identity and distinct Type-conversion /
+  ordinary aggregate validation boundaries; `/tmp/luna-tools-vgdq26gr/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler`:
+  17 passed, `/tmp/luna-tools-f6u_nrju/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_lists --test comptime_list_operations --test type_lists --test dependent_list_collectors --test execution`:
+  the new source bytecode test passed, then 53 of 54 real-library list tests
+  passed. The explicit-package CLI fixture failed before VM execution because
+  it omitted the public bool import and current attrs dependency; exit 101,
+  `/tmp/luna-tools-tr3kp3ny/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_list_operations ordinary_package_uses_public_list_operations_without_builtin_access`:
+  the fixture passed with public `builtin.bool` and explicit package dependencies,
+  preserving the original result assertion; `/tmp/luna-tools-b5_dvfp0/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_lists --test dependent_list_collectors --test execution`:
+  type lists 28, dependent collectors 1 and execution 1365 passed, exit 0;
+  `/tmp/luna-tools-kpw63s59/result.json`.
+
+The initial source test incorrectly compared comptime lists through the public
+runtime-only Interpreter::new entry, which rejects their transport. The source
+regression instead checks exact list values and actual bytecode counts; the new
+internal tests compare both carriers in comptime mode. Initial extraction also
+required fixing macro scope and an iterator spelling error before tests ran.
+
+List indexing is not yet compiled. Self-append currently follows compiled
+concatenation plus assignment where eligible, rather than the tree evaluator's
+fused append optimization; porting that optimization remains necessary for
+allocation-sensitive builders. No general list speedup is claimed by this stage.
+- Final managed `cargo fmt --all -- --check` passed:
+  `/tmp/luna-tools-dvnp8igb/result.json`; `git diff --check` passed.
