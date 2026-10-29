@@ -366,7 +366,16 @@ impl<'a> Interpreter<'a> {
                     call,
                     parameter,
                     is_default,
+                    passing,
+                    argument_source,
                 } => {
+                    if *passing != nir::program::ArgumentPassing::Value
+                        && (*is_default || *parameter != 0)
+                    {
+                        return Err(
+                            self.failure(ErrorKind::InvalidCallPlan, Some(*argument_source))
+                        );
+                    }
                     let pending = frame.calls.get_mut(call).ok_or_else(missing)?;
                     if *parameter >= pending.arguments.len()
                         || pending.arguments[*parameter].is_some()
@@ -383,6 +392,28 @@ impl<'a> Interpreter<'a> {
                     } else if pending.last_default.is_some() {
                         return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
                     }
+                }
+                Op::Reference {
+                    destination,
+                    base,
+                    local,
+                    fields,
+                    rebind,
+                } => {
+                    let reference = if *local {
+                        value_reference::ValueReference::for_slot(
+                            frame.slots[*base].as_mut().ok_or_else(missing)?,
+                        )
+                    } else {
+                        value_reference::ValueReference::root(Storage::new(
+                            frame.slots[*base].take().ok_or_else(missing)?,
+                        ))
+                    };
+                    let mut reference = self.project_value_reference(reference, fields, source)?;
+                    if !rebind {
+                        reference.prohibit_rebind();
+                    }
+                    frame.slots[*destination] = Some(Value::ComptimeReference(reference));
                 }
                 Op::DefaultArgument {
                     call,
@@ -619,7 +650,125 @@ mod tests {
     use super::*;
 
     #[test]
-    fn invalid_default_order_is_checked_before_evaluating_the_next_expression() {
+    fn receiver_path_is_revalidated_after_later_arguments_change_storage() {
+        let package = Package::default();
+        let source = SourceRange { start: 1, end: 2 };
+        let boolean = Term::Primitive(Primitive::Bool);
+        let root = LocalId { owner: 1, index: 0 };
+        let function = LocalId { owner: 1, index: 1 };
+        let parameters = vec![
+            LocalId { owner: 2, index: 0 },
+            LocalId { owner: 2, index: 1 },
+        ];
+        let signature = Term::ComptimeFunction(Box::new(Term::Function {
+            parameters: parameters
+                .iter()
+                .map(|_| nir::Parameter {
+                    sort: nir::Sort::Runtime,
+                    ty: boolean.clone(),
+                })
+                .collect(),
+            result: Box::new(boolean.clone()),
+        }));
+        let literal = Expr {
+            source,
+            ty: boolean.clone(),
+            kind: K::Literal(Literal::Bool(true)),
+        };
+        let closure = Value::Closure(Arc::new(Closure {
+            definition_source: None,
+            origin: None,
+            instance_arguments: None,
+            parameters,
+            environment: Environment::new(),
+            capture_order: vec![],
+            body: Arc::new(literal.clone()),
+            ty: signature.clone(),
+        }));
+        let receiver = Expr {
+            source,
+            ty: boolean.clone(),
+            kind: K::AnonymousField {
+                value: Box::new(Expr {
+                    source,
+                    ty: Term::Record(vec![("flag".into(), boolean.clone())]),
+                    kind: K::Local(root),
+                }),
+                name: "flag".into(),
+                index: 0,
+            },
+        };
+        // Deliberately malformed typed IR invalidates the acquired path after
+        // selection. Storage updates must survive failure, but entry must fail.
+        let later = Expr {
+            source,
+            ty: boolean.clone(),
+            kind: K::Block {
+                statements: vec![Expr {
+                    source,
+                    ty: Term::Primitive(Primitive::Void),
+                    kind: K::Assign {
+                        place: nir::program::Place {
+                            root,
+                            fields: vec![],
+                        },
+                        value: Box::new(Expr {
+                            source,
+                            ty: Term::Primitive(Primitive::Void),
+                            kind: K::Unit,
+                        }),
+                    },
+                }],
+                result: Some(Box::new(literal)),
+            },
+        };
+        let body = Expr {
+            source,
+            ty: boolean,
+            kind: K::Call {
+                callee: Box::new(Expr {
+                    source,
+                    ty: signature,
+                    kind: K::Local(function),
+                }),
+                arguments: vec![
+                    nir::program::CallArgument {
+                        passing: nir::program::ArgumentPassing::ComptimeReference,
+                        parameter: 0,
+                        value: receiver,
+                        is_default: false,
+                    },
+                    nir::program::CallArgument {
+                        passing: nir::program::ArgumentPassing::Value,
+                        parameter: 1,
+                        value: later,
+                        is_default: false,
+                    },
+                ],
+                parameter_bindings: vec![],
+            },
+        };
+        let code = Arc::new(comptime_compiler::compile(&body, &mut 1000).unwrap());
+        let mut environment = Environment::new();
+        environment.insert(function, closure);
+        environment.insert(
+            root,
+            Value::AnonymousRecord(vec![("flag".into(), Value::Bool(false))]),
+        );
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        assert_eq!(
+            vm.execute_code(&code, &mut environment).unwrap_err().kind,
+            ErrorKind::InvalidValueReference
+        );
+        assert_eq!(
+            vm.local_value(&environment, root, Some(source)).unwrap(),
+            Value::Unit
+        );
+        assert_eq!(vm.depth, 0);
+    }
+
+    #[test]
+    fn invalid_call_preparation_is_checked_before_evaluating_the_next_expression() {
         let package = Package::default();
         let source = SourceRange { start: 1, end: 2 };
         let boolean = Term::Primitive(Primitive::Bool);
@@ -653,7 +802,7 @@ mod tests {
             body: Arc::new(literal.clone()),
             ty: signature.clone(),
         }));
-        for fault in 0..3 {
+        for fault in 0..5 {
             let mut arguments: Vec<_> = (0..2)
                 .map(|parameter| nir::program::CallArgument {
                     passing: nir::program::ArgumentPassing::Value,
@@ -667,6 +816,12 @@ mod tests {
                 0 => arguments.reverse(),
                 1 => arguments[1].is_default = false,
                 2 => parameter_bindings.clear(),
+                3 => {
+                    arguments[0].is_default = false;
+                    arguments[1].is_default = false;
+                    arguments[1].passing = nir::program::ArgumentPassing::ComptimeReference;
+                }
+                4 => arguments[0].passing = nir::program::ArgumentPassing::ComptimeReference,
                 _ => unreachable!(),
             }
             // This expression would fail with MissingBinding if evaluated.

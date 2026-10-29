@@ -13,6 +13,19 @@ pub struct ValueReference {
 }
 
 impl ValueReference {
+    /// Promote a binding to shared invocation storage without copying its value.
+    pub(super) fn for_slot(value: &mut Value) -> Self {
+        match value {
+            Value::ComptimeReference(reference) => reference.clone(),
+            Value::Storage(storage) => Self::root(storage.clone()),
+            _ => {
+                let storage = Storage::new(std::mem::replace(value, Value::Unit));
+                *value = Value::Storage(storage.clone());
+                Self::root(storage)
+            }
+        }
+    }
+
     pub(crate) fn root(storage: Storage) -> Self {
         Self {
             storage,
@@ -259,22 +272,9 @@ impl crate::Interpreter<'_> {
         fields.reverse();
         let reference = if let crate::K::Local(binding) = base.kind {
             let value = environment
-                .remove(&binding)
+                .get_mut(&binding)
                 .ok_or_else(|| self.failure(ErrorKind::MissingBinding, Some(base.source)))?;
-            match value {
-                Value::ComptimeReference(reference) => {
-                    environment.insert(binding, Value::ComptimeReference(reference.clone()));
-                    reference
-                }
-                value => {
-                    let storage = match value {
-                        Value::Storage(storage) => storage,
-                        value => Storage::new(value),
-                    };
-                    environment.insert(binding, Value::Storage(storage.clone()));
-                    ValueReference::root(storage)
-                }
-            }
+            ValueReference::for_slot(value)
         } else {
             if matches!(base.kind, crate::K::ReadPointer(_)) {
                 return Err(self.failure(ErrorKind::Unsupported, Some(base.source)));
@@ -284,13 +284,23 @@ impl crate::Interpreter<'_> {
                 control => return Ok(control),
             }
         };
+        let reference = self.project_value_reference(reference, &fields, expr.source)?;
+        Ok(crate::Flow::Value(Value::ComptimeReference(reference)))
+    }
+
+    pub(super) fn project_value_reference(
+        &mut self,
+        reference: ValueReference,
+        fields: &[(FieldOwner, usize)],
+        source: crate::SourceRange,
+    ) -> Result<ValueReference, crate::Error> {
         let reference = reference
-            .project(&fields, &mut self.budget.steps)
-            .map_err(|kind| self.failure(kind, Some(expr.source)))?;
+            .project(fields, &mut self.budget.steps)
+            .map_err(|kind| self.failure(kind, Some(source)))?;
         reference
             .borrow(&mut self.budget.steps)
-            .map_err(|kind| self.failure(kind, Some(expr.source)))?;
-        Ok(crate::Flow::Value(Value::ComptimeReference(reference)))
+            .map_err(|kind| self.failure(kind, Some(source)))?;
+        Ok(reference)
     }
 }
 

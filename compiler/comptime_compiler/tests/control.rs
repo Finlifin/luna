@@ -175,3 +175,52 @@ fn default_templates_are_owned_and_copy_work_is_bounded() {
     assert!(dump.contains("(prepare-defaults true)"));
     assert!(dump.contains("\\\"\\n"));
 }
+
+#[test]
+fn reference_dump_preserves_field_ownership_and_rebind_permission() {
+    use nir::program::{ArgumentPassing, CallArgument};
+    let source = SourceRange { start: 1, end: 2 };
+    let boolean = Term::Primitive(Primitive::Bool);
+    let body = Expr {
+        source,
+        ty: boolean.clone(),
+        kind: K::Call {
+            callee: Box::new(Expr {
+                source,
+                ty: Term::ComptimeFunction(Box::new(Term::Function {
+                    parameters: vec![nir::Parameter {
+                        sort: nir::Sort::Runtime,
+                        ty: boolean.clone(),
+                    }],
+                    result: Box::new(boolean.clone()),
+                })),
+                kind: K::Local(LocalId { owner: 1, index: 0 }),
+            }),
+            arguments: vec![CallArgument {
+                passing: ArgumentPassing::ComptimeReferenceNoRebind,
+                parameter: 0,
+                is_default: false,
+                value: Expr {
+                    source,
+                    ty: boolean.clone(),
+                    kind: K::AnonymousField {
+                        value: Box::new(Expr {
+                            source,
+                            ty: Term::Record(vec![("flag".into(), boolean)]),
+                            kind: K::Local(LocalId { owner: 1, index: 1 }),
+                        }),
+                        name: "flag".into(),
+                        index: 0,
+                    },
+                },
+            }],
+            parameter_bindings: vec![],
+        },
+    };
+    let dump = compile(&body, &mut 1000).unwrap().to_string();
+    assert!(dump.contains("(value-reference "));
+    assert!(dump.contains("(local true)"));
+    assert!(dump.contains("(field (anonymous-record) 0)"));
+    assert!(dump.contains("(rebind false)"));
+    assert_eq!(dump, compile(&body, &mut 1000).unwrap().to_string());
+}

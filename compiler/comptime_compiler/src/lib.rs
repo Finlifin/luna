@@ -1,7 +1,7 @@
 //! Linear invocation code. Unsupported operations are detected before execution.
 //! Constants and default templates own bounded typed NIR copies; opcodes never evaluate trees.
 pub mod scalar;
-use nir::program::{Expr, ExprKind as K, LocalId, SourceRange};
+use nir::program::{ArgumentPassing, Expr, ExprKind as K, FieldOwner, LocalId, SourceRange};
 use nir::{Primitive, Term};
 use scalar::{OwnedScalar, Scalar};
 use std::collections::BTreeMap;
@@ -22,6 +22,15 @@ pub enum Op {
         call: Register,
         parameter: usize,
         is_default: bool,
+        passing: ArgumentPassing,
+        argument_source: SourceRange,
+    },
+    Reference {
+        destination: Register,
+        base: Register,
+        local: bool,
+        fields: Vec<(FieldOwner, usize)>,
+        rebind: bool,
     },
     DefaultArgument {
         call: Register,
@@ -161,7 +170,29 @@ impl fmt::Display for Program {
                     call,
                     parameter,
                     is_default,
-                } => write!(f, "(check-call-argument {call} {parameter} {is_default})")?,
+                    passing,
+                    argument_source,
+                } => write!(
+                    f,
+                    "(check-call-argument {call} {parameter} {is_default} {passing} (argument-source {} {}))",
+                    argument_source.start, argument_source.end
+                )?,
+                Op::Reference {
+                    destination,
+                    base,
+                    local,
+                    fields,
+                    rebind,
+                } => {
+                    write!(
+                        f,
+                        "(value-reference {destination} (base {base} (local {local})) (fields"
+                    )?;
+                    for (owner, index) in fields {
+                        write!(f, " (field {owner} {index})")?;
+                    }
+                    write!(f, ") (rebind {rebind}))")?;
+                }
                 Op::DefaultArgument {
                     call,
                     destination,
@@ -350,10 +381,7 @@ pub fn compile(body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
                         && matches!(
                             callee.kind,
                             K::Function(_) | K::FunctionInstance { .. } | K::Local(_)
-                        )
-                        && arguments
-                            .iter()
-                            .all(|a| a.passing == nir::program::ArgumentPassing::Value) =>
+                        ) =>
                     {
                         *fuel = fuel
                             .checked_sub(arguments.len() + parameter_bindings.len())
@@ -394,6 +422,50 @@ pub fn compile(body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
                                         dynamic: matches!(callee.kind, K::Local(_)),
                                     },
                                 );
+                            } else if argument.passing != ArgumentPassing::Value {
+                                let mut base = &argument.value;
+                                let mut fields = Vec::new();
+                                loop {
+                                    let (next, field) = match &base.kind {
+                                        K::Field {
+                                            value,
+                                            declaration,
+                                            index,
+                                        } => (
+                                            value.as_ref(),
+                                            (FieldOwner::Nominal(*declaration), *index),
+                                        ),
+                                        K::AnonymousField { value, index, .. } => {
+                                            (value.as_ref(), (FieldOwner::Anonymous, *index))
+                                        }
+                                        _ => break,
+                                    };
+                                    *fuel =
+                                        fuel.checked_sub(1).ok_or(Error::Budget(base.source))?;
+                                    fields.push(field);
+                                    base = next;
+                                }
+                                fields.reverse();
+                                let (base_slot, local) = match base.kind {
+                                    K::Local(binding) => {
+                                        (*locals.entry(binding).or_insert_with(&mut fresh), true)
+                                    }
+                                    _ => (fresh(), false),
+                                };
+                                work.push(Work::Emit(
+                                    argument.value.source,
+                                    Op::Reference {
+                                        destination: value,
+                                        base: base_slot,
+                                        local,
+                                        fields,
+                                        rebind: argument.passing
+                                            == ArgumentPassing::ComptimeReference,
+                                    },
+                                ));
+                                if !local {
+                                    work.push(Work::Expression(base, base_slot));
+                                }
                             } else {
                                 work.push(Work::Expression(&argument.value, value));
                             }
@@ -403,6 +475,8 @@ pub fn compile(body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
                                     call,
                                     parameter: argument.parameter,
                                     is_default: argument.is_default,
+                                    passing: argument.passing,
+                                    argument_source: argument.value.source,
                                 },
                             );
                         }

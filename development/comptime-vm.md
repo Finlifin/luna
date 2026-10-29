@@ -7,7 +7,7 @@ interpreter. `comptime_compiler` lowers supported closed function bodies before
 execution; `comptime_interpretor::bytecode` runs a program counter, fixed dense
 registers and explicit lexical scope records. Mixed-stage interpretation and
 scheduled runtime cleanup continue to use the existing interpreter. This is not
-yet a complete bytecode VM: reference/trait calls, general primitives, effect/query suspension,
+yet a complete bytecode VM: trait calls, general primitives, effect/query suspension,
 specialized-code caching and the unified value representation remain outstanding.
 
 Compilation traverses control with a bounded heap worklist, including untaken
@@ -26,7 +26,7 @@ boolean/BitVec negation, branches, loops, break/continue and return. Integer
 arithmetic, exact/machine floating arithmetic, scalar comparisons and admitted
 comptime scalar intrinsics execute linear instructions,
 using the same checked primitive operations as tree interpretation. Ordinary
-by-value calls to named functions, function instances and local callable values
+calls to named functions, function instances and local callable values
 suspend the caller and run the callee on an explicit activation stack. Temporary
 registers are allocated densely independent of LocalId values. Scope exit and
 loop transfers clear introduced bindings; imported inputs are restored on both
@@ -1167,8 +1167,8 @@ body starts; no already-executed parent work is replayed. The native recursion
 limit remains because contracts and migration boundaries still use native calls.
 This does not establish unrestricted-depth execution or a performance speedup.
 
-Reference arguments, trait-method call plans, effect environments,
-and IIR/scheduled cleanup remain on the migration path. In particular an active
+Trait-method call plans, effect environments and IIR/scheduled cleanup remain
+on the migration path. In particular an active
 effect environment selects tree evaluation before body execution: scope-targeted
 control transfer has not yet been implemented for suspended bytecode frames.
 These execution restrictions do not change language-level call semantics.
@@ -1230,8 +1230,8 @@ defaults do not copy argument values into an unused default environment.
 A local selected generic instance substitutes its declaration inputs into the
 default through the same budgeted helper used by tree evaluation. This supports
 the existing dynamic-instance preparation carrier; it does not add new source
-function-value default protocols. Trait-interface defaults and reference
-arguments remain on the tree path with their existing semantics.
+function-value default protocols. Trait-interface defaults remain on the tree path with their existing semantics.
+Value-reference argument migration is described below.
 
 The separate `bytecode_default_evaluations()` counter records actual compiled
 default executions; `bytecode_invocations()` continues to count function bodies
@@ -1261,3 +1261,49 @@ admission and directly at the executor boundary; the latter is an internal test,
 not a new public validation bypass. Selected-instance substitution and early
 control-flow tests construct NIR carriers explicitly and do not claim new source
 syntax support.
+
+## Compiled value-reference argument transport (2026-10-30)
+
+Compiled calls now support comptime receiver references, including whole locals,
+nominal/anonymous field paths and computed temporary bases. The lowering keeps
+local-slot identity instead of reading a snapshot. Computed bases execute once
+and receive private invocation storage. Reference argument plans are checked
+before evaluating their expressions and remain restricted to an explicit,
+non-default receiver at parameter zero.
+
+Both execution carriers share promotion of a binding to invocation storage and
+checked field projection. Existing reference handles keep their rebind permission
+when forwarded. Whole-value replacement through a no-rebind handle is rejected;
+projecting a field retains the existing rule permitting mutation of that field.
+The per-call permission can further prohibit replacing the selected receiver.
+This adds no source pointer type or runtime Copy/Drop obligation.
+
+Receiver selection precedes later arguments. Aliases therefore observe updates
+made by later arguments, and structural paths are revalidated before entry and
+on subsequent access. Invalidating a path does not roll back effects that already
+ran, and failure still restores the suspended invocation state. Reference paths
+and permissions have stable S-expression dumps and bounded lowering/runtime work.
+
+The source tests exercise compiled callers as well as callees: whole-value writes,
+field receivers, forwarding, reading through a let receiver, field updates
+through a no-rebind root, a default reading self, and temporary receivers.
+An internal malformed-NIR test invalidates an acquired path in a later argument
+and verifies rejection before entry while preserving the completed storage write.
+The existing aggregate-construction and field-read/write expression families are
+not all lowered yet; those bodies still choose their migration carrier before
+execution. This change does not introduce new trait-call or effect support.
+
+Validation from `/home/fin/luna`, all commands exited 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  224 tests passed, including later-argument path invalidation and rejecting
+  reference defaults/non-receiver references before their expressions execute;
+  report `/tmp/luna-tools-vrhtcbkd/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler --test control`:
+  eight tests passed, including reference path and permission dumps;
+  report `/tmp/luna-tools-ye_opow4/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_references --test comptime_bytecode --test comptime_bytecode_defaults --test comptime_memory --test execution --test builder_invocations`:
+  reference, ordinary call, default, comptime memory, 1,365 execution and 73
+  builder cases passed; report `/tmp/luna-tools-21zabtal/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  report `/tmp/luna-tools-41l6stgr/result.json`.
