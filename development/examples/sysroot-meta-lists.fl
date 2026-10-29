@@ -1,7 +1,15 @@
 {-
     Use the complete sysroot and public meta interfaces. The callback state and
     input snapshots belong to this invocation, not to the collection helpers.
+    Zero is a probe input for the stateful callbacks below; the source contains
+    only positive values. Probes inspect captured state without source pointers.
 -}
+{- An empty or singleton traversal must never execute this callback path. -}
+comptime fn invalid_callback() -> bool {
+    let empty: meta.List<bool> = [];
+    empty[0]
+}
+
 comptime fn select(value: Integer) -> ?Integer {
     if value == 2 { null } else { value * 10 }
 }
@@ -19,25 +27,28 @@ comptime fn run() -> bool {
     var original: meta.List<Integer> = [1, 2, 3];
     let saved = original;
     var visits: Integer = 0;
-    let counter = visits.ref;
-    let source = original.ref;
-    let selected = saved.filter_map(|value| {
-        counter.* = counter.* * 10 + value;
-        source.* = [];
-        select(value)
-    });
+    let mapper = |value: Integer| -> ?Integer {
+        if value == 0 {visits + original.length()} else {
+            visits = visits * 10 + value;
+            original = [];
+            select(value)
+        }
+    };
+    let selected = saved.filter_map(mapper);
+    let trace = mapper(0);
     let flattened = saved.flat_map(expand);
     let nested = meta.List<bool>.filter_map([false, true, false],optional);
     let empty: meta.List<Integer> = [];
     let unused = empty.flat_map(|value| {
-        counter.* = 999;
+        invalid_callback();
         expand(value)
     });
     let unused_filter = empty.filter_map(|value| {
-        counter.* = 999;
+        invalid_callback();
         select(value)
     });
-    visits == 123 and original.length() == 0 and saved.length() == 3
+    (trace match {value? => value == 123, null => false})
+        and visits == 0 and original.length() == 3 and saved.length() == 3
         and selected.length() == 2 and selected[0] == 10 and selected[1] == 30
         and flattened.length() == 4
         and flattened[0] == 1 and flattened[1] == 11
@@ -99,38 +110,45 @@ comptime fn update_metadata(output: meta.Object, enabled: bool) -> meta.Object {
 comptime fn reducers_and_searches() -> bool {
     var original: meta.List<Integer> = [1, 2, 3];
     let saved = original;
-    let source = original.ref;
     var calls: Integer = 0;
-    let counter = calls.ref;
-    let reduced = saved.reduce(|left, right| {
-        counter.* += 1;
-        source.* = [];
-        left * 10 + right
-    });
+    let reducer = |left: Integer, right: Integer| {
+        if right == 0 {calls + original.length()} else {
+            calls += 1;
+            original = [];
+            left * 10 + right
+        }
+    };
+    let reduced = saved.reduce(reducer);
+    let reduction_calls = reducer(0, 0);
     let empty: meta.List<Integer> = [];
     let absent = empty.reduce(|left, right| {
-        counter.* = 999;
+        invalid_callback();
         left + right
     });
     let singles: meta.List<Integer> = [7];
     let singleton = singles.reduce(|left, right| {
-        counter.* = 999;
+        invalid_callback();
         left + right
     });
     let optionals: meta.List<?Integer> = [null];
     let nested = optionals.reduce(|left, right| right);
     var visits: Integer = 0;
-    let trace = visits.ref;
-    let found: ?Integer = saved.find_map(|value| {
-        trace.* = trace.* * 10 + value;
-        if value == 2 { value * 10 } else { null }
-    });
+    let finder = |value: Integer| -> ?Integer {
+        if value == 0 {visits} else {
+            visits = visits * 10 + value;
+            if value == 2 { value * 10 } else { null }
+        }
+    };
+    let found: ?Integer = saved.find_map(finder);
+    let search_trace = finder(0);
     let present_null = meta.List<bool>.find_map([false, true, false],optional);
     let no_match = empty.find_map(|value| {
-        trace.* = 999;
+        invalid_callback();
         select(value)
     });
-    calls == 2 and visits == 12 and original.length() == 0
+    reduction_calls == 2 and calls == 0 and visits == 0
+        and (search_trace match {value? => value == 12, null => false})
+        and original.length() == 3
         and saved.length() == 3
         and (reduced match { value? => value == 123, null => false })
         and (absent match { null => true, _? => false })

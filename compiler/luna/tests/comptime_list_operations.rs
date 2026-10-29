@@ -888,20 +888,23 @@ fn list_queries_evaluate_producers_once_and_retain_callback_capture_state() {
     let package = compile(
         "
         typealias Integer=.Integer'builtin;
-        comptime fn input(trace:*Integer)->meta.List<Integer> {
-            trace.* = trace.* * 10 + 1; [3,5,7]
+        struct Trace {value: Integer}
+        impl Trace {
+            comptime fn input(self)->meta.List<Integer> {
+                self.value = self.value * 10 + 1; [3,5,7]
+            }
+            comptime fn producer(self)->comptime fn(Integer)->bool {
+                self.value = self.value * 10 + 2; accepts
+            }
         }
         comptime fn accepts(value:Integer)->bool {true}
-        comptime fn producer(trace:*Integer)->comptime fn(Integer)->bool {
-            trace.* = trace.* * 10 + 2; accepts
-        }
         comptime fn run()->bool {
-            var trace:Integer=0;
-            let first=(input(trace.ref)).find(producer(trace.ref));
+            let trace = Trace {value: 0};
+            let first=trace.input().find(trace.producer());
             var visits:Integer=0;
             let values:meta.List<Integer> = [3,5,7];
             let second=values.find(|value| {visits = visits + 1; visits == 2});
-            trace == 12 and visits == 0
+            trace.value == 12 and visits == 0
                 and (first match {value? => value == 3,null => false})
                 and (second match {value? => value == 5,null => false})
         }
