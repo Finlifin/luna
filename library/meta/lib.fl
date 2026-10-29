@@ -6,12 +6,14 @@ pub pure comptime fn List<T> -> Type {
 }
 
 {- Comptime data, arithmetic, reflection, and checked definition builders. -}
-use data.{object, integer, list};
+use data.{object, integer, list, optional, errors};
 use definitions.{structs, enums};
 use numeric.scalar_math;
 use reflection.structure;
 
 pub use object.*;
+pub use optional.ComptimeOptionalOps;
+pub use errors.ComptimeErrorResultOps;
 pub use integer.*;
 pub use structure.*;
 pub use structs.*;
@@ -23,5 +25,7 @@ pub mod math {
 
 pub mod prelude {
     pub use .List;
+    pub use optional.ComptimeOptionalOps;
+    pub use errors.ComptimeErrorResultOps;
     pub use .Object;
 }

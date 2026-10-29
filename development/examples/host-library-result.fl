@@ -1,4 +1,5 @@
 -- Native error results retain their error identity through library operations.
+use fallible.ErrorResultOps;
 
 fn invert(value: bool) -> bool {not value}
 fn choose(value: bool) -> !bool bool {
@@ -23,7 +24,7 @@ fn recover_trial(ok: bool, succeed: bool) -> bool {
         if reason {true} else {error 42}
     };
     let input: !bool bool = if ok {true} else {error succeed};
-    let result = input.or_else<.u32'builtin>(recover);
+    let result = input.as(ErrorResultOps<bool, bool>).or_else<.u32'builtin>(recover);
     let valid = result match {
         value! => value and (ok or succeed),
         error reason => reason == 42 and not ok and not succeed,
@@ -41,23 +42,23 @@ fn fallback_trial(ok: bool) -> bool {
         reason
     };
     let input: !bool bool = if ok {true} else {error true};
-    let value = input.unwrap_or_else(fallback);
+    let value = input.as(ErrorResultOps<bool, bool>).unwrap_or_else(fallback);
     value and called == not ok and retired
 }
 fn good(value: bool) -> !bool bool {value}
 fn failed(value: bool) -> !bool bool {error value}
 
 fn run() -> bool {
-    let mapped = good(false).map<bool>(invert);
-    let mapped_err = failed(false).map_err<bool>(invert);
-    let chained = good(true).and_then<bool>(choose);
-    let rejected = good(false).and_then<bool>(choose);
-    let preserved = failed(true).and_then<bool>(choose);
+    let mapped = good(false).as(ErrorResultOps<bool, bool>).map<bool>(invert);
+    let mapped_err = failed(false).as(ErrorResultOps<bool, bool>).map_err<bool>(invert);
+    let chained = good(true).as(ErrorResultOps<bool, bool>).and_then<bool>(choose);
+    let rejected = good(false).as(ErrorResultOps<bool, bool>).and_then<bool>(choose);
+    let preserved = failed(true).as(ErrorResultOps<bool, bool>).and_then<bool>(choose);
     (mapped match {value! => value, error _ => false})
         and (mapped_err match {_! => false, error value => value})
-        and chained.is_ok()
-        and rejected.is_err()
-        and preserved.is_err()
+        and chained.as(ErrorResultOps<bool, bool>).is_ok()
+        and rejected.as(ErrorResultOps<bool, bool>).is_err()
+        and preserved.as(ErrorResultOps<bool, bool>).is_err()
         and recover_trial(true, false) and recover_trial(false, true)
         and recover_trial(false, false) and fallback_trial(true) and fallback_trial(false)
 }

@@ -40,7 +40,7 @@ fn forward(value: T) -> T where T :- Once { value }
 Clone／Copy，也不替代字段或载荷的清理：非 Copy 值只能按移动规则交付；
 空值没有载荷清理，present、成功或错误分支转移实际存在的责任。
 
-`!E T` 的固有方法 `inspect` 与 `inspect_err` 接收整个结果的所有权，分别在成功或错误分支把载荷的指针交给回调，随后返回原分支及其完整载荷：
+`!E T` 的 runtime trait `ErrorResultOps<T, E>` 提供 `inspect` 与 `inspect_err`：接收整个结果的所有权，分别在成功或错误分支把载荷的指针交给回调，随后返回原分支及其完整载荷：
 
 ~~~flurry
 struct Ticket { valid: bool }
@@ -50,12 +50,17 @@ fn check_ticket(ticket: *Ticket) { assumes ticket.valid.*; }
 fn check_failure(failure: *Failure) { assumes failure.retryable.*; }
 
 fn check(value: !Failure Ticket) -> !Failure Ticket {
-    value.inspect(check_ticket)
-        .inspect_err(check_failure)
+    value.as(ErrorResultOps<Ticket, Failure>).inspect(check_ticket)
+        .as(ErrorResultOps<Ticket, Failure>).inspect_err(check_failure)
 }
 ~~~
 
 这里不要求 Ticket 或 Failure 具有 Copy。每次调用最多执行一次回调，另一分支跳过回调；载荷的清理责任随返回值继续传递。回调自身的捕获环境无论是否被调用都按普通资源规则清理。回调通过指针执行的操作仍须符合内存契约，不能借此把局部载荷的地址逃逸到更长的生命周期。
+
+可选类型同样通过 runtime trait `OptionalOps<T>` 提供方法。comptime 使用
+meta 中的 `ComptimeOptionalOps<T>` 与 `ComptimeErrorResultOps<T, E>`；方法名
+仍为 `map`、`inspect`、`is_some`、`is_ok` 等，不增加 `comptime_` 前缀。
+comptime 回调接收值，接收者遵循 comptime 值引用语义，不使用 runtime 指针。
 
 ### Clone
 

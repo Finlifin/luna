@@ -1,0 +1,27 @@
+{- Optional and error-qualified values expose the same method names through
+   the protocols for their respective execution phases. -}
+
+comptime fn invert(value: bool) -> bool { not value }
+comptime fn forbidden() -> bool { assumes false; false }
+comptime fn recover(failure: u8) -> bool { failure == 7 }
+
+comptime fn inspect() -> bool {
+    let present: ?bool = true;
+    let absent: ?bool = null;
+    let success: !u8 bool = true;
+    let failure: !u8 bool = error 7;
+    let mapped = present.as(ComptimeOptionalOps<bool>).map(invert);
+    let flipped = success.as(ComptimeErrorResultOps<bool, u8>).map(invert);
+    present.as(ComptimeOptionalOps<bool>).unwrap_or_else(forbidden)
+        and absent.as(ComptimeOptionalOps<bool>).is_none()
+        and not mapped.as(ComptimeOptionalOps<bool>).unwrap_or(true)
+        and not flipped.as(ComptimeErrorResultOps<bool, u8>).unwrap_or_else(recover)
+        and failure.as(ComptimeErrorResultOps<bool, u8>).unwrap_or_else(recover)
+}
+
+fn run() -> bool {
+    let present: ?bool = true;
+    let success: !u8 bool = true;
+    present.as(OptionalOps<bool>).is_some()
+        and success.as(ErrorResultOps<bool, u8>).is_ok()
+}

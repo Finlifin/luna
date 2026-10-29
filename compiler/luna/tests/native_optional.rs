@@ -449,20 +449,20 @@ fn repository_optional_methods_preserve_nested_absence_and_lazy_callbacks() {
         fn run()->bool {{
             let present:?bool=true;
             let missing:?bool=null;
-            let mapped=present.map(absent);
-            let chained=present.and_then(absent);
-            let fallback=missing.unwrap_or_else(|| true);
-            present.is_some() and missing.is_none() and
-            present.unwrap_or(false) and missing.unwrap_or(true) and
-            present.unwrap_or_else(forbidden) and fallback and
-            not present.map(invert).unwrap_or(true) and
-            missing.map(invert).is_none() and
-            (mapped match {{inner?=>inner.is_none(),null=>false}}) and
-            chained.is_none()
+            let mapped=present.as(OptionalOps<bool>).map(absent);
+            let chained=present.as(OptionalOps<bool>).and_then(absent);
+            let fallback=missing.as(OptionalOps<bool>).unwrap_or_else(|| true);
+            present.as(OptionalOps<bool>).is_some() and missing.as(OptionalOps<bool>).is_none() and
+            present.as(OptionalOps<bool>).unwrap_or(false) and missing.as(OptionalOps<bool>).unwrap_or(true) and
+            present.as(OptionalOps<bool>).unwrap_or_else(forbidden) and fallback and
+            not present.as(OptionalOps<bool>).map(invert).as(OptionalOps<bool>).unwrap_or(true) and
+            missing.as(OptionalOps<bool>).map(invert).as(OptionalOps<bool>).is_none() and
+            (mapped match {{inner?=>inner.as(OptionalOps<bool>).is_none(),null=>false}}) and
+            chained.as(OptionalOps<bool>).is_none()
         }}
         fn verify() {{let passed=run();assumes passed;}}",
         format!(
-            "mod primitives {{\n{}\n}}\n{}",
+            "mod primitives {{\n{}\n}}\nmod qualified {{\n{}\n}} pub use qualified.*;",
             include_str!("../../../library/builtin/primitives.fl"),
             include_str!("../../../library/builtin/types/option.fl")
         )

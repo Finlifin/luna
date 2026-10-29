@@ -3264,8 +3264,8 @@ fn shipped_optional_module_resolves_without_enum_substitute() {
     }
     sandbox.write(
         "lib.fl",
-        "pub use primitives.*;
-        fn run()->bool {let value:?bool=true;value.unwrap_or(false)}",
+        "pub use primitives.*;pub use option.OptionalOps;
+        fn run()->bool {let value:?bool=true;value.as(OptionalOps<bool>).unwrap_or(false)}",
     );
     let output = sandbox.run(&["lib.fl", "--emit", "hir"]);
     hir_dump(&output);
@@ -3290,8 +3290,8 @@ fn draft_result_unwrap_composes_with_shipped_result_callbacks() {
     }
     sandbox.write(
         "lib.fl",
-        "pub use primitives.*;pub use result_unwrap.ErrorResultUnwrap;
-        fn panic(message:str)->noreturn {panic(message)}
+        "pub use primitives.*;pub use result.ErrorResultOps;pub use result_unwrap.ErrorResultUnwrap;
+        fn panic(message:str)->NoReturn {panic(message)}
         fn good()->!u8 bool {true}
         fn bad()->!u8 bool {error 7}
         fn forbidden_bool(value:bool)->bool {forbidden_bool(value)}
@@ -3299,15 +3299,15 @@ fn draft_result_unwrap_composes_with_shipped_result_callbacks() {
         fn forbidden_result(value:bool)->!u8 bool {forbidden_result(value)}
         fn invert(value:bool)->!u8 bool {not value}
         fn run()->bool {
-            good().is_ok() and bad().is_err() and
+            good().as(ErrorResultOps<bool,u8>).is_ok() and bad().as(ErrorResultOps<bool,u8>).is_err() and
             good().as(ErrorResultUnwrap<bool,u8>).unwrap() and bad().as(ErrorResultUnwrap<bool,u8>).unwrap_err()==7 and
-            not good().map(|value| not value).as(ErrorResultUnwrap<bool,u8>).unwrap() and
-            bad().map_err(|value| value==7).as(ErrorResultUnwrap<bool,bool>).unwrap_err() and
-            good().and_then(invert).is_ok() and
-            good().and_then(|value| {let result:!u8 bool=not value;return result;}).is_ok() and
-            bad().and_then(forbidden_result).is_err() and
-            bad().map(forbidden_bool).as(ErrorResultUnwrap<bool,u8>).unwrap_err()==7 and
-            good().map_err(forbidden_byte).as(ErrorResultUnwrap<bool,u8>).unwrap()
+            not good().as(ErrorResultOps<bool,u8>).map(|value| not value).as(ErrorResultUnwrap<bool,u8>).unwrap() and
+            bad().as(ErrorResultOps<bool,u8>).map_err(|value| value==7).as(ErrorResultUnwrap<bool,bool>).unwrap_err() and
+            good().as(ErrorResultOps<bool,u8>).and_then(invert).as(ErrorResultOps<bool,u8>).is_ok() and
+            good().as(ErrorResultOps<bool,u8>).and_then(|value| {let result:!u8 bool=not value;return result;}).as(ErrorResultOps<bool,u8>).is_ok() and
+            bad().as(ErrorResultOps<bool,u8>).and_then(forbidden_result).as(ErrorResultOps<bool,u8>).is_err() and
+            bad().as(ErrorResultOps<bool,u8>).map(forbidden_bool).as(ErrorResultUnwrap<bool,u8>).unwrap_err()==7 and
+            good().as(ErrorResultOps<bool,u8>).map_err(forbidden_byte).as(ErrorResultUnwrap<bool,u8>).unwrap()
         }",
     );
     let output = sandbox.run(&[
@@ -3356,14 +3356,14 @@ fn draft_result_unwrap_executes_from_an_importing_package() {
     // checkable. No assertion below invokes panic or claims its API is shipped.
     sandbox.write(
         "library/std/lib.fl",
-        "mod primitives {pub use builtin.Type;} pub use result_unwrap.ErrorResultUnwrap;fn panic(message:str)->noreturn {panic(message)}",
+        "mod primitives {pub use builtin.{Type,bool};} pub use result.ErrorResultOps;pub use result_unwrap.ErrorResultUnwrap;fn panic(message:str)->NoReturn {panic(message)}",
     );
     sandbox.write(
         "input.fl",
-        "use std.ErrorResultUnwrap;
+        "use std.{ErrorResultOps,ErrorResultUnwrap};
         fn good()->!u8 bool {true}
         fn bad()->!u8 bool {error 7}
-        fn run()->bool {good().map(|value| not value).is_ok() and bad().as(ErrorResultUnwrap<bool,u8>).unwrap_err()==7}",
+        fn run()->bool {good().as(ErrorResultOps<bool,u8>).map(|value| not value).as(ErrorResultOps<bool,u8>).is_ok() and bad().as(ErrorResultUnwrap<bool,u8>).unwrap_err()==7}",
     );
     let output = sandbox.run(&["input.fl", "--sysroot", "library", "--interpret", "run"]);
     assert_eq!(success(&output).trim(), "(bool true)");
@@ -3389,8 +3389,8 @@ fn draft_optional_unwrap_composes_with_shipped_operations() {
     // Test-only diverging panic; exercised success branches do not invoke it.
     sandbox.write(
         "lib.fl",
-        "pub use primitives.*;pub use option_unwrap.OptionalUnwrap;
-        fn panic(message:str)->noreturn {panic(message)}
+        "pub use primitives.*;pub use option.OptionalOps;pub use option_unwrap.OptionalUnwrap;
+        fn panic(message:str)->NoReturn {panic(message)}
         fn some()->?bool {true}
         fn none()->?bool {null}
         fn nested()->??bool {none()}
@@ -3398,29 +3398,16 @@ fn draft_optional_unwrap_composes_with_shipped_operations() {
         fn forbidden_optional(value:bool)->?bool {forbidden_optional(value)}
         fn invert(value:bool)->?bool {not value}
         fn run()->bool {
-            some().is_some() and none().is_none() and
+            some().as(OptionalOps<bool>).is_some() and none().as(OptionalOps<bool>).is_none() and
             some().as(OptionalUnwrap<bool>).unwrap() and
-            some().unwrap_or(false) and none().unwrap_or(true) and
-            not some().map(|value| not value).as(OptionalUnwrap<bool>).unwrap() and
-            none().map(forbidden).is_none() and
-            some().and_then(invert).is_some() and
-            none().and_then(forbidden_optional).is_none() and
-            nested().as(OptionalUnwrap<?bool>).unwrap().is_none()}",
+            some().as(OptionalOps<bool>).unwrap_or(false) and none().as(OptionalOps<bool>).unwrap_or(true) and
+            not some().as(OptionalOps<bool>).map(|value| not value).as(OptionalUnwrap<bool>).unwrap() and
+            none().as(OptionalOps<bool>).map(forbidden).as(OptionalOps<bool>).is_none() and
+            some().as(OptionalOps<bool>).and_then(invert).as(OptionalOps<bool>).is_some() and
+            none().as(OptionalOps<bool>).and_then(forbidden_optional).as(OptionalOps<bool>).is_none() and
+            nested().as(OptionalUnwrap<?bool>).unwrap().as(OptionalOps<bool>).is_none()}",
     );
-    let output = sandbox.run(&[
-        "--packages-v1",
-        "--package",
-        "0",
-        "0",
-        "input",
-        "lib.fl",
-        "--primary",
-        "0",
-        "--builtin-impl-package",
-        "0",
-        "--interpret",
-        "run",
-    ]);
+    let output = sandbox.run(&["lib.fl", "--interpret", "run"]);
     assert_eq!(success(&output).trim(), "(bool true)");
 }
 

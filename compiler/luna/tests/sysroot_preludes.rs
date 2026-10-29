@@ -151,7 +151,7 @@ fn complete_shipped_sysroot_runs_tuple_optional_math_and_iteration() {
 }
 
 #[test]
-fn complete_shipped_sysroot_runs_inherent_qualified_type_methods() {
+fn complete_shipped_sysroot_runs_qualified_type_traits() {
     let input = Inputs::new();
     input.write(
         "input.fl",
@@ -271,4 +271,37 @@ fn optional_provider_absence_is_distinct_from_a_broken_present_provider() {
         "pub mod prelude {pub fn metadata()->bool {true}}",
     );
     assert_true(input.run("fn run()->bool {base() and metadata()}"));
+}
+
+#[test]
+fn complete_shipped_sysroot_invokes_comptime_qualified_type_traits() {
+    let input = Inputs::new();
+    input.write(
+        "input.fl",
+        include_str!("../../../development/examples/sysroot-qualified-phases.fl"),
+    );
+    let library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_luna"))
+        .arg(input.0.join("input.fl"))
+        .arg("--sysroot")
+        .arg(library)
+        .args([
+            "--build-target",
+            "x86_64",
+            "linux",
+            "64",
+            "--invoke-comptime",
+            "inspect",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "(bool true)"
+    );
 }

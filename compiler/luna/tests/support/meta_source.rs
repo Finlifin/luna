@@ -3,12 +3,15 @@
 // Embed the real primitive bindings for this single-package fixture; production
 // resolves the same names through the builtin package dependency.
 concat!(
+    "mod attrs {\n", include!("attrs_source.rs"), "\n}\n",
     "mod builtin {\n", include_str!("../../../../library/builtin/primitives.fl"), "\n}\n",
     "mod bindings {\n", include_str!("../../../../library/meta/bindings.fl"), "\n}\n",
     "mod data {\n",
     "mod integer {\n", include_str!("../../../../library/meta/data/integer.fl"), "\n}\n",
     "mod object {\n", include_str!("../../../../library/meta/data/object.fl"), "\n}\n",
     "mod list {\n", include_str!("../../../../library/meta/data/list.fl"), "\n}\n",
+    "mod optional {\n", include_str!("../../../../library/meta/data/optional.fl"), "\n}\n",
+    "mod errors {\n", include_str!("../../../../library/meta/data/errors.fl"), "\n}\n",
     "} mod reflection {mod structure {\n",
     include_str!("../../../../library/meta/reflection/structure.fl"), "\n}}\n",
     "mod definitions {\n",

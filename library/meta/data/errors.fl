@@ -1,0 +1,71 @@
+{- Comptime operations on native optional/error values use value references
+   for self and value parameters for callbacks; no comptime pointers. -}
+
+use builtin.{Type, bool};
+
+pub trait ComptimeErrorResultOps where T, E {
+
+    ^attrs.comptime_phase
+    comptime fn is_ok(self) -> bool;
+    ^attrs.comptime_phase
+    comptime fn is_err(self) -> bool;
+    ^attrs.comptime_phase
+    comptime fn inspect(self, observer: %c comptime fn(T)) -> !E T where c: Type.vars.Closure;
+    ^attrs.comptime_phase
+    comptime fn inspect_err(self, observer: %c comptime fn(E)) -> !E T where c: Type.vars.Closure;
+    ^attrs.comptime_phase
+    comptime fn map(self, f: %c comptime fn(T) -> U) -> !E U where U, c: Type.vars.Closure;
+    ^attrs.comptime_phase
+    comptime fn map_err(self, f: %c comptime fn(E) -> F) -> !F T where F, c: Type.vars.Closure;
+    ^attrs.comptime_phase
+    comptime fn and_then(self, f: %c comptime fn(T) -> !E U) -> !E U where U, c: Type.vars.Closure;
+    ^attrs.comptime_phase
+    comptime fn or_else(self, f: %c comptime fn(E) -> !F T) -> !F T where F, c: Type.vars.Closure;
+    ^attrs.comptime_phase
+    comptime fn unwrap_or_else(self, fallback: %c comptime fn(E) -> T) -> T where c: Type.vars.Closure;
+}
+
+comptime impl ComptimeErrorResultOps<T, E> for !E T where T, E {
+    comptime fn is_ok(self) -> bool = self match {
+        _! => true,
+        error _ => false,
+    };
+
+    comptime fn is_err(self) -> bool = not self.as(ComptimeErrorResultOps<T, E>).is_ok();
+
+    -- Invoke the observer with the successful value and preserve the result.
+    comptime fn inspect(self, observer: %c comptime fn(T)) -> !E T where c: Type.vars.Closure = self match {
+        value! => do { observer(value); value },
+        error failure => error failure,
+    };
+
+    comptime fn inspect_err(self, observer: %c comptime fn(E)) -> !E T where c: Type.vars.Closure = self match {
+        value! => value,
+        error failure => do { observer(failure); error failure },
+    };
+
+    comptime fn map(self, f: %c comptime fn(T) -> U) -> !E U where U, c: Type.vars.Closure = self match {
+        value! => f(value),
+        error failure => error failure,
+    };
+
+    comptime fn map_err(self, f: %c comptime fn(E) -> F) -> !F T where F, c: Type.vars.Closure = self match {
+        value! => value,
+        error failure => error f(failure),
+    };
+
+    comptime fn and_then(self, f: %c comptime fn(T) -> !E U) -> !E U where U, c: Type.vars.Closure = self match {
+        value! => f(value),
+        error failure => error failure,
+    };
+
+    comptime fn or_else(self, f: %c comptime fn(E) -> !F T) -> !F T where F, c: Type.vars.Closure = self match {
+        value! => value,
+        error failure => f(failure),
+    };
+
+    comptime fn unwrap_or_else(self, fallback: %c comptime fn(E) -> T) -> T where c: Type.vars.Closure = self match {
+        value! => value,
+        error failure => fallback(failure),
+    };
+}
