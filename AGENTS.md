@@ -79,7 +79,7 @@ Limitations:
 
 ### 内置包持续开发
 
-- 为某个类型准备的方法直接定义在该类型的固有 `impl` 中，通过类型或接收者调用，不堆积为带类型名前缀的自由函数，也不为承载这些方法另造扩展 trait。此规则同时适用于 runtime 与 comptime 方法。
+- 为某个类型准备的方法直接定义在该类型的固有 `impl` 中，通过类型或接收者调用，不堆积为带类型名前缀的自由函数，也不为承载这些方法另造扩展 trait。可选类型与错误限定类型的方法是作者确认的例外：通过分别面向 runtime 与 comptime 的 trait 提供，两阶段保留相同方法名，不添加 `comptime_` 前缀。
 - 可选类型与错误限定类型也直接使用固有实现，例如 `impl ?T where T { ... }` 和 `impl !E T where T, E { ... }`。它们的专属操作不需要新增 `OptionalOps`、`ErrorResultOps` 等承载方法的 trait；现有此类接口属于待迁移实现，不能据此要求调用方导入 trait 或通过 `.as(Trait)` 访问这些方法。这不限制它们按需实现 Iterator、Clone 等实际协议。
 - 对编译器 builtin 类型，`builtin`、`meta`、`build`、`attrs`、`std`、`verification` 六个内置包都可以为其编写 `impl`（包括固有方法和 trait 实现），不受孤儿规则限制，不要求类型或 trait 归当前包所有。该豁免不自动扩展到用户包或非 builtin 类型，也不免除重复／冲突实现及其他语义检查；目标类型仍通过已有具名绑定引用。
 - 内置包是完成 Flurry 的主线交付，不能长期只推进编译器而搁置库实现，也不能等编译器全部完成后才补库。持续推进 `builtin`、`meta`、`build`、`attrs`、`std` 的实际能力；`verification` 按作者此前决定暂缓高级内容，但保留接口与依赖边界。
@@ -105,7 +105,8 @@ Limitations:
 - str 位于 builtin，String 位于 std；内存相关模块使用 mem 命名。
 - 禁止在使用处直接写 `.symbol'builtin`；这里的 `symbol` 泛指任意编译器内置符号，并非仅指 Symbol 类型。必须先在六个内置包内部的集中绑定层建立具名绑定（类型使用 `typealias`，值或函数使用相应具名绑定），其余代码通过绑定名称、导入或公开接口使用。此规则同样约束内置包自身的签名、子句、impl 和函数体；已有绑定应复用，不得在各使用处重复绑定。原始 builtin 访问只允许出现在建立这些绑定的定义中，用户代码不直接访问。例如先定义 `pub typealias u8 = .u8'builtin;`，之后统一使用 `u8`。
 - Normal form 的头不展开；Identity<T> 不因函数体返回 T 就与 T 相等。
-- Tuple 的签名是 `pure comptime fn Tuple<...Es: meta.List<Type>> -> Type`；变参收集为一个类型列表输入，类型身份保留 Tuple 的 normal-form 头。内部结构视图与迁移期的结构元组表示不能替代这一语言定义。
+- NF 参数按签名接收普通 comptime 值，`meta.List<Type>` 及其值不例外。禁止将类型列表硬编码为 NF 参数类别、专用参数槽或唯一允许的变参收集类型；参数绑定、类型检查、求值、替换与身份比较必须遵循通用 comptime 值和调用规则。当前实现中的特判是待消除的实现偏差，不是语言契约。
+- Tuple 通过集中绑定 `pub const Tuple: pure comptime fn<...Es: meta.List<Type>> -> Type = .Tuple'builtin;` 提供。`Es` 是按该签名收集的普通 comptime 列表值，类型身份保留 Tuple 的 normal-form 头；不得用递归函数体伪造绑定，也不得要求 Tuple 必须声明为源码函数。Tuple 的名称、参数与调用不获得特设的解析、绑定或 NF 语义。编译器的内部结构视图与布局支持不得替代普通绑定、调用和类型身份规则；同样的通用机制须适用于用户定义。
 - 已有完整参数列表时优先具名赋值，例如 `Tuple<.Es = Es>`，不要先用 `Tuple<...Es>` 展开再收集。仅在确实需要逐项拼接或展开语义时使用参数展开；测试展开本身的用例不受此限制。
 - `Once` 在 builtin.resources 中定义，并由 `impl Once for T where T {}` 提供默认仿射能力，不为标量、指针、元组、可选或错误结果重复枚举实现。Once 不授予 Clone／Copy，也不替代移动与清理检查。
 - PTC 只处理类型命题；程序状态、内存与资源规格由程序验证层负责。
