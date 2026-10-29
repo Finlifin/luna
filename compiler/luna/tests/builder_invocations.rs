@@ -349,6 +349,12 @@ impl Fixture {
     ) -> Result<(Artifact, Value, elaboration::program::Protocols), String> {
         let mut packages = self.packages();
         packages.push(SourcePackage {
+            resolution_id: 44,
+            identity: 903,
+            name: "attrs".into(),
+            entry: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../library/attrs/lib.fl"),
+        });
+        packages.push(SourcePackage {
             resolution_id: 42,
             identity: 901,
             name: "meta".into(),
@@ -373,6 +379,16 @@ impl Fixture {
         compile_and_invoke_with_struct_builders(
             &packages,
             &[
+                resolve::DependencyEdge {
+                    requester: 42,
+                    alias: "attrs".into(),
+                    provider: 44,
+                },
+                resolve::DependencyEdge {
+                    requester: 44,
+                    alias: "builtin".into(),
+                    provider: 43,
+                },
                 resolve::DependencyEdge {
                     requester: 17,
                     alias: "meta".into(),
@@ -504,6 +520,10 @@ fn package_cli_invokes_public_builders_with_observed_inputs() {
                     .join("../../library/builtin/primitives.fl"),
             )
             .args(["--dependency", "42", "builtin", "43"])
+            .args(["--package", "44", "903", "attrs"])
+            .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../library/attrs/lib.fl"))
+            .args(["--dependency", "42", "attrs", "44"])
+            .args(["--dependency", "44", "builtin", "43"])
             .args(nir::intrinsics::Operation::ALL.iter().flat_map(|op| {
                 [
                     "--comptime-intrinsic".to_owned(),
