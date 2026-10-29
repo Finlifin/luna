@@ -74,3 +74,100 @@ fn type_equality_uses_proofs_without_unfolding_heads() {
         assert_eq!(vm.bytecode_invocations() - before, 1);
     }
 }
+
+#[test]
+fn structural_type_factories_preserve_phase_sorts_and_environment() {
+    let package = support::compile(
+        "typealias Type = .Type'builtin;
+        comptime fn Mapper(input: Type, output: Type) -> Type { fn(input) -> output }
+        comptime fn Staged(input: Type, output: Type) -> Type { comptime fn(comptime input, output) -> output }
+        comptime fn Reader(input: Type, output: Type) -> Type { %{saved: input} comptime fn() -> output }
+        comptime fn Pointer(input: Type) -> Type { *input }
+        comptime fn Optional(input: Type) -> Type { ?input }
+        comptime fn Empty(input: Type) -> Type { %{} input }",
+    );
+    let boolean = Term::Primitive(Primitive::Bool);
+    let character = Term::Primitive(Primitive::Char);
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let mut tree = Interpreter::new(&package, Budget::default()).unwrap();
+    let function = |parameters, result| Term::Function {
+        parameters,
+        result: Box::new(result),
+    };
+    for (name, inputs, expected) in [
+        (
+            "Mapper",
+            vec![boolean.clone(), character.clone()],
+            function(
+                vec![nir::Parameter {
+                    sort: nir::Sort::Runtime,
+                    ty: boolean.clone(),
+                }],
+                character.clone(),
+            ),
+        ),
+        (
+            "Staged",
+            vec![Term::Primitive(Primitive::Type), character.clone()],
+            function(
+                vec![
+                    nir::Parameter {
+                        sort: nir::Sort::Type,
+                        ty: Term::Primitive(Primitive::Type),
+                    },
+                    nir::Parameter {
+                        sort: nir::Sort::Runtime,
+                        ty: character.clone(),
+                    },
+                ],
+                character.clone(),
+            )
+            .with_comptime_phase(true),
+        ),
+        (
+            "Staged",
+            vec![boolean.clone(), character.clone()],
+            function(
+                vec![
+                    nir::Parameter {
+                        sort: nir::Sort::ComptimeValue,
+                        ty: boolean.clone(),
+                    },
+                    nir::Parameter {
+                        sort: nir::Sort::Runtime,
+                        ty: character.clone(),
+                    },
+                ],
+                character.clone(),
+            )
+            .with_comptime_phase(true),
+        ),
+        (
+            "Reader",
+            vec![boolean.clone(), character.clone()],
+            Term::Closure {
+                environment: vec![boolean.clone()],
+                signature: Box::new(function(vec![], character.clone()).with_comptime_phase(true)),
+            },
+        ),
+        (
+            "Pointer",
+            vec![boolean.clone()],
+            Term::Pointer(Box::new(boolean.clone())),
+        ),
+        (
+            "Optional",
+            vec![boolean.clone()],
+            Term::Optional(Box::new(boolean.clone())),
+        ),
+        ("Empty", vec![boolean.clone()], boolean.clone()),
+    ] {
+        let before = vm.bytecode_invocations();
+        let inputs: Vec<_> = inputs.into_iter().map(Value::Type).collect();
+        let id = support::id(&package, name);
+        let result = vm.invoke(id, inputs.clone()).unwrap();
+        assert_eq!(result, Value::Type(expected), "{name}");
+        assert_eq!(result, tree.invoke(id, inputs).unwrap(), "{name}");
+        assert_eq!(vm.bytecode_invocations() - before, 1, "{name}");
+    }
+}

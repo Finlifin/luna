@@ -3,6 +3,7 @@
 pub mod objects;
 mod patterns;
 pub mod scalar;
+pub mod type_constructors;
 use nir::program::{ArgumentPassing, Expr, ExprKind as K, FieldOwner, LocalId, SourceRange};
 use nir::{Primitive, Term};
 use scalar::{OwnedScalar, Scalar};
@@ -30,6 +31,17 @@ impl fmt::Display for ErrorConversion {
 
 #[derive(Debug)]
 pub enum Op {
+    PrepareTypeConstructor(Arc<type_constructors::Constructor>),
+    CheckTypeConstructorInput {
+        constructor: Arc<type_constructors::Constructor>,
+        index: usize,
+        value: Register,
+    },
+    TypeConstructor {
+        destination: Register,
+        constructor: Arc<type_constructors::Constructor>,
+        inputs: Vec<Register>,
+    },
     PrepareTypeEqual {
         ty: Arc<Term>,
         inputs: [Arc<Term>; 2],
@@ -259,6 +271,28 @@ impl fmt::Display for Program {
                 instruction.source.start, instruction.source.end
             )?;
             match &instruction.op {
+                Op::PrepareTypeConstructor(constructor) => {
+                    write!(f, "(prepare-type-constructor {constructor})")?
+                }
+                Op::CheckTypeConstructorInput {
+                    constructor,
+                    index,
+                    value,
+                } => write!(
+                    f,
+                    "(check-type-constructor-input {constructor} {index} %{value})"
+                )?,
+                Op::TypeConstructor {
+                    destination,
+                    constructor,
+                    inputs,
+                } => {
+                    write!(f, "(construct-type %{destination} {constructor} (inputs")?;
+                    for input in inputs {
+                        write!(f, " %{input}")?;
+                    }
+                    write!(f, "))")?;
+                }
                 Op::PrepareTypeEqual { ty, inputs } => write!(
                     f,
                     "(prepare-type-equal (type {ty}) (left {}) (right {}))",
@@ -867,6 +901,83 @@ pub fn compile(body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
                         for (field, slot) in fields.iter().zip(slots).rev() {
                             work.push(Work::Expression(field, slot));
                         }
+                    }
+                    K::FunctionType { .. }
+                    | K::FunctionResultType { .. }
+                    | K::OptionalType(_)
+                    | K::PointerType(_)
+                    | K::ClosureType { .. } => {
+                        use type_constructors::{Constructor, Kind};
+                        let count = match &expr.kind {
+                            K::FunctionType {
+                                comptime_parameters,
+                                parameters,
+                                ..
+                            } => comptime_parameters.len().saturating_add(parameters.len()),
+                            K::ClosureType { environment, .. } => {
+                                environment.len().saturating_add(1)
+                            }
+                            _ => 2,
+                        };
+                        *fuel = fuel.checked_sub(count).ok_or(Error::Budget(source))?;
+                        let (kind, fields): (_, Vec<&Expr>) = match &expr.kind {
+                            K::FunctionType {
+                                comptime,
+                                comptime_parameters,
+                                parameters,
+                            } => (
+                                Kind::Function {
+                                    comptime: *comptime,
+                                    parameters: comptime_parameters.clone(),
+                                },
+                                parameters.iter().collect(),
+                            ),
+                            K::FunctionResultType { signature, result } => {
+                                (Kind::Result, vec![signature, result])
+                            }
+                            K::OptionalType(inner) => (Kind::Optional, vec![inner]),
+                            K::PointerType(inner) => (Kind::Pointer, vec![inner]),
+                            K::ClosureType {
+                                environment,
+                                signature,
+                            } => (
+                                Kind::Closure,
+                                environment
+                                    .iter()
+                                    .chain(std::iter::once(signature.as_ref()))
+                                    .collect(),
+                            ),
+                            _ => unreachable!(),
+                        };
+                        let constructor = Arc::new(Constructor {
+                            kind,
+                            ty: copy_term(&expr.ty, fuel, source)?,
+                            inputs: fields
+                                .iter()
+                                .map(|field| copy_term(&field.ty, fuel, field.source))
+                                .collect::<Result<_, _>>()?,
+                        });
+                        let inputs: Vec<_> = fields.iter().map(|_| fresh()).collect();
+                        emit(
+                            &mut work,
+                            Op::TypeConstructor {
+                                destination: dst,
+                                constructor: constructor.clone(),
+                                inputs: inputs.clone(),
+                            },
+                        );
+                        for (index, (field, value)) in fields.iter().zip(inputs).enumerate().rev() {
+                            work.push(Work::Emit(
+                                field.source,
+                                Op::CheckTypeConstructorInput {
+                                    constructor: constructor.clone(),
+                                    index,
+                                    value,
+                                },
+                            ));
+                            work.push(Work::Expression(field, value));
+                        }
+                        emit(&mut work, Op::PrepareTypeConstructor(constructor));
                     }
                     K::TypeEqual(left, right) => {
                         let left_slot = fresh();

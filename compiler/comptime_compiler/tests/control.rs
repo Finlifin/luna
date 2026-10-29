@@ -401,3 +401,55 @@ fn type_comparison_validates_each_operand_before_the_next() {
     assert_eq!(dump, compile(&body, &mut 1000).unwrap().to_string());
     assert!(matches!(compile(&body, &mut 1), Err(Error::Budget(_))));
 }
+
+#[test]
+fn function_type_dump_retains_phase_and_parameter_staging() {
+    use comptime_compiler::Op;
+    let source = SourceRange { start: 1, end: 4 };
+    let body = Expr {
+        source,
+        ty: Term::Primitive(Primitive::Type),
+        kind: K::FunctionType {
+            comptime: true,
+            comptime_parameters: vec![true, false],
+            parameters: [Primitive::Type, Primitive::Bool]
+                .into_iter()
+                .map(|ty| Expr {
+                    source,
+                    ty: Term::Primitive(Primitive::Type),
+                    kind: K::TypeValue(Term::Primitive(ty)),
+                })
+                .collect(),
+        },
+    };
+    let code = compile(&body, &mut 1000).unwrap();
+    let dump = code.to_string();
+    assert!(
+        dump.contains("(function (comptime true) (parameters true false))"),
+        "{dump}"
+    );
+    assert_eq!(dump, compile(&body, &mut 1000).unwrap().to_string());
+    let order = code
+        .instructions()
+        .iter()
+        .filter_map(|instruction| match instruction.op {
+            Op::PrepareTypeConstructor(_) => Some("prepare"),
+            Op::Constant { .. } => Some("operand"),
+            Op::CheckTypeConstructorInput { .. } => Some("check"),
+            Op::TypeConstructor { .. } => Some("construct"),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        order,
+        [
+            "prepare",
+            "operand",
+            "check",
+            "operand",
+            "check",
+            "construct"
+        ]
+    );
+    assert!(matches!(compile(&body, &mut 1), Err(Error::Budget(_))));
+}

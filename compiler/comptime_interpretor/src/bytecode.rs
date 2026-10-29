@@ -335,6 +335,44 @@ impl<'a> Interpreter<'a> {
                 source: Some(source),
             };
             match &instruction.op {
+                Op::PrepareTypeConstructor(constructor) => {
+                    let inputs: Vec<_> = constructor.inputs.iter().collect();
+                    self.prepare_type_constructor(
+                        &constructor.kind,
+                        &constructor.ty,
+                        &inputs,
+                        source,
+                    )?;
+                }
+                Op::CheckTypeConstructorInput {
+                    constructor,
+                    index,
+                    value,
+                } => {
+                    let input = frame.slots[*value].take().ok_or_else(missing)?;
+                    frame.slots[*value] = Some(Value::Type(self.check_type_constructor_input(
+                        &constructor.kind,
+                        *index,
+                        constructor.inputs.len(),
+                        input,
+                        source,
+                    )?));
+                }
+                Op::TypeConstructor {
+                    destination,
+                    constructor,
+                    inputs,
+                } => {
+                    let types = inputs
+                        .iter()
+                        .map(|slot| match frame.slots[*slot].take() {
+                            Some(Value::Type(ty)) => Ok(ty),
+                            _ => Err(self.failure(ErrorKind::Type, Some(source))),
+                        })
+                        .collect::<Result<_, _>>()?;
+                    frame.slots[*destination] =
+                        Some(self.complete_type_constructor(&constructor.kind, types, source)?);
+                }
                 Op::PrepareTypeEqual { ty, inputs } => {
                     self.prepare_type_equal(ty, &inputs[0], &inputs[1], source)?
                 }
@@ -2275,3 +2313,7 @@ mod tests {
 #[cfg(test)]
 #[path = "bytecode_type_equality.rs"]
 mod type_equality_tests;
+
+#[cfg(test)]
+#[path = "bytecode_type_constructors.rs"]
+mod type_constructor_tests;

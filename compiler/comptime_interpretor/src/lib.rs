@@ -3187,10 +3187,10 @@ impl<'a> Interpreter<'a> {
             }
             K::NormalFormType { .. } => self.eval_normal_form_type(expr, environment),
             K::FunctionType { .. } | K::FunctionResultType { .. } => {
-                self.eval_function_type(expr, environment)
+                self.eval_type_constructor(expr, environment)
             }
             K::OptionalType(..) | K::PointerType(..) | K::ClosureType { .. } => {
-                self.eval_environment_type(expr, environment)
+                self.eval_type_constructor(expr, environment)
             }
             K::NominalType { .. } => self.eval_nominal_type(expr, environment),
             K::CheckTypeAlias { .. } => self.eval_nominal_type(expr, environment),
@@ -4346,155 +4346,6 @@ impl<'a> Interpreter<'a> {
             _ => unreachable!("expression dispatcher selected an incompatible evaluator"),
         };
         Ok(Flow::Value(result))
-    }
-
-    #[inline(never)]
-    fn eval_function_type(
-        &mut self,
-        expr: &Expr,
-        environment: &mut Environment,
-    ) -> Result<Flow, Error> {
-        let fields: Vec<&Expr> = match &expr.kind {
-            K::FunctionType { parameters, .. } => parameters.iter().collect(),
-            K::FunctionResultType { signature, result } => vec![signature, result],
-            _ => unreachable!(),
-        };
-        let expected = if fields
-            .iter()
-            .any(|field| field.ty == Term::Primitive(Primitive::Never))
-        {
-            Primitive::Never
-        } else {
-            Primitive::Type
-        };
-        if expr.ty != Term::Primitive(expected)
-            || fields.iter().any(|field| {
-                !matches!(
-                    field.ty,
-                    Term::Primitive(Primitive::Type | Primitive::Never)
-                )
-            })
-        {
-            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-        }
-        self.integer_operation(Some(expr.source), |budget| {
-            budget.consume(fields.len().saturating_add(1))
-        })?;
-        let ty = match &expr.kind {
-            K::FunctionType {
-                comptime,
-                comptime_parameters,
-                parameters,
-            } => {
-                if comptime_parameters.len() != parameters.len() {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                }
-                let mut types = Vec::with_capacity(parameters.len());
-                for (parameter, staged) in parameters.iter().zip(comptime_parameters) {
-                    let value = value!(self.eval(parameter, environment));
-                    let ty = self.type_description_term(value, parameter.source)?;
-                    types.push(nir::Parameter {
-                        sort: if *staged {
-                            if ty == Term::Primitive(Primitive::Type) {
-                                nir::Sort::Type
-                            } else {
-                                nir::Sort::ComptimeValue
-                            }
-                        } else {
-                            nir::Sort::Runtime
-                        },
-                        ty,
-                    });
-                }
-                Term::Function {
-                    parameters: types,
-                    result: Box::new(Term::Primitive(Primitive::Void)),
-                }
-                .with_comptime_phase(*comptime)
-            }
-            K::FunctionResultType { signature, result } => {
-                let value = value!(self.eval(signature, environment));
-                let input = self.type_description_term(value, signature.source)?;
-                if !matches!(input.callable_signature(), Term::Function { .. }) {
-                    return Err(self.failure(ErrorKind::Type, Some(signature.source)));
-                }
-                let value = value!(self.eval(result, environment));
-                let output = self.type_description_term(value, result.source)?;
-                input
-                    .with_callable_result(output)
-                    .ok_or_else(|| self.failure(ErrorKind::Type, Some(signature.source)))?
-            }
-            _ => unreachable!(),
-        };
-        Ok(Flow::Value(Value::Type(ty)))
-    }
-
-    #[inline(never)]
-    fn eval_environment_type(
-        &mut self,
-        expr: &Expr,
-        scope: &mut Environment,
-    ) -> Result<Flow, Error> {
-        let (fields, signature): (&[Expr], &Expr) = match &expr.kind {
-            K::OptionalType(inner) | K::PointerType(inner) => (&[], inner),
-            K::ClosureType {
-                environment,
-                signature,
-            } => (environment, signature),
-            _ => unreachable!(),
-        };
-        let expected = if fields
-            .iter()
-            .chain(std::iter::once(signature))
-            .any(|field| field.ty == Term::Primitive(Primitive::Never))
-        {
-            Primitive::Never
-        } else {
-            Primitive::Type
-        };
-        if expr.ty != Term::Primitive(expected)
-            || fields
-                .iter()
-                .chain(std::iter::once(signature))
-                .any(|field| {
-                    !matches!(
-                        field.ty,
-                        Term::Primitive(Primitive::Type | Primitive::Never)
-                    )
-                })
-        {
-            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-        }
-        self.integer_operation(Some(expr.source), |budget| {
-            budget.consume(fields.len().saturating_add(2))
-        })?;
-        let mut environment = Vec::with_capacity(fields.len());
-        for field in fields {
-            let value = value!(self.eval(field, scope));
-            let ty = self.type_description_term(value, field.source)?;
-            environment.push(ty);
-        }
-        let value = value!(self.eval(signature, scope));
-        let body = self.type_description_term(value, signature.source)?;
-        let ty = if matches!(expr.kind, K::OptionalType(_)) {
-            Term::Optional(Box::new(body))
-        } else if matches!(expr.kind, K::PointerType(_)) {
-            Term::Pointer(Box::new(body))
-        } else if environment.is_empty() {
-            body
-        } else {
-            if !matches!(
-                body,
-                Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_)
-            ) {
-                return Err(self.failure(ErrorKind::Type, Some(signature.source)));
-            }
-            Term::Closure {
-                environment,
-                signature: Box::new(body),
-            }
-        };
-        Ok(Flow::Value(Value::Type(ty)))
     }
 
     #[inline(never)]
@@ -9830,6 +9681,7 @@ mod pointer_copy_budget_tests {
 mod error_results;
 mod newtypes;
 mod optional;
+mod type_constructors;
 mod type_equality;
 
 #[cfg(test)]

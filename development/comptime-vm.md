@@ -1846,3 +1846,43 @@ Validation from `/home/fin/luna`, all commands exited 0:
   source-order effects, defaults and early transfers.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
   passed, `/tmp/luna-tools-qyx46qj7/result.json`; `git diff --check` passed.
+
+## Structural Type constructors in bytecode
+
+Computed FunctionType, FunctionResultType, ClosureType, OptionalType and
+PointerType now compile with owned, bounded metadata and ordinary operand
+instructions. Preparation checks output/input domains and parameter-flag arity
+before evaluation. Each operand is converted to a Type description immediately;
+FunctionResultType also validates its signature before evaluating its output.
+Construction retains callable wrappers, invocation phase, runtime/Type/comptime
+value parameter sorts, closure environments and empty-environment elimination.
+
+The tree evaluator and VM share the checked operations in `type_constructors.rs`.
+This extracts the two former construction evaluators from the interpreter root;
+there is no tree-evaluation opcode and no package/name-specific shortcut.
+Metadata and instructions have stable S-expression displays. Type construction
+is independent of runtime pointer values: PointerType creates a Type value, not
+a comptime pointer or reference storage.
+
+Validation from `/home/fin/luna`, all commands exited 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  existing 238 tests passed, `/tmp/luna-tools-9sm5mx5v/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib bytecode::type_constructor_tests`:
+  the new two-carrier validation test passed, covering malformed output/flags,
+  non-Type payloads, non-callable signatures, suppressed later effects and
+  successful reuse after failure; `/tmp/luna-tools-zv_544y_/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler`:
+  15 passed, including metadata staging/phase display and interleaved operand
+  checking; `/tmp/luna-tools-gbic8v6z/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_types --test function_type_dependencies --test execution`:
+  source bytecode types 2, function dependencies 37 and execution 1365 passed;
+  `/tmp/luna-tools-pffao6ci/result.json`. The new source test asserts actual
+  bytecode counts, exact Type values and agreement with tree interpretation for
+  each constructor family and both comptime input sorts.
+
+Normal-form input-plan and nominal-type construction compilation remain separate
+unfinished work. This stage does not claim wall-clock speedups or completion of
+all type factories.
+- Final `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed, `/tmp/luna-tools-q4_06plr/result.json`; `git diff --check` passed.
