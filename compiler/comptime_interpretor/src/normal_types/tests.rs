@@ -1309,6 +1309,96 @@ fn contextual_type_tuples_accept_scoped_parameters_in_every_input_order() {
             }
             assert!(plan_locals.iter().all(|local| !env.contains_key(local)));
             assert_eq!(env.get(&local), Some(&Value::TypeParameter(declaration)));
+            if mode == 3 {
+                assert!(vm.bytecode_staged_inputs() > 0);
+            }
+        }
+    }
+}
+
+#[test]
+fn staged_list_spreads_finish_after_all_operand_effects() {
+    let package = container_package();
+    let ty = container_list(Term::Primitive(Primitive::U8));
+    let seed = LocalId {
+        owner: 92,
+        index: 0,
+    };
+    let touched = LocalId {
+        owner: 92,
+        index: 1,
+    };
+    let input = A::TypeList {
+        source: SOURCE,
+        items: vec![
+            A::TypeListSpread(Expr {
+                source: SOURCE,
+                ty: ty.clone(),
+                kind: K::Local(seed),
+            }),
+            A::Block {
+                source: SOURCE,
+                statements: vec![expr(
+                    Primitive::Void,
+                    K::Assign {
+                        place: Place {
+                            root: touched,
+                            fields: vec![],
+                        },
+                        value: Box::new(expr(Primitive::Bool, K::Literal(Literal::Bool(true)))),
+                    },
+                )],
+                result: Some(Box::new(A::Integer {
+                    source: SOURCE,
+                    spelling: "29".into(),
+                    negative: false,
+                })),
+            },
+        ],
+    };
+    for invalid in [true, false] {
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let mut env = Environment::new();
+        env.insert(touched, Value::Bool(false));
+        env.insert(
+            seed,
+            if invalid {
+                Value::List {
+                    ty: container_list(Term::Primitive(Primitive::Bool)),
+                    values: vec![Value::Bool(true)],
+                }
+            } else {
+                Value::List {
+                    ty: ty.clone(),
+                    values: vec![Value::UnsignedInteger(17), Value::UnsignedInteger(23)],
+                }
+            },
+        );
+        let std::ops::ControlFlow::Continue(staged) =
+            vm.stage_normal_argument(&input, &mut env, 0).unwrap()
+        else {
+            panic!("transfer")
+        };
+        assert_eq!(vm.bytecode_staged_inputs(), 1);
+        assert_eq!(env.get(&touched), Some(&Value::Bool(true)));
+        let mut prepared = BTreeMap::new();
+        vm.prepare_normal_argument(&input, &ty, &mut prepared, 0)
+            .unwrap();
+        let result = vm.finish_staged_normal_argument(staged, &mut prepared, SOURCE, 0);
+        if invalid {
+            assert_eq!(result.unwrap_err().kind, ErrorKind::Type);
+        } else {
+            assert_eq!(
+                result.unwrap(),
+                Value::List {
+                    ty: ty.clone(),
+                    values: vec![
+                        Value::UnsignedInteger(17),
+                        Value::UnsignedInteger(23),
+                        Value::UnsignedInteger(29)
+                    ]
+                }
+            );
         }
     }
 }

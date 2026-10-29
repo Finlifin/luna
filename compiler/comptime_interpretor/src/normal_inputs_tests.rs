@@ -115,7 +115,11 @@ fn staged_scopes_cleanup_on_errors_transfers_and_budget_exhaustion() {
                 result: Some(Box::new(A::Value(ending.clone()))),
             })),
         };
-        for steps in 0..40 {
+        let (code, _) = comptime_compiler::compile_staged_input(&input, &mut 10000).unwrap();
+        let maximum = code.storage_work() as u64 + 256;
+        let mut failed_before_effect = false;
+        let mut failed_after_effect = false;
+        for steps in 0..=maximum {
             let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
             vm.budget.steps = steps;
             let mut env = Environment::new();
@@ -124,7 +128,21 @@ fn staged_scopes_cleanup_on_errors_transfers_and_budget_exhaustion() {
             assert_eq!(vm.depth, 0);
             assert!(!env.contains_key(&inner));
             assert_eq!(env.len(), 1);
-            if steps == 39 {
+            if matches!(
+                &result,
+                Err(Error {
+                    kind: ErrorKind::StepsExhausted,
+                    ..
+                })
+            ) {
+                if env.get(&outer) == Some(&Value::Bool(true)) {
+                    failed_after_effect = true;
+                } else {
+                    failed_before_effect = true;
+                }
+            }
+            if steps == maximum {
+                assert_eq!(vm.bytecode_staged_inputs(), 1);
                 assert_eq!(env.get(&outer), Some(&Value::Bool(true)));
                 match ending.kind {
                     K::Return(_) => assert!(matches!(
@@ -147,5 +165,151 @@ fn staged_scopes_cleanup_on_errors_transfers_and_budget_exhaustion() {
                 }
             }
         }
+        assert!(failed_before_effect);
+        assert!(failed_after_effect);
     }
+}
+
+#[test]
+fn staged_bytecode_preserves_selected_shapes_and_delayed_preflight() {
+    use nir::program::{NormalMatchArm, Pattern};
+    let package = Package::default();
+    let trace = LocalId { owner: 7, index: 0 };
+    let literal = |spelling: &str| A::Integer {
+        source: SOURCE,
+        spelling: spelling.into(),
+        negative: false,
+    };
+    for invalid in [false, true] {
+        let input = A::Tuple {
+            source: SOURCE,
+            type_head: None,
+            items: vec![
+                A::Block {
+                    source: SOURCE,
+                    statements: vec![expr(
+                        Primitive::Void,
+                        K::Assign {
+                            place: Place {
+                                root: trace,
+                                fields: vec![],
+                            },
+                            value: Box::new(expr(
+                                Primitive::Bool,
+                                K::Not(Box::new(expr(Primitive::Bool, K::Local(trace)))),
+                            )),
+                        },
+                    )],
+                    result: Some(Box::new(literal("17"))),
+                },
+                A::If {
+                    source: SOURCE,
+                    condition: boolean(false),
+                    then_input: Box::new(literal(if invalid { "256" } else { "99" })),
+                    else_input: Box::new(literal("23")),
+                },
+                A::Match {
+                    source: SOURCE,
+                    value: boolean(true),
+                    arms: vec![
+                        NormalMatchArm {
+                            pattern: Pattern::Wild,
+                            guard: Some(boolean(false)),
+                            body: literal("99"),
+                        },
+                        NormalMatchArm {
+                            pattern: Pattern::Wild,
+                            guard: Some(boolean(true)),
+                            body: literal("29"),
+                        },
+                    ],
+                },
+            ],
+        };
+        let expected = Term::Tuple(vec![Term::Primitive(Primitive::U8); 3]);
+        for compiled in [false, true] {
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            let mut env = Environment::new();
+            env.insert(trace, Value::Bool(false));
+            let staged = if compiled {
+                vm.stage_normal_argument(&input, &mut env, 0)
+            } else {
+                vm.interpret_staged_argument(&input, &mut env, 0)
+            }
+            .unwrap();
+            assert_eq!(vm.bytecode_staged_inputs(), usize::from(compiled));
+            let ControlFlow::Continue(staged) = staged else {
+                panic!("unexpected transfer")
+            };
+            assert_eq!(env.get(&trace), Some(&Value::Bool(true)));
+            let mut prepared = BTreeMap::new();
+            let result = vm.prepare_normal_argument(&input, &expected, &mut prepared, 0);
+            if invalid {
+                assert_eq!(result.unwrap_err().kind, ErrorKind::Type);
+            } else {
+                result.unwrap();
+                assert_eq!(
+                    vm.finish_staged_normal_argument(staged, &mut prepared, SOURCE, 0)
+                        .unwrap(),
+                    Value::Tuple(vec![
+                        Value::UnsignedInteger(17),
+                        Value::UnsignedInteger(23),
+                        Value::UnsignedInteger(29)
+                    ])
+                );
+            }
+            assert_eq!(env.get(&trace), Some(&Value::Bool(true)));
+            assert_eq!(vm.depth, 0);
+        }
+    }
+}
+
+#[test]
+fn unsupported_staged_code_is_selected_before_operand_effects() {
+    use nir::program::{MatchArm, Pattern};
+    let package = Package::default();
+    let trace = LocalId { owner: 7, index: 0 };
+    let input = A::Value(expr(
+        Primitive::Bool,
+        K::Block {
+            statements: vec![expr(
+                Primitive::Void,
+                K::Assign {
+                    place: Place {
+                        root: trace,
+                        fields: vec![],
+                    },
+                    value: Box::new(expr(
+                        Primitive::Bool,
+                        K::Not(Box::new(expr(Primitive::Bool, K::Local(trace)))),
+                    )),
+                },
+            )],
+            result: Some(Box::new(expr(
+                Primitive::Bool,
+                K::Match {
+                    value: Box::new(boolean(true)),
+                    arms: vec![MatchArm {
+                        pattern: Pattern::Then {
+                            first: Box::new(Pattern::Wild),
+                            value: Box::new(boolean(false)),
+                            next: Box::new(Pattern::Wild),
+                        },
+                        guard: None,
+                        body: boolean(true),
+                    }],
+                },
+            ))),
+        },
+    ));
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let mut env = Environment::new();
+    env.insert(trace, Value::Bool(false));
+    let result = vm.stage_normal_argument(&input, &mut env, 0).unwrap();
+    assert!(matches!(
+        result,
+        ControlFlow::Continue(StagedNormalInput::Value(Value::Bool(true)))
+    ));
+    assert_eq!(env.get(&trace), Some(&Value::Bool(true)));
+    assert_eq!(vm.bytecode_staged_inputs(), 0);
 }

@@ -143,6 +143,7 @@ pub(super) fn compile_input<'a>(
     fuel: &mut usize,
     labels: &mut Vec<Option<usize>>,
     locals: &mut BTreeMap<LocalId, Register>,
+    staged: bool,
 ) -> Result<(Shape, Vec<Work<'a>>), Error> {
     use nir::program::NormalFormArgument as A;
     enum Task<'a> {
@@ -313,6 +314,16 @@ pub(super) fn compile_input<'a>(
             Task::Enter(argument, depth) => {
                 if depth >= 128 {
                     return Err(Error::Unsupported(argument.source()));
+                }
+                if staged {
+                    code.push(Work::Emit(
+                        argument.source(),
+                        Op::Stage(staged_inputs::Instruction::Enter),
+                    ));
+                    pending.push(Task::Code(Work::Emit(
+                        argument.source(),
+                        Op::Stage(staged_inputs::Instruction::Leave),
+                    )));
                 }
                 let slot = fresh();
                 let scalar = match argument {
@@ -513,7 +524,8 @@ mod tests {
                 &mut fresh,
                 &mut 0,
                 &mut vec![],
-                &mut BTreeMap::new()
+                &mut BTreeMap::new(),
+                false
             ),
             Err(Error::Budget(_))
         ));
@@ -531,6 +543,7 @@ mod tests {
             &mut 10000,
             &mut vec![],
             &mut BTreeMap::new(),
+            false,
         )
         .unwrap();
         assert!(!shape.diverges);
@@ -547,7 +560,8 @@ mod tests {
                 &mut fresh,
                 &mut 10000,
                 &mut vec![],
-                &mut BTreeMap::new()
+                &mut BTreeMap::new(),
+                false
             ),
             Err(Error::Unsupported(_))
         ));
@@ -562,7 +576,8 @@ mod tests {
                 &mut fresh,
                 &mut 10,
                 &mut vec![],
-                &mut BTreeMap::new()
+                &mut BTreeMap::new(),
+                false
             ),
             Err(Error::Budget(_))
         ));

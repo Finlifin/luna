@@ -35,6 +35,7 @@ mod object_queries;
 mod object_values;
 mod objects;
 mod scalar_math;
+mod staged_bytecode;
 mod value_reference;
 pub use objects::ObjectProperty;
 pub use value_reference::ValueReference;
@@ -767,6 +768,7 @@ enum PointerCopyPermission<'a> {
 pub struct Interpreter<'a> {
     bytecode_invocations: usize,
     bytecode_default_evaluations: usize,
+    bytecode_staged_inputs: usize,
     bytecode_compilations: usize,
     bytecode_compilation_steps: u64,
     bytecode_cache: bytecode::CodeCache,
@@ -1629,6 +1631,7 @@ impl<'a> Interpreter<'a> {
         Ok(Self {
             bytecode_invocations: 0,
             bytecode_default_evaluations: 0,
+            bytecode_staged_inputs: 0,
             bytecode_compilations: 0,
             bytecode_compilation_steps: 0,
             bytecode_cache: Default::default(),

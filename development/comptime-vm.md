@@ -2620,3 +2620,59 @@ finisher is shared groundwork, not a claim that those plans now use bytecode.
 Source regression check also passed (exit 0):
 `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_types --test comptime_clause_inputs --test builder_invocations`,
 `/tmp/luna-tools-8lni84lz/result.json`.
+
+## Bytecode evaluation of deferred contextual operands
+
+`stage_normal_argument` now compiles and executes supported comptime operands as
+linear staged fragments before their contextual domain arrives. This is connected
+to existing NF and nominal input-plan evaluation, not a test-only entrypoint.
+The compiler reuses contextual control lowering and ordinary expression opcodes;
+staged instructions retain literal placeholders, list spread flags, tuple children
+and selected branch results separately from language Values. No opcode evaluates
+an NIR tree or re-executes a staged operand during final assembly.
+
+Compiled metadata uses register keys. After execution a bounded adapter translates
+those keys to the boxed invocation-owned NIR identities expected by the migration
+finisher. No NIR address or invocation value enters reusable code. State and code
+have S-expression dumps; ordinary frames allocate no staged state until needed.
+The existing abstract Type authority and opaque normal-form head checks remain in
+shared completion helpers.
+
+Fragment calls enter the existing invocation driver. Compilable default expressions
+use an explicit stack of VM frames; unsupported defaults retain their normal
+migration boundary. Unsupported operand compilation selects the tree path before
+that operand executes, while compile failures and execution failures propagate
+without replay. Compilation, key translation and execution consume the caller's
+budget. Logical contextual depth and imported environment mutations are restored
+on completion, transfer and error.
+
+Validation from `/home/fin/luna`, final successful runs exit 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-3rz7lvvn/result.json`. Covers owned staged code and exact
+  compilation-work bounds, small-stack/depth limits, abstract Type inputs,
+  selected branches and guarded matches, deferred literal rejection, list
+  spreads, effect timing, scope cleanup, recovery and unsupported-code selection.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_types --test comptime_clause_inputs --test builder_invocations --test execution`:
+  `/tmp/luna-tools-1olk58z9/result.json`. New source cases assert staged-fragment
+  and default-frame counters, exact NF/list identity across u8 and Integer,
+  one-time mutation before a late Type input observes it, and an early return
+  skipping a nonterminating later Type expression.
+- Managed `cargo fmt --all`: `/tmp/luna-tools-7n8ioai3/result.json`;
+  `git diff --check` passed.
+
+Intermediate checks found two incomplete initialization sites while integrating
+state (`/tmp/luna-tools-8idahs2m/result.json`, missing IIR telemetry initializer;
+`/tmp/luna-tools-tzjezrri/result.json`, optional staged-state access), both fixed.
+The original fixed-budget scope test failed at 39 steps because compilation now
+exhausted its budget before executing the assignment
+(`/tmp/luna-tools-c8dz64w7/result.json`). It now derives its range from measured
+compilation work, requires exhaustion both before and after the effect, and keeps
+exact final mutation, flow and cleanup assertions. This reflects budgeted
+compilation rather than weakening operand behavior.
+
+Remaining work: outer preparation/reordering scheduling and domain specialization
+still use the migration evaluator. Staged fragments are compiled per invocation;
+no end-to-end speedup or complete input-plan bytecode support is claimed. The next
+integration should move outer plan scheduling into VM continuations while retaining
+this distinct staged-result channel and the shared normal-form binding state.

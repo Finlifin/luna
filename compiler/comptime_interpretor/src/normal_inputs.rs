@@ -35,6 +35,18 @@ impl Interpreter<'_> {
         environment: &mut Environment,
         depth: usize,
     ) -> Result<ControlFlow<Flow, StagedNormalInput>, Error> {
+        if let Some(result) = self.try_stage_bytecode(input, environment, depth)? {
+            return Ok(result);
+        }
+        self.interpret_staged_argument(input, environment, depth)
+    }
+
+    fn interpret_staged_argument(
+        &mut self,
+        input: &A,
+        environment: &mut Environment,
+        depth: usize,
+    ) -> Result<ControlFlow<Flow, StagedNormalInput>, Error> {
         enum Work<'a> {
             Enter(&'a A, usize),
             Exit(&'a A),

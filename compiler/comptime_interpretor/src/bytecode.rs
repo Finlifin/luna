@@ -11,6 +11,7 @@ pub(super) struct Frame {
     waiting: Option<Waiting>,
     calls: BTreeMap<usize, PendingCall>,
     normal_types: BTreeMap<usize, super::normal_types::Inputs>,
+    staged: Option<Box<staged_bytecode::State>>,
     pc: usize,
     slots: Vec<Option<Value>>,
     scopes: Vec<Vec<usize>>,
@@ -75,7 +76,11 @@ impl fmt::Display for Frame {
             }
             None => {}
         }
-        write!(f, ") (normal-types")?;
+        write!(f, ")")?;
+        if let Some(staged) = &self.staged {
+            write!(f, " {staged}")?;
+        }
+        write!(f, " (normal-types")?;
         for (slot, inputs) in &self.normal_types {
             write!(f, " (%{slot} {inputs})")?;
         }
@@ -202,6 +207,13 @@ impl<'a> Interpreter<'a> {
     }
 
     fn compile_body(&mut self, body: &Expr) -> Result<Option<Program>, Error> {
+        self.compile_bytecode(|fuel| comptime_compiler::compile(body, fuel))
+    }
+
+    fn compile_bytecode<T>(
+        &mut self,
+        compile: impl FnOnce(&mut usize) -> Result<T, comptime_compiler::Error>,
+    ) -> Result<Option<T>, Error> {
         self.bytecode_compilations += 1;
         // Compilation is actual invocation work, including unsuccessful probes.
         // Use the caller's remaining budget rather than an unrelated fixed cap;
@@ -209,7 +221,7 @@ impl<'a> Interpreter<'a> {
         let before = self.budget.steps;
         let available = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
         let mut remaining = available;
-        let result = comptime_compiler::compile(body, &mut remaining);
+        let result = compile(&mut remaining);
         self.budget.steps -= (available - remaining) as u64;
         self.bytecode_compilation_steps = self
             .bytecode_compilation_steps
@@ -260,37 +272,112 @@ impl<'a> Interpreter<'a> {
         environment: &mut Environment,
     ) -> Result<Flow, Error> {
         let mut frame = self.start_frame(code, environment)?;
-        let result = loop {
-            match self.resume_frame(&mut frame, 1024) {
-                Ok(Progress::Suspended) => continue,
-                Ok(Progress::Call { callee, arguments }) => {
-                    match self.invoke_value_scoped(callee, arguments, None) {
-                        Ok(value) => {
-                            if let Err(error) = frame.deliver(value) {
-                                break Err(error);
-                            }
-                        }
-                        Err(error) => break Err(error),
-                    }
-                }
-                Ok(Progress::Default {
-                    expression,
-                    mut environment,
-                }) => {
-                    let result = self.eval(&expression, &mut environment);
-                    match frame.receive(result, Some(environment)) {
-                        Ok(None) => {}
-                        Ok(Some(flow)) => break Ok(flow),
-                        Err(error) => break Err(error),
-                    }
-                }
-                Ok(Progress::Complete(flow)) => break Ok(flow),
-                Err(error) => break Err(error),
-            }
-        };
-        // Delivery contracts observe input mutations on both success and error.
+        let result = self.run_fragment(&mut frame);
         *environment = frame.restore_environment();
         result
+    }
+
+    fn run_fragment(&mut self, frame: &mut Frame) -> Result<Flow, Error> {
+        let mut defaults: Vec<Frame> = Vec::new();
+        let mut delivered = None;
+        loop {
+            let active = defaults.last_mut().unwrap_or(frame);
+            let outcome = match delivered.take() {
+                Some(result) => result,
+                None => match self.resume_frame(active, 1024) {
+                    Ok(Progress::Suspended) => continue,
+                    Ok(Progress::Call { callee, arguments }) => {
+                        match self.invoke_value_scoped(callee, arguments, None) {
+                            Ok(value) => match active.deliver(value) {
+                                Ok(()) => continue,
+                                Err(error) => Err(error),
+                            },
+                            Err(error) => Err(error),
+                        }
+                    }
+                    Ok(Progress::Default {
+                        expression,
+                        mut environment,
+                    }) => {
+                        let result = match self.invocation_code(&expression, None) {
+                            Ok(Some(code)) => match self.start_frame(&code, &mut environment) {
+                                Ok(child) => {
+                                    self.bytecode_default_evaluations += 1;
+                                    defaults.push(child);
+                                    continue;
+                                }
+                                Err(error) => Err(error),
+                            },
+                            Ok(None) => self.eval(&expression, &mut environment),
+                            Err(error) => Err(error),
+                        };
+                        match active.receive(result, Some(environment)) {
+                            Ok(None) => continue,
+                            Ok(Some(flow)) => Ok(flow),
+                            Err(error) => Err(error),
+                        }
+                    }
+                    Ok(Progress::Complete(flow)) => Ok(flow),
+                    Err(error) => Err(error),
+                },
+            };
+            let Some(child) = defaults.pop() else {
+                return outcome;
+            };
+            let parent = defaults.last_mut().unwrap_or(frame);
+            match parent.receive(outcome, Some(child.restore_environment())) {
+                Ok(None) => {}
+                Ok(Some(flow)) => delivered = Some(Ok(flow)),
+                Err(error) => delivered = Some(Err(error)),
+            }
+        }
+    }
+
+    /// Staged input fragments actually started, including failed evaluations.
+    pub fn bytecode_staged_inputs(&self) -> usize {
+        self.bytecode_staged_inputs
+    }
+
+    pub(super) fn try_stage_bytecode(
+        &mut self,
+        input: &nir::program::NormalFormArgument,
+        environment: &mut Environment,
+        depth: usize,
+    ) -> Result<Option<std::ops::ControlFlow<Flow, normal_inputs::StagedNormalInput>>, Error> {
+        if !self.comptime_only
+            || self.cleanup_schedule.is_some()
+            || self.graph.is_some()
+            || !self.effect_state.environment.is_empty()
+            || depth != 0
+        {
+            return Ok(None);
+        }
+        let Some((program, shape)) =
+            self.compile_bytecode(|fuel| comptime_compiler::compile_staged_input(input, fuel))?
+        else {
+            return Ok(None);
+        };
+        let mut frame = self.start_frame(&Arc::new(program), environment)?;
+        let original_depth = self.depth;
+        self.bytecode_staged_inputs += 1;
+        let result = self.run_fragment(&mut frame);
+        self.depth = original_depth;
+        let staged = frame
+            .staged
+            .as_mut()
+            .and_then(|state| state.completed.take());
+        *environment = frame.restore_environment();
+        let result = match result? {
+            Flow::Value(_) => {
+                let mut staged = staged.ok_or_else(|| {
+                    self.failure(ErrorKind::InvalidControlFlow, Some(input.source()))
+                })?;
+                self.rekey_staged_input(input, &shape, &mut staged)?;
+                std::ops::ControlFlow::Continue(staged)
+            }
+            flow => std::ops::ControlFlow::Break(flow),
+        };
+        Ok(Some(result))
     }
 
     pub(super) fn start_frame(
@@ -310,6 +397,7 @@ impl<'a> Interpreter<'a> {
             waiting: None,
             calls: BTreeMap::new(),
             normal_types: BTreeMap::new(),
+            staged: None,
             pc: 0,
             scopes: Vec::new(),
             slots: (0..code.registers()).map(|_| None).collect(),
@@ -348,13 +436,27 @@ impl<'a> Interpreter<'a> {
                 .get(frame.pc)
                 .ok_or_else(|| self.failure(ErrorKind::InvalidControlFlow, None))?;
             let source = instruction.source;
-            self.tick(Some(source))?;
+            if matches!(&instruction.op, Op::Stage(operation) if !matches!(operation, comptime_compiler::staged_inputs::Instruction::Enter))
+            {
+                self.effect_charge(1, Some(source))?;
+            } else {
+                self.tick(Some(source))?;
+            }
             frame.pc += 1;
             let missing = || Error {
                 kind: ErrorKind::MissingBinding,
                 source: Some(source),
             };
             match &instruction.op {
+                Op::Stage(operation) => {
+                    if let Some(flow) = frame
+                        .staged
+                        .get_or_insert_with(|| Box::new(staged_bytecode::State::default()))
+                        .step(operation, &mut frame.slots, self, source)?
+                    {
+                        return Ok(Progress::Complete(flow));
+                    }
+                }
                 Op::CheckListAppend { local, ty } => {
                     self.check_list_append(
                         frame.slots[*local].as_ref().ok_or_else(missing)?,

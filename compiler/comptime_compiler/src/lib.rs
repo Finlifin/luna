@@ -6,6 +6,7 @@ pub mod normal_types;
 pub mod objects;
 mod patterns;
 pub mod scalar;
+pub mod staged_inputs;
 pub mod type_constructors;
 use nir::program::{ArgumentPassing, Expr, ExprKind as K, FieldOwner, LocalId, SourceRange};
 use nir::{Primitive, Term};
@@ -34,6 +35,7 @@ impl fmt::Display for ErrorConversion {
 
 #[derive(Debug)]
 pub enum Op {
+    Stage(staged_inputs::Instruction),
     BeginNormalType {
         destination: Register,
         constructor: Arc<normal_types::Constructor>,
@@ -445,6 +447,7 @@ impl fmt::Display for Program {
                     }
                     write!(f, "))")?;
                 }
+                Op::Stage(operation) => write!(f, "{operation}")?,
                 Op::BeginNormalType {
                     destination,
                     constructor,
@@ -830,6 +833,30 @@ enum Work<'a> {
 /// Compile structured control using a heap worklist, not host recursion. Fuel
 /// bounds traversal and register/code allocation, including unreachable code.
 pub fn compile(body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
+    compile_root(Root::Expression(body), fuel).map(|(program, _)| program)
+}
+
+/// Compile operands while retaining contextual literal/container placeholders.
+/// The returned shape uses stable register keys, never borrowed NIR addresses.
+pub fn compile_staged_input(
+    input: &nir::program::NormalFormArgument,
+    fuel: &mut usize,
+) -> Result<(Program, normal_types::Shape), Error> {
+    compile_root(Root::Staged(input), fuel).map(|(program, shape)| (program, shape.unwrap()))
+}
+
+enum Root<'a> {
+    Expression(&'a Expr),
+    Staged(&'a nir::program::NormalFormArgument),
+}
+fn compile_root(
+    root: Root<'_>,
+    fuel: &mut usize,
+) -> Result<(Program, Option<normal_types::Shape>), Error> {
+    let source = match root {
+        Root::Expression(body) => body.source,
+        Root::Staged(input) => input.source(),
+    };
     let initial_fuel = *fuel;
     let mut instructions = Vec::new();
     let mut locals = BTreeMap::new();
@@ -837,18 +864,49 @@ pub fn compile(body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
     let mut labels = Vec::new();
     let mut loops = BTreeMap::new();
     let mut scope_depth = 0;
-    let mut work = vec![
-        Work::Emit(
-            body.source,
-            Op::Finish {
-                value: 0,
-                explicit: false,
-            },
+    let (mut work, shape) = match root {
+        Root::Expression(body) => (
+            vec![
+                Work::Emit(
+                    source,
+                    Op::Finish {
+                        value: 0,
+                        explicit: false,
+                    },
+                ),
+                Work::Expression(body, 0),
+            ],
+            None,
         ),
-        Work::Expression(body, 0),
-    ];
+        Root::Staged(input) => {
+            let mut fresh = || {
+                let slot = registers;
+                registers += 1;
+                slot
+            };
+            let (shape, code) = normal_types::compile_input(
+                input,
+                0,
+                &mut fresh,
+                fuel,
+                &mut labels,
+                &mut locals,
+                true,
+            )?;
+            let code = staged_inputs::lower(code, &shape, fuel)?;
+            let mut work = vec![Work::Emit(
+                source,
+                Op::Stage(staged_inputs::Instruction::Finish {
+                    value: shape.slot,
+                    diverges: shape.diverges,
+                }),
+            )];
+            work.extend(code.into_iter().rev());
+            (work, Some(shape))
+        }
+    };
     while let Some(task) = work.pop() {
-        *fuel = fuel.checked_sub(1).ok_or(Error::Budget(body.source))?;
+        *fuel = fuel.checked_sub(1).ok_or(Error::Budget(source))?;
         match task {
             Work::Emit(source, op) => instructions.push(Instruction { source, op }),
             Work::Label(label) => labels[label] = Some(instructions.len()),
@@ -1143,6 +1201,7 @@ pub fn compile(body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
                                 fuel,
                                 &mut labels,
                                 &mut locals,
+                                false,
                             )?);
                         }
                         let constructor = Arc::new(normal_types::Constructor {
@@ -1977,19 +2036,22 @@ pub fn compile(body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
         }
     }
     for instruction in &mut instructions {
-        *fuel = fuel.checked_sub(1).ok_or(Error::Budget(body.source))?;
+        *fuel = fuel.checked_sub(1).ok_or(Error::Budget(source))?;
         let target = match &mut instruction.op {
             Op::Jump(target) | Op::Branch { target, .. } => target,
             _ => continue,
         };
         *target = labels[*target].ok_or(Error::InvalidControl(instruction.source))?;
     }
-    Ok(Program {
-        instructions,
-        locals: locals.into_iter().collect(),
-        registers,
-        storage_work: initial_fuel - *fuel,
-    })
+    Ok((
+        Program {
+            instructions,
+            locals: locals.into_iter().collect(),
+            registers,
+            storage_work: initial_fuel - *fuel,
+        },
+        shape,
+    ))
 }
 
 fn copy_error(error: nir::copy_budget::CopyBudgetExhausted, source: SourceRange) -> Error {

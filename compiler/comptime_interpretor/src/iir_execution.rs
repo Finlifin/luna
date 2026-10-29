@@ -113,6 +113,7 @@ impl<'a> Interpreter<'a> {
         Ok(Self {
             bytecode_invocations: 0,
             bytecode_default_evaluations: 0,
+            bytecode_staged_inputs: 0,
             bytecode_compilations: 0,
             bytecode_compilation_steps: 0,
             bytecode_cache: Default::default(),
