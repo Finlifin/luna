@@ -160,6 +160,10 @@ comptime fn configured() -> bool {
 `List.append` 通过内部值引用更新接收者，不要求 runtime Copy／Clone。
 读取列表值产生独立快照，字段路径在写入时重新检查；预算或路径失败不提交该次写入。
 纯 Type 描述保持 comptime 数据身份，不因这些检查展开 normal-form 头。
+值引用接收者的 `self = list_concat(self, [value])` 现可复用原列表缓冲区，
+包括调用者字段上的接收者；已有快照不受影响。该优化只接受不执行用户代码的
+追加后缀，验证失败时撤销后缀。它仍执行完整的类型与表示预算检查，因此减少
+列表复制与分配，但不保证连续追加的总成本为线性；一般拼接仍按快照顺序求值。
 上面的 Object 指针示例仍是待迁移的旧实现记录，不是有效的 comptime 语言用法。
 
 CMTT 生成器也可以保存和查询局部 Object，再据此选择 quoted code。其物化

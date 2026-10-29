@@ -82,6 +82,87 @@ impl Interpreter<'_> {
         })())
     }
 
+    /// A method receiver may refer to a projected caller field. Only fuse a
+    /// local receiver read and a suffix that cannot execute user code, so no
+    /// callback can invalidate the snapshot semantics of concatenation.
+    pub(super) fn eval_reference_list_append(
+        &mut self,
+        expr: &Expr,
+        environment: &mut Environment,
+    ) -> Option<Result<Flow, Error>> {
+        if !self.comptime_only || self.cleanup_schedule.is_some() {
+            return None;
+        }
+        let K::Assign { place, value } = &expr.kind else {
+            return None;
+        };
+        let K::ListConcat(left, right) = &value.kind else {
+            return None;
+        };
+        if !place.fields.is_empty()
+            || !matches!(left.kind, K::Local(binding) if binding == place.root)
+            || left.ty != value.ty
+            || right.ty != value.ty
+            || expr.ty != Term::Primitive(Primitive::Void)
+            || (self.list_element(&value.ty).is_none() && !self.is_type_list_input(&value.ty))
+        {
+            return None;
+        }
+        let simple = match &right.kind {
+            K::TypeList(fields) => fields
+                .iter()
+                .all(|field| matches!(field.kind, K::Local(_) | K::TypeValue(_) | K::Literal(_))),
+            K::TypeListValue(_) => true,
+            _ => false,
+        };
+        if !simple {
+            return None;
+        }
+        let Value::ComptimeReference(reference) = environment.get(&place.root)? else {
+            return None;
+        };
+        let reference = reference.clone();
+        Some((|| {
+            self.tick(Some(value.source))?;
+            self.tick(Some(left.source))?;
+            {
+                let contents = reference
+                    .borrow(&mut self.budget.steps)
+                    .map_err(|kind| self.failure(kind, Some(left.source)))?;
+                self.validate_immutable_input(contents.value(), &value.ty)?;
+            }
+            let suffix = match self.eval(right, environment)? {
+                Flow::Value(value) => value,
+                flow => return Ok(flow),
+            };
+            self.validate_immutable_input(&suffix, &value.ty)?;
+            // Charge path traversal before borrowing self inside validation.
+            // The suffix contains no calls, so the location cannot change.
+            let mut path_fuel = self.budget.steps;
+            let mut checked = false;
+            let result =
+                reference.append_list_checked(suffix, &mut path_fuel, |combined, remaining| {
+                    checked = true;
+                    self.budget.steps = remaining;
+                    let work = combined
+                        .scoped_copy_work_with_evidence(
+                            &self.abstract_type_parameters,
+                            &self.abstract_value_parameters,
+                        )
+                        .ok_or(ErrorKind::RepresentationSizeLimit)?;
+                    self.integer_operation(Some(expr.source), |budget| budget.consume(work))
+                        .map_err(|error| error.kind)?;
+                    self.validate_immutable_input(combined, &value.ty)
+                        .map_err(|error| error.kind)
+                });
+            if !checked {
+                self.budget.steps = path_fuel;
+            }
+            result.map_err(|kind| self.failure(kind, Some(expr.source)))?;
+            Ok(Flow::Value(Value::Unit))
+        })())
+    }
+
     pub(super) fn eval_list_operation(
         &mut self,
         expr: &Expr,

@@ -289,36 +289,87 @@ mod tests {
             ty: ty.clone(),
             values: vec![Value::Bool(false), Value::Bool(true)],
         };
-        let mut failures = 0;
-        let mut successes = 0;
-        for steps in 1..200 {
-            let storage = Storage::new(original.clone());
-            let mut env = Environment::new();
-            env.insert(
-                LocalId { owner: 1, index: 0 },
-                Value::Pointer(storage.pointer(ty.clone(), vec![])),
-            );
-            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
-            vm.budget.steps = steps;
-            match vm
-                .eval_list_append(&expr, &mut env)
-                .expect("fused append path")
-            {
-                Ok(Flow::Value(Value::Unit)) => {
-                    successes += 1;
-                    assert_eq!(storage.read().unwrap(), expected);
+        let K::WritePointer { value, .. } = &expr.kind else {
+            unreachable!()
+        };
+        let mut reference_value = value.clone();
+        let K::ListConcat(left, _) = &mut reference_value.kind else {
+            unreachable!()
+        };
+        left.kind = K::Local(LocalId { owner: 1, index: 0 });
+        let reference_expr = Expr {
+            source,
+            ty: Term::Primitive(Primitive::Void),
+            kind: K::Assign {
+                place: nir::program::Place {
+                    root: LocalId { owner: 1, index: 0 },
+                    fields: vec![],
+                },
+                value: reference_value,
+            },
+        };
+        for mode in 0..3 {
+            let wrap = |value| {
+                if mode == 2 {
+                    Value::AnonymousRecord(vec![
+                        ("items".into(), value),
+                        ("sibling".into(), Value::Bool(true)),
+                    ])
+                } else {
+                    value
                 }
-                Err(error) => {
-                    failures += 1;
-                    assert_eq!(error.kind, ErrorKind::StepsExhausted);
-                    assert_eq!(storage.read().unwrap(), original);
-                    vm.budget.steps = 1000;
-                    vm.eval_list_append(&expr, &mut env).unwrap().unwrap();
-                    assert_eq!(storage.read().unwrap(), expected);
+            };
+            let original = wrap(original.clone());
+            let expected = wrap(expected.clone());
+            let mut failures = 0;
+            let mut successes = 0;
+            for steps in 1..200 {
+                let storage = Storage::new(original.clone());
+                let mut env = Environment::new();
+                let receiver = if mode == 0 {
+                    Value::Pointer(storage.pointer(ty.clone(), vec![]))
+                } else {
+                    let reference = if mode == 2 {
+                        value_reference::ValueReference::projected(
+                            storage.clone(),
+                            &[(nir::program::FieldOwner::Anonymous, 0)],
+                            &mut 1000,
+                        )
+                        .unwrap()
+                    } else {
+                        value_reference::ValueReference::root(storage.clone())
+                    };
+                    Value::ComptimeReference(reference)
+                };
+                env.insert(LocalId { owner: 1, index: 0 }, receiver);
+                let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+                vm.budget.steps = steps;
+                let mut append = |vm: &mut Interpreter<'_>| {
+                    if mode == 0 {
+                        vm.eval_list_append(&expr, &mut env)
+                            .expect("pointer append")
+                    } else {
+                        vm.eval_reference_list_append(&reference_expr, &mut env)
+                            .expect("reference append")
+                    }
+                };
+                match append(&mut vm) {
+                    Ok(Flow::Value(Value::Unit)) => {
+                        successes += 1;
+                        assert_eq!(storage.read().unwrap(), expected);
+                    }
+                    Err(error) => {
+                        failures += 1;
+                        assert_eq!(error.kind, ErrorKind::StepsExhausted);
+                        assert_eq!(storage.read().unwrap(), original);
+                        vm.budget.steps = 1000;
+                        append(&mut vm).unwrap();
+                        assert_eq!(storage.read().unwrap(), expected);
+                    }
+                    other => panic!("unexpected append: {other:?}"),
                 }
-                other => panic!("unexpected append: {other:?}"),
             }
+            assert!(failures > 0 && successes > 0);
         }
-        assert!(failures > 0 && successes > 0);
     }
 }

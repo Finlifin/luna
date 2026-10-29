@@ -51,7 +51,38 @@ impl ValueReference {
     /// Resolve after RHS evaluation and replace only the selected field. A bad
     /// path or exhausted budget leaves the entire original value unchanged.
     pub(crate) fn replace(&self, value: Value, fuel: &mut u64) -> Result<(), ErrorKind> {
+        self.update(fuel, |target| {
+            *target = value;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn append_list_checked(
+        &self,
+        suffix: Value,
+        fuel: &mut u64,
+        check: impl FnOnce(&Value, u64) -> Result<(), ErrorKind>,
+    ) -> Result<(), ErrorKind> {
         charge(&self.fields, fuel)?;
+        let remaining = *fuel;
+        self.update_unmetered(|target| {
+            super::memory::append_list_checked(target, suffix, |value| check(value, remaining))
+        })
+    }
+
+    fn update(
+        &self,
+        fuel: &mut u64,
+        update: impl FnOnce(&mut Value) -> Result<(), ErrorKind>,
+    ) -> Result<(), ErrorKind> {
+        charge(&self.fields, fuel)?;
+        self.update_unmetered(update)
+    }
+
+    fn update_unmetered(
+        &self,
+        update: impl FnOnce(&mut Value) -> Result<(), ErrorKind>,
+    ) -> Result<(), ErrorKind> {
         if !self.rebind {
             return Err(ErrorKind::InvalidValueReference);
         }
@@ -84,8 +115,7 @@ impl ValueReference {
             }
             .ok_or(ErrorKind::InvalidValueReference)?;
         }
-        *target = value;
-        Ok(())
+        update(target)
     }
 }
 
@@ -816,5 +846,53 @@ mod call_tests {
             vm.eval(&call, &mut Environment::new()).unwrap_err().kind,
             ErrorKind::InvalidCallPlan
         );
+    }
+}
+
+#[cfg(test)]
+mod append_tests {
+    use super::*;
+    use nir::Term;
+
+    #[test]
+    fn append_reuses_buffer_and_preserves_snapshots_and_permissions() {
+        let mut values = Vec::with_capacity(16);
+        values.push(Term::Primitive(nir::Primitive::Bool));
+        let buffer = values.as_ptr();
+        let storage = Storage::new(Value::TypeList(values));
+        let snapshot = storage.read().unwrap();
+        let mut reference = ValueReference::root(storage.clone());
+        let suffix = || Value::TypeList(vec![Term::Primitive(nir::Primitive::Type)]);
+        reference
+            .append_list_checked(suffix(), &mut 100, |_, _| Ok(()))
+            .unwrap();
+        let Value::TypeList(old) = &snapshot else {
+            unreachable!()
+        };
+        assert_eq!(old.len(), 1);
+        {
+            let contents = reference.borrow(&mut 100).unwrap();
+            let Value::TypeList(values) = contents.value() else {
+                unreachable!()
+            };
+            assert_eq!(values.len(), 2);
+            assert_eq!(values.as_ptr(), buffer);
+        }
+        let updated = storage.read().unwrap();
+        assert_eq!(
+            reference.append_list_checked(suffix(), &mut 100, |_, _| Err(
+                ErrorKind::RepresentationSizeLimit
+            )),
+            Err(ErrorKind::RepresentationSizeLimit)
+        );
+        assert_eq!(storage.read().unwrap(), updated);
+        reference.prohibit_rebind();
+        assert_eq!(
+            reference.append_list_checked(suffix(), &mut 100, |_, _| panic!(
+                "readonly receiver must not mutate"
+            )),
+            Err(ErrorKind::InvalidValueReference)
+        );
+        assert_eq!(storage.read().unwrap(), updated);
     }
 }

@@ -596,46 +596,9 @@ impl PointerValue {
         suffix: Value,
         check: impl FnOnce(&Value) -> Result<(), ErrorKind>,
     ) -> Result<(), ErrorKind> {
-        self.with_target(|target| {
-            let original = match (&mut *target, suffix) {
-                (Value::TypeList(left), Value::TypeList(right)) => {
-                    let original = left.len();
-                    if original.saturating_add(right.len()) > 100_000 {
-                        return Err(ErrorKind::RepresentationSizeLimit);
-                    }
-                    left.extend(right);
-                    original
-                }
-                (
-                    Value::List {
-                        ty: left_ty,
-                        values: left,
-                    },
-                    Value::List {
-                        ty: right_ty,
-                        values: right,
-                    },
-                ) if *left_ty == right_ty => {
-                    let original = left.len();
-                    if original.saturating_add(right.len()) > 100_000 {
-                        return Err(ErrorKind::RepresentationSizeLimit);
-                    }
-                    left.extend(right);
-                    original
-                }
-                _ => return Err(ErrorKind::Type),
-            };
-            if let Err(error) = check(target) {
-                match target {
-                    Value::TypeList(values) => values.truncate(original),
-                    Value::List { values, .. } => values.truncate(original),
-                    _ => unreachable!(),
-                }
-                return Err(error);
-            }
-            Ok(())
-        })
+        self.with_target(|target| append_list_checked(target, suffix, check))
     }
+
     pub(crate) fn project_anonymous(
         &self,
         name: &str,
@@ -1459,4 +1422,49 @@ mod optional_projection_tests {
         assert_eq!(copy, root);
         assert!(root.immutable_copy_work().is_none());
     }
+}
+
+/// Extend one list transactionally; validation cannot execute user code.
+pub(super) fn append_list_checked(
+    target: &mut Value,
+    suffix: Value,
+    check: impl FnOnce(&Value) -> Result<(), ErrorKind>,
+) -> Result<(), ErrorKind> {
+    let original = match (&mut *target, suffix) {
+        (Value::TypeList(left), Value::TypeList(right)) => {
+            let original = left.len();
+            if original.saturating_add(right.len()) > 100_000 {
+                return Err(ErrorKind::RepresentationSizeLimit);
+            }
+            left.extend(right);
+            original
+        }
+        (
+            Value::List {
+                ty: left_ty,
+                values: left,
+            },
+            Value::List {
+                ty: right_ty,
+                values: right,
+            },
+        ) if *left_ty == right_ty => {
+            let original = left.len();
+            if original.saturating_add(right.len()) > 100_000 {
+                return Err(ErrorKind::RepresentationSizeLimit);
+            }
+            left.extend(right);
+            original
+        }
+        _ => return Err(ErrorKind::Type),
+    };
+    if let Err(error) = check(target) {
+        match target {
+            Value::TypeList(values) => values.truncate(original),
+            Value::List { values, .. } => values.truncate(original),
+            _ => unreachable!(),
+        }
+        return Err(error);
+    }
+    Ok(())
 }
