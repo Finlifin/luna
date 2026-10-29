@@ -275,13 +275,16 @@ fn exact_float_arithmetic_preserves_small_differences_and_constant_results() {
             value(expected)
         );
     }
-    assert_eq!(
-        Interpreter::for_comptime(&package, Budget::default())
-            .unwrap()
-            .invoke(id(&package, "combined"), vec![value("2.5"), value("1.5")])
-            .unwrap(),
-        value("4.0")
-    );
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    for (a, b, expected) in [("2.5", "1.5", "4.0"), ("1.5", "2.5", "-4.0")] {
+        assert_eq!(
+            vm.invoke(id(&package, "combined"), vec![value(a), value(b)])
+                .unwrap(),
+            value(expected)
+        );
+    }
+    assert_eq!(vm.bytecode_invocations(), 2);
+    assert_eq!(vm.bytecode_compilations(), 1);
     for operation in ["/", "%"] {
         let source = format!(
             "typealias Float=.Float'builtin;comptime fn bad(a:Float,b:Float)->Float {{a {operation} b}}"

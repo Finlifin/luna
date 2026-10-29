@@ -50,6 +50,7 @@ mod reflection;
 pub use reflection::{
     CallableReflection, EnumReflection, ReflectedField, ReflectedVariant, StructReflection,
 };
+mod float_operations;
 mod scalar_operations;
 #[cfg(test)]
 mod scoped_work;
@@ -3630,7 +3631,7 @@ impl<'a> Interpreter<'a> {
             }
             K::BitEqual(..) => self.eval_bit_equal(expr, environment),
             K::FloatNegate(..) | K::FloatBinary { .. } => {
-                self.eval_float_arithmetic(expr, environment)
+                self.eval_scalar_operation(expr, environment)
             }
             K::IntegerNegate(..) => self.eval_scalar_operation(expr, environment),
             K::IntegerBinary { .. } => self.eval_scalar_operation(expr, environment),
@@ -7334,113 +7335,6 @@ impl<'a> Interpreter<'a> {
             _ => unreachable!("expression dispatcher selected an incompatible evaluator"),
         };
         Ok(Flow::Value(result))
-    }
-
-    #[inline(never)]
-    fn eval_float_arithmetic(
-        &mut self,
-        expr: &Expr,
-        environment: &mut Environment,
-    ) -> Result<Flow, Error> {
-        let never = Term::Primitive(Primitive::Never);
-        let supported = |ty: &Term| {
-            matches!(
-                ty,
-                Term::Primitive(
-                    Primitive::F16
-                        | Primitive::Bf16
-                        | Primitive::F32
-                        | Primitive::F64
-                        | Primitive::Never
-                )
-            )
-        };
-        match &expr.kind {
-            K::FloatNegate(value) => {
-                if (!supported(&value.ty) && value.ty != Term::Primitive(Primitive::Float))
-                    || expr.ty != value.ty
-                {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                }
-                let result =
-                    Self::concrete_value(value!(self.eval(value, environment)), expr.source)?;
-                if !self.has_type(&result, &value.ty) {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                }
-                Ok(Flow::Value(match result {
-                    // Negation flips the sign even for zero and NaN, without
-                    // arithmetic rounding or payload canonicalization.
-                    Value::Float(value) => Value::Float(
-                        self.integer_operation(Some(expr.source), |budget| value.negate(budget))?,
-                    ),
-                    Value::Float16(bits) => Value::Float16(bits ^ 0x8000),
-                    Value::BFloat16(bits) => Value::BFloat16(bits ^ 0x8000),
-                    Value::Float32(bits) => Value::Float32(bits ^ (1 << 31)),
-                    Value::Float64(bits) => Value::Float64(bits ^ (1 << 63)),
-                    _ => return Err(self.failure(ErrorKind::Type, Some(expr.source))),
-                }))
-            }
-            K::FloatBinary { op, left, right } => {
-                let expected = if left.ty == never || right.ty == never {
-                    &never
-                } else {
-                    &left.ty
-                };
-                let exact = !matches!(op, nir::program::FloatOp::Divide);
-                let operand_supported = |ty: &Term| {
-                    supported(ty) || (exact && *ty == Term::Primitive(Primitive::Float))
-                };
-                if &expr.ty != expected
-                    || !operand_supported(&left.ty)
-                    || !operand_supported(&right.ty)
-                    || (left.ty != never && right.ty != never && left.ty != right.ty)
-                {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                }
-                let a = Self::concrete_value(value!(self.eval(left, environment)), expr.source)?;
-                let b = Self::concrete_value(value!(self.eval(right, environment)), expr.source)?;
-                if !self.has_type(&a, &left.ty) || !self.has_type(&b, &right.ty) {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                }
-                Ok(Flow::Value(match (a, b) {
-                    (Value::Float(a), Value::Float(b)) => Value::Float(self.integer_operation(
-                        Some(expr.source),
-                        |budget| match op {
-                            nir::program::FloatOp::Add => a.add(&b, budget),
-                            nir::program::FloatOp::Subtract => a.subtract(&b, budget),
-                            nir::program::FloatOp::Multiply => a.multiply(&b, budget),
-                            nir::program::FloatOp::Divide => {
-                                unreachable!("unsupported exact division")
-                            }
-                        },
-                    )?),
-                    (Value::Float16(a), Value::Float16(b)) => {
-                        Value::Float16(self.integer_operation(Some(expr.source), |budget| {
-                            op.evaluate_half(
-                                comptime_runtime::float16::Float16Format::Binary16,
-                                a,
-                                b,
-                                budget,
-                            )
-                        })?)
-                    }
-                    (Value::BFloat16(a), Value::BFloat16(b)) => {
-                        Value::BFloat16(self.integer_operation(Some(expr.source), |budget| {
-                            op.evaluate_half(
-                                comptime_runtime::float16::Float16Format::BFloat16,
-                                a,
-                                b,
-                                budget,
-                            )
-                        })?)
-                    }
-                    (Value::Float32(a), Value::Float32(b)) => Value::Float32(op.evaluate_f32(a, b)),
-                    (Value::Float64(a), Value::Float64(b)) => Value::Float64(op.evaluate_f64(a, b)),
-                    _ => return Err(self.failure(ErrorKind::Type, Some(expr.source))),
-                }))
-            }
-            _ => unreachable!(),
-        }
     }
 
     #[inline(never)]

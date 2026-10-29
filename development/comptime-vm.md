@@ -20,7 +20,7 @@ No opcode delegates a child expression tree back to `eval`.
 Supported bodies include existing literal/frozen-value/Type leaves, reads,
 local initialization and whole-slot assignment, blocks, boolean short circuit,
 boolean/BitVec negation, branches, loops, break/continue and return. Integer
-arithmetic and scalar comparisons also execute linear instructions,
+arithmetic, exact/machine floating arithmetic and scalar comparisons execute linear instructions,
 using the same checked primitive operations as tree interpretation. Temporary
 registers are allocated densely independent of LocalId values. Scope exit and
 loop transfers clear introduced bindings; imported inputs are restored on both
@@ -954,3 +954,27 @@ Validation from `/home/fin/luna` (all exit 0):
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode --test comptime_receivers --test comptime_local_types`: `/tmp/luna-tools-2o3slpkb/result.json`.
 - `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --test target_integers --test function_types --test instance_budget`: `/tmp/luna-tools-0rtl3w_7/result.json`.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: `/tmp/luna-tools-lh5szs5h/result.json`; `git diff --check` passed.
+
+## Floating scalar instructions (2026-10-30)
+
+Float negation and arithmetic now use the shared scalar instruction pipeline.
+The tree interpreter calls the same operand-free implementation. Exact `Float`
+retains decimal add/subtract/multiply and negation; no implicit exact-division
+rounding policy is introduced. f16/bf16/f32/f64 retain their existing arithmetic
+implementations and bit-preserving sign negation (including zero and NaN).
+Signature checks precede operand evaluation, unresolved abstract operands stop
+evaluation in order, and concrete operand types are checked after evaluation.
+
+Tests require actual bytecode execution and code reuse while asserting known
+round-to-even results, NaN payload/sign preservation, exact decimal results and
+rejection of exact division. Source nested arithmetic checks different input
+values against one retained code object. `meta.math` wrappers still route through
+their intrinsic calls; scalar instruction support does not imply those calls
+have been migrated into the bytecode engine.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --test exact_floats --test scalar_equality --test abstract_values`: exit 0, `/tmp/luna-tools-qhivl28m/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test exact_floats --test comptime_bytecode`: exit 0, `/tmp/luna-tools-jzpt2iy2/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: exit 0, `/tmp/luna-tools-15_4nvxi/result.json`; `git diff --check` passed.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test frontend_cli sysroot_half_float_arithmetic_rounds_once_and_preserves_special_values -- --exact`: exit 0, `/tmp/luna-tools-tcpztxaz/result.json`. Real sysroot f16/bf16 computation passed comptime invocation, runtime interpretation, and LLVM O0/O3 native execution.

@@ -15,6 +15,7 @@ pub(super) enum Plan {
         op: Option<IntegerOp>,
     },
     Compare(IntegerOp),
+    Float(Option<nir::program::FloatOp>),
 }
 fn machine(value: &Value, signed: bool, width: u32) -> Result<MachineInteger, MError> {
     match value {
@@ -34,6 +35,10 @@ impl Interpreter<'_> {
         let invalid = || self.failure(ErrorKind::Type, Some(source));
         let never = Term::Primitive(Primitive::Never);
         match scalar.kind {
+            ScalarKind::Float(op) => {
+                self.prepare_float(scalar, op, source)?;
+                Ok(Plan::Float(op))
+            }
             ScalarKind::Integer(op) => {
                 if scalar.right.is_some() != op.is_some() {
                     return Err(invalid());
@@ -141,6 +146,7 @@ impl Interpreter<'_> {
             return Err(self.failure(ErrorKind::AbstractValueUnresolved, Some(source)));
         }
         let valid = match plan {
+            Plan::Float(_) => true,
             Plan::Integer(_) => matches!(value, Value::Integer(_)),
             Plan::Machine { signed, width, .. } => machine(value, signed, width).is_ok(),
             Plan::Compare(_) => unreachable!(),
@@ -161,6 +167,7 @@ impl Interpreter<'_> {
         source: SourceRange,
     ) -> Result<Value, Error> {
         match plan {
+            Plan::Float(op) => self.float_values(scalar, op, a, b, source),
             Plan::Integer(op) => {
                 let Value::Integer(left) = a else {
                     return Err(self.failure(ErrorKind::Type, Some(source)));

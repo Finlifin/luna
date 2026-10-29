@@ -1,12 +1,13 @@
 //! Operand-free descriptors shared by lowering and primitive execution.
 use nir::Term;
-use nir::program::{Expr, ExprKind as K, IntegerOp};
+use nir::program::{Expr, ExprKind as K, FloatOp, IntegerOp};
 use std::fmt;
 
 #[derive(Clone, Copy, Debug)]
 pub enum ScalarKind {
     Integer(Option<IntegerOp>),
     Compare(IntegerOp),
+    Float(Option<FloatOp>),
 }
 #[derive(Clone, Copy, Debug)]
 pub struct Scalar<'a> {
@@ -20,6 +21,12 @@ impl<'a> Scalar<'a> {
         let (kind, left, right) = match &expr.kind {
             K::IntegerBinary { op, left, right } => (
                 ScalarKind::Integer(Some(*op)),
+                left.as_ref(),
+                Some(right.as_ref()),
+            ),
+            K::FloatNegate(value) => (ScalarKind::Float(None), value.as_ref(), None),
+            K::FloatBinary { op, left, right } => (
+                ScalarKind::Float(Some(*op)),
                 left.as_ref(),
                 Some(right.as_ref()),
             ),
@@ -66,6 +73,8 @@ impl<'a> Scalar<'a> {
 impl fmt::Display for Scalar<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.kind {
+            ScalarKind::Float(None) => write!(f, "(float negate")?,
+            ScalarKind::Float(Some(op)) => write!(f, "(float {op}")?,
             ScalarKind::Integer(None) => write!(f, "(integer negate")?,
             ScalarKind::Integer(Some(op)) => write!(f, "(integer {op}")?,
             ScalarKind::Compare(op) => write!(f, "(compare {op}")?,
