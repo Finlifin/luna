@@ -610,7 +610,7 @@ pub fn machine_arithmetic_functions(
                                     .ok_or_else(|| {
                                         error("normal-form callable declaration is missing")
                                     })?;
-                                if !ct || _callee || !matches!(expr.kind, K::Function(_)) {
+                                if !ct || !matches!(expr.kind, K::Function(_)) {
                                     return Err(error(
                                         "normal-form heads cannot be invoked as ordinary functions or stored at runtime",
                                     ));
@@ -793,6 +793,23 @@ pub fn machine_arithmetic_functions(
                             arguments,
                             parameter_bindings,
                         } => {
+                            if callee.ty.is_normal_form_callable()
+                                && (!ct
+                                    || !parameter_bindings.is_empty()
+                                    || !matches!(
+                                        expr.ty,
+                                        Term::Primitive(Primitive::Type | Primitive::Never)
+                                    )
+                                    || arguments.iter().any(|argument| {
+                                        argument.is_default
+                                            || argument.passing
+                                                != crate::program::ArgumentPassing::Value
+                                    }))
+                            {
+                                return Err(error(
+                                    "invalid normal-form application phase or argument plan",
+                                ));
+                            }
                             for argument in arguments {
                                 if argument.passing != crate::program::ArgumentPassing::Value
                                     && (!ct

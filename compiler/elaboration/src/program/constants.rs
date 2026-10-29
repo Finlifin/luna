@@ -2729,6 +2729,11 @@ impl Checker<'_, '_> {
         mut call: n::Expr,
         source: &Expr<'_>,
     ) -> Result<n::Expr, Error> {
+        // NF application is itself a comptime operation. Its inputs belong to
+        // the current invocation, not an earlier runtime-call staging boundary.
+        if matches!(&call.kind, K::Call { callee, .. } if callee.ty.is_normal_form_callable()) {
+            return Ok(call);
+        }
         if self.in_required_comptime
             || self.preparing_spread
                 == Some(n::SourceRange {

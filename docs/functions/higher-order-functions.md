@@ -38,8 +38,28 @@ pub const Tuple: pure comptime fn<...Es: meta.List<Type>> -> Type = .Tuple'built
 范式 callable 类型不能作为 runtime 参数或 quote 上下文中的 runtime 绑定。
 当前实现也支持取得源码范式头的 callable 值，经 comptime 函数返回并保存到
 常量，再通过常量别名应用。别名保留原始头身份、形成约束和变参收集位置；
-普通圆括号调用不能执行范式头的函数体。任意局部或动态 callee 的范式应用
-仍待接通；Tuple 也尚未迁移到上述 builtin 绑定。
+普通圆括号调用不能执行范式头的函数体。局部值、函数参数和表达式也可以作为
+范式 callee；callee 先求值一次，实参随后按源顺序求值，再检查所选头的形成
+约束并构造保留该头身份的类型。例如：
+
+```flurry
+pure comptime fn Identity<T> -> Type { T }
+pure comptime fn Alternate<T> -> Type { T }
+
+comptime fn select(flag: bool) -> pure comptime fn<Type> -> Type {
+    if flag { Identity } else { Alternate }
+}
+
+comptime fn Make(flag: bool, input: Type) -> Type {
+    const factory = select(flag);
+    factory<input>
+}
+```
+
+这里的局部 `const` 在所属 invocation 中初始化，不为了提前识别头而在
+elaboration 时执行。当前动态路径支持位置实参、依赖输入、尾部逐项收集或
+单次完整集合展开；动态 callee 的具名入口和混合展开仍待接通。Tuple 也尚未
+迁移到上述 builtin 绑定。
 
 ## 正式定义
 

@@ -150,7 +150,50 @@ replace this operation.
 python3 -B development/reproduce.py --timeout 60 -- development/repros/normal-form-local-application.fl --invoke-comptime Run
 ```
 
-This reproduction exits 1 at `factory<bool>` with `explicit instantiation
+At the snapshot-transport stage, this reproduction exited 1 at `factory<bool>` with `explicit instantiation
 requires a resolved generic function` (`/tmp/luna-tools-4d3xbza9`). It selects a
 head using an invocation parameter and expects an opaque `Identity<bool>` result;
 this is an unsupported positive case, not a language rejection rule.
+
+## Dynamic application at invocation time
+
+The recorded local application now succeeds. NIR retains the callee and its
+source-ordered arguments using the existing type-directed `Call` shape. A
+`NormalFormFunction` callee identifies NF application; Display emits
+`normal-form-apply`. It is not an ordinary invocation of the head's body.
+The phase verifier requires comptime execution, a Type result (or divergence),
+and an explicit argument frame without executable defaults or receiver transport.
+
+The interpreter evaluates the callee once, verifies its declaration and full
+callable type, evaluates inputs once in source order, and forms the opaque type
+through the same domain and formation-contract checks as static NF applications.
+NF arguments are not frozen at an earlier staging boundary: invocation-local
+values, including mutable cells, must be observed at their actual evaluation site.
+Required type positions use this operation through required comptime evaluation.
+
+Supported dynamic inputs include positional and dependent parameters, a final
+positional collection, and a single whole-collection expansion. Tests use both
+`List<Type>` and `List<bool>`, plus a `List<T>` domain dependent on a preceding
+Type input. Named entries and mixed expansions for dynamic callees still need
+the callable-entry metadata and routing work; no guessed label mapping was added.
+Tuple's builtin constant registration remains pending.
+
+Validation from `/home/fin/luna`, all exited 0:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p luna --test frontend_cli normal_form_
+python3 -B development/check.py --timeout 900 -- test -p luna --test normal_form_methods --test normal_patterns --test type_lists
+python3 -B development/check.py --timeout 900 -- test -p nir --test phases --test normal_inputs --test normal_form_callables
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib normal_form
+python3 -B development/reproduce.py --timeout 60 -- development/repros/normal-form-local-application.fl --invoke-comptime Run
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+```
+
+The groups passed 6, 74, 60, and 3 tests respectively (143 total). Reports:
+`/tmp/luna-tools-d4dnpwcd`, `/tmp/luna-tools-41nv8b25`,
+`/tmp/luna-tools-0tcg8viq`, `/tmp/luna-tools-qv0om_ff`,
+`/tmp/luna-tools-yolizove`, and `/tmp/luna-tools-spdql79r`.
+The reproduction returned the opaque Identity head applied to bool. Source
+checks also cover two dynamically selected heads, callable parameters, computed
+callees in type positions, once-only source ordering, and a selected head's
+formation-contract rejection followed by a successful independent invocation.

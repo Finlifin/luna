@@ -3851,10 +3851,10 @@ impl Checker<'_, '_> {
                     return self.type_expr(&application);
                 }
                 let H::ResolvedDef { def_id, .. } = head.kind else {
-                    return Err(error(
-                        expr.span,
-                        "type application requires a resolved generic type",
-                    ));
+                    return match self.required_value(expr, P::Type)? {
+                        comptime_interpretor::Value::Type(ty) => Ok(ty),
+                        _ => Err(error(expr.span, "type application did not produce a completed Type")),
+                    };
                 };
                 let owner = self
                     .package
@@ -6774,7 +6774,7 @@ impl Checker<'_, '_> {
         expected: Option<&Term>,
         partial: Option<&crate::calls::CallableContext>,
     ) -> Result<n::Expr, Error> {
-        if callee.ty.is_normal_form_callable() {
+        if callee.ty.is_normal_form_callable() && !matches!(expr.kind, H::NFApplication(..)) {
             return Err(error(
                 expr.span,
                 "normal-form heads cannot be invoked as ordinary functions",
@@ -6803,12 +6803,14 @@ impl Checker<'_, '_> {
             K::TraitMethod { member, .. } => Some(*member),
             _ => None,
         };
-        let direct = direct_id.and_then(|id| {
-            self.package.owners().find_map(|(owner, _)| {
-                matches_declaration(self.package, &self.package_identities, owner, id)
-                    .then_some(owner)
-            })
-        });
+        let direct = direct_id
+            .filter(|_| !callee.ty.is_normal_form_callable())
+            .and_then(|id| {
+                self.package.owners().find_map(|(owner, _)| {
+                    matches_declaration(self.package, &self.package_identities, owner, id)
+                        .then_some(owner)
+                })
+            });
         if direct.is_some_and(|owner| self.is_quote_function(owner)) {
             self.record_quote_application(expr.span)?;
         }

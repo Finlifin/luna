@@ -1,7 +1,6 @@
 {- A local callable must be applied when its enclosing comptime invocation runs.
-   Elaborating the body must not execute Select early to discover the head.
-   This currently fails with "explicit instantiation requires a resolved generic
-   function"; the expected result is an opaque Identity<bool> Type value.
+   Elaborating the body must not execute select early to discover the head.
+   The expected result is an opaque Identity<bool> Type value.
 -}
 typealias Type = .Type'builtin;
 typealias bool = .bool'builtin;
@@ -9,12 +8,12 @@ typealias bool = .bool'builtin;
 pure comptime fn Identity<T> -> Type { T }
 pure comptime fn Alternate<T> -> Type { T }
 
-comptime fn Select(flag: bool) -> pure comptime fn<Type> -> Type {
+comptime fn select(flag: bool) -> pure comptime fn<Type> -> Type {
     if flag { Identity } else { Alternate }
 }
 
 comptime fn Apply(flag: bool) -> Type {
-    const factory = Select(flag);
+    const factory = select(flag);
     factory<bool>
 }
 

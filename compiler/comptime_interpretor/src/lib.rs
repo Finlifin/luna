@@ -8352,6 +8352,51 @@ impl<'a> Interpreter<'a> {
         environment: &mut Environment,
         effects: Option<Vec<effects::Entry>>,
     ) -> Result<Flow, Error> {
+        if let K::Call {
+            callee,
+            arguments,
+            parameter_bindings,
+        } = &expr.kind
+            && callee.ty.is_normal_form_callable()
+        {
+            if effects.is_some() || !parameter_bindings.is_empty() {
+                return Err(self.failure(ErrorKind::InvalidCallPlan, Some(expr.source)));
+            }
+            let selected = value!(self.eval(callee, environment));
+            if !self.has_type(&selected, &callee.ty) {
+                return Err(self.failure(ErrorKind::Type, Some(callee.source)));
+            }
+            let Value::Function(head) = selected else {
+                return Err(self.failure(ErrorKind::Type, Some(callee.source)));
+            };
+            let metadata = self.normal_forms[&head];
+            if arguments.len() != metadata.parameters.len() {
+                return Err(self.failure(ErrorKind::InvalidCallPlan, Some(expr.source)));
+            }
+            self.integer_operation(Some(expr.source), |budget| budget.consume(arguments.len()))?;
+            let mut inputs = vec![None; arguments.len()];
+            for argument in arguments {
+                if argument.parameter >= inputs.len()
+                    || inputs[argument.parameter].is_some()
+                    || argument.is_default
+                    || argument.passing != nir::program::ArgumentPassing::Value
+                {
+                    return Err(self.failure(ErrorKind::InvalidCallPlan, Some(expr.source)));
+                }
+                let value = value!(self.eval(&argument.value, environment));
+                inputs[argument.parameter] =
+                    Some(self.residual_input_term(value, argument.value.source)?);
+            }
+            let inputs = inputs
+                .into_iter()
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(expr.source)))?;
+            return Ok(Flow::Value(self.complete_normal_type(
+                head,
+                inputs,
+                expr.source,
+            )?));
+        }
         self.with_prepared_frame(expr.source, |this| {
             let (callee, arguments, context, interface_exit) =
                 match this.prepare_call(expr, environment)? {

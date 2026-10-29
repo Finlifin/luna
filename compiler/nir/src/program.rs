@@ -1294,6 +1294,9 @@ pub enum ExprKind {
         else_branch: Option<Box<Expr>>,
     },
     Return(Option<Box<Expr>>),
+    /// Type-directed application. A NormalFormFunction callee forms an opaque
+    /// type at comptime; it never invokes the head's body. Both calling forms
+    /// retain the callee and source-ordered inputs in the same traversal shape.
     Call {
         callee: Box<Expr>,
         /// Source-ordered explicit inputs followed by missing defaults in
@@ -3170,7 +3173,12 @@ impl fmt::Display for ExprKind {
                 arguments,
                 parameter_bindings,
             } => {
-                write!(f, "(call (callee {callee}) (parameter-bindings")?;
+                let kind = if callee.ty.is_normal_form_callable() {
+                    "normal-form-apply"
+                } else {
+                    "call"
+                };
+                write!(f, "({kind} (callee {callee}) (parameter-bindings")?;
                 for binding in parameter_bindings {
                     write!(f, " {binding}")?;
                 }

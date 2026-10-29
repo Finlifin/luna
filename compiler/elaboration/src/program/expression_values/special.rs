@@ -309,6 +309,14 @@ impl Checker<'_, '_> {
             }
         }
         if let H::NFApplication(head, arguments) = &expr.kind {
+            if !matches!(head.kind, H::ResolvedDef { .. }) {
+                let callee = self.expr(head, None)?;
+                if callee.ty.is_normal_form_callable() {
+                    return self
+                        .dynamic_normal_form_application(expr, callee, arguments, expected)
+                        .map(Some);
+                }
+            }
             if let Some(owner) = self.normal_form_constant_target(head)? {
                 return self
                     .normal_type_expression(expr, owner, arguments, expected)

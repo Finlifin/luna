@@ -324,6 +324,26 @@ fn normal_form_callable_aliases_preserve_collected_inputs() {
         comptime fn Direct() -> Type { Bundle<.Es = [bool, Type]> }
         comptime fn Named() -> Type { Alias<.Es = [bool, Type]> }
         comptime fn Collected() -> Type { Alias<bool, Type> }
+        comptime fn Dynamic() -> Type {
+            const factory = Get();
+            factory<bool, Type>
+        }
+        comptime fn DynamicPacket() -> Type {
+            const factory = Get();
+            let elements:List<Type> = [bool, Type];
+            factory<...elements>
+        }
+        pure comptime fn Flags<...values:List<bool>> -> Type { bool }
+        comptime fn flag_factory() -> pure comptime fn<...values:List<bool>> -> Type { Flags }
+        comptime fn DirectFlags() -> Type { Flags<.values = [true, false]> }
+        comptime fn DynamicFlags() -> Type {
+            const factory = flag_factory();
+            factory<true, false>
+        }
+        pure comptime fn Values<T, ...values:List<T>> -> Type { bool }
+        comptime fn value_factory() -> pure comptime fn<T:Type, ...values:List<T>> -> Type { Values }
+        comptime fn DirectValues() -> Type { Values<bool, .values = [true, false]> }
+        comptime fn DynamicValues() -> Type { value_factory()<bool, true, false> }
     ",
     );
     let direct = sandbox.run(&[
@@ -334,7 +354,7 @@ fn normal_form_callable_aliases_preserve_collected_inputs() {
         "Direct",
     ]);
     let expected = success(&direct);
-    for entry in ["Named", "Collected"] {
+    for entry in ["Named", "Collected", "Dynamic", "DynamicPacket"] {
         let output = sandbox.run(&[
             "input.fl",
             "--meta-list-type",
@@ -344,6 +364,102 @@ fn normal_form_callable_aliases_preserve_collected_inputs() {
         ]);
         assert_eq!(success(&output), expected);
     }
+    let direct = sandbox.run(&[
+        "input.fl",
+        "--meta-list-type",
+        "input.List",
+        "--invoke-comptime",
+        "DirectFlags",
+    ]);
+    let dynamic = sandbox.run(&[
+        "input.fl",
+        "--meta-list-type",
+        "input.List",
+        "--invoke-comptime",
+        "DynamicFlags",
+    ]);
+    assert_eq!(success(&direct), success(&dynamic));
+    let direct = sandbox.run(&[
+        "input.fl",
+        "--meta-list-type",
+        "input.List",
+        "--invoke-comptime",
+        "DirectValues",
+    ]);
+    let dynamic = sandbox.run(&[
+        "input.fl",
+        "--meta-list-type",
+        "input.List",
+        "--invoke-comptime",
+        "DynamicValues",
+    ]);
+    assert_eq!(success(&direct), success(&dynamic));
+}
+
+#[test]
+fn normal_form_dynamic_applications_preserve_selection_order_and_contracts() {
+    let sandbox = Sandbox::new();
+    let source = "
+        typealias Type = .Type'builtin;
+        typealias u8 = .u8'builtin;
+        pure comptime fn Identity<T> -> Type { T }
+        pure comptime fn Alternate<T> -> Type { T }
+        pure comptime fn Limited<T> -> Type where requires T == bool { T }
+        comptime fn select(flag:bool) -> pure comptime fn<Type> -> Type {
+            if flag { Identity } else { Alternate }
+        }
+        comptime fn Apply(factory:pure comptime fn<Type> -> Type, input:Type) -> Type {
+            factory<input>
+        }
+        comptime fn Local(flag:bool) -> Type {
+            const factory = select(flag);
+            factory<bool>
+        }
+        comptime fn First() -> Type { Local(true) }
+        comptime fn Second() -> Type { Local(false) }
+        comptime fn DirectFirst() -> Type { Identity<bool> }
+        comptime fn DirectSecond() -> Type { Alternate<bool> }
+        comptime fn Parameter() -> Type { Apply(select(true), bool) }
+        typealias Selected = select(true)<bool>;
+        comptime fn ThroughType() -> Type { Selected }
+        comptime fn Ordered() -> Type {
+            var count:u8 = 0;
+            let result = (do {count = count + 1; Identity})<do {count = count * 2; bool}>;
+            if count == 2 {result} else {Alternate<bool>}
+        }
+        pure comptime fn Tagged<T, value:T> -> Type { T }
+        comptime fn tag_factory() -> pure comptime fn<T:Type, value:T> -> Type { Tagged }
+        comptime fn Dependent() -> Type { tag_factory()<bool, true> }
+        comptime fn DirectDependent() -> Type { Tagged<bool, true> }
+    ";
+    sandbox.write("input.fl", source);
+    let first = sandbox.run(&["input.fl", "--invoke-comptime", "DirectFirst"]);
+    let second = sandbox.run(&["input.fl", "--invoke-comptime", "DirectSecond"]);
+    assert_ne!(success(&first), success(&second));
+    for (entry, expected) in [
+        ("First", &first),
+        ("Second", &second),
+        ("Parameter", &first),
+        ("ThroughType", &first),
+        ("Ordered", &first),
+    ] {
+        let output = sandbox.run(&["input.fl", "--invoke-comptime", entry]);
+        assert_eq!(success(&output), success(expected), "{entry}");
+    }
+    let dump = sandbox.run(&["input.fl", "--emit", "nir"]);
+    assert!(success(&dump).contains("(normal-form-apply "));
+    let dependent = sandbox.run(&["input.fl", "--invoke-comptime", "Dependent"]);
+    let direct = sandbox.run(&["input.fl", "--invoke-comptime", "DirectDependent"]);
+    assert_eq!(success(&dependent), success(&direct));
+    sandbox.write(
+        "input.fl",
+        &format!("{source}\ncomptime fn Rejected() -> Type {{ Apply(Limited, Type) }}"),
+    );
+    let output = sandbox.run(&["input.fl", "--invoke-comptime", "Rejected"]);
+    failure(&output, 1);
+    assert!(!details(&output).contains("panicked"));
+    let output = sandbox.run(&["input.fl", "--invoke-comptime", "First"]);
+    success(&output);
 }
 
 #[test]

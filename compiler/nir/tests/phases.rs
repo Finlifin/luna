@@ -75,6 +75,39 @@ fn normal_form_values_require_matching_metadata_and_comptime_storage() {
         ..Default::default()
     };
     nir::phases::validate(&package).unwrap();
+    let mut application = package.clone();
+    let callee = application.functions[0].body.clone();
+    application.functions[0].body = Expr {
+        source: callee.source,
+        ty: Term::Primitive(Primitive::Type),
+        kind: K::Call {
+            callee: Box::new(callee),
+            arguments: vec![],
+            parameter_bindings: vec![],
+        },
+    };
+    application.functions[0].signature = Term::Function {
+        parameters: vec![],
+        result: Box::new(Term::Primitive(Primitive::Type)),
+    };
+    nir::phases::validate(&application).unwrap();
+    assert!(
+        application.functions[0]
+            .body
+            .to_string()
+            .contains("(normal-form-apply ")
+    );
+    let mut invalid = application.clone();
+    invalid.functions[0].body.ty = Term::Primitive(Primitive::Bool);
+    assert!(nir::phases::validate(&invalid).is_err());
+    let mut invalid = application;
+    if let K::Call {
+        parameter_bindings, ..
+    } = &mut invalid.functions[0].body.kind
+    {
+        parameter_bindings.push(LocalId { owner: 1, index: 0 });
+    }
+    assert!(nir::phases::validate(&invalid).is_err());
     let mut bad = package.clone();
     bad.normal_forms.clear();
     assert!(nir::phases::validate(&bad).is_err());
