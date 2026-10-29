@@ -33,7 +33,8 @@ class Example:
         primitive_consumers = [name for name, path in self.dependencies
                                if path in ('library/meta/lib.fl',
                                            'library/builtin/types/option.fl',
-                                           'library/builtin/types/result.fl')]
+                                           'library/builtin/types/result.fl',
+                                           'library/builtin/protocols/iterator.fl')]
         if primitive_consumers:
             primitives = next((identities[name] for name, path in self.dependencies
                                if path == 'library/builtin/primitives.fl'), None)

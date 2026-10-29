@@ -54,11 +54,7 @@ fn cli_accepts_one_explicit_iterator_binding() {
 
 #[test]
 fn repository_iterator_is_a_valid_push_protocol() {
-    check(
-        include_str!("../../../library/builtin/protocols/iterator.fl"),
-        "input.Iterator",
-    )
-    .unwrap();
+    check(&include!("support/iterator_source.rs"), "input.Iterator").unwrap();
 }
 
 #[test]

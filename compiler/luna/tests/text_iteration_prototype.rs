@@ -9,7 +9,7 @@ fn compile(body: &str) -> nir::program::Package {
         "{}\n{}\nmod iterator {{ {} }}\nmod text_bytes {{ {} }}\nmod text_iteration {{ {} }}\n{}",
         include_str!("../../../library/builtin/primitives.fl"),
         include_str!("../../../library/builtin/protocols/resources.fl"),
-        include_str!("../../../library/builtin/protocols/iterator.fl"),
+        &include!("support/iterator_source.rs"),
         include_str!("../../../library/builtin/text_impl/bytes.fl"),
         include_str!("../../../development/library-prototypes/builtin/text_iteration.fl"),
         body

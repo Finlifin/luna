@@ -57,6 +57,10 @@ fn source_configured_iterator_runs_ordinary_for_from_prelude() {
         "pub use iterator.*; pub use resources.*; pub mod prelude {pub use iterator.Iterator;}",
     );
     input.write(
+        "library/builtin/primitives.fl",
+        include_str!("../../../library/builtin/primitives.fl"),
+    );
+    input.write(
         "library/builtin/iterator.fl",
         include_str!("../../../library/builtin/protocols/iterator.fl"),
     );

@@ -192,3 +192,60 @@ test flatten_short_circuit_retires_outer_remainder {
         .as(Iterator).any(|item| item.value);
     assumes found and first_retired and second_retired;
 }
+
+
+{- Separators are produced lazily; no leading or trailing factory calls. -}
+test interspersed_order_and_factory_calls {
+    var calls: usize = 0;
+    var outputs: usize = 0;
+    let counter = calls.ref;
+    let output = outputs.ref;
+    let first: ?bool = true;
+    let second: ?bool = true;
+    let third: ?bool = true;
+    first.as(Iterator).chain(second).as(Iterator).chain(third).as(Iterator)
+        .intersperse_with(|| {
+            assumes counter.* < 2;
+            counter.* = counter.* + 1;
+            false
+        }).as(Iterator).foreach(|value| {
+            assumes output.* < 5;
+            assumes value == (output.* == 0 or output.* == 2 or output.* == 4);
+            output.* = output.* + 1;
+        });
+    assumes calls == 2 and outputs == 5;
+    let empty: ?bool = null;
+    empty.as(Iterator).intersperse_with(|| {assumes false; false})
+        .as(Iterator).foreach(|value| {assumes false;});
+    let singleton: ?bool = true;
+    let found = singleton.as(Iterator).intersperse_with(|| {assumes false; false})
+        .as(Iterator).last();
+    let correct = found matches true?;
+    assumes correct;
+}
+
+test separator_exit_retires_pending_items {
+    var first_retired = false;
+    var second_retired = false;
+    var third_retired = false;
+    var separator_retired = false;
+    let separator = separator_retired.ref;
+    let first: ?Watch = Watch {seen: first_retired.ref, value: false};
+    let second: ?Watch = Watch {seen: second_retired.ref, value: false};
+    let third: ?Watch = Watch {seen: third_retired.ref, value: false};
+    let found = first.as(Iterator).chain(second).as(Iterator).chain(third).as(Iterator)
+        .intersperse_with(|| Watch {seen: separator, value: true})
+        .as(Iterator).any(|value| value.value.*);
+    assumes found and first_retired and second_retired and third_retired and separator_retired;
+}
+
+test unused_separator_factory_retires_capture {
+    var retired = false;
+    let captured = Watch {seen: retired.ref, value: true};
+    let empty: ?bool = null;
+    empty.as(Iterator).intersperse_with(|| {
+        assumes false;
+        captured.value
+    }).as(Iterator).foreach(|value| {assumes false;});
+    assumes retired;
+}

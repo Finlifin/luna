@@ -64,3 +64,31 @@ without introducing a mapper closure. `FlattenIterator` is exported from builtin
 checks ordinary interpretation, joint expansion with no remaining handler/request
 nodes, and LLVM O0/O3 execution. The sysroot iteration stage also checks the public
 interface and resource cleanup without pasting library source into the test.
+
+## Generated separators
+
+`Iterator.intersperse_with(make)` produces one separator between consecutive
+items by calling `make: fn() -> Item`. Empty and singleton inputs never call
+the factory; complete consumption of n nonempty items calls it n - 1 times.
+The adapter preserves source order and has no leading or trailing separator.
+Neither the source items nor separators need Clone or Copy.
+
+```flurry
+let first: ?bool = true;
+let second: ?bool = true;
+first.as(Iterator).chain(second).as(Iterator)
+    .intersperse_with(|| false).as(Iterator)
+    .foreach(|value| { {- Receives true, false, true. -} });
+```
+
+The source produces its next item before the intervening separator is made.
+If the consumer exits at that separator, the already produced item is retired,
+not delivered; unproduced source resources and the factory environment are
+also retired through ordinary cleanup. An unused factory's owned captures are
+retired even for empty input. This is an inline adapter using `emit_item` and
+joint expansion, with no resumable iterator state or buffered stream.
+
+`IntersperseWithIterator` is exported from builtin. The `sysroot-iteration`
+stage covers order, factory counts, empty/singleton input, early-exit resource
+cleanup, and unused factory captures. The source regression also rejects
+factory result/arity mismatches and checks expansion plus LLVM O0/O3 execution.
