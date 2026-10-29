@@ -593,6 +593,17 @@ impl<'a> Interpreter<'a> {
                     frame.slots[*value] =
                         Some(self.finish_compiled_normal_container(container, source)?);
                 }
+                Op::NormalResult {
+                    destination,
+                    value,
+                    diverges,
+                } => {
+                    if *diverges {
+                        return Err(self.failure(ErrorKind::Type, Some(source)));
+                    }
+                    let value = frame.slots[*value].take().ok_or_else(missing)?;
+                    frame.slots[*destination] = Some(value);
+                }
                 Op::NormalLiteral {
                     constructor,
                     destination,

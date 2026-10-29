@@ -700,3 +700,175 @@ fn contextual_container_checks_do_not_reorder_operand_effects() {
         assert_eq!(env[&trace], Value::Bool(false));
     }
 }
+
+#[test]
+fn contextual_choices_prepare_both_branches_and_clean_selected_blocks() {
+    let package = container_package();
+    let flag = LocalId {
+        owner: 21,
+        index: 0,
+    };
+    let observed = LocalId {
+        owner: 21,
+        index: 1,
+    };
+    let selected = LocalId {
+        owner: 21,
+        index: 2,
+    };
+    let temporary = LocalId {
+        owner: 21,
+        index: 3,
+    };
+    let set = |binding, value| {
+        expr(
+            Primitive::Void,
+            K::Assign {
+                place: Place {
+                    root: binding,
+                    fields: vec![],
+                },
+                value: Box::new(expr(Primitive::Bool, K::Literal(Literal::Bool(value)))),
+            },
+        )
+    };
+    let branch = |choice, invalid| A::Block {
+        source: SOURCE,
+        statements: vec![
+            expr(
+                Primitive::Void,
+                K::Let {
+                    binding: temporary,
+                    value: Box::new(expr(Primitive::Bool, K::Literal(Literal::Bool(choice)))),
+                },
+            ),
+            set(selected, choice),
+        ],
+        result: Some(Box::new(A::Integer {
+            source: SOURCE,
+            spelling: if invalid {
+                "256"
+            } else if choice {
+                "17"
+            } else {
+                "23"
+            }
+            .into(),
+            negative: false,
+        })),
+    };
+    for compiled in [false, true] {
+        for invalid in [false, true] {
+            for choice in [false, true] {
+                let body = container_body(
+                    Term::Primitive(Primitive::U8),
+                    A::If {
+                        source: SOURCE,
+                        condition: expr(
+                            Primitive::Bool,
+                            K::Block {
+                                statements: vec![set(observed, true)],
+                                result: Some(Box::new(expr(Primitive::Bool, K::Local(flag)))),
+                            },
+                        ),
+                        then_input: Box::new(branch(true, false)),
+                        else_input: Box::new(branch(false, invalid)),
+                    },
+                );
+                let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+                let mut env = Environment::from([
+                    (flag, Value::Bool(choice)),
+                    (observed, Value::Bool(false)),
+                    (selected, Value::Bool(!choice)),
+                ]);
+                let result = if compiled {
+                    let code = Arc::new(comptime_compiler::compile(&body, &mut 100000).unwrap());
+                    vm.execute_code(&code, &mut env)
+                } else {
+                    vm.eval(&body, &mut env)
+                };
+                if invalid {
+                    assert_eq!(result.unwrap_err().kind, ErrorKind::Type);
+                    assert_eq!(env[&observed], Value::Bool(false));
+                    assert_eq!(env[&selected], Value::Bool(!choice));
+                } else {
+                    let Flow::Value(value) = result.unwrap() else {
+                        panic!("value")
+                    };
+                    assert_eq!(
+                        value,
+                        Value::Type(Term::NormalForm {
+                            head: DeclarationId {
+                                package: 12,
+                                local: 1
+                            },
+                            sort: nir::Sort::Type,
+                            arguments: vec![
+                                Term::Primitive(Primitive::U8),
+                                Term::Integer(comptime_runtime::Integer::from_u128(if choice {
+                                    17
+                                } else {
+                                    23
+                                }))
+                            ],
+                        })
+                    );
+                    assert_eq!(env[&observed], Value::Bool(true));
+                    assert_eq!(env[&selected], Value::Bool(choice));
+                }
+                assert!(!env.contains_key(&temporary));
+            }
+        }
+    }
+}
+
+#[test]
+fn contextual_blocks_preserve_unit_and_early_return_boundaries() {
+    let package = container_package();
+    let temporary = LocalId {
+        owner: 22,
+        index: 0,
+    };
+    for compiled in [false, true] {
+        for early in [false, true] {
+            let mut statements = vec![expr(
+                Primitive::Void,
+                K::Let {
+                    binding: temporary,
+                    value: Box::new(expr(Primitive::Bool, K::Literal(Literal::Bool(true)))),
+                },
+            )];
+            if early {
+                statements.push(expr(
+                    Primitive::Never,
+                    K::Return(Some(Box::new(expr(Primitive::Bool, K::Local(temporary))))),
+                ));
+            }
+            let mut body = container_body(
+                Term::Primitive(Primitive::Void),
+                A::Block {
+                    source: SOURCE,
+                    statements,
+                    result: None,
+                },
+            );
+            if early {
+                body.ty = Term::Primitive(Primitive::Never);
+            }
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            let mut env = Environment::new();
+            let result = if compiled {
+                let code = Arc::new(comptime_compiler::compile(&body, &mut 100000).unwrap());
+                vm.execute_code(&code, &mut env)
+            } else {
+                vm.eval(&body, &mut env)
+            };
+            if early {
+                assert!(matches!(result.unwrap(), Flow::Return(Value::Bool(true))));
+            } else {
+                assert!(matches!(result.unwrap(), Flow::Value(Value::Type(_))));
+            }
+            assert!(env.is_empty());
+        }
+    }
+}

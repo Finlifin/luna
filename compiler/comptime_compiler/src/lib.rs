@@ -55,6 +55,11 @@ pub enum Op {
         value: Register,
         diverges: bool,
     },
+    NormalResult {
+        destination: Register,
+        value: Register,
+        diverges: bool,
+    },
     NormalLiteral {
         constructor: Register,
         destination: Register,
@@ -466,6 +471,14 @@ impl fmt::Display for Program {
                 } => write!(
                     f,
                     "(finish-normal-container %{constructor} %{value} (diverges {diverges}))"
+                )?,
+                Op::NormalResult {
+                    destination,
+                    value,
+                    diverges,
+                } => write!(
+                    f,
+                    "(normal-result %{destination} %{value} (diverges {diverges}))"
                 )?,
                 Op::NormalLiteral {
                     constructor,
@@ -1124,7 +1137,11 @@ pub fn compile(body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
                         let mut inputs = Vec::with_capacity(arguments.len());
                         for argument in arguments {
                             inputs.push(normal_types::compile_input(
-                                argument, dst, &mut fresh, fuel,
+                                argument,
+                                dst,
+                                &mut fresh,
+                                fuel,
+                                &mut labels,
                             )?);
                         }
                         let constructor = Arc::new(normal_types::Constructor {

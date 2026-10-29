@@ -2470,3 +2470,45 @@ performance gain.
 
 Final managed `cargo fmt --all -- --check` passed, exit 0,
 `/tmp/luna-tools-27rpqgl6/result.json`; `git diff --check` passed.
+
+## Compile contextual normal-form choices and blocks
+
+Input shapes now include if and block nodes. Their domain preparation validates
+both branches, condition types and empty-block result contracts before operand
+execution, retaining the existing contextual typing order. The compiler emits
+ordinary branch labels and scope tasks via the bounded worklist. Only the selected
+branch executes. Result-transfer instructions move values between registers and
+reject malformed Never fallthrough at contextual boundaries.
+
+Blocks use the VM's existing scope/unwind machinery, including normal completion
+and early return. Local bindings do not become part of reusable shape metadata.
+Shape dumps include branch domains and children, and code dumps retain explicit
+branch/result/scope instructions. No opcode evaluates an NIR tree.
+
+Validation from `/home/fin/luna` (successful runs exit 0):
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-2ntjus0z/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_types`:
+  `/tmp/luna-tools-n9sjb1in/result.json`. Dynamic-domain conditional literals,
+  nested blocks and early return execute as bytecode and produce explicit
+  expected NF terms. An unselected overflowing u8 branch is still rejected.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_clause_inputs --test builder_invocations --test execution`:
+  `/tmp/luna-tools-gl7ro80a/result.json`.
+- After strengthening overflow checks to assert ErrorKind::Type, reran
+  `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib contextual_choices_prepare`
+  and `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_types contextual_normal_control_flow`:
+  `/tmp/luna-tools-wsgxjgy1/result.json` and
+  `/tmp/luna-tools-_3h02qs_/result.json`. Differential cases verify condition
+  effects, selected branch effects, rejection before effects, local cleanup,
+  void block completion and early transfer.
+- The initial integration check found a missing label-table argument at the
+  compile_input caller (`/tmp/luna-tools-14mx2nms/result.json`); it was connected
+  before successful compiler/interpreter and source checks.
+
+Contextual match and explicit preparation/reordering plans remain unsupported
+by bytecode and select tree execution before effects. No complete-plan support
+or measured performance gain is claimed by this stage.
+
+Final managed `cargo fmt --all -- --check` passed, exit 0,
+`/tmp/luna-tools-cky4cgee/result.json`; `git diff --check` passed.

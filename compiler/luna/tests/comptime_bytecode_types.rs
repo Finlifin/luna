@@ -344,3 +344,72 @@ fn contextual_normal_containers_execute_with_ordinary_list_identity() {
         assert_eq!(vm.bytecode_invocations() - before, 1);
     }
 }
+
+#[test]
+fn contextual_normal_control_flow_executes_in_the_vm() {
+    let package = support::compile(
+        "typealias Type = .Type'builtin;
+        pure comptime fn Payload<T, value: T> -> Type { T }
+        comptime fn Conditional(input: Type, flag: bool) -> Type {
+            Payload<input, if flag { 17 } else { do { let local = false; 23 } }>
+        }
+        comptime fn Limited(input: Type, flag: bool) -> Type {
+            Payload<input, if flag { 17 } else { 256 }>
+        }
+        comptime fn Early(input: Type) -> Type {
+            Payload<input, do { return bool; 17 }>
+        }",
+    );
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    for primitive in [Primitive::U8, Primitive::Integer] {
+        for flag in [false, true] {
+            let before = vm.bytecode_invocations();
+            let result = vm
+                .invoke(
+                    support::id(&package, "Conditional"),
+                    vec![Value::Type(Term::Primitive(primitive)), Value::Bool(flag)],
+                )
+                .unwrap();
+            assert_eq!(
+                result,
+                Value::Type(Term::NormalForm {
+                    head: support::id(&package, "Payload"),
+                    sort: nir::Sort::Type,
+                    arguments: vec![
+                        Term::Primitive(primitive),
+                        Term::Integer(comptime_runtime::Integer::from_u128(if flag {
+                            17
+                        } else {
+                            23
+                        }))
+                    ],
+                })
+            );
+            assert_eq!(vm.bytecode_invocations() - before, 1);
+        }
+    }
+    let before = vm.bytecode_invocations();
+    assert_eq!(
+        vm.invoke(
+            support::id(&package, "Limited"),
+            vec![
+                Value::Type(Term::Primitive(Primitive::U8)),
+                Value::Bool(true)
+            ],
+        )
+        .unwrap_err()
+        .kind,
+        ErrorKind::Type
+    );
+    assert_eq!(vm.bytecode_invocations() - before, 1);
+    let before = vm.bytecode_invocations();
+    assert_eq!(
+        vm.invoke(
+            support::id(&package, "Early"),
+            vec![Value::Type(Term::Primitive(Primitive::U8))]
+        )
+        .unwrap(),
+        Value::Type(Term::Primitive(Primitive::Bool))
+    );
+    assert_eq!(vm.bytecode_invocations() - before, 1);
+}

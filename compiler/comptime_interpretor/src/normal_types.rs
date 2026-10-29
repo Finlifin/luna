@@ -119,6 +119,36 @@ impl Interpreter<'_> {
         self.tick(Some(source))?;
         let value =
             match &shape.kind {
+                ShapeKind::Choice {
+                    condition,
+                    condition_source,
+                    then_input,
+                    else_input,
+                } => {
+                    if !matches!(
+                        condition,
+                        Term::Primitive(Primitive::Bool | Primitive::Never)
+                    ) {
+                        return Err(self.failure(ErrorKind::Type, Some(*condition_source)));
+                    }
+                    self.prepare_normal_shape(then_input, expected, prepared, depth + 1)?;
+                    self.prepare_normal_shape(else_input, expected, prepared, depth + 1)?;
+                    return Ok(());
+                }
+                ShapeKind::Block { result } => {
+                    if let Some(result) = result {
+                        self.prepare_normal_shape(result, expected, prepared, depth + 1)?;
+                    } else if !shape.diverges {
+                        self.check_type_contract(
+                            &nir::program::TypePredicate::Equal(
+                                Term::Primitive(Primitive::Void),
+                                expected.clone(),
+                            ),
+                            source,
+                        )?;
+                    }
+                    return Ok(());
+                }
                 ShapeKind::Scalar(Input::Value(ty)) => {
                     self.prepare_normal_value_type(ty, expected, source)?;
                     return Ok(());
