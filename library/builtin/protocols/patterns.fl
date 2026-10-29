@@ -4,14 +4,14 @@
     Copy to its payload. Ordinary call and resource contracts remain required.
 -}
 pub trait ListPatternView {
-    assoc Element: .Type'builtin;
-    fn list_pattern_view_get_len(*self) -> .usize'builtin;
-    fn list_pattern_view_get_element(*self, comptime index: .usize'builtin) -> Element;
+    assoc Element: Type;
+    fn list_pattern_view_get_len(*self) -> usize;
+    fn list_pattern_view_get_element(*self, comptime index: usize) -> Element;
 
     ^attrs.comptime_phase
-    assoc ElementComptime: .Type'builtin;
+    assoc ElementComptime: Type;
     ^attrs.comptime_phase
-    comptime fn list_pattern_view_get_len_comptime(self) -> .usize'builtin;
+    comptime fn list_pattern_view_get_len_comptime(self) -> usize;
     ^attrs.comptime_phase
-    comptime fn list_pattern_view_get_element_comptime(self, index: .usize'builtin) -> ElementComptime;
+    comptime fn list_pattern_view_get_element_comptime(self, index: usize) -> ElementComptime;
 }

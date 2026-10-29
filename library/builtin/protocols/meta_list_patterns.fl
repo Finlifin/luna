@@ -2,12 +2,12 @@ use patterns.ListPatternView;
 
 {- List values and elements stay in the comptime phase. -}
 comptime impl ListPatternView for meta.List<T> where T {
-    assoc Element: .Type'builtin = T;
-    assoc ElementComptime: .Type'builtin = T;
-    comptime fn list_pattern_view_get_len_comptime(self) -> .usize'builtin {
+    assoc Element: Type = T;
+    assoc ElementComptime: Type = T;
+    comptime fn list_pattern_view_get_len_comptime(self) -> usize {
         meta.to_usize(self.length())
     }
-    comptime fn list_pattern_view_get_element_comptime(self, index: .usize'builtin) -> T {
+    comptime fn list_pattern_view_get_element_comptime(self, index: usize) -> T {
         -- A local index lets the VM copy only the selected element.
         let position = meta.from_usize(index);
         self[position]
