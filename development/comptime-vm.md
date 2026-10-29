@@ -1763,3 +1763,47 @@ tests (`/tmp/luna-tools-tmm7ub7x/result.json`); the correct target above is
 - Final `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_aggregates`
   after binding Type explicitly in the bootstrap fixture: 3 passed, exit 0,
   `/tmp/luna-tools-ymi01ja5/result.json`.
+
+## Type equality in bytecode
+
+TypeEqual now has explicit contract preparation, operand-to-Type-description
+validation and proof instructions. The left value is validated before the right
+operand executes. Both carriers share `type_equality.rs`, retaining the existing
+host solver interface and metered proof work: structural identity proves true;
+otherwise equality and its negation are asked separately. Neither Unknown nor
+Rejected alone proves inequality. An unresolved comparison reports
+TypeContractUnresolved, and exhausted proof fuel stops before another query.
+Normal-form heads remain opaque; no body unfolding or value-cache expansion was
+introduced. The Object source regression now includes EntryType equality in the
+same bytecode invocation.
+
+Normal-form construction itself still uses its existing input-plan interpreter.
+An initial source test incorrectly expected its caller and comparison callee to
+both compile; the count exposed the caller fallback. The final test constructs
+an opaque Type first and directly verifies that its comparison compiles, remains
+unresolved, and permits subsequent successful invocations. Existing factory
+integration tests also retain the construction-plus-comparison path. New compiler
+metadata uses the ordinary bounded copy mechanism and S-expression Display.
+
+Validation from `/home/fin/luna`, final commands exited 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  existing 233 tests passed after implementation extraction;
+  `/tmp/luna-tools-6w7zi4oa/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib bytecode::type_equality_tests`:
+  3 new tests passed across both carriers, including proof query order, rejection
+  versus negation, malformed operands, budget exhaustion and recovery;
+  `/tmp/luna-tools-_wocfq37/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler`:
+  14 passed, including instruction ordering, bounded compilation and stable dump;
+  `/tmp/luna-tools-r6_f3rs5/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_types --test comptime_bytecode_aggregates --test execution --test library_meta_objects`:
+  source types 1, aggregates 3, execution 1365 and Object library 25 passed;
+  `/tmp/luna-tools-_e924lbn/result.json`.
+
+Initial test-only failures were corrected: Rust enum/assignment field spelling
+(`/tmp/luna-tools-v1cfsd2r/result.json`), an expected dump missing primitive nodes
+(`/tmp/luna-tools-okhdl0zu/result.json`), and the normal-form caller's execution
+count (`/tmp/luna-tools-dkz8upix/result.json`). No semantic checks were relaxed.
+- Final `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0, `/tmp/luna-tools-xbf_o692/result.json`; `git diff --check` also passed.

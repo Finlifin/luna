@@ -335,6 +335,28 @@ impl<'a> Interpreter<'a> {
                 source: Some(source),
             };
             match &instruction.op {
+                Op::PrepareTypeEqual { ty, inputs } => {
+                    self.prepare_type_equal(ty, &inputs[0], &inputs[1], source)?
+                }
+                Op::TypeDescription(slot) => {
+                    let value = frame.slots[*slot].take().ok_or_else(missing)?;
+                    frame.slots[*slot] =
+                        Some(Value::Type(self.type_description_term(value, source)?));
+                }
+                Op::TypeEqual {
+                    destination,
+                    left,
+                    right,
+                } => {
+                    let Some(Value::Type(left)) = frame.slots[*left].take() else {
+                        return Err(self.failure(ErrorKind::Type, Some(source)));
+                    };
+                    let Some(Value::Type(right)) = frame.slots[*right].take() else {
+                        return Err(self.failure(ErrorKind::Type, Some(source)));
+                    };
+                    frame.slots[*destination] =
+                        Some(self.complete_type_equal(left, right, source)?);
+                }
                 Op::PrepareObjectAccess(access) => {
                     use comptime_compiler::objects::ObjectOperation;
                     match access.operation {
@@ -2249,3 +2271,7 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "bytecode_type_equality.rs"]
+mod type_equality_tests;

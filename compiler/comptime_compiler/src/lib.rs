@@ -30,6 +30,16 @@ impl fmt::Display for ErrorConversion {
 
 #[derive(Debug)]
 pub enum Op {
+    PrepareTypeEqual {
+        ty: Arc<Term>,
+        inputs: [Arc<Term>; 2],
+    },
+    TypeDescription(Register),
+    TypeEqual {
+        destination: Register,
+        left: Register,
+        right: Register,
+    },
     PrepareObjectAccess(Arc<objects::ObjectAccess>),
     ObjectAccess {
         destination: Register,
@@ -249,6 +259,17 @@ impl fmt::Display for Program {
                 instruction.source.start, instruction.source.end
             )?;
             match &instruction.op {
+                Op::PrepareTypeEqual { ty, inputs } => write!(
+                    f,
+                    "(prepare-type-equal (type {ty}) (left {}) (right {}))",
+                    inputs[0], inputs[1]
+                )?,
+                Op::TypeDescription(value) => write!(f, "(type-description %{value})")?,
+                Op::TypeEqual {
+                    destination,
+                    left,
+                    right,
+                } => write!(f, "(type-equal %{destination} %{left} %{right})")?,
                 Op::PrepareObjectAccess(access) => write!(f, "(prepare-object-access {access})")?,
                 Op::ObjectAccess {
                     destination,
@@ -846,6 +867,32 @@ pub fn compile(body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
                         for (field, slot) in fields.iter().zip(slots).rev() {
                             work.push(Work::Expression(field, slot));
                         }
+                    }
+                    K::TypeEqual(left, right) => {
+                        let left_slot = fresh();
+                        let right_slot = fresh();
+                        emit(
+                            &mut work,
+                            Op::TypeEqual {
+                                destination: dst,
+                                left: left_slot,
+                                right: right_slot,
+                            },
+                        );
+                        emit(&mut work, Op::TypeDescription(right_slot));
+                        work.push(Work::Expression(right, right_slot));
+                        emit(&mut work, Op::TypeDescription(left_slot));
+                        work.push(Work::Expression(left, left_slot));
+                        emit(
+                            &mut work,
+                            Op::PrepareTypeEqual {
+                                ty: Arc::new(copy_term(&expr.ty, fuel, source)?),
+                                inputs: [
+                                    Arc::new(copy_term(&left.ty, fuel, source)?),
+                                    Arc::new(copy_term(&right.ty, fuel, source)?),
+                                ],
+                            },
+                        );
                     }
                     K::ObjectQuery { subject, .. } | K::ObjectEdit { subject, .. } => {
                         let operation = match &expr.kind {

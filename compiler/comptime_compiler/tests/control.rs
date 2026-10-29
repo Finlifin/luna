@@ -359,3 +359,45 @@ fn ordered_object_dump_escapes_keys_and_retains_duplicate_positions() {
     assert_eq!(dump.matches("(check-object-entry ").count(), 3);
     assert_eq!(dump, compile(&body, &mut 1000).unwrap().to_string());
 }
+
+#[test]
+fn type_comparison_validates_each_operand_before_the_next() {
+    use comptime_compiler::Op;
+    let type_value = Expr {
+        source: SourceRange { start: 3, end: 4 },
+        ty: Term::Primitive(Primitive::Type),
+        kind: K::TypeValue(Term::Primitive(Primitive::Bool)),
+    };
+    let body = Expr {
+        source: SourceRange { start: 1, end: 6 },
+        ty: Term::Primitive(Primitive::Bool),
+        kind: K::TypeEqual(Box::new(type_value.clone()), Box::new(type_value)),
+    };
+    let code = compile(&body, &mut 1000).unwrap();
+    let operations = code
+        .instructions()
+        .iter()
+        .filter_map(|instruction| match instruction.op {
+            Op::PrepareTypeEqual { .. } => Some("prepare"),
+            Op::Constant { .. } => Some("operand"),
+            Op::TypeDescription(_) => Some("description"),
+            Op::TypeEqual { .. } => Some("compare"),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        operations,
+        [
+            "prepare",
+            "operand",
+            "description",
+            "operand",
+            "description",
+            "compare"
+        ]
+    );
+    let dump = code.to_string();
+    assert!(dump.contains("(prepare-type-equal (type (primitive bool)) (left (primitive Type)) (right (primitive Type)))"), "{dump}");
+    assert_eq!(dump, compile(&body, &mut 1000).unwrap().to_string());
+    assert!(matches!(compile(&body, &mut 1), Err(Error::Budget(_))));
+}

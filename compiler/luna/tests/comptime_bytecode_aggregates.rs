@@ -105,6 +105,7 @@ fn object_queries_and_edits_stay_in_bytecode_and_preserve_snapshots() {
             let removed = remove(replaced, 1);
             let joined = concat(removed, saved);
             length(joined) == 4
+                and EntryType(joined, 0) == EntryType(joined, 1)
                 and (key(joined, 0) matches .flag?)
                 and (key(joined, 1) matches null)
                 and (value(bool, joined, 2) matches true?)
