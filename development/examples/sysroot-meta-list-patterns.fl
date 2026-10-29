@@ -20,7 +20,7 @@ struct Producer {calls: Integer}
 
 impl Producer {
     comptime fn produce(self) -> meta.List<Integer> {
-        self.calls = self.calls + 1;
+        self.calls += 1;
         [9]
     }
 }

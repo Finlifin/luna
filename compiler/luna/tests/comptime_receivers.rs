@@ -94,3 +94,47 @@ fn trait_receivers_write_back_to_the_selected_subject() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn compound_receiver_fields_preserve_old_operand_and_rhs_writes() {
+    let package = support::compile(
+        "typealias Integer = .Integer'builtin;
+        struct Counter {value: Integer, calls: Integer}
+        struct Pair {left: Counter, right: Counter}
+        impl Counter {
+            comptime fn step(self) {
+                self.value += do {self.value = 100; self.calls += 1; 3};
+                self.value *= 2;
+                self.value -= 1;
+            }
+            comptime fn produce(self) -> Counter {
+                self.calls += 1;
+                Counter {value: 2, calls: 0}
+            }
+            comptime fn read(self) -> Integer {self.value}
+        }
+        impl Pair {
+            comptime fn nested(self) {
+                self.left.value += do {self.right.value += 4; 2};
+            }
+        }
+        comptime fn run() -> bool {
+            let counter = Counter {value: 2, calls: 0};
+            let saved = counter;
+            counter.step();
+            let pair = Pair {left: counter, right: saved};
+            pair.nested();
+            let temporary = counter.produce();
+            temporary.step();
+            counter.produce().step();
+            counter.value == 9 and counter.calls == 3
+                and saved.value == 2 and saved.calls == 0
+                and pair.left.value == 11 and pair.right.value == 6
+                and temporary.read() == 9
+        }",
+    );
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 1_000_000).unwrap(),
+        Value::Bool(true)
+    );
+}

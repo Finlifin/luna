@@ -318,7 +318,10 @@ impl Checker<'_, '_> {
             }
             if !matches!(
                 base.kind,
-                H::ResolvedLocal(..) | H::ResolvedFnParam(..) | H::TacticParameter(_)
+                H::ResolvedLocal(..)
+                    | H::ResolvedFnParam(..)
+                    | H::TacticParameter(_)
+                    | H::SelfValue
             ) {
                 return Err(error(
                     target.span,
