@@ -2609,3 +2609,36 @@ fn fixed_enum_builder_rejects_invalid_partitions_and_domains() {
         );
     }
 }
+
+#[test]
+fn enum_builder_batch_edits_keep_publication_validation_and_allow_repair() {
+    for (paths, shapes, names, types) in [
+        ("[[.one],[.one]]", "[.unit,.unit]", "[[],[]]", "[[],[]]"),
+        ("[[.missing,.one]]", "[.unit]", "[[]]", "[[]]"),
+        ("[[.one]]", "[.named]", "[[.flag]]", "[[bool,bool]]"),
+        ("[[.one]]", "[.unknown]", "[[]]", "[[]]"),
+    ] {
+        let fixture = Fixture::new(&format!(
+            "comptime fn draft()->meta.EnumBuilder {{
+                let builder=meta.EnumBuilder.new();
+                let added=builder.add_variants({paths},{shapes},{names},{types});
+                assumes added; builder
+            }}
+            comptime fn Make()->.Type'builtin {{draft().Build()}}
+            comptime fn repaired()->bool {{
+                let builder=draft();
+                let fixed=builder.replace_variants(0,{count},[[.ok]],[.unit],[[]],[[]]);
+                assumes fixed;
+                let result=builder.Build();
+                meta.enum_variant_paths(result).length()==1
+                    and meta.enum_variant_paths(result)[0][0]==.ok
+            }}",
+            count = if paths == "[[.one],[.one]]" { 2 } else { 1 },
+        ));
+        assert!(fixture.invoke_meta("Make").is_err(), "{paths} {shapes}");
+        assert_eq!(
+            fixture.invoke_meta("repaired").unwrap().1,
+            Value::Bool(true)
+        );
+    }
+}

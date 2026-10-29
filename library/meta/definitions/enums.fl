@@ -110,6 +110,27 @@ impl EnumBuilder {
         self.edit_variants(index, index + 1, [], [], [], [])
     }
 
+    {-
+        Compose reflection results without unpacking them into individual calls.
+        Parallel outer lists must agree in length. Invalid input leaves the
+        draft unchanged; Build validates each shape, path and payload layout.
+    -}
+    pub comptime fn add_variants(self, paths: List<List<Symbol>>, shapes: List<Symbol>,
+        names: List<List<Symbol>>, types: List<List<Type>>) -> bool {
+        let end = self.variant_names.length();
+        self.replace_variants(end, end, paths, shapes, names, types)
+    }
+
+    pub comptime fn replace_variants(self, start: Integer, end: Integer,
+        paths: List<List<Symbol>>, shapes: List<Symbol>,
+        names: List<List<Symbol>>, types: List<List<Type>>) -> bool {
+        let count = paths.length();
+        if shapes.length() != count or names.length() != count or types.length() != count {
+            return false;
+        };
+        self.edit_variants(start, end, paths, shapes, names, types)
+    }
+
     comptime fn edit_variants(self, start: Integer, end: Integer,
         paths: List<List<Symbol>>, shapes: List<Symbol>,
         names: List<List<Symbol>>, types: List<List<Type>>) -> bool {
@@ -149,6 +170,16 @@ impl EnumBuilder {
 
     pub comptime fn remove_group(self, index: Integer) -> bool {
         self.edit_groups(index, index + 1, [])
+    }
+
+    pub comptime fn add_groups(self, paths: List<List<Symbol>>) -> bool {
+        let end = self.groups.length();
+        self.replace_groups(end, end, paths)
+    }
+
+    pub comptime fn replace_groups(self, start: Integer, end: Integer,
+        paths: List<List<Symbol>>) -> bool {
+        self.edit_groups(start, end, paths)
     }
 
     comptime fn edit_groups(self, start: Integer, end: Integer,

@@ -696,3 +696,28 @@ comptime fn offsets() -> bool {
 
 输入及 Type 元素保持原有身份；这些操作不展开 normal-form 头，也不引入
 runtime List 或 comptime 指针。输出构造仍受不可变表示验证的现有成本限制。
+
+### 枚举反射结果的批量组合
+
+`EnumBuilder.add_variants(paths, shapes, names, types)` 直接接收四个枚举反射列表；
+`replace_variants(start, end, ...)` 替换半开区间。四个外层列表长度必须相同，
+长度不齐、负数／逆序／越界区间返回 false，草稿保持原样。空批次可追加，
+空替换可删除区间。`add_groups(paths)` 与 `replace_groups(start, end, paths)`
+提供对应的分组操作；它们不自动重写变体路径。
+
+```flurry
+comptime fn MirrorEnum(source: Type) -> Type {
+    let builder = meta.EnumBuilder.new(.name = .Mirror);
+    let groups = builder.add_groups(meta.enum_group_paths(source));
+    let variants = builder.add_variants(meta.enum_variant_paths(source),
+        meta.enum_variant_shapes(source), meta.enum_variant_field_names(source),
+        meta.enum_variant_field_types(source));
+    assumes groups and variants;
+    builder.Build()
+}
+```
+
+操作保留列表顺序与 Type 身份；成功编辑不代表可发布。重复路径、缺失分组、
+非法形状、payload 域与布局仍由 Build 检查，BuildSymbol／BuildBits 的编码检查
+也不被批量编辑绕过。已有草稿快照保持独立。原生用例见
+[sysroot-edited-enum.fl](../../development/examples/sysroot-edited-enum.fl)。

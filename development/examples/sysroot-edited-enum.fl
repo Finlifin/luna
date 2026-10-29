@@ -81,3 +81,70 @@ test edited_enum_values {
 test edited_enum_reflection {
     inline if inspect_enum() { assumes true; } else { assumes false; };
 }
+
+{- Batch composition keeps group paths and payload Types in declaration order. -}
+comptime fn ComposedEnum() -> Type {
+    let builder = meta.EnumBuilder.new(.name = .Composed);
+    let groups_added = builder.add_groups(meta.enum_group_paths(Source));
+    assumes groups_added;
+    let variants_added = builder.add_variants(meta.enum_variant_paths(Source),
+        meta.enum_variant_shapes(Source), meta.enum_variant_field_names(Source),
+        meta.enum_variant_field_types(Source));
+    assumes variants_added;
+    let saved = builder;
+    let bad_shapes = not builder.add_variants([[.bad]], [], [[]], [[]]);
+    assumes bad_shapes;
+    let bad_names = not builder.add_variants([[.bad]], [.unit], [], [[]]);
+    assumes bad_names;
+    let bad_types = not builder.add_variants([[.bad]], [.unit], [[]], []);
+    assumes bad_types;
+    let negative_range = not builder.replace_variants(-1, 0, [], [], [], []);
+    assumes negative_range;
+    let reversed_range = not builder.replace_variants(1, 0, [], [], [], []);
+    assumes reversed_range;
+    let past_variants = not builder.replace_variants(0, 3, [], [], [], []);
+    assumes past_variants;
+    let past_groups = not builder.replace_groups(0, 3, []);
+    assumes past_groups;
+    let intact = builder.Build();
+    let path_intact = meta.enum_variant_paths(intact)[0][1] == .old;
+    assumes path_intact;
+    let count_intact = meta.enum_variant_paths(intact).length() == 2;
+    assumes count_intact;
+    let groups_replaced = builder.replace_groups(1, 2, [[.io]]);
+    assumes groups_replaced;
+    let variants_replaced = builder.replace_variants(0, 2,
+        [[.net, .data], [.io, .record]], [.tuple, .named], [[], [.ready]], [[u8], [bool]]);
+    assumes variants_replaced;
+    let idle_added = builder.add_variants([[.idle]], [.unit], [[]], [[]]);
+    assumes idle_added;
+    let empty_variants = builder.add_variants([], [], [], []);
+    assumes empty_variants;
+    let empty_groups = builder.add_groups([]);
+    assumes empty_groups;
+    let original = saved.Build();
+    let saved_path = meta.enum_variant_paths(original)[0][1] == .old;
+    assumes saved_path;
+    let saved_group = meta.enum_group_paths(original)[1][0] == .spare;
+    assumes saved_group;
+    builder.Build()
+}
+
+typealias Composed = ComposedEnum();
+
+fn read_composed(value: Composed) -> bool {
+    value match {
+        .net.data(byte) => byte == 7,
+        .io.record {ready: ready} => ready,
+        .idle => false,
+    }
+}
+
+test batch_enum_composition {
+    let tuple_case = read_composed(Composed.net.data(7));
+    assumes tuple_case;
+    let named_case = read_composed(Composed.io.record {ready: true});
+    assumes named_case;
+    let unit_case = not read_composed(Composed.idle);
+    assumes unit_case;
+}
