@@ -580,6 +580,13 @@ impl<'a> Interpreter<'a> {
                 }
                 Value::Object(Object::from_entries(entries))
             }
+            Value::ComptimeReference(reference) => {
+                if !self.comptime_only || !preserve_identity {
+                    return Err(self.failure(ErrorKind::Unsupported, Some(source)));
+                }
+                self.copy_work(reference.metadata_work(), source)?;
+                value.clone()
+            }
             Value::Storage(_) | Value::Closure(_) if preserve_identity => value.clone(),
             Value::Storage(storage) => {
                 let limit = self

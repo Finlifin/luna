@@ -27,6 +27,7 @@ mod objects;
 mod scalar_math;
 mod value_reference;
 pub use objects::ObjectProperty;
+pub use value_reference::ValueReference;
 mod generated_enums;
 pub use generated_enums::EnumPublicationError;
 mod generated_structs;
@@ -107,6 +108,8 @@ pub enum Value {
     Pointer(PointerValue),
     /// Interpreter-internal addressable local storage; never a source value.
     Storage(Storage),
+    /// Invocation-only comptime alias, including a checked structural field path.
+    ComptimeReference(ValueReference),
     /// Type description; abstract constituents require an authorized comptime scope.
     Type(Term),
     /// Opaque declaration Type input, admitted only by a comptime scope.
@@ -236,6 +239,19 @@ impl Value {
             }
             visitor(value, fuel)?;
             match value {
+                Value::ComptimeReference(reference) => {
+                    *fuel = fuel
+                        .checked_sub(reference.metadata_work() as u64)
+                        .ok_or(ErrorKind::StepsExhausted)?;
+                    visit(
+                        &Value::Storage(reference.storage.clone()),
+                        fuel,
+                        depth + 1,
+                        closures,
+                        storage,
+                        visitor,
+                    )?;
+                }
                 Value::Storage(cell) => {
                     let payload = cell.0.try_lock().map_err(|_| ErrorKind::InvalidPointer)?;
                     visit(&payload, fuel, depth + 1, closures, storage, visitor)?;
@@ -402,6 +418,7 @@ impl Value {
                 }
                 Value::Pointer(_)
                 | Value::Storage(_)
+                | Value::ComptimeReference(_)
                 | Value::Closure(_)
                 | Value::Function(_)
                 | Value::RuntimeFunction { .. }
@@ -3030,6 +3047,9 @@ impl<'a> Interpreter<'a> {
         {
             let representation = match &argument {
                 Value::Storage(storage) => self.read_owned_value(storage)?,
+                Value::ComptimeReference(reference) => {
+                    self.read_value_reference(reference, source)?
+                }
                 value => self.checkpoint_representation(value, source)?,
             };
             let expected = match &type_scope {
@@ -3583,6 +3603,7 @@ impl<'a> Interpreter<'a> {
             .get(&id)
             .ok_or_else(|| self.failure(ErrorKind::MissingBinding, source))?
         {
+            Value::ComptimeReference(reference) => self.read_value_reference(reference, location),
             Value::Storage(storage) => {
                 if self.comptime_only {
                     let reference = value_reference::ValueReference::root(storage.clone());
@@ -7545,6 +7566,18 @@ impl<'a> Interpreter<'a> {
                 )?;
                 // Resolve again after RHS evaluation: a write performed by the
                 // RHS to a sibling or the root must not be lost to a snapshot.
+                if let Some(Value::ComptimeReference(reference)) = environment.get(&place.root) {
+                    if !self.comptime_only {
+                        return Err(self.failure(ErrorKind::PhaseMismatch, Some(expr.source)));
+                    }
+                    let reference = reference
+                        .project(&place.fields, &mut self.budget.steps)
+                        .map_err(|kind| self.failure(kind, Some(expr.source)))?;
+                    reference
+                        .replace(value, &mut self.budget.steps)
+                        .map_err(|kind| self.failure(kind, Some(expr.source)))?;
+                    return Ok(Flow::Value(Value::Unit));
+                }
                 let storage = match environment.get(&place.root) {
                     Some(Value::Storage(storage)) => Some(storage.clone()),
                     _ => None,
@@ -8718,6 +8751,9 @@ impl<'a> Interpreter<'a> {
             for (binding, value) in preparation_parameters.iter().zip(&arguments) {
                 let observed = match value {
                     Value::Storage(storage) => this.read_owned_value(storage)?,
+                    Value::ComptimeReference(reference) => {
+                        this.read_value_reference(reference, expr.source)?
+                    }
                     value => this.checkpoint_representation(value, expr.source)?,
                 };
                 default_scope.insert(*binding, observed);
@@ -8870,6 +8906,7 @@ impl fmt::Display for Value {
             }
             Self::Pointer(pointer) => pointer.fmt(f),
             Self::Storage(_) => f.write_str("(internal-storage)"),
+            Self::ComptimeReference(reference) => reference.fmt(f),
             Self::Type(ty) => write!(f, "(type-value {ty})"),
             Self::TypeParameter(id) => write!(f, "(abstract-type-input {id})"),
             Self::AbstractValue { declaration, ty } => {

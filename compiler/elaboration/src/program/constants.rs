@@ -876,6 +876,10 @@ impl Checker<'_, '_> {
         }
         self.required_steps -= 1;
         match value {
+            Value::ComptimeReference(_) => Err(error(
+                span,
+                "active comptime value reference cannot escape in a closure snapshot",
+            )),
             Value::Storage(cell) => {
                 let value = cell
                     .read()
@@ -3404,6 +3408,12 @@ impl Checker<'_, '_> {
                 return Err(error(
                     span,
                     "storage pointer cannot be materialized as a constant",
+                ));
+            }
+            Value::ComptimeReference(_) => {
+                return Err(error(
+                    span,
+                    "active comptime value reference cannot be materialized as a constant",
                 ));
             }
             Value::Storage(_) => {

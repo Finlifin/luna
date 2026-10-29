@@ -4,7 +4,7 @@ comptime 没有指针。comptime 方法的 `self` 使用值引用语义，接收
 
 本文下方实现进展中涉及 comptime 指针读写、`*Integer`、`*List<T>` 或通过 runtime Copy 取得 comptime 数据的描述，均属于待纠正的旧实现记录，不是有效语言规则或可仿照的用法。当前 `List.append`、列表范围追加及相关 VM 路径尚需迁移到值引用语义；不能仅删除指针语法而保留按值复制行为。
 
-VM 的 comptime 存储读写现在使用内部值引用路径：引用共享存储身份，字段赋值在右值求值后重新定位，并在预算、字段路径检查通过后写回，不借助 runtime pointer 或 Copy／Clone 协议。NIR 调用参数现可显式记录 `comptime-reference` 传递，VM 支持局部变量别名、引用转发和只求值一次的临时接收者；字段接收者传递尚未接通。源码 lowering 仍未发出该标记，接收者可写性检查也尚未完成，`List.append` 与 definition builder 的旧指针接收者尚未迁移。
+VM 的 comptime 存储读写现在使用内部值引用路径：引用共享存储身份，字段赋值在右值求值后重新定位，并在预算、字段路径检查通过后写回，不借助 runtime pointer 或 Copy／Clone 协议。NIR 调用参数现可显式记录 `comptime-reference` 传递，VM 支持局部变量、结构字段的别名和跨调用路径转发，计算得到的接收者只求值一次。活动引用不能冻结为常量、逃逸进闭包快照或进入 runtime Copy 路径。源码 lowering 仍未发出该标记，接收者可写性检查也尚未完成，`List.append` 与 definition builder 的旧指针接收者尚未迁移。
 
 ## Intro
 

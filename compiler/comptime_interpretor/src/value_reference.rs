@@ -6,20 +6,20 @@ use nir::program::FieldOwner;
 use std::{fmt, sync::MutexGuard};
 
 #[derive(Clone, PartialEq)]
-pub(super) struct ValueReference {
-    storage: Storage,
+pub struct ValueReference {
+    pub(crate) storage: Storage,
     fields: Vec<(FieldOwner, usize)>,
 }
 
 impl ValueReference {
-    pub fn root(storage: Storage) -> Self {
+    pub(crate) fn root(storage: Storage) -> Self {
         Self {
             storage,
             fields: Vec::new(),
         }
     }
 
-    pub fn projected(
+    pub(crate) fn projected(
         storage: Storage,
         fields: &[(FieldOwner, usize)],
         fuel: &mut u64,
@@ -31,7 +31,7 @@ impl ValueReference {
         })
     }
 
-    pub fn borrow(&self, fuel: &mut u64) -> Result<Contents<'_>, ErrorKind> {
+    pub(crate) fn borrow(&self, fuel: &mut u64) -> Result<Contents<'_>, ErrorKind> {
         charge(&self.fields, fuel)?;
         let guard = self
             .storage
@@ -47,7 +47,7 @@ impl ValueReference {
 
     /// Resolve after RHS evaluation and replace only the selected field. A bad
     /// path or exhausted budget leaves the entire original value unchanged.
-    pub fn replace(&self, value: Value, fuel: &mut u64) -> Result<(), ErrorKind> {
+    pub(crate) fn replace(&self, value: Value, fuel: &mut u64) -> Result<(), ErrorKind> {
         charge(&self.fields, fuel)?;
         let mut guard = self
             .storage
@@ -142,38 +142,114 @@ impl fmt::Debug for ValueReference {
     }
 }
 
+impl ValueReference {
+    pub(crate) fn project(
+        &self,
+        fields: &[(FieldOwner, usize)],
+        fuel: &mut u64,
+    ) -> Result<Self, ErrorKind> {
+        let length = self
+            .fields
+            .len()
+            .checked_add(fields.len())
+            .ok_or(ErrorKind::DepthExhausted)?;
+        if length >= 128 {
+            return Err(ErrorKind::DepthExhausted);
+        }
+        *fuel = fuel
+            .checked_sub(length as u64 + 1)
+            .ok_or(ErrorKind::StepsExhausted)?;
+        let mut path = self.fields.clone();
+        path.extend_from_slice(fields);
+        Ok(Self {
+            storage: self.storage.clone(),
+            fields: path,
+        })
+    }
+    pub(crate) fn metadata_work(&self) -> usize {
+        self.fields.len() + 1
+    }
+}
+
 impl crate::Interpreter<'_> {
-    /// Preserve a local slot's identity instead of reading a value snapshot.
-    /// Computed receivers get a private slot after evaluating exactly once.
+    pub(super) fn read_value_reference(
+        &mut self,
+        reference: &ValueReference,
+        source: crate::SourceRange,
+    ) -> Result<Value, crate::Error> {
+        if !self.comptime_only {
+            return Err(self.failure(ErrorKind::PhaseMismatch, Some(source)));
+        }
+        let contents = reference
+            .borrow(&mut self.budget.steps)
+            .map_err(|kind| self.failure(kind, Some(source)))?;
+        self.checkpoint_representation(contents.value(), source)
+    }
+
+    /// Preserve the base slot and the complete field path. Computed bases are
+    /// evaluated once into private storage, without exposing a source pointer.
     pub(super) fn prepare_value_reference(
         &mut self,
         expr: &crate::Expr,
         environment: &mut crate::environment::Environment,
     ) -> Result<crate::Flow, crate::Error> {
         self.tick(Some(expr.source))?;
-        if let crate::K::Local(binding) = expr.kind {
+        let mut base = expr;
+        let mut fields = Vec::new();
+        loop {
+            let (next, field) = match &base.kind {
+                crate::K::Field {
+                    value,
+                    declaration,
+                    index,
+                } => (value.as_ref(), (FieldOwner::Nominal(*declaration), *index)),
+                crate::K::AnonymousField { value, index, .. } => {
+                    (value.as_ref(), (FieldOwner::Anonymous, *index))
+                }
+                _ => break,
+            };
+            self.tick(Some(base.source))?;
+            if fields.len() >= 127 {
+                return Err(self.failure(ErrorKind::DepthExhausted, Some(expr.source)));
+            }
+            fields.push(field);
+            base = next;
+        }
+        fields.reverse();
+        let reference = if let crate::K::Local(binding) = base.kind {
             let value = environment
                 .remove(&binding)
-                .ok_or_else(|| self.failure(ErrorKind::MissingBinding, Some(expr.source)))?;
-            let storage = match value {
-                Value::Storage(storage) => storage,
-                value => Storage::new(value),
-            };
-            environment.insert(binding, Value::Storage(storage.clone()));
-            return Ok(crate::Flow::Value(Value::Storage(storage)));
-        }
-        if matches!(
-            expr.kind,
-            crate::K::Field { .. } | crate::K::AnonymousField { .. } | crate::K::ReadPointer(_)
-        ) {
-            return Err(self.failure(ErrorKind::Unsupported, Some(expr.source)));
-        }
-        match self.eval(expr, environment)? {
-            crate::Flow::Value(value) => {
-                Ok(crate::Flow::Value(Value::Storage(Storage::new(value))))
+                .ok_or_else(|| self.failure(ErrorKind::MissingBinding, Some(base.source)))?;
+            match value {
+                Value::ComptimeReference(reference) => {
+                    environment.insert(binding, Value::ComptimeReference(reference.clone()));
+                    reference
+                }
+                value => {
+                    let storage = match value {
+                        Value::Storage(storage) => storage,
+                        value => Storage::new(value),
+                    };
+                    environment.insert(binding, Value::Storage(storage.clone()));
+                    ValueReference::root(storage)
+                }
             }
-            control => Ok(control),
-        }
+        } else {
+            if matches!(base.kind, crate::K::ReadPointer(_)) {
+                return Err(self.failure(ErrorKind::Unsupported, Some(base.source)));
+            }
+            match self.eval(base, environment)? {
+                crate::Flow::Value(value) => ValueReference::root(Storage::new(value)),
+                control => return Ok(control),
+            }
+        };
+        let reference = reference
+            .project(&fields, &mut self.budget.steps)
+            .map_err(|kind| self.failure(kind, Some(expr.source)))?;
+        reference
+            .borrow(&mut self.budget.steps)
+            .map_err(|kind| self.failure(kind, Some(expr.source)))?;
+        Ok(crate::Flow::Value(Value::ComptimeReference(reference)))
     }
 }
 
@@ -271,6 +347,35 @@ mod tests {
             ValueReference::projected(storage, &vec![(FieldOwner::Anonymous, 0); 128], &mut 1000),
             Err(ErrorKind::DepthExhausted)
         ));
+    }
+
+    #[test]
+    fn nominal_projection_revalidates_owner_after_root_replacement() {
+        let id = nir::DeclarationId {
+            package: 1,
+            local: 3,
+        };
+        let record = |declaration| Value::Record {
+            declaration,
+            arguments: vec![],
+            fields: vec![Value::Bool(false)],
+        };
+        let storage = Storage::new(record(id));
+        let root = ValueReference::root(storage.clone());
+        let field =
+            ValueReference::projected(storage, &[(FieldOwner::Nominal(id), 0)], &mut 100).unwrap();
+        field.replace(Value::Bool(true), &mut 100).unwrap();
+        assert_eq!(field.borrow(&mut 100).unwrap().value(), &Value::Bool(true));
+        let other = nir::DeclarationId {
+            package: 2,
+            local: 3,
+        };
+        root.replace(record(other), &mut 100).unwrap();
+        assert_eq!(
+            field.replace(Value::Bool(true), &mut 100),
+            Err(ErrorKind::InvalidValueReference)
+        );
+        assert_eq!(root.borrow(&mut 100).unwrap().value(), &record(other));
     }
 
     #[test]
@@ -528,6 +633,126 @@ mod call_tests {
             .filter(|event| matches!(event, Event::EnterFunction(_)))
             .count();
         assert_eq!(after - before, 2);
+    }
+
+    #[test]
+    fn projected_receivers_compose_through_calls_and_preserve_siblings() {
+        let target = setter();
+        let boolean = Term::Primitive(Primitive::Bool);
+        let inner_type = Term::Record(vec![
+            ("left".into(), boolean.clone()),
+            ("right".into(), boolean.clone()),
+        ]);
+        let outer_type = Term::Record(vec![
+            ("inner".into(), inner_type.clone()),
+            ("tag".into(), boolean.clone()),
+        ]);
+        let mut forwarding = setter();
+        forwarding.declaration.local = 3;
+        forwarding.name = "forward_field".into();
+        forwarding.parameters = vec![LocalId { owner: 3, index: 0 }];
+        let Term::Function { parameters, .. } = &mut forwarding.signature else {
+            unreachable!()
+        };
+        parameters[0].ty = inner_type.clone();
+        let field = expr(K::AnonymousField {
+            value: Box::new(Expr {
+                ty: inner_type.clone(),
+                ..expr(K::Local(forwarding.parameters[0]))
+            }),
+            name: "left".into(),
+            index: 0,
+        });
+        forwarding.body = expr(K::Block {
+            statements: vec![call(
+                &target,
+                ArgumentPassing::ComptimeReference,
+                field.clone(),
+            )],
+            result: Some(Box::new(field)),
+        });
+        let package = Package {
+            functions: vec![target.clone(), forwarding.clone()],
+            ..Default::default()
+        };
+        nir::phases::validate(&package).unwrap();
+        let binding = LocalId { owner: 1, index: 0 };
+        let value = Value::AnonymousRecord(vec![
+            (
+                "inner".into(),
+                Value::AnonymousRecord(vec![
+                    ("left".into(), Value::Bool(false)),
+                    ("right".into(), Value::Bool(false)),
+                ]),
+            ),
+            ("tag".into(), Value::Bool(false)),
+        ]);
+        let receiver = Expr {
+            ty: inner_type,
+            ..expr(K::AnonymousField {
+                value: Box::new(Expr {
+                    ty: outer_type,
+                    ..expr(K::Local(binding))
+                }),
+                name: "inner".into(),
+                index: 0,
+            })
+        };
+        let invocation = call(&forwarding, ArgumentPassing::ComptimeReference, receiver);
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let mut environment = Environment::new();
+        environment.insert(binding, value.clone());
+        assert!(matches!(
+            vm.eval(&invocation, &mut environment).unwrap(),
+            Flow::Value(Value::Bool(true))
+        ));
+        let got = vm.local_value(&environment, binding, None).unwrap();
+        assert_eq!(
+            got,
+            Value::AnonymousRecord(vec![
+                (
+                    "inner".into(),
+                    Value::AnonymousRecord(vec![
+                        ("left".into(), Value::Bool(true)),
+                        ("right".into(), Value::Bool(false))
+                    ])
+                ),
+                ("tag".into(), Value::Bool(false)),
+            ])
+        );
+        assert_ne!(got, value);
+    }
+
+    #[test]
+    fn internal_references_cannot_be_frozen_or_read_by_runtime() {
+        let reference = crate::ValueReference::root(Storage::new(Value::Bool(true)));
+        let value = Value::ComptimeReference(reference.clone());
+        assert!(
+            value
+                .clone()
+                .into_normal_term(&mut comptime_runtime::Budget::default())
+                .is_err()
+        );
+        assert_eq!(value.to_string(), "(value-reference (fields))");
+        let package = Package::default();
+        let mut comptime = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        assert_eq!(
+            comptime
+                .copy_representation(&value, SourceRange { start: 1, end: 2 }, 0)
+                .unwrap_err()
+                .kind,
+            ErrorKind::Unsupported
+        );
+
+        let package = Package::default();
+        let mut runtime = Interpreter::new(&package, Budget::default()).unwrap();
+        assert_eq!(
+            runtime
+                .read_value_reference(&reference, SourceRange { start: 1, end: 2 })
+                .unwrap_err()
+                .kind,
+            ErrorKind::PhaseMismatch
+        );
     }
 
     #[test]

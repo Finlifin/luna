@@ -39,7 +39,19 @@ impl Interpreter<'_> {
             } else {
                 None
             };
-            let record = guard.as_deref().unwrap_or(local);
+            let referenced = if let Value::ComptimeReference(reference) = local {
+                Some(
+                    reference
+                        .borrow(&mut self.budget.steps)
+                        .map_err(|kind| self.failure(kind, Some(base.source)))?,
+                )
+            } else {
+                None
+            };
+            let record = referenced
+                .as_ref()
+                .map(|value| value.value())
+                .unwrap_or_else(|| guard.as_deref().unwrap_or(local));
             let selected = match (record, nominal, name) {
                 (
                     Value::Record {
