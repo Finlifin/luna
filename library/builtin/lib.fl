@@ -12,7 +12,7 @@ pub use primitives.*;
 pub use tuple.Tuple;
 pub use traits.*;
 pub use patterns.ListPatternView;
-pub use iterator.{Iterator, IntoIterator, FromIterator, emit_item, MapIterator, MapWhileIterator, FilterIterator, FilterMapIterator, FlatMapIterator, FlattenIterator, TakeWhileIterator, SkipWhileIterator, TakeIterator, SkipIterator, ChainIterator, InspectIterator, IntersperseWithIterator};
+pub use iterator.{Iterator, IntoIterator, FromIterator, emit_item, MapIterator, MapWhileIterator, ScanIterator, FilterIterator, FilterMapIterator, FlatMapIterator, FlattenIterator, TakeWhileIterator, SkipWhileIterator, TakeIterator, SkipIterator, ChainIterator, InspectIterator, IntersperseWithIterator};
 pub use ops.*;
 
 pub mod text {

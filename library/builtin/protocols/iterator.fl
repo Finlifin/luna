@@ -51,6 +51,12 @@ pub trait Iterator {
         MapWhileIterator<Self, U, c> {iter: self, f: f}
     }
 
+    inline fn scan(self, initial: A, f: %c fn(*A, Item) -> ?U) -> ScanIterator<Self, A, U, c>
+        where A, U, c: IterationType.vars.Closure
+    {
+        ScanIterator<Self, A, U, c> {iter: self, state: initial, f: f}
+    }
+
     inline fn inspect(self, f: %c fn(*Item)) -> InspectIterator<Self, c>
         where c: IterationType.vars.Closure
     {
@@ -527,6 +533,35 @@ impl Iterator for MapWhileIterator<I, U, c>
         let f = self.f;
         self.iter.as(Iterator).iterate()# {
             emit_item<I.as(Iterator).Item>(value) => f(value) match {
+                mapped? => emit_item<U>(mapped)#,
+                null => {return;},
+            },
+        }
+    }
+}
+
+{-
+    State is owned by this traversal. Each callback observes the same state
+    location and consumes one item. An absent result ends only this adapter;
+    normal cleanup retires the state, callback and unproduced input remainder.
+-}
+pub struct ScanIterator where I :- Iterator, A, U, c: IterationType.vars.Closure {
+    iter: I,
+    state: A,
+    f: %c fn(*A, I.as(Iterator).Item) -> ?U,
+}
+
+impl Iterator for ScanIterator<I, A, U, c>
+    where I :- Iterator, A, U, c: IterationType.vars.Closure
+{
+    assoc Item: IterationType = U;
+
+    inline fn iterate(self) -> #emit_item<U> IterationUnit {
+        var state = self.state;
+        let state_ref = state.ref;
+        let f = self.f;
+        self.iter.as(Iterator).iterate()# {
+            emit_item<I.as(Iterator).Item>(value) => f(state_ref, value) match {
                 mapped? => emit_item<U>(mapped)#,
                 null => {return;},
             },

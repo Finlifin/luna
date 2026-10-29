@@ -1731,3 +1731,28 @@ fn map_while_stops_mapping_without_stopping_a_following_chain() {
     );
     check_iteration_with_budget(&source, None, 4_000_000);
 }
+
+#[test]
+fn scan_preserves_state_across_items_and_stops_before_chain_tail() {
+    let source = format!(
+        "{}\n{}\n
+        fn step(state:*bool,value:bool)->?bool {{
+            if not value {{return null;}};state.* = not state.*;state.*
+        }}
+        fn run()->bool {{
+            let first:?bool=true;let second:?bool=true;let stop:?bool=false;
+            let tail:?bool=true;
+            var count:primitives.usize=0;let output=count.ref;
+            first.as(Iterator).chain(second).as(Iterator).chain(stop).as(Iterator)
+                .scan(false,step).as(Iterator).chain(tail).as(Iterator).foreach(|value| {{
+                    assumes value == (output.* != 1);
+                    assumes output.* < 3;output.* += 1;
+                }});
+            count==3
+        }}
+        fn verify() {{let passed=run();assumes passed;}}",
+        &include!("support/iterator_source.rs"),
+        include_str!("../../../library/builtin/protocols/resources.fl"),
+    );
+    check_iteration_with_budget(&source, None, 4_000_000);
+}
