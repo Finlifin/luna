@@ -1056,3 +1056,24 @@ Final targeted validation from `/home/fin/luna`:
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test effect_contracts --test snapshot_contracts --test comptime_bytecode --test comptime_receivers --test comptime_local_types`: exit 0, `/tmp/luna-tools-h78_9lan/result.json`.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: exit 0, `/tmp/luna-tools-p0glcb66/result.json`; `git diff --check` passed.
 - Final `python3 -B development/check.py --timeout 900 -- test -p luna --test execution`: exit 101, 1,360 passed and the same five baseline failures, `/tmp/luna-tools-lqej_gyj/result.json`.
+
+## Generic method-value application repair (2026-10-30)
+
+The five baseline failures above are now resolved. Normal-form application
+probing previously elaborated a projected head as a complete standalone value
+before supplying its explicit clause inputs. Generic method projections therefore
+failed with a missing-context diagnostic even when `<...>` provided the inputs.
+The application boundary now resolves a callee, then dispatches either a stored
+normal-form callable or a declaration-side method packet with its supplied inputs.
+Method origin, fixed receiver/interface arguments, bounds and expected function
+type validation continue through the existing method-instantiation machinery.
+There is no head unfolding, fallback after a semantic failure, or test expectation
+relaxation. This follows the function-value input/identity contracts in
+`docs/functions/comptime_fn.md` and `docs/traits/declarations.md`.
+
+Validation from `/home/fin/luna` (all exit 0):
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test execution`: all 1,365 passed, including the five previously failing cases; `/tmp/luna-tools-kjm9dim_/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test elaboration generic`: 51 passed, including explicit method-value missing-bound and conflicting-context rejection; `/tmp/luna-tools-fgr183pf/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test normal_form_methods --test normal_form_inference --test comptime_clause_inputs`: passed, `/tmp/luna-tools-rzby59po/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: passed, `/tmp/luna-tools-k0c6a58s/result.json`; `git diff --check` passed.

@@ -310,10 +310,20 @@ impl Checker<'_, '_> {
         }
         if let H::NFApplication(head, arguments) = &expr.kind {
             if !matches!(head.kind, H::ResolvedDef { .. }) {
-                let callee = self.expr(head, None)?;
+                // Resolve an application head without demanding a complete
+                // function value before its explicit clause inputs arrive.
+                // Stored normal-form callables and declaration-side method
+                // packets share this boundary, but retain distinct application
+                // semantics below.
+                let callee = self.invocation_callee(head)?;
                 if callee.ty.is_normal_form_callable() {
                     return self
                         .dynamic_normal_form_application(expr, callee, arguments, expected)
+                        .map(Some);
+                }
+                if self.method_instantiation_inputs(&callee).is_some() {
+                    return self
+                        .explicit_method_instance(expr, callee, arguments, expected, false)
                         .map(Some);
                 }
             }

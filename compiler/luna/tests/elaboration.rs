@@ -5491,6 +5491,14 @@ fn explicit_generic_methods_check_arity_and_bounds() {
         "trait Allowed {} struct Holder {} impl Holder {fn keep(self,value:T)->T where T :- Allowed {value}} fn run()->bool {Holder {}.keep<bool>(true)}",
         "trait bound is not established",
     );
+    rejected(
+        "trait Allowed {} struct Holder {} impl Holder {fn keep(value:T)->T where T :- Allowed {value}} fn run() {let action=Holder.keep<bool>;}",
+        "trait bound is not established",
+    );
+    rejected(
+        "struct Holder {} impl Holder {fn keep(value:T)->T where T {value}} fn run() {let action:fn(bool)->bool=Holder.keep<'x''type>;}",
+        "type mismatch",
+    );
 }
 
 #[test]
