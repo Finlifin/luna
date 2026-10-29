@@ -1,5 +1,6 @@
 //! Linear invocation code. Unsupported operations are detected before execution.
 //! Constants and default templates own bounded typed NIR copies; opcodes never evaluate trees.
+pub mod objects;
 mod patterns;
 pub mod scalar;
 use nir::program::{ArgumentPassing, Expr, ExprKind as K, FieldOwner, LocalId, SourceRange};
@@ -29,6 +30,21 @@ impl fmt::Display for ErrorConversion {
 
 #[derive(Debug)]
 pub enum Op {
+    PrepareObject(Arc<objects::ObjectConstructor>),
+    CheckObjectEntry {
+        object: Arc<objects::ObjectConstructor>,
+        index: usize,
+        value: Register,
+    },
+    Object {
+        destination: Register,
+        object: Arc<objects::ObjectConstructor>,
+        fields: Vec<Register>,
+    },
+    Tuple {
+        destination: Register,
+        fields: Vec<Register>,
+    },
     MatchPattern {
         destination: Register,
         value: Register,
@@ -227,6 +243,33 @@ impl fmt::Display for Program {
                 instruction.source.start, instruction.source.end
             )?;
             match &instruction.op {
+                Op::PrepareObject(object) => write!(f, "(prepare-object {object})")?,
+                Op::CheckObjectEntry {
+                    object,
+                    index,
+                    value,
+                } => write!(f, "(check-object-entry {index} {value} {object})")?,
+                Op::Object {
+                    destination,
+                    object,
+                    fields,
+                } => {
+                    write!(f, "(object {destination} {object} (inputs")?;
+                    for field in fields {
+                        write!(f, " {field}")?;
+                    }
+                    write!(f, "))")?;
+                }
+                Op::Tuple {
+                    destination,
+                    fields,
+                } => {
+                    write!(f, "(tuple {destination} (inputs")?;
+                    for field in fields {
+                        write!(f, " {field}")?;
+                    }
+                    write!(f, "))")?;
+                }
                 Op::MatchPattern {
                     destination,
                     value,
@@ -773,6 +816,58 @@ pub fn compile(body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
                         for (field, slot) in fields.iter().zip(slots).rev() {
                             work.push(Work::Expression(field, slot));
                         }
+                    }
+                    K::Tuple(fields) => {
+                        *fuel = fuel
+                            .checked_sub(fields.len())
+                            .ok_or(Error::Budget(source))?;
+                        let slots: Vec<_> = fields.iter().map(|_| fresh()).collect();
+                        emit(
+                            &mut work,
+                            Op::Tuple {
+                                destination: dst,
+                                fields: slots.clone(),
+                            },
+                        );
+                        for (field, slot) in fields.iter().zip(slots).rev() {
+                            work.push(Work::Expression(field, slot));
+                        }
+                    }
+                    K::Object { names, fields } => {
+                        let mut weight = names.len().saturating_add(fields.len());
+                        for name in names.iter().flatten() {
+                            weight = weight.saturating_add(name.len());
+                        }
+                        *fuel = fuel.checked_sub(weight).ok_or(Error::Budget(source))?;
+                        let object = Arc::new(objects::ObjectConstructor {
+                            ty: copy_term(&expr.ty, fuel, source)?,
+                            names: names.clone(),
+                            fields: fields
+                                .iter()
+                                .map(|field| copy_term(&field.ty, fuel, field.source))
+                                .collect::<Result<_, _>>()?,
+                        });
+                        let slots: Vec<_> = fields.iter().map(|_| fresh()).collect();
+                        emit(
+                            &mut work,
+                            Op::Object {
+                                destination: dst,
+                                object: object.clone(),
+                                fields: slots.clone(),
+                            },
+                        );
+                        for (index, (field, slot)) in fields.iter().zip(slots).enumerate().rev() {
+                            work.push(Work::Emit(
+                                field.source,
+                                Op::CheckObjectEntry {
+                                    object: object.clone(),
+                                    index,
+                                    value: slot,
+                                },
+                            ));
+                            work.push(Work::Expression(field, slot));
+                        }
+                        emit(&mut work, Op::PrepareObject(object));
                     }
                     K::Match { value, arms } => {
                         let subject = fresh();

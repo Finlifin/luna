@@ -1538,10 +1538,12 @@ rejection diagnostics without weakening the front-end rule that `else` must exit
 
 Pattern preparation is shared with match lowering. Nested executable pattern
 children, active effects and scheduled cleanup retain the same migration limits.
-An initial test also exposed the independent unsupported `TypedWith` AST lowering
-for `(null: ?bool)`; the declaration/continue test now supplies its type using a
-separate typed declaration. Type-ascription lowering remains unimplemented and
-is not claimed by this VM change.
+An initial test also encountered unsupported `TypedWith` AST lowering for
+`(null: ?bool)`; the declaration/continue test supplies its type using a separate
+typed declaration. Subsequent review found that the grammar retains this syntax
+but does not establish its result semantics, while historical HIR classifies it
+as a proposition. Author clarification is pending; this is not evidence that
+value-preserving type ascription is a confirmed missing feature.
 
 Default-template regression coverage now keeps both routes: a structural match
 is compiled, while sequential pattern computation uses the tree carrier. Both
@@ -1559,3 +1561,49 @@ Validation from `/home/fin/luna`, all final commands exited 0:
   report `/tmp/luna-tools-eavlxbuo/result.json`.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
   report `/tmp/luna-tools-eeoj3vol/result.json`.
+
+## Compiled tuple and ordered Object assembly (2026-10-30)
+
+Tuple value assembly now follows the existing NIR element order and ordinary
+control transfers. This does not construct or unfold a Tuple type, change its
+normal-form head, or privilege type-list inputs. Tuple construction followed by
+destructuring can remain in one compiled invocation.
+
+Object construction retains ordered positional/property entries, duplicate keys
+and each entry's declared domain. A preparation instruction checks the phase,
+result type and metadata arity before evaluating entries. Each evaluated entry
+is validated and charged before the next entry starts. Completion assembles the
+owned Object without sorting or merging keys. An early return skips later
+entries and assembly. Tree interpretation uses the shared preparation and cost
+checks while retaining its existing prepared-value cleanup order.
+
+Object edits and queries still have their original evaluators; active effects,
+scheduled cleanup and nested executable patterns remain separate migration work.
+The Object constructor descriptor and instructions provide escaped S-expression
+dumps, including duplicate property names and positional entries.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  exit 0, 232 tests passed, including metadata rejection before effects and
+  per-entry validation before later effects;
+  report `/tmp/luna-tools-drnxsb1a/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_aggregates --test library_meta_objects --test comptime_object_storage --test execution --test builder_invocations`:
+  exit 101. Both new source tests, four Object snapshot tests, 1,365 execution
+  cases and 73 builders passed. The meta Object suite passed 24 of 25 cases;
+  `repository_package_exports_object_for_user_attribute_constructors` failed
+  during multi-package attribute elaboration with `6877..6882: expression
+  elaboration requires a protocol or construct not yet implemented`.
+  Report `/tmp/luna-tools-9f_ykvjn/result.json`.
+- Baseline reproduction: temporarily restored the three modified implementation
+  files to commit `76c18b52`, ran
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test library_meta_objects repository_package_exports_object_for_user_attribute_constructors`,
+  then restored all in-progress contents in a `finally` block. The baseline
+  failed with the same diagnostic (exit 101);
+  report `/tmp/luna-tools-gq79hgby/result.json`. This pre-existing integration
+  failure remains open; it is not counted as a passing library check.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler --test control`:
+  exit 0, 13 tests passed, including Object key escaping and ordering;
+  report `/tmp/luna-tools-u088sq4_/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; report `/tmp/luna-tools-rkm6its8/result.json`.

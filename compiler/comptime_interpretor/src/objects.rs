@@ -59,6 +59,55 @@ impl Interpreter<'_> {
         })
     }
 
+    pub(super) fn prepare_object(
+        &mut self,
+        ty: &Term,
+        names: usize,
+        fields: usize,
+        diverges: bool,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        if !self.comptime_only {
+            return Err(self.failure(ErrorKind::PhaseMismatch, Some(source)));
+        }
+        let expected = Term::Primitive(if diverges {
+            Primitive::Never
+        } else {
+            Primitive::Object
+        });
+        if names != fields || *ty != expected {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        }
+        self.integer_operation(Some(source), |budget| budget.consume(fields))
+    }
+
+    pub(super) fn check_object_entry(
+        &mut self,
+        value: &Value,
+        ty: &Term,
+        name: Option<&str>,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        if !self.has_type(value, ty) {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        }
+        self.charge_object_entry(ty, name, source)
+    }
+
+    pub(super) fn charge_object_entry(
+        &mut self,
+        ty: &Term,
+        name: Option<&str>,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        let work = self
+            .type_description_work(ty)
+            .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
+        self.integer_operation(Some(source), |budget| {
+            budget.consume(work.saturating_add(name.map_or(0, str::len)))
+        })
+    }
+
     pub(super) fn eval_object(
         &mut self,
         expr: &Expr,
@@ -67,21 +116,15 @@ impl Interpreter<'_> {
         let K::Object { names, fields } = &expr.kind else {
             unreachable!()
         };
-        if !self.comptime_only {
-            return Err(self.failure(ErrorKind::PhaseMismatch, Some(expr.source)));
-        }
-        let diverges = fields
-            .iter()
-            .any(|field| field.ty == Term::Primitive(Primitive::Never));
-        let expected = Term::Primitive(if diverges {
-            Primitive::Never
-        } else {
-            Primitive::Object
-        });
-        if names.len() != fields.len() || expr.ty != expected {
-            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-        }
-        self.integer_operation(Some(expr.source), |budget| budget.consume(fields.len()))?;
+        self.prepare_object(
+            &expr.ty,
+            names.len(),
+            fields.len(),
+            fields
+                .iter()
+                .any(|field| field.ty == Term::Primitive(Primitive::Never)),
+            expr.source,
+        )?;
         self.with_prepared_frame(expr.source, |this| {
             let mut entries = Vec::with_capacity(fields.len());
             for (slot, (name, field)) in names.iter().zip(fields).enumerate() {
@@ -93,12 +136,7 @@ impl Interpreter<'_> {
                     return Err(this.failure(ErrorKind::Type, Some(field.source)));
                 }
                 this.retain_prepared(slot, field.source, &value)?;
-                let work = this
-                    .type_description_work(&field.ty)
-                    .ok_or_else(|| this.failure(ErrorKind::Type, Some(field.source)))?;
-                this.integer_operation(Some(field.source), |budget| {
-                    budget.consume(work.saturating_add(name.as_ref().map_or(0, String::len)))
-                })?;
+                this.charge_object_entry(&field.ty, name.as_deref(), field.source)?;
                 let value = ObjectValue {
                     ty: field.ty.clone(),
                     value,

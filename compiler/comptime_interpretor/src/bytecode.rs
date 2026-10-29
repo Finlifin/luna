@@ -335,6 +335,60 @@ impl<'a> Interpreter<'a> {
                 source: Some(source),
             };
             match &instruction.op {
+                Op::PrepareObject(object) => self.prepare_object(
+                    &object.ty,
+                    object.names.len(),
+                    object.fields.len(),
+                    object
+                        .fields
+                        .iter()
+                        .any(|ty| *ty == Term::Primitive(Primitive::Never)),
+                    source,
+                )?,
+                Op::CheckObjectEntry {
+                    object,
+                    index,
+                    value,
+                } => {
+                    self.check_object_entry(
+                        frame.slots[*value].as_ref().ok_or_else(missing)?,
+                        &object.fields[*index],
+                        object.names[*index].as_deref(),
+                        source,
+                    )?;
+                }
+                Op::Object {
+                    destination,
+                    object,
+                    fields,
+                } => {
+                    let mut entries = Vec::with_capacity(fields.len());
+                    for (index, slot) in fields.iter().enumerate() {
+                        let value = ObjectValue {
+                            ty: object.fields[index].clone(),
+                            value: frame.slots[*slot].take().ok_or_else(missing)?,
+                        };
+                        entries.push(match &object.names[index] {
+                            Some(key) => ObjectEntry::Property {
+                                key: key.clone(),
+                                value,
+                            },
+                            None => ObjectEntry::Value(value),
+                        });
+                    }
+                    frame.slots[*destination] = Some(Value::Object(Object::from_entries(entries)));
+                }
+                Op::Tuple {
+                    destination,
+                    fields,
+                } => {
+                    let values = fields
+                        .iter()
+                        .map(|slot| frame.slots[*slot].take().ok_or_else(missing))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    frame.slots[*destination] = Some(Value::Tuple(values));
+                }
+
                 Op::MatchPattern {
                     destination,
                     value,
@@ -804,6 +858,75 @@ impl<'a> Interpreter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn object_validation_orders_effects_and_stops_before_later_entries() {
+        let package = Package::default();
+        let source = SourceRange { start: 7, end: 9 };
+        let trace = LocalId { owner: 1, index: 0 };
+        let boolean = Term::Primitive(Primitive::Bool);
+        let field = |effect, malformed| Expr {
+            source,
+            ty: boolean.clone(),
+            kind: K::Block {
+                statements: vec![Expr {
+                    source,
+                    ty: Term::Primitive(Primitive::Void),
+                    kind: K::Assign {
+                        place: nir::program::Place {
+                            root: trace,
+                            fields: vec![],
+                        },
+                        value: Box::new(Expr {
+                            source,
+                            ty: boolean.clone(),
+                            kind: K::Literal(Literal::Bool(effect)),
+                        }),
+                    },
+                }],
+                result: Some(Box::new(Expr {
+                    source,
+                    ty: boolean.clone(),
+                    kind: if malformed {
+                        K::Unit
+                    } else {
+                        K::Literal(Literal::Bool(true))
+                    },
+                })),
+            },
+        };
+        for compiled in [false, true] {
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            for case in 0..3 {
+                let body = Expr {
+                    source,
+                    ty: Term::Primitive(Primitive::Object),
+                    kind: K::Object {
+                        names: if case == 0 {
+                            vec![]
+                        } else {
+                            vec![None, Some("same".into())]
+                        },
+                        fields: vec![field(true, case == 1), field(false, false)],
+                    },
+                };
+                let mut environment = Environment::new();
+                environment.insert(trace, Value::Bool(false));
+                let result = if compiled {
+                    let code = Arc::new(comptime_compiler::compile(&body, &mut 1000).unwrap());
+                    vm.execute_code(&code, &mut environment)
+                } else {
+                    vm.eval(&body, &mut environment)
+                };
+                assert_eq!(environment.get(&trace), Some(&Value::Bool(case == 1)));
+                if case < 2 {
+                    assert_eq!(result.unwrap_err().kind, ErrorKind::Type);
+                } else {
+                    assert!(matches!(result.unwrap(), Flow::Value(Value::Object(_))));
+                }
+            }
+        }
+    }
 
     #[test]
     fn failed_declarations_reject_missing_or_fallthrough_else_without_publishing() {

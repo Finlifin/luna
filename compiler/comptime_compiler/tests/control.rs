@@ -344,3 +344,18 @@ fn declaration_dump_distinguishes_scope_commit_and_invalid_else_completion() {
     assert!(dump.contains("(invalid-control-flow)"));
     assert_eq!(dump, compile(&body, &mut 1000).unwrap().to_string());
 }
+
+#[test]
+fn ordered_object_dump_escapes_keys_and_retains_duplicate_positions() {
+    let body = Expr {
+        ty: Term::Primitive(Primitive::Object),
+        ..expr(K::Object {
+            names: vec![Some("quote\"\n".into()), None, Some("quote\"\n".into())],
+            fields: vec![expr(K::Unit), expr(K::Unit), expr(K::Unit)],
+        })
+    };
+    let dump = compile(&body, &mut 1000).unwrap().to_string();
+    assert!(dump.contains("(name \"quote\\\"\\n\") (positional) (name \"quote\\\"\\n\")"));
+    assert_eq!(dump.matches("(check-object-entry ").count(), 3);
+    assert_eq!(dump, compile(&body, &mut 1000).unwrap().to_string());
+}
