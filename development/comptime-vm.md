@@ -2273,3 +2273,57 @@ Validation from `/home/fin/luna`:
 Repeated telescope preparation, substitution-term copies, dependent-body code
 reuse and normal-form plan bytecode remain separate work. This change removes
 one intermediate immutable representation, not all input copying.
+
+## Bind invocation inputs incrementally
+
+`FunctionInputBuilder` now carries a completed substitution prefix through one
+invocation. It prepares each parameter domain on demand, moves each staged input
+into the substitution once and constructs the residual signature at completion.
+The borrowed whole-input and type-view APIs share this implementation. Failed
+pushes preserve the completed prefix; retained parameters, Type-domain refinement,
+callable phase wrappers and variadic positions retain their existing contracts.
+The builder has a deterministic S-expression Display.
+
+The interpreter creates the builder only at the first materialized static input,
+then supplies any preceding ordinary parameters as retained slots. Ordinary-only
+calls do not allocate builder state. Representation admission, abstract-input
+authority, storage snapshots and per-argument checks remain in place. No invocation
+result caching or library-head specialization is introduced.
+
+Validation from `/home/fin/luna` (all listed runs exited 0):
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir --lib --tests`:
+  `/tmp/luna-tools-q5mnxnqq/result.json`. Includes refinement failure/recovery,
+  opaque NF results, retained indices and phase/variadic wrapper checks.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-f9fmp31e/result.json`, after lazy builder initialization.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_clause_inputs --test function_type_dependencies --test dependent_list_collectors --test builder_invocations`:
+  `/tmp/luna-tools-arq2jc8n/result.json`, after lazy initialization; all four
+  source-level suites passed.
+- Before lazy initialization, the same source suites plus
+  `--test comptime_list_operations --test execution` passed:
+  `/tmp/luna-tools-85648og7/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib staged_binding_after_ordinary_prefix_preserves_dependent_domains`:
+  `/tmp/luna-tools-vwpr06p7/result.json`. Additional regression covers an ordinary
+  prefix before a static Type argument, dependent suffix admission/rejection,
+  owned and storage-backed inputs, and the final retained signature.
+- `LUNA_BENCH_ITERATIONS=10 python3 -B development/check.py --timeout 900 -- test -p nir --bench input_binding`:
+  `/tmp/luna-tools-94te7st_/result.json`. Same-build comparison of incremental
+  binding against repeated whole-prefix binding, with three warmups and ten
+  measurements. Both produce equal bindings. Each Type input carries a
+  64-element structural type payload; this is an internal representation probe,
+  not a new language-level Tuple identity rule.
+
+| Inputs | Repeated-prefix allocated bytes/bind | Incremental allocated bytes/bind |
+| --- | ---: | ---: |
+| 1 | 7,561 | 3,921 |
+| 16 | 588,744 | 58,912 |
+| 64 | 8,457,096 | 234,928 |
+
+This isolates allocation costs in telescope binding; it is not a historical
+compiler or release-profile end-to-end timing comparison. Complex dependent
+domains still require substitution and scope checking, including retained-prefix
+work. Dependent-body code reuse and normal-form plan bytecode remain unfinished.
+
+Final managed `cargo fmt --all -- --check` passed:
+`/tmp/luna-tools-jmdo_0v2/result.json`; `git diff --check` passed.

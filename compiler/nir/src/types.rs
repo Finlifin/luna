@@ -10,7 +10,7 @@ use std::fmt;
 use std::sync::Arc;
 
 mod input_binding;
-pub use input_binding::{FunctionCallBinding, FunctionInputBinding};
+pub use input_binding::{FunctionCallBinding, FunctionInputBinding, FunctionInputBuilder};
 
 /// Semantic domain of an argument, not a source-language type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

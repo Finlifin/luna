@@ -45,96 +45,204 @@ pub(super) fn replace_scope(
     })
 }
 
+/// Incremental binding of one callable telescope. Inputs are moved into the
+/// substitution once; a failed push leaves the completed prefix unchanged.
+#[derive(Debug)]
+pub struct FunctionInputBuilder<'a> {
+    original: &'a Term,
+    parameters: &'a [Parameter],
+    result: &'a Term,
+    replacements: Vec<Term>,
+    type_slots: BTreeSet<usize>,
+    retained: Vec<Parameter>,
+    supplied: Vec<bool>,
+    next: Option<Term>,
+}
+
+impl<'a> FunctionInputBuilder<'a> {
+    pub fn new(signature: &'a Term) -> Result<Self, TypeError> {
+        let Term::Function { parameters, result } = signature.callable_signature() else {
+            return Err(TypeError::InvalidFunctionSignature);
+        };
+        signature.check_scope(&[])?;
+        Ok(Self {
+            original: signature,
+            parameters,
+            result,
+            replacements: Vec::with_capacity(parameters.len()),
+            type_slots: BTreeSet::new(),
+            retained: Vec::new(),
+            supplied: Vec::with_capacity(parameters.len()),
+            next: None,
+        })
+    }
+    fn prepare_next(&mut self) -> Result<(), TypeError> {
+        let index = self.replacements.len();
+        let parameter = self.parameters.get(index).ok_or(TypeError::ArgumentCount {
+            expected: self.parameters.len(),
+            actual: index + 1,
+        })?;
+        if self.next.is_none() {
+            self.next = Some(replace_scope(
+                &parameter.ty,
+                &self.replacements,
+                &self.type_slots,
+                false,
+            )?);
+        }
+        Ok(())
+    }
+    /// The next declared domain after binding the completed prefix. Missing
+    /// inputs retain their telescope indices rather than becoming dummy types.
+    pub fn next_type(&mut self) -> Result<&Term, TypeError> {
+        self.prepare_next()?;
+        Ok(self.next.as_ref().unwrap())
+    }
+    pub fn push(&mut self, input: Option<Term>) -> Result<(), TypeError> {
+        self.prepare_next()?;
+        let ty = self.next.take().unwrap();
+        self.push_domain(input, ty)
+    }
+    fn push_domain(&mut self, input: Option<Term>, ty: Term) -> Result<(), TypeError> {
+        let index = self.replacements.len();
+        let parameter = &self.parameters[index];
+        require_sort(&ty, Sort::Type)?;
+        ty.check_scope(&[self.retained.iter().map(|p| p.sort).collect()])?;
+        let sort = input_sort(parameter, &ty);
+        if let Some(input) = &input {
+            input.check_scope(&[])?;
+            require_sort(input, sort)?;
+        }
+        // All fallible checks precede mutation of the completed prefix.
+        if sort != parameter.sort {
+            self.type_slots.insert(index);
+        }
+        self.supplied.push(input.is_some());
+        if let Some(input) = input {
+            self.replacements.push(input);
+        } else {
+            self.replacements.push(Term::Bound {
+                depth: 0,
+                index: self.retained.len(),
+                sort,
+            });
+            self.retained.push(Parameter { sort, ty });
+        }
+        Ok(())
+    }
+    pub fn finish(self) -> Result<FunctionInputBinding, TypeError> {
+        if self.replacements.len() != self.parameters.len() {
+            return Err(TypeError::ArgumentCount {
+                expected: self.parameters.len(),
+                actual: self.replacements.len(),
+            });
+        }
+        let specialized = Term::Function {
+            parameters: self.retained,
+            result: Box::new(replace_scope(
+                self.result,
+                &self.replacements,
+                &self.type_slots,
+                false,
+            )?),
+        };
+        let signature = wrap_signature(self.original, specialized, &self.supplied);
+        signature.check_scope(&[])?;
+        Ok(FunctionInputBinding {
+            signature,
+            replacements: self.replacements,
+            type_slots: self.type_slots,
+        })
+    }
+}
+
+fn wrap_signature(original: &Term, specialized: Term, supplied: &[bool]) -> Term {
+    match original {
+        Term::ContextualClosure { context, signature } => Term::ContextualClosure {
+            context: context.clone(),
+            signature: Box::new(wrap_signature(signature, specialized, supplied)),
+        },
+        Term::Closure {
+            environment,
+            signature,
+        } => Term::Closure {
+            environment: environment.clone(),
+            signature: Box::new(wrap_signature(signature, specialized, supplied)),
+        },
+        Term::ComptimeFunction(inner) => {
+            Term::ComptimeFunction(Box::new(wrap_signature(inner, specialized, supplied)))
+        }
+        Term::NormalFormFunction(inner, variadic) => Term::NormalFormFunction(
+            Box::new(wrap_signature(inner, specialized, supplied)),
+            variadic.and_then(|index| {
+                (!supplied[index]).then(|| {
+                    supplied[..index]
+                        .iter()
+                        .filter(|supplied| !**supplied)
+                        .count()
+                })
+            }),
+        ),
+        Term::UnsafeFunction(inner) => {
+            Term::UnsafeFunction(Box::new(wrap_signature(inner, specialized, supplied)))
+        }
+        _ => specialized,
+    }
+}
+
+impl fmt::Display for FunctionInputBuilder<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(function-input-builder (original {}) (replacements",
+            self.original
+        )?;
+        for term in &self.replacements {
+            write!(f, " {term}")?;
+        }
+        f.write_str(") (type-slots")?;
+        for slot in &self.type_slots {
+            write!(f, " {slot}")?;
+        }
+        f.write_str(") (retained")?;
+        for parameter in &self.retained {
+            write!(f, " (parameter {} {})", parameter.sort, parameter.ty)?;
+        }
+        f.write_str(") (supplied")?;
+        for supplied in &self.supplied {
+            write!(f, " {supplied}")?;
+        }
+        f.write_str(") (next")?;
+        if let Some(next) = &self.next {
+            write!(f, " {next}")?;
+        }
+        f.write_str("))")
+    }
+}
+
 impl FunctionInputBinding {
     pub(super) fn new(signature: &Term, inputs: &[Option<Term>]) -> Result<Self, TypeError> {
-        Self::with_type_view(signature, inputs, |ty, _| Ok::<_, TypeError>(ty.clone()))
+        check_input_count(signature, inputs.len())?;
+        let mut builder = FunctionInputBuilder::new(signature)?;
+        for input in inputs {
+            builder.push(input.clone())?;
+        }
+        builder.finish()
     }
-
     pub(super) fn with_type_view<E: From<TypeError>>(
         signature: &Term,
         inputs: &[Option<Term>],
         mut view: impl FnMut(&Term, &[Parameter]) -> Result<Term, E>,
     ) -> Result<Self, E> {
-        let Term::Function { parameters, result } = signature.callable_signature() else {
-            return Err(TypeError::InvalidFunctionSignature.into());
-        };
-        if inputs.len() != parameters.len() {
-            return Err(TypeError::ArgumentCount {
-                expected: parameters.len(),
-                actual: inputs.len(),
-            }
-            .into());
+        check_input_count(signature, inputs.len())?;
+        let mut builder = FunctionInputBuilder::new(signature)?;
+        for input in inputs {
+            builder.prepare_next()?;
+            let ty = builder.next.take().unwrap();
+            let ty = view(&ty, &builder.retained)?;
+            builder.push_domain(input.clone(), ty)?;
         }
-        signature.check_scope(&[])?;
-        let mut replacements = Vec::with_capacity(inputs.len());
-        let mut type_slots = BTreeSet::new();
-        let mut retained = Vec::new();
-        for (index, (parameter, input)) in parameters.iter().zip(inputs).enumerate() {
-            let ty = replace_scope(&parameter.ty, &replacements, &type_slots, false)?;
-            let ty = view(&ty, &retained)?;
-            require_sort(&ty, Sort::Type)?;
-            ty.check_scope(&[retained.iter().map(|p| p.sort).collect()])?;
-            let sort = input_sort(parameter, &ty);
-            if sort != parameter.sort {
-                type_slots.insert(index);
-            }
-            if let Some(input) = input {
-                input.check_scope(&[])?;
-                require_sort(input, sort)?;
-                replacements.push(input.clone());
-            } else {
-                replacements.push(Term::Bound {
-                    depth: 0,
-                    index: retained.len(),
-                    sort,
-                });
-                retained.push(Parameter { sort, ty });
-            }
-        }
-        let specialized = Term::Function {
-            parameters: retained,
-            result: Box::new(replace_scope(result, &replacements, &type_slots, false)?),
-        };
-        fn wrap(original: &Term, specialized: Term, inputs: &[Option<Term>]) -> Term {
-            match original {
-                Term::ContextualClosure { context, signature } => Term::ContextualClosure {
-                    context: context.clone(),
-                    signature: Box::new(wrap(signature, specialized, inputs)),
-                },
-                Term::Closure {
-                    environment,
-                    signature,
-                } => Term::Closure {
-                    environment: environment.clone(),
-                    signature: Box::new(wrap(signature, specialized, inputs)),
-                },
-                Term::ComptimeFunction(inner) => {
-                    Term::ComptimeFunction(Box::new(wrap(inner, specialized, inputs)))
-                }
-                Term::NormalFormFunction(inner, variadic) => Term::NormalFormFunction(
-                    Box::new(wrap(inner, specialized, inputs)),
-                    variadic.and_then(|index| {
-                        inputs[index].is_none().then(|| {
-                            inputs[..index]
-                                .iter()
-                                .filter(|input| input.is_none())
-                                .count()
-                        })
-                    }),
-                ),
-                Term::UnsafeFunction(inner) => {
-                    Term::UnsafeFunction(Box::new(wrap(inner, specialized, inputs)))
-                }
-                _ => specialized,
-            }
-        }
-        let signature = wrap(signature, specialized, inputs);
-        signature.check_scope(&[])?;
-        Ok(Self {
-            signature,
-            replacements,
-            type_slots,
-        })
+        Ok(builder.finish()?)
     }
 
     pub fn signature(&self) -> &Term {
@@ -167,6 +275,19 @@ impl fmt::Display for FunctionInputBinding {
         }
         f.write_str("))")
     }
+}
+
+fn check_input_count(signature: &Term, count: usize) -> Result<(), TypeError> {
+    let Term::Function { parameters, .. } = signature.callable_signature() else {
+        return Err(TypeError::InvalidFunctionSignature);
+    };
+    if parameters.len() != count {
+        return Err(TypeError::ArgumentCount {
+            expected: parameters.len(),
+            actual: count,
+        });
+    }
+    Ok(())
 }
 
 /// A checked substitution from a callee telescope into its caller's scope.

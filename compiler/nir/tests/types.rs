@@ -2668,3 +2668,101 @@ fn closure_snapshot_rejects_non_type_factory_inputs() {
     };
     assert!(invalid.check_scope(&[]).is_err());
 }
+
+#[test]
+fn incremental_input_binding_refines_domains_and_recovers_after_rejection() {
+    let signature = Term::Function {
+        parameters: vec![
+            Parameter {
+                sort: Sort::Type,
+                ty: primitive(Primitive::Type),
+            },
+            Parameter {
+                sort: Sort::ComptimeValue,
+                ty: bound(0, 0, Sort::Type),
+            },
+        ],
+        result: Box::new(Term::NormalForm {
+            head: IDENTITY,
+            sort: Sort::Type,
+            arguments: vec![bound(0, 1, Sort::ComptimeValue)],
+        }),
+    };
+    let mut builder = FunctionInputBuilder::new(&signature).unwrap();
+    assert_eq!(builder.next_type().unwrap(), &primitive(Primitive::Type));
+    builder.push(Some(primitive(Primitive::Type))).unwrap();
+    assert_eq!(builder.next_type().unwrap(), &primitive(Primitive::Type));
+    let before = builder.to_string();
+    assert!(builder.push(Some(Term::Bool(true))).is_err());
+    assert_eq!(builder.next_type().unwrap(), &primitive(Primitive::Type));
+    assert_eq!(builder.to_string(), before);
+    builder.push(Some(primitive(Primitive::Char))).unwrap();
+    assert!(builder.push(None).is_err());
+    let finished = builder.finish().unwrap();
+    assert_eq!(
+        finished.rebind(&bound(0, 1, Sort::ComptimeValue)).unwrap(),
+        primitive(Primitive::Char)
+    );
+    assert_eq!(
+        finished.signature(),
+        &Term::Function {
+            parameters: vec![],
+            result: Box::new(Term::NormalForm {
+                head: IDENTITY,
+                sort: Sort::Type,
+                arguments: vec![primitive(Primitive::Char)],
+            })
+        }
+    );
+    assert!(finished.to_string().contains("(type-slots 1)"));
+    assert!(
+        FunctionInputBuilder::new(&signature)
+            .unwrap()
+            .finish()
+            .is_err()
+    );
+}
+
+#[test]
+fn incremental_binding_preserves_phase_variadics_and_retained_indices() {
+    let signature = Term::UnsafeFunction(Box::new(Term::NormalFormFunction(
+        Box::new(Term::Function {
+            parameters: vec![
+                Parameter {
+                    sort: Sort::ComptimeValue,
+                    ty: primitive(Primitive::Bool)
+                };
+                2
+            ],
+            result: Box::new(primitive(Primitive::Type)),
+        }),
+        Some(1),
+    )));
+    for suffix in [None, Some(Term::Bool(false))] {
+        let mut builder = FunctionInputBuilder::new(&signature).unwrap();
+        builder.push(Some(Term::Bool(true))).unwrap();
+        builder.push(suffix.clone()).unwrap();
+        let result = builder.finish().unwrap();
+        assert_eq!(
+            result,
+            signature
+                .prepare_function_inputs(&[Some(Term::Bool(true)), suffix.clone()])
+                .unwrap()
+        );
+        let Term::UnsafeFunction(inner) = result.signature() else {
+            panic!("unsafe wrapper")
+        };
+        let Term::NormalFormFunction(inner, variadic) = inner.as_ref() else {
+            panic!("normal-form wrapper")
+        };
+        assert_eq!(*variadic, if suffix.is_some() { None } else { Some(0) });
+        let Term::Function { parameters, .. } = inner.as_ref() else {
+            panic!("function")
+        };
+        assert_eq!(parameters.len(), usize::from(suffix.is_none()));
+        assert_eq!(
+            result.rebind(&bound(0, 1, Sort::ComptimeValue)).unwrap(),
+            suffix.unwrap_or_else(|| bound(0, 0, Sort::ComptimeValue))
+        );
+    }
+}

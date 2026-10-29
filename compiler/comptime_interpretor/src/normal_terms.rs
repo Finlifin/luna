@@ -778,6 +778,79 @@ mod borrowed_input_tests {
     const SOURCE: SourceRange = SourceRange { start: 1, end: 2 };
 
     #[test]
+    fn staged_binding_after_ordinary_prefix_preserves_dependent_domains() {
+        let package = Package::default();
+        let bindings = [0, 1, 2].map(|index| LocalId { owner: 1, index });
+        let bool_ty = Term::Primitive(Primitive::Bool);
+        let type_input = Term::Bound {
+            depth: 0,
+            index: 1,
+            sort: nir::Sort::Type,
+        };
+        let signature = Term::Function {
+            parameters: vec![
+                nir::Parameter {
+                    sort: nir::Sort::Runtime,
+                    ty: bool_ty.clone(),
+                },
+                nir::Parameter {
+                    sort: nir::Sort::Type,
+                    ty: Term::Primitive(Primitive::Type),
+                },
+                nir::Parameter {
+                    sort: nir::Sort::Runtime,
+                    ty: type_input.clone(),
+                },
+            ],
+            result: Box::new(type_input.clone()),
+        };
+        for stored in [false, true] {
+            for valid in [false, true] {
+                let prefix = if stored {
+                    Value::Storage(Storage::new(Value::Bool(true)))
+                } else {
+                    Value::Bool(true)
+                };
+                let suffix = if valid {
+                    Value::Bool(false)
+                } else {
+                    Value::Type(bool_ty.clone())
+                };
+                let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+                let mut env = Environment::new();
+                let result = vm.bind_invocation_inputs(
+                    &bindings,
+                    vec![prefix, Value::Type(bool_ty.clone()), suffix],
+                    &signature,
+                    &mut env,
+                    SOURCE,
+                );
+                if !valid {
+                    assert!(result.is_err());
+                    assert!(!env.contains_key(&bindings[2]));
+                    continue;
+                }
+                let scope = result.unwrap().unwrap();
+                assert_eq!(scope.rebind(&type_input).unwrap(), bool_ty);
+                assert_eq!(
+                    scope.signature(),
+                    &Term::Function {
+                        parameters: vec![
+                            nir::Parameter {
+                                sort: nir::Sort::Runtime,
+                                ty: bool_ty.clone(),
+                            };
+                            2
+                        ],
+                        result: Box::new(bool_ty.clone()),
+                    }
+                );
+                assert_eq!(env[&bindings[2]], Value::Bool(false));
+            }
+        }
+    }
+
+    #[test]
     fn borrowed_exports_retain_scope_checks_and_leave_input_intact_on_failure() {
         let parameter = DeclarationId {
             package: 1,

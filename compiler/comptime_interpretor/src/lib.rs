@@ -2187,8 +2187,7 @@ impl<'a> Interpreter<'a> {
         if parameters.len() != arguments.len() || types.len() != arguments.len() {
             return Err(self.failure(ErrorKind::Arity, Some(source)));
         }
-        let mut type_inputs = vec![None; types.len()];
-        let mut type_scope: Option<nir::FunctionInputBinding> = None;
+        let mut builder: Option<nir::FunctionInputBuilder<'_>> = None;
         for (index, ((binding, argument), parameter)) in
             parameters.iter().zip(arguments).zip(types).enumerate()
         {
@@ -2212,11 +2211,19 @@ impl<'a> Interpreter<'a> {
                     .as_ref()
                     .map_or(&argument, |contents| contents.value());
                 self.check_borrowed_representation(representation, source, 0)?;
-                let expected = match &type_scope {
-                    Some(scope) => scope.rebind(&parameter.ty),
-                    None => parameter.ty.substitute_partial(&type_inputs),
-                }
-                .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
+                let expected = match builder.as_mut() {
+                    Some(builder) => std::borrow::Cow::Borrowed(
+                        builder
+                            .next_type()
+                            .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?,
+                    ),
+                    None => std::borrow::Cow::Owned(
+                        parameter
+                            .ty
+                            .substitute_partial(&[])
+                            .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?,
+                    ),
+                };
                 expected
                     .check_scope(&[])
                     .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
@@ -2225,6 +2232,12 @@ impl<'a> Interpreter<'a> {
                 }
                 self.admit_embedded_type_descriptions(representation, 0)?;
                 drop(contents);
+                drop(expected);
+                if let Some(builder) = &mut builder {
+                    builder
+                        .push(None)
+                        .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
+                }
                 environment.insert(*binding, argument);
                 continue;
             }
@@ -2239,11 +2252,19 @@ impl<'a> Interpreter<'a> {
                 }
                 value => std::borrow::Cow::Owned(self.checkpoint_representation(value, source)?),
             };
-            let expected = match &type_scope {
-                Some(scope) => scope.rebind(&parameter.ty),
-                None => parameter.ty.substitute_partial(&type_inputs),
-            }
-            .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
+            let expected = match builder.as_mut() {
+                Some(builder) => std::borrow::Cow::Borrowed(
+                    builder
+                        .next_type()
+                        .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?,
+                ),
+                None => std::borrow::Cow::Owned(
+                    parameter
+                        .ty
+                        .substitute_partial(&[])
+                        .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?,
+                ),
+            };
             expected
                 .check_scope(&[])
                 .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
@@ -2253,9 +2274,9 @@ impl<'a> Interpreter<'a> {
             if self.comptime_only {
                 self.admit_embedded_type_descriptions(&representation, 0)?;
             }
-            if parameter.sort == nir::Sort::Type
+            let input = if parameter.sort == nir::Sort::Type
                 || (parameter.sort == nir::Sort::ComptimeValue
-                    && expected == Term::Primitive(Primitive::Type))
+                    && *expected == Term::Primitive(Primitive::Type))
             {
                 let ty = match representation.as_ref() {
                     Value::Type(ty) => ty.clone(),
@@ -2269,33 +2290,48 @@ impl<'a> Interpreter<'a> {
                     }
                     _ => return Err(self.failure(ErrorKind::Type, Some(source))),
                 };
-                type_inputs[index] = Some(ty);
-                type_scope = Some(
-                    signature
-                        .prepare_function_inputs(&type_inputs)
-                        .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?,
-                );
+                Some(ty)
             } else if parameter.sort == nir::Sort::ComptimeValue
                 && self.normal_input_is_data(&representation, source)?
             {
                 // Checked data inputs may remain symbolic in a generic
                 // invocation. Preserve their authorized declaration identity
                 // in dependent inputs, results and body annotations.
-                type_inputs[index] = Some(match representation {
+                Some(match representation {
                     std::borrow::Cow::Borrowed(value) => {
                         self.borrowed_residual_input_term(value, source)?
                     }
                     std::borrow::Cow::Owned(value) => self.residual_input_term(value, source)?,
-                });
-                type_scope = Some(
-                    signature
-                        .prepare_function_inputs(&type_inputs)
-                        .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?,
-                );
+                })
+            } else {
+                None
+            };
+            drop(expected);
+            if input.is_some() && builder.is_none() {
+                let mut prefix = nir::FunctionInputBuilder::new(signature)
+                    .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
+                for _ in 0..index {
+                    prefix
+                        .push(None)
+                        .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
+                }
+                builder = Some(prefix);
+            }
+            if let Some(builder) = &mut builder {
+                builder
+                    .push(input)
+                    .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
             }
             environment.insert(*binding, argument);
         }
-        Ok(type_scope)
+        if let Some(builder) = builder {
+            builder
+                .finish()
+                .map(Some)
+                .map_err(|_| self.failure(ErrorKind::Type, Some(source)))
+        } else {
+            Ok(None)
+        }
     }
 
     fn specialize_input_types(
