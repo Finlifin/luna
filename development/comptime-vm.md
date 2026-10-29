@@ -1646,3 +1646,30 @@ Validation from `/home/fin/luna`:
   report `/tmp/luna-tools-cjbsa1zf/result.json`.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
   exit 0; report `/tmp/luna-tools-5wy2bw2_/result.json`.
+
+## Restore frontend source-protection checks (2026-10-30)
+
+Nine of the recorded frontend fixture failures are corrected without changing
+compiler behavior or weakening their success/rejection requirements. Three
+comptime CLI fixtures now use the existing standalone primitive-binding writer,
+so their bool signatures reach invocation and contract checks. Source-protection
+and observed-input assertions capture the complete written source before running
+the compiler, including those explicit fixture bindings. They continue to check
+exact bytes after attempted overwrites and exact escaped contents in reports;
+artifact preservation, hard-link protection, native execution and type-contract
+failure checks remain intact.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test frontend_cli explicit_package_cli`:
+  exit 0; report `/tmp/luna-tools-3lwoqh7s/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test frontend_cli -- --exact comptime_invocation_executes_real_closures_defaults_and_writes_complete_values comptime_invocation_rejects_wrong_entries_and_preserves_output_on_failure comptime_invocation_uses_type_solver_and_preserves_outputs_on_contract_failure explicit_package_cli_compiles_cross_package_calls_and_preserves_outputs explicit_package_cli_exports_observed_inputs_with_the_selected_result explicit_package_cli_input_envelope_is_published_only_after_success explicit_sysroot_protects_dependency_sources_and_reports_invalid_packages package_llvm_dump_selects_primary_identity_and_preserves_inputs package_native_build_preserves_identity_resources_and_previous_artifacts`:
+  exit 0; all nine selected tests passed, 243 filtered out;
+  report `/tmp/luna-tools-ig048hap/result.json`.
+
+The remaining three recorded frontend failures concern shipped-library fixture
+paths/dependencies and a duplicated primitive binding; they are not addressed by
+this source-protection correction. No full frontend-suite rerun was needed for
+these bounded fixture changes.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; report `/tmp/luna-tools-zxlthwpb/result.json`.

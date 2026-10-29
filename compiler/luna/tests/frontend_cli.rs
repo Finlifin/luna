@@ -1778,6 +1778,7 @@ fn explicit_sysroot_protects_dependency_sources_and_reports_invalid_packages() {
     sandbox.write("library/builtin/lib.fl", "pub mod prelude {}");
     let source = "pub fn standard()->bool {true}";
     sandbox.write("library/std/lib.fl", source);
+    let source = fs::read_to_string(sandbox.path("library/std/lib.fl")).unwrap();
     failure(
         &sandbox.run(&[
             "input.fl",
@@ -2264,7 +2265,7 @@ fn comptime_invocation_specializes_type_dispatch_and_preserves_failed_output() {
 #[test]
 fn comptime_invocation_executes_real_closures_defaults_and_writes_complete_values() {
     let sandbox = Sandbox::new();
-    fs::write(
+    primitive_bindings::write_fixture(
         sandbox.0.join("input.fl"),
         include_str!("../../../development/examples/computed-environment-types.fl"),
     )
@@ -2289,7 +2290,7 @@ fn comptime_invocation_executes_real_closures_defaults_and_writes_complete_value
             .unwrap()
             .contains("pointer")
     );
-    fs::write(
+    primitive_bindings::write_fixture(
         sandbox.0.join("input.fl"),
         "comptime fn run(.value: .u8'builtin = 7) -> .u8'builtin { value }",
     )
@@ -2326,8 +2327,8 @@ fn comptime_invocation_rejects_wrong_entries_and_preserves_output_on_failure() {
             "ambiguous",
         ),
     ] {
-        fs::write(sandbox.0.join("input.fl"), source).unwrap();
-        fs::write(sandbox.0.join("value.lisp"), OLD_OUTPUT).unwrap();
+        primitive_bindings::write_fixture(sandbox.0.join("input.fl"), source).unwrap();
+        primitive_bindings::write_fixture(sandbox.0.join("value.lisp"), OLD_OUTPUT).unwrap();
         let output = sandbox.run(&[
             "input.fl",
             "--invoke-comptime",
@@ -2378,8 +2379,8 @@ fn comptime_invocation_fuel_bounds_nontermination_and_does_not_execute_runtime_c
 #[test]
 fn comptime_invocation_uses_type_solver_and_preserves_outputs_on_contract_failure() {
     let sandbox = Sandbox::new();
-    fs::write(sandbox.0.join("input.fl"), "typealias Type = .Type'builtin; struct Checked where T, requires T == bool { value: T } comptime fn CheckedType(value: Type) -> Type { Checked<value> } comptime fn run() -> Type { CheckedType('z''type) }").unwrap();
-    fs::write(sandbox.0.join("value.lisp"), OLD_OUTPUT).unwrap();
+    primitive_bindings::write_fixture(sandbox.0.join("input.fl"), "typealias Type = .Type'builtin; struct Checked where T, requires T == bool { value: T } comptime fn CheckedType(value: Type) -> Type { Checked<value> } comptime fn run() -> Type { CheckedType('z''type) }").unwrap();
+    primitive_bindings::write_fixture(sandbox.0.join("value.lisp"), OLD_OUTPUT).unwrap();
     let output = sandbox.run(&[
         "input.fl",
         "--invoke-comptime",
@@ -6206,11 +6207,12 @@ fn explicit_package_cli_compiles_cross_package_calls_and_preserves_outputs() {
         dump.trim()
     );
     sandbox.write("provider.fl", "pub fn answer()->bool {true}");
+    let source = fs::read_to_string(sandbox.path("provider.fl")).unwrap();
     *output_args.last_mut().unwrap() = "provider.fl";
     failure(&sandbox.run(&output_args), 1);
     assert_eq!(
         fs::read_to_string(sandbox.path("provider.fl")).unwrap(),
-        "pub fn answer()->bool {true}"
+        source
     );
 }
 
@@ -7324,6 +7326,8 @@ fn explicit_package_cli_exports_observed_inputs_with_the_selected_result() {
     let sandbox = Sandbox::new();
     sandbox.write("client.fl", "use dep.answer;fn run()->bool {answer()}");
     sandbox.write("provider.fl", "pub fn answer()->bool {true}");
+    let source = fs::read_to_string(sandbox.path("provider.fl")).unwrap();
+    let expected_input = format!("(text (string {}))", nir::QuotedDisplay(&source));
     let base = [
         "--packages-v1",
         "--package",
@@ -7366,10 +7370,7 @@ fn explicit_package_cli_exports_observed_inputs_with_the_selected_result() {
             dump.contains("(source (resolution-id 9) (identity 901)"),
             "{dump}"
         );
-        assert!(
-            dump.contains("(text (string \"pub fn answer()->bool {true}\"))"),
-            "{dump}"
-        );
+        assert!(dump.contains(&expected_input), "{dump}");
         if args.contains(&"--interpret") {
             assert!(dump.contains("(result (bool true))"), "{dump}");
         }
@@ -7418,17 +7419,18 @@ fn explicit_package_cli_input_envelope_is_published_only_after_success() {
         completed
     );
     sandbox.write("client.fl", "fn run()->bool {false}");
+    let source = fs::read_to_string(sandbox.path("client.fl")).unwrap();
     *args.last_mut().unwrap() = "client.fl";
     failure(&sandbox.run(&args), 1);
     assert_eq!(
         fs::read_to_string(sandbox.path("client.fl")).unwrap(),
-        "fn run()->bool {false}"
+        source
     );
     *args.last_mut().unwrap() = "result.lisp";
     success(&sandbox.run(&args));
     let updated = fs::read_to_string(sandbox.path("result.lisp")).unwrap();
     assert!(updated.contains("(result (bool false))"));
-    assert!(updated.contains("(text (string \"fn run()->bool {false}\"))"));
+    assert!(updated.contains(&format!("(text (string {}))", nir::QuotedDisplay(&source))));
 }
 
 #[test]
@@ -7590,6 +7592,7 @@ fn package_llvm_dump_selects_primary_identity_and_preserves_inputs() {
     sandbox.write("app.fl", "use support.answer;fn run()->bool {answer()}");
     let library = "pub trait Duplicate {} pub trait Retire {fn drop(*self);}impl Duplicate for bool {}pub inline fn answer()->bool {true}fn run()->bool {false}";
     sandbox.write("support.fl", library);
+    let library = fs::read_to_string(sandbox.path("support.fl")).unwrap();
     let base = [
         "--packages-v1",
         "--package",
@@ -7660,6 +7663,7 @@ fn package_native_build_preserves_identity_resources_and_previous_artifacts() {
     let sandbox = Sandbox::new();
     let support = "pub trait Duplicate {}pub trait Retire {fn drop(*self);}impl Duplicate for bool {}impl Duplicate for *T where T {}struct Watch {target:*bool}impl Retire for Watch {fn drop(*self) {self.target.*.* = true;}}pub inline effect get()->bool;pub inline fn answer(target:*bool)->#get bool {let watch=Watch {target:target};get()#}fn run()->bool {false}";
     sandbox.write("support.fl", support);
+    let support = fs::read_to_string(sandbox.path("support.fl")).unwrap();
     sandbox.write("app.fl", "use support.get;use support.answer;fn run()->bool {let seen=false;let result=answer(seen.ref)# {get()=>true,};result and seen}");
     let base = [
         "--packages-v1",
