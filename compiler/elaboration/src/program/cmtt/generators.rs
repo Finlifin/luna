@@ -12,6 +12,7 @@ mod places;
 mod properties;
 pub(in crate::program::cmtt) mod spreads;
 pub(in crate::program::cmtt) mod statements;
+mod type_inputs;
 use statements::Control;
 
 use nir::code_interfaces::{CodeFunctionSignature, CodeInput as Input};

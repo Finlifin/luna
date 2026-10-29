@@ -10569,3 +10569,64 @@ fn contextual_data_properties_preserve_positional_only_extended_calls() {
         fn run()->bool {const value=inspect {'(true),true};value}";
     assert_eq!(run(source, "run", vec![]), Value::Bool(true));
 }
+
+#[test]
+fn contextual_type_clauses_execute_live_updates_once_before_property_inputs() {
+    let source =
+        include_str!("../../../development/repros/contextual-property-live-type-clause.fl");
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let ordinary = source.replace("{ code, enabled: flag }", "(code, .props=SAMPLE)");
+    assert_eq!(run(&ordinary, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn contextual_type_clauses_update_multiple_inputs_in_source_order() {
+    let source = "
+        comptime fn schema(...fields:T)->T where T {fields}
+        const SAMPLE=schema {enabled:true}; typealias Options=SAMPLE'type;
+        comptime fn pack(code:<|-bool>, ...props:B)->B where A,B {props}
+        comptime fn forward(code:<|-bool>)->bool {
+            var flag=false;
+            const props=pack<do {flag=not flag; Options}, do {assumes flag; flag=false; Options}>
+                {code, enabled:not flag};
+            not flag and props.enabled
+        }
+        fn run()->bool {const value=forward('(true)); value}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn contextual_type_clauses_check_unused_effects_without_executing_them() {
+    let base = include_str!("../../../development/repros/contextual-property-live-type-clause.fl");
+    let source = base.replace(
+        "flag = not flag; Options",
+        "flag = not flag; assumes false; Options",
+    );
+    let unused = source.replace("const value = forward('(true));", "const value = true;");
+    assert_eq!(run(&unused, "run", vec![]), Value::Bool(true));
+    let failure = support::compile_with_protocols(&source, &Default::default()).unwrap_err();
+    assert!(
+        !failure.contains("is not available in this invocation"),
+        "{failure}"
+    );
+    assert!(!failure.contains("parsing failed"), "{failure}");
+    let invalid = unused.replace("assumes false", "flag = 'x'");
+    assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+}
+
+#[test]
+fn contextual_type_clauses_do_not_guess_input_dependent_result_identities() {
+    let source = "
+        typealias Char=.char'builtin;
+        comptime fn keep(code:<|-bool>, value:T)->T where T {value}
+        comptime fn forward(code:<|-bool>, flag:bool)->bool {
+            const value=keep<if flag {bool} else {Char}>(code, true);
+            value
+        }
+        fn run()->bool {true}";
+    let failure = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+    assert!(
+        failure.contains("result identity known during definition checking"),
+        "{failure}"
+    );
+}

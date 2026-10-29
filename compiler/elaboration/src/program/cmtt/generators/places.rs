@@ -416,7 +416,7 @@ impl Checker<'_, '_> {
         })
     }
 
-    pub(super) fn generator_data_frame_with(
+    pub(in crate::program::cmtt) fn generator_data_frame_with(
         &mut self,
         value: &Expr<'_>,
         check: impl FnOnce(&mut Self) -> Result<n::Expr, Error>,

@@ -1,7 +1,7 @@
 {-
-    Valid intended behavior: run returns true. The explicit Type clause toggles
-    flag once, before the property fields are evaluated. Current elaboration
-    rejects the local input because Type evaluation lacks the generator frame.
+    Regression: run returns true. The explicit Type clause toggles flag once,
+    before the property fields read it. Required Type evaluation must use the
+    generator's live input frame and publish the update to the following field.
 -}
 comptime fn schema(...fields: T) -> T where T { fields }
 const SAMPLE = schema { enabled: true };
@@ -11,7 +11,7 @@ comptime fn pack(code: <|-bool>, ...props: T) -> T where T { props }
 
 comptime fn forward(code: <|-bool>) -> bool {
     var flag = false;
-    const props = pack<do { flag = not flag; Options }> { code, enabled: true };
+    const props = pack<do { flag = not flag; Options }> { code, enabled: flag };
     flag and props.enabled
 }
 

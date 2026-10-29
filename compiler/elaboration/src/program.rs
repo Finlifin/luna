@@ -3734,6 +3734,9 @@ impl Checker<'_, '_> {
                 // remaining projections are ordinary computations. Evaluate
                 // the complete receiver and projection at the required stage;
                 // a Type field's declared domain alone is not its identity.
+                if !self.generator_data.is_empty() && self.data_consumer_call(expr).is_none() {
+                    return self.generator_required_type(expr);
+                }
                 let value = self.required_value(expr, P::Type)?;
                 let comptime_interpretor::Value::Type(ty) = value else {
                     unreachable!()

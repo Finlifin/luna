@@ -509,3 +509,49 @@ exited 1 at source 534..566 with unavailable comptime input `(local 5 5)`
 (`/tmp/luna-tools-m4hvmmfw/result.json`). Repairing Type-input live-frame transport
 is the next implementation task. Contextual methods, quoted-code containers and
 arbitrary expression scheduling also remain unfinished.
+
+
+## Required Type computations in live generator frames
+
+The explicit-Type-clause reproducer from the preceding stage is now a passing
+regression. Computed Type positions inside a generator data environment reuse
+its owned input/update frame, including budget accounting and failure restoration.
+Updates are published before the following explicit clauses or argument fields
+are evaluated. The property path retains its prepared clause plan; ordinary calls
+use the same Type computation path.
+
+Definition checking validates the expression without supplying fake live values.
+Already established Type evidence is retained. For an effectful block, a closed
+tail Type identity can be used only after checking for earlier control transfers;
+the actual block still executes at invocation. Closed required computations retain
+their existing required-evaluation behavior, with generator admissibility checked
+before invocation. Different input-dependent result identities remain unresolved;
+this does not invent a normal-form identity or expand normal-form heads.
+
+The saved source now reads the updated flag in its property field and documents
+the expected success. Four source regressions cover ordinary/property calls,
+multiple clause updates in source order, unused failing checks versus invoked
+failure, invalid unused effects, and rejection of unknown result identity.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --test cmtt_phase_boundaries --test comptime_memory --test builder_invocations --test elaboration
+python3 -B development/check.py --timeout 900 -- run -p luna -- development/repros/contextual-property-live-type-clause.fl --interpret run
+python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --test cmtt_phase_boundaries --test comptime_memory --test builder_invocations
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+git diff --check
+```
+
+The broad run passed 566 CMTT, 73 builder, three phase-boundary, 17 memory and 451
+elaboration tests (`/tmp/luna-tools-049zlzc3/result.json`). The CLI reproducer
+returned `(bool true)` (`/tmp/luna-tools-uia9th8b/result.json`). After moving the
+closed-expression admissibility check ahead of execution, the final CMTT/builder/
+phase/memory run passed again (`/tmp/luna-tools-aapdrllt/result.json`); the CLI and
+elaboration-only evidence preceded that last ordering adjustment. Formatting
+completed at `/tmp/luna-tools-gaz7oijr/result.json`; whitespace checks passed.
+
+This repairs live Type-input transport with known result identity. Arbitrary
+input-dependent Type results still require a deferred elaboration representation;
+contextual data methods, code containers and general expression call scheduling
+remain unfinished.
