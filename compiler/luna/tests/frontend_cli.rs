@@ -1086,6 +1086,52 @@ impl Sandbox {
         path
     }
 
+    fn write_exact(&self, name: &str, content: impl AsRef<[u8]>) -> PathBuf {
+        let path = self.path(name);
+        fs::write(&path, content).unwrap();
+        path
+    }
+
+    fn copy_sysroot(&self) {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
+        let mut directories = vec![root.clone()];
+        while let Some(directory) = directories.pop() {
+            let relative = directory.strip_prefix(&root).unwrap();
+            fs::create_dir_all(self.path("library").join(relative)).unwrap();
+            for entry in fs::read_dir(directory).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if entry.file_type().unwrap().is_dir() {
+                    directories.push(path);
+                } else if path.extension().is_some_and(|extension| extension == "fl")
+                    || path
+                        .file_name()
+                        .is_some_and(|name| name == "language-items.conf")
+                {
+                    fs::copy(
+                        &path,
+                        self.path("library").join(path.strip_prefix(&root).unwrap()),
+                    )
+                    .unwrap();
+                }
+            }
+        }
+    }
+
+    // Semantic tests use an explicit 64-bit target with the copied real sysroot.
+    fn run_with_sysroot(&self, args: &[&str]) -> Output {
+        let mut configured = args.to_vec();
+        configured.extend([
+            "--sysroot",
+            "library",
+            "--build-target",
+            "x86_64",
+            "linux",
+            "64",
+        ]);
+        self.run(&configured)
+    }
+
     fn command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_luna"));
         command
@@ -3694,18 +3740,25 @@ fn shipped_library_files_use_current_syntax() {
 #[test]
 fn shipped_operator_protocols_execute_with_default_and_named_types() {
     let sandbox = Sandbox::new();
-    let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    for name in ["primitives", "ops"] {
-        fs::copy(
-            repository.join(format!("library/builtin/{name}.fl")),
-            sandbox.path(format!("{name}.fl")),
-        )
-        .unwrap();
-    }
-    sandbox.write("lib.fl", "pub use primitives.*; pub use ops.*; impl Add for bool {assoc Output:Type=bool;fn add(self,rhs:bool)->bool {self or rhs}} impl Add<.Rhs=bool> for char {assoc Output:Type=bool;fn add(self,rhs:bool)->bool {rhs}} fn run()->bool {false.as(Add).add(true) and 'x'.as(Add<.Rhs=bool>).add(true)}");
-    let output = sandbox.run(&["lib.fl", "--emit", "hir"]);
-    hir_dump(&output);
-    let output = sandbox.run(&["lib.fl", "--interpret", "run"]);
+    sandbox.copy_sysroot();
+    sandbox.write_exact("input.fl", "struct Flag {value:bool} struct Character {value:char}
+        impl Add for Flag {assoc Output:Type=bool;fn add(self,rhs:Self)->bool {self.value or rhs.value}}
+        impl Add<.Rhs=bool> for Character {assoc Output:Type=bool;fn add(self,rhs:bool)->bool {rhs}}
+        fn run()->bool {Flag {value:false}.as(Add).add(Flag {value:true}) and Character {value:'x'}.as(Add<.Rhs=bool>).add(true)}");
+    let output = sandbox.run(&[
+        "input.fl",
+        "--sysroot",
+        "library",
+        "--emit",
+        "hir",
+        "--output",
+        "hir.lisp",
+    ]);
+    success(&output);
+    let hir = fs::read_to_string(sandbox.path("hir.lisp")).unwrap();
+    single_sexpression(&hir);
+    assert!(hir.starts_with("(hir-package"));
+    let output = sandbox.run_with_sysroot(&["input.fl", "--interpret", "run"]);
     assert!(output.status.success(), "{}", details(&output));
     assert_eq!(
         String::from_utf8_lossy(&output.stdout).trim(),
@@ -4272,35 +4325,15 @@ fn optional_callback_tails_use_explicit_return_payload_evidence() {
 #[test]
 fn shipped_clone_protocol_preserves_noncopy_sources() {
     let sandbox = Sandbox::new();
-    let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    for name in [
-        "primitives",
-        "traits",
-        "resources",
-        "comparison",
-        "conversion",
-    ] {
-        fs::copy(
-            repository.join(if name == "primitives" {
-                format!("library/builtin/{name}.fl")
-            } else {
-                format!("library/builtin/types/{name}.fl")
-            }),
-            sandbox.path(format!("{name}.fl")),
-        )
-        .unwrap();
-    }
-    // Formatting is outside this fixture. This local type only supplies the
-    // opaque signatures of Display/Debug; neither formatting method is called.
-    let prefix="pub use primitives.*;pub use traits.*;struct String {}
+    sandbox.copy_sysroot();
+    let prefix="
         struct Ticket {flag:bool}
-        impl Once for Ticket {}
         impl Clone for Ticket {fn clone(*self)->Self {Ticket {flag:self.flag}}}
         impl Drop for Ticket {fn drop(*self) {}}
         fn require_once(value:*T) where T :- Once {}
         fn clone_generic(value:*T)->T where T :- Clone {require_once(value);value.*.as(Clone).clone()}";
-    sandbox.write(
-        "lib.fl",
+    sandbox.write_exact(
+        "input.fl",
         &format!(
             "{prefix}
         fn run()->bool {{let source=Ticket {{flag:true}};
@@ -4308,32 +4341,35 @@ fn shipped_clone_protocol_preserves_noncopy_sources() {
             source.flag and first.flag and second.flag}}"
         ),
     );
-    let output = sandbox.run(&["lib.fl", "--interpret", "run"]);
+    let output = sandbox.run_with_sysroot(&["input.fl", "--interpret", "run"]);
     assert_eq!(success(&output).trim(), "(bool true)");
     // The concrete method footprint must also pass resource-checked execution.
-    let checked = sandbox.run(&[
-        "lib.fl",
+    let checked = sandbox.run_with_sysroot(&[
+        "input.fl",
         "--interpret",
         "run",
         "--copy-protocol",
-        "Copy",
+        "builtin.protocols.resources.Copy",
         "--drop-protocol",
-        "Drop",
+        "builtin.protocols.resources.Drop",
     ]);
     assert_eq!(success(&checked).trim(), "(bool true)");
     for invalid in [
-        prefix.replace("impl Once for Ticket {}", ""),
+        prefix.replace(
+            "impl Clone for Ticket {fn clone(*self)->Self {Ticket {flag:self.flag}}}",
+            "",
+        ),
         prefix.replace("fn clone(*self)->Self", "fn clone(self)->Self"),
     ] {
-        sandbox.write("lib.fl", &format!("{invalid} fn run()->bool {{true}}"));
+        sandbox.write_exact("input.fl", &format!("{invalid} fn run()->bool {{let source=Ticket {{flag:true}};clone_generic(source.ref).flag}}"));
         assert!(
             !sandbox
-                .run(&["lib.fl", "--interpret", "run"])
+                .run_with_sysroot(&["input.fl", "--interpret", "run"])
                 .status
                 .success()
         );
     }
-    sandbox.write("lib.fl","pub use primitives.*;pub use traits.*;struct String {}
+    sandbox.write_exact("input.fl","
         struct Key {value:u8}
         impl Eq for Key {fn eq(self,other:Self)->bool {self.value == other.value}}
         impl Ord for Key {fn cmp(self,other:Self)->Order {
@@ -4354,7 +4390,7 @@ fn shipped_clone_protocol_preserves_noncopy_sources() {
             Key {value:2}.as(Ord).ge(Key {value:2}) and
             Key {value:3}.as(Ord).ge(Key {value:2}) and
             Key {value:1}.as(Hash).hash() == 7}");
-    let output = sandbox.run(&["lib.fl", "--interpret", "run"]);
+    let output = sandbox.run_with_sysroot(&["input.fl", "--interpret", "run"]);
     assert_eq!(success(&output).trim(), "(bool true)");
 }
 
@@ -4396,121 +4432,68 @@ fn field_pointer_reads_require_a_target_and_copy_payload() {
 #[test]
 fn sysroot_language_items_bind_real_list_and_tuple_definitions_by_default() {
     let sandbox = Sandbox::new();
-    fs::create_dir_all(sandbox.path("library/builtin")).unwrap();
-    sandbox.write(
-        "library/builtin/primitives.fl",
-        include_str!("../../../library/builtin/primitives.fl"),
-    );
-    for name in [
-        "builtin/protocols",
-        "builtin/types",
-        "builtin/numeric",
-        "std",
-        "meta",
-    ] {
-        fs::create_dir_all(sandbox.path(&format!("library/{name}"))).unwrap();
-    }
-    sandbox.write("library/builtin/lib.fl","use protocols.ops; use types.tuple; use numeric.{comparison,math_intrinsics}; pub use primitives.*;pub use tuple.Tuple;pub use ops.*;pub use comparison.*;pub mod math {pub use math_intrinsics.*;} pub mod prelude {pub use tuple.Tuple;}");
-    sandbox.write(
-        "library/builtin/protocols/resources.fl",
-        include!("support/resources_source.rs"),
-    );
-    sandbox.write(
-        "library/builtin/types/tuple.fl",
-        include!("support/tuple_source.rs"),
-    );
-    fs::create_dir_all(sandbox.path("library/attrs")).unwrap();
-    sandbox.write("library/attrs/lib.fl", include!("support/attrs_source.rs"));
-    sandbox.write(
-        "library/builtin/numeric/comparison.fl",
-        include_str!("../../../library/builtin/numeric/comparison.fl"),
-    );
-    sandbox.write(
-        "library/builtin/protocols/ops.fl",
-        include!("support/operators_source.rs"),
-    );
-    sandbox.write("library/meta/lib.fl", include!("support/meta_source.rs"));
-    sandbox.write("library/std/lib.fl", "pub mod prelude {}");
-    sandbox.write(
-        "library/language-items.conf",
-        // This fixture supplies list/tuple and numeric protocols, not the
-        // iterator or list-pattern implementations from the complete sysroot.
-        include_str!("../../../library/language-items.conf")
-            .lines()
-            .filter(|line| {
-                !line.starts_with("comptime-intrinsic.")
-                    && !line.starts_with("iterator-protocol =")
-                    && !line.starts_with("into-iterator-protocol =")
-                    && !line.starts_with("list-pattern-protocol =")
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
-    );
-    sandbox.write(
-        "library/builtin/numeric/math_intrinsics.fl",
-        include_str!("../../../library/builtin/numeric/math_intrinsics.fl"),
-    );
-    sandbox.write("input.fl","fn pair()->Tuple<bool,.u8'builtin> {(true,9)} fn present()->?bool {true} fn run()->bool {let (flag,byte)=pair();flag and byte==9 and (present() match {value?=>value,null=>false})}");
+    sandbox.copy_sysroot();
+    sandbox.write_exact("input.fl","fn pair()->Tuple<bool,u8> {(true,9)} fn present()->?bool {true} fn run()->bool {let (flag,byte)=pair();flag and byte==9 and (present() match {value?=>value,null=>false})}");
     assert_eq!(
-        success(&sandbox.run(&["input.fl", "--sysroot", "library", "--interpret", "run"])).trim(),
+        success(&sandbox.run_with_sysroot(&["input.fl", "--interpret", "run"])).trim(),
         "(bool true)"
     );
-    let output = sandbox.run(&["input.fl", "--sysroot", "library", "--emit", "nir"]);
+    let output = sandbox.run_with_sysroot(&["input.fl", "--emit", "nir"]);
     let dump = success(&output);
     assert!(dump.contains("normal-form"), "{dump}");
     assert!(dump.contains("type-list-value"), "{dump}");
     let original = fs::read_to_string(sandbox.path("input.fl")).unwrap();
-    sandbox.write("input.fl","use builtin.Add;typealias Type=.Type'builtin;
+    sandbox.write_exact("input.fl","use builtin.Add;
         struct Flag {value:bool}
         impl Add<.Rhs=bool> for Flag {assoc Output:Type=bool;fn add(self,rhs:bool)->bool {self.value and rhs}}
         fn run()->bool {Flag {value:true} + true}");
     assert_eq!(
-        success(&sandbox.run(&["input.fl", "--sysroot", "library", "--interpret", "run"])).trim(),
+        success(&sandbox.run_with_sysroot(&["input.fl", "--interpret", "run"])).trim(),
         "(bool true)"
     );
-    sandbox.write("input.fl", "struct Flag {value:bool}
+    sandbox.write_exact("input.fl", "struct Flag {value:bool}
         impl builtin.Eq for Flag {fn eq(self,other:Self)->bool {self.value==other.value}}
         impl builtin.Ord for Flag {fn cmp(self,other:Self)->builtin.Order {
             if not self.value and other.value {.less} else if self.value==other.value {.equal} else {.greater}
         }}
         fn run()->bool {Flag {value:false} < Flag {value:true} and Flag {value:true}==Flag {value:true} and Flag {value:false}!=Flag {value:true}}");
     assert_eq!(
-        success(&sandbox.run(&["input.fl", "--sysroot", "library", "--interpret", "run"])).trim(),
+        success(&sandbox.run_with_sysroot(&["input.fl", "--interpret", "run"])).trim(),
         "(bool true)"
     );
     for (trait_name, method, symbol) in [("Neg", "neg", "-"), ("Not", "invert", "not ")] {
-        sandbox.write("input.fl",format!("use builtin.{trait_name};typealias Type=.Type'builtin;
+        sandbox.write_exact("input.fl",format!("use builtin.{trait_name};
             struct Flag {{value:bool}}
             impl {trait_name} for Flag {{assoc Output:Type=bool;fn {method}(self)->bool {{self.value}}}}
             fn run()->bool {{ {symbol}Flag {{value:true}} }}"));
         assert_eq!(
-            success(&sandbox.run(&["input.fl", "--sysroot", "library", "--interpret", "run"]))
-                .trim(),
+            success(&sandbox.run_with_sysroot(&["input.fl", "--interpret", "run"])).trim(),
             "(bool true)"
         );
     }
-    sandbox.write("input.fl", original);
+    sandbox.write_exact("input.fl", original);
     // Defaults do not override explicit driver choices.
-    sandbox.write(
+    sandbox.write_exact(
         "library/language-items.conf",
-        format!(
-            "version = 1\nmeta-list-type = meta.List\ntuple-type = missing.Tuple\n{}",
-            include_str!("../../../library/language-items.conf")
-                .lines()
-                .filter(|line| line.starts_with("host-intrinsic."))
-                .collect::<Vec<_>>()
-                .join("\n")
-        ),
+        include_str!("../../../library/language-items.conf")
+            .lines()
+            .map(|line| {
+                if line.starts_with("tuple-type =") {
+                    "tuple-type = missing.Tuple"
+                } else {
+                    line
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
     );
     failure(
-        &sandbox.run(&["input.fl", "--sysroot", "library", "--interpret", "run"]),
+        &sandbox.run_with_sysroot(&["input.fl", "--interpret", "run"]),
         1,
     );
     assert_eq!(
-        success(&sandbox.run(&[
+        success(&sandbox.run_with_sysroot(&[
             "input.fl",
-            "--sysroot",
-            "library",
             "--interpret",
             "run",
             "--tuple-type",
@@ -4519,25 +4502,12 @@ fn sysroot_language_items_bind_real_list_and_tuple_definitions_by_default() {
         .trim(),
         "(bool true)"
     );
-    sandbox.write(
+    sandbox.write_exact(
         "library/language-items.conf",
-        include_str!("../../../library/language-items.conf")
-            .lines()
-            .filter(|line| {
-                !line.starts_with("comptime-intrinsic.")
-                    && !line.starts_with("iterator-protocol =")
-                    && !line.starts_with("into-iterator-protocol =")
-                    && !line.starts_with("list-pattern-protocol =")
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
+        include_str!("../../../library/language-items.conf"),
     );
-    sandbox.write(
-        "library/builtin/numeric/math_intrinsics.fl",
-        include_str!("../../../library/builtin/numeric/math_intrinsics.fl"),
-    );
-    sandbox.write("input.fl","typealias Type=.Type'builtin;pure comptime fn Tuple<...Es:meta.List<Type>>->Type {Tuple<...Es>} fn run()->Tuple<bool> {(true,)}");
-    let shadow = sandbox.run(&["input.fl", "--sysroot", "library", "--interpret", "run"]);
+    sandbox.write_exact("input.fl","pure comptime fn Tuple<...Es:meta.List<Type>>->Type {Tuple<...Es>} fn run()->Tuple<bool> {(true,)}");
+    let shadow = sandbox.run_with_sysroot(&["input.fl", "--interpret", "run"]);
     failure(&shadow, 1);
     assert!(String::from_utf8_lossy(&shadow.stderr).contains("multi-package elaboration failed"));
 }

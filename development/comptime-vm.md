@@ -1673,3 +1673,42 @@ this source-protection correction. No full frontend-suite rerun was needed for
 these bounded fixture changes.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
   exit 0; report `/tmp/luna-tools-zxlthwpb/result.json`.
+
+## Exercise the remaining fixtures against the real sysroot (2026-10-30)
+
+The three remaining recorded failures now use a raw copy of the repository's
+library source hierarchy and language-item manifest. They no longer flatten old
+module paths or inject standalone bool aliases into library files. Semantic runs
+supply an explicit x86_64/Linux/64-bit target, required by the full library's
+runtime integer proxies. The HIR dump is written to a file and checked there so
+the test runner's bounded stdout capture cannot truncate the tree.
+
+Operator checks use local user types with the actual builtin Add protocol,
+covering its default Self input and named Rhs input without a foreign-trait /
+foreign-type implementation. Clone tests obtain Once from the library's blanket
+implementation and retain both source-preserving cloning and resource-checked
+execution. Their rejection cases actually request a missing Clone implementation
+or supply an incompatible receiver; lack of a redundant Once impl is no longer
+incorrectly treated as failure. Comparison and Hash behavior remain checked.
+
+The List/Tuple test uses public primitive names from the prelude. It alters only
+the tuple selector when testing explicit CLI overrides, preserving unrelated
+library registrations, and still rejects replacing the registered tuple head
+with an unrelated source definition. This closes the previously recorded three
+fixture failures without changing compiler semantics.
+
+Validation from `/home/fin/luna`, final commands exited 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test frontend_cli -- --exact shipped_operator_protocols_execute_with_default_and_named_types shipped_clone_protocol_preserves_noncopy_sources sysroot_language_items_bind_real_list_and_tuple_definitions_by_default`:
+  all three passed, 249 filtered out;
+  report `/tmp/luna-tools-74qdbwjp/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test frontend_cli sysroot_language_items_bind_real_list_and_tuple_definitions_by_default`:
+  passed after replacing legacy primitive accesses with prelude names;
+  report `/tmp/luna-tools-mfg4dnt3/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  report `/tmp/luna-tools-pfq_lkt4/result.json`.
+
+Together with the preceding nine-case run, every failure from the recorded
+12-case frontend list has now passed its focused regression. The entire 252-case
+suite has not been rerun after these fixture corrections; no new full-suite
+result is claimed.
