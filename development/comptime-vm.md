@@ -2327,3 +2327,50 @@ work. Dependent-body code reuse and normal-form plan bytecode remain unfinished.
 
 Final managed `cargo fmt --all -- --check` passed:
 `/tmp/luna-tools-jmdo_0v2/result.json`; `git diff --check` passed.
+
+## Execute sequential normal-form constructors as bytecode
+
+Normal-form construction without an input-reordering plan now compiles when its
+inputs are ordinary expression arguments (including the existing spread-value
+wrapper). Begin/prepare/bind/finish instructions retain per-constructor state in
+the invocation frame. Nested constructors use distinct registers; all operand
+expressions use the ordinary bytecode compiler and invocation machinery. No opcode
+calls the NIR evaluator and no definition body is unfolded.
+
+Tree and bytecode paths share constructor preflight and input-domain checks.
+Before operand effects, the interpreter validates the head, arity, result kind
+and the next instantiated input domain. Each completed input is exported through
+the existing normal-term admission path. Final construction uses the existing
+representation validation and instantiated requirements. Early control transfer
+exits without completing the constructor. Metadata and pending state have
+S-expression dumps. Compilation work and owned type copies remain budgeted.
+
+Validation from `/home/fin/luna`, all successful runs below exited 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-vfzc0cyn/result.json`, after shared domain checking and the
+  initial differential identity/effect-order regression.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib normal_type_tests`:
+  `/tmp/luna-tools-zw4sp6p1/result.json`, final three tests. Tree/bytecode cases
+  check dependent domains before effects, final requirements and recovery,
+  unknown heads, bad arity/result kinds, and early return propagation.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_types --test normal_form_inference --test normal_form_methods --test execution`:
+  `/tmp/luna-tools-4vbn8axm/result.json`. Source-level wrappers and nested
+  `Identity` applications preserve opaque heads for changing Type inputs;
+  invocation counters prove that these constructors actually use bytecode.
+  The type-bytecode, inference, method and execution suites all passed.
+- Initial test scaffolding failed Rust compilation because a sibling module
+  could not access the private bytecode test runner, then because Flow does not
+  implement PartialEq (`/tmp/luna-tools-fmn_6gx9/result.json` and
+  `/tmp/luna-tools-30fuqmk2/result.json`). Tests were placed beneath the bytecode
+  module and destructure Flow before comparing values; production visibility and
+  Flow semantics were not changed. An initial formatter run preceded creation
+  of the test module and failed; subsequent formatting completed successfully.
+
+Contextual literals, contextual containers and explicit preparation/reordering
+plans still select the tree path before execution. This is the sequential
+constructor foundation, not completion of normal-form plan bytecode. Their
+staging, late domain resolution and temporary binding cleanup remain required.
+
+Final managed `cargo fmt --all -- --check` passed, exit 0,
+`/tmp/luna-tools-zjt6k2op/result.json`; `git diff --check` passed.

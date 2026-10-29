@@ -2,6 +2,7 @@
 //! Constants and default templates own bounded typed NIR copies; opcodes never evaluate trees.
 pub mod leaf_inputs;
 pub mod lists;
+pub mod normal_types;
 pub mod objects;
 mod patterns;
 pub mod scalar;
@@ -33,6 +34,22 @@ impl fmt::Display for ErrorConversion {
 
 #[derive(Debug)]
 pub enum Op {
+    BeginNormalType {
+        destination: Register,
+        constructor: Arc<normal_types::Constructor>,
+    },
+    PrepareNormalInput {
+        destination: Register,
+        index: usize,
+        ty: Term,
+    },
+    BindNormalInput {
+        destination: Register,
+        value: Register,
+    },
+    FinishNormalType {
+        destination: Register,
+    },
     CheckListAppend {
         local: Register,
         ty: Term,
@@ -405,6 +422,21 @@ impl fmt::Display for Program {
                         write!(f, " {selector}")?;
                     }
                     write!(f, "))")?;
+                }
+                Op::BeginNormalType {
+                    destination,
+                    constructor,
+                } => write!(f, "(begin-normal-type %{destination} {constructor})")?,
+                Op::PrepareNormalInput {
+                    destination,
+                    index,
+                    ty,
+                } => write!(f, "(prepare-normal-input %{destination} {index} {ty})")?,
+                Op::BindNormalInput { destination, value } => {
+                    write!(f, "(bind-normal-input %{destination} %{value})")?
+                }
+                Op::FinishNormalType { destination } => {
+                    write!(f, "(finish-normal-type %{destination})")?
                 }
                 Op::PrepareTypeConstructor(constructor) => {
                     write!(f, "(prepare-type-constructor {constructor})")?
@@ -1036,6 +1068,58 @@ pub fn compile(body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
                         for (field, slot) in fields.iter().zip(slots).rev() {
                             work.push(Work::Expression(field, slot));
                         }
+                    }
+                    K::NormalFormType {
+                        head,
+                        arguments,
+                        plan: None,
+                    } => {
+                        use nir::program::NormalFormArgument as A;
+                        *fuel = fuel
+                            .checked_sub(arguments.len())
+                            .ok_or(Error::Budget(source))?;
+                        let fields = arguments
+                            .iter()
+                            .map(|argument| match argument {
+                                A::Value(value) | A::TypeListSpread(value) => Ok(value),
+                                _ => Err(Error::Unsupported(source)),
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        let constructor = Arc::new(normal_types::Constructor {
+                            head: *head,
+                            ty: copy_term(&expr.ty, fuel, source)?,
+                            count: fields.len(),
+                            diverges: fields
+                                .iter()
+                                .any(|field| field.ty == Term::Primitive(Primitive::Never)),
+                        });
+                        emit(&mut work, Op::FinishNormalType { destination: dst });
+                        for (index, field) in fields.into_iter().enumerate().rev() {
+                            let value = fresh();
+                            work.push(Work::Emit(
+                                field.source,
+                                Op::BindNormalInput {
+                                    destination: dst,
+                                    value,
+                                },
+                            ));
+                            work.push(Work::Expression(field, value));
+                            work.push(Work::Emit(
+                                field.source,
+                                Op::PrepareNormalInput {
+                                    destination: dst,
+                                    index,
+                                    ty: copy_term(&field.ty, fuel, field.source)?,
+                                },
+                            ));
+                        }
+                        emit(
+                            &mut work,
+                            Op::BeginNormalType {
+                                destination: dst,
+                                constructor,
+                            },
+                        );
                     }
                     K::FunctionType { .. }
                     | K::FunctionResultType { .. }

@@ -27,6 +27,7 @@ mod list_operations;
 mod memory;
 mod normal_inputs;
 mod normal_terms;
+mod normal_types;
 mod normal_values;
 mod object_edits;
 mod object_queries;
@@ -3619,24 +3620,14 @@ impl<'a> Interpreter<'a> {
             .normal_forms
             .get(head)
             .ok_or_else(|| self.failure(ErrorKind::Type, Some(expr.source)))?;
-        let expected_result = if arguments
+        let diverges = arguments
             .iter()
             .any(nir::program::NormalFormArgument::is_diverging)
             || plan
                 .iter()
                 .flat_map(|p| &p.preparations)
-                .any(|p| p.expression.ty == Term::Primitive(Primitive::Never))
-        {
-            Primitive::Never
-        } else {
-            Primitive::Type
-        };
-        if expr.ty != Term::Primitive(expected_result)
-            || arguments.len() != metadata.parameters.len()
-        {
-            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-        }
-        self.integer_operation(Some(expr.source), |budget| budget.consume(arguments.len()))?;
+                .any(|p| p.expression.ty == Term::Primitive(Primitive::Never));
+        self.prepare_normal_type(*head, &expr.ty, arguments.len(), diverges, expr.source)?;
         if plan.is_some() {
             nir::copy_budget::charge_type_rewrite(expr, &mut self.budget.steps).map_err(
                 |error| {
@@ -4014,12 +4005,7 @@ impl<'a> Interpreter<'a> {
                 );
             }
             A::TypeListSpread(value) | A::Value(value) => {
-                if value.ty != *expected && value.ty != Term::Primitive(Primitive::Never) {
-                    self.check_type_contract(
-                        &nir::program::TypePredicate::Equal(value.ty.clone(), expected.clone()),
-                        value.source,
-                    )?;
-                }
+                self.prepare_normal_value_type(&value.ty, expected, value.source)?;
             }
             A::Integer {
                 source,

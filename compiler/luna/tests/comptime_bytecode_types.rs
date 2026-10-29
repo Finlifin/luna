@@ -51,8 +51,7 @@ fn type_equality_uses_proofs_without_unfolding_heads() {
         );
         assert_eq!(vm.bytecode_invocations() - before, 1);
     }
-    // Construction still uses the normal-form input-plan evaluator. The
-    // comparison below must compile independently and keep that head opaque.
+    // Construction and comparison retain the same opaque head identity.
     let opaque = vm.invoke(support::id(&package, "Opaque"), vec![]).unwrap();
     let before = vm.bytecode_invocations();
     assert_eq!(
@@ -169,5 +168,54 @@ fn structural_type_factories_preserve_phase_sorts_and_environment() {
         assert_eq!(result, Value::Type(expected), "{name}");
         assert_eq!(result, tree.invoke(id, inputs).unwrap(), "{name}");
         assert_eq!(vm.bytecode_invocations() - before, 1, "{name}");
+    }
+}
+
+#[test]
+fn opaque_type_applications_execute_as_bytecode_without_body_reduction() {
+    let package = support::compile(
+        "typealias Type = .Type'builtin;
+        typealias char = .char'builtin;
+        pure comptime fn Identity<T> -> Type { T }
+        comptime fn Wrapped(input: Type) -> Type { Identity<input> }
+        comptime fn Nested(input: Type) -> Type { Identity<Identity<input>> }",
+    );
+    let head = support::id(&package, "Identity");
+    let wrapped = support::id(&package, "Wrapped");
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    for primitive in [Primitive::Bool, Primitive::Char, Primitive::Bool] {
+        let before = vm.bytecode_invocations();
+        let result = vm
+            .invoke(wrapped, vec![Value::Type(Term::Primitive(primitive))])
+            .unwrap();
+        assert_eq!(
+            result,
+            Value::Type(Term::NormalForm {
+                head,
+                sort: nir::Sort::Type,
+                arguments: vec![Term::Primitive(primitive)],
+            })
+        );
+        assert_eq!(vm.bytecode_invocations() - before, 1);
+        let before = vm.bytecode_invocations();
+        let result = vm
+            .invoke(
+                support::id(&package, "Nested"),
+                vec![Value::Type(Term::Primitive(primitive))],
+            )
+            .unwrap();
+        assert_eq!(
+            result,
+            Value::Type(Term::NormalForm {
+                head,
+                sort: nir::Sort::Type,
+                arguments: vec![Term::NormalForm {
+                    head,
+                    sort: nir::Sort::Type,
+                    arguments: vec![Term::Primitive(primitive)],
+                }],
+            })
+        );
+        assert_eq!(vm.bytecode_invocations() - before, 1);
     }
 }

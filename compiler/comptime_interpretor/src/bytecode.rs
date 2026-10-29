@@ -10,6 +10,7 @@ pub(super) struct Frame {
     terminal: bool,
     waiting: Option<Waiting>,
     calls: BTreeMap<usize, PendingCall>,
+    normal_types: BTreeMap<usize, super::normal_types::Inputs>,
     pc: usize,
     slots: Vec<Option<Value>>,
     scopes: Vec<Vec<usize>>,
@@ -73,6 +74,10 @@ impl fmt::Display for Frame {
                 write!(f, " (default {call} {destination})")?
             }
             None => {}
+        }
+        write!(f, ") (normal-types")?;
+        for (slot, inputs) in &self.normal_types {
+            write!(f, " (%{slot} {inputs})")?;
         }
         write!(f, ") (calls")?;
         for (id, call) in &self.calls {
@@ -304,6 +309,7 @@ impl<'a> Interpreter<'a> {
             terminal: false,
             waiting: None,
             calls: BTreeMap::new(),
+            normal_types: BTreeMap::new(),
             pc: 0,
             scopes: Vec::new(),
             slots: (0..code.registers()).map(|_| None).collect(),
@@ -525,6 +531,43 @@ impl<'a> Interpreter<'a> {
                         return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source)));
                     };
                     frame.slots[*destination] = Some(value);
+                }
+                Op::BeginNormalType {
+                    destination,
+                    constructor,
+                } => {
+                    self.prepare_normal_type(
+                        constructor.head,
+                        &constructor.ty,
+                        constructor.count,
+                        constructor.diverges,
+                        source,
+                    )?;
+                    frame.normal_types.insert(
+                        *destination,
+                        super::normal_types::Inputs::new(constructor.head),
+                    );
+                }
+                Op::PrepareNormalInput {
+                    destination,
+                    index,
+                    ty,
+                } => {
+                    let input = frame.normal_types.get(destination).ok_or_else(missing)?;
+                    self.prepare_compiled_normal_input(input, *index, ty, source)?;
+                }
+                Op::BindNormalInput { destination, value } => {
+                    let value = frame.slots[*value].take().ok_or_else(missing)?;
+                    let input = frame
+                        .normal_types
+                        .get_mut(destination)
+                        .ok_or_else(missing)?;
+                    self.bind_compiled_normal_input(input, value, source)?;
+                }
+                Op::FinishNormalType { destination } => {
+                    let input = frame.normal_types.remove(destination).ok_or_else(missing)?;
+                    frame.slots[*destination] =
+                        Some(self.complete_normal_type(input.head, input.arguments, source)?);
                 }
                 Op::PrepareTypeConstructor(constructor) => {
                     let inputs: Vec<_> = constructor.inputs.iter().collect();
@@ -2525,3 +2568,7 @@ mod list_tests;
 #[cfg(test)]
 #[path = "bytecode_compilation.rs"]
 mod compilation_tests;
+
+#[cfg(test)]
+#[path = "normal_types/tests.rs"]
+mod normal_type_tests;
