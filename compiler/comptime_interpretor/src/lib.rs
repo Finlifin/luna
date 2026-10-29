@@ -3645,7 +3645,7 @@ impl<'a> Interpreter<'a> {
                 },
             )?;
         }
-        let mut values = vec![None; arguments.len()];
+        let mut bindings = normal_types::Bindings::new(arguments.len());
         let mut pending: Vec<
             Option<(
                 Box<nir::program::NormalFormArgument>,
@@ -3653,8 +3653,6 @@ impl<'a> Interpreter<'a> {
             )>,
         > = (0..arguments.len()).map(|_| None).collect();
         let mut pending_slots = BTreeSet::new();
-        let mut type_parameters = Vec::new();
-        let mut type_arguments = Vec::new();
         let order: Vec<_> = plan
             .as_ref()
             .map(|plan| plan.order.clone())
@@ -3668,13 +3666,13 @@ impl<'a> Interpreter<'a> {
             let parameter = &metadata.parameters[slot];
             let mut instantiated = plan.as_ref().map(|_| Box::new(arguments[slot].clone()));
             if let Some(input) = &mut instantiated {
-                self.specialize_contextual_input(input, &type_parameters, &type_arguments)?;
+                self.specialize_contextual_input(input, &bindings.parameters, &bindings.arguments)?;
             }
             let argument = instantiated.as_deref().unwrap_or(&arguments[slot]);
             let expected = self.instantiate_contextual_domain(
                 &parameter.ty,
-                &type_parameters,
-                &type_arguments,
+                &bindings.parameters,
+                &bindings.arguments,
                 expr.source,
             )?;
             let unresolved = metadata
@@ -3699,23 +3697,13 @@ impl<'a> Interpreter<'a> {
             if let Some(plan) = plan {
                 environment.insert(plan.bindings[slot], value.clone());
             }
-            let term = self.residual_input_term(value, argument.source())?;
-            type_parameters.push(nir::DeclarationParameter {
-                declaration: parameter.declaration,
-                sort: if parameter.kind == nir::normal_forms::Kind::Type {
-                    nir::Sort::Type
-                } else {
-                    nir::Sort::ComptimeValue
-                },
-            });
-            type_arguments.push(term.clone());
-            values[slot] = Some(term);
+            self.bind_normal_input(*head, &mut bindings, slot, value, argument.source())?;
             for index in pending_slots.iter().copied().collect::<Vec<_>>() {
                 self.tick(Some(expr.source))?;
                 let expected = self.instantiate_contextual_domain(
                     &metadata.parameters[index].ty,
-                    &type_parameters,
-                    &type_arguments,
+                    &bindings.parameters,
+                    &bindings.arguments,
                     expr.source,
                 )?;
                 if metadata
@@ -3727,31 +3715,24 @@ impl<'a> Interpreter<'a> {
                 }
                 let (mut input, staged) = pending[index].take().unwrap();
                 pending_slots.remove(&index);
-                self.specialize_contextual_input(&mut input, &type_parameters, &type_arguments)?;
+                self.specialize_contextual_input(
+                    &mut input,
+                    &bindings.parameters,
+                    &bindings.arguments,
+                )?;
                 let mut literals = BTreeMap::new();
                 self.prepare_normal_argument(&input, &expected, &mut literals, 0)?;
                 let value =
                     self.finish_staged_normal_argument(staged, &mut literals, input.source(), 0)?;
                 environment.insert(plan.as_ref().unwrap().bindings[index], value.clone());
-                let term = self.residual_input_term(value, input.source())?;
-                type_parameters.push(nir::DeclarationParameter {
-                    declaration: metadata.parameters[index].declaration,
-                    sort: if metadata.parameters[index].kind == nir::normal_forms::Kind::Type {
-                        nir::Sort::Type
-                    } else {
-                        nir::Sort::ComptimeValue
-                    },
-                });
-                type_arguments.push(term.clone());
-                values[index] = Some(term);
+                self.bind_normal_input(*head, &mut bindings, index, value, input.source())?;
             }
         }
         for preparation in preparations {
             value!(self.eval(&preparation.expression, environment));
         }
-        let arguments = values
-            .into_iter()
-            .collect::<Option<Vec<_>>>()
+        let arguments = bindings
+            .finish()
             .ok_or_else(|| self.failure(ErrorKind::Type, Some(expr.source)))?;
         Ok(Flow::Value(self.complete_normal_type(
             *head,

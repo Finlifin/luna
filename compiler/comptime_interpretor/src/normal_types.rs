@@ -1,29 +1,81 @@
-//! Invocation-local state for sequential normal-form construction.
+//! Invocation-local bindings and contextual normal-form construction.
 use super::*;
 
+/// Substitutions follow completion order; final arguments follow declaration order.
+/// Slots store indices rather than cloning potentially large comptime terms.
+pub(super) struct Bindings {
+    slots: Vec<Option<usize>>,
+    pub parameters: Vec<nir::DeclarationParameter>,
+    pub arguments: Vec<Term>,
+}
+impl Bindings {
+    pub fn new(count: usize) -> Self {
+        Self {
+            slots: vec![None; count],
+            parameters: vec![],
+            arguments: vec![],
+        }
+    }
+    pub fn contains(&self, slot: usize) -> bool {
+        self.slots.get(slot).is_some_and(Option::is_some)
+    }
+    pub fn finish(self) -> Option<Vec<Term>> {
+        if self
+            .slots
+            .iter()
+            .enumerate()
+            .all(|(slot, index)| *index == Some(slot))
+        {
+            return Some(self.arguments);
+        }
+        let order = self.slots.into_iter().collect::<Option<Vec<_>>>()?;
+        let mut terms: Vec<_> = self.arguments.into_iter().map(Some).collect();
+        order
+            .into_iter()
+            .map(|index| terms.get_mut(index)?.take())
+            .collect()
+    }
+}
+impl fmt::Display for Bindings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(normal-bindings")?;
+        for (slot, index) in self.slots.iter().enumerate() {
+            write!(f, " (slot {slot}")?;
+            if let Some(index) = index {
+                write!(
+                    f,
+                    " (declaration {}) (value {})",
+                    self.parameters[*index].declaration, self.arguments[*index]
+                )?;
+            } else {
+                write!(f, " pending")?;
+            }
+            write!(f, ")")?;
+        }
+        write!(f, ")")
+    }
+}
 pub(super) struct Inputs {
     pub head: DeclarationId,
-    pub arguments: Vec<Term>,
-    parameters: Vec<nir::DeclarationParameter>,
+    pub bindings: Bindings,
     pub prepared: BTreeMap<usize, Prepared>,
 }
 impl Inputs {
-    pub fn new(head: DeclarationId) -> Self {
+    pub fn new(head: DeclarationId, count: usize) -> Self {
         Self {
             head,
-            arguments: vec![],
-            parameters: vec![],
+            bindings: Bindings::new(count),
             prepared: BTreeMap::new(),
         }
     }
 }
 impl fmt::Display for Inputs {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "(normal-inputs (head {}) (arguments", self.head)?;
-        for argument in &self.arguments {
-            write!(f, " {argument}")?;
-        }
-        write!(f, ") (prepared")?;
+        write!(
+            f,
+            "(normal-inputs (head {}) {} (prepared",
+            self.head, self.bindings
+        )?;
         for (slot, value) in &self.prepared {
             write!(f, " (%{slot} {value})")?;
         }
@@ -64,13 +116,13 @@ impl Interpreter<'_> {
             .normal_forms
             .get(&inputs.head)
             .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
-        if index != inputs.arguments.len() || index >= metadata.parameters.len() {
+        if index != inputs.bindings.arguments.len() || index >= metadata.parameters.len() {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         }
         let expected = self.instantiate_contextual_domain(
             &metadata.parameters[index].ty,
-            &inputs.parameters,
-            &inputs.arguments,
+            &inputs.bindings.parameters,
+            &inputs.bindings.arguments,
             source,
         )?;
         inputs.prepared.clear();
@@ -336,10 +388,24 @@ impl Interpreter<'_> {
         value: Value,
         source: SourceRange,
     ) -> Result<(), Error> {
+        let slot = inputs.bindings.arguments.len();
+        self.bind_normal_input(inputs.head, &mut inputs.bindings, slot, value, source)
+    }
+    pub(super) fn bind_normal_input(
+        &mut self,
+        head: DeclarationId,
+        bindings: &mut Bindings,
+        slot: usize,
+        value: Value,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        if slot >= bindings.slots.len() || bindings.contains(slot) {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        }
         let parameter = self
             .normal_forms
-            .get(&inputs.head)
-            .and_then(|head| head.parameters.get(inputs.arguments.len()))
+            .get(&head)
+            .and_then(|head| head.parameters.get(slot))
             .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
         let parameter = nir::DeclarationParameter {
             declaration: parameter.declaration,
@@ -350,8 +416,9 @@ impl Interpreter<'_> {
             },
         };
         let term = self.residual_input_term(value, source)?;
-        inputs.parameters.push(parameter);
-        inputs.arguments.push(term);
+        bindings.slots[slot] = Some(bindings.arguments.len());
+        bindings.parameters.push(parameter);
+        bindings.arguments.push(term);
         Ok(())
     }
 }

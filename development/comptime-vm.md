@@ -2551,3 +2551,36 @@ not full NF plan support.
 
 Final managed `cargo fmt --all -- --check` passed, exit 0,
 `/tmp/luna-tools-2mvtq7rf/result.json`; `git diff --check` passed.
+
+## Shared normal-form binding state
+
+Tree evaluation (including reordered and pending inputs) and sequential bytecode
+now use the same invocation-local binder. It records declaration slots separately
+from completion-order substitutions. Slots hold indices into owned terms, so the
+tree path no longer clones each completed residual input to maintain both orders.
+Finalization restores declaration order by moving terms; already ordered inputs
+return their existing vector. Duplicate/out-of-range binding fails before state
+mutation, and incomplete inputs cannot produce a completed normal form. State
+has an S-expression Display including pending slots.
+
+This is the shared-state foundation for VM input plans, not bytecode support for
+preparations or deferred-input continuations. Those plans still select the tree
+path before executing any effects. Opaque head identity and pending literal
+staging remain unchanged.
+
+Validation from `/home/fin/luna`, successful runs exit 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-5h3w7n09/result.json`. Includes out-of-order binding,
+  duplicate and missing slots, deferred overflow followed by successful reuse,
+  declaration-order output and plan-local cleanup.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_types --test comptime_clause_inputs --test builder_invocations`:
+  `/tmp/luna-tools-sd0uq48l/result.json`.
+- After strengthening the deferred-input test to check the complete NF argument
+  vector, `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib planned_contextual_inputs_recover_after_deferred_literal_failure`:
+  `/tmp/luna-tools-ym_25d7s/result.json`.
+- Managed `cargo fmt --all`: `/tmp/luna-tools-vktlo6x5/result.json`;
+  `git diff --check` passed.
+- Initial test compilation failed because the test module needed the qualified
+  `normal_types::Bindings` path (`/tmp/luna-tools-9p5czfpp/result.json`);
+  corrected before the successful runs above.

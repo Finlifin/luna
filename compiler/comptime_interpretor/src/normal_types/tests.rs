@@ -1108,3 +1108,101 @@ fn contextual_match_failure_and_guard_return_clean_bindings() {
         }
     }
 }
+
+#[test]
+fn normal_bindings_preserve_declaration_order_and_reject_duplicate_slots() {
+    let package = container_package();
+    let head = package.normal_forms[0].declaration;
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let mut bindings = normal_types::Bindings::new(2);
+    vm.bind_normal_input(head, &mut bindings, 1, Value::Bool(true), SOURCE)
+        .unwrap();
+    assert!(bindings.contains(1));
+    assert!(!bindings.contains(0));
+    assert!(bindings.to_string().contains("(slot 0 pending)"));
+    for slot in [1, 2] {
+        assert_eq!(
+            vm.bind_normal_input(head, &mut bindings, slot, Value::Bool(false), SOURCE)
+                .unwrap_err()
+                .kind,
+            ErrorKind::Type
+        );
+    }
+    vm.bind_normal_input(
+        head,
+        &mut bindings,
+        0,
+        Value::Type(Term::Primitive(Primitive::Bool)),
+        SOURCE,
+    )
+    .unwrap();
+    assert_eq!(bindings.parameters[0].sort, nir::Sort::ComptimeValue);
+    assert_eq!(bindings.parameters[1].sort, nir::Sort::Type);
+    assert_eq!(
+        bindings.finish().unwrap(),
+        vec![Term::Primitive(Primitive::Bool), Term::Bool(true)]
+    );
+    assert!(normal_types::Bindings::new(1).finish().is_none());
+    assert_eq!(normal_types::Bindings::new(0).finish(), Some(vec![]));
+}
+
+#[test]
+fn planned_contextual_inputs_recover_after_deferred_literal_failure() {
+    use nir::program::NormalFormInputPlan;
+    let package = container_package();
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let locals = vec![
+        LocalId {
+            owner: 90,
+            index: 0,
+        },
+        LocalId {
+            owner: 90,
+            index: 1,
+        },
+    ];
+    let mut environment = Environment::new();
+    for spelling in ["256", "17", "256", "23"] {
+        let mut body = container_body(
+            Term::Primitive(Primitive::U8),
+            A::Integer {
+                source: SOURCE,
+                spelling: spelling.into(),
+                negative: false,
+            },
+        );
+        let K::NormalFormType { plan, head, .. } = &mut body.kind else {
+            unreachable!()
+        };
+        let head = *head;
+        *plan = Some(NormalFormInputPlan {
+            order: vec![1, 0],
+            bindings: locals.clone(),
+            preparations: vec![],
+        });
+        let result = vm.eval(&body, &mut environment);
+        if spelling == "256" {
+            assert_eq!(result.unwrap_err().kind, ErrorKind::Type);
+        } else {
+            let Flow::Value(Value::Type(Term::NormalForm {
+                head: actual,
+                arguments,
+                ..
+            })) = result.unwrap()
+            else {
+                panic!("expected opaque normal form")
+            };
+            assert_eq!(actual, head);
+            assert_eq!(
+                arguments,
+                vec![
+                    Term::Primitive(Primitive::U8),
+                    Term::Integer(comptime_runtime::Integer::from_u128(
+                        spelling.parse().unwrap()
+                    )),
+                ]
+            );
+        }
+        assert!(locals.iter().all(|local| !environment.contains_key(local)));
+    }
+}

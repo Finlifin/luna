@@ -545,7 +545,7 @@ impl<'a> Interpreter<'a> {
                     )?;
                     frame.normal_types.insert(
                         *destination,
-                        super::normal_types::Inputs::new(constructor.head),
+                        super::normal_types::Inputs::new(constructor.head, constructor.count),
                     );
                 }
                 Op::PrepareNormalInput {
@@ -636,8 +636,11 @@ impl<'a> Interpreter<'a> {
                 }
                 Op::FinishNormalType { destination } => {
                     let input = frame.normal_types.remove(destination).ok_or_else(missing)?;
-                    frame.slots[*destination] =
-                        Some(self.complete_normal_type(input.head, input.arguments, source)?);
+                    frame.slots[*destination] = Some(self.complete_normal_type(
+                        input.head,
+                        input.bindings.finish().ok_or_else(missing)?,
+                        source,
+                    )?);
                 }
                 Op::PrepareTypeConstructor(constructor) => {
                     let inputs: Vec<_> = constructor.inputs.iter().collect();
