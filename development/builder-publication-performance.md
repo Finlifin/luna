@@ -68,3 +68,56 @@ publication. Do not quote the ratios as an overall compiler speedup. The result
 supports retaining the current per-publisher caches; subsequent builder work
 should extend definition coverage rather than assume this benchmark establishes
 the performance of those unimplemented paths.
+
+## Public source invocation baseline (2026-10-29)
+
+`development/builder_source_bench.py` adds the previously missing source-level
+measurement. It runs the existing release luna binary with the complete sysroot,
+compiles a comptime loop, and invokes public StructBuilder methods. Every loop
+publishes a two-field bool/optional-bool struct and reflects its fields. It checks
+that successive calls with identical descriptions produce distinct nominal
+identities. No invocation result memoization is enabled by the benchmark.
+
+Each size gets one discarded warmup and three measured fresh processes. Timing
+includes process startup, parsing, elaboration, VM execution, publication,
+reflection and teardown. The common process wrapper polls at roughly 20 ms, so
+small differences at that scale are not reliable. Target inputs default to
+x86_64/linux/64 and can be overridden. Raw source, every command/log/result,
+binary SHA-256, target and fuel are retained; failed cases retain a summary and
+return nonzero instead of being reported as successful samples.
+
+Run from `/home/fin/luna`, after building luna:
+
+```sh
+python3 -B development/builder_source_bench.py
+python3 -B development/builder_source_bench.py --counts 16,256,4096,16384,65536 --samples 3
+```
+
+Measured against `7c786635` (same compiler binary as the preceding receiver fix):
+
+| Generated types | Median wall time (seconds) | Result |
+|---:|---:|---|
+| 16 | 0.221 | passed |
+| 256 | 0.241 | passed |
+| 4,096 | 0.382 | passed |
+| 16,384 | 0.884 | passed |
+| 65,536 | — | structural publication allowance exhausted during warmup |
+
+Evidence: `/tmp/luna-builder-source-6gqpa7d9/summary.json`. The final failure is
+`/tmp/luna-tools-z3ez0dx_/result.json`; the command returns 1 as intended.
+The invocation allowance was 100,000,000. Failure originates in
+`AllocatedDefinitionPublisher::reserve`, which prepays descriptor assembly and
+transfer using a separate structural allowance. Increasing invocation fuel does
+not replenish that allowance. This is a bounded failure, not evidence of a hang.
+The next budget investigation should trace the structural allowance from the
+CLI to publication; it must not collapse it into type-solver or invocation work.
+
+The internal publication benchmark also passed at this revision:
+`development/check.py --timeout 900 -- run --release -p elaboration --example
+builder-publication-bench -- --samples 3 --baseline 64 --counts 64,256,1024`.
+Reuse medians were 0.130, 0.489 and 1.972 ms; rebuilding controls were 0.713,
+5.206 and 58.381 ms. Evidence: `/tmp/luna-tools-ztoxq5k3/result.json`.
+These differ in workload and timing scope from the source benchmark and cannot
+be subtracted to attribute VM cost. Neither measurement covers field default
+code, attributes, generic declaration inputs or method publication, which still
+lack builder request and publication support.
