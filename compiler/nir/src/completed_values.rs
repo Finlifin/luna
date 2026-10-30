@@ -264,13 +264,49 @@ pub fn validate_with_declarations_in<'d>(
     target: Option<crate::target::TargetData>,
     fuel: &mut usize,
 ) -> Result<(), &'static str> {
+    validate_with_layout_evidence_in(
+        value,
+        definitions,
+        &|ty| {
+            let Term::NormalForm {
+                head,
+                sort: crate::Sort::Type,
+                arguments,
+            } = ty
+            else {
+                return None;
+            };
+            if !is_tuple(*head) {
+                return None;
+            }
+            let [Term::TypeListValue(fields)] = arguments.as_slice() else {
+                return None;
+            };
+            Some(fields.as_slice())
+        },
+        lookup,
+        target,
+        fuel,
+    )
+}
+
+/// Reconstruct using borrowed declaration-owned tuple layouts. Callers supply
+/// the exact head's metadata; neither names nor payload shape confer authority.
+pub fn validate_with_layout_evidence_in<'d>(
+    value: &Expr,
+    definitions: impl Iterator<Item = &'d crate::newtypes::Newtype> + Clone,
+    tuple_fields: &impl for<'t> Fn(&'t Term) -> Option<&'t [Term]>,
+    lookup: &impl Fn(crate::DeclarationId, &mut usize) -> Option<NominalValueDeclaration<'d>>,
+    target: Option<crate::target::TargetData>,
+    fuel: &mut usize,
+) -> Result<(), &'static str> {
     value_in(
         value,
         fuel,
         &mut BTreeMap::new(),
         0,
         &definitions,
-        is_tuple,
+        tuple_fields,
         lookup,
         target,
     )
@@ -281,7 +317,7 @@ fn value_in<'a, 'd>(
     scope: &mut BTreeMap<LocalId, &'a Term>,
     depth: usize,
     definitions: &(impl Iterator<Item = &'d crate::newtypes::Newtype> + Clone),
-    is_tuple: &impl Fn(crate::DeclarationId) -> bool,
+    tuple_fields: &impl for<'t> Fn(&'t Term) -> Option<&'t [Term]>,
     lookup: &impl Fn(crate::DeclarationId, &mut usize) -> Option<NominalValueDeclaration<'d>>,
     target: Option<crate::target::TargetData>,
 ) -> Result<(), &'static str> {
@@ -310,7 +346,7 @@ fn value_in<'a, 'd>(
                 scope,
                 depth + 1,
                 definitions,
-                is_tuple,
+                tuple_fields,
                 lookup,
                 target,
             )
@@ -360,16 +396,8 @@ fn value_in<'a, 'd>(
         K::Tuple(fields) => {
             let expected = match &value.ty {
                 Term::Tuple(types) => types.as_slice(),
-                Term::NormalForm {
-                    head,
-                    sort: crate::Sort::Type,
-                    arguments,
-                } if is_tuple(*head) => {
-                    let [Term::TypeListValue(types)] = arguments.as_slice() else {
-                        return Err("completed tuple has an invalid registered layout");
-                    };
-                    types.as_slice()
-                }
+                Term::NormalForm { .. } => tuple_fields(&value.ty)
+                    .ok_or("completed tuple lacks registered layout evidence")?,
                 _ => return Err("completed tuple lacks registered layout evidence"),
             };
             if fields.len() != expected.len() {
@@ -385,7 +413,7 @@ fn value_in<'a, 'd>(
                     scope,
                     depth + 1,
                     definitions,
-                    is_tuple,
+                    tuple_fields,
                     lookup,
                     target,
                 )?;
@@ -411,7 +439,7 @@ fn value_in<'a, 'd>(
                     scope,
                     depth + 1,
                     definitions,
-                    is_tuple,
+                    tuple_fields,
                     lookup,
                     target,
                 )?;
@@ -491,7 +519,7 @@ fn value_in<'a, 'd>(
                     scope,
                     depth + 1,
                     definitions,
-                    is_tuple,
+                    tuple_fields,
                     lookup,
                     target,
                 )?;
@@ -504,14 +532,25 @@ fn value_in<'a, 'd>(
         } => {
             // Completed payloads can undergo checked row and product layout
             // transport. No call or other deferred computation is introduced.
-            crate::error_results::validate_conversion_with_tuple(
-                *conversion,
-                &payload.ty,
-                &value.ty,
-                fuel,
-                &mut |_, _| false,
-                is_tuple,
-            )
+            if *conversion == crate::error_results::Conversion::Product {
+                crate::error_results::transport_plan_with_layouts(
+                    &payload.ty,
+                    &value.ty,
+                    true,
+                    fuel,
+                    &mut |_, _| false,
+                    tuple_fields,
+                )
+                .map(|_| ())
+            } else {
+                crate::error_results::validate_conversion(
+                    *conversion,
+                    &payload.ty,
+                    &value.ty,
+                    fuel,
+                    &mut |_, _| false,
+                )
+            }
             .map_err(|error| match error {
                 crate::error_results::Error::Budget => "completed value budget exhausted",
                 _ => "completed error payload type mismatch",
@@ -522,7 +561,7 @@ fn value_in<'a, 'd>(
                 scope,
                 depth + 1,
                 definitions,
-                is_tuple,
+                tuple_fields,
                 lookup,
                 target,
             )
@@ -546,7 +585,7 @@ fn value_in<'a, 'd>(
                 scope,
                 depth + 1,
                 definitions,
-                is_tuple,
+                tuple_fields,
                 lookup,
                 target,
             )
@@ -604,7 +643,7 @@ fn value_in<'a, 'd>(
                     scope,
                     depth + 1,
                     definitions,
-                    is_tuple,
+                    tuple_fields,
                     lookup,
                     target,
                 )?;
@@ -649,7 +688,7 @@ fn value_in<'a, 'd>(
                 &mut BTreeMap::new(),
                 depth + 1,
                 definitions,
-                is_tuple,
+                tuple_fields,
                 lookup,
                 target,
             )
@@ -673,7 +712,7 @@ fn value_in<'a, 'd>(
                         scope,
                         depth + 1,
                         definitions,
-                        is_tuple,
+                        tuple_fields,
                         lookup,
                         target,
                     )?;
@@ -690,7 +729,7 @@ fn value_in<'a, 'd>(
                     scope,
                     depth + 1,
                     definitions,
-                    is_tuple,
+                    tuple_fields,
                     lookup,
                     target,
                 )

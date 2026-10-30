@@ -953,8 +953,8 @@ impl<'a> Interpreter<'a> {
             .normal_forms
             .iter()
             .filter(|metadata| metadata.role == nir::normal_forms::Role::Tuple)
-            .map(|metadata| metadata.declaration)
-            .collect::<BTreeSet<_>>();
+            .map(|metadata| (metadata.declaration, metadata))
+            .collect::<BTreeMap<_, _>>();
         let mut traits = BTreeMap::new();
         for interface in &package.traits {
             if traits.insert(interface.declaration, interface).is_some() {
@@ -1390,19 +1390,29 @@ impl<'a> Interpreter<'a> {
                 // Reconstruction cannot invoke arbitrary code or capture the
                 // invoking function's lexical environment.
                 let mut value_fuel = usize::try_from(budget.steps).unwrap_or(usize::MAX);
-                nir::completed_values::validate_with_declarations_in(
+                nir::completed_values::validate_with_layout_evidence_in(
                     value,
                     package.newtypes.iter(),
-                    &|head| completed_tuple_heads.contains(&head),
+                    &|ty| {
+                        let Term::NormalForm { head, .. } = ty else {
+                            return None;
+                        };
+                        completed_tuple_heads.get(head)?.tuple_elements(ty)
+                    },
                     &|id, fuel| nir::completed_values::lookup_nominal(package, id, fuel),
                     package.target,
                     &mut value_fuel,
                 )
                 .map_err(|_| invalid())?;
-                nir::completed_values::validate_with_declarations_in(
+                nir::completed_values::validate_with_layout_evidence_in(
                     original,
                     package.newtypes.iter(),
-                    &|head| completed_tuple_heads.contains(&head),
+                    &|ty| {
+                        let Term::NormalForm { head, .. } = ty else {
+                            return None;
+                        };
+                        completed_tuple_heads.get(head)?.tuple_elements(ty)
+                    },
                     &|id, fuel| nir::completed_values::lookup_nominal(package, id, fuel),
                     package.target,
                     &mut value_fuel,

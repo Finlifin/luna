@@ -6415,3 +6415,38 @@ Validation from /home/fin/luna:
   exit 0, `/tmp/luna-tools-ziwez6fl/result.json`; `git diff --check` passed.
 
 Canonical storage migration remains outstanding. No full workspace suite.
+
+
+## Declaration-owned completed tuple layouts (2026-10-31)
+
+Completed value reconstruction now has a layout-evidence entrypoint borrowing
+fields from the owning declaration, rather than parsing TypeListValue itself.
+The interpreter uses its validated normal-form metadata when admitting both
+original and instantiated associated values. Head::tuple_elements checks the
+exact collector domain for ordinary typed list payloads.
+
+Product/error-row transport accepts the same borrowed layout evidence, recurses
+through fields, and retains the same-head requirement. It does not unfold heads
+or infer type equality from equal layouts. Legacy boolean-head APIs delegate to
+the shared traversal but remain limited to their old representation.
+
+Regression coverage reconstructs ordinary typed tuple inputs, rejects missing
+layout authority, wrong list domains, field counts/types and malformed Type
+payloads, checks budget failure/recovery, and remaps an error row inside a typed
+tuple. The existing representation plan Display is reused.
+
+Validation from /home/fin/luna:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p comptime_interpretor --no-fail-fast`:
+  exit 0, 998 passed; `/tmp/luna-tools-b54adxha/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test associated_signatures --test associated_purity --test builder_invocations --test normal_form_methods --no-fail-fast`:
+  exit 0, 96 passed; `/tmp/luna-tools-536v8eyi/result.json`.
+- Formatting used `python3 -B development/command.py --timeout 120 -- cargo fmt --all`;
+  exit 0, `/tmp/luna-tools-uhdnumzg/result.json`; `git diff --check` passed.
+
+This does not complete storage migration. The type-resolution implementation
+index currently keeps nominal layouts without the normal-form metadata needed
+by the new entrypoint, and its existing caller remains on the legacy adapter;
+elaboration also still uses the legacy adapter. Those evidence paths and all
+canonical producers must migrate before switching frozen list storage. No full
+workspace suite was run.

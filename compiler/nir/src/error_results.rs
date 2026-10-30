@@ -4,7 +4,7 @@
 //! must never prove that two symbolic error labels are distinct.
 pub mod specialize;
 mod transport;
-pub use transport::{RepresentationTransport, transport_plan};
+pub use transport::{RepresentationTransport, transport_plan, transport_plan_with_layouts};
 
 use crate::{Sort, Term};
 use std::fmt;

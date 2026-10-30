@@ -948,3 +948,135 @@ fn nominal_completed_values_check_instantiated_layouts_and_constructor_identity(
     );
     assert!(check(&nested, &mut 10000).is_ok());
 }
+
+#[test]
+fn typed_tuple_payloads_use_declaration_layouts_for_reconstruction_and_transport() {
+    use nir::normal_forms::{Head, Kind, Parameter, Role};
+    use nir::{DeclarationId, Sort};
+    let owner = DeclarationId {
+        package: 42,
+        local: 1,
+    };
+    let list = Term::NormalForm {
+        head: DeclarationId {
+            package: 42,
+            local: 2,
+        },
+        sort: Sort::Type,
+        arguments: vec![Term::Primitive(Primitive::Type)],
+    };
+    let metadata = Head {
+        declaration: owner,
+        role: Role::Tuple,
+        collector: None,
+        requirements: vec![],
+        parameters: vec![Parameter {
+            declaration: DeclarationId {
+                package: 42,
+                local: 3,
+            },
+            binding: id(0),
+            kind: Kind::Value,
+            ty: list.clone(),
+        }],
+    };
+    let tuple = |fields: Vec<Term>| Term::NormalForm {
+        head: owner,
+        sort: Sort::Type,
+        arguments: vec![Term::NominalValue {
+            ty: Box::new(list.clone()),
+            variant: None,
+            fields,
+        }],
+    };
+    let check = |value: &Expr, fuel: &mut usize| {
+        nir::completed_values::validate_with_layout_evidence_in(
+            value,
+            std::iter::empty(),
+            &|ty| metadata.tuple_elements(ty),
+            &|_, _| None,
+            None,
+            fuel,
+        )
+    };
+    let flag = expr(boolean(), K::Literal(Literal::Bool(true)));
+    let good = expr(tuple(vec![boolean()]), K::Tuple(vec![flag.clone()]));
+    check(&good, &mut 10000).unwrap();
+    assert!(validate(&good).is_err());
+    for bad in [
+        expr(good.ty.clone(), K::Tuple(vec![])),
+        expr(
+            tuple(vec![Term::Primitive(Primitive::Char)]),
+            good.kind.clone(),
+        ),
+        expr(tuple(vec![Term::Bool(true)]), good.kind.clone()),
+    ] {
+        assert!(check(&bad, &mut 10000).is_err());
+    }
+    let mut wrong = good.clone();
+    let Term::NormalForm { arguments, .. } = &mut wrong.ty else {
+        unreachable!()
+    };
+    let Term::NominalValue { ty, .. } = &mut arguments[0] else {
+        unreachable!()
+    };
+    *ty = Box::new(Term::NormalForm {
+        head: DeclarationId {
+            package: 42,
+            local: 99,
+        },
+        sort: Sort::Type,
+        arguments: vec![Term::Primitive(Primitive::Type)],
+    });
+    assert!(check(&wrong, &mut 10000).is_err());
+    assert!(check(&good, &mut 0).is_err());
+    check(&good, &mut 10000).unwrap();
+
+    let char_type = Term::Primitive(Primitive::Char);
+    let source = Term::ErrorResult {
+        errors: vec![boolean(), char_type.clone()],
+        result: Box::new(boolean()),
+    };
+    let target = Term::ErrorResult {
+        errors: vec![char_type, boolean()],
+        result: Box::new(boolean()),
+    };
+    let payload = expr(
+        source.clone(),
+        K::ErrorConvert {
+            conversion: nir::error_results::Conversion::Success,
+            value: Box::new(flag),
+        },
+    );
+    let converted = expr(
+        tuple(vec![target.clone()]),
+        K::ErrorConvert {
+            conversion: nir::error_results::Conversion::Product,
+            value: Box::new(expr(tuple(vec![source.clone()]), K::Tuple(vec![payload]))),
+        },
+    );
+    check(&converted, &mut 10000).unwrap();
+    let plan = nir::error_results::transport_plan_with_layouts(
+        &tuple(vec![source.clone()]),
+        &tuple(vec![target.clone()]),
+        true,
+        &mut 10000,
+        &mut |_, _| false,
+        &|ty| metadata.tuple_elements(ty),
+    )
+    .unwrap();
+    let input = Term::TupleValue(vec![Term::ErrorValue {
+        ty: Box::new(source),
+        label: Some(Box::new(boolean())),
+        value: Box::new(Term::Bool(true)),
+    }]);
+    assert_eq!(
+        plan.frozen(&input, &mut 10000).unwrap(),
+        Term::TupleValue(vec![Term::ErrorValue {
+            ty: Box::new(target),
+            label: Some(Box::new(boolean())),
+            value: Box::new(Term::Bool(true)),
+        }])
+    );
+    assert!(format!("{plan}").starts_with("(tuple-layout (error-layout"));
+}
