@@ -87,3 +87,34 @@ Type 的 normal-form 头和嵌套 Object 也不会因区间编辑而改变。
 切片使用受预算约束的 Object 操作，替换由切片与 concat 组合实现；结果是值，
 不是可写视图，不承诺常数时间或零拷贝。真实 sysroot 用例在
 `development/examples/sysroot-meta-object-methods.fl`。
+
+## 精确 Integer 运算
+
+任意精度 `Integer` 的操作直接定义为固有 comptime 方法，不经机器整数转换：
+
+- `value.div_trunc(divisor)`、`value.rem_trunc(divisor)` 向零截断，余数与被除数同号或为零。
+- `value.div_euclid(divisor)`、`value.rem_euclid(divisor)` 满足
+  `value == quotient * divisor + remainder` 与 `0 <= remainder < divisor.abs()`，
+  除数可正可负。两种除法的零除数都使 invocation 失败。
+- `value.abs()` 精确取绝对值，没有固定宽度整数最小值溢出问题。
+- `value.gcd(other)` 返回非负最大公约数，`gcd(0, 0) == 0`。
+- `value.lcm(other)` 返回非负最小公倍数，任一输入为零时返回零。
+- `value.to_usize()` 和 `Integer.from_usize(value)` 使用所选目标的位宽；
+  转窄仍拒绝负数和越界值，不截断、不使用编译器宿主位宽。
+
+```flurry
+pure comptime fn padded_size(size: Integer, alignment: Integer) -> Integer {
+    -- Explicit ceiling division for a positive alignment, including negative size.
+    -(-size).div_euclid(alignment) * alignment
+}
+
+pure comptime fn common_period(a: Integer, b: Integer) -> Integer {
+    a.lcm(b)
+}
+```
+
+`meta.div_trunc`、`meta.rem_trunc`、`meta.to_usize` 和 `meta.from_usize`
+保留为既有入口。这些方法不改变 `/` 或 `%` 的舍入规则，也不把 Integer
+隐式降为固定宽度值。gcd 使用普通 comptime 循环，lcm 先除后乘；它们与其它
+库函数一样受工作预算约束。完整 sysroot 示例见
+`development/examples/sysroot-meta-integers.fl`。

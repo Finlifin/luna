@@ -1,4 +1,5 @@
 use bindings;
+use builtin.{Integer, usize};
 
 {-
   Exact host-pipeline size conversion during comptime invocation. to_usize
@@ -17,3 +18,65 @@ pub use bindings.from_usize;
 -}
 pub use bindings.div_trunc;
 pub use bindings.rem_trunc;
+
+impl Integer {
+    pub pure comptime fn to_usize(self) -> usize {
+        bindings.to_usize(self)
+    }
+
+    pub pure comptime fn from_usize(value: usize) -> Self {
+        bindings.from_usize(value)
+    }
+
+    pub pure comptime fn div_trunc(self, divisor: Integer) -> Integer {
+        bindings.div_trunc(self, divisor)
+    }
+
+    pub pure comptime fn rem_trunc(self, divisor: Integer) -> Integer {
+        bindings.rem_trunc(self, divisor)
+    }
+
+    pub pure comptime fn abs(self) -> Integer {
+        if self < 0 { -self } else { self }
+    }
+
+    {-
+        Euclidean division: a = q * b + r, with 0 <= r < abs(b).
+        Both signs of the divisor are supported. A zero divisor retains the
+        explicit division failure; it is not assigned an arbitrary quotient.
+    -}
+    pub pure comptime fn div_euclid(self, divisor: Integer) -> Integer {
+        let quotient = self.div_trunc(divisor);
+        let remainder = self.rem_trunc(divisor);
+        if remainder < 0 {
+            if divisor < 0 { quotient + 1 } else { quotient - 1 }
+        } else { quotient }
+    }
+
+    pub pure comptime fn rem_euclid(self, divisor: Integer) -> Integer {
+        let remainder = self.rem_trunc(divisor);
+        if remainder < 0 { remainder + divisor.abs() } else { remainder }
+    }
+
+    {-
+        Nonnegative greatest common divisor, including gcd(0, 0) = 0.
+        All intermediates remain arbitrary precision. The local loop consumes
+        the ordinary invocation budget, with no library-specific VM operation.
+    -}
+    pub pure comptime fn gcd(self, other: Integer) -> Integer {
+        var a = self.abs();
+        var b = other.abs();
+        while b != 0 {
+            let remainder = a.rem_trunc(b);
+            a = b;
+            b = remainder;
+        };
+        a
+    }
+
+    -- Nonnegative least common multiple; either zero operand yields zero.
+    pub pure comptime fn lcm(self, other: Integer) -> Integer {
+        if self == 0 or other == 0 { return 0; };
+        (self.div_trunc(self.gcd(other)) * other).abs()
+    }
+}

@@ -1,0 +1,23 @@
+{- Exact integer algorithms through public sysroot methods. -}
+pure comptime fn integer_algorithms() -> bool {
+    let huge: Integer = 1606938044258990275541962092341162602522202993782792835301376;
+    let negative = -huge * 17 - 9;
+    let zero: Integer = 0;
+    negative.div_trunc(17) == -huge
+        and negative.rem_trunc(17) == -9
+        and negative.div_euclid(17) == -huge - 1
+        and negative.rem_euclid(17) == 8
+        and negative.div_euclid(-17) == huge + 1
+        and negative.rem_euclid(-17) == 8
+        and (huge * -6).gcd(huge * 15) == huge * 3
+        and (huge * -6).lcm(huge * 15) == huge * 30
+        and zero.gcd(zero) == 0
+        and zero.lcm(zero) == 0
+        and Integer.from_usize(zero.to_usize()) == 0
+}
+
+const correct = integer_algorithms();
+
+test {
+    inline if correct { assumes true; } else { assumes false; };
+}
