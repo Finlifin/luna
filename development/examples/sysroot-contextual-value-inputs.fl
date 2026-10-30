@@ -183,3 +183,16 @@ test {
     let second_value = second();
     assumes first_value and not second_value;
 }
+
+struct Flags where bits: meta.List<bool> {
+    enabled: bool,
+}
+
+comptime fn inspect_flags(value: Flags<[true, false]>) -> bool {
+    value.enabled
+}
+
+test {
+    const enabled = inspect_flags(Flags<[true, false]> {enabled: true});
+    assumes enabled;
+}

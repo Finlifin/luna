@@ -846,3 +846,150 @@ fn type_valued_dependent_indices_substitute_all_nominal_layouts() {
         );
     }
 }
+
+#[test]
+fn nominal_collection_layouts_use_registered_domains_and_capture_order() {
+    use nir::normal_forms::{Head, Kind, Parameter, Role, nominal_value_fields_budgeted as fields};
+    let list = |element| Term::NormalForm {
+        head: id(90),
+        sort: Sort::Type,
+        arguments: vec![element],
+    };
+    let domain = list(Term::Primitive(P::Bool));
+    let value = Term::NominalValue {
+        ty: Box::new(domain.clone()),
+        variant: None,
+        fields: vec![Term::Bool(true)],
+    };
+    // The first input depends on a later captured Type input. Stored order
+    // remains unchanged even though newtype admission processes captures first.
+    let domains = vec![list(rigid(2, Sort::Type)), Term::Primitive(P::Type)];
+    let mut structure = record(domains.clone());
+    structure.fields = vec![("value".into(), rigid(2, Sort::Type))];
+    let mut package = nir::program::Package {
+        normal_forms: vec![Head {
+            declaration: id(90),
+            role: Role::TypeList,
+            collector: None,
+            parameters: vec![Parameter {
+                declaration: id(91),
+                binding: nir::program::LocalId {
+                    owner: 90,
+                    index: 0,
+                },
+                kind: Kind::Type,
+                ty: Term::Primitive(P::Type),
+            }],
+            requirements: vec![],
+        }],
+        structs: vec![structure],
+        enums: vec![Enum {
+            declaration: id(10),
+            name: "Choice".into(),
+            type_parameters: vec![id(1), id(2)],
+            parameter_types: domains.clone(),
+            capabilities: vec![],
+            requirements: vec![],
+            is_intrinsic: false,
+            groups: vec![],
+            encoding: None,
+            symbol_encoding: None,
+            variants: vec![Variant {
+                name: "value".into(),
+                shape: VariantShape::Tuple,
+                fields: vec![rigid(2, Sort::Type)],
+            }],
+        }],
+        newtypes: vec![nir::newtypes::Newtype {
+            declaration: id(20),
+            name: "Wrapped".into(),
+            type_parameters: vec![id(1), id(2)],
+            parameter_types: domains,
+            capture_count: 1,
+            requirements: vec![],
+            capabilities: vec![],
+            representation: rigid(2, Sort::Type),
+        }],
+        ..Default::default()
+    };
+    for (declaration, variant) in [(0, None), (10, Some(0)), (20, None)] {
+        let ty = |value| Term::Nominal {
+            declaration: id(declaration),
+            arguments: vec![value, Term::Primitive(P::Bool)],
+        };
+        let valid = ty(value.clone());
+        assert_eq!(
+            fields(&package, &valid, variant, &mut 10000),
+            Some(vec![Term::Primitive(P::Bool)])
+        );
+        for invalid in [
+            Term::NominalValue {
+                ty: Box::new(domain.clone()),
+                variant: None,
+                fields: vec![Term::Unit],
+            },
+            Term::NominalValue {
+                ty: Box::new(list(Term::Primitive(P::U8))),
+                variant: None,
+                fields: vec![],
+            },
+            Term::NominalValue {
+                ty: Box::new(domain.clone()),
+                variant: Some(0),
+                fields: vec![],
+            },
+        ] {
+            assert!(fields(&package, &ty(invalid), variant, &mut 10000).is_none());
+        }
+        assert!(fields(&package, &valid, variant, &mut 0).is_none());
+        package.normal_forms[0].role = Role::Opaque;
+        assert!(fields(&package, &valid, variant, &mut 10000).is_none());
+        package.normal_forms[0].role = Role::TypeList;
+        assert!(fields(&package, &valid, variant, &mut 10000).is_some());
+        package.normal_forms.push(package.normal_forms[0].clone());
+        assert!(fields(&package, &valid, variant, &mut 10000).is_none());
+        package.normal_forms.pop();
+    }
+    // Recursing into a nominal value must retain the same collection evidence.
+    let inner = Term::Nominal {
+        declaration: id(0),
+        arguments: vec![value.clone(), Term::Primitive(P::Bool)],
+    };
+    package.structs.push(Struct {
+        declaration: id(30),
+        name: "Outer".into(),
+        type_parameters: vec![id(31)],
+        parameter_types: vec![inner.clone()],
+        fields: vec![],
+        requirements: vec![],
+        capabilities: vec![],
+    });
+    let outer = |payload| Term::Nominal {
+        declaration: id(30),
+        arguments: vec![Term::NominalValue {
+            ty: Box::new(inner.clone()),
+            variant: None,
+            fields: vec![payload],
+        }],
+    };
+    assert_eq!(
+        fields(&package, &outer(Term::Bool(false)), None, &mut 10000),
+        Some(vec![])
+    );
+    assert!(fields(&package, &outer(Term::Unit), None, &mut 10000).is_none());
+    let valid = Term::Nominal {
+        declaration: id(0),
+        arguments: vec![value, Term::Primitive(P::Bool)],
+    };
+    assert!(
+        nir::normal_forms::nominal_value_fields_with_lookup(
+            &valid,
+            None,
+            &mut 10000,
+            &|_, _| Some(nir::normal_forms::NominalValueDeclaration::Struct(
+                &package.structs[0]
+            )),
+        )
+        .is_none()
+    );
+}

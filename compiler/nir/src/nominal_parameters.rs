@@ -507,7 +507,10 @@ pub fn admit_with_evidence_in<'a>(
     )
 }
 
-fn admit_with_collections_in<'a>(
+/// Admit a completed telescope and retain its checked substitution for formation
+/// predicates. Collection metadata and symbolic declarations are independent
+/// evidence sources; callbacks must charge lookup work to the shared budget.
+pub fn admit_with_collections_in<'a>(
     parameters: &[DeclarationId],
     domains: &[Term],
     arguments: &'a [Term],

@@ -3,6 +3,30 @@
 use super::*;
 
 impl Interpreter<'_> {
+    /// Registered head metadata supplies collection authority; payload shape
+    /// alone cannot establish an element domain.
+    pub(super) fn admitted_collection_domain(
+        &self,
+        domain: &Term,
+        fuel: &mut usize,
+    ) -> Result<Option<Term>, nir::NominalAdmissionError> {
+        let Term::NormalForm { head, .. } = domain else {
+            return Ok(None);
+        };
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or(nir::NominalAdmissionError::Budget)?;
+        let Some(element) = self
+            .normal_forms
+            .get(head)
+            .and_then(|head| head.list_element(domain))
+        else {
+            return Ok(None);
+        };
+        nir::type_computations::charge_term(element, fuel)?;
+        Ok(Some(element.clone()))
+    }
+
     /// Decode immutable host data in this VM's type world without executing
     /// closure factories or reconstructing callable values. Nested aggregates
     /// follow the same policy. Admission proves representation and domain, not
@@ -259,20 +283,24 @@ impl Interpreter<'_> {
                 let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
                 let mut remaining = before;
                 let valid = if let Some(definition) = self.newtypes.get(declaration) {
-                    definition.validate_completed_arguments_with_evidence(
+                    definition.validate_completed_arguments_with_collections_in(
                         arguments,
                         &mut remaining,
                         |ty, variant, fuel| self.admitted_nominal_layout(ty, variant, fuel),
                         |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)),
+                        |domain, fuel| self.admitted_collection_domain(domain, fuel),
+                        self.target,
                     )
                 } else {
-                    nir::validate_declaration_arguments_with_evidence(
+                    nir::validate_declaration_arguments_with_collections_in(
                         parameters,
                         domains,
                         arguments,
                         &mut remaining,
                         |ty, variant, fuel| self.admitted_nominal_layout(ty, variant, fuel),
                         |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)),
+                        |domain, fuel| self.admitted_collection_domain(domain, fuel),
+                        self.target,
                     )
                 };
                 self.budget.steps -= (before - remaining) as u64;
@@ -434,7 +462,7 @@ impl Interpreter<'_> {
                         .unwrap_or(usize::MAX)
                         .min(100_000);
                     let before = fuel;
-                    let checked = nir::validate_declaration_arguments_with_evidence(
+                    let checked = nir::validate_declaration_arguments_with_collections_in(
                         &declaration.type_parameters,
                         &declaration.parameter_types,
                         &operation.arguments,
@@ -447,6 +475,8 @@ impl Interpreter<'_> {
                             })
                         },
                         |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)),
+                        |domain, fuel| self.admitted_collection_domain(domain, fuel),
+                        self.target,
                     );
                     self.budget.steps -= (before - fuel) as u64;
                     checked.map_err(|_| {

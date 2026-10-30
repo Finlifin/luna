@@ -1211,7 +1211,7 @@ pub fn nominal_value_fields_budgeted(
     variant: Option<u32>,
     fuel: &mut usize,
 ) -> Option<Vec<Term>> {
-    nominal_value_fields_with_lookup_in(
+    nominal_value_fields_at(
         ty,
         variant,
         fuel,
@@ -1236,6 +1236,8 @@ pub fn nominal_value_fields_budgeted(
             }
             None
         },
+        &|domain, fuel| list_element_budgeted(package, domain, fuel),
+        0,
         package.target,
     )
 }
@@ -1257,13 +1259,14 @@ pub fn nominal_value_fields_with_lookup_in<'a>(
     lookup: &impl Fn(DeclarationId, &mut usize) -> Option<NominalValueDeclaration<'a>>,
     target: Option<crate::target::TargetData>,
 ) -> Option<Vec<Term>> {
-    nominal_value_fields_at(ty, variant, fuel, lookup, 0, target)
+    nominal_value_fields_at(ty, variant, fuel, lookup, &|_, _| Ok(None), 0, target)
 }
 fn nominal_value_fields_at<'a>(
     ty: &Term,
     variant: Option<u32>,
     fuel: &mut usize,
     lookup: &impl Fn(DeclarationId, &mut usize) -> Option<NominalValueDeclaration<'a>>,
+    collection: &impl Fn(&Term, &mut usize) -> Result<Option<Term>, crate::NominalAdmissionError>,
     depth: usize,
     target: Option<crate::target::TargetData>,
 ) -> Option<Vec<Term>> {
@@ -1271,13 +1274,16 @@ fn nominal_value_fields_at<'a>(
         return None;
     }
     let layout = |ty: &Term, variant, fuel: &mut usize| {
-        nominal_value_fields_at(ty, variant, fuel, lookup, depth + 1, target).ok_or_else(|| {
-            if *fuel == 0 {
-                crate::NominalAdmissionError::Budget
-            } else {
-                crate::NominalAdmissionError::Invalid("nominal payload layout unavailable".into())
-            }
-        })
+        nominal_value_fields_at(ty, variant, fuel, lookup, collection, depth + 1, target)
+            .ok_or_else(|| {
+                if *fuel == 0 {
+                    crate::NominalAdmissionError::Budget
+                } else {
+                    crate::NominalAdmissionError::Invalid(
+                        "nominal payload layout unavailable".into(),
+                    )
+                }
+            })
     };
     let Term::Nominal {
         declaration,
@@ -1290,12 +1296,14 @@ fn nominal_value_fields_at<'a>(
         (NominalValueDeclaration::Enum(definition), Some(index))
             if definition.declaration == *declaration =>
         {
-            let admitted = crate::validate_declaration_arguments_with_layouts_in(
+            let admitted = crate::validate_declaration_arguments_with_collections_in(
                 &definition.type_parameters,
                 &definition.parameter_types,
                 arguments,
                 fuel,
                 layout,
+                |_, _, _| false,
+                collection,
                 target,
             );
             layout_admission(admitted, fuel)?;
@@ -1310,8 +1318,14 @@ fn nominal_value_fields_at<'a>(
         (NominalValueDeclaration::Newtype(definition), None)
             if definition.declaration == *declaration =>
         {
-            let admitted = definition
-                .validate_completed_arguments_with_layouts_in(arguments, fuel, layout, target);
+            let admitted = definition.validate_completed_arguments_with_collections_in(
+                arguments,
+                fuel,
+                layout,
+                |_, _, _| false,
+                collection,
+                target,
+            );
             layout_admission(admitted, fuel)?;
             Some(vec![
                 definition
@@ -1322,12 +1336,14 @@ fn nominal_value_fields_at<'a>(
         (NominalValueDeclaration::Struct(definition), None)
             if definition.declaration == *declaration =>
         {
-            let admitted = crate::validate_declaration_arguments_with_layouts_in(
+            let admitted = crate::validate_declaration_arguments_with_collections_in(
                 &definition.type_parameters,
                 &definition.parameter_types,
                 arguments,
                 fuel,
                 layout,
+                |_, _, _| false,
+                collection,
                 target,
             );
             layout_admission(admitted, fuel)?;

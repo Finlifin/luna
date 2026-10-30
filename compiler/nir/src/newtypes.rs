@@ -101,19 +101,45 @@ impl Newtype {
         declared: impl FnMut(&Term, &Term, &mut usize) -> bool,
         target: Option<crate::target::TargetData>,
     ) -> Result<(), crate::NominalAdmissionError> {
+        self.validate_completed_arguments_with_collections_in(
+            arguments,
+            fuel,
+            layout,
+            declared,
+            |_, _| Ok(None),
+            target,
+        )
+    }
+
+    /// Collection domains require independent representation evidence, including
+    /// when a captured parameter supplies the element type.
+    pub fn validate_completed_arguments_with_collections_in(
+        &self,
+        arguments: &[Term],
+        fuel: &mut usize,
+        layout: impl FnMut(
+            &Term,
+            Option<u32>,
+            &mut usize,
+        ) -> Result<Vec<Term>, crate::NominalAdmissionError>,
+        declared: impl FnMut(&Term, &Term, &mut usize) -> bool,
+        collection: impl FnMut(&Term, &mut usize) -> Result<Option<Term>, crate::NominalAdmissionError>,
+        target: Option<crate::target::TargetData>,
+    ) -> Result<(), crate::NominalAdmissionError> {
         let own = self
             .type_parameters
             .len()
             .checked_sub(self.capture_count)
             .ok_or("invalid newtype capture count")?;
         if self.capture_count == 0 {
-            return crate::nominal_parameters::validate_with_evidence_in(
+            return crate::nominal_parameters::validate_with_collections_in(
                 &self.type_parameters,
                 &self.parameter_types,
                 arguments,
                 fuel,
                 layout,
                 declared,
+                collection,
                 target,
             );
         }
@@ -150,13 +176,14 @@ impl Newtype {
             .iter()
             .map(|&i| arguments[i].clone())
             .collect::<Vec<_>>();
-        crate::nominal_parameters::validate_with_evidence_in(
+        crate::nominal_parameters::validate_with_collections_in(
             &parameters,
             &domains,
             &arguments,
             fuel,
             layout,
             declared,
+            collection,
             target,
         )
     }

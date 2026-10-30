@@ -2531,11 +2531,11 @@ impl<'a> Interpreter<'a> {
                     });
             }
             return self.newtypes.get(declaration).is_some_and(|d| {
-                d.validate_completed_arguments_with_evidence_in(
+                d.validate_completed_arguments_with_collections_in(
                     arguments,
                     &mut 100_000,
                     |ty, variant, fuel| self.admitted_nominal_layout(ty, variant, fuel),
-                    |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)), self.target)
+                    |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)), |domain, fuel| self.admitted_collection_domain(domain, fuel), self.target)
                 .is_ok()
                     && d.parameter_binders().is_ok_and(|parameters| {
                         self.capabilities_hold_parameters(&d.capabilities, &parameters, arguments)
@@ -2629,13 +2629,13 @@ impl<'a> Interpreter<'a> {
                         .enums
                         .get(declaration)
                         .filter(|definition| {
-                            nir::validate_declaration_arguments_with_evidence_in(
+                            nir::validate_declaration_arguments_with_collections_in(
                                 &definition.type_parameters,
                                 &definition.parameter_types,
                                 arguments,
                                 &mut 100_000,
                                 |ty, variant, fuel| self.admitted_nominal_layout(ty, variant, fuel),
-                    |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)), self.target)
+                    |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)), |domain, fuel| self.admitted_collection_domain(domain, fuel), self.target)
                             .is_ok()
                                 && definition.parameter_binders().is_ok_and(|parameters| {
                                     self.capabilities_hold_parameters(
@@ -2756,13 +2756,13 @@ impl<'a> Interpreter<'a> {
                 },
             ) if declaration == expected && actual_arguments == arguments => {
                 self.structs.get(declaration).is_some_and(|s| {
-                    if nir::validate_declaration_arguments_with_evidence_in(
+                    if nir::validate_declaration_arguments_with_collections_in(
                         &s.type_parameters,
                         &s.parameter_types,
                         arguments,
                         &mut 100_000,
                         |ty, variant, fuel| self.admitted_nominal_layout(ty, variant, fuel),
-                    |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)), self.target)
+                    |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)), |domain, fuel| self.admitted_collection_domain(domain, fuel), self.target)
                     .is_err()
                         || !s.parameter_binders().is_ok_and(|parameters| {
                             self.capabilities_hold_parameters(
@@ -4655,13 +4655,13 @@ impl<'a> Interpreter<'a> {
                 ).map_err(|_| if *fuel == 0 { ErrorKind::StepsExhausted } else { ErrorKind::Type })?;
                 continue;
             }
-            nir::validate_declaration_arguments_with_evidence_in(
+            nir::validate_declaration_arguments_with_collections_in(
                 &[binder.declaration],
                 &[domain],
                 std::slice::from_ref(argument),
                 fuel,
                 |ty, variant, fuel| self.admitted_nominal_layout(ty, variant, fuel),
-                |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)), self.target)
+                |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)), |domain, fuel| self.admitted_collection_domain(domain, fuel), self.target)
             .map_err(|failure| {
                 if matches!(failure, nir::NominalAdmissionError::Budget) {
                     ErrorKind::StepsExhausted

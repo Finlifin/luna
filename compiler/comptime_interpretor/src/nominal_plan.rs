@@ -245,7 +245,7 @@ impl Contract<'_> {
         // Captured newtype binders follow their own capture-first admission
         // order; do not replace it with the ordinary declaration telescope.
         let valid = if let Contract::Newtype(def) = self {
-            def.validate_completed_arguments_with_evidence_in(
+            def.validate_completed_arguments_with_collections_in(
                 &types,
                 &mut remaining,
                 |ty, variant, fuel| {
@@ -259,12 +259,12 @@ impl Contract<'_> {
                         }
                     })
                 },
-                |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if vm.abstract_value_parameters.get(declaration)==Some(domain)), vm.target)
+                |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if vm.abstract_value_parameters.get(declaration)==Some(domain)), |domain, fuel| vm.admitted_collection_domain(domain, fuel), vm.target)
         } else {
             Ok(())
         };
         let valid = valid.and_then(|_| {
-            nir::admit_declaration_arguments_with_evidence_in(
+            nir::admit_declaration_arguments_with_collections_in(
                 &ids,
                 domains,
                 &types,
@@ -281,6 +281,7 @@ impl Contract<'_> {
                     })
                 },
                 |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if vm.abstract_value_parameters.get(declaration)==Some(domain)),
+                |domain, fuel| vm.admitted_collection_domain(domain, fuel),
                 vm.target,
             )
         });

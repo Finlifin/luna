@@ -7111,3 +7111,42 @@ Final public-library validation:
 `python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
 exit 0, eight native tests passed, including the formerly failing local-const
 body; `/tmp/luna-tools-nxv7876y/result.json`.
+
+### Nominal layouts and VM admission for ordinary collection inputs
+
+Package-backed nominal value layouts now obtain list element domains from
+registered normal-form metadata and pass that evidence through recursive
+struct, enum and newtype argument admission. Newtypes retain capture-first
+checking without changing stored argument order or nominal identity. The
+lookup-only layout API intentionally supplies no collection authority: a
+caller that supplies only nominal declarations cannot certify an opaque
+collection head from its payload shape.
+
+The same evidence callback is now used by VM nominal construction plans,
+immutable type admission, nominal value membership and declaration argument
+checking. The original native reproduction constructed
+`Flags<[true, false]> {enabled: true}` and passed it to a comptime function;
+fixing package layout queries alone still failed with interpretation Type.
+Connecting the VM construction and receiving checks is part of this change.
+No normal-form body is unfolded and no special parameter category is added.
+
+Regression coverage includes all three nominal declaration kinds, a list
+whose element domain comes from a later captured Type parameter, nested
+nominal values, wrong element/domain/variant rejection, missing or duplicate
+collection metadata, and budget failure followed by recovery. This does not
+finish the canonical TypeListValue representation migration. Elaboration
+consumers that only supply nominal lookup evidence still require explicit
+collection evidence wiring before they can use this expanded layout path.
+
+Validation in `/home/fin/luna` (all final commands exited 0):
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p comptime_interpretor`:
+  1007 tests passed; `/tmp/luna-tools-s07wx3ux/result.json`.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
+  9 native tests passed; `/tmp/luna-tools-5k37q4rp/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  `/tmp/luna-tools-cyl3p82h/result.json`; `git diff --check` passed.
+
+The first source run after changing only NIR failed with interpretation Type
+(`/tmp/luna-tools-2rvbczs0/result.json`); the VM changes above resolve that
+failure. No full language suite was run.
