@@ -1261,6 +1261,19 @@ pub fn nominal_value_fields_with_lookup_in<'a>(
 ) -> Option<Vec<Term>> {
     nominal_value_fields_at(ty, variant, fuel, lookup, &|_, _| Ok(None), 0, target)
 }
+/// Query nominal layouts with separately supplied collection representation
+/// evidence. Both callbacks charge their work to the shared budget.
+pub fn nominal_value_fields_with_collections_in<'a>(
+    ty: &Term,
+    variant: Option<u32>,
+    fuel: &mut usize,
+    lookup: &impl Fn(DeclarationId, &mut usize) -> Option<NominalValueDeclaration<'a>>,
+    collection: &impl Fn(&Term, &mut usize) -> Result<Option<Term>, crate::NominalAdmissionError>,
+    target: Option<crate::target::TargetData>,
+) -> Option<Vec<Term>> {
+    nominal_value_fields_at(ty, variant, fuel, lookup, collection, 0, target)
+}
+
 fn nominal_value_fields_at<'a>(
     ty: &Term,
     variant: Option<u32>,

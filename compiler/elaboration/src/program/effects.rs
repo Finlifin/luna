@@ -569,7 +569,7 @@ impl Checker<'_, '_> {
         variant: Option<u32>,
         fuel: &mut usize,
     ) -> Result<Vec<Term>, nir::NominalAdmissionError> {
-        let result = nir::normal_forms::nominal_value_fields_with_lookup_in(
+        let result = nir::normal_forms::nominal_value_fields_with_collections_in(
             ty,
             variant,
             fuel,
@@ -582,6 +582,7 @@ impl Checker<'_, '_> {
                     .or_else(|| self.enums.get(&id).map(D::Enum))
                     .or_else(|| self.newtypes.get(&id).map(D::Newtype))
             },
+            &|domain, fuel| self.collection_domain_budgeted(domain, fuel),
             self.target,
         );
         result.ok_or_else(|| {

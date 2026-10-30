@@ -177,6 +177,21 @@ impl Checker<'_, '_> {
             }
     }
 
+    pub(super) fn collection_domain_budgeted(
+        &self,
+        domain: &Term,
+        fuel: &mut usize,
+    ) -> Result<Option<Term>, nir::NominalAdmissionError> {
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or(nir::NominalAdmissionError::Budget)?;
+        let Some(element) = self.list_element_type(domain) else {
+            return Ok(None);
+        };
+        nir::type_computations::charge_term(element, fuel)?;
+        Ok(Some(element.clone()))
+    }
+
     pub(super) fn list_element_type<'a>(&self, ty: &'a Term) -> Option<&'a Term> {
         match ty {
             Term::NormalForm {

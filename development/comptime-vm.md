@@ -7150,3 +7150,50 @@ Validation in `/home/fin/luna` (all final commands exited 0):
 The first source run after changing only NIR failed with interpretation Type
 (`/tmp/luna-tools-2rvbczs0/result.json`); the VM changes above resolve that
 failure. No full language suite was run.
+
+### Elaboration collection evidence for nominal observations
+
+The explicit collection-evidence nominal layout API is now available without
+constructing a temporary package. Elaboration supplies the already resolved
+meta.List protocol identity and charges element-domain copying to the caller's
+budget. It is used for negated nominal patterns, computed-pattern scalar
+export checks and nominal effect-value layouts. Coverage complement queries
+carry the same callback, including coverage used to subtract handled error
+labels. These queries remain program/pattern analyses, not PTC propositions.
+The lookup-only API continues to deny collection authority by default.
+
+The sysroot contextual-values example now matches `Flags<[true, false]>`
+with `not {enabled: true}` and `{enabled: true}`, without a wildcard fallback.
+The explicit Copy implementation is still required; layout evidence alone
+does not authorize duplication or cleanup. Ordinary TypeListValue migration
+and coverage's remaining tuple representation view are separate pending work.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib coverage`:
+  69 passed, exit 0; `/tmp/luna-tools-guofbnfx/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test negated_nominal_patterns --test normal_patterns --test effect_contracts --no-fail-fast`:
+  85 passed, exit 0; `/tmp/luna-tools-fc051yk9/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-puitkf93/result.json`.
+
+The native fixture initially omitted Clone, a required Copy parent, and then
+put calls directly in assumes. These fixture mistakes were corrected using
+the actual library hierarchy and local result bindings; no protocol or
+program-specification rules were weakened. No full language suite was run.
+
+Native lowering exposed one more consumer after elaboration succeeded:
+materialization's concrete struct/enum/newtype instance checks still used
+layout-only admission. They now supply package collection metadata, as does
+nominal value index admission. The failure was
+`nominal value index has a different nominal identity` in the new native
+test (`/tmp/luna-tools-cvl6xmcd/result.json`). This is a compiler fix, distinct
+from the two fixture corrections above. Materialization's test suite passes
+with the expanded admission (`/tmp/luna-tools-nitkcsi_/result.json`, command
+`python3 -B development/check.py --timeout 900 -- test -p materialization`).
+
+Final native run:
+`python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`
+passed all 10 tests, exit 0 (`/tmp/luna-tools-66g4_rmn/result.json`). Final
+format check also exited 0 (`/tmp/luna-tools-72qk6fkm/result.json`), and
+`git diff --check` passed.

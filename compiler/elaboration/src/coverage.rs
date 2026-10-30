@@ -81,7 +81,32 @@ pub(crate) fn check_metered_in(
     tuple_head: Option<DeclarationId>,
     target: Option<nir::target::TargetData>,
 ) -> (Coverage, usize) {
+    check_metered_with_collections_in(
+        structs,
+        enums,
+        ty,
+        patterns,
+        steps,
+        context,
+        tuple_head,
+        &|_, _| Ok(None),
+        target,
+    )
+}
+
+pub(crate) fn check_metered_with_collections_in(
+    structs: &BTreeMap<DeclarationId, Struct>,
+    enums: &BTreeMap<DeclarationId, Enum>,
+    ty: &Term,
+    patterns: &[&Pattern],
+    steps: usize,
+    context: &Context,
+    tuple_head: Option<DeclarationId>,
+    collection: &dyn Fn(&Term, &mut usize) -> Result<Option<Term>, nir::NominalAdmissionError>,
+    target: Option<nir::target::TargetData>,
+) -> (Coverage, usize) {
     let mut engine = Engine {
+        collection,
         target,
         tuple_head,
         structs,
@@ -113,6 +138,7 @@ enum Head<'a> {
     Other,
 }
 struct Engine<'a> {
+    collection: &'a dyn Fn(&Term, &mut usize) -> Result<Option<Term>, nir::NominalAdmissionError>,
     target: Option<nir::target::TargetData>,
     tuple_head: Option<DeclarationId>,
     structs: &'a BTreeMap<DeclarationId, Struct>,

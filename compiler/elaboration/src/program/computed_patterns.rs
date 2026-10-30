@@ -202,7 +202,7 @@ impl Checker<'_, '_> {
                 for index in 0..variants.unwrap_or(1) {
                     let allowance = self.required_steps.min(10_000) as usize;
                     let mut fuel = allowance;
-                    let fields = nir::normal_forms::nominal_value_fields_with_lookup_in(
+                    let fields = nir::normal_forms::nominal_value_fields_with_collections_in(
                         ty,
                         variants.map(|_| index as u32),
                         &mut fuel,
@@ -215,6 +215,7 @@ impl Checker<'_, '_> {
                                 .or_else(|| self.enums.get(&id).map(D::Enum))
                                 .or_else(|| self.newtypes.get(&id).map(D::Newtype))
                         },
+                        &|domain, fuel| self.collection_domain_budgeted(domain, fuel),
                         self.target,
                     );
                     self.required_steps -= (allowance - fuel) as u64;

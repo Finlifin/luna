@@ -977,7 +977,7 @@ impl Checker<'_, '_> {
                 let allowance = usize::try_from(self.required_steps)
                     .unwrap_or(usize::MAX)
                     .min(100_000);
-                let (coverage, used) = crate::coverage::check_metered_in(
+                let (coverage, used) = crate::coverage::check_metered_with_collections_in(
                     &self.structs,
                     &self.enums,
                     &domain,
@@ -985,6 +985,7 @@ impl Checker<'_, '_> {
                     allowance,
                     &self.context,
                     self.protocols.tuple,
+                    &|domain, fuel| self.collection_domain_budgeted(domain, fuel),
                     self.target,
                 );
                 self.required_steps -= used as u64;

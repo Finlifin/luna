@@ -450,7 +450,7 @@ impl Engine<'_> {
     ) -> Result<Option<Vec<Term>>, ()> {
         let structs = self.structs;
         let enums = self.enums;
-        Ok(nir::normal_forms::nominal_value_fields_with_lookup_in(
+        Ok(nir::normal_forms::nominal_value_fields_with_collections_in(
             ty,
             variant,
             &mut self.steps,
@@ -465,6 +465,7 @@ impl Engine<'_> {
                             .map(nir::normal_forms::NominalValueDeclaration::Enum)
                     })
             },
+            &|domain, fuel| (self.collection)(domain, fuel),
             self.target,
         ))
     }
@@ -1027,6 +1028,69 @@ mod tests {
         assert_eq!(
             check(&enums, &ty, &[&wrong, &positive], 100_000),
             Coverage::Missing
+        );
+    }
+    #[test]
+    fn collection_indexed_complements_require_evidence_and_recover_from_budget() {
+        let (mut enums, mut ty) = setup();
+        let list_id = DeclarationId {
+            package: 0,
+            local: 90,
+        };
+        let domain = Term::NormalForm {
+            head: list_id,
+            sort: nir::Sort::Type,
+            arguments: vec![Term::Primitive(Primitive::Bool)],
+        };
+        let definition = enums.values_mut().next().unwrap();
+        definition.type_parameters = vec![DeclarationId {
+            package: 0,
+            local: 91,
+        }];
+        definition.parameter_types = vec![domain.clone()];
+        let Term::Nominal { arguments, .. } = &mut ty else {
+            unreachable!()
+        };
+        arguments.push(Term::NominalValue {
+            ty: Box::new(domain.clone()),
+            variant: None,
+            fields: vec![Term::Bool(true)],
+        });
+        let positive = selected(1, &ty);
+        let negative = negate(positive.clone(), &ty);
+        let patterns = [&positive, &negative];
+        let evidence = |actual: &Term, fuel: &mut usize| {
+            *fuel = fuel
+                .checked_sub(1)
+                .ok_or(nir::NominalAdmissionError::Budget)?;
+            Ok((actual == &domain).then_some(Term::Primitive(Primitive::Bool)))
+        };
+        let check_with =
+            |budget,
+             collection: &dyn Fn(
+                &Term,
+                &mut usize,
+            )
+                -> Result<Option<Term>, nir::NominalAdmissionError>| {
+                crate::coverage::check_metered_with_collections_in(
+                    &BTreeMap::new(),
+                    &enums,
+                    &ty,
+                    &patterns,
+                    budget,
+                    &Context::default(),
+                    None,
+                    collection,
+                    None,
+                )
+                .0
+            };
+        assert_ne!(check_with(100_000, &|_, _| Ok(None)), Coverage::Exhaustive);
+        assert_eq!(check_with(0, &evidence), Coverage::Unknown);
+        assert_eq!(check_with(100_000, &evidence), Coverage::Exhaustive);
+        assert_ne!(
+            check_with(100_000, &|_, _| Ok(Some(Term::Primitive(Primitive::U8)))),
+            Coverage::Exhaustive
         );
     }
 }

@@ -196,3 +196,23 @@ test {
     const enabled = inspect_flags(Flags<[true, false]> {enabled: true});
     assumes enabled;
 }
+
+impl Clone for Flags<[true, false]> {
+    fn clone(*self) -> Self {
+        Flags<[true, false]> {enabled: self.enabled.*}
+    }
+}
+impl Copy for Flags<[true, false]> {}
+
+fn inspect_flag_pattern(value: Flags<[true, false]>) -> bool {
+    value match {
+        not {enabled: true} => true,
+        {enabled: true} => false,
+    }
+}
+
+test {
+    let clear = inspect_flag_pattern(Flags<[true, false]> {enabled: false});
+    let set = inspect_flag_pattern(Flags<[true, false]> {enabled: true});
+    assumes clear and not set;
+}

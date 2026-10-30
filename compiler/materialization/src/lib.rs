@@ -2156,7 +2156,7 @@ impl Builder<'_> {
         let Term::Nominal { declaration, .. } = ty.as_ref() else {
             return Err("nominal value index has no nominal domain".into());
         };
-        nir::validate_declaration_arguments_with_layouts_in(
+        nir::validate_declaration_arguments_with_collections_in(
             &[*declaration],
             std::slice::from_ref(ty.as_ref()),
             std::slice::from_ref(input),
@@ -2171,6 +2171,8 @@ impl Builder<'_> {
                         }
                     })
             },
+            |_, _, _| false,
+            |domain, fuel| nir::normal_forms::list_element_budgeted(self.package, domain, fuel),
             self.package.target,
         )
         .map_err(|e| e.to_string())?;
@@ -2296,7 +2298,7 @@ impl Builder<'_> {
                     .find(|s| s.declaration == *declaration)
                 {
                     if self.instances.is_some() {
-                        nir::validate_declaration_arguments_with_layouts_in(
+                        nir::validate_declaration_arguments_with_collections_in(
                             &s.type_parameters,
                             &s.parameter_types,
                             arguments,
@@ -2317,6 +2319,10 @@ impl Builder<'_> {
                                         )
                                     }
                                 })
+                            },
+                            |_, _, _| false,
+                            |domain, fuel| {
+                                nir::normal_forms::list_element_budgeted(self.package, domain, fuel)
                             },
                             self.package.target,
                         )?;
@@ -2375,7 +2381,7 @@ impl Builder<'_> {
                     .find(|e| e.declaration == *declaration)
                 {
                     if self.instances.is_some() {
-                        nir::validate_declaration_arguments_with_layouts_in(
+                        nir::validate_declaration_arguments_with_collections_in(
                             &e.type_parameters,
                             &e.parameter_types,
                             arguments,
@@ -2396,6 +2402,10 @@ impl Builder<'_> {
                                         )
                                     }
                                 })
+                            },
+                            |_, _, _| false,
+                            |domain, fuel| {
+                                nir::normal_forms::list_element_budgeted(self.package, domain, fuel)
                             },
                             self.package.target,
                         )?;
@@ -2461,7 +2471,7 @@ impl Builder<'_> {
                     // value admission belongs to concrete materialization, as
                     // for struct and enum; invocation checks scoped evidence.
                     if self.instances.is_some() {
-                        n.validate_completed_arguments_with_layouts_in(
+                        n.validate_completed_arguments_with_collections_in(
                             arguments,
                             &mut self.fuel,
                             |ty, variant, fuel| {
@@ -2480,6 +2490,10 @@ impl Builder<'_> {
                                         )
                                     }
                                 })
+                            },
+                            |_, _, _| false,
+                            |domain, fuel| {
+                                nir::normal_forms::list_element_budgeted(self.package, domain, fuel)
                             },
                             self.package.target,
                         )?;

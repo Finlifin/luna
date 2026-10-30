@@ -3065,7 +3065,7 @@ impl Checker<'_, '_> {
             Term::Nominal { declaration, .. } => {
                 let variants = self.enums.get(declaration).map(|item| item.variants.len());
                 for index in 0..variants.unwrap_or(1) {
-                    let fields = nir::normal_forms::nominal_value_fields_with_lookup_in(
+                    let fields = nir::normal_forms::nominal_value_fields_with_collections_in(
                         ty,
                         variants.map(|_| index as u32),
                         fuel,
@@ -3080,6 +3080,7 @@ impl Checker<'_, '_> {
                                         .map(nir::normal_forms::NominalValueDeclaration::Enum)
                                 })
                         },
+                        &|domain, fuel| self.collection_domain_budgeted(domain, fuel),
                         self.target,
                     )
                     .ok_or("negated nominal pattern layout is unresolved or budget exhausted")?;
@@ -3108,7 +3109,7 @@ impl Checker<'_, '_> {
         patterns: &[&n::Pattern],
         ty: &Term,
     ) -> crate::coverage::Coverage {
-        crate::coverage::check_metered_in(
+        crate::coverage::check_metered_with_collections_in(
             &self.structs,
             &self.enums,
             ty,
@@ -3116,6 +3117,7 @@ impl Checker<'_, '_> {
             100_000,
             &self.context,
             self.protocols.tuple,
+            &|domain, fuel| self.collection_domain_budgeted(domain, fuel),
             self.target,
         )
         .0
