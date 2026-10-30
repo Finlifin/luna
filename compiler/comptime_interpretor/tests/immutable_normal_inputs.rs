@@ -435,3 +435,97 @@ fn frozen_callable_type_inputs_check_contracts_phase_and_safety() {
         assert!(vm.events().is_empty());
     }
 }
+
+#[test]
+fn named_comptime_identity_resolves_in_receiving_vm_and_rechecks_contracts() {
+    let mut package = world();
+    let source = SourceRange { start: 1, end: 2 };
+    let callback = LocalId { owner: 4, index: 0 };
+    let mut consumer = function(
+        4,
+        vec![callback],
+        Expr {
+            source,
+            ty: boolean(),
+            kind: K::Call {
+                callee: Box::new(Expr {
+                    source,
+                    ty: callable(),
+                    kind: K::Local(callback),
+                }),
+                arguments: vec![],
+                parameter_bindings: vec![],
+            },
+        },
+    );
+    consumer.signature = Term::Function {
+        parameters: vec![nir::Parameter {
+            sort: nir::Sort::Runtime,
+            ty: callable(),
+        }],
+        result: Box::new(boolean()),
+    };
+    package.functions.push(consumer);
+    package.functions[2].type_parameters = vec![id(30)];
+    let descriptor = || Value::FunctionInstance {
+        declaration: id(3),
+        arguments: vec![boolean()],
+    };
+    let mut tree = Interpreter::new(&package, Budget::default()).unwrap();
+    assert_eq!(
+        tree.invoke(id(4), vec![descriptor()]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(tree.bytecode_invocations(), 0);
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke(id(4), vec![descriptor()]).unwrap(),
+        Value::Bool(true)
+    );
+    assert!(vm.bytecode_invocations() > 0);
+    assert!(
+        vm.events()
+            .iter()
+            .any(|event| matches!(event, Event::EnterFunction(d) if *d == id(3)))
+    );
+    for arguments in [vec![], vec![Term::Bool(true)]] {
+        assert!(
+            vm.invoke(
+                id(4),
+                vec![Value::FunctionInstance {
+                    declaration: id(3),
+                    arguments
+                }]
+            )
+            .is_err()
+        );
+    }
+    assert_eq!(
+        vm.invoke(id(4), vec![descriptor()]).unwrap(),
+        Value::Bool(true)
+    );
+    drop(vm);
+
+    // The same transported identity resolves against the new world, not a
+    // specialized body retained from its producer or a previous VM.
+    package.functions[2].body.kind = K::Literal(Literal::Bool(false));
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke(id(4), vec![descriptor()]).unwrap(),
+        Value::Bool(false)
+    );
+    drop(vm);
+    package.functions[2]
+        .requirements
+        .push(nir::program::TypePredicate::Equal(
+            boolean(),
+            Term::Primitive(Primitive::Char),
+        ));
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    assert!(vm.invoke(id(4), vec![descriptor()]).is_err());
+    assert!(
+        !vm.events()
+            .iter()
+            .any(|event| matches!(event, Event::EnterFunction(d) if *d == id(3)))
+    );
+}

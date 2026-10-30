@@ -1187,6 +1187,31 @@ fn configured_boolean() -> bool { configured() }
 
 默认 alias 复用已取得的 config，参数域读取其中的实际回调。取得泛型实参后才执行的 struct／enum 生产函数也可交付此类输入；IIR 冻结核对 nominal 声明、类型实参、字段布局和 enum 分支，不能只记录相同形状的字段。newtype 包装同样保留声明与表示值，包装／解包须经对应的表示声明核验，见 [newtype 的 comptime 输入](../type/user-defined-types/newtype-and-typealias.md#作为-comptime-输入)。这是调用输入的表示能力：不把具名函数变成可任意导出的纯数据，也不把捕获环境、指针或可变存储转换为不可变快照。
 
+具名 comptime 函数实例也能作为调用结果参与泛型签名中的 normal-form 输入。
+此时 Type 实参可能仍属于调用者的参数作用域，不能提前换成某个具体类型：
+
+~~~flurry
+comptime fn identity(value: T) -> T where T { value }
+
+comptime fn callback(comptime T: Type) -> comptime fn(T) -> T {
+    identity<T>
+}
+
+pure comptime fn Carrier<T, action: comptime fn(T) -> T> -> Type { bool }
+
+fn accept(comptime T: Type, value: Carrier<T, callback(T)>) -> bool { true }
+~~~
+
+`callback(T)` 的结果保留 `identity` 的声明身份和调用者的 `T`；它不保留此次
+编译期求值中以临时 Type 身份特化的函数体。随后真正调用此身份时，接收方按普通
+实例化规则取得函数体并重新检查适用的约束。仅持有签名或 runtime 函数身份不能
+获得 comptime 执行权限。`Carrier` 的 normal-form 头仍然不展开。
+
+这里适用于无捕获的具名实例，包括聚合结果中的此类字段。带捕获闭包具有自身的
+环境和共享状态，不能压缩成声明身份；跨上述抽象 Type 作用域恢复这种环境的实现
+仍未完成。
+
+
 需要冻结证据的路径仍使用受检查的闭包重建工厂。这类只读快照接纳 Type、Type 列表、builtin 标量及由它们、具名 comptime 实例和只读闭包组成的 tuple／结构记录图，不能用重建来模拟共享可变状态。泛型推断期间已能为域已形成的显式输入、默认值和位置收集保留活动图；未完成的域和未确定的声明类型实参仍须等待。runtime 函数中显式 comptime 参数的对应活动图路径仍需继续接通。指针与用户资源捕获也须分别满足交付和内存协议，不能因支持闭包状态就跳过这些检查。
 
 

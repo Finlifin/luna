@@ -53,7 +53,7 @@ impl Value {
                     ty.drop_iteratively();
                     pending.push(*value);
                 }
-                Value::RuntimeFunction {
+                Value::FunctionInstance {
                     arguments: types, ..
                 } => {
                     for ty in types {
@@ -638,7 +638,7 @@ impl Value {
             }
             let instance = match value {
                 Value::Function(declaration) => Some((*declaration, &[][..])),
-                Value::RuntimeFunction {
+                Value::FunctionInstance {
                     declaration,
                     arguments,
                 } => Some((*declaration, arguments.as_slice())),

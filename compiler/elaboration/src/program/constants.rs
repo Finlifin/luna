@@ -635,7 +635,7 @@ impl Checker<'_, '_> {
         if matches!(&ty, Term::Function { .. })
             && matches!(
                 value,
-                Value::RuntimeFunction { .. } | Value::RuntimeTraitMethod(_)
+                Value::FunctionInstance { .. } | Value::RuntimeTraitMethod(_)
             )
         {
             return self.materialize_local_constant(value, ty, span);
@@ -644,7 +644,7 @@ impl Checker<'_, '_> {
         // capture graph. Anonymous bodies and generic instances reuse constant
         // reconstruction as local callable constants.
         let captureless_callable = match &value {
-            Value::Function(_) => true,
+            Value::Function(_) | Value::FunctionInstance { .. } => true,
             Value::Closure(closure) => closure.captured_values().len() == 0,
             _ => false,
         };
@@ -1107,19 +1107,19 @@ impl Checker<'_, '_> {
                     )
                 })
             }
-            Value::RuntimeFunction { .. } | Value::RuntimeTraitMethod(_) => {
+            Value::FunctionInstance { .. } | Value::RuntimeTraitMethod(_) => {
                 let mut budget = comptime_runtime::Budget {
                     steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
                     max_limbs: 4096,
                 };
                 let before = budget.steps;
-                let checked = value.validate_runtime_identity_snapshot(&mut budget, type_scope);
+                let checked = value.validate_callable_identity_snapshot(&mut budget, type_scope);
                 self.required_steps -= (before - budget.steps) as u64;
                 checked.map_err(|cause| {
                     error(
                         span,
                         format!(
-                            "closure snapshot requires completed runtime identity inputs: {cause:?}"
+                            "closure snapshot requires completed callable identity inputs: {cause:?}"
                         ),
                     )
                 })
@@ -3647,7 +3647,7 @@ impl Checker<'_, '_> {
                 }
             }
             Value::Function(declaration) => K::Function(declaration),
-            Value::RuntimeFunction {
+            Value::FunctionInstance {
                 declaration,
                 arguments,
             } => K::FunctionInstance {

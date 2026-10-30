@@ -878,10 +878,10 @@ impl<'a> Interpreter<'a> {
                     values,
                 }
             }
-            Value::RuntimeFunction {
+            Value::FunctionInstance {
                 declaration,
                 arguments,
-            } => Value::RuntimeFunction {
+            } => Value::FunctionInstance {
                 declaration: *declaration,
                 arguments: self.copy_instance_arguments(arguments, source)?,
             },
@@ -1901,7 +1901,7 @@ mod representation_copy_tests {
         };
         let arguments = vec![Term::Bool(true), Term::Primitive(Primitive::Bool)];
         for value in [
-            Value::RuntimeFunction {
+            Value::FunctionInstance {
                 declaration,
                 arguments: arguments.clone(),
             },

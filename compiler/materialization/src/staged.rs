@@ -183,7 +183,7 @@ impl Builder<'_> {
     ) -> Result<n::Expr, String> {
         self.tick(depth)?;
         let kind = match value {
-            Value::RuntimeFunction {
+            Value::FunctionInstance {
                 declaration,
                 arguments,
             } if !ty.is_comptime_callable()

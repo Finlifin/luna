@@ -71,6 +71,42 @@ fn runtime_function_values_preserve_scoped_normal_form_arguments() {
 }
 
 #[test]
+fn comptime_function_values_preserve_scoped_normal_form_arguments() {
+    let source = "typealias Type=.Type'builtin;typealias char=.char'builtin;
+        comptime fn identity(value:T)->T where T {value}
+        comptime fn callback(comptime T:Type)->comptime fn(T)->T {identity<T>}
+        pure comptime fn Carrier<T,action:comptime fn(T)->T>->Type {bool}
+        fn generic(comptime T:Type,value:Carrier<T,callback(T)>)->bool {true}
+        fn concrete(value:Carrier<bool,callback(bool)>)->bool {true}
+        fn other(value:Carrier<char,callback(char)>)->bool {true}";
+    let package = support::compile_with_protocols(source, &Default::default()).unwrap();
+    let input = |name: &str, index: usize| {
+        let signature = &package
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap()
+            .signature;
+        signature.check_scope(&[]).unwrap();
+        let nir::Term::Function { parameters, .. } = signature else {
+            panic!("function signature");
+        };
+        parameters[index].ty.clone()
+    };
+    let open = input("generic", 1);
+    for (name, ty) in [
+        ("concrete", nir::Primitive::Bool),
+        ("other", nir::Primitive::Char),
+    ] {
+        assert_eq!(
+            open.substitute(&[nir::Term::Primitive(ty)]).unwrap(),
+            input(name, 0)
+        );
+    }
+    assert_ne!(input("concrete", 0), input("other", 0));
+}
+
+#[test]
 fn invocation_constructs_normal_forms_with_callable_inputs() {
     for qualifier in ["", "comptime", "unsafe"] {
         let source = "typealias Type=.Type'builtin;
@@ -131,7 +167,8 @@ fn runtime_instances_retain_function_valued_type_arguments() {
 
 #[test]
 fn invocation_preserves_callable_fields_inside_nominal_nf_inputs() {
-    let source = "typealias Type=.Type'builtin;
+    for qualifier in ["", "comptime"] {
+        let source = "typealias Type=.Type'builtin;
         fn identity(value:T)->T where T {value}
         struct Descriptor where T {action:fn(T)->T}
         comptime fn describe(comptime T:Type)->Descriptor<T> {Descriptor<T> {action:identity<T>}}
@@ -139,11 +176,15 @@ fn invocation_preserves_callable_fields_inside_nominal_nf_inputs() {
         comptime fn DescribeType(comptime T:Type)->Type {Carrier<T,describe(T)>}
         fn generic(comptime T:Type,value:Carrier<T,describe(T)>)->bool {true}
         comptime fn run()->bool {DescribeType(bool) == Carrier<bool,describe(bool)>}";
-    let package = support::compile_with_protocols(source, &Default::default()).unwrap();
-    assert_eq!(
-        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
-        Value::Bool(true)
-    );
+        let source = source
+            .replace("fn identity", &format!("{qualifier} fn identity"))
+            .replace("fn(T)", &format!("{qualifier} fn(T)"));
+        let package = support::compile_with_protocols(&source, &Default::default()).unwrap();
+        assert_eq!(
+            luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+            Value::Bool(true)
+        );
+    }
 }
 
 #[test]

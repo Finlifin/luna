@@ -183,8 +183,9 @@ pub enum Value {
         value: Box<Value>,
     },
     Function(DeclarationId),
-    /// A runtime declaration transported at comptime, without an executable body.
-    RuntimeFunction {
+    /// A named instance identity without an executable body. Its declaration
+    /// supplies phase and invocation authority; transporting it grants neither.
+    FunctionInstance {
         declaration: DeclarationId,
         arguments: Vec<Term>,
     },
@@ -427,7 +428,7 @@ impl Value {
                 | Value::ComptimeReference(_)
                 | Value::Closure(_)
                 | Value::Function(_)
-                | Value::RuntimeFunction { .. }
+                | Value::FunctionInstance { .. }
                 | Value::RuntimeTraitMethod(_) => return None,
                 _ => 0,
             };
@@ -511,15 +512,15 @@ impl Value {
     ) -> Result<Term, ErrorKind> {
         self.into_scoped_term(budget, parameters, &BTreeMap::new(), true)
     }
-    /// Validate immutable runtime declaration identity for capture snapshots.
-    /// This does not turn it into a callable comptime value or a normal term.
-    pub fn validate_runtime_identity_snapshot(
+    /// Validate immutable callable declaration inputs for capture snapshots.
+    /// This checks data shape only; the receiving VM still checks invocation authority.
+    pub fn validate_callable_identity_snapshot(
         &self,
         budget: &mut comptime_runtime::Budget,
         parameters: &BTreeSet<DeclarationId>,
     ) -> Result<(), ErrorKind> {
         let terms: Vec<&Term> = match self {
-            Self::RuntimeFunction { arguments, .. } => {
+            Self::FunctionInstance { arguments, .. } => {
                 budget
                     .consume(arguments.len().saturating_add(1))
                     .map_err(|_| ErrorKind::StepsExhausted)?;
@@ -602,6 +603,9 @@ impl Closure {
     /// A declaration instance can be restored without serializing an execution
     /// environment or treating an arbitrary lambda as a named function.
     pub fn declaration_instance(&self) -> Option<(DeclarationId, &[Term])> {
+        if !self.environment.is_empty() || !self.capture_order.is_empty() {
+            return None;
+        }
         Some((self.origin?, self.instance_arguments.as_deref()?))
     }
 }
@@ -2411,7 +2415,7 @@ impl<'a> Interpreter<'a> {
         }
         if let (
             Some(graph),
-            Value::RuntimeFunction {
+            Value::FunctionInstance {
                 declaration,
                 arguments,
             },
@@ -2773,30 +2777,15 @@ impl<'a> Interpreter<'a> {
                 })
             }
             (
-                Value::RuntimeFunction {
+                Value::FunctionInstance {
                     declaration,
                     arguments,
                 },
                 ty,
             ) => self
-                .runtime_function_identities
-                .get(declaration)
-                .is_some_and(|identity| {
-                    self.validate_function_inputs(
-                        &identity.type_parameters,
-                        arguments,
-                        &mut 100_000,
-                    )
-                    .is_ok()
-                        && identity
-                            .signature
-                            .instantiate_parameters(
-                                &self.input_binders(&identity.type_parameters),
-                                arguments,
-                            )
-                            .is_ok_and(|signature| {
-                                selected_types::same(&signature, ty, &self.associated_values)
-                            })
+                .normal_callable_signature(*declaration, arguments, &[], &mut 100_000)
+                .is_some_and(|signature| {
+                    selected_types::same(&signature, ty, &self.associated_values)
                 }),
             (Value::RuntimeTraitMethod(identity), ty) => {
                 let TraitMethodIdentity {
@@ -3367,7 +3356,7 @@ impl<'a> Interpreter<'a> {
             K::Unit => Value::Unit,
             K::Local(id) => self.local_value(environment, *id, Some(expr.source))?,
             K::Function(id) if self.runtime_function_identities.contains_key(id) => {
-                Value::RuntimeFunction {
+                Value::FunctionInstance {
                     declaration: *id,
                     arguments: vec![],
                 }
@@ -4690,7 +4679,7 @@ impl<'a> Interpreter<'a> {
                 if !selected_types::same(&signature, &expr.ty, &self.associated_values) {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                 }
-                return Ok(Flow::Value(Value::RuntimeFunction {
+                return Ok(Flow::Value(Value::FunctionInstance {
                     declaration: *declaration,
                     arguments: arguments.clone(),
                 }));
@@ -5777,7 +5766,7 @@ impl<'a> Interpreter<'a> {
     #[inline(never)]
     fn call_parameters(&self, callee: &Value, source: SourceRange) -> Result<Vec<LocalId>, Error> {
         match callee {
-            Value::RuntimeFunction { .. } | Value::RuntimeTraitMethod(_) => {
+            Value::FunctionInstance { .. } | Value::RuntimeTraitMethod(_) => {
                 Err(self.failure(ErrorKind::PhaseMismatch, Some(source)))
             }
             Value::Function(id) => self
@@ -5916,6 +5905,7 @@ impl<'a> Interpreter<'a> {
             K::Function(_) | K::FunctionInstance { .. } | K::TraitMethod { .. }
         );
         let callee = prepared_value!(this.eval_in_position(callee, environment, true));
+        let callee = this.resolve_invocation_identity(callee)?;
         // Spread preparation can retain an already-created instance in a local.
         // Anonymous closure environments have no declaration substitution.
         let dynamic_defaults = dynamic_defaults
@@ -6203,11 +6193,11 @@ impl fmt::Display for Value {
             Self::Newtype { ty, value } => {
                 write!(f, "(newtype-value (type {ty}) (representation {value}))")
             }
-            Self::RuntimeFunction {
+            Self::FunctionInstance {
                 declaration,
                 arguments,
             } => {
-                write!(f, "(runtime-function {declaration} (arguments")?;
+                write!(f, "(function-instance {declaration} (arguments")?;
                 for argument in arguments {
                     write!(f, " {argument}")?;
                 }

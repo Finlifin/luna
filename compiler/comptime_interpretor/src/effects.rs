@@ -762,7 +762,7 @@ impl Interpreter<'_> {
             {
                 return Err(self.failure(ErrorKind::Unsupported, Some(source)));
             }
-            Value::RuntimeFunction { arguments, .. } => {
+            Value::FunctionInstance { arguments, .. } => {
                 for ty in arguments {
                     let work = self.closed_term_description_work(ty).ok_or_else(|| {
                         self.failure(ErrorKind::RepresentationSizeLimit, Some(source))

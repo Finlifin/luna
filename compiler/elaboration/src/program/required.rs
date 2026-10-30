@@ -2384,7 +2384,7 @@ fn live_references(
         .visit_owned_graph(steps, &mut |value, fuel| {
             match value {
                 Value::Function(id)
-                | Value::RuntimeFunction {
+                | Value::FunctionInstance {
                     declaration: id, ..
                 } => {
                     found.insert(*id);

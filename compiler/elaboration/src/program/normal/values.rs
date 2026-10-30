@@ -42,7 +42,7 @@ impl Checker<'_, '_> {
             Value::Type(_) => {
                 return Err(error(span, "normal-form Type input contains a non-Type"));
             }
-            Value::RuntimeFunction {
+            Value::FunctionInstance {
                 declaration,
                 arguments,
             } => {

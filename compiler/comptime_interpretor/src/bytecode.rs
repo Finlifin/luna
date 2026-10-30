@@ -2154,6 +2154,11 @@ impl<'a> Interpreter<'a> {
                     } else {
                         frame.slots[*callee].take().ok_or_else(missing)?
                     };
+                    let callee = if normal_form.is_none() {
+                        self.resolve_invocation_identity(callee)?
+                    } else {
+                        callee
+                    };
                     let (normal_head, parameters, count) = if let Some((ty, count)) = normal_form {
                         if !self.has_type(&callee, ty) {
                             return Err(self.failure(ErrorKind::Type, Some(*callee_source)));

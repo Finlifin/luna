@@ -104,7 +104,7 @@ impl Checker<'_, '_> {
                     callbacks.push(value)
                 }
                 Value::Closure(_)
-                | Value::RuntimeFunction { .. }
+                | Value::FunctionInstance { .. }
                 | Value::RuntimeTraitMethod(_) => runtime_callback = true,
                 _ => {}
             }

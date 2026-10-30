@@ -4449,7 +4449,7 @@ fn memoized_invocation_worlds_are_owned_and_unfreezable_results_stay_uncached() 
         let result = invocation.invoke(vec![], &mut context).unwrap();
         assert!(matches!(
             *result.value,
-            Value::Function(_) | Value::RuntimeFunction { .. }
+            Value::Function(_) | Value::FunctionInstance { .. }
         ));
         assert!(!result.reused);
     }

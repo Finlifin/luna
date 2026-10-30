@@ -185,10 +185,10 @@ pub(super) fn restore_required_packet(
                 depth + 1,
             )?),
         },
-        Value::RuntimeFunction {
+        Value::FunctionInstance {
             declaration,
             arguments: inputs,
-        } => Value::RuntimeFunction {
+        } => Value::FunctionInstance {
             declaration,
             arguments: inputs
                 .into_iter()
@@ -233,6 +233,34 @@ pub(super) fn restore_required_packet(
                 })
                 .collect::<Result<Vec<_>, Error>>()?;
             Value::Object(Object::from_entries(entries))
+        }
+        Value::Closure(closure)
+            if !parameters.is_empty() && closure.declaration_instance().is_some() =>
+        {
+            // A capture-free declaration instance transports identity only.
+            // Do not retain its invocation-local specialized executable body.
+            let (declaration, inputs) = closure.declaration_instance().unwrap();
+            Value::FunctionInstance {
+                declaration,
+                arguments: inputs
+                    .iter()
+                    .map(|ty| {
+                        let mut fuel = usize::try_from(*steps).unwrap_or(usize::MAX);
+                        let before = fuel;
+                        let charged = nir::type_computations::charge_term(ty, &mut fuel);
+                        *steps -= (before - fuel) as u64;
+                        charged.map_err(|cause| error(span, cause.to_string()))?;
+                        restore_required_type_input(
+                            steps,
+                            ty.clone(),
+                            parameters,
+                            arguments,
+                            frames,
+                            span,
+                        )
+                    })
+                    .collect::<Result<_, _>>()?,
+            }
         }
         Value::Code(_)
         | Value::Closure(_)

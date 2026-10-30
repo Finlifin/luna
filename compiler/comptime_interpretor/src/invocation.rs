@@ -440,6 +440,7 @@ impl<'a> Interpreter<'a> {
         arguments: Vec<Value>,
         context: Option<(iir::InstanceKey, Vec<iir::cleanup::ContextKey>)>,
     ) -> Result<Box<Activation<'a>>, Error> {
+        let function = self.resolve_invocation_identity(function)?;
         let origin = self.admit_invocation(&function, context.as_ref())?;
         let saved = self.enter_invocation(&function, origin, context)?;
         match self.prepare_invocation(function, arguments, origin) {
@@ -448,6 +449,43 @@ impl<'a> Interpreter<'a> {
                 self.leave_invocation(saved);
                 Err(error)
             }
+        }
+    }
+
+    /// A transported name has no executable environment. Resolve it against
+    /// this VM's authority and specialize through the ordinary formation path.
+    pub(super) fn resolve_invocation_identity(&mut self, function: Value) -> Result<Value, Error> {
+        let Value::FunctionInstance {
+            declaration,
+            arguments,
+        } = function
+        else {
+            return Ok(function);
+        };
+        // Runtime identities and retained IIR evidence are transport-only.
+        // A signature, including a forged comptime qualifier, is not authority.
+        let definition = self
+            .functions
+            .get(&declaration)
+            .copied()
+            .filter(|definition| definition.phase == nir::program::FunctionPhase::Comptime)
+            .ok_or_else(|| self.failure(ErrorKind::PhaseMismatch, None))?;
+        let mut fuel = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+        let before = fuel;
+        let signature = self.normal_callable_signature(declaration, &arguments, &[], &mut fuel);
+        self.budget.steps -= (before - fuel) as u64;
+        let signature = signature.ok_or_else(|| self.failure(ErrorKind::Type, None))?;
+        let expression = Expr {
+            source: definition.body.source,
+            ty: signature,
+            kind: K::FunctionInstance {
+                declaration,
+                arguments,
+            },
+        };
+        match self.eval_function_instance(&expression, &mut Environment::new())? {
+            Flow::Value(Value::Closure(closure)) => Ok(Value::Closure(closure)),
+            _ => Err(self.failure(ErrorKind::PhaseMismatch, Some(expression.source))),
         }
     }
 
@@ -468,7 +506,7 @@ impl<'a> Interpreter<'a> {
     ) -> Result<Option<DeclarationId>, Error> {
         if matches!(
             function,
-            Value::RuntimeFunction { .. } | Value::RuntimeTraitMethod(_)
+            Value::FunctionInstance { .. } | Value::RuntimeTraitMethod(_)
         ) {
             return Err(self.failure(ErrorKind::PhaseMismatch, None));
         }

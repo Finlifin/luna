@@ -31,7 +31,7 @@ impl<'a> Interpreter<'a> {
         if [&a, &b].iter().any(|value| {
             !matches!(
                 value,
-                Value::RuntimeFunction { .. } | Value::RuntimeTraitMethod(_)
+                Value::FunctionInstance { .. } | Value::RuntimeTraitMethod(_)
             )
         }) {
             return Err(self.failure(ErrorKind::Type, Some(expr.source)));
@@ -39,7 +39,7 @@ impl<'a> Interpreter<'a> {
         self.charge_copy_work(Some(expr.source), |fuel| {
             for value in [&a, &b] {
                 match value {
-                    Value::RuntimeFunction { arguments, .. } => {
+                    Value::FunctionInstance { arguments, .. } => {
                         for term in arguments {
                             nir::copy_budget::charge_type_substitution(term, &[], &[], fuel)?;
                         }
@@ -59,18 +59,18 @@ impl<'a> Interpreter<'a> {
         })?;
         let equal = match (&a, &b) {
             (
-                Value::RuntimeFunction {
+                Value::FunctionInstance {
                     declaration: ad,
                     arguments: aa,
                 },
-                Value::RuntimeFunction {
+                Value::FunctionInstance {
                     declaration: bd,
                     arguments: ba,
                 },
             ) => ad == bd && aa == ba,
             (Value::RuntimeTraitMethod(a), Value::RuntimeTraitMethod(b)) => a == b,
-            (Value::RuntimeFunction { .. }, Value::RuntimeTraitMethod(_))
-            | (Value::RuntimeTraitMethod(_), Value::RuntimeFunction { .. }) => false,
+            (Value::FunctionInstance { .. }, Value::RuntimeTraitMethod(_))
+            | (Value::RuntimeTraitMethod(_), Value::FunctionInstance { .. }) => false,
             _ => return Err(self.failure(ErrorKind::Type, Some(expr.source))),
         };
         Ok(Flow::Value(Value::Bool(equal)))
@@ -412,7 +412,7 @@ impl<'a> Interpreter<'a> {
                     member: *member,
                     method_arguments: method_arguments.clone(),
                 })),
-                _ => Value::RuntimeFunction {
+                _ => Value::FunctionInstance {
                     declaration: key.declaration,
                     arguments: key.arguments,
                 },

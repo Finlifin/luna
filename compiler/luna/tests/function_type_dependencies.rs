@@ -1119,11 +1119,11 @@ fn comptime_factories_transport_contracted_named_templates() {
         "{error}"
     );
     // A full package has the declaration body; dependency-only snapshots use
-    // RuntimeFunction. Both must retain exactly the checked declaration.
+    // FunctionInstance. Both must retain exactly the checked declaration.
     let expected = support::id(&package, "checked");
     match luna::invocation::invoke(&package, "make", 500_000).unwrap() {
         Value::Function(declaration) => assert_eq!(declaration, expected),
-        Value::RuntimeFunction {
+        Value::FunctionInstance {
             declaration,
             arguments,
         } => {

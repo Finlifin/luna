@@ -5329,3 +5329,53 @@ Validation from `/home/fin/luna`:
   exit 0; `/tmp/luna-tools-ci84lu2n/result.json`.
 - `python3 -B development/check.py --timeout 900 -- run -p luna -- development/examples/sysroot-callable-type-inputs.fl --sysroot library --test-native`:
   exit 0, one native test passed; `/tmp/luna-tools-j7qaan6w/result.json`.
+
+
+### Scoped named comptime results (2026-10-30)
+
+Named callable identity and a captured closure environment have different
+transport requirements. A capture-free named instance needs its declaration and
+ordinary comptime arguments; it must not carry a specialized body containing the
+producer invocation's temporary Type identities. The VM identity value is now
+phase-neutral `FunctionInstance` (formerly `RuntimeFunction`). Its S-expression
+is `(function-instance ... (arguments ...))`. Runtime-only declaration metadata
+remains runtime-only; renaming the value does not grant execution authority.
+
+Required-result restoration converts capture-free named Closure instances into
+this descriptor and substitutes their inputs back into the caller's telescope.
+The same recursive packet restoration handles nominal fields. A captured or
+anonymous Closure is not reduced to a named descriptor. `declaration_instance`
+now explicitly requires an empty environment as well as a declaration origin.
+
+The receiving source VM resolves a named comptime descriptor through its own
+checked declarations and ordinary generic specialization and contract path.
+Tree and bytecode call preparation both resolve it before preparing defaults;
+host invocation uses the same boundary. A runtime identity or an IIR signature
+with no executable comptime declaration still cannot be invoked. Type evidence,
+argument validation, phase and safety qualifiers remain separate from execution
+permission. No invocation-result cache policy changes.
+
+Source coverage includes scoped bool/char substitutions, nominal descriptor
+fields, callable type dependencies and the real-sysroot example's additional
+comptime callbacks. VM coverage invokes a host descriptor through both tree and
+bytecode routes, rejects malformed generic inputs and failed formation contracts,
+recovers after rejection, and confirms that a new VM uses its own body rather
+than a producer's specialization. Existing runtime identity rejection cases
+continue to run.
+
+Remaining boundary: captured closures, quoted code and mutable state returned
+across abstract Type scopes still need full environment/context restoration.
+This change deliberately does not rewrite just a closure's signature while
+leaving stale body or capture bindings behind. The older limitation above is
+now narrowed to these environment-bearing results, not named comptime instances.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test scoped_comptime_callables --test function_type_dependencies`:
+  exit 0, 45 tests passed; `/tmp/luna-tools-9taau99h/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --test immutable_normal_inputs --test runtime_function_identities`:
+  exit 0, 357 tests passed; `/tmp/luna-tools-5d8qtv3w/result.json`.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- development/examples/sysroot-callable-type-inputs.fl --sysroot library --test-native`:
+  exit 0, one native test passed; `/tmp/luna-tools-ran7lmro/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-1z1492ps/result.json`.

@@ -61,13 +61,13 @@ fn runtime_identity_is_typed_transport_without_a_body() {
     let value = vm.invoke(id(1), vec![]).unwrap();
     assert_eq!(
         value,
-        Value::RuntimeFunction {
+        Value::FunctionInstance {
             declaration: id(2),
             arguments: vec![Term::Primitive(Primitive::Bool)]
         }
     );
     assert!(format!("{package}").contains("(runtime-function-identity"));
-    assert!(format!("{value}").starts_with("(runtime-function "));
+    assert!(format!("{value}").starts_with("(function-instance "));
     assert_eq!(
         vm.invoke(id(2), vec![]).unwrap_err().kind,
         ErrorKind::PhaseMismatch
@@ -76,7 +76,7 @@ fn runtime_identity_is_typed_transport_without_a_body() {
 
 #[test]
 fn runtime_identity_snapshots_validate_scope_and_recover_after_budget_failure() {
-    let value = Value::RuntimeFunction {
+    let value = Value::FunctionInstance {
         declaration: id(2),
         arguments: vec![Term::Rigid {
             declaration: id(3),
@@ -86,14 +86,14 @@ fn runtime_identity_snapshots_validate_scope_and_recover_after_budget_failure() 
     let scope = std::collections::BTreeSet::from([id(3)]);
     let original = value.clone();
     assert_eq!(
-        value.validate_runtime_identity_snapshot(
+        value.validate_callable_identity_snapshot(
             &mut comptime_runtime::Budget::default(),
             &Default::default()
         ),
         Err(ErrorKind::Type)
     );
     assert_eq!(
-        value.validate_runtime_identity_snapshot(
+        value.validate_callable_identity_snapshot(
             &mut comptime_runtime::Budget {
                 steps: 0,
                 max_limbs: 4096
@@ -103,7 +103,7 @@ fn runtime_identity_snapshots_validate_scope_and_recover_after_budget_failure() 
         Err(ErrorKind::StepsExhausted)
     );
     value
-        .validate_runtime_identity_snapshot(&mut comptime_runtime::Budget::default(), &scope)
+        .validate_callable_identity_snapshot(&mut comptime_runtime::Budget::default(), &scope)
         .unwrap();
     assert_eq!(value, original);
     for argument in [
@@ -113,12 +113,12 @@ fn runtime_identity_snapshots_validate_scope_and_recover_after_budget_failure() 
         },
         Term::TypeListConcat(vec![Term::TypeListValue(vec![])]),
     ] {
-        let unresolved = Value::RuntimeFunction {
+        let unresolved = Value::FunctionInstance {
             declaration: id(2),
             arguments: vec![argument],
         };
         assert_eq!(
-            unresolved.validate_runtime_identity_snapshot(
+            unresolved.validate_callable_identity_snapshot(
                 &mut comptime_runtime::Budget::default(),
                 &scope
             ),
@@ -367,7 +367,7 @@ fn body_free_runtime_identity_checks_unused_value_parameter_domains() {
         if matches!(value, Term::Bool(_)) {
             assert_eq!(
                 result.unwrap(),
-                Value::RuntimeFunction {
+                Value::FunctionInstance {
                     declaration: id(2),
                     arguments: vec![value]
                 }
@@ -424,7 +424,7 @@ fn runtime_identity_admission_checks_structured_value_layouts() {
         if valid {
             assert_eq!(
                 result.unwrap(),
-                Value::RuntimeFunction {
+                Value::FunctionInstance {
                     declaration: id(2),
                     arguments: vec![argument],
                 }
@@ -464,7 +464,7 @@ fn host_runtime_identity_cannot_hide_an_invalid_unused_value_argument() {
         let valid = matches!(argument, Term::Bool(_));
         let result = vm.invoke(
             id(1),
-            vec![Value::RuntimeFunction {
+            vec![Value::FunctionInstance {
                 declaration: id(2),
                 arguments: vec![argument],
             }],
@@ -478,7 +478,7 @@ fn host_runtime_identity_cannot_hide_an_invalid_unused_value_argument() {
     drop(vm);
     package.function_parameters.clear();
     let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
-    let opaque = Value::RuntimeFunction {
+    let opaque = Value::FunctionInstance {
         declaration: id(2),
         arguments: vec![Term::Rigid {
             declaration: id(99),
@@ -603,7 +603,7 @@ fn host_runtime_identity_checks_dependent_domains_inside_aggregates() {
             true,
         ),
     ] {
-        let identity = Value::RuntimeFunction {
+        let identity = Value::FunctionInstance {
             declaration: id(2),
             arguments: vec![domain, value],
         };
@@ -760,7 +760,7 @@ fn frozen_runtime_identity_round_trips_without_changing_phase_or_responsibility(
 
 #[test]
 fn runtime_identity_freezing_is_bounded_and_keeps_aggregate_structure() {
-    let identity = Value::RuntimeFunction {
+    let identity = Value::FunctionInstance {
         declaration: id(2),
         arguments: vec![Term::Primitive(Primitive::Bool)],
     };
@@ -791,7 +791,7 @@ fn runtime_identity_freezing_is_bounded_and_keeps_aggregate_structure() {
             }
         )])])
     );
-    let unresolved = Value::RuntimeFunction {
+    let unresolved = Value::FunctionInstance {
         declaration: id(2),
         arguments: vec![Term::Rigid {
             declaration: id(8),
@@ -814,7 +814,7 @@ fn indexed_world_lookup_preserves_late_function_collisions_and_duplicate_bodies(
     }));
     let mut vm = Interpreter::for_comptime(&world, Budget::default()).unwrap();
     assert!(
-        matches!(vm.invoke(id(611), vec![]).unwrap(), Value::RuntimeFunction { declaration, .. } if declaration == id(2))
+        matches!(vm.invoke(id(611), vec![]).unwrap(), Value::FunctionInstance { declaration, .. } if declaration == id(2))
     );
     world.runtime_function_identities[0].declaration = id(611);
     assert!(
