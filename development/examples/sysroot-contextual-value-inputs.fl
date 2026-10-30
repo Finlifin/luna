@@ -115,3 +115,16 @@ test {
     let types = keep_type_list(Holder<Surround<Type, [u8], bool, bool>> {flag: true});
     assumes flags.flag and types.flag;
 }
+
+fn recover_description(value: Holder<Marker<Description {enabled: true, kind: T}>>)
+    -> Holder<T>
+where T
+{
+    Holder<T> {flag: value.flag}
+}
+
+test {
+    let recovered = recover_description(
+        Holder<Marker<Description {enabled: true, kind: bool}>> {flag: true});
+    assumes recovered.flag;
+}

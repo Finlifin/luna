@@ -26,6 +26,244 @@ fn scheme(parameters: Vec<Term>, result: Term, types: usize) -> Scheme {
         },
     }
 }
+
+#[test]
+fn ordinary_list_tuple_contexts_preserve_domains_and_partial_field_inference() {
+    use type_resolution::{calls::InputContext as C, ptc::Context};
+    let head = DeclarationId {
+        package: 92,
+        local: 1,
+    };
+    let list_head = DeclarationId {
+        package: 92,
+        local: 2,
+    };
+    let domain = Term::NormalForm {
+        head: list_head,
+        sort: Sort::Type,
+        arguments: vec![primitive(P::Type)],
+    };
+    let tuple = |fields| Term::NormalForm {
+        head,
+        sort: Sort::Type,
+        arguments: vec![Term::NominalValue {
+            ty: Box::new(domain.clone()),
+            variant: None,
+            fields,
+        }],
+    };
+    let mut world = Context::default();
+    world.admit_tuple_head(head);
+    world.admit_list_inference_head(list_head);
+    let consumer = scheme(
+        vec![tuple(vec![generic(0), primitive(P::U8)])],
+        generic(0),
+        1,
+    );
+    let pending = consumer
+        .infer_partial_types_in_context(&[None], None, &world, Budget::default())
+        .unwrap();
+    let shape = pending.parameter_input_context(0).unwrap();
+    assert!(
+        matches!(&shape, C::NormalTuple { head: actual, list_domain: Some(ty), fields }
+        if *actual == head && *ty == domain && matches!(fields.as_slice(), [C::Unknown, C::Known(t)] if *t == primitive(P::U8)))
+    );
+    assert!(pending.finish().is_err());
+
+    let producer = scheme(vec![generic(0)], generic(0), 1);
+    let completed = tuple(vec![primitive(P::Bool), primitive(P::U8)]);
+    let mut candidate = producer
+        .infer_partial_types_in_context(&[Some(completed.clone())], None, &world, Budget::default())
+        .unwrap();
+    assert!(
+        candidate
+            .constrain_result_context(
+                &shape,
+                Budget {
+                    steps: 1,
+                    ..Budget::default()
+                }
+            )
+            .is_err()
+    );
+    candidate
+        .constrain_result_context(&shape, Budget::default())
+        .unwrap();
+    // A source-syntax context can also borrow the settled input's exact domain.
+    candidate
+        .constrain_result_context(
+            &C::NormalTuple {
+                head,
+                fields: vec![C::Unknown, C::Known(primitive(P::U8))],
+                list_domain: None,
+            },
+            Budget::default(),
+        )
+        .unwrap();
+    assert_eq!(candidate.finish().unwrap().result, completed);
+
+    let mut candidate = consumer
+        .infer_partial_types_in_context(&[None], None, &world, Budget::default())
+        .unwrap();
+    candidate
+        .constrain_parameter_context(
+            0,
+            &C::NormalTuple {
+                head,
+                list_domain: Some(domain),
+                fields: vec![C::Known(primitive(P::Bool)), C::Known(primitive(P::U8))],
+            },
+            Budget::default(),
+        )
+        .unwrap();
+    let instance = candidate.finish().unwrap();
+    assert_eq!(instance.type_arguments, vec![primitive(P::Bool)]);
+    assert_eq!(instance.result, primitive(P::Bool));
+}
+
+#[test]
+fn ordinary_tuple_contexts_require_list_authority_and_do_not_erase_domain_mismatches() {
+    use type_resolution::{calls::InputContext as C, ptc::Context};
+    let head = DeclarationId {
+        package: 93,
+        local: 1,
+    };
+    let list_head = DeclarationId {
+        package: 93,
+        local: 2,
+    };
+    let other_head = DeclarationId {
+        package: 93,
+        local: 3,
+    };
+    let domain = |head, element| Term::NormalForm {
+        head,
+        sort: Sort::Type,
+        arguments: vec![element],
+    };
+    let tuple = |ty, fields| Term::NormalForm {
+        head,
+        sort: Sort::Type,
+        arguments: vec![Term::NominalValue {
+            ty: Box::new(ty),
+            variant: None,
+            fields,
+        }],
+    };
+    let mut world = Context::default();
+    world.admit_tuple_head(head);
+    let ty = domain(list_head, primitive(P::Type));
+    let consumer = scheme(vec![tuple(ty.clone(), vec![generic(0)])], generic(0), 1);
+    let pending = consumer
+        .infer_partial_types_in_context(&[None], None, &world, Budget::default())
+        .unwrap();
+    assert!(matches!(
+        pending.parameter_input_context(0).unwrap(),
+        C::Unknown
+    ));
+    world.admit_list_inference_head(list_head);
+    world.admit_list_inference_head(other_head);
+    let producer = scheme(vec![generic(0)], generic(0), 1);
+    let complete = tuple(ty.clone(), vec![primitive(P::Bool)]);
+    let mut candidate = producer
+        .infer_partial_types_in_context(&[Some(complete.clone())], None, &world, Budget::default())
+        .unwrap();
+    for wrong in [
+        domain(other_head, primitive(P::Type)),
+        domain(list_head, primitive(P::Bool)),
+    ] {
+        let mut trial = producer
+            .infer_partial_types_in_context(
+                &[Some(complete.clone())],
+                None,
+                &world,
+                Budget::default(),
+            )
+            .unwrap();
+        assert!(
+            trial
+                .constrain_result_context(
+                    &C::NormalTuple {
+                        head,
+                        list_domain: Some(wrong),
+                        fields: vec![C::Unknown],
+                    },
+                    Budget::default()
+                )
+                .and_then(|_| trial.finish())
+                .is_err()
+        );
+    }
+    candidate
+        .constrain_result_context(
+            &C::NormalTuple {
+                head,
+                list_domain: Some(ty),
+                fields: vec![C::Known(primitive(P::Bool))],
+            },
+            Budget::default(),
+        )
+        .unwrap();
+    assert_eq!(candidate.finish().unwrap().result, complete);
+}
+
+#[test]
+fn immutable_aggregate_inputs_propose_fields_but_keep_the_whole_identity_obligation() {
+    use type_resolution::ptc::Context;
+    let marker = DeclarationId {
+        package: 94,
+        local: 1,
+    };
+    let description = Term::Nominal {
+        declaration: DeclarationId {
+            package: 94,
+            local: 2,
+        },
+        arguments: vec![],
+    };
+    let applied = |input| Term::NormalForm {
+        head: marker,
+        sort: Sort::Type,
+        arguments: vec![input],
+    };
+    let mut world = Context::default();
+    world.admit_congruence(marker);
+    for kind in 0..3 {
+        let payload = |ty, flag| match kind {
+            0 => Term::NominalValue {
+                ty: Box::new(description.clone()),
+                variant: None,
+                fields: vec![ty, Term::Bool(flag)],
+            },
+            1 => Term::TupleValue(vec![ty, Term::Bool(flag)]),
+            _ => Term::RecordValue(vec![
+                ("kind".into(), ty),
+                ("enabled".into(), Term::Bool(flag)),
+            ]),
+        };
+        let consumer = scheme(vec![applied(payload(generic(0), true))], generic(0), 1);
+        let complete = applied(payload(primitive(P::Bool), true));
+        let instance = consumer
+            .infer_partial_types_in_context(&[Some(complete)], None, &world, Budget::default())
+            .unwrap()
+            .finish()
+            .unwrap();
+        assert_eq!(instance.type_arguments, vec![primitive(P::Bool)]);
+        assert_eq!(instance.result, primitive(P::Bool));
+        // Inferring the Type field cannot discard a different value field.
+        assert!(
+            consumer
+                .infer_partial_types_in_context(
+                    &[Some(applied(payload(primitive(P::Bool), false)))],
+                    None,
+                    &world,
+                    Budget::default(),
+                )
+                .and_then(|candidate| candidate.finish())
+                .is_err()
+        );
+    }
+}
 fn argument(ty: Term, index: u32) -> Argument {
     Argument {
         ty,
@@ -1124,6 +1362,7 @@ fn bound_tuple_inference_proposes_fields_and_preserves_context_identity() {
     let C::NormalTuple {
         head: actual,
         fields,
+        ..
     } = pending.parameter_input_context(0).unwrap()
     else {
         panic!("normal tuple context");
@@ -1144,6 +1383,7 @@ fn bound_tuple_inference_proposes_fields_and_preserves_context_identity() {
         .infer_partial_types_in_context(&[None], None, &context, Budget::default())
         .unwrap();
     let partial = C::NormalTuple {
+        list_domain: None,
         head,
         fields: vec![C::Known(primitive(P::U8)), C::Unknown],
     };
@@ -1164,6 +1404,7 @@ fn bound_tuple_inference_proposes_fields_and_preserves_context_identity() {
     let C::NormalTuple {
         head: retained,
         fields,
+        ..
     } = candidate.parameter_input_context(0).unwrap()
     else {
         panic!("retained tuple head");

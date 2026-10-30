@@ -290,6 +290,41 @@ impl Engine {
     pub(crate) fn is_tuple_head(&self, head: nir::DeclarationId) -> bool {
         self.context.is_tuple_head(head)
     }
+    pub(crate) fn is_type_list_domain(&self, ty: &Term) -> bool {
+        self.context.is_list_type(ty) && nir::normal_forms::type_list_input_type(ty)
+    }
+
+    /// Read the payload of an already stage-authorized signature. This is a
+    /// checking hint, not declaration formation or a new proof of layout.
+    pub(crate) fn tuple_input<'a>(&self, ty: &'a Term) -> Option<(Option<&'a Term>, &'a [Term])> {
+        let Term::NormalForm {
+            head,
+            sort: Sort::Type,
+            arguments,
+        } = ty
+        else {
+            return None;
+        };
+        if !self.is_tuple_head(*head) {
+            return None;
+        }
+        let [input] = arguments.as_slice() else {
+            return None;
+        };
+        let (domain, fields) = match input {
+            Term::TypeListValue(fields) => (None, fields.as_slice()),
+            Term::NominalValue {
+                ty,
+                variant: None,
+                fields,
+            } if self.is_type_list_domain(ty) => (Some(ty.as_ref()), fields.as_slice()),
+            _ => return None,
+        };
+        fields
+            .iter()
+            .all(|field| field.sort() == Sort::Type)
+            .then_some((domain, fields))
+    }
     pub fn is_nominal_constructor(&self, head: nir::DeclarationId) -> bool {
         self.context.is_nominal_constructor(head)
     }

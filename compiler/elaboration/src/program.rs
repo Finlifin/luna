@@ -2627,9 +2627,11 @@ impl Checker<'_, '_> {
                         .into_iter()
                         .map(|fields| {
                             fields.map(|fields| match self.protocols.tuple {
-                                Some(head) => {
-                                    crate::calls::InputContext::NormalTuple { head, fields }
-                                }
+                                Some(head) => crate::calls::InputContext::NormalTuple {
+                                    head,
+                                    fields,
+                                    list_domain: None,
+                                },
                                 None => crate::calls::InputContext::Tuple(fields),
                             })
                         })

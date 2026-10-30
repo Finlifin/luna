@@ -502,7 +502,7 @@ fn decompose(
             scope,
             work,
         )?,
-        (Term::Record(a), Term::Record(b))
+        (Term::Record(a), Term::Record(b)) | (Term::RecordValue(a), Term::RecordValue(b))
             if a.len() == b.len() && a.iter().zip(b).all(|((a, _), (b, _))| a == b) =>
         {
             for ((_, a), (_, b)) in a.iter().zip(b) {
@@ -551,7 +551,53 @@ fn decompose(
                 )?;
             }
         }
-        (Term::Tuple(a), Term::Tuple(b)) | (Term::TypeListValue(a), Term::TypeListValue(b))
+        (
+            Term::NominalValue {
+                ty: left,
+                variant: a,
+                fields: af,
+            },
+            Term::NominalValue {
+                ty: right,
+                variant: b,
+                fields: bf,
+            },
+        ) if a == b && af.len() == bf.len() => {
+            // Immutable payloads can propose ordinary input substitutions.
+            // Keep their complete domain and enclosing equality obligation:
+            // field inspection is not an inverse theorem for an opaque head.
+            decompose(
+                left,
+                right,
+                arguments,
+                actual_arguments,
+                nesting,
+                depth + 1,
+                fuel,
+                limit,
+                context,
+                scope,
+                work,
+            )?;
+            for (left, right) in af.iter().zip(bf) {
+                decompose(
+                    left,
+                    right,
+                    arguments,
+                    actual_arguments,
+                    nesting,
+                    depth + 1,
+                    fuel,
+                    limit,
+                    context,
+                    scope,
+                    work,
+                )?;
+            }
+        }
+        (Term::Tuple(a), Term::Tuple(b))
+        | (Term::TupleValue(a), Term::TupleValue(b))
+        | (Term::TypeListValue(a), Term::TypeListValue(b))
             if a.len() == b.len() =>
         {
             for (a, b) in a.iter().zip(b) {

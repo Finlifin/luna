@@ -63,7 +63,11 @@ impl Checker<'_, '_> {
             } else {
                 complete.push(None);
                 partial.push(Some(match self.protocols.tuple {
-                    Some(head) => C::NormalTuple { head, fields },
+                    Some(head) => C::NormalTuple {
+                        head,
+                        fields,
+                        list_domain: None,
+                    },
                     None => C::Tuple(fields),
                 }));
             }

@@ -3252,7 +3252,11 @@ impl Checker<'_, '_> {
                                 })
                                 .collect();
                             Some(match self.bound_tuple_head(packet.span)? {
-                                Some(head) => C::NormalTuple { head, fields },
+                                Some(head) => C::NormalTuple {
+                                    head,
+                                    fields,
+                                    list_domain: None,
+                                },
                                 None => C::Tuple(fields),
                             })
                         } else {

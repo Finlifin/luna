@@ -4,6 +4,36 @@
 mod support;
 
 #[test]
+fn type_fields_in_ordinary_description_values_infer_without_erasing_other_fields() {
+    let source = "typealias Type=.Type'builtin;
+        struct Description {enabled:bool,kind:Type}
+        pure comptime fn Marker<description:Description>->Type {while true {} bool}
+        pure comptime fn Other<description:Description>->Type {while true {} bool}
+        struct Holder where T {flag:bool}
+        fn recover(value:Holder<Marker<Description {enabled:true,kind:T}>>)->Holder<T>
+        where T
+        {Holder<T>{flag:value.flag}}
+        fn run()->bool {
+            let result=recover(Holder<Marker<Description {enabled:true,kind:bool}>>{flag:true});
+            result.flag
+        }";
+    let package = support::compile_with_protocols(source, &Default::default()).unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+    for rejected in [
+        source.replace("enabled:true,kind:bool", "enabled:false,kind:bool"),
+        source.replace(
+            "Holder<Marker<Description {enabled:true,kind:bool}",
+            "Holder<Other<Description {enabled:true,kind:bool}",
+        ),
+    ] {
+        assert!(support::compile_with_protocols(&rejected, &Default::default()).is_err());
+    }
+}
+
+#[test]
 fn user_normal_form_inputs_are_inferred_through_ordinary_calls() {
     let source = "
         typealias Type = .Type'builtin;

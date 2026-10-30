@@ -119,7 +119,11 @@ impl<'h> RoutedArgument<'h> {
                 C::Record(fields)
             }
             None => match checker.protocols.tuple {
-                Some(head) => C::NormalTuple { head, fields },
+                Some(head) => C::NormalTuple {
+                    head,
+                    fields,
+                    list_domain: None,
+                },
                 None => C::Tuple(fields),
             },
         }
@@ -173,7 +177,11 @@ impl<'h> RoutedArgument<'h> {
             return None;
         }
         Some(match checker.protocols.tuple {
-            Some(head) => C::NormalTuple { head, fields },
+            Some(head) => C::NormalTuple {
+                head,
+                fields,
+                list_domain: None,
+            },
             None => C::Tuple(fields),
         })
     }

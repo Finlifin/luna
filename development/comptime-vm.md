@@ -6755,3 +6755,55 @@ exit 0, 1481 passed; `/tmp/luna-tools-0ybj0y3p/result.json`.
 After batching adjacent collector inputs and sharing the owned list encoder,
 the public-library command above was repeated on the final implementation:
 exit 0, four native tests passed; `/tmp/luna-tools-x1rmnvif/result.json`.
+
+
+## Ordinary aggregate inputs in contextual call inference (2026-10-31)
+
+Partial tuple checking contexts now retain the declared domain of an ordinary
+frozen list payload. Context reconstruction and settled-field hints read that
+payload as well as the legacy compact form, then preserve the original input
+representation when rebuilding a candidate. A source-syntax context without a
+retained domain can use the settled tuple's domain. Missing list authority,
+non-Type collection domains and malformed payloads do not yield tuple hints.
+Copied domains and field inspection are charged to the candidate's budget.
+
+These are hints from already stage-authorized signatures, not independent
+formation certificates. Declaration formation and full value admission remain
+with their existing owners. No layout registry, value evaluation, or new
+injectivity theorem was added to PTC. Raw compact and ordinary payload encodings
+are not silently equated.
+
+The new round-trip regression exposed a separate matching gap: ordinary
+immutable aggregate fields could not propose clause substitutions. Matching now
+walks nominal values with equal variant/arity, tuple values and consistently
+labelled record values, retaining the domain and original complete equality
+obligation. This applies to ordinary descriptions as well as list values. A
+Type-valued field can supply a candidate without discarding a mismatched scalar
+field or changing the enclosing opaque head. Unknown or incompatible remaining
+obligations still prevent `finish` from exporting an instance; the contextual
+checking call is not itself the export boundary.
+
+Tests cover partial-field hints, reconstruction with and without a retained
+domain, inference, budget failure/recovery, missing list authority, foreign
+domains and complete aggregate identity checks. Source tests infer a Type from
+`Description.kind` without an explicit type argument or expected result type,
+reject changed boolean fields and foreign heads, and use nonterminating opaque
+head bodies to ensure they are not invoked for inference. The public-library
+native example now includes the same description-driven call path.
+
+The compact Type-list writer convention remains in source syntax contexts.
+This stage makes the call path representation-aware; canonical frozen storage
+still needs a coordinated producer migration.
+
+Validation from /home/fin/luna:
+
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution --no-fail-fast`:
+  exit 0, 302 passed; `/tmp/luna-tools-mt_9g1er/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test normal_form_inference --test normal_form_methods --test nominal_value_parameters --test type_spreads --test comptime_clause_inputs --test cmtt --no-fail-fast`:
+  exit 0, 1038 passed; `/tmp/luna-tools-buwuws8c/result.json`.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
+  exit 0, five native tests passed; `/tmp/luna-tools-9u7vtsvp/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-ho4rbpwh/result.json`; `git diff --check` passed.
+
+No full workspace test suite was run.

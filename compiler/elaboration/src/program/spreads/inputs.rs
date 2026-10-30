@@ -201,7 +201,11 @@ impl Checker<'_, '_> {
                 let packet_context = context.map_or(Input::Unknown, |fields| {
                     let fields = fields.iter().map(|(ty, _)| ty.clone()).collect();
                     match self.protocols.tuple {
-                        Some(head) => Input::NormalTuple { head, fields },
+                        Some(head) => Input::NormalTuple {
+                            head,
+                            fields,
+                            list_domain: None,
+                        },
                         None => Input::Tuple(fields),
                     }
                 });
@@ -428,7 +432,11 @@ impl Checker<'_, '_> {
                     })
                     .collect();
                 let context = match self.protocols.tuple {
-                    Some(head) => crate::calls::InputContext::NormalTuple { head, fields },
+                    Some(head) => crate::calls::InputContext::NormalTuple {
+                        head,
+                        fields,
+                        list_domain: None,
+                    },
                     None => crate::calls::InputContext::Tuple(fields),
                 };
                 candidate

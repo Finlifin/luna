@@ -546,7 +546,11 @@ impl Checker<'_, '_> {
                         } else {
                             let fields = vec![C::Unknown; route.source_inputs().count()];
                             match self.protocols.tuple {
-                                Some(head) => C::NormalTuple { head, fields },
+                                Some(head) => C::NormalTuple {
+                                    head,
+                                    fields,
+                                    list_domain: None,
+                                },
                                 None => C::Tuple(fields),
                             }
                         };

@@ -53,6 +53,9 @@ pub enum InputContext {
     NormalTuple {
         head: DeclarationId,
         fields: Vec<InputContext>,
+        /// Preserve the domain of an ordinary frozen list from the checked
+        /// signature. None retains the legacy compact construction convention.
+        list_domain: Option<Term>,
     },
     /// A generative nominal type with partially known Type and value arguments.
     Nominal {
@@ -770,41 +773,50 @@ impl CallCandidate {
                         })
                         .collect::<Result<_, _>>()?,
                 )),
-                InputContext::NormalTuple { head, fields } => {
+                InputContext::NormalTuple {
+                    head,
+                    fields,
+                    list_domain,
+                } => {
                     if !engine.is_tuple_head(*head) {
                         return Err(Error::TypeView("unbound Tuple result context".into()));
                     }
+                    let settled_input = settled
+                        .filter(|ty| matches!(ty, Term::NormalForm { head: actual, .. } if actual == head))
+                        .and_then(|ty| engine.tuple_input(ty));
+                    let domain = list_domain
+                        .as_ref()
+                        .or_else(|| settled_input.and_then(|(domain, _)| domain));
+                    if let Some(domain) = domain {
+                        if !engine.is_type_list_domain(domain) {
+                            return Err(Error::TypeView("unbound tuple collection domain".into()));
+                        }
+                        crate::associated::charge_projection_copy(domain, fuel)
+                            .map_err(Error::TypeView)?;
+                    }
+                    let fields = fields
+                        .iter()
+                        .enumerate()
+                        .map(|(slot, field)| {
+                            let hint = settled_input.and_then(|(_, fields)| fields.get(slot));
+                            build(field, hint, engine, components, nesting, depth + 1, fuel)
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    // Preserve the supplied packet representation. Converting
+                    // it to the legacy encoding here would change the input
+                    // identity before checking the complete type obligation.
+                    let input = match domain {
+                        Some(domain) => Term::NominalValue {
+                            ty: Box::new(domain.clone()),
+                            variant: None,
+                            fields,
+                        },
+                        None => Term::TypeListValue(fields),
+                    };
                     Ok(Term::NormalForm {
                         head: *head,
                         sort: Sort::Type,
-                        arguments: vec![Term::TypeListValue(
-                            fields
-                                .iter()
-                                .enumerate()
-                                .map(|(slot, field)| {
-                                    let field_hint = match settled {
-                                        Some(Term::NormalForm {
-                                            head: actual,
-                                            arguments,
-                                            ..
-                                        }) if actual == head => match arguments.as_slice() {
-                                            [Term::TypeListValue(fields)] => fields.get(slot),
-                                            _ => None,
-                                        },
-                                        _ => None,
-                                    };
-                                    build(
-                                        field,
-                                        field_hint,
-                                        engine,
-                                        components,
-                                        nesting,
-                                        depth + 1,
-                                        fuel,
-                                    )
-                                })
-                                .collect::<Result<_, _>>()?,
-                        )],
+                        arguments: vec![input],
                     })
                 }
                 InputContext::Record(fields) => Ok(Term::Record(
@@ -1240,6 +1252,14 @@ impl CallCandidate {
                 return Ok(InputContext::Unknown);
             }
         };
+        if let Some((domain, fields)) = self.engine.tuple_input(&template) {
+            *fuel = fuel
+                .checked_sub(fields.len())
+                .ok_or_else(|| Error::TypeView("input checking context budget exhausted".into()))?;
+            if let Some(domain) = domain {
+                crate::associated::charge_projection_copy(domain, fuel).map_err(Error::TypeView)?;
+            }
+        }
         let mut field_context = |field: Term| -> Result<InputContext, Error> {
             let sort = field.sort();
             let field = match &arguments {
@@ -1303,16 +1323,17 @@ impl CallCandidate {
                     .map(&mut field_context)
                     .collect::<Result<_, _>>()?,
             }),
-            Term::NormalForm {
+            tuple @ Term::NormalForm {
                 head,
                 sort: Sort::Type,
-                arguments: inputs,
+                ..
             } if self.engine.is_tuple_head(head) => {
-                let [Term::TypeListValue(fields)] = inputs.as_slice() else {
+                let Some((domain, fields)) = self.engine.tuple_input(&tuple) else {
                     return Ok(InputContext::Unknown);
                 };
                 Ok(InputContext::NormalTuple {
                     head,
+                    list_domain: domain.cloned(),
                     fields: fields
                         .iter()
                         .cloned()
