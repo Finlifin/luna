@@ -284,7 +284,9 @@ impl Checker<'_, '_> {
         let H::Projection(base, name) = head.kind else {
             return None;
         };
-        if let H::Cast(_, interface) = base.kind {
+        if let H::Cast(_, interface) = base.kind
+            && self.is_trait_view_target(interface)
+        {
             let interface = match interface.kind {
                 H::NFApplication(head, _) => head,
                 _ => interface,
@@ -420,6 +422,7 @@ impl Checker<'_, '_> {
         };
         if let H::Projection(view, name) = head.kind
             && let H::Cast(base, interface) = view.kind
+            && self.is_trait_view_target(interface)
         {
             return self.with_trait_code_method_callee(
                 callee, head, arguments, base, interface, name, invoke,

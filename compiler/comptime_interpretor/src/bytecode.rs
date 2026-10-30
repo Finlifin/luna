@@ -13,6 +13,7 @@ pub(super) struct Frame {
     interface: Option<Box<interface::InterfaceCall>>,
     waiting: Option<Waiting>,
     calls: BTreeMap<usize, PendingCall>,
+    newtype_conversions: BTreeMap<usize, nir::newtypes::Conversion>,
     instance_origins: BTreeMap<usize, Option<(DeclarationId, usize)>>,
     instance_methods: BTreeMap<usize, Expr>,
     closures: BTreeMap<usize, PendingClosure>,
@@ -923,6 +924,7 @@ impl<'a> Interpreter<'a> {
             interface: None,
             waiting: None,
             calls: BTreeMap::new(),
+            newtype_conversions: BTreeMap::new(),
             instance_origins: BTreeMap::new(),
             instance_methods: BTreeMap::new(),
             normal_types: BTreeMap::new(),
@@ -1066,6 +1068,27 @@ impl<'a> Interpreter<'a> {
                     )?;
                 }
 
+                Op::PrepareNewtypeConversion {
+                    identity,
+                    input,
+                    output,
+                } => {
+                    let plan = self.prepare_newtype_conversion(input, output, source)?;
+                    frame.newtype_conversions.insert(*identity, plan);
+                }
+                Op::FinishNewtypeConversion {
+                    identity,
+                    destination,
+                    value,
+                } => {
+                    let plan = frame
+                        .newtype_conversions
+                        .remove(identity)
+                        .ok_or_else(missing)?;
+                    let value = frame.slots[*value].take().ok_or_else(missing)?;
+                    frame.slots[*destination] =
+                        Some(self.complete_newtype_conversion(&plan, value, source)?);
+                }
                 Op::CheckBuildMetadata => self.check_build_metadata(source)?,
                 Op::ReadBuildMetadata {
                     destination,

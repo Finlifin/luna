@@ -550,6 +550,7 @@ fn comptime_newtype_casts_evaluate_the_producer_once() {
             .count(),
         1
     );
+    assert_eq!(vm.bytecode_invocations(), 2);
 }
 
 #[test]
@@ -6647,5 +6648,49 @@ fn interpreter_admission_rejects_forged_nominal_completed_dispatch_payloads() {
                 "accepted mutation {mutation} of {definition}"
             );
         }
+    }
+}
+
+#[test]
+fn comptime_newtype_nested_generic_payloads_run_on_the_invocation_stack() {
+    let source = "newtype Wrapper<T> = T;
+        struct Payload {enabled:bool}
+        comptime fn wrap(value:T)->Wrapper<T> where T {value.as(Wrapper<T>)}
+        comptime fn unwrap(value:Wrapper<T>)->T where T {value.as(T)}
+        comptime fn run()->bool {
+            var touched=false;
+            let value=wrap(wrap(do {touched=not touched;Payload {enabled:true}}));
+            unwrap(unwrap(value)).enabled and touched
+        }
+        comptime fn early()->bool {
+            let unused=wrap<bool>(do {return true;false});
+            false
+        }";
+    let Artifact::Nir(package) = compile(source, Emit::Nir).unwrap() else {
+        panic!("NIR")
+    };
+    let id = |name| {
+        package
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap()
+            .declaration
+    };
+    let mut vm =
+        comptime_interpretor::Interpreter::for_comptime(&package, Default::default()).unwrap();
+    for _ in 0..2 {
+        let before = vm.bytecode_invocations();
+        assert_eq!(
+            vm.invoke(id("run"), vec![]).unwrap(),
+            comptime_interpretor::Value::Bool(true)
+        );
+        assert_eq!(vm.bytecode_invocations() - before, 5);
+        let before = vm.bytecode_invocations();
+        assert_eq!(
+            vm.invoke(id("early"), vec![]).unwrap(),
+            comptime_interpretor::Value::Bool(true)
+        );
+        assert_eq!(vm.bytecode_invocations() - before, 1);
     }
 }

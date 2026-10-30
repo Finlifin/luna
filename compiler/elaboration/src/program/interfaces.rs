@@ -2298,7 +2298,7 @@ impl Checker<'_, '_> {
         let (base, interface) = match view.kind {
             // A conversion to a Type produces the receiver; only a trait
             // target selects a method interface on the original receiver.
-            H::Cast(_, target) if self.is_type_head(target) => (view, None),
+            H::Cast(_, target) if !self.is_trait_view_target(target) => (view, None),
             H::Cast(base, interface) if !self.is_static_method_subject(base) => {
                 (base, Some(interface))
             }

@@ -95,6 +95,16 @@ pub enum Op {
         value: Register,
         condition_source: SourceRange,
     },
+    PrepareNewtypeConversion {
+        identity: Register,
+        input: Arc<Term>,
+        output: Arc<Term>,
+    },
+    FinishNewtypeConversion {
+        identity: Register,
+        destination: Register,
+        value: Register,
+    },
     CheckBuildMetadata,
     ReadBuildMetadata {
         destination: Register,
@@ -614,6 +624,22 @@ impl fmt::Display for Program {
                     value,
                     build,
                 } => write!(f, "(build-definition %{destination} %{value} {build})")?,
+                Op::PrepareNewtypeConversion {
+                    identity,
+                    input,
+                    output,
+                } => write!(
+                    f,
+                    "(prepare-newtype-conversion %{identity} (input {input}) (output {output}))"
+                )?,
+                Op::FinishNewtypeConversion {
+                    identity,
+                    destination,
+                    value,
+                } => write!(
+                    f,
+                    "(finish-newtype-conversion %{destination} (plan %{identity}) (value %{value}))"
+                )?,
                 Op::CheckObservation(observation) => {
                     write!(f, "(check-observation {observation})")?
                 }
@@ -1424,6 +1450,27 @@ fn compile_root<'a>(
                         );
                         work.push(Work::Expression(selector, value));
                         emit(&mut work, Op::CheckBuildMetadata);
+                    }
+                    K::NewtypeConvert(operand) => {
+                        let identity = fresh();
+                        let value = fresh();
+                        emit(
+                            &mut work,
+                            Op::FinishNewtypeConversion {
+                                identity,
+                                destination: dst,
+                                value,
+                            },
+                        );
+                        work.push(Work::Expression(operand, value));
+                        emit(
+                            &mut work,
+                            Op::PrepareNewtypeConversion {
+                                identity,
+                                input: Arc::new(copy_term(&operand.ty, fuel, source)?),
+                                output: Arc::new(copy_term(&expr.ty, fuel, source)?),
+                            },
+                        );
                     }
                     K::BuildStruct(request) | K::BuildEnum(request) => {
                         let build = Arc::new(definitions::Build {

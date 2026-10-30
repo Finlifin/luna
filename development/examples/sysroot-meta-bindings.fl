@@ -3,11 +3,15 @@ struct Source {
     enabled: bool,
 }
 
+newtype Inputs = meta.List<Integer>;
+comptime fn preserve(input: Inputs) -> Inputs { input }
+
 comptime fn double(value: Integer) -> Integer { value * 2 }
 
 comptime fn run() -> bool {
     let input: meta.List<Integer> = [1, 2, 3];
-    let output = input.map(double);
+    let wrapped = preserve(input.as(Inputs));
+    let output = wrapped.as(meta.List<Integer>).map(double);
     let generated = meta.StructBuilder.from_type(Source).Build();
     output[2] == 6
         and meta.div_trunc(7, 2) == 3

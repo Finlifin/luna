@@ -4759,3 +4759,54 @@ Validation in /home/fin/luna:
   meta.to_usize/from_usize compose with List mapping and checked struct building.
 - `git diff --check`: exit 0. Existing unrelated unreachable-pattern warnings
   remain; no full-workspace test claim is made.
+
+### Compile checked newtype payload transfers
+
+NewtypeConvert now emits a preparation instruction followed by ordinary operand
+code and a completion instruction. Preparation checks the direct representation
+edge in the current declaration world and charges the existing plan budget before
+operand effects. The invocation frame owns that plan; cached code holds only
+bounded copies of the input/output types. Completion moves the whole payload,
+checks its input/output domains and exact wrapper identity, and consumes the plan.
+No field view, transitive cast, inherited method or resource capability is added.
+Tree interpretation and bytecode share both checks, including IIR's instantiated
+representation lookup. S-expression dumps expose the preparation and transfer.
+
+The integration cases exposed two frontend defects, fixed in the same path:
+- A generic comptime call used as a field receiver must establish its result
+  domain without capturing unavailable invocation-time locals. Speculative
+  expression checking now instantiates that domain in the current phase; the
+  eventual expression still performs the producer's work.
+- An explicit method receiver cast selects a trait view only when its target
+  resolves to a trait declaration. A Type-producing binding such as meta.List
+  instead yields an ordinary converted receiver. Both ordinary and CMTT method
+  selection use this distinction, without a library-name exception.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-m0vj9spr/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib newtype_vm`:
+  exit 0, `/tmp/luna-tools-p_98d8we/result.json`; tree/VM live-edge revalidation,
+  pre-operand rejection, forged identity/payload rejection after effects,
+  recovery and dump operation names.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test newtypes`:
+  exit 0, `/tmp/luna-tools-1ha5i__z/result.json`; 212 cases. The new regression
+  counts every compiled helper activation through nested generic wrappers and
+  struct payload projection, and verifies early return skips the helper call.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- development/examples/sysroot-meta-bindings.fl --sysroot library --build-target x86_64 linux 64 --invoke-comptime run`:
+  exit 0 with `(bool true)`, `/tmp/luna-tools-pab55u8t/result.json`. The actual
+  sysroot List is wrapped, passed through a comptime function, unwrapped and
+  mapped before composing with integer conversion and StructBuilder reflection.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-aoaxd_hb/result.json`; `git diff --check`: exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test newtypes --test comptime_receivers --test source_reflection --test comptime_list_operations --test cmtt_methods`:
+  `/tmp/luna-tools-4xycfeck/result.json`; CMTT methods passed all 144 cases,
+  then List tests exposed a fixture missing the ordinary BitVec binding used by
+  its shared example (57 passed, one failed before elaboration). Added the same
+  BitVec alias as builtin.primitives; no compiler fallback or expectation changed.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_receivers --test source_reflection --test newtypes --test comptime_list_operations`:
+  exit 0, `/tmp/luna-tools-0wc4twn_/result.json`; 58 List, nine receiver,
+  212 newtype and 14 reflection cases passed after the fixture correction.
+- Final formatting: `/tmp/luna-tools-vo65d5vu/result.json`, exit 0. Existing
+  unrelated unreachable-pattern warnings remain; no full-workspace or measured
+  performance claim is made.

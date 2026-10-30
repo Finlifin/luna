@@ -306,12 +306,13 @@ impl Checker<'_, '_> {
         if !dependent.map_err(|failure| error(base.span, failure.to_string()))? {
             return Ok(Some(domain));
         }
-        // The declared result is still in the callee's telescope. Complete
-        // ordinary call argument/default inference before inspecting fields.
-        // Preparation supplies the instantiated domain without invoking the
-        // producer; the eventual required computation keeps its effects.
-        let prepared = self.prepare_required_expression(base, None, None, Vec::new(), false)?;
-        Ok(Some(prepared.result_type))
+        // The declared result is still in the callee's telescope. Check the
+        // call in the current phase to instantiate it, without constructing a
+        // required invocation or trying to capture unexecuted local values.
+        // The ordinary projection retains the producer and its effects.
+        Ok(self
+            .checking_attempt(true, false, |checker| checker.expr(base, None))?
+            .map(|checked| checked.ty))
     }
 
     fn declared_comptime_call_result(&mut self, base: &Expr<'_>) -> Result<Option<Term>, Error> {

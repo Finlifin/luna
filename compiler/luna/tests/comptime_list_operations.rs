@@ -1204,7 +1204,14 @@ fn list_ranges_reject_incompatible_inputs_and_propagate_invocation_limits() {
 #[test]
 fn list_transform_collectors_preserve_order_snapshots_and_optional_layers() {
     let source = include_str!("../../../development/examples/sysroot-meta-lists.fl");
-    let package = compile(&format!("typealias Integer=.Integer'builtin;typealias Type=.Type'builtin;typealias u32=.u32'builtin;{source}")).unwrap();
+    let package = compile(&format!(
+        "typealias Integer = .Integer'builtin;
+        typealias Type = .Type'builtin;
+        typealias u32 = .u32'builtin;
+        typealias BitVec<n: Integer> = .BitVec'builtin<n>;
+        {source}"
+    ))
+    .unwrap();
     assert_eq!(
         luna::invocation::invoke(&package, "run", 1_000_000).unwrap(),
         Value::Bool(true)

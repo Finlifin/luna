@@ -2,6 +2,22 @@ use super::*;
 use std::collections::HashSet;
 
 impl Checker<'_, '_> {
+    /// Classify an explicit method view by declaration identity, not by the
+    /// spelling of a Type producer or the shape of its application syntax.
+    pub(in crate::program) fn is_trait_view_target(&self, expr: &Expr<'_>) -> bool {
+        let head = match expr.kind {
+            H::NFApplication(head, _) => head,
+            _ => expr,
+        };
+        let H::ResolvedDef { def_id, .. } = head.kind else {
+            return false;
+        };
+        self.package
+            .definition_owner(def_id)
+            .and_then(|owner| self.package.item(owner))
+            .is_some_and(|item| matches!(item.kind, ItemKind::Trait(_)))
+    }
+
     pub(in crate::program) fn interface_expr_for(
         &mut self,
         expr: &Expr<'_>,
