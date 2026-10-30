@@ -192,7 +192,10 @@ fn list_indices_read_sibling_references_after_releasing_receiver_locks() {
     let index = LocalId { owner: 1, index: 1 };
     for element in [Primitive::Bool, Primitive::Type] {
         let value = if element == Primitive::Type {
-            Value::TypeList(vec![Term::Primitive(Primitive::Bool)])
+            Value::List {
+                ty: list(Primitive::Type),
+                values: vec![Value::Type(Term::Primitive(Primitive::Bool))],
+            }
         } else {
             Value::List {
                 ty: list(element),
@@ -340,20 +343,18 @@ fn fused_append_preserves_aliases_and_reuses_owned_buffers() {
         );
         for compiled in [false, true] {
             for carrier in 0..3 {
-                let original = if element == Primitive::Type {
-                    let mut values = Vec::with_capacity(8);
-                    values.push(Term::Primitive(Primitive::Bool));
-                    Value::TypeList(values)
+                let item = if element == Primitive::Type {
+                    Value::Type(Term::Primitive(Primitive::Bool))
                 } else {
-                    let mut values = Vec::with_capacity(8);
-                    values.push(Value::Bool(true));
-                    Value::List {
-                        ty: ty.clone(),
-                        values,
-                    }
+                    Value::Bool(true)
+                };
+                let mut values = Vec::with_capacity(8);
+                values.push(item.clone());
+                let original = Value::List {
+                    ty: ty.clone(),
+                    values,
                 };
                 let buffer = match &original {
-                    Value::TypeList(v) => v.as_ptr() as usize,
                     Value::List { values, .. } => values.as_ptr() as usize,
                     _ => unreachable!(),
                 };
@@ -396,16 +397,12 @@ fn fused_append_preserves_aliases_and_reuses_owned_buffers() {
                     .invocation_slot_value(&env[&input], Some(SOURCE))
                     .unwrap();
                 match actual {
-                    Value::List { values, .. } => assert_eq!(values, vec![Value::Bool(true); 2]),
-                    Value::TypeList(values) => {
-                        assert_eq!(values, vec![Term::Primitive(Primitive::Bool); 2])
-                    }
+                    Value::List { values, .. } => assert_eq!(values, vec![item; 2]),
                     _ => panic!("list expected"),
                 }
                 if carrier == 0 {
                     let after = match &env[&input] {
                         Value::List { values, .. } => values.as_ptr() as usize,
-                        Value::TypeList(v) => v.as_ptr() as usize,
                         _ => unreachable!(),
                     };
                     assert_eq!(

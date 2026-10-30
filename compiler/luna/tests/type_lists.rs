@@ -462,27 +462,25 @@ fn type_lists_and_tuple_packets_keep_distinct_domains() {
             },
         )
     };
-    for (domain, value, expected) in [
-        (
-            "List<Type>",
-            "[bool,.u8'builtin]",
-            Value::TypeList(vec![Term::Primitive(P::Bool), Term::Primitive(P::U8)]),
-        ),
+    for (domain, value, elements) in [
+        ("List<Type>", "[bool,.u8'builtin]", vec![P::Bool, P::U8]),
         (
             "Tuple<Type,Type>",
             "(bool,.u8'builtin)",
-            Value::Tuple(vec![
-                Value::Type(Term::Primitive(P::Bool)),
-                Value::Type(Term::Primitive(P::U8)),
-            ]),
+            vec![P::Bool, P::U8],
         ),
-        ("List<Type>", "[]", Value::TypeList(vec![])),
-        ("Tuple<>", "()", Value::Tuple(vec![])),
+        ("List<Type>", "[]", vec![]),
+        ("Tuple<>", "()", vec![]),
     ] {
         let package = compile_packet(&format!("comptime fn make()->{domain} {{{value}}}")).unwrap();
-        let expected = match expected {
-            Value::TypeList(types) => support::type_list_value(&package, types),
-            value => value,
+        let types = elements
+            .into_iter()
+            .map(Term::Primitive)
+            .collect::<Vec<_>>();
+        let expected = if domain == "List<Type>" {
+            support::type_list_value(&package, types)
+        } else {
+            Value::Tuple(types.into_iter().map(Value::Type).collect())
         };
         assert_eq!(
             luna::invocation::invoke(&package, "make", 100_000).unwrap(),

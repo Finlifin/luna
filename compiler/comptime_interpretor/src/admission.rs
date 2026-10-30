@@ -91,9 +91,7 @@ impl Interpreter<'_> {
         }
         self.tick(None)?;
         match value {
-            Value::Type(_) | Value::TypeList(_) | Value::List { .. } => {
-                self.admit_value_types(value, depth)?
-            }
+            Value::Type(_) | Value::List { .. } => self.admit_value_types(value, depth)?,
             Value::Optional { value, .. } => {
                 if let Some(value) = value {
                     self.admit_embedded_type_descriptions(value, depth + 1)?;
@@ -171,13 +169,6 @@ impl Interpreter<'_> {
                 ty.check_scope(&[])
                     .map_err(|_| self.failure(ErrorKind::Type, None))?;
                 self.admit_type(ty, depth)?;
-            }
-            Value::TypeList(types) => {
-                for ty in types {
-                    ty.check_scope(&[])
-                        .map_err(|_| self.failure(ErrorKind::Type, None))?;
-                    self.admit_type(ty, depth + 1)?;
-                }
             }
             Value::Tuple(fields) => {
                 for field in fields {

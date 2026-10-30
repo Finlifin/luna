@@ -665,7 +665,7 @@ fn residual_type_lists_compose_with_aggregates_without_becoming_closed_constants
             sort: Sort::ComptimeValue,
         }],
     };
-    let types = Value::TypeList(vec![bool_ty(), ty.clone(), ty.clone()]);
+    let types = ordinary_type_list(vec![bool_ty(), ty.clone(), ty.clone()]);
     let expected = Term::TypeListValue(vec![bool_ty(), ty.clone(), ty.clone()]);
     let authority = [(id(10), bool_ty())].into_iter().collect();
     for (value, expected) in [
@@ -743,7 +743,7 @@ fn residual_type_reification_rejects_value_roots_even_with_authority() {
             sort: Sort::ComptimeValue,
         },
     ] {
-        for value in [Value::Type(ty.clone()), Value::TypeList(vec![ty])] {
+        for value in [Value::Type(ty.clone()), ordinary_type_list(vec![ty])] {
             assert!(
                 value
                     .into_abstract_invocation_term(
@@ -1017,5 +1017,19 @@ fn explicit_physical_error_rows_freeze_and_use_checked_input_transport() {
                 .unwrap(),
             expected
         );
+    }
+}
+
+fn ordinary_type_list(types: Vec<nir::Term>) -> Value {
+    Value::List {
+        ty: nir::Term::NormalForm {
+            head: nir::DeclarationId {
+                package: 4294967294,
+                local: 0,
+            },
+            sort: nir::Sort::Type,
+            arguments: vec![nir::Term::Primitive(nir::Primitive::Type)],
+        },
+        values: types.into_iter().map(Value::Type).collect(),
     }
 }

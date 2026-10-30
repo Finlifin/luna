@@ -43,11 +43,11 @@ fn compile(width: u32, legacy: bool) -> nir::program::Package {
     .unwrap()
 }
 
-fn arguments(length: usize) -> Vec<Value> {
-    vec![Value::TypeList(vec![
-        Term::Primitive(Primitive::Bool);
-        length
-    ])]
+fn arguments(package: &nir::program::Package, length: usize) -> Vec<Value> {
+    vec![support::type_list_value(
+        package,
+        vec![Term::Primitive(Primitive::Bool); length],
+    )]
 }
 
 #[test]
@@ -68,7 +68,7 @@ fn staged_list_getter_avoids_an_additional_full_list_copy() {
                 .unwrap();
                 let before = vm.remaining_steps();
                 assert_eq!(
-                    vm.invoke(support::id(package, "First"), arguments(length))
+                    vm.invoke(support::id(package, "First"), arguments(package, length))
                         .unwrap(),
                     Value::Type(Term::Primitive(Primitive::Bool)),
                 );
@@ -94,7 +94,7 @@ fn staged_list_pattern_handles_empty_input_and_budget_exhaustion() {
         let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         for length in [0, 1, 512, 0] {
             assert_eq!(
-                vm.invoke(support::id(&package, "First"), arguments(length))
+                vm.invoke(support::id(&package, "First"), arguments(&package, length))
                     .unwrap(),
                 Value::Type(Term::Primitive(Primitive::Bool)),
             );
@@ -109,7 +109,7 @@ fn staged_list_pattern_handles_empty_input_and_budget_exhaustion() {
         .unwrap();
         assert_eq!(
             limited
-                .invoke(support::id(&package, "First"), arguments(512))
+                .invoke(support::id(&package, "First"), arguments(&package, 512))
                 .unwrap_err()
                 .kind,
             ErrorKind::StepsExhausted,
@@ -123,12 +123,12 @@ fn ordinary_list_method_checks_indices_and_recovers_after_failure() {
         let package = compile(width, false);
         let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         for (length, index) in [(0, 0), (3, 3), (3, u32::MAX)] {
-            let mut args = arguments(length);
+            let mut args = arguments(&package, length);
             args.push(Value::UnsignedInteger(index as u128));
             let error = vm.invoke(support::id(&package, "Read"), args).unwrap_err();
             assert_eq!(error.kind, ErrorKind::IndexOutOfBounds);
             assert!(error.source.is_some());
-            let mut args = arguments(3);
+            let mut args = arguments(&package, 3);
             args.push(Value::UnsignedInteger(2));
             assert_eq!(
                 vm.invoke(support::id(&package, "Read"), args).unwrap(),

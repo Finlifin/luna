@@ -2134,7 +2134,6 @@ impl Checker<'_, '_> {
                             | Value::Newtype { ty, .. }
                             | Value::Optional { ty, .. }
                             | Value::ErrorResult { ty, .. } => vec![ty],
-                            Value::TypeList(types) => types.iter().collect(),
                             Value::Closure(closure) => {
                                 let mut types = vec![closure.ty()];
                                 if let Some((_, arguments)) = closure.declaration_instance() {

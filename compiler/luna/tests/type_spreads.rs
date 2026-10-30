@@ -27,7 +27,7 @@ fn bound_meta_list_values_do_not_depend_on_tuple_declarations() {
     assert!(package.to_string().contains("(role type-list)"));
     let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     for types in [vec![], vec![nir::Term::Primitive(nir::Primitive::Bool)]] {
-        let value = Value::TypeList(types);
+        let value = execution_support::type_list_value(&package, types);
         assert_eq!(
             vm.invoke(id(&package, "pass"), vec![value.clone()])
                 .unwrap(),
@@ -1547,7 +1547,7 @@ fn named_type_list_supply_accepts_literal_prefix_packets_in_source_order() {
             },
         )
         .unwrap();
-        let mut vm = comptime_interpretor::Interpreter::new(
+        let mut vm = comptime_interpretor::Interpreter::for_comptime(
             &package,
             comptime_interpretor::Budget::default(),
         )
@@ -1590,7 +1590,7 @@ fn named_type_list_prefix_packets_preserve_exits_and_reject_conflicting_supply()
         )
     };
     let package = compile(".Es=do {tail();return bool;}, ...(First(),value())").unwrap();
-    let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     assert_eq!(
         vm.invoke(id(&package, "Build"), vec![]).unwrap(),
         Value::Type(nir::Term::Primitive(nir::Primitive::Bool))
@@ -1654,7 +1654,7 @@ fn computed_prefix_packets_share_the_named_type_list_input_plan() {
                 continue;
             }
             let package = package.unwrap();
-            let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
             let Value::Type(nir::Term::NormalForm { arguments, .. }) =
                 vm.invoke(id(&package, "Build"), vec![]).unwrap()
             else {
@@ -1694,14 +1694,14 @@ fn computed_prefix_packets_keep_exit_order_and_dependent_checks() {
         )
     };
     let package = compile(".Es=do {tail();return bool;},...packet()", "(bool,true)").unwrap();
-    let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     assert_eq!(
         vm.invoke(id(&package, "Build"), vec![]).unwrap(),
         Value::Type(nir::Term::Primitive(nir::Primitive::Bool))
     );
     assert_eq!(calls(&package, &vm), vec!["Build", "tail"]);
     let package = compile("...packet(),.Es=tail()", "(.u8'builtin,true)").unwrap();
-    let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     assert!(vm.invoke(id(&package, "Build"), vec![]).is_err());
     assert_eq!(calls(&package, &vm), vec!["Build", "packet"]);
     for (arguments, diagnostic) in [
@@ -1759,7 +1759,7 @@ fn named_type_list_packets_compose_with_dependent_defaults() {
         ),
         ("Empty", true, vec![], vec!["Empty", "packet"]),
     ] {
-        let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         let Value::Type(nir::Term::NormalForm { arguments, .. }) =
             vm.invoke(id(&package, entry), vec![]).unwrap()
         else {
@@ -1850,7 +1850,7 @@ fn defaulted_normal_heads_collect_type_items_in_source_order() {
             },
         )
         .unwrap();
-        let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         let Value::Type(nir::Term::NormalForm { arguments, .. }) =
             vm.invoke(id(&package, "Build"), vec![]).unwrap()
         else {
@@ -1890,14 +1890,14 @@ fn defaulted_type_collection_preserves_early_exit_and_rejects_mixed_supply() {
     };
     let package =
         compile("bool,true,First(),do {return bool;},.copy=replacement(),Second()").unwrap();
-    let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     assert_eq!(
         vm.invoke(id(&package, "Build"), vec![]).unwrap(),
         Value::Type(nir::Term::Primitive(nir::Primitive::Bool))
     );
     assert_eq!(calls(&package, &vm), vec!["Build", "First"]);
     let package = compile("bool,true,First(),.copy=replacement(),Second()").unwrap();
-    let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     assert!(matches!(
         vm.invoke(id(&package, "Build"), vec![]).unwrap(),
         Value::Type(nir::Term::NormalForm { .. })
@@ -1950,7 +1950,7 @@ fn defaulted_type_collectors_spread_lists_once_in_source_order() {
             },
         )
         .unwrap();
-        let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         let Value::Type(nir::Term::NormalForm { arguments, .. }) =
             vm.invoke(id(&package, "Build"), vec![]).unwrap()
         else {
@@ -1989,7 +1989,7 @@ fn defaulted_list_spreads_preserve_exit_and_validate_element_domains() {
     };
     let package =
         compile("bool,true,...do {items();return bool;},.copy=replacement(),bool").unwrap();
-    let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     assert_eq!(
         vm.invoke(id(&package, "Build"), vec![]).unwrap(),
         Value::Type(nir::Term::Primitive(nir::Primitive::Bool))
@@ -2039,7 +2039,7 @@ fn required_prefix_heads_collect_after_computed_packets() {
         ),
         ("Empty", vec![], vec!["Empty", "packet"]),
     ] {
-        let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         let Value::Type(nir::Term::NormalForm { arguments, .. }) =
             vm.invoke(id(&package, entry), vec![]).unwrap()
         else {
@@ -2404,13 +2404,16 @@ fn generic_invocation_transports_residual_nominal_type_lists() {
         .with_abstract_value_parameters(&authority)
         .unwrap();
     let value = vm.invoke(id(&package, "pack"), vec![opaque]).unwrap();
-    let Value::TypeList(elements) = &value else {
+    let Value::List {
+        values: elements, ..
+    } = &value
+    else {
         panic!("type list")
     };
     assert_eq!(elements.len(), 2);
     assert_eq!(elements[0], elements[1]);
     assert!(
-        matches!(&elements[0],nir::Term::Nominal {arguments,..} if arguments==&vec![nir::Term::Rigid {declaration:parameter,sort:nir::Sort::ComptimeValue}])
+        matches!(&elements[0],Value::Type(nir::Term::Nominal {arguments,..}) if arguments==&vec![nir::Term::Rigid {declaration:parameter,sort:nir::Sort::ComptimeValue}])
     );
     assert_eq!(
         vm.invoke(id(&package, "pass"), vec![value.clone()])
@@ -2429,13 +2432,16 @@ fn generic_invocation_transports_residual_nominal_type_lists() {
         .find(|item| item.name == "Tagged")
         .unwrap()
         .declaration;
-    let forged = Value::TypeList(vec![nir::Term::Nominal {
-        declaration: tagged,
-        arguments: vec![nir::Term::Rigid {
-            declaration: parameter,
-            sort: nir::Sort::ComptimeValue,
+    let forged = execution_support::type_list_value(
+        &package,
+        vec![nir::Term::Nominal {
+            declaration: tagged,
+            arguments: vec![nir::Term::Rigid {
+                declaration: parameter,
+                sort: nir::Sort::ComptimeValue,
+            }],
         }],
-    }]);
+    );
     assert!(
         vm.invoke(
             id(&package, "pass_packet"),

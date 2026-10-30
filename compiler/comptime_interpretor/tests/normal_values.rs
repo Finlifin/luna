@@ -228,9 +228,15 @@ fn type_list_freezing_preserves_list_identity_order_and_opaque_heads() {
         arguments: vec![Term::TypeListValue(vec![Term::Primitive(Primitive::U8)])],
     };
     let elements = vec![opaque, Term::Primitive(Primitive::Bool)];
-    let list = Value::TypeList(elements.clone());
+    let list = ordinary_type_list(elements.clone());
     let expected = Term::TypeListValue(elements.clone());
-    assert_eq!(list.to_string(), expected.to_string());
+    assert_eq!(
+        list.to_string(),
+        format!(
+            "(comptime-list (type (normal-form (head (declaration (package 4294967294) (local 0))) (sort type) (arguments ((primitive Type))))) (values (type-value {}) (type-value (primitive bool))))",
+            elements[0]
+        )
+    );
     assert_eq!(
         list.clone().into_normal_term(&mut Budget::default()),
         Ok(expected.clone())
@@ -241,10 +247,10 @@ fn type_list_freezing_preserves_list_identity_order_and_opaque_heads() {
     );
     assert_ne!(expected, Term::TupleValue(elements));
     assert_eq!(
-        Value::TypeList(vec![]).into_normal_term(&mut Budget::default()),
+        ordinary_type_list(vec![]).into_normal_term(&mut Budget::default()),
         Ok(Term::TypeListValue(vec![]))
     );
-    assert_ne!(Value::TypeList(vec![]), Value::Tuple(vec![]));
+    assert_ne!(ordinary_type_list(vec![]), Value::Tuple(vec![]));
     let nested = Value::Tuple(vec![list]);
     assert_eq!(
         nested.into_normal_term(&mut Budget::default()),
@@ -284,7 +290,7 @@ fn type_list_freezing_rejects_non_types_and_unfinished_inputs() {
         },
     ];
     for element in invalid {
-        let value = Value::TypeList(vec![element]);
+        let value = ordinary_type_list(vec![element]);
         assert_eq!(value.immutable_copy_work(), None);
         assert_eq!(
             value.into_normal_term(&mut Budget::default()),
@@ -303,7 +309,7 @@ fn type_list_freezing_rejects_non_types_and_unfinished_inputs() {
         }),
     };
     assert!(
-        Value::TypeList(vec![scoped])
+        ordinary_type_list(vec![scoped])
             .into_normal_term(&mut Budget::default())
             .is_ok()
     );
@@ -311,8 +317,14 @@ fn type_list_freezing_rejects_non_types_and_unfinished_inputs() {
 
 #[test]
 fn type_list_copy_and_freezing_charge_contents_and_recover_after_budget_failure() {
-    let small = Value::TypeList(vec![Term::Primitive(Primitive::Bool); 8]);
-    let work = small.immutable_copy_work().unwrap();
+    let small = ordinary_type_list(vec![Term::Primitive(Primitive::Bool); 8]);
+    let copy_work = small.immutable_copy_work().unwrap();
+    let mut measured = Budget::default();
+    let before = measured.steps;
+    small.clone().into_normal_term(&mut measured).unwrap();
+    let work = before - measured.steps;
+    // Freezing also meters output slots, independently of immutable copying.
+    assert!(work >= copy_work + 8);
     let mut enough = Budget {
         steps: work,
         ..Budget::default()
@@ -327,7 +339,7 @@ fn type_list_copy_and_freezing_charge_contents_and_recover_after_budget_failure(
         Err(ErrorKind::StepsExhausted)
     );
     assert!(small.into_normal_term(&mut Budget::default()).is_ok());
-    let wide = Value::TypeList(vec![Term::Primitive(Primitive::Bool); 100_001]);
+    let wide = ordinary_type_list(vec![Term::Primitive(Primitive::Bool); 100_001]);
     assert!(wide.immutable_copy_work().is_none());
     assert_eq!(
         wide.into_normal_term(&mut Budget {
@@ -345,7 +357,7 @@ fn completed_type_lists_do_not_pass_tuple_or_type_admission() {
         comptime_interpretor::Interpreter::new(&package, comptime_interpretor::Budget::default())
             .unwrap();
     let types = vec![Term::Primitive(Primitive::Bool)];
-    let list = Value::TypeList(types.clone());
+    let list = ordinary_type_list(types.clone());
     for ty in [
         Term::Primitive(Primitive::Type),
         Term::Tuple(vec![Term::Primitive(Primitive::Type)]),
@@ -386,7 +398,7 @@ fn unreduced_type_list_concatenations_do_not_cross_completed_value_boundaries() 
             .unwrap();
     for value in [
         Value::Type(unfinished.clone()),
-        Value::TypeList(vec![unfinished.clone()]),
+        ordinary_type_list(vec![unfinished.clone()]),
         Value::Tuple(vec![Value::Type(unfinished.clone())]),
     ] {
         assert_eq!(value.immutable_copy_work(), None);
@@ -469,7 +481,7 @@ fn rejected_embedded_types_are_released_on_a_two_mebibyte_stack() {
                     ty = Term::Pointer(Box::new(ty));
                 }
                 let value = if list {
-                    Value::TypeList(vec![ty])
+                    ordinary_type_list(vec![ty])
                 } else {
                     Value::Type(ty)
                 };
@@ -612,4 +624,18 @@ fn immutable_copy_work_preserves_nested_sibling_accounting_and_limits() {
     }
     assert_eq!(deep.immutable_copy_work(), Some(128));
     assert_eq!(Value::Tuple(vec![deep]).immutable_copy_work(), None);
+}
+
+fn ordinary_type_list(types: Vec<nir::Term>) -> Value {
+    Value::List {
+        ty: nir::Term::NormalForm {
+            head: nir::DeclarationId {
+                package: 4294967294,
+                local: 0,
+            },
+            sort: nir::Sort::Type,
+            arguments: vec![nir::Term::Primitive(nir::Primitive::Type)],
+        },
+        values: types.into_iter().map(Value::Type).collect(),
+    }
 }

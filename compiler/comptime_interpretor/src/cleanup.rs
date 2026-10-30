@@ -555,7 +555,6 @@ impl<'a> Interpreter<'a> {
         if !matches!(
             value,
             Value::Object(_)
-                | Value::TypeList(_)
                 | Value::List { .. }
                 | Value::Tuple(_)
                 | Value::AnonymousRecord(_)
@@ -582,12 +581,6 @@ impl<'a> Interpreter<'a> {
                     self.copy_work(entry.key().map_or(0, str::len), source)?;
                     self.copy_invocation_type_work(&entry.value().ty, source, true)?;
                     self.check_borrowed_representation(&entry.value().value, source, depth + 1)?;
-                }
-            }
-            Value::TypeList(types) => {
-                self.copy_work(types.len(), source)?;
-                for ty in types {
-                    self.copy_invocation_type_work(ty, source, true)?;
                 }
             }
             Value::List { ty, values } => {
@@ -867,13 +860,6 @@ impl<'a> Interpreter<'a> {
             Value::Type(ty) | Value::AbstractValue { ty, .. } => {
                 self.copy_invocation_type_work(ty, source, preserve_identity)?;
                 value.clone()
-            }
-            Value::TypeList(types) => {
-                self.copy_work(types.len(), source)?;
-                for ty in types {
-                    self.copy_invocation_type_work(ty, source, preserve_identity)?;
-                }
-                Value::TypeList(types.clone())
             }
             Value::List { ty, values } => {
                 self.copy_invocation_type_work(ty, source, preserve_identity)?;
@@ -1939,7 +1925,7 @@ mod representation_copy_tests {
         };
         assert_eq!(copied.instance_arguments, Some(arguments));
         assert!(
-            vm.copy_representation(&Value::TypeList(vec![Term::Bool(true)]), source, 0)
+            vm.copy_representation(&crate::test_type_list(vec![Term::Bool(true)]), source, 0)
                 .is_err()
         );
         assert!(
@@ -2107,7 +2093,10 @@ mod copy_budget_tests {
                 sort: nir::Sort::Type,
             },
         )]);
-        for value in [Value::Type(ty.clone()), Value::TypeList(vec![ty.clone()])] {
+        for value in [
+            Value::Type(ty.clone()),
+            crate::test_type_list(vec![ty.clone()]),
+        ] {
             let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
             assert!(vm.checkpoint_representation(&value, source).is_err());
             vm.authorize_abstract_type_parameters(&[parameter]).unwrap();
@@ -2647,16 +2636,16 @@ mod borrowed_checkpoint_tests {
                 Term::Primitive(Primitive::Bool),
             )]),
             object(
-                Value::TypeList(vec![Term::Primitive(Primitive::Bool); 4]),
+                crate::test_type_list(vec![Term::Primitive(Primitive::Bool); 4]),
                 Term::Primitive(Primitive::Type),
             ),
             Value::Object(Object::from_entries(vec![])),
-            Value::TypeList(vec![Term::Primitive(Primitive::Bool); 8]),
-            Value::TypeList(vec![Term::Bool(true)]),
+            crate::test_type_list(vec![Term::Primitive(Primitive::Bool); 8]),
+            crate::test_type_list(vec![Term::Bool(true)]),
             list(vec![Value::Bool(true); 16]),
             list(vec![list(vec![Value::Bool(false); 4]); 4]),
             list(vec![Value::Tuple(vec![Value::Bool(true)])]),
-            Value::TypeList(vec![Term::Rigid {
+            crate::test_type_list(vec![Term::Rigid {
                 declaration: DeclarationId {
                     package: 1,
                     local: 99,

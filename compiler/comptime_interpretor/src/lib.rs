@@ -142,10 +142,6 @@ pub enum Value {
         declaration: DeclarationId,
         ty: Term,
     },
-    /// Legacy compact input carrier retained during representation migration.
-    /// Evaluation and reflection produce ordinary List values, including Type
-    /// elements. Abstract inputs still require the Type description scope.
-    TypeList(Vec<Term>),
     /// Immutable homogeneous comptime data with its original list type identity.
     List {
         ty: Term,
@@ -376,21 +372,6 @@ impl Value {
                     value_parameters,
                     |_, _, _| None,
                 )?,
-                Value::TypeList(types) => {
-                    if types.len() > 100_000 {
-                        return None;
-                    }
-                    types.iter().try_fold(types.len(), |n, ty| {
-                        let total = n.checked_add(scoped_type_value_work_with_evidence(
-                            ty,
-                            &BTreeMap::new(),
-                            parameters,
-                            value_parameters,
-                            |_, _, _| None,
-                        )?)?;
-                        (total <= 100_000).then_some(total)
-                    })?
-                }
                 Value::Float(value) => value
                     .digits()
                     .len()
@@ -2633,13 +2614,6 @@ impl<'a> Interpreter<'a> {
                     && self.list_element(ty).is_some_and(|element|
                         values.iter().all(|value| self.has_type_at(value, element, depth + 1)))
             }
-            (Value::TypeList(elements), ty) => {
-                self.is_type_list_input(ty)
-                    && elements.len() <= 100_000
-                    && elements
-                        .iter()
-                        .all(|element| self.type_description_work(element).is_some())
-            }
             (Value::TypeParameter(id), Term::Primitive(Primitive::Type)) => {
                 self.abstract_type_parameters.contains(id)
             }
@@ -3578,8 +3552,7 @@ impl<'a> Interpreter<'a> {
                 | Value::Float64(_)
                 | Value::BitVec(_)
                 | Value::Type(_)
-                | Value::TypeParameter(_)
-                | Value::TypeList(_) => continue,
+                | Value::TypeParameter(_) => continue,
                 _ => return Ok(false),
             };
             // Charge width before growing the traversal stack. Freezing checks
@@ -3650,10 +3623,6 @@ impl<'a> Interpreter<'a> {
         if spread {
             self.validate_immutable_input(&value, ty)?;
             let elements = match value {
-                Value::TypeList(elements) if self.is_type_list_input(ty) => {
-                    self.integer_operation(Some(source), |budget| budget.consume(elements.len()))?;
-                    elements.into_iter().map(Value::Type).collect()
-                }
                 Value::List {
                     values: elements, ..
                 } => {
@@ -6241,16 +6210,6 @@ impl fmt::Display for Value {
             Self::String(v) => nir::program::Literal::String(v.to_string()).fmt(f),
             Self::Symbol(v) => nir::program::Literal::Symbol(v.to_string()).fmt(f),
             Self::Function(id) => write!(f, "(function {id})"),
-            Self::TypeList(types) => {
-                f.write_str("(type-list-value (")?;
-                for (index, ty) in types.iter().enumerate() {
-                    if index != 0 {
-                        f.write_str(" ")?;
-                    }
-                    write!(f, "{ty}")?;
-                }
-                f.write_str("))")
-            }
             Self::List { ty, values } => {
                 write!(f, "(comptime-list (type {ty}) (values")?;
                 for value in values {
@@ -7515,7 +7474,7 @@ mod computation_type_tests {
             };
             assert!(scoped_type_value_work(&nested, &heads, &parameters).is_none());
         }
-        let value = Value::TypeList(vec![pointer]);
+        let value = test_type_list(vec![pointer]);
         assert!(value.scoped_copy_work(&parameters).is_some());
         assert!(value.immutable_copy_work().is_none());
         assert!(
@@ -8381,3 +8340,20 @@ mod metered_type_solver_tests {
 
 #[cfg(test)]
 mod not_spine_tests;
+
+// Representation-only fixtures use an opaque list head. Invocation tests must
+// instead use a head registered in their package so admission checks its domain.
+#[cfg(test)]
+fn test_type_list(types: Vec<nir::Term>) -> Value {
+    Value::List {
+        ty: nir::Term::NormalForm {
+            head: nir::DeclarationId {
+                package: 4294967294,
+                local: 0,
+            },
+            sort: nir::Sort::Type,
+            arguments: vec![nir::Term::Primitive(nir::Primitive::Type)],
+        },
+        values: types.into_iter().map(Value::Type).collect(),
+    }
+}

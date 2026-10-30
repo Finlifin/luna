@@ -43,7 +43,6 @@ impl Interpreter<'_> {
             .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
         self.integer_operation(Some(source), |budget| budget.consume(work))?;
         match value {
-            Value::TypeList(values) if self.is_type_list_input(ty) => Ok(values.len()),
             Value::List { ty: stored, values }
                 if stored == ty && self.list_element(ty).is_some() =>
             {
@@ -78,14 +77,6 @@ impl Interpreter<'_> {
         let position = self.list_position(index, length, source)?;
         match list {
             Value::List { mut values, .. } => Ok(values.swap_remove(position)),
-            Value::TypeList(mut values) => {
-                let ty = values.swap_remove(position);
-                let work = self
-                    .type_description_work(&ty)
-                    .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
-                self.integer_operation(Some(source), |budget| budget.consume(work))?;
-                Ok(Value::Type(ty))
-            }
             _ => unreachable!(),
         }
     }
@@ -141,14 +132,6 @@ impl Interpreter<'_> {
         let value = match list {
             Value::List { values, .. } => {
                 self.checkpoint_representation(&values[position], source)?
-            }
-            Value::TypeList(values) => {
-                let ty = &values[position];
-                let work = self
-                    .type_description_work(ty)
-                    .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
-                self.integer_operation(Some(source), |budget| budget.consume(work))?;
-                Value::Type(ty.clone())
             }
             _ => unreachable!(),
         };

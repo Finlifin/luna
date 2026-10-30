@@ -1430,55 +1430,7 @@ pub(super) fn append_list_checked(
     suffix: Value,
     check: impl FnOnce(&Value) -> Result<(), ErrorKind>,
 ) -> Result<(), ErrorKind> {
-    let length = |value: &Value| match value {
-        Value::TypeList(values) => Some(values.len()),
-        Value::List { values, .. } => Some(values.len()),
-        _ => None,
-    };
-    if length(target)
-        .ok_or(ErrorKind::Type)?
-        .saturating_add(length(&suffix).ok_or(ErrorKind::Type)?)
-        > 100_000
-    {
-        return Err(ErrorKind::RepresentationSizeLimit);
-    }
-    let type_domain = |ty: &Term| {
-        matches!(ty,
-        Term::NormalForm { sort: nir::Sort::Type, arguments, .. }
-            if arguments.as_slice() == [Term::Primitive(nir::Primitive::Type)])
-    };
-    // Preserve the target representation so rollback restores its exact shape.
-    // The caller has admitted both operands against the same List domain.
-    let suffix = match (&*target, suffix) {
-        (Value::List { ty, .. }, Value::TypeList(types)) if type_domain(ty) => Value::List {
-            ty: ty.clone(),
-            values: types.into_iter().map(Value::Type).collect(),
-        },
-        (Value::TypeList(_), Value::List { ty, values }) if type_domain(&ty) => {
-            let types = values
-                .into_iter()
-                .map(|value| match value {
-                    Value::Type(ty) => Ok(ty),
-                    Value::TypeParameter(declaration) => Ok(Term::Rigid {
-                        declaration,
-                        sort: nir::Sort::Type,
-                    }),
-                    _ => Err(ErrorKind::Type),
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            Value::TypeList(types)
-        }
-        (_, suffix) => suffix,
-    };
     let original = match (&mut *target, suffix) {
-        (Value::TypeList(left), Value::TypeList(right)) => {
-            let original = left.len();
-            if original.saturating_add(right.len()) > 100_000 {
-                return Err(ErrorKind::RepresentationSizeLimit);
-            }
-            left.extend(right);
-            original
-        }
         (
             Value::List {
                 ty: left_ty,
@@ -1500,7 +1452,6 @@ pub(super) fn append_list_checked(
     };
     if let Err(error) = check(target) {
         match target {
-            Value::TypeList(values) => values.truncate(original),
             Value::List { values, .. } => values.truncate(original),
             _ => unreachable!(),
         }
@@ -1510,43 +1461,34 @@ pub(super) fn append_list_checked(
 }
 
 #[test]
-fn mixed_type_list_append_rolls_back_the_original_carrier() {
-    let ty = Term::NormalForm {
-        head: nir::DeclarationId {
-            package: 1,
-            local: 1,
-        },
-        sort: nir::Sort::Type,
-        arguments: vec![Term::Primitive(nir::Primitive::Type)],
-    };
-    let ordinary = |types: Vec<Term>| Value::List {
-        ty: ty.clone(),
-        values: types.into_iter().map(Value::Type).collect(),
-    };
+fn type_list_append_restores_values_and_rejects_foreign_identity() {
     let element = Term::Primitive(nir::Primitive::Bool);
-    for (mut target, suffix) in [
-        (
-            ordinary(vec![element.clone()]),
-            Value::TypeList(vec![element.clone()]),
-        ),
-        (
-            Value::TypeList(vec![element.clone()]),
-            ordinary(vec![element.clone()]),
-        ),
-    ] {
-        let original = target.clone();
-        assert_eq!(
-            append_list_checked(&mut target, suffix.clone(), |_| Err(
-                ErrorKind::StepsExhausted
-            )),
-            Err(ErrorKind::StepsExhausted)
-        );
-        assert_eq!(target, original);
-        append_list_checked(&mut target, suffix, |_| Ok(())).unwrap();
-        match target {
-            Value::List { values, .. } => assert_eq!(values, vec![Value::Type(element.clone()); 2]),
-            Value::TypeList(types) => assert_eq!(types, vec![element.clone(); 2]),
-            _ => panic!(),
-        }
-    }
+    let original = crate::test_type_list(vec![element]);
+    let mut target = original.clone();
+    assert_eq!(
+        append_list_checked(&mut target, original.clone(), |_| Err(
+            ErrorKind::StepsExhausted
+        )),
+        Err(ErrorKind::StepsExhausted)
+    );
+    assert_eq!(target, original);
+    let mut foreign = original.clone();
+    let Value::List {
+        ty: Term::NormalForm { head, .. },
+        ..
+    } = &mut foreign
+    else {
+        panic!()
+    };
+    head.local += 1;
+    assert_eq!(
+        append_list_checked(&mut target, foreign, |_| Ok(())),
+        Err(ErrorKind::Type)
+    );
+    assert_eq!(target, original);
+    append_list_checked(&mut target, original, |_| Ok(())).unwrap();
+    let Value::List { values, .. } = target else {
+        panic!()
+    };
+    assert_eq!(values.len(), 2);
 }

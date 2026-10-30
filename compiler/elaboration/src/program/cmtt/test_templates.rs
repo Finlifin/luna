@@ -527,7 +527,6 @@ impl Checker<'_, '_> {
                         ));
                     }
                     let items = match value {
-                        Value::TypeList(items) => items,
                         Value::List { ty, values } if ty == *domain => values
                             .into_iter()
                             .map(|value| match value {

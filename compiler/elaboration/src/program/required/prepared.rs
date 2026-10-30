@@ -1169,14 +1169,23 @@ fn restore_required_packet(
         Value::Type(ty) => Value::Type(restore_required_type_input(
             steps, ty, parameters, arguments, frames, span,
         )?),
-        Value::TypeList(types) => Value::TypeList(
-            types
+        Value::List { ty, values } => Value::List {
+            ty: restore_required_type_input(steps, ty, parameters, arguments, frames, span)?,
+            values: values
                 .into_iter()
-                .map(|ty| {
-                    restore_required_type_input(steps, ty, parameters, arguments, frames, span)
+                .map(|value| {
+                    restore_required_packet(
+                        steps,
+                        value,
+                        parameters,
+                        arguments,
+                        frames,
+                        span,
+                        depth + 1,
+                    )
                 })
                 .collect::<Result<_, _>>()?,
-        ),
+        },
         Value::Tuple(values) => Value::Tuple(
             values
                 .into_iter()

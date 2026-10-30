@@ -399,7 +399,8 @@ fn ordinary_type_lists_support_methods_spreads_and_canonical_normal_inputs() {
         }
         comptime fn Form(types: meta.List<Type>) -> Type { Pack<.Ts = types> }
         comptime fn Spread(types: meta.List<Type>) -> Type { Pack<...types> }
-        comptime fn identity(types: meta.List<Type>) -> meta.List<Type> { types }",
+        comptime fn identity(types: meta.List<Type>) -> meta.List<Type> { types }
+        comptime fn source_values() -> meta.List<Type> { [bool, Byte] }",
     )
     .unwrap();
     let function = package
@@ -419,7 +420,6 @@ fn ordinary_type_lists_support_methods_spreads_and_canonical_normal_inputs() {
         ty: ty.clone(),
         values: elements.iter().cloned().map(Value::Type).collect(),
     };
-    let compact = Value::TypeList(elements);
     let mut vm = Interpreter::for_comptime(
         &package,
         comptime_interpretor::Budget {
@@ -428,6 +428,10 @@ fn ordinary_type_lists_support_methods_spreads_and_canonical_normal_inputs() {
         },
     )
     .unwrap();
+    let produced = vm
+        .invoke(support::id(&package, "source_values"), vec![])
+        .unwrap();
+    assert_eq!(produced, ordinary);
     vm.validate_immutable_input(&ordinary, &ty)
         .unwrap_or_else(|error| {
             panic!(
@@ -435,7 +439,7 @@ fn ordinary_type_lists_support_methods_spreads_and_canonical_normal_inputs() {
                 ordinary.immutable_copy_work()
             )
         });
-    for input in [ordinary.clone(), compact.clone()] {
+    for input in [ordinary.clone(), produced.clone()] {
         assert_eq!(
             vm.invoke(
                 support::id(&package, "inspect_type_list_carrier"),
@@ -452,7 +456,7 @@ fn ordinary_type_lists_support_methods_spreads_and_canonical_normal_inputs() {
     );
     let mut expected = None;
     for entry in ["Form", "Spread"] {
-        for input in [ordinary.clone(), compact.clone()] {
+        for input in [ordinary.clone(), produced.clone()] {
             let value = vm
                 .invoke(support::id(&package, entry), vec![input])
                 .unwrap();

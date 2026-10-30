@@ -472,7 +472,7 @@ impl Checker<'_, '_> {
         span: Span,
         type_scope: BTreeSet<DeclarationId>,
     ) -> Result<n::Expr, Error> {
-        if matches!(value, Value::Type(_) | Value::TypeList(_)) {
+        if matches!(value, Value::Type(_)) {
             return self.materialize_generator_data(value, ty, span);
         }
         // Declaration identities are ordinary constant data, not quoted-code
@@ -609,7 +609,7 @@ impl Checker<'_, '_> {
         }
         // Local construction data can retain the enclosing Type telescope;
         // immutable module exports use the stricter closed-value boundary.
-        if matches!(value, Value::Type(_) | Value::TypeList(_)) {
+        if matches!(value, Value::Type(_)) {
             let symbol = self.required_normal_term(value, span)?;
             let kind = match symbol {
                 Term::TypeListValue(elements) if self.is_type_list_type(&ty) => {
@@ -717,7 +717,7 @@ impl Checker<'_, '_> {
         // A call-site dependency may retain the caller's Type telescope. It is
         // not an exported, closed module constant; use the same scoped boundary
         // as normal-form inputs, after required evaluation restores those slots.
-        if matches!(value, Value::Type(_) | Value::TypeList(_)) {
+        if matches!(value, Value::Type(_)) {
             let symbol = self.required_normal_term(value, span)?;
             let kind = match &symbol {
                 Term::TypeListValue(elements) => {
@@ -1077,7 +1077,6 @@ impl Checker<'_, '_> {
             }
             Value::TypeParameter(_)
             | Value::Type(_)
-            | Value::TypeList(_)
             | Value::Unit
             | Value::Bool(_)
             | Value::Char(_)
@@ -3472,25 +3471,6 @@ impl Checker<'_, '_> {
                 ));
             }
             Value::Type(value) => K::TypeValue(value),
-            Value::TypeList(types) => {
-                if !self.is_type_list_type(&ty) {
-                    return Err(error(
-                        span,
-                        "type-list constant requires the bound meta.List<Type>",
-                    ));
-                }
-                for element in &types {
-                    let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-                    let before = fuel;
-                    let checked = iir::completed_type(element, &BTreeSet::new(), &mut fuel);
-                    self.required_steps -= (before - fuel) as u64;
-                    checked.map_err(|e| error(span, e))?;
-                    if element.sort() != Sort::Type {
-                        return Err(error(span, "type-list element is not Type"));
-                    }
-                }
-                K::TypeListValue(types)
-            }
             Value::Unit => K::Unit,
             Value::Bool(value) => K::Literal(n::Literal::Bool(value)),
             Value::Char(value) => K::Literal(n::Literal::Char(value)),

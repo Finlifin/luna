@@ -34147,7 +34147,7 @@ fn variadic_normal_heads_collect_type_lists_without_replacing_the_head() {
             arguments: vec![Term::TypeListValue(elements)],
         })
     };
-    let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     for (name, elements) in [
         (
             "BuildTuple",
@@ -34298,10 +34298,16 @@ fn variadic_normal_heads_forward_named_whole_type_lists_once() {
         vec![],
         vec![Term::Primitive(P::U8), Term::Primitive(P::Bool)],
     ] {
-        let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         assert_eq!(
-            vm.invoke(forward, vec![Value::TypeList(elements.clone())])
-                .unwrap(),
+            vm.invoke(
+                forward,
+                vec![execution_support::type_list_value(
+                    &package,
+                    elements.clone()
+                )]
+            )
+            .unwrap(),
             Value::Type(Term::NormalForm {
                 head: tuple,
                 sort: Sort::Type,
@@ -34321,10 +34327,16 @@ fn variadic_normal_heads_forward_named_whole_type_lists_once() {
             .find(|f| f.name == "ForwardTagged")
             .unwrap()
             .declaration;
-        let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         assert_eq!(
-            vm.invoke(tagged, vec![Value::TypeList(elements.clone())])
-                .unwrap(),
+            vm.invoke(
+                tagged,
+                vec![execution_support::type_list_value(
+                    &package,
+                    elements.clone()
+                )]
+            )
+            .unwrap(),
             Value::Type(Term::NormalForm {
                 head: product,
                 sort: Sort::Type,
@@ -34397,10 +34409,16 @@ fn normal_type_list_named_supply_preserves_order_around_positional_anchors() {
             .unwrap()
             .declaration;
         let elements = vec![Term::Primitive(P::Char), Term::Primitive(P::Bool)];
-        let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         assert_eq!(
-            vm.invoke(build, vec![Value::TypeList(elements.clone())])
-                .unwrap(),
+            vm.invoke(
+                build,
+                vec![execution_support::type_list_value(
+                    &package,
+                    elements.clone()
+                )]
+            )
+            .unwrap(),
             Value::Type(Term::NormalForm {
                 head: product,
                 sort: Sort::Type,
@@ -34418,9 +34436,14 @@ fn normal_type_list_named_supply_preserves_order_around_positional_anchors() {
             .find(|f| f.name == "BuildExit")
             .unwrap()
             .declaration;
-        let mut early = Interpreter::new(&package, Budget::default()).unwrap();
+        let mut early = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         assert_eq!(
-            early.invoke(exit, vec![Value::TypeList(vec![])]).unwrap(),
+            early
+                .invoke(
+                    exit,
+                    vec![execution_support::type_list_value(&package, vec![])]
+                )
+                .unwrap(),
             Value::Type(Term::Primitive(P::Bool))
         );
         assert_eq!(calls(&package, &early), vec!["BuildExit", "Pass"]);
@@ -34436,10 +34459,13 @@ fn normal_type_list_named_supply_preserves_order_around_positional_anchors() {
             .find(|f| f.name == "BuildDependent")
             .unwrap()
             .declaration;
-        let mut staged = Interpreter::new(&package, Budget::default()).unwrap();
+        let mut staged = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         assert_eq!(
             staged
-                .invoke(build_dependent, vec![Value::TypeList(vec![])])
+                .invoke(
+                    build_dependent,
+                    vec![execution_support::type_list_value(&package, vec![])]
+                )
                 .unwrap(),
             Value::Type(Term::NormalForm {
                 head: dependent,
@@ -34543,10 +34569,16 @@ fn normal_type_list_spreads_preserve_elements_order_and_single_evaluation() {
                 .find(|f| f.name == name)
                 .unwrap()
                 .declaration;
-            let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
             assert_eq!(
-                vm.invoke(entry, vec![Value::TypeList(elements.clone())])
-                    .unwrap(),
+                vm.invoke(
+                    entry,
+                    vec![execution_support::type_list_value(
+                        &package,
+                        elements.clone()
+                    )]
+                )
+                .unwrap(),
                 expected
             );
             assert_eq!(calls(&package, &vm), events);
@@ -35264,9 +35296,8 @@ fn type_list_constants_reconstruct_and_specialize_without_tuple_coercion() {
         instance.key.arguments.as_slice(),
         [nir::Term::TypeListValue(_)]
     )));
-    let mut raw = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
-        raw.invoke(id(&package, "run"), vec![]).unwrap(),
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Bool(true)
     );
     assert_eq!(
@@ -35466,9 +35497,8 @@ fn type_list_call_inputs_specialize_mixed_tuple_annotations() {
         },
     )
     .unwrap();
-    let mut raw = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
-        raw.invoke(id(&package, "run"), vec![]).unwrap(),
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Bool(true)
     );
     for bad in ["(true,false,9)", "(true,false,false,true)"] {
@@ -36467,7 +36497,7 @@ fn comptime_type_list_indexing_preserves_elements_and_checks_bounds() {
         },
     )
     .unwrap();
-    let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     assert!(package.to_string().contains("(type-list-index (values"));
     let tuple = package
         .normal_forms
@@ -36492,7 +36522,7 @@ fn comptime_type_list_indexing_preserves_elements_and_checks_bounds() {
             vm.invoke(
                 id(&package, "Pick"),
                 vec![
-                    Value::TypeList(types.clone()),
+                    execution_support::type_list_value(&package, types.clone()),
                     Value::Integer(comptime_runtime::Integer::from_u128(index as u128))
                 ]
             )
@@ -36505,7 +36535,7 @@ fn comptime_type_list_indexing_preserves_elements_and_checks_bounds() {
             .invoke(
                 id(&package, "Pick"),
                 vec![
-                    Value::TypeList(types.clone()),
+                    execution_support::type_list_value(&package, types.clone()),
                     Value::Integer(comptime_runtime::Integer::from_i128(index)),
                 ],
             )
@@ -36520,7 +36550,7 @@ fn comptime_type_list_indexing_preserves_elements_and_checks_bounds() {
         vm.invoke(
             id(&package, "Pick"),
             vec![
-                Value::TypeList(vec![]),
+                execution_support::type_list_value(&package, vec![]),
                 Value::Integer(comptime_runtime::Integer::from_u128(0))
             ]
         )
@@ -36528,10 +36558,13 @@ fn comptime_type_list_indexing_preserves_elements_and_checks_bounds() {
         .kind,
         comptime_interpretor::ErrorKind::IndexOutOfBounds
     );
-    let mut ordered = Interpreter::new(&package, Budget::default()).unwrap();
+    let mut ordered = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     assert_eq!(
         ordered
-            .invoke(id(&package, "Select"), vec![Value::TypeList(types.clone())])
+            .invoke(
+                id(&package, "Select"),
+                vec![execution_support::type_list_value(&package, types.clone())]
+            )
             .unwrap(),
         Value::Type(nir::Term::Primitive(nir::Primitive::U8))
     );
@@ -36540,7 +36573,7 @@ fn comptime_type_list_indexing_preserves_elements_and_checks_bounds() {
         vm.invoke(
             id(&package, "Pick"),
             vec![
-                Value::TypeList(types),
+                execution_support::type_list_value(&package, types),
                 Value::Integer(comptime_runtime::Integer::from_u128(0))
             ]
         )
@@ -38630,7 +38663,10 @@ fn abstract_type_admission_preserves_nested_formation_requirements() {
         )
         .unwrap();
     scoped
-        .validate_immutable_input(&Value::TypeList(vec![rigid.clone(), tuple.clone()]), &list)
+        .validate_immutable_input(
+            &execution_support::type_list_value(&package, vec![rigid.clone(), tuple.clone()]),
+            &list,
+        )
         .unwrap();
     let checked = Term::NormalForm {
         head: id(&package, "Checked"),
@@ -38677,7 +38713,10 @@ fn abstract_type_admission_preserves_nested_formation_requirements() {
         result: Box::new(computation),
     };
     for constrained in [checked, nominal, callable] {
-        let nested = Value::TypeList(vec![Term::Pointer(Box::new(constrained))]);
+        let nested = execution_support::type_list_value(
+            &package,
+            vec![Term::Pointer(Box::new(constrained))],
+        );
         assert_eq!(
             scoped
                 .validate_immutable_input(&nested, &list)
@@ -38704,7 +38743,10 @@ fn abstract_type_admission_preserves_nested_formation_requirements() {
     };
     assert_eq!(
         proven
-            .validate_immutable_input(&Value::TypeList(vec![foreign]), &list)
+            .validate_immutable_input(
+                &execution_support::type_list_value(&package, vec![foreign]),
+                &list
+            )
             .unwrap_err()
             .kind,
         ErrorKind::Type

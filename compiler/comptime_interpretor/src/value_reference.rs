@@ -919,22 +919,25 @@ mod append_tests {
     #[test]
     fn append_reuses_buffer_and_preserves_snapshots_and_permissions() {
         let mut values = Vec::with_capacity(16);
-        values.push(Term::Primitive(nir::Primitive::Bool));
+        values.push(Value::Type(Term::Primitive(nir::Primitive::Bool)));
         let buffer = values.as_ptr();
-        let storage = Storage::new(Value::TypeList(values));
+        let Value::List { ty, .. } = crate::test_type_list(vec![]) else {
+            unreachable!()
+        };
+        let storage = Storage::new(Value::List { ty, values });
         let snapshot = storage.read().unwrap();
         let mut reference = ValueReference::root(storage.clone());
-        let suffix = || Value::TypeList(vec![Term::Primitive(nir::Primitive::Type)]);
+        let suffix = || crate::test_type_list(vec![Term::Primitive(nir::Primitive::Type)]);
         reference
             .append_list_checked(suffix(), &mut 100, |_, _| Ok(()))
             .unwrap();
-        let Value::TypeList(old) = &snapshot else {
+        let Value::List { values: old, .. } = &snapshot else {
             unreachable!()
         };
         assert_eq!(old.len(), 1);
         {
             let contents = reference.borrow(&mut 100).unwrap();
-            let Value::TypeList(values) = contents.value() else {
+            let Value::List { values, .. } = contents.value() else {
                 unreachable!()
             };
             assert_eq!(values.len(), 2);

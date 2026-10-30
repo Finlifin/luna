@@ -53,8 +53,7 @@ impl Value {
                     ty.drop_iteratively();
                     pending.push(*value);
                 }
-                Value::TypeList(types)
-                | Value::RuntimeFunction {
+                Value::RuntimeFunction {
                     arguments: types, ..
                 } => {
                     for ty in types {
@@ -718,26 +717,6 @@ impl Value {
                     ty.clone()
                 }
 
-                Value::TypeList(types) => {
-                    // Charge width before traversing or allocating a frozen list.
-                    charge(budget, types.len())?;
-                    for ty in types {
-                        let work = if invocation {
-                            scoped_type_value_work_with_evidence(
-                                ty,
-                                &BTreeMap::new(),
-                                parameters,
-                                value_parameters,
-                                |_, _, _| None,
-                            )
-                        } else {
-                            scoped_type_value_work(ty, &BTreeMap::new(), parameters)
-                        }
-                        .ok_or(ErrorKind::Type)?;
-                        charge(budget, work)?;
-                    }
-                    Term::TypeListValue(types.clone())
-                }
                 Value::Unit => Term::Unit,
                 Value::Bool(value) => Term::Bool(*value),
                 Value::Char(value) => Term::Char(*value),

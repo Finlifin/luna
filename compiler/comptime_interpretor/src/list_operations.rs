@@ -196,12 +196,7 @@ impl Interpreter<'_> {
             K::TypeListValue(_) | K::Local(_) => true,
             _ => false,
         };
-        if !simple
-            || !matches!(
-                environment.get(&place.root)?,
-                Value::List { .. } | Value::TypeList(_)
-            )
-        {
+        if !simple || !matches!(environment.get(&place.root)?, Value::List { .. }) {
             return None;
         }
         let depth = self.depth;
@@ -218,7 +213,6 @@ impl Interpreter<'_> {
             self.validate_immutable_input(original, &left.ty)?;
             let length = match original {
                 Value::List { values, .. } => values.len(),
-                Value::TypeList(values) => values.len(),
                 _ => unreachable!(),
             };
             let suffix = match self.eval(right, environment)? {
@@ -228,7 +222,6 @@ impl Interpreter<'_> {
             self.validate_immutable_input(&suffix, &right.ty)?;
             let suffix_length = match &suffix {
                 Value::List { values, .. } => values.len(),
-                Value::TypeList(values) => values.len(),
                 _ => return Err(self.failure(ErrorKind::Type, Some(value.source))),
             };
             let count = length
@@ -293,7 +286,6 @@ impl Interpreter<'_> {
         };
         self.validate_immutable_input(&value, &left.ty)?;
         let length = match &value {
-            Value::TypeList(values) => values.len(),
             Value::List { values, .. } => values.len(),
             _ => return Err(self.failure(ErrorKind::Type, Some(expr.source))),
         };
@@ -306,7 +298,6 @@ impl Interpreter<'_> {
         };
         self.validate_immutable_input(&other, &right.ty)?;
         let other_length = match &other {
-            Value::TypeList(values) => values.len(),
             Value::List { values, .. } => values.len(),
             _ => return Err(self.failure(ErrorKind::Type, Some(expr.source))),
         };
@@ -377,7 +368,6 @@ impl Interpreter<'_> {
             .ok_or_else(|| self.failure(ErrorKind::Type, Some(value_source)))?;
         self.integer_operation(Some(value_source), |budget| budget.consume(work))?;
         let length = match value {
-            Value::TypeList(values) if self.is_type_list_input(ty) => values.len(),
             Value::List { ty: stored, values }
                 if stored == ty && self.list_element(stored).is_some() =>
             {
@@ -404,7 +394,6 @@ impl Interpreter<'_> {
         source: SourceRange,
     ) -> Result<usize, Error> {
         match value {
-            Value::TypeList(values) => Ok(values.len()),
             Value::List { values, .. } => Ok(values.len()),
             _ => Err(self.failure(ErrorKind::Type, Some(source))),
         }
@@ -426,20 +415,7 @@ impl Interpreter<'_> {
             budget.consume(count.saturating_add(1))
         })?;
         let value = match (value, other) {
-            (Value::TypeList(mut left), Value::TypeList(right)) => {
-                left.extend(right);
-                Value::TypeList(left)
-            }
             (Value::List { ty, mut values }, Value::List { values: right, .. }) => {
-                values.extend(right);
-                Value::List { ty, values }
-            }
-            (Value::List { ty, mut values }, Value::TypeList(right)) => {
-                values.extend(right.into_iter().map(Value::Type));
-                Value::List { ty, values }
-            }
-            (Value::TypeList(left), Value::List { ty, values: right }) => {
-                let mut values: Vec<_> = left.into_iter().map(Value::Type).collect();
                 values.extend(right);
                 Value::List { ty, values }
             }

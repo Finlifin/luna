@@ -477,7 +477,27 @@ impl Checker<'_, '_> {
             Value::Type(_) => {
                 return Err(error(span, "normal-form Type input contains a non-Type"));
             }
-            Value::TypeList(types) => Term::TypeListValue(types),
+            Value::List { ty, values } => {
+                // Invocation results have already been admitted by the VM and
+                // restored to this call's telescope. Freeze children in that
+                // same scope rather than requiring closed Type descriptions.
+                let mut fields = Vec::with_capacity(values.len());
+                for value in values {
+                    let Some(field) = self.optional_normal_term(value, span)? else {
+                        return Ok(None);
+                    };
+                    fields.push(field);
+                }
+                if self.is_type_list_type(&ty) {
+                    Term::TypeListValue(fields)
+                } else {
+                    Term::NominalValue {
+                        ty: Box::new(ty),
+                        variant: None,
+                        fields,
+                    }
+                }
+            }
             value => {
                 let parameters = self.visible_comptime_parameters(span)?;
                 let mut value_parameters = BTreeMap::new();

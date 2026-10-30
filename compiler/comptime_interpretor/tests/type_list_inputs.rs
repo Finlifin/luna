@@ -137,7 +137,7 @@ fn homogeneous_value_lists_require_the_bound_head_and_validate_every_element() {
             values: vec![Value::Bool(true)],
         },
         Value::Tuple(vec![Value::Bool(true)]),
-        Value::TypeList(vec![ty(P::Bool)]),
+        ordinary_type_list(vec![ty(P::Bool)]),
     ] {
         assert!(vm.invoke(id(3), vec![bad]).is_err());
         assert_eq!(vm.invoke(id(3), vec![good.clone()]).unwrap(), good);
@@ -233,7 +233,7 @@ fn collected_type_list_crosses_invocation_and_preserves_tuple_head() {
         vec![ty(P::U8), ty(P::Bool), ty(P::U8)],
     ] {
         let result = vm
-            .invoke(id(3), vec![Value::TypeList(elements.clone())])
+            .invoke(id(3), vec![ordinary_type_list(elements.clone())])
             .unwrap();
         assert_eq!(result, Value::Type(tuple_type(elements.clone())));
         assert_ne!(result, Value::Type(Term::Tuple(elements.clone())));
@@ -315,15 +315,15 @@ fn type_list_constant_nodes_validate_elements_domain_and_substitution() {
 #[test]
 fn list_input_contract_rejects_tuple_wrong_elements_and_recovers() {
     let package = package();
-    let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     for bad in [
         Value::Tuple(vec![Value::Type(ty(P::U8))]),
-        Value::TypeList(vec![Term::Bool(true)]),
+        ordinary_type_list(vec![Term::Bool(true)]),
         Value::Type(ty(P::U8)),
     ] {
         assert!(vm.invoke(id(3), vec![bad]).is_err());
         assert_eq!(
-            vm.invoke(id(3), vec![Value::TypeList(vec![ty(P::Bool)])])
+            vm.invoke(id(3), vec![ordinary_type_list(vec![ty(P::Bool)])])
                 .unwrap(),
             Value::Type(tuple_type(vec![ty(P::Bool)]))
         );
@@ -336,7 +336,7 @@ fn list_input_contract_rejects_tuple_wrong_elements_and_recovers() {
         .is_err()
     );
     assert!(
-        vm.validate_immutable_input(&Value::TypeList(vec![ty(P::Bool)]), &list_type())
+        vm.validate_immutable_input(&ordinary_type_list(vec![ty(P::Bool)]), &list_type())
             .is_ok()
     );
 }
@@ -487,13 +487,13 @@ fn explicit_list_role_does_not_require_a_variadic_consumer() {
     };
     let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     for types in [vec![], vec![ty(P::Bool), ty(P::U8)]] {
-        let value = Value::TypeList(types);
+        let value = ordinary_type_list(types);
         assert_eq!(vm.invoke(id(3), vec![value.clone()]).unwrap(), value);
     }
     let mut unbound = package.clone();
     unbound.normal_forms[0].role = nir::normal_forms::Role::Opaque;
     let mut vm = Interpreter::for_comptime(&unbound, Budget::default()).unwrap();
-    assert!(vm.invoke(id(3), vec![Value::TypeList(vec![])]).is_err());
+    assert!(vm.invoke(id(3), vec![ordinary_type_list(vec![])]).is_err());
 
     let mut invalid = package.clone();
     invalid.normal_forms[0].parameters.clear();
@@ -501,7 +501,7 @@ fn explicit_list_role_does_not_require_a_variadic_consumer() {
     let mut impostor = package.clone();
     impostor.normal_forms[0].declaration = id(99);
     let mut vm = Interpreter::for_comptime(&impostor, Budget::default()).unwrap();
-    assert!(vm.invoke(id(3), vec![Value::TypeList(vec![])]).is_err());
+    assert!(vm.invoke(id(3), vec![ordinary_type_list(vec![])]).is_err());
 }
 
 #[test]
@@ -587,7 +587,7 @@ fn check_list_read_cost(local_index: bool) {
                 use_local_list_index(&mut package);
             }
             let argument = if element == P::Type {
-                Value::TypeList(vec![ty(P::Bool); 512])
+                ordinary_type_list(vec![ty(P::Bool); 512])
             } else {
                 Value::List {
                     ty: list,
@@ -690,7 +690,7 @@ fn fixed_list_index_rejects_bounds_and_recovers_without_mutating_the_list() {
                 recovery.declaration = id(4);
                 package.functions.push(recovery);
                 let argument = if element == P::Type {
-                    Value::TypeList(vec![ty(P::Bool)])
+                    ordinary_type_list(vec![ty(P::Bool)])
                 } else {
                     Value::List {
                         ty: list,
@@ -788,7 +788,7 @@ fn immutable_list_operations_preserve_types_and_enforce_combined_size_limit() {
         package.functions.push(length);
         let argument = |count| {
             if element == P::Type {
-                Value::TypeList(vec![ty(P::Bool); count])
+                ordinary_type_list(vec![ty(P::Bool); count])
             } else {
                 Value::List {
                     ty: list.clone(),
@@ -918,7 +918,7 @@ fn repeated_list_lengths_charge_the_observation_not_every_element() {
             let run = |length, reads, general| {
                 let (package, list) = repeated_list_lengths(element, reads, storage, general);
                 let argument = if element == P::Type {
-                    Value::TypeList(vec![ty(P::Bool); length])
+                    ordinary_type_list(vec![ty(P::Bool); length])
                 } else {
                     Value::List {
                         ty: list,
@@ -990,7 +990,7 @@ fn list_length_does_not_accept_a_local_with_a_different_element_domain() {
             }
             package.functions.push(malformed);
             let argument = if element == P::Type {
-                Value::TypeList(vec![ty(P::Bool)])
+                ordinary_type_list(vec![ty(P::Bool)])
             } else {
                 Value::List {
                     ty: list,
@@ -1069,7 +1069,7 @@ fn list_length_observes_replacement_and_runs_general_operand_effects() {
                     statements.push(assignment);
                 }
                 let argument = if element == P::Type {
-                    Value::TypeList(vec![ty(P::Bool)])
+                    ordinary_type_list(vec![ty(P::Bool)])
                 } else {
                     Value::List {
                         ty: list,
@@ -1211,7 +1211,7 @@ fn comptime_list_pointer_writes_are_atomic_under_budget_exhaustion() {
         let (package, list, pointer_ty) = list_pointer_package(element);
         let value = |count| {
             if element == P::Type {
-                Value::TypeList(vec![ty(P::Bool); count])
+                ordinary_type_list(vec![ty(P::Bool); count])
             } else {
                 Value::List {
                     ty: list.clone(),
@@ -1275,7 +1275,7 @@ fn list_pointer_access_does_not_grant_runtime_copy_permission() {
     for element in [P::Bool, P::Type] {
         let (mut package, list, pointer_ty) = list_pointer_package(element);
         let original = if element == P::Type {
-            Value::TypeList(vec![])
+            ordinary_type_list(vec![])
         } else {
             Value::List {
                 ty: list.clone(),
@@ -1309,13 +1309,8 @@ fn list_pointer_access_does_not_grant_runtime_copy_permission() {
             )
             .unwrap_err()
             .kind,
-            // Generic lists are rejected at runtime argument admission;
-            // the specialized type-list representation reaches the copy gate.
-            if element == P::Type {
-                ErrorKind::Unsupported
-            } else {
-                ErrorKind::Type
-            }
+            // All ordinary comptime lists fail runtime argument admission.
+            ErrorKind::Type
         );
         assert_eq!(owner.read().unwrap(), original);
     }
@@ -1335,7 +1330,7 @@ fn list_pointer_rejects_wrong_element_and_identity_without_modifying_storage() {
         .invoke_with_typed_values(id(3), vec![(list.clone(), Value::Storage(owner.clone()))])
         .unwrap();
     for invalid in [
-        Value::TypeList(vec![ty(P::Bool)]),
+        ordinary_type_list(vec![ty(P::Bool)]),
         Value::List {
             ty: list.clone(),
             values: vec![Value::Type(ty(P::Bool))],
@@ -1503,7 +1498,16 @@ fn list_append_failure_rolls_back_and_success_preserves_snapshots() {
 fn list_append_representation_limit_preserves_old_storage_and_recovers() {
     use comptime_interpretor::{ErrorKind, Storage};
     let (package, list, pointer_ty) = list_append_package(P::Type, false);
-    let original = Value::TypeList(vec![ty(P::Bool); 49_999]);
+    let overhead = ordinary_type_list(vec![]).immutable_copy_work().unwrap();
+    let element_work = Value::Type(ty(P::Bool)).immutable_copy_work().unwrap();
+    let capacity = (100_000 - overhead) / element_work;
+    let original = ordinary_type_list(vec![ty(P::Bool); capacity]);
+    assert!(original.immutable_copy_work().is_some());
+    assert!(
+        ordinary_type_list(vec![ty(P::Bool); capacity + 1])
+            .immutable_copy_work()
+            .is_none()
+    );
     let owner = Storage::new(original.clone());
     let mut vm = Interpreter::for_comptime(
         &package,

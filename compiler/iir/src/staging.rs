@@ -2863,9 +2863,6 @@ fn constant<'layout>(
             let element = heads
                 .list_element(ty, fuel)?
                 .ok_or("staged list requires a bound list head")?;
-            if element == Term::Primitive(Primitive::Type) {
-                return Err("staged Type list is not canonical".into());
-            }
             charge(fuel, fields.len())?;
             nir::type_computations::charge_term(ty, fuel).map_err(|e| e.to_string())?;
             let mut values = Vec::with_capacity(fields.len());
@@ -2875,10 +2872,14 @@ fn constant<'layout>(
                 }
                 values.push(constant(heads, field, fuel, depth + 1)?);
             }
-            Term::NominalValue {
-                ty: Box::new(ty.clone()),
-                variant: None,
-                fields: values,
+            if element == Term::Primitive(Primitive::Type) {
+                Term::TypeListValue(values)
+            } else {
+                Term::NominalValue {
+                    ty: Box::new(ty.clone()),
+                    variant: None,
+                    fields: values,
+                }
             }
         }
         (K::OptionalAbsent, Term::Optional(_)) => {
@@ -3423,6 +3424,24 @@ mod tests {
             constant(&heads, &list, &mut 100, 0).unwrap(),
             Term::TypeListValue(vec![Term::Primitive(Primitive::Bool)])
         );
+        let ordinary = Expr {
+            kind: K::TypeList(vec![expr(
+                K::TypeValue(Term::Primitive(Primitive::Bool)),
+                Primitive::Type,
+            )]),
+            ..list.clone()
+        };
+        assert_eq!(
+            constant(&heads, &ordinary, &mut 100, 0).unwrap(),
+            constant(&heads, &list, &mut 100, 0).unwrap()
+        );
+        assert!(constant(&[], &ordinary, &mut 100, 0).is_err());
+        assert!(constant(&heads, &ordinary, &mut 1, 0).is_err());
+        let wrong_element = Expr {
+            kind: K::TypeList(vec![expr(K::Literal(Literal::Bool(true)), Primitive::Bool)]),
+            ..ordinary
+        };
+        assert!(constant(&heads, &wrong_element, &mut 100, 0).is_err());
         assert!(constant(&[], &list, &mut 100, 0).is_err());
         assert!(constant(&heads, &list, &mut 1, 0).is_err());
         let mut wrong = list.clone();

@@ -52,7 +52,7 @@ fn input(shape: &str) -> Value {
         },
         Value::List {
             ty: list(list(p(Primitive::Type))),
-            values: vec![Value::TypeList(vec![p(Primitive::Bool)])],
+            values: vec![ordinary_type_list(vec![p(Primitive::Bool)])],
         },
     ])
 }
@@ -317,7 +317,7 @@ fn duplicate_payload_diagnostic_does_not_publish_or_poison_recovery() {
         };
         values[5] = Value::List {
             ty: list(list(p(Primitive::Type))),
-            values: vec![Value::TypeList(vec![
+            values: vec![ordinary_type_list(vec![
                 p(Primitive::Bool),
                 p(Primitive::Bool),
             ])],
@@ -382,7 +382,7 @@ fn ordinary_enum_builder_rejects_host_added_symbol_encoding_before_commit() {
         };
         values[5] = Value::List {
             ty: list(list(p(Primitive::Type))),
-            values: vec![Value::TypeList(vec![])],
+            values: vec![ordinary_type_list(vec![])],
         };
         let input = Value::Tuple(values);
         let mut vm = Interpreter::for_comptime(&world, Budget::default())
@@ -516,14 +516,7 @@ fn ordinary_struct_builder_rejects_host_added_metadata_before_commit() {
             let input = Value::Tuple(vec![
                 Value::Symbol("Generated".into()),
                 symbols(&["flag"]),
-                if case % 2 == 0 {
-                    Value::List {
-                        ty: list(p(Primitive::Type)),
-                        values: vec![Value::Type(p(Primitive::Bool))],
-                    }
-                } else {
-                    Value::TypeList(vec![p(Primitive::Bool)])
-                },
+                ordinary_type_list(vec![p(Primitive::Bool)]),
             ]);
             let mut vm = Interpreter::for_comptime(&world, Budget::default())
                 .unwrap()
@@ -551,7 +544,7 @@ fn symbol_input(codes: &[&str]) -> Value {
     };
     values[5] = Value::List {
         ty: list(list(p(Primitive::Type))),
-        values: vec![Value::TypeList(vec![])],
+        values: vec![ordinary_type_list(vec![])],
     };
     values.push(symbols(codes));
     Value::Tuple(values)
@@ -859,5 +852,12 @@ fn enum_builder_accepts_ordinary_type_lists_without_erasing_element_checks() {
                 assert_eq!(commits.get(), 1);
             }
         }
+    }
+}
+
+fn ordinary_type_list(types: Vec<nir::Term>) -> Value {
+    Value::List {
+        ty: list(p(Primitive::Type)),
+        values: types.into_iter().map(Value::Type).collect(),
     }
 }

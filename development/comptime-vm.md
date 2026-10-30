@@ -5033,3 +5033,52 @@ tuple carriers or hide the representation change through Value equality.
   `python3 -B development/check.py --timeout 900 -- test -p luna --test type_lists --test comptime_list_type_evidence --test test_templates`:
   all groups passed, `/tmp/luna-tools-f9meyot6/result.json`.
 - Final formatting check and `git diff --check` passed.
+
+
+### Remove the VM Type-list carrier
+
+The VM no longer has `Value::TypeList`. Type elements use `Value::List` with
+its declared list identity and ordinary `Value::Type` children. Admission,
+indexing, concatenation, in-place append, cleanup, reflection, definition
+builders, materialization and host fixtures now share that representation.
+Appending a list with a different declaration identity fails without changing
+storage; exhausted validation restores the previous elements and snapshots.
+
+Required invocation restoration now recursively restores list domains and
+elements into the caller's telescope. Scoped normal-input freezing follows
+that telescope rather than treating restored Type children as closed exports.
+IIR canonical input checking accepts an ordinary list of Type constants and
+retains domain, element and fuel checks. Runtime tests use the public
+instantiation pipeline; comptime invocation tests use `for_comptime`, avoiding
+the retired carrier's runtime admission exception.
+
+The final VM checks preserve invalid-element rejection, abstract-domain
+validation, exact freezing budget exhaustion, append rollback and bounded
+incremental indexing cost. List setup costs now include the ordinary domain
+and child value nodes. The representation-limit test constructs a list at the
+actual work boundary and verifies that one extra element fails atomically.
+
+Evidence (working directory `/home/fin/luna`, all commands exit 0):
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --test normal_values --test abstract_values --test type_list_inputs --test type_list_index`:
+  310 unit tests and all four integration suites passed;
+  `/tmp/luna-tools-z8obhgyn/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_spreads --test type_lists --test comptime_list_type_evidence --test meta_list_pattern_cost --test builder_invocations --test test_templates`:
+  all six suites passed, including 76 builder and 81 template cases;
+  `/tmp/luna-tools-up7opvuw/result.json`.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- development/examples/sysroot-object-struct-builder.fl --sysroot library --test-native`:
+  one native test passed using the real sysroot;
+  `/tmp/luna-tools-mkoqij25/result.json`.
+
+- Final `python3 -B development/check.py --timeout 900 -- test -p iir --lib staging::tests`:
+  passed, `/tmp/luna-tools-xe0msfd9/result.json`; includes ordinary staged
+  Type lists, invalid elements, unknown heads and exhausted fuel.
+- Final `python3 -B development/check.py --timeout 900 -- test -p luna --test execution type_list`:
+  all 17 selected cases passed, `/tmp/luna-tools-ri31z701/result.json`.
+- Workspace formatting and `git diff --check` passed.
+
+Remaining boundary: NIR still has the specialized frozen `Term::TypeListValue`
+and collection nodes. Their removal requires migrating normal-form identity,
+substitution and structural views together; this stage does not claim that
+ordinary NF argument representation is finished. No source-language exception
+for `meta.List<Type>` is authorized by the remaining encoding.

@@ -161,8 +161,17 @@ fn repeated_leaf_reads_do_not_recopy_unrelated_types() {
         for storage in [false, true] {
             let run = |reads| {
                 let package = reads_package(reads, local, "4095", storage);
-                let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
-                let mut arguments = vec![Value::TypeList(vec![ty(P::Bool); 4096])];
+                // Allow two full input admissions; the assertion below bounds only
+                // the incremental cost of repeated leaf reads.
+                let mut vm = Interpreter::for_comptime(
+                    &package,
+                    Budget {
+                        steps: 1_000_000,
+                        ..Budget::default()
+                    },
+                )
+                .unwrap();
+                let mut arguments = vec![ordinary_type_list(vec![ty(P::Bool); 4096])];
                 if local {
                     arguments.push(Value::Integer(comptime_runtime::Integer::from_u128(4095)));
                 }
@@ -202,7 +211,7 @@ fn bounds_failures_leave_the_vm_reusable() {
             good.declaration = id(4);
             package.functions.push(good);
             let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
-            let mut arguments = vec![Value::TypeList(vec![ty(P::Bool)])];
+            let mut arguments = vec![ordinary_type_list(vec![ty(P::Bool)])];
             if local {
                 let mut index_value = comptime_runtime::Integer::parse_literal(
                     index.trim_start_matches('-'),
@@ -219,7 +228,7 @@ fn bounds_failures_leave_the_vm_reusable() {
                 comptime_interpretor::ErrorKind::IndexOutOfBounds
             );
             assert_eq!(
-                vm.invoke(id(4), vec![Value::TypeList(vec![ty(P::Bool)])])
+                vm.invoke(id(4), vec![ordinary_type_list(vec![ty(P::Bool)])])
                     .unwrap(),
                 Value::Type(ty(P::Bool))
             );
@@ -262,8 +271,15 @@ fn effectful_index_keeps_the_list_snapshot_from_before_index_evaluation() {
     };
     let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     assert_eq!(
-        vm.invoke(id(3), vec![Value::TypeList(vec![ty(P::Bool)])])
+        vm.invoke(id(3), vec![ordinary_type_list(vec![ty(P::Bool)])])
             .unwrap(),
         Value::Type(ty(P::Bool))
     );
+}
+
+fn ordinary_type_list(types: Vec<nir::Term>) -> Value {
+    Value::List {
+        ty: list_type(),
+        values: types.into_iter().map(Value::Type).collect(),
+    }
 }

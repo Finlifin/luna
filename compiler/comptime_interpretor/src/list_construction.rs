@@ -51,14 +51,12 @@ impl Interpreter<'_> {
     }
 
     /// Decode a checked list of Type values at a host definition boundary.
-    /// The legacy compact carrier is accepted during VM representation migration.
     pub(super) fn definition_type_elements(
         &mut self,
         value: Value,
         source: SourceRange,
     ) -> Result<Vec<Term>, Error> {
         match value {
-            Value::TypeList(elements) => Ok(elements),
             Value::List { ty, values } if self.is_type_list_input(&ty) => {
                 self.integer_operation(Some(source), |budget| budget.consume(values.len()))?;
                 values

@@ -391,24 +391,6 @@ impl Builder<'_> {
                         .collect::<Result<_, _>>()?,
                 )
             }
-            Value::TypeList(types) => {
-                if !nir::normal_forms::type_list_input_type(ty)
-                    || !self
-                        .package
-                        .normal_forms
-                        .iter()
-                        .any(|head| head.is_type_list_instance(ty))
-                {
-                    return Err("staged type-list result requires trusted meta.List<Type>".into());
-                }
-                for element in &types {
-                    iir::completed_type(element, &BTreeSet::new(), &mut self.fuel)?;
-                    if element.sort() != nir::Sort::Type {
-                        return Err("staged type-list element is not Type".into());
-                    }
-                }
-                K::TypeListValue(types)
-            }
             Value::BitVec(v) => {
                 self.fuel = self
                     .fuel

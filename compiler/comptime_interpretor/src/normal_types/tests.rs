@@ -656,7 +656,10 @@ fn contextual_container_checks_do_not_reorder_operand_effects() {
                 (
                     source,
                     if valid {
-                        Value::TypeList(vec![Term::Primitive(Primitive::Char)])
+                        Value::List {
+                            ty: list_ty.clone(),
+                            values: vec![Value::Type(Term::Primitive(Primitive::Char))],
+                        }
                     } else {
                         Value::Bool(false)
                     },
