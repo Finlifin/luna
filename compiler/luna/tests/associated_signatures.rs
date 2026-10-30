@@ -5,6 +5,32 @@ mod support;
 use comptime_interpretor::Value;
 
 #[test]
+fn inherited_callable_associated_values_use_symbolic_interface_evidence() {
+    for invocation in ["(value)", " {value}", "(...do {(value,)})"] {
+        let source = format!(
+            "fn invert(value:bool)->bool {{not value}}
+            trait Parent {{assoc action:fn(bool)->bool;}}
+            trait Child :- Parent {{fn keep(value:bool)->bool {{value}}}}
+            struct Holder {{}}
+            impl Parent for Holder {{assoc action:fn(bool)->bool=invert;}}
+            impl Child for Holder {{}}
+            fn apply(value:bool)->bool where T:-Child {{
+                T.as(Child).action{invocation} and T.as(Child).keep(true)
+            }}
+            fn run()->bool {{apply<Holder>(false) and not apply<Holder>(true)}}"
+        );
+        let package = support::compile(&source);
+        assert_eq!(
+            luna::execution::interpret(&package, "run", 100_000).unwrap(),
+            Value::Bool(true),
+            "{invocation}"
+        );
+        let missing_child = source.replace("impl Child for Holder {}", "");
+        assert!(support::compile_with_protocols(&missing_child, &Default::default()).is_err());
+    }
+}
+
+#[test]
 fn associated_definition_inherits_only_its_implementation_clause_assumptions() {
     let source = "typealias Type=.Type'builtin;
         typealias Char=.char'builtin;

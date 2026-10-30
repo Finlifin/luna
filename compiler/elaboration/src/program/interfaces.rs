@@ -1705,6 +1705,16 @@ impl Checker<'_, '_> {
                 }
                 return self.selected_method(subject, Some(origin), name, span);
             }
+            // Associated values share the member namespace with methods, but
+            // obtain their callable behavior from their value type. Leave them
+            // to ordinary projection/call elaboration, without demanding a
+            // method body or recovering declaration-side call metadata.
+            if self.checked_traits.iter().any(|contract| {
+                contract.declaration == interface.declaration
+                    && contract.associated.iter().any(|member| member.name == name)
+            }) {
+                return Ok(None);
+            }
             if self.symbolic_interface_evidence(&subject, interface) {
                 let contract = self
                     .checked_traits
