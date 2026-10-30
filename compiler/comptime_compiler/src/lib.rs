@@ -252,6 +252,14 @@ pub enum Op {
         receiver_source: SourceRange,
         selector: Option<leaf_inputs::Selector>,
     },
+    PrepareBitVecType {
+        input: Term,
+        output: Term,
+    },
+    BitVecType {
+        destination: Register,
+        width: Register,
+    },
     PrepareTypeConstructor(Arc<type_constructors::Constructor>),
     CheckTypeConstructorInput {
         constructor: Arc<type_constructors::Constructor>,
@@ -791,6 +799,12 @@ impl fmt::Display for Program {
                 )?,
                 Op::FinishNormalType { destination } => {
                     write!(f, "(finish-normal-type %{destination})")?
+                }
+                Op::PrepareBitVecType { input, output } => {
+                    write!(f, "(prepare-bitvec-type (input {input}) (output {output}))")?
+                }
+                Op::BitVecType { destination, width } => {
+                    write!(f, "(bitvec-type %{destination} %{width})")?
                 }
                 Op::PrepareTypeConstructor(constructor) => {
                     write!(f, "(prepare-type-constructor {constructor})")?
@@ -1900,6 +1914,24 @@ fn compile_root<'a>(
                             Op::BeginNormalType {
                                 destination: dst,
                                 constructor,
+                            },
+                        );
+                    }
+                    K::BitVecType(width) => {
+                        let value = fresh();
+                        emit(
+                            &mut work,
+                            Op::BitVecType {
+                                destination: dst,
+                                width: value,
+                            },
+                        );
+                        work.push(Work::Expression(width, value));
+                        emit(
+                            &mut work,
+                            Op::PrepareBitVecType {
+                                input: copy_term(&width.ty, fuel, source)?,
+                                output: copy_term(&expr.ty, fuel, source)?,
                             },
                         );
                     }

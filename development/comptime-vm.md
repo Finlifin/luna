@@ -4693,3 +4693,33 @@ Validation in /home/fin/luna:
   counts include the anonymous saved-callable initializer, not just named events.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
   exit 0, `/tmp/luna-tools-6pxvedvj/result.json`; `git diff --check`: exit 0.
+
+### Compile concrete dynamic BitVec construction
+
+The existing BitVecType primitive now lowers to domain admission, ordinary width
+expression code and checked Type construction. Width values stay ordinary Integer
+values in VM registers; they are not packed into the structural Type operand
+channel. Tree and bytecode paths share the original width conversion and budget
+checks. Invalid input/result domains reject before operand effects; negative or
+unrepresentable widths reject after once-only operand evaluation. Return skips
+construction, and later invocations recover after errors or exhausted budgets.
+
+This covers the existing concrete-width representation, including zero width.
+It does not introduce symbolic widths, change normal-form identity, or replace
+ordinary Tuple/List definitions with special type constructors. No result-cache
+policy changes or measured speedup are claimed.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-udfav44t/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib bitvec_type_tests`:
+  exit 0, `/tmp/luna-tools-nz3iv20a/result.json`; tree/VM effect ordering, width
+  range, domain rejection, early return, budget exhaustion and recovery.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_types --test comptime_bytecode_bits`:
+  exit 0, `/tmp/luna-tools-_l5n8o6e/result.json`; ordinary typealias application
+  resumes the width callback, and both named calls are counted as compiled.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-a2flqn5n/result.json`; `git diff --check`: exit 0.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- development/examples/sysroot-meta-lists.fl --sysroot library --test-native`:
+  exit 0, `/tmp/luna-tools-8r7dey4b/result.json`; the native collector case now
+  includes mapping computed prefix offsets through the public BitVec binding.

@@ -3,6 +3,61 @@ use super::*;
 use comptime_compiler::type_constructors::Kind;
 
 impl Interpreter<'_> {
+    pub(super) fn prepare_bitvec_type(
+        &self,
+        input: &Term,
+        output: &Term,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        let expected = if *input == Term::Primitive(Primitive::Never) {
+            Primitive::Never
+        } else {
+            Primitive::Type
+        };
+        if *output != Term::Primitive(expected)
+            || !matches!(
+                input,
+                Term::Primitive(Primitive::Integer | Primitive::Never)
+            )
+        {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        }
+        Ok(())
+    }
+
+    pub(super) fn complete_bitvec_type(
+        &mut self,
+        width: Value,
+        source: SourceRange,
+    ) -> Result<Value, Error> {
+        let Value::Integer(width) = width else {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        };
+        self.integer_operation(Some(source), |budget| {
+            budget.consume(width.bit_len().div_ceil(32).saturating_add(1))
+        })?;
+        let width = width
+            .to_u128()
+            .ok()
+            .and_then(|n| usize::try_from(n).ok())
+            .ok_or_else(|| self.failure(ErrorKind::InvalidBitWidth, Some(source)))?;
+        Ok(Value::Type(Term::Primitive(Primitive::BitVec(width))))
+    }
+
+    pub(super) fn eval_bit_vec_type(
+        &mut self,
+        expr: &Expr,
+        environment: &mut Environment,
+    ) -> Result<Flow, Error> {
+        let K::BitVecType(width) = &expr.kind else {
+            unreachable!()
+        };
+        self.prepare_bitvec_type(&width.ty, &expr.ty, expr.source)?;
+        let width = value!(self.eval(width, environment));
+        self.complete_bitvec_type(width, expr.source)
+            .map(Flow::Value)
+    }
+
     pub(super) fn prepare_type_constructor(
         &mut self,
         kind: &Kind,
@@ -169,3 +224,7 @@ impl Interpreter<'_> {
             .map(Flow::Value)
     }
 }
+
+#[cfg(test)]
+#[path = "bitvec_type_tests.rs"]
+mod bitvec_type_tests;

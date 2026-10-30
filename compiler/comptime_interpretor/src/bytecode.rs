@@ -1642,6 +1642,13 @@ impl<'a> Interpreter<'a> {
                         source,
                     )?);
                 }
+                Op::PrepareBitVecType { input, output } => {
+                    self.prepare_bitvec_type(input, output, source)?
+                }
+                Op::BitVecType { destination, width } => {
+                    let value = frame.slots[*width].take().ok_or_else(missing)?;
+                    frame.slots[*destination] = Some(self.complete_bitvec_type(value, source)?);
+                }
                 Op::PrepareTypeConstructor(constructor) => {
                     let inputs: Vec<_> = constructor.inputs.iter().collect();
                     self.prepare_type_constructor(

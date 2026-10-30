@@ -934,3 +934,33 @@ fn dynamic_type_factories_execute_in_bytecode_without_entering_their_heads() {
     assert!(!vm.events().iter().any(|event| matches!(event,
         comptime_interpretor::Event::EnterFunction(id) if [identity, alternate, tagged, limited].contains(id))));
 }
+
+#[test]
+fn dynamic_bitvector_type_widths_resume_calls_and_recover_after_invalid_inputs() {
+    let package = support::compile(
+        "typealias Type=.Type'builtin;
+        typealias Integer=.Integer'builtin;
+        typealias Bits<n:Integer> = .BitVec'builtin<n>;
+        comptime fn width(value:Integer)->Integer {value}
+        comptime fn BitsFrom(value:Integer)->Type {Bits<width(value)>}",
+    );
+    let entry = support::id(&package, "BitsFrom");
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let mut tree = Interpreter::new(&package, Budget::default()).unwrap();
+    for width in [0, 1, 512, -1, 8] {
+        let input = Value::Integer(comptime_runtime::Integer::from_i128(width));
+        let before = vm.bytecode_invocations();
+        let result = vm.invoke(entry, vec![input.clone()]);
+        let expected = tree.invoke(entry, vec![input]);
+        assert_eq!(result, expected);
+        if width < 0 {
+            assert_eq!(result.unwrap_err().kind, ErrorKind::InvalidBitWidth);
+        } else {
+            assert_eq!(
+                result.unwrap(),
+                Value::Type(Term::Primitive(Primitive::BitVec(width as usize)))
+            );
+        }
+        assert_eq!(vm.bytecode_invocations() - before, 2);
+    }
+}

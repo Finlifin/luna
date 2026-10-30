@@ -61,12 +61,18 @@ comptime fn run() -> bool {
         and prefix_layout() and adjacent_groups()
 }
 
+comptime fn Bits(width: Integer) -> Type {
+    BitVec<width>
+}
+
 comptime fn prefix_layout() -> bool {
     let sizes: meta.List<Integer> = [4, 8, 1];
     let offsets = sizes.scan_exclusive(0, |offset, size| offset + size);
     let ends = sizes.scan(0, |offset, size| offset + size);
+    let storage = offsets.map(Bits);
     offsets.length() == 3 and offsets[0] == 0 and offsets[1] == 4 and offsets[2] == 12
         and ends.length() == 3 and ends[0] == 4 and ends[1] == 12 and ends[2] == 13
+        and storage[0] == BitVec<0> and storage[1] == BitVec<4> and storage[2] == BitVec<12>
 }
 
 comptime fn exact_integer_division() -> bool {

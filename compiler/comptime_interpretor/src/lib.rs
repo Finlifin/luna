@@ -4168,45 +4168,6 @@ impl<'a> Interpreter<'a> {
     }
 
     #[inline(never)]
-    fn eval_bit_vec_type(
-        &mut self,
-        expr: &Expr,
-        environment: &mut Environment,
-    ) -> Result<Flow, Error> {
-        let result = match &expr.kind {
-            K::BitVecType(width) => {
-                let expected = if width.ty == Term::Primitive(Primitive::Never) {
-                    Primitive::Never
-                } else {
-                    Primitive::Type
-                };
-                if expr.ty != Term::Primitive(expected)
-                    || !matches!(
-                        width.ty,
-                        Term::Primitive(Primitive::Integer | Primitive::Never)
-                    )
-                {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                }
-                let Value::Integer(width) = value!(self.eval(width, environment)) else {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                };
-                self.integer_operation(Some(expr.source), |budget| {
-                    budget.consume(width.bit_len().div_ceil(32).saturating_add(1))
-                })?;
-                let width = width
-                    .to_u128()
-                    .ok()
-                    .and_then(|n| usize::try_from(n).ok())
-                    .ok_or_else(|| self.failure(ErrorKind::InvalidBitWidth, Some(expr.source)))?;
-                Value::Type(Term::Primitive(Primitive::BitVec(width)))
-            }
-            _ => unreachable!("expression dispatcher selected an incompatible evaluator"),
-        };
-        Ok(Flow::Value(result))
-    }
-
-    #[inline(never)]
     fn eval_literal(&mut self, expr: &Expr, _environment: &mut Environment) -> Result<Flow, Error> {
         if let K::Literal(Literal::PendingInteger { spelling, negative }) = &expr.kind {
             let Term::Primitive(domain) = expr.ty else {
