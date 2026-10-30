@@ -19,10 +19,10 @@ class Example:
     # Additional library-to-library edges; app already depends on every input.
     dependency_links: tuple[tuple[str, str], ...] = ()
 
-    def inputs(self, source):
+    def inputs(self, source, command=None):
         if not self.dependencies:
-            return [str(source)]
-        arguments = ['--packages-v1', '--package', '1', '101', 'app', str(source)]
+            return ([command] if command else []) + [str(source)]
+        arguments = (['packages', command] if command else ['--packages-v1']) + ['--package', '1', '101', 'app', str(source)]
         for index, (name, path) in enumerate(self.dependencies, start=2):
             arguments.extend(['--package', str(index), str(index * 101), name,
                               str(ROOT / path), '--dependency', '1', name, str(index)])
@@ -337,7 +337,7 @@ def run_examples(args, selected, directory, driver):
         executable = case / 'program'
         source = ROOT / 'development/examples' / f'host-{name}.fl'
         code, build_logs = run(
-            [str(driver), *example.inputs(source), '--build', 'run',
+            [str(driver), *example.inputs(source, 'build'), '--entry', 'run',
              '--opt-level', level, '--output', str(executable), *example.options],
             timeout=args.timeout, label=f'build-{name}', directory=case / 'build')
         result = {'example': name, 'build_exit_code': code,

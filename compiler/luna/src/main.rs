@@ -119,6 +119,9 @@ fn main() -> ExitCode {
             }
         }),
         Command::Help => output::write_stdout(cli::HELP),
+        Command::HelpTopic(text) => output::write_stdout(&text),
+        Command::Check(options) => frontend::compile(&options).map(|_| ()),
+        Command::CheckPackages(request) => request.compile().map(|_| ()),
         Command::Packages(request)
             if matches!(request.action, luna::package_cli::Action::Build { .. }) =>
         {

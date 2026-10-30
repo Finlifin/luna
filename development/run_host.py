@@ -53,11 +53,11 @@ def main(argv=None):
             parser.error('omit the source argument when using --packages-v1')
         if not source.is_file():
             parser.error(f'source file does not exist: {source}')
-        inputs = [str(source)]
+        inputs = ['build', str(source)]
     elif compiler_args[:1] == ['--packages-v1']:
         # Keep package identities, dependency aliases, and paths verbatim.
         # luna owns validation of this existing versioned input protocol.
-        inputs, compiler_args = compiler_args, []
+        inputs, compiler_args = ['packages', 'build', *compiler_args[1:]], []
     else:
         parser.error('provide a source file or -- followed by --packages-v1 inputs')
     directory = Path(tempfile.mkdtemp(prefix='luna-run-host-'))
@@ -73,7 +73,7 @@ def main(argv=None):
     stages = [
         ('driver-build', [sys.executable, '-B', str(ROOT / 'development/build_host_driver.py'),
                           str(driver), *(['--release'] if args.release_driver else [])], args.build_timeout),
-        ('build', [str(driver), *inputs, '--build', args.entry, '--output', str(executable),
+        ('build', [str(driver), *inputs, '--entry', args.entry, '--output', str(executable),
                    '--opt-level', args.opt_level, *compiler_args], args.build_timeout),
         ('execute', [str(executable)], args.run_timeout),
     ]

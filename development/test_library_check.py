@@ -59,7 +59,7 @@ class LibraryCheckTests(unittest.TestCase):
                 command = next(command for label, command in calls if label == f'native-{name}')
                 self.assertIn(str(library_check.ROOT / f'library/builtin/types/{name}.fl'), command)
                 self.assertIn(str(library_check.ROOT / 'library/builtin/protocols/resources.fl'), command)
-                self.assertIn('--test-native', command)
+                self.assertIn('test', command[command.index('--') + 1:])
                 self.assertIn('resources.Copy', command)
                 self.assertIn('resources.Drop', command)
                 if name == 'option':
@@ -72,10 +72,10 @@ class LibraryCheckTests(unittest.TestCase):
                 self.assertNotIn('--packages-v1', command)
                 self.assertNotIn('--host-intrinsic', command)
                 self.assertNotIn('--copy-protocol', command)
-                self.assertIn('--test-native', command)
+                self.assertIn('test', command[command.index('--') + 1:])
             if not selected or 'sysroot' in selected:
                 build = next(command for label, command in calls if label == 'sysroot')
-                self.assertIn('--build', build)
+                self.assertIn('build', build[build.index('--') + 1:])
                 executable = build[build.index('--output') + 1]
                 executions = [command for label, command in calls if label == 'sysroot-run']
                 self.assertEqual(executions, [] if failing == 'sysroot' else [[executable]])

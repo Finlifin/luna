@@ -1305,7 +1305,7 @@ fn help_succeeds_without_reading_an_input() {
     let sandbox = Sandbox::new();
     let output = sandbox.run(&["--help"]);
     let help = success(&output);
-    for option in ["--emit", "--output", "--sysroot", "--help"] {
+    for option in ["check", "build", "test", "dump", "--help"] {
         assert!(help.contains(option), "missing {option}: {help}");
     }
     assert_eq!(fs::read_dir(&sandbox.0).unwrap().count(), 0);
@@ -1314,7 +1314,11 @@ fn help_succeeds_without_reading_an_input() {
 #[test]
 fn missing_input_is_a_usage_error() {
     let sandbox = Sandbox::new();
-    for args in [vec![], vec!["--emit", "ast"], vec!["--output", "dump.lisp"]] {
+    for args in [
+        vec!["check"],
+        vec!["--emit", "ast"],
+        vec!["--output", "dump.lisp"],
+    ] {
         failure(&sandbox.run(&args), 2);
         assert!(!sandbox.path("dump.lisp").exists());
     }
@@ -5025,7 +5029,7 @@ fn literal_into_cli_runs_suffix_conversion_and_checks_usage() {
     ] {
         failure(&sandbox.run(&args), 2);
     }
-    assert!(success(&sandbox.run(&["--help"])).contains("--literal-into-protocol"));
+    assert!(success(&sandbox.run(&["dump", "--help"])).contains("--literal-into-protocol"));
 }
 
 #[test]

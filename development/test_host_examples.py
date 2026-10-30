@@ -10,6 +10,14 @@ from host_examples import execution_result
 
 
 class NativeExampleOutputTests(unittest.TestCase):
+    def test_subcommands_preserve_source_and_package_inputs(self):
+        self.assertEqual(host_examples.Example('true').inputs(Path('entry.fl'), 'build'),
+                         ['build', 'entry.fl'])
+        example = host_examples.EXAMPLES['library-tuple']
+        legacy = example.inputs(Path('entry.fl'))
+        self.assertEqual(example.inputs(Path('entry.fl'), 'test'),
+                         ['packages', 'test', *legacy[1:]])
+
     def test_library_dependency_edges_use_declared_package_identities(self):
         example = host_examples.EXAMPLES['library-tuple']
         arguments = example.inputs(Path('entry.fl'))

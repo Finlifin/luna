@@ -258,7 +258,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Request, String
     let mut ordinary = forwarded;
     ordinary.push("--".into());
     ordinary.push(entry.into_os_string());
-    let (options, action) = match cli::parse(ordinary)? {
+    let (options, action) = match cli::parse_options(ordinary)? {
         Command::Compile(options) => (options, Action::Compile),
         Command::Invoke {
             definition_fuel,
