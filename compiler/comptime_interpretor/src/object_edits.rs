@@ -39,7 +39,7 @@ impl Interpreter<'_> {
         let Term::Tuple(domains) = input else {
             return Err(failure());
         };
-        let count = if matches!(operation, O::Append | O::Replace) {
+        let count = if matches!(operation, O::Append | O::Replace | O::Slice) {
             3
         } else {
             2
@@ -58,6 +58,12 @@ impl Interpreter<'_> {
             _ => Term::Primitive(Primitive::Integer),
         };
         if domains[1] != second && domains[1] != Term::Primitive(Primitive::Never) {
+            return Err(failure());
+        }
+        if operation == O::Slice
+            && domains[2] != Term::Primitive(Primitive::Integer)
+            && domains[2] != Term::Primitive(Primitive::Never)
+        {
             return Err(failure());
         }
         Ok(())
@@ -79,7 +85,7 @@ impl Interpreter<'_> {
         let Term::Tuple(domains) = input else {
             return Err(failure());
         };
-        let count = if matches!(operation, O::Append | O::Replace) {
+        let count = if matches!(operation, O::Append | O::Replace | O::Slice) {
             3
         } else {
             2
@@ -149,7 +155,7 @@ impl Interpreter<'_> {
                         }
                     });
                 } else {
-                    let index = self.object_edit_index(operand, entries.len(), source)?;
+                    let index = self.object_edit_index(operand, entries.len(), false, source)?;
                     match &mut entries[index] {
                         ObjectEntry::Value(old) | ObjectEntry::Property { value: old, .. } => {
                             *old = value
@@ -157,8 +163,25 @@ impl Interpreter<'_> {
                     }
                 }
             }
+            O::Slice => {
+                let start = self.object_edit_index(operand, entries.len(), true, source)?;
+                let end = self.object_edit_index(
+                    packet.next().ok_or_else(failure)?,
+                    entries.len(),
+                    true,
+                    source,
+                )?;
+                if start > end {
+                    return Err(self.failure(ErrorKind::IndexOutOfBounds, Some(source)));
+                }
+                self.integer_operation(Some(source), |budget| {
+                    budget.consume(entries.len().saturating_add(1))
+                })?;
+                entries.truncate(end);
+                entries.drain(..start);
+            }
             O::Remove => {
-                let index = self.object_edit_index(operand, entries.len(), source)?;
+                let index = self.object_edit_index(operand, entries.len(), false, source)?;
                 self.integer_operation(Some(source), |budget| {
                     budget.consume(entries.len().saturating_add(1))
                 })?;
@@ -172,6 +195,7 @@ impl Interpreter<'_> {
         &self,
         value: Value,
         length: usize,
+        inclusive: bool,
         source: SourceRange,
     ) -> Result<usize, Error> {
         let Value::Integer(index) = value else {
@@ -181,7 +205,7 @@ impl Interpreter<'_> {
             .to_u128()
             .ok()
             .and_then(|index| usize::try_from(index).ok())
-            .filter(|index| *index < length)
+            .filter(|index| *index < length || inclusive && *index == length)
             .ok_or_else(|| self.failure(ErrorKind::IndexOutOfBounds, Some(source)))
     }
 }
@@ -270,5 +294,139 @@ mod tests {
                 .kind,
             ErrorKind::PhaseMismatch
         );
+    }
+}
+
+#[cfg(test)]
+mod slice_tests {
+    use super::*;
+    use nir::program::{ObjectEditKind, Place};
+    const SOURCE: SourceRange = SourceRange { start: 1, end: 2 };
+    const TRACE: LocalId = LocalId { owner: 1, index: 3 };
+    fn expr(ty: Term, kind: K) -> Expr {
+        Expr {
+            source: SOURCE,
+            ty,
+            kind,
+        }
+    }
+    fn body(end: Primitive) -> Expr {
+        let fields = [Primitive::Object, Primitive::Integer, end]
+            .into_iter()
+            .enumerate()
+            .map(|(index, ty)| {
+                expr(
+                    Term::Primitive(ty),
+                    K::Local(LocalId {
+                        owner: 1,
+                        index: index as u32,
+                    }),
+                )
+            })
+            .collect::<Vec<_>>();
+        let packet = expr(
+            Term::Tuple(fields.iter().map(|e| e.ty.clone()).collect()),
+            K::Tuple(fields),
+        );
+        expr(
+            Term::Primitive(Primitive::Object),
+            K::ObjectEdit {
+                operation: ObjectEditKind::Slice,
+                subject: Box::new(expr(
+                    packet.ty.clone(),
+                    K::Block {
+                        statements: vec![expr(
+                            Term::Primitive(Primitive::Void),
+                            K::Assign {
+                                place: Place {
+                                    root: TRACE,
+                                    fields: vec![],
+                                },
+                                value: Box::new(expr(
+                                    Term::Primitive(Primitive::Bool),
+                                    K::Literal(nir::program::Literal::Bool(true)),
+                                )),
+                            },
+                        )],
+                        result: Some(Box::new(packet)),
+                    },
+                )),
+            },
+        )
+    }
+    #[test]
+    fn object_slice_admission_precedes_effects_and_bounds_follow_them() {
+        let package = Package::default();
+        let original = Value::Object(Object::from_entries(vec![ObjectEntry::Property {
+            key: "flag".into(),
+            value: ObjectValue {
+                ty: Term::Primitive(Primitive::Bool),
+                value: Value::Bool(true),
+            },
+        }]));
+        for compiled in [false, true] {
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            for (end_ty, end_value, error, observed) in [
+                (
+                    Primitive::Bool,
+                    Value::Bool(true),
+                    Some(ErrorKind::Type),
+                    false,
+                ),
+                (
+                    Primitive::Integer,
+                    Value::Integer(comptime_runtime::Integer::from_i128(2)),
+                    Some(ErrorKind::IndexOutOfBounds),
+                    true,
+                ),
+                (
+                    Primitive::Integer,
+                    Value::Bool(true),
+                    Some(ErrorKind::Type),
+                    true,
+                ),
+                (
+                    Primitive::Integer,
+                    Value::Integer(comptime_runtime::Integer::from_i128(1)),
+                    None,
+                    true,
+                ),
+            ] {
+                let body = body(end_ty);
+                let mut env = Environment::from([
+                    (LocalId { owner: 1, index: 0 }, original.clone()),
+                    (
+                        LocalId { owner: 1, index: 1 },
+                        Value::Integer(comptime_runtime::Integer::from_i128(0)),
+                    ),
+                    (LocalId { owner: 1, index: 2 }, end_value),
+                    (TRACE, Value::Bool(false)),
+                ]);
+                let result = if compiled {
+                    let code = Arc::new(comptime_compiler::compile(&body, &mut 10000).unwrap());
+                    assert!(code.to_string().contains("(object-edit slice"));
+                    vm.execute_code(&code, &mut env)
+                } else {
+                    vm.eval(&body, &mut env)
+                };
+                if let Some(error) = error {
+                    assert_eq!(result.unwrap_err().kind, error);
+                } else {
+                    let Flow::Value(value) = result.unwrap() else {
+                        panic!("value")
+                    };
+                    assert_eq!(value, original);
+                }
+                assert_eq!(
+                    vm.local_value(&env, TRACE, Some(SOURCE)).unwrap(),
+                    Value::Bool(observed)
+                );
+                assert_eq!(
+                    vm.local_value(&env, LocalId { owner: 1, index: 0 }, Some(SOURCE))
+                        .unwrap(),
+                    original
+                );
+            }
+        }
     }
 }

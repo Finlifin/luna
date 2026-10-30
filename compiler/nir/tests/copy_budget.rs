@@ -431,6 +431,7 @@ fn struct_reflection_charges_subject_copy_before_allocation() {
         nir::program::ObjectEditKind::Append,
         nir::program::ObjectEditKind::Replace,
         nir::program::ObjectEditKind::Remove,
+        nir::program::ObjectEditKind::Slice,
     ] {
         let expression = expr(K::ObjectEdit {
             subject: Box::new(large()),

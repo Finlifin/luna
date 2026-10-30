@@ -895,6 +895,7 @@ impl fmt::Display for EffectHandler {
 /// Functional editing of ordered heterogeneous Objects.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ObjectEditKind {
+    Slice,
     Concat,
     Append,
     Replace,
@@ -907,6 +908,7 @@ impl fmt::Display for ObjectEditKind {
             Self::Append => "append",
             Self::Replace => "replace",
             Self::Remove => "remove",
+            Self::Slice => "slice",
         })
     }
 }

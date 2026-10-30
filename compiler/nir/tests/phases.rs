@@ -1553,7 +1553,7 @@ fn declaration_responsibility_survives_specialization_without_wrapping_its_teles
 
 #[test]
 fn struct_reflection_is_not_a_runtime_operation_even_with_a_runtime_result_annotation() {
-    for operation in 0..18 {
+    for operation in 0..19 {
         let mut f = function(1, Phase::Runtime, &[]);
         let subject = Box::new(Expr {
             source: f.body.source,
@@ -1592,6 +1592,7 @@ fn struct_reflection_is_not_a_runtime_operation_even_with_a_runtime_result_annot
                     nir::program::ObjectEditKind::Append,
                     nir::program::ObjectEditKind::Replace,
                     nir::program::ObjectEditKind::Remove,
+                    nir::program::ObjectEditKind::Slice,
                 ][operation - 14],
             },
         };

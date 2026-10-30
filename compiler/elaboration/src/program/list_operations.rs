@@ -21,9 +21,10 @@ impl Checker<'_, '_> {
             "object_append" => O::Append,
             "object_replace" => O::Replace,
             "object_remove" => O::Remove,
+            "object_slice" => O::Slice,
             _ => unreachable!(),
         };
-        let count = if matches!(operation, O::Append | O::Replace) {
+        let count = if matches!(operation, O::Append | O::Replace | O::Slice) {
             3
         } else {
             2
@@ -46,6 +47,7 @@ impl Checker<'_, '_> {
                     O::Append => Term::Optional(Box::new(p(P::Symbol))),
                     _ => p(P::Integer),
                 }),
+                2 if operation == O::Slice => Some(p(P::Integer)),
                 _ => None,
             };
             fields.push(self.expr(value, domain.as_ref())?);

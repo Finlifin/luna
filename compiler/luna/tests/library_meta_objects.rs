@@ -748,3 +748,93 @@ fn object_set_rejects_bad_indices_and_immutable_rebinding() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn object_ranges_preserve_order_domains_duplicates_and_snapshots() {
+    let source = include_str!("../../../development/examples/sysroot-meta-object-methods.fl");
+    assert_eq!(invoke(&format!("typealias Object=meta.Object;typealias Type=.Type'builtin;typealias char=.char'builtin;{source}")).unwrap(),Value::Bool(true));
+}
+
+#[test]
+fn object_range_failures_leave_inputs_usable_and_vm_recovers() {
+    let meta = include!("support/meta_source.rs");
+    let package = compile(&format!(
+        "mod meta {{{meta}}}
+        typealias Integer=.Integer'builtin;
+        comptime fn range_slice(start:Integer,end:Integer)->meta.Object {{
+            let input={{flag:true,'x',flag:false}};input.slice(start,end)
+        }}
+        comptime fn range_replace(start:Integer,end:Integer)->meta.Object {{
+            let input={{flag:true,'x',flag:false}};input.replace_range(start,end,{{false}})
+        }}"
+    ))
+    .unwrap();
+    let mut vm = Interpreter::for_comptime(&package, Default::default()).unwrap();
+    let integer = |value| Value::Integer(comptime_runtime::Integer::from_i128(value));
+    for name in ["range_slice", "range_replace"] {
+        for (start, end) in [
+            (-1, 0),
+            (0, -1),
+            (2, 1),
+            (0, 4),
+            (4, 4),
+            (i128::MAX, i128::MAX),
+        ] {
+            assert_eq!(
+                vm.invoke(
+                    support::id(&package, name),
+                    vec![integer(start), integer(end)]
+                )
+                .unwrap_err()
+                .kind,
+                comptime_interpretor::ErrorKind::IndexOutOfBounds
+            );
+        }
+        let before = vm.bytecode_invocations();
+        let Value::Object(value) = vm
+            .invoke(support::id(&package, name), vec![integer(0), integer(3)])
+            .unwrap()
+        else {
+            panic!("Object")
+        };
+        assert_eq!(
+            value.entries().len(),
+            if name == "range_slice" { 3 } else { 1 }
+        );
+        assert_eq!(
+            vm.bytecode_invocations() - before,
+            if name == "range_slice" { 3 } else { 13 }
+        );
+    }
+    for body in [
+        "fn bad(value:meta.Object)->meta.Object {value.slice(0,0)}",
+        "comptime fn bad(value:meta.Object)->meta.Object {value.slice(false,0)}",
+        "comptime fn bad(value:meta.Object)->meta.Object {value.slice(0,true)}",
+        "comptime fn bad(value:meta.Object)->meta.Object {value.replace_range(0,0,false)}",
+    ] {
+        assert!(
+            compile(&format!("mod meta {{{meta}}}{body}")).is_err(),
+            "{body}"
+        );
+    }
+}
+
+#[test]
+fn object_range_arguments_run_once_in_order_and_return_skips_edit() {
+    assert_eq!(invoke("typealias Integer=.Integer'builtin;typealias char=.char'builtin;
+        struct Trace {value:Integer}
+        impl Trace {
+            comptime fn input(self)->meta.Object {self.value=self.value * 10 + 1;let object={flag:true,'x',flag:false};object}
+            comptime fn bound(self,tag:Integer,value:Integer)->Integer {self.value=self.value * 10 + tag;value}
+            comptime fn replacement(self)->meta.Object {self.value=self.value * 10 + 4;let object={flag:'y'};object}
+        }
+        comptime fn early()->bool {
+            let input={flag:true};input.slice(do {return true;0},-1);false
+        }
+        comptime fn run()->bool {
+            var trace=Trace {value:0};
+            let changed=trace.input().replace_range(trace.bound(2,1),trace.bound(3,2),trace.replacement());
+            trace.value==1234 and changed.length()==3
+                and (changed.value<char>(1) matches 'y'?) and early()
+        }").unwrap(),Value::Bool(true));
+}

@@ -4810,3 +4810,46 @@ Validation in /home/fin/luna:
 - Final formatting: `/tmp/luna-tools-vo65d5vu/result.json`, exit 0. Existing
   unrelated unreachable-pattern warnings remain; no full-workspace or measured
   performance claim is made.
+
+### Ordered Object interval editing
+
+ObjectEdit now includes Slice, with two exact Integer endpoints in the ordinary
+operand packet. The shared tree/VM operation validates both endpoint domains
+before evaluating the packet, then checks 0 <= start <= end <= entry count.
+Selection moves complete typed entries, retaining positional entries, duplicate
+keys and payload identity. Work is charged against the existing invocation budget;
+this remains a functional value operation, not a writable or zero-copy view.
+
+meta.Object.slice exposes that checked primitive through a bound compiler symbol.
+meta.Object.replace_range composes slices and concat, supporting insertion and
+removal without changing either input snapshot. Bounds failure is an invocation
+error, consistent with existing single-entry Object edits. Evaluation order and
+early returns follow normal call rules. No new opcode interpreter or result-cache
+policy is introduced; ObjectEdit's existing S-expression Display names Slice.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-qpoegwbv/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib object_slice`:
+  exit 0, `/tmp/luna-tools-315vwln_/result.json`; both carriers check malformed
+  domains before effects, bad bounds/values after effects, and recovery without
+  mutation of the input snapshot.
+- `python3 -B development/check.py --timeout 900 -- test -p nir --test phases --test type_rewrite --test copy_budget`:
+  exit 0, `/tmp/luna-tools-98dqufh_/result.json`; Slice is included in operation
+  enumeration for phase checks, bounded copying, rewriting and Display.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test library_meta_objects`:
+  `/tmp/luna-tools-ltlm_i7_/result.json`; 27 cases passed, one new evaluation-order
+  fixture failed parsing because its bare trailing Object was parsed as a block.
+  Corrected it to bind the Object before returning it, without changing the case.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test library_meta_objects object_range_arguments`:
+  exit 0, `/tmp/luna-tools-b0yo1llg/result.json`; the corrected case checks receiver,
+  endpoints and replacement order (1234), single evaluation, and early return.
+  The preceding passing range cases include negative/reversed/oversized bounds,
+  recovery, declared domains, duplicate-key shadowing, optional layers, retained
+  normal-form heads and exact compiled activation counts for both public methods.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-q43t6gwd/result.json`; `git diff --check`: exit 0.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- development/examples/sysroot-meta-object-methods.fl --sysroot library --test-native`:
+  exit 0, `/tmp/luna-tools-y5hzmze3/result.json`; the public methods execute in
+  the actual sysroot, and their comptime observations stage into a passing native
+  test. Existing unrelated compiler warnings remain; no full-workspace claim.

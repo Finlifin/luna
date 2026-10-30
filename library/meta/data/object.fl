@@ -61,4 +61,26 @@ impl Object {
     pub pure comptime fn remove(self, index: Integer) -> Object {
         bindings.object_remove(self, index)
     }
+
+    {-
+        Select the half-open interval [start, end), preserving every entry's
+        name, domain and value. Empty ranges are valid, including at length().
+        Negative, reversed or out-of-range bounds fail the invocation.
+    -}
+    pub pure comptime fn slice(self, start: Integer, end: Integer) -> Object {
+        bindings.object_slice(self, start, end)
+    }
+
+    {-
+        Replace an interval with the complete ordered replacement. This also
+        supports insertion at an empty interval and removal with an empty Object.
+        Both input snapshots remain unchanged; duplicate names are not merged.
+    -}
+    pub pure comptime fn replace_range(self, start: Integer, end: Integer,
+        replacement: Object) -> Object {
+        -- Validate the entire interval before constructing the result.
+        self.slice(start, end);
+        self.slice(0, start).concat(replacement).concat(self.slice(end, self.length()))
+    }
+
 }

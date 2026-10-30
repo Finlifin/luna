@@ -462,7 +462,7 @@ fn capture_failure_does_not_rewrite_later_captures_or_clone_shared_body() {
 
 #[test]
 fn struct_reflection_rewrites_and_visits_its_subject() {
-    for operation in 0..18 {
+    for operation in 0..19 {
         let subject = Box::new(expr(K::TypeValue(rigid())));
         let mut query = expr(match operation {
             0 => K::StructFieldNames(subject),
@@ -496,6 +496,7 @@ fn struct_reflection_rewrites_and_visits_its_subject() {
                     nir::program::ObjectEditKind::Append,
                     nir::program::ObjectEditKind::Replace,
                     nir::program::ObjectEditKind::Remove,
+                    nir::program::ObjectEditKind::Slice,
                 ][operation - 14],
             },
         });

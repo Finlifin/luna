@@ -11,7 +11,7 @@ comptime fn run() -> bool {
         and changed.EntryType(1) == bool
         and (changed.value<bool>(1) matches false?)
         and (result.get<bool>(.tail) matches true?)
-        and mutable_entries() and nominal_storage()
+        and mutable_entries() and nominal_storage() and ranges()
 }
 
 
@@ -54,4 +54,31 @@ comptime fn nominal_storage() -> bool {
 {- Checked comptime observations can feed a native program through staging. -}
 test object_observation {
     inline if run() { assumes true; } else { assumes false; };
+}
+
+
+pure comptime fn Identity<T> -> Type { T }
+
+comptime fn ranges() -> bool {
+    let absent: ?bool = null;
+    let source: Object = {flag: true, 'x', flag: false, empty: absent, kind: Identity<bool>};
+    let middle = source.slice(1, 4);
+    let replacement: Object = {flag: 'y', false};
+    let changed = source.replace_range(1, 3, replacement);
+    let inserted = source.replace_range(5, 5, replacement);
+    let removed = source.replace_range(0, 5, {});
+    source.length() == 5 and middle.length() == 3
+        and (middle.key(0) matches null)
+        and middle.EntryType(0) == char
+        and (middle.get<bool>(.flag) matches false?)
+        and (middle.get<?bool>(.empty) match {v? => v matches null, null => false})
+        and (source.get<bool>(.flag) matches false?)
+        and changed.length() == 5
+        and (changed.get<char>(.flag) matches 'y'?)
+        and (changed.get<bool>(.flag) matches null)
+        and (changed.get<Type>(.kind) match {T? => T == Identity<bool>, null => false})
+        and inserted.length() == 7 and removed.length() == 0
+        and source.slice(0, 0).length() == 0
+        and source.slice(5, 5).length() == 0
+        and replacement.length() == 2
 }

@@ -60,3 +60,30 @@ comptime fn distinct_sizes() -> List<Integer> {
 去重输出仍复用现有 `append` 的完整表示检查，不承诺线性构造成本。
 真实 sysroot 用例位于 `development/examples/sysroot-meta-lists.fl`，同时覆盖
 有状态比较器、输入快照、排序组合与不调用回调的边界。
+
+## Object 区间编辑
+
+`object.slice(start, end)` 返回半开区间 `[start, end)` 内的条目。
+`object.replace_range(start, end, replacement)` 用 replacement 的全部条目替换该区间。
+索引是精确 Integer，必须满足 `0 <= start <= end <= object.length()`；
+负数、逆序和越界都会使 invocation 失败，与现有 Object 单项编辑一致。
+长度位置上的空区间合法；空区间替换用于插入，空 Object 替换用于删除。
+
+```flurry
+comptime fn edit_fields() -> Object {
+    let fields: Object = {name: char, enabled: bool, name: Symbol};
+    let selected = fields.slice(1, 3);
+    selected.replace_range(0, 1, {count: usize, char})
+    -- 顺序为 count: usize、无名 char、name: Symbol。
+}
+```
+
+条目的名字、声明顺序、完整值与类型身份一起保留。重复键不会合并；`get`
+仍只检查最后一个同名条目，不因其类型不匹配而回看此前条目。可选值的层次、
+Type 的 normal-form 头和嵌套 Object 也不会因区间编辑而改变。
+两个输入均保持快照，失败不会部分写回；实参按普通调用规则求值一次，
+提前 return 跳过编辑，已执行的实参副作用不回滚。
+
+切片使用受预算约束的 Object 操作，替换由切片与 concat 组合实现；结果是值，
+不是可写视图，不承诺常数时间或零拷贝。真实 sysroot 用例在
+`development/examples/sysroot-meta-object-methods.fl`。

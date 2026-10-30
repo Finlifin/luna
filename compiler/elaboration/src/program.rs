@@ -9698,7 +9698,7 @@ impl Checker<'_, '_> {
                 H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "enum_group_paths" | "enum_variant_paths" | "enum_variant_shapes" | "enum_variant_field_names" | "enum_variant_field_types")) => {
                     self.enum_reflection_builtin(expr, callee, args, expected)
                 }
-                H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "object_concat" | "object_append" | "object_replace" | "object_remove")) => {
+                H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "object_concat" | "object_append" | "object_replace" | "object_remove" | "object_slice")) => {
                     self.object_edit_builtin(expr, callee, args, expected)
                 }
                 H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "object_length" | "object_key" | "object_entry_type" | "object_value" | "object_get")) => {
