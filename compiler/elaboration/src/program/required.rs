@@ -1450,15 +1450,19 @@ impl Checker<'_, '_> {
                         package: u64::MAX,
                         local,
                     };
-                    mapping[*index] = Term::Rigid {
-                        declaration,
-                        sort: Sort::Type,
-                    };
-                    scoped_parameters.push(nir::DeclarationParameter {
-                        declaration,
-                        sort: Sort::Type,
-                    });
-                    scoped_arguments.push(symbol.clone());
+                    // Several prefix bindings can name the same caller slot.
+                    // Restore each slot once while retaining every local input.
+                    if matches!(mapping[*index], Term::Bound { .. }) {
+                        mapping[*index] = Term::Rigid {
+                            declaration,
+                            sort: Sort::Type,
+                        };
+                        scoped_parameters.push(nir::DeclarationParameter {
+                            declaration,
+                            sort: Sort::Type,
+                        });
+                        scoped_arguments.push(symbol.clone());
+                    }
                     if free.contains(binding) && !inputs.iter().any(|(id, _, _)| id == binding) {
                         inputs.push((*binding, p(P::Type), mapping[*index].clone()));
                     }

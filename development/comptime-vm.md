@@ -6121,3 +6121,62 @@ Validation from `/home/fin/luna`:
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
   `/tmp/luna-tools-r2ldjmm2/result.json`, exit 0. `git diff --check` passed.
   No full workspace test run was performed.
+
+## Ordinary Type defaults in contextual calls (2026-10-31)
+
+Missing ordinary Type inputs now complete through the shared contextual
+argument pipeline. All explicit inputs are obtained first in source order.
+A callee prefix frame then prepares omitted defaults through the last missing
+Type slot in parameter order. Earlier code, pattern and data inputs are
+available to those computations. Prepared defaults and post-default data
+state transfer to the invocation frame rather than executing again.
+
+Clause inference can provide checking context, but it does not supply an
+ordinary Type value. Each supplied or default Type value specializes subsequent
+input interfaces and constrains the final call candidate. Code defaults retain
+their provenance so forwarding preserves caller associations. The new prefix
+uses the existing capture environment, storage checkpoint and fuel machinery;
+interface copies are charged before default evaluation. Cached definitions
+remain unspecialized; prepared-default metadata is invocation-local and has an
+S-expression display.
+
+A prefix may bind several names to one caller Type slot. Required invocation
+now registers one restoration parameter per slot, retaining all local bindings;
+previously duplicate restoration declarations rejected a generic A -> T -> U
+default chain. This preserves caller scope rather than expanding normal forms.
+
+Validation from `/home/fin/luna`:
+
+- The initial dependent-default regression failed with unresolved call inference
+  before implementation: `/tmp/luna-tools-5cm4gmk2/result.json`, exit 101. The
+  companion fixture initially needed whitespace between `>` and `=` and was
+  corrected. An intermediate run exposed duplicate scoped restoration inputs:
+  `/tmp/luna-tools-ro7b7htb/result.json`, exit 101; that mechanism is fixed.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt_type_inputs --test cmtt --test cmtt_methods --test scoped_comptime_callables --test function_type_dependencies --test open_functions --no-fail-fast`:
+  `/tmp/luna-tools-08s98qfw/result.json`, exit 101. Type inputs: 21 passed;
+  methods: 144; scoped callables: 10; function type dependencies: 37;
+  open functions: 389. CMTT: 580 passed, with only the same three documented
+  Type-list/layout baseline failures. Existing expectations remain unchanged.
+- After adding explicit prefix-copy budget charging,
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt_type_inputs`:
+  `/tmp/luna-tools-xnbsddsq/result.json`, exit 0; all 21 tests passed. New tests
+  cover expression/pattern/data defaults, generic dependency chains, preserved
+  updates and evaluation counts, skipped overrides, incompatible inferred
+  contexts, caller code associations and selected trait implementations.
+
+Type computations whose identities remain unknown during definition checking
+still require the broader suspended-elaboration work. This stage does not
+claim complete CMTT, arbitrary default-dependent inference or whole-language
+support.
+
+The first expanded sysroot example reached the predicate checker and rejected
+an ordinary call inside `assumes` (`/tmp/luna-tools-4wpcz6ll/result.json`, exit 1).
+The example now binds the call result before checking its predicate, matching
+the existing supported verification boundary; no predicate rule was weakened.
+Format check: `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`,
+`/tmp/luna-tools-3anvu8z3/result.json`, exit 0. `git diff --check` passed.
+Final public-interface/native check:
+`python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-type-inputs.fl --sysroot library`,
+`/tmp/luna-tools-f83njyss/result.json`, exit 0. All three LLVM native tests
+passed with the complete sysroot, including bool/char generic default chains
+and pattern Type defaults. No full workspace test run was performed.

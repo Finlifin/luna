@@ -987,6 +987,7 @@ impl Checker<'_, '_> {
             let contextual = super::super::generators::Generator {
                 signature: template.contextual_signature(&mut self.required_steps, span)?,
                 input_values: template.input_values.clone(),
+                prepared_defaults: BTreeSet::new(),
                 captures: template.captures.clone(),
                 types: template.types.clone(),
                 defaults: signature

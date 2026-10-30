@@ -4,6 +4,7 @@
 use super::*;
 pub(in crate::program::cmtt) mod clauses;
 mod consumers;
+mod defaults;
 mod inference;
 mod inputs;
 mod matches;
@@ -22,6 +23,7 @@ pub(in crate::program) struct Generator<O = Interface> {
     pub(super) types: Vec<(DeclarationId, Term)>,
     pub(super) signature: CodeFunctionSignature<O>,
     pub(super) input_values: BTreeMap<usize, Term>,
+    pub(super) prepared_defaults: BTreeSet<usize>,
     pub(super) defaults: Vec<(usize, hir::HirId)>,
     pub(super) variadics: Vec<usize>,
     pub(super) body: Option<hir::BodyId>,
@@ -85,6 +87,10 @@ impl<O: fmt::Display> fmt::Display for Generator<O> {
         f.write_str(") (input-values")?;
         for (slot, value) in &self.input_values {
             write!(f, " (input {slot} {value})")?;
+        }
+        f.write_str(") (prepared-defaults")?;
+        for slot in &self.prepared_defaults {
+            write!(f, " {slot}")?;
         }
         f.write_str(") (inputs")?;
         for (binding, input) in &self.inputs {
@@ -395,6 +401,7 @@ impl Checker<'_, '_> {
                     output,
                 },
                 input_values: BTreeMap::new(),
+                prepared_defaults: BTreeSet::new(),
                 variadics: sig
                     .params
                     .iter()
@@ -695,6 +702,9 @@ impl Checker<'_, '_> {
     ) -> Result<(), Error> {
         let mut remaining = usize::try_from(*fuel).unwrap_or(usize::MAX);
         let result = (|| {
+            remaining = remaining
+                .checked_sub(definition.prepared_defaults.len())
+                .ok_or(nir::type_computations::Error::Budget)?;
             for (_, ty) in &definition.captures {
                 nir::type_computations::charge_term(ty, &mut remaining)?;
             }
@@ -1207,8 +1217,8 @@ impl Checker<'_, '_> {
             };
             // Every definition checks its defaults even when all calls override
             // them. Invocation evaluates only omitted inputs, in prefix order.
-            let from_default = argument.is_none();
-            let supplied = if self.checking_code_generator || from_default {
+            let from_default = argument.is_none() || definition.prepared_defaults.contains(&index);
+            let supplied = if self.checking_code_generator || argument.is_none() {
                 default
                     .map(|value| self.generator_default(value, input))
                     .transpose()?

@@ -56,3 +56,23 @@ test {
     let letter = ~[value=input_letter]<packet_expression(char)>;
     assumes letter == 'p';
 }
+
+comptime fn default_expression(comptime A: Type,
+    comptime .T: Type = A, comptime .U: Type = T) -> <value: U |- U> {
+    identity_code(U)
+}
+
+comptime fn default_pattern(comptime .T: Type = bool) -> <T -| result: T> {
+    binding_code(T)
+}
+
+fn select_default(comptime T: Type, input: T) -> T {
+    ~[value=input]<default_expression(T)>
+}
+
+test {
+    let ~<default_pattern()> = select_default(bool, true);
+    assumes result;
+    let letter = select_default(char, 'd');
+    assumes letter == 'd';
+}

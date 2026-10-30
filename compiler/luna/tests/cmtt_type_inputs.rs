@@ -203,3 +203,102 @@ fn unknown_packet_type_values_are_not_inferred_from_peer_arguments() {
         "{failure}"
     );
 }
+
+#[test]
+fn ordinary_type_defaults_bind_expression_pattern_and_data_interfaces() {
+    let source = "typealias Type=.Type'builtin;
+        comptime fn identity(comptime .T:Type=bool)-><x:T|-T> {'(x)}
+        comptime fn pattern(comptime .T:Type=bool)-><T -| value:T> {'<value>}
+        comptime fn inspect(comptime .T:Type=bool,.code:<x:T|-T> = identity(.T=T))->bool {true}
+        fn run()->bool {
+            let input=true;let result=~[x=input]<identity()>;
+            let ~<pattern()> = result;
+            const ok=inspect();value and ok
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn ordinary_type_defaults_depend_on_preceding_inputs() {
+    let source = "typealias Type=.Type'builtin;
+        comptime fn identity(comptime A:Type,comptime .T:Type=A,
+            comptime .U:Type=T)-><x:U|-U> {'(x)}
+        comptime fn forward(comptime T:Type)-><x:T|-T> {identity(T)}
+        fn pick(comptime T:Type,input:T)->T {~[x=input]<forward(T)>}
+        fn run()->bool {pick(bool,true) and pick(.char'builtin,'d') == 'd'}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn type_default_prefixes_execute_once_and_retain_updated_values() {
+    let source = "typealias Type=.Type'builtin;typealias Count=.Integer'builtin;
+        struct State {count:Count}
+        comptime fn emit(state:State,
+            .before:bool=do {state.count=state.count * 10 + 2;true},
+            comptime .T:Type=do {state.count=state.count * 10 + 3;bool},
+            .after:bool=do {state.count=state.count * 10 + 4;true})-><|-bool> {
+            let result=state.count == 1234;'(result)
+        }
+        fn run()->bool {~<emit(State {count:1})>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn explicit_type_inputs_skip_their_defaults() {
+    let source = "typealias Type=.Type'builtin;
+        comptime fn Forever()->Type {while true {} bool}
+        comptime fn identity(comptime .T:Type=Forever())-><x:T|-T> {'(x)}
+        fn run()->bool {let input=true;~[x=input]<identity(.T=bool)>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn type_defaults_cannot_be_replaced_by_contextual_inference() {
+    let source = "typealias Type=.Type'builtin;
+        comptime fn identity(comptime .T:Type=bool,value:T)-><|-T> {'(value)}
+        fn run()->bool {const code=identity('x');true}";
+    let failure = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+    assert!(failure.contains("elaboration failed"), "{failure}");
+}
+
+#[test]
+fn code_defaults_before_type_inputs_preserve_caller_associations() {
+    let source = "typealias Type=.Type'builtin;
+        comptime fn forward(first:<x:bool|-bool>,
+            .second:<x:bool|-bool> = first,comptime .T:Type=bool)-><x:bool|-bool> {second}
+        fn run(flag:bool)->bool {
+            const code=forward('[input=flag](flag));let flag=false;~<code>
+        }";
+    assert_eq!(
+        run(source, "run", vec![Value::Bool(true)]),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        run(source, "run", vec![Value::Bool(false)]),
+        Value::Bool(false)
+    );
+}
+
+#[test]
+fn trait_dispatch_uses_completed_ordinary_type_defaults() {
+    let source = "typealias Type=.Type'builtin;
+        trait Builder {
+            comptime fn expression(comptime .T:Type=bool)-><x:T|-T>;
+            comptime fn pattern(comptime .T:Type=bool)-><T -| value:T>;
+            comptime fn inspect(comptime .T:Type=bool,
+                .code:<x:T|-T> = '(x))->bool;
+        }
+        struct Reader {}
+        impl Builder for Reader {
+            comptime fn expression(comptime .U:Type=bool)-><x:U|-U> {'(x)}
+            comptime fn pattern(comptime .U:Type=bool)-><U -| value:U> {'<value>}
+            comptime fn inspect(comptime .U:Type=bool,
+                .code:<x:U|-U> = '(x))->bool {true}
+        }
+        fn run()->bool {
+            let input=true;
+            let ~<Reader.as(Builder).pattern()> = ~[x=input]<Reader.as(Builder).expression()>;
+            const ok=Reader.as(Builder).inspect();value and ok
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}

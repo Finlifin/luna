@@ -690,6 +690,53 @@ impl Checker<'_, '_> {
             values[route.parameter] = Some(value);
             actual[route.parameter] = Some(ty);
         }
+        let mut prepared_defaults = BTreeSet::new();
+        if let Some(last) = template
+            .input_binders
+            .keys()
+            .copied()
+            .filter(|slot| values[*slot].is_none())
+            .max()
+        {
+            let candidate = self.generator_call_candidate_with_result_context(
+                owner,
+                &parameters,
+                &mut type_plan,
+                &pending,
+                &deferred_clauses,
+                &mut completed,
+                &scheme,
+                &actual,
+                &partial,
+                expected_type.as_ref(),
+                result_context,
+                site.span,
+            )?;
+            let view = self.generator_inference_view(
+                &template,
+                &parameters,
+                &type_plan,
+                &candidate,
+                site.span,
+            )?;
+            // Clause hints may type-check prefix data, but ordinary Type
+            // inputs must still come from their supplied or default values.
+            let types = view
+                .types
+                .iter()
+                .map(|(_, ty)| ty.clone())
+                .collect::<Vec<_>>();
+            let definition = self.instantiate_code_generator(&template, &types, site.span)?;
+            prepared_defaults = self.complete_generator_type_defaults(
+                owner,
+                definition,
+                last,
+                &mut values,
+                &mut actual,
+                &mut completed.inputs,
+                site.span,
+            )?;
+        }
         let types = if parameters.is_empty() {
             type_plan
         } else {
@@ -801,13 +848,12 @@ impl Checker<'_, '_> {
         }
         formation?;
         let mut definition = self.instantiate_code_generator(&template, &types, site.span)?;
+        definition.prepared_defaults = prepared_defaults;
         for (&slot, binder) in &template.input_binders {
-            let value = completed.inputs.get(&binder.declaration).ok_or_else(|| {
-                error(
-                    site.span,
-                    "contextual Type parameter default completion is not yet implemented",
-                )
-            })?;
+            let value = completed
+                .inputs
+                .get(&binder.declaration)
+                .ok_or_else(|| error(site.span, "contextual Type input was not completed"))?;
             self.specialize_generator_input(&mut definition, slot, value, site.span)?;
         }
         for ((value, actual), (_, input)) in values.iter_mut().zip(&actual).zip(&definition.inputs)
