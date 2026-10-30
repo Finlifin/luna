@@ -1643,17 +1643,13 @@ fn validate_head_arguments_with_domains(
     if binders.len() != arguments.len() {
         return Err("implementation argument count mismatch".into());
     }
+    let ids: Vec<_> = binders.iter().map(|binder| binder.declaration).collect();
+    let substitution = nir::DeclarationSubstitution::bounded(&ids, domains, arguments, &[], fuel)?;
     for (index, (binder, argument)) in binders.iter().zip(arguments).enumerate() {
         let declared = domains
             .get(index)
             .unwrap_or(&nir::Term::Primitive(nir::Primitive::Type));
-        let domain = nir::type_computations::instantiate_parameters_bounded(
-            declared,
-            &binders[..index],
-            &arguments[..index],
-            &[],
-            fuel,
-        )?;
+        let domain = substitution.instantiate_bounded(declared, fuel)?;
         nir::type_computations::charge_term(argument, fuel)?;
         if let Term::TypeListValue(elements) = argument {
             let package = layouts.ok_or_else(|| {
@@ -1807,6 +1803,37 @@ fn validate_head_arguments_with_domains(
 #[cfg(test)]
 mod captured_head_domains {
     use super::*;
+
+    #[test]
+    fn completed_domains_admit_type_valued_indices_and_later_parameters() {
+        let ids: Vec<_> = (1..=3)
+            .map(|local| DeclarationId { package: 81, local })
+            .collect();
+        let type_domain = Term::Primitive(nir::Primitive::Type);
+        let boolean = Term::Primitive(nir::Primitive::Bool);
+        let domains = [
+            type_domain.clone(),
+            Term::Rigid {
+                declaration: ids[0],
+                sort: Sort::Type,
+            },
+            type_domain.clone(),
+        ];
+        let binders = nir::declaration_parameters(&ids, &domains).unwrap();
+        let arguments = [type_domain.clone(), boolean.clone(), boolean.clone()];
+        assert!(validate_head_arguments(&binders, &domains, &arguments, &mut 1000).is_ok());
+        for invalid in [Term::Char('x'), Term::Bool(true)] {
+            let arguments = [type_domain.clone(), boolean.clone(), invalid];
+            assert!(validate_head_arguments(&binders, &domains, &arguments, &mut 1000).is_err());
+        }
+        let invalid = [type_domain, Term::Bool(true), Term::Bool(true)];
+        assert!(validate_head_arguments(&binders, &domains, &invalid, &mut 1000).is_err());
+        assert!(matches!(
+            validate_head_arguments(&binders, &domains, &arguments, &mut 0),
+            Err(nir::NominalAdmissionError::Budget)
+        ));
+        assert!(validate_head_arguments(&binders, &domains, &arguments, &mut 1000).is_ok());
+    }
 
     #[test]
     fn symbolic_admission_requires_the_same_binder_and_unchanged_domain() {

@@ -3263,3 +3263,23 @@ Production primitive lookup and all test expectations are unchanged.
 from `/home/fin/luna`: `/tmp/luna-tools-fzhxygw6/result.json`, exit 0, all 81 cases
 passed without exclusions. This resolves the 67 earlier fixture failures rather
 than changing template semantics. `git diff --check` passed.
+
+### Implementation argument admission follows completed domains
+
+Implementation head admission now uses bounded `DeclarationSubstitution` for
+parameter domains. A dependent input completed to `Type` can carry a type value
+without making later parameter substitution fail the original fixed-sort check.
+Value/layout admission and captured-domain evidence remain mandatory. Regression
+coverage includes later parameters, wrong sorts, budget exhaustion and recovery.
+
+Validation in `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution`: exit 0,
+  `/tmp/luna-tools-6fr6bhcg/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: exit 0,
+  `/tmp/luna-tools-upa5yo_6/result.json`.
+
+The source regressions for `Key<Type, bool>` inherent/trait method selection still
+fail before admission: head inference creates fixed-sort metavariables and leaves
+head obligations unsettled (`/tmp/luna-tools-54lpr6cz/result.json`). These pending
+source tests remain outside this admission commit. Head inference and proof replay
+still need completed-domain integration; this stage does not claim source support.
