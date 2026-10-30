@@ -208,6 +208,28 @@ fn dumps_are_stable_escaped_and_balanced() {
     );
 }
 
+fn primitive_library() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/builtin/primitives.fl")
+}
+fn with_primitives(mut args: Vec<String>) -> Vec<String> {
+    args.extend([
+        "--package".into(),
+        "11".into(),
+        "400".into(),
+        "builtin".into(),
+        primitive_library().to_string_lossy().into_owned(),
+    ]);
+    for requester in ["3", "9"] {
+        args.extend([
+            "--dependency".into(),
+            requester.into(),
+            "builtin".into(),
+            "11".into(),
+        ]);
+    }
+    args
+}
+
 struct SourceFixture(std::path::PathBuf);
 impl SourceFixture {
     fn new(app: &str, dependency: &str) -> Self {
@@ -218,8 +240,12 @@ impl SourceFixture {
             NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir(&dir).unwrap();
-        std::fs::write(dir.join("app.fl"), app).unwrap();
-        std::fs::write(dir.join("dependency.fl"), dependency).unwrap();
+        std::fs::write(dir.join("app.fl"), format!("use builtin.bool;\n{app}")).unwrap();
+        std::fs::write(
+            dir.join("dependency.fl"),
+            format!("use builtin.bool;\n{dependency}"),
+        )
+        .unwrap();
         Self(dir)
     }
     fn compile(&self, modes: &[(u64, &str)]) -> Result<luna::frontend::Artifact, String> {
@@ -235,7 +261,7 @@ impl SourceFixture {
         protocols: &elaboration::program::Protocols,
         target: Option<TargetData>,
     ) -> Result<luna::frontend::Artifact, String> {
-        let packages = vec![
+        let mut packages = vec![
             SourcePackage {
                 resolution_id: 3,
                 identity: 100,
@@ -256,7 +282,7 @@ impl SourceFixture {
                     .join("../../library/build/lib.fl"),
             },
         ];
-        let dependencies = vec![
+        let mut dependencies = vec![
             resolve::DependencyEdge {
                 requester: 3,
                 alias: "build".into(),
@@ -273,6 +299,17 @@ impl SourceFixture {
                 provider: 7,
             },
         ];
+        packages.push(SourcePackage {
+            resolution_id: 11,
+            identity: 400,
+            name: "builtin".into(),
+            entry: primitive_library(),
+        });
+        dependencies.extend([3, 7, 9].map(|requester| resolve::DependencyEdge {
+            requester,
+            alias: "builtin".into(),
+            provider: 11,
+        }));
         luna::packages::compile_with_definitions(
             &packages,
             &dependencies,
@@ -458,7 +495,7 @@ fn package_cli_and_stream_transport_mode_and_invalidate_reuse() {
         "",
     );
     let build = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/build/lib.fl");
-    let base = vec![
+    let base = with_primitives(vec![
         "--package".to_string(),
         "3".into(),
         "100".into(),
@@ -477,7 +514,7 @@ fn package_cli_and_stream_transport_mode_and_invalidate_reuse() {
         "3".into(),
         "--emit".into(),
         "nir".into(),
-    ];
+    ]);
     let mut frames = String::new();
     for mode in [
         Some("debug"),
@@ -917,7 +954,7 @@ fn resident_target_inputs_recompile_changes_and_recover_after_missing_config() {
         "",
     );
     let build = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/build/lib.fl");
-    let base = vec![
+    let base = with_primitives(vec![
         "--package".to_string(),
         "3".into(),
         "100".into(),
@@ -936,7 +973,7 @@ fn resident_target_inputs_recompile_changes_and_recover_after_missing_config() {
         "3".into(),
         "--emit".into(),
         "nir".into(),
-    ];
+    ]);
     let mut frames = String::new();
     for feature in [
         Some("true"),
@@ -1412,7 +1449,7 @@ fn metadata_wire_stream_invalidates_and_recovers_without_stale_fallback() {
         "",
     );
     let build = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/build/lib.fl");
-    let base = vec![
+    let base = with_primitives(vec![
         "--package".to_string(),
         "3".into(),
         "100".into(),
@@ -1431,7 +1468,7 @@ fn metadata_wire_stream_invalidates_and_recovers_without_stale_fallback() {
         "3".into(),
         "--emit".into(),
         "nir".into(),
-    ];
+    ]);
 
     let encoded = |value| {
         encode_hex(&[Input {
@@ -1510,4 +1547,77 @@ fn metadata_wire_stream_invalidates_and_recovers_without_stale_fallback() {
         first,
     ]);
     assert!(luna::package_cli::parse(duplicate.into_iter().map(Into::into)).is_err());
+}
+
+#[test]
+fn metadata_selector_calls_and_saved_origins_execute_as_bytecode() {
+    let fixture = SourceFixture::new(
+        r#"
+        typealias str=.str'builtin;
+        comptime fn select(alias:str)->str {alias}
+        comptime fn run()->bool {
+            let own=build.package_metadata(select("dependency")).features;
+            let foreign=dependency.saved(select("build")).features;
+            (own.get(.enabled,bool) matches true?) and (foreign.get(.enabled,bool) matches false?)
+        }
+    "#,
+        "pub const saved=build.package_metadata;",
+    );
+    let luna::frontend::Artifact::Nir(package) = fixture
+        .compile_configured(&metadata_protocols(), None)
+        .unwrap()
+    else {
+        panic!("expected NIR")
+    };
+    let entry = package
+        .functions
+        .iter()
+        .find(|f| f.name == "run")
+        .unwrap()
+        .declaration;
+    let select = package
+        .functions
+        .iter()
+        .find(|f| f.name == "select")
+        .unwrap()
+        .declaration;
+    let mut vm = comptime_interpretor::Interpreter::for_comptime(
+        &package,
+        comptime_interpretor::Budget {
+            steps: 1_000_000,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for _ in 0..2 {
+        let before = vm.bytecode_invocations();
+        let start = vm.events().len();
+        assert_eq!(
+            vm.invoke(entry, vec![]).unwrap(),
+            comptime_interpretor::Value::Bool(true)
+        );
+        let events = &vm.events()[start..];
+        // Each created closure is invoked once in this fixture: direct lookup,
+        // the saved callable's initializer, and the saved lookup itself.
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, comptime_interpretor::Event::CreateClosure { .. }))
+                .count(),
+            3
+        );
+        assert_eq!(
+            vm.bytecode_invocations() - before,
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    comptime_interpretor::Event::EnterFunction(_)
+                        | comptime_interpretor::Event::CreateClosure { .. }
+                ))
+                .count(),
+            "{events:?}"
+        );
+        assert_eq!(events.iter().filter(|event|matches!(event,comptime_interpretor::Event::EnterFunction(id) if *id==select)).count(),2);
+    }
 }

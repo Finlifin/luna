@@ -1,3 +1,5 @@
+use builtin.bool;
+
 typealias Symbol = .Symbol'builtin;
 typealias Integer = .Integer'builtin;
 typealias Object = .Object'builtin;

@@ -7,6 +7,7 @@ pub mod definitions;
 pub mod instances;
 pub mod leaf_inputs;
 pub mod lists;
+pub mod metadata;
 pub mod normal_types;
 pub mod objects;
 pub mod observations;
@@ -93,6 +94,12 @@ pub enum Op {
     CheckPredicate {
         value: Register,
         condition_source: SourceRange,
+    },
+    CheckBuildMetadata,
+    ReadBuildMetadata {
+        destination: Register,
+        selector: Register,
+        snapshot: Arc<metadata::Snapshot>,
     },
     CheckDefinitionBuild(Arc<definitions::Build>),
     BuildDefinition {
@@ -583,6 +590,15 @@ impl fmt::Display for Program {
                     f,
                     "(check-predicate %{value} (condition-source {} {}))",
                     condition_source.start, condition_source.end
+                )?,
+                Op::CheckBuildMetadata => write!(f, "(check-build-metadata)")?,
+                Op::ReadBuildMetadata {
+                    destination,
+                    selector,
+                    snapshot,
+                } => write!(
+                    f,
+                    "(read-build-metadata %{destination} %{selector} {snapshot})"
                 )?,
                 Op::CheckDefinitionBuild(build) => write!(f, "(check-definition-build {build})")?,
                 Op::BuildDefinition {
@@ -1360,6 +1376,40 @@ fn compile_root<'a>(
                                 constructor,
                             },
                         );
+                    }
+                    K::BuildMetadata {
+                        owner,
+                        selector,
+                        entries,
+                    } => {
+                        *fuel = fuel
+                            .checked_sub(entries.len().saturating_add(1))
+                            .ok_or(Error::Budget(source))?;
+                        let mut copied = Vec::with_capacity(entries.len());
+                        for (alias, provider, value) in entries {
+                            *fuel = fuel.checked_sub(alias.len()).ok_or(Error::Budget(source))?;
+                            let value = value
+                                .as_ref()
+                                .map(|value| copy_term(value, fuel, source))
+                                .transpose()?;
+                            copied.push((alias.clone(), *provider, value));
+                        }
+                        let snapshot = Arc::new(metadata::Snapshot {
+                            owner: *owner,
+                            output: copy_term(&expr.ty, fuel, source)?,
+                            entries: copied,
+                        });
+                        let value = fresh();
+                        emit(
+                            &mut work,
+                            Op::ReadBuildMetadata {
+                                destination: dst,
+                                selector: value,
+                                snapshot,
+                            },
+                        );
+                        work.push(Work::Expression(selector, value));
+                        emit(&mut work, Op::CheckBuildMetadata);
                     }
                     K::BuildStruct(request) | K::BuildEnum(request) => {
                         let build = Arc::new(definitions::Build {

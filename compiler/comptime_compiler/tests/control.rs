@@ -761,3 +761,35 @@ fn structure_shape_dumps_escape_labels_and_keep_computation_outside_metadata() {
     assert_eq!(dump, compile(&body, &mut 1000).unwrap().to_string());
     assert!(matches!(compile(&body, &mut 5), Err(Error::Budget(_))));
 }
+
+#[test]
+fn metadata_code_meters_snapshot_copy_and_dumps_origin_and_unavailable_inputs() {
+    let body = Expr {
+        source: SourceRange { start: 1, end: 2 },
+        ty: Term::Primitive(Primitive::Bool),
+        kind: K::BuildMetadata {
+            owner: 7,
+            selector: Box::new(Expr {
+                source: SourceRange { start: 1, end: 2 },
+                ty: Term::Primitive(Primitive::Str),
+                kind: K::Literal(nir::program::Literal::String("a\"\n".into())),
+            }),
+            entries: vec![
+                ("a\"\n".into(), 9, Some(Term::Bool(true))),
+                ("missing".into(), 11, None),
+            ],
+        },
+    };
+    let dump = compile(&body, &mut 1000).unwrap().to_string();
+    assert!(dump.contains("(owner 7)"));
+    assert!(
+        dump.contains("(entry \"a\\\"\\n\" (provider 9) (value (bool true)))"),
+        "{dump}"
+    );
+    assert!(
+        dump.contains("(entry \"missing\" (provider 11) (unavailable))"),
+        "{dump}"
+    );
+    assert_eq!(dump, compile(&body, &mut 1000).unwrap().to_string());
+    assert!(matches!(compile(&body, &mut 1), Err(Error::Budget(_))));
+}

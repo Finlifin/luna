@@ -2,59 +2,74 @@
 use super::*;
 
 impl Interpreter<'_> {
-    #[inline(never)]
+    pub(super) fn check_build_metadata(&self, source: SourceRange) -> Result<(), Error> {
+        if !self.comptime_only {
+            return Err(self.failure(ErrorKind::PhaseMismatch, Some(source)));
+        }
+        Ok(())
+    }
+
+    pub(super) fn read_build_metadata(
+        &mut self,
+        owner: u64,
+        output: &Term,
+        entries: &[comptime_compiler::metadata::Entry],
+        selector: Value,
+        source: SourceRange,
+    ) -> Result<Value, Error> {
+        let Value::String(alias) = selector else {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        };
+        for (name, provider, value) in entries {
+            self.integer_operation(Some(source), |budget| {
+                budget.consume(name.len().min(alias.len()).saturating_add(1))
+            })?;
+            if name == alias.as_ref() {
+                let value = value.as_ref().ok_or_else(|| {
+                    self.failure(
+                        ErrorKind::BuildMetadataUnavailable {
+                            owner,
+                            provider: Some(*provider),
+                            alias: alias.to_string(),
+                        },
+                        Some(source),
+                    )
+                })?;
+                return self
+                    .decode_immutable_input(value, output)
+                    .map_err(|mut error| {
+                        error.source = Some(source);
+                        error
+                    });
+            }
+        }
+        Err(self.failure(
+            ErrorKind::BuildMetadataUnavailable {
+                owner,
+                provider: None,
+                alias: alias.to_string(),
+            },
+            Some(source),
+        ))
+    }
+
     pub(super) fn eval_build_metadata(
         &mut self,
         expr: &Expr,
         environment: &mut Environment,
     ) -> Result<Flow, Error> {
-        match &expr.kind {
-            K::BuildMetadata {
-                owner,
-                selector,
-                entries,
-            } => {
-                if !self.comptime_only {
-                    return Err(self.failure(ErrorKind::PhaseMismatch, Some(expr.source)));
-                }
-                let Value::String(alias) = value!(self.eval(selector, environment)) else {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                };
-                for (name, provider, value) in entries {
-                    self.integer_operation(Some(expr.source), |budget| {
-                        budget.consume(name.len().min(alias.len()).saturating_add(1))
-                    })?;
-                    if name == alias.as_ref() {
-                        let value = value.as_ref().ok_or_else(|| {
-                            self.failure(
-                                ErrorKind::BuildMetadataUnavailable {
-                                    owner: *owner,
-                                    provider: Some(*provider),
-                                    alias: alias.to_string(),
-                                },
-                                Some(expr.source),
-                            )
-                        })?;
-                        return self
-                            .decode_immutable_input(value, &expr.ty)
-                            .map(Flow::Value)
-                            .map_err(|mut error| {
-                                error.source = Some(expr.source);
-                                error
-                            });
-                    }
-                }
-                Err(self.failure(
-                    ErrorKind::BuildMetadataUnavailable {
-                        owner: *owner,
-                        provider: None,
-                        alias: alias.to_string(),
-                    },
-                    Some(expr.source),
-                ))
-            }
-            _ => unreachable!("expression dispatcher selected an incompatible observation"),
-        }
+        let K::BuildMetadata {
+            owner,
+            selector,
+            entries,
+        } = &expr.kind
+        else {
+            unreachable!()
+        };
+        self.check_build_metadata(expr.source)?;
+        let selector = value!(self.eval(selector, environment));
+        self.read_build_metadata(*owner, &expr.ty, entries, selector, expr.source)
+            .map(Flow::Value)
     }
     pub(super) fn eval_observation(
         &mut self,
@@ -358,3 +373,7 @@ impl Interpreter<'_> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "metadata_tests.rs"]
+mod metadata_tests;

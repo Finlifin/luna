@@ -1066,6 +1066,21 @@ impl<'a> Interpreter<'a> {
                     )?;
                 }
 
+                Op::CheckBuildMetadata => self.check_build_metadata(source)?,
+                Op::ReadBuildMetadata {
+                    destination,
+                    selector,
+                    snapshot,
+                } => {
+                    let selector = frame.slots[*selector].take().ok_or_else(missing)?;
+                    frame.slots[*destination] = Some(self.read_build_metadata(
+                        snapshot.owner,
+                        &snapshot.output,
+                        &snapshot.entries,
+                        selector,
+                        source,
+                    )?);
+                }
                 Op::CheckDefinitionBuild(build) => {
                     self.check_definition_build(&build.output, source)?
                 }

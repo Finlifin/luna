@@ -4659,3 +4659,37 @@ Validation in /home/fin/luna:
   exit 0, `/tmp/luna-library-t40jvoi5/summary.json`; all four struct and three
   enum native cases pass through the actual sysroot, including field transforms,
   reflection and batch composition of generated definitions.
+
+### Compile source-owned build metadata reads
+
+BuildMetadata now lowers to phase admission, ordinary selector expression code,
+and one lookup/decode instruction. Nested selector calls run on the invocation
+stack, while return exits before lookup. Both engines share selected-entry decode
+and the exact owner/provider/alias diagnostics for unknown aliases versus known
+dependencies with unavailable inputs. Malformed unselected values remain unread.
+
+Compiled descriptors retain only the immutable snapshot already present in NIR;
+alias strings and stored terms are charged before copying. They contain neither
+selector results nor decoded metadata values. Saved/forwarded callables retain
+their defining package's dependency mapping. Repeated calls still evaluate their
+selector and decode the selected value. Dump output includes escaped aliases,
+owner/provider identities and explicit unavailable entries.
+
+The build-context fixtures now supply the real primitive package and import bool
+as an ordinary alias, including resident CLI frames. build's TargetFeatures also
+imports builtin.bool explicitly; no keyword fallback is introduced.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-mvzvejgy/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor metadata`:
+  exit 0, `/tmp/luna-tools-ggsddpye/result.json`; includes descriptor copy budgets
+  and dump escaping, selected-only decoding, distinct missing-input diagnostics,
+  selector effects exactly once, phase rejection, early return and recovery.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test build_context`:
+  exit 0, `/tmp/luna-tools-yrjsatif/result.json`; all 33 cases, including saved
+  origin, resident invalidation/recovery, explicit compiled activation counts,
+  and real-sysroot metadata/target execution at LLVM O0 and O3. Compiled entry
+  counts include the anonymous saved-callable initializer, not just named events.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-6pxvedvj/result.json`; `git diff --check`: exit 0.
