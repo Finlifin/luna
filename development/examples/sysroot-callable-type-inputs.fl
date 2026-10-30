@@ -38,3 +38,23 @@ test {
     assumes staged;
     assumes staged_number;
 }
+
+comptime fn capturing_callback(comptime T: Type)
+    -> %{flag: bool, saved: Type} comptime fn() -> Type {
+    var flag = false;
+    let saved = T;
+    || { flag = not flag; if flag { saved } else { bool } }
+}
+
+comptime fn check_captured(comptime T: Type,
+    comptime .action: %{flag: bool, saved: Type} comptime fn() -> Type = capturing_callback(T)) -> bool {
+    action() == T and action() == bool and action() == T
+}
+
+test scoped_capture_state {
+    inline if check_captured(bool) and check_captured(char) {
+        assumes true;
+    } else {
+        assumes false;
+    };
+}

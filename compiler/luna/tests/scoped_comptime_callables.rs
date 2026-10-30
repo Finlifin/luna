@@ -207,3 +207,51 @@ fn retained_callable_signatures_close_nominal_dependencies_without_bodies() {
     );
     graph.validate(&mut 100_000).unwrap();
 }
+
+#[test]
+fn scoped_default_restores_captured_type_and_executable_body() {
+    let source = "typealias Type = .Type'builtin;
+        comptime fn callback(comptime T:Type)->%{saved:Type} comptime fn(T)->T {
+            let saved=T;
+            |value:T| {let observed=saved; value}
+        }
+        comptime fn dispatch(comptime T:Type,
+            comptime .action:%{saved:Type} comptime fn(T)->T=callback(T), value:T)->T {
+            action(value)
+        }
+        const answer=dispatch(bool,true);
+        comptime fn run()->bool {answer}";
+    let package = support::compile_with_protocols(source, &Default::default()).unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn scoped_default_restores_captured_types_and_keeps_mutable_state_between_calls() {
+    let source = r#"typealias Type = .Type'builtin;
+        typealias char = .char'builtin;
+
+comptime fn capturing_callback(comptime T: Type)
+    -> %{flag: bool, saved: Type} comptime fn() -> Type {
+    var flag = false;
+    let saved = T;
+    || { flag = not flag; if flag { saved } else { bool } }
+}
+
+comptime fn check_captured(comptime T: Type,
+    comptime .action: %{flag: bool, saved: Type} comptime fn() -> Type = capturing_callback(T)) -> bool {
+    action() == T and action() == bool and action() == T
+}
+
+        const a = check_captured(bool);
+        const b = check_captured(char);
+        comptime fn run()->bool {a and b}
+    "#;
+    let package = support::compile_with_protocols(source, &Default::default()).unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}

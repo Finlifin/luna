@@ -12,6 +12,7 @@ mod aggregate_values;
 mod bytecode;
 mod cleanup;
 mod code_values;
+mod scoped_restore;
 pub use code_values::CodeValue;
 mod bit_operations;
 mod bit_representation;

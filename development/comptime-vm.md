@@ -5800,3 +5800,50 @@ Validation from `/home/fin/luna`:
   `/tmp/luna-library-0sikoxc8/summary.json`.
 - Formatting completed via development/command.py cargo fmt --all;
   `/tmp/luna-tools-jul0ajw7/result.json`; git diff --check passed.
+
+## Scoped closure result transport (2026-10-31)
+
+Required-result restoration now delegates to the VM's bounded value-graph
+transport. It substitutes the closure signature, executable body, instance
+arguments and every captured value together. Capture cells and repeated closure
+objects are memoized by producer identity, so the restored graph retains its
+internal sharing but never aliases producer-owned cells. A failed substitution,
+invalid ownership state or exhausted budget cannot partially update the producer.
+Named capture-free instances keep their identity-only FunctionInstance transport;
+anonymous/capturing closures retain their actual body and environment.
+
+This closes the earlier boundary for acyclic owned capture graphs returned from
+abstract Type scopes. Quoted code, pointers, active comptime references, runtime
+trait-method identities and cyclic capture graphs still reject transport. No
+invocation-result cache policy changes, runtime execution permission or source
+pointer semantics are introduced. Type restoration still preserves normal-form
+heads and checks the caller telescope. This is graph transport, not serialization
+of arbitrary interpreter state.
+
+Source regressions call generic defaults returning closures, restore bool/char
+Type captures and T-dependent callable bodies, and observe mutable captured
+state across repeated calls. VM regressions check shared cells, repeated closure
+identity, producer isolation, budget failure/retry, cycles and nesting limits.
+Splitting body substitution and variant handlers also prevents the large closure
+transport stack frame from overflowing on deeply nested ordinary result packets.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test scoped_comptime_callables`:
+  10 tests passed; `/tmp/luna-tools-m0a57gz8/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor -p elaboration --lib scoped`:
+  9 VM and 3 elaboration scoped tests passed;
+  `/tmp/luna-tools-7ctb415r/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib required::restore`:
+  both restoration regressions passed; `/tmp/luna-tools-16vx4z0k/result.json`.
+- The first real-sysroot native fixture used comptime constants directly in a
+  runtime assumes and correctly failed the Splice boundary. The fixture now
+  performs its check through inline if; no cross-stage rule was relaxed.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-callable-type-inputs.fl --sysroot library`:
+  both real sysroot native tests passed, exit 0;
+  `/tmp/luna-tools-d33ag46p/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test function_type_dependencies --test scoped_comptime_callables`:
+  37 dependency and 10 scoped-callable tests passed, exit 0;
+  `/tmp/luna-tools-rbjmw44o/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed, `/tmp/luna-tools-su7kr3pj/result.json`; git diff --check passed.

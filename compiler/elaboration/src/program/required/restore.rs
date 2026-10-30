@@ -1,4 +1,4 @@
-//! Restore invocation-local Type identities throughout immutable result data.
+//! Restore invocation-local Type identities in result data and capture graphs.
 use super::*;
 
 pub(super) fn restore_required_packet(
@@ -10,273 +10,20 @@ pub(super) fn restore_required_packet(
     span: Span,
     depth: usize,
 ) -> Result<Value, Error> {
+    if parameters.is_empty() {
+        return Ok(value);
+    }
     if depth >= 128 {
         return Err(error(span, "required type packet nesting limit exceeded"));
     }
-    *steps = steps
-        .checked_sub(1)
-        .ok_or_else(|| error(span, "required type packet budget exhausted"))?;
-    Ok(match value {
-        Value::TypeParameter(declaration) => Value::Type(restore_required_type_input(
-            steps,
-            Term::Rigid {
-                declaration,
-                sort: Sort::Type,
-            },
-            parameters,
-            arguments,
-            frames,
-            span,
-        )?),
-        Value::Type(ty) => Value::Type(restore_required_type_input(
-            steps, ty, parameters, arguments, frames, span,
-        )?),
-        Value::List { ty, values } => Value::List {
-            ty: restore_required_type_input(steps, ty, parameters, arguments, frames, span)?,
-            values: values
-                .into_iter()
-                .map(|value| {
-                    restore_required_packet(
-                        steps,
-                        value,
-                        parameters,
-                        arguments,
-                        frames,
-                        span,
-                        depth + 1,
-                    )
-                })
-                .collect::<Result<_, _>>()?,
-        },
-        Value::Tuple(values) => Value::Tuple(
-            values
-                .into_iter()
-                .map(|value| {
-                    restore_required_packet(
-                        steps,
-                        value,
-                        parameters,
-                        arguments,
-                        frames,
-                        span,
-                        depth + 1,
-                    )
-                })
-                .collect::<Result<_, _>>()?,
-        ),
-        Value::AnonymousRecord(fields) => Value::AnonymousRecord(
-            fields
-                .into_iter()
-                .map(|(name, value)| {
-                    Ok((
-                        name,
-                        restore_required_packet(
-                            steps,
-                            value,
-                            parameters,
-                            arguments,
-                            frames,
-                            span,
-                            depth + 1,
-                        )?,
-                    ))
-                })
-                .collect::<Result<_, Error>>()?,
-        ),
-        Value::Record {
-            declaration,
-            arguments: inputs,
-            fields,
-        } => Value::Record {
-            declaration,
-            arguments: inputs
-                .into_iter()
-                .map(|ty| {
-                    restore_required_type_input(steps, ty, parameters, arguments, frames, span)
-                })
-                .collect::<Result<_, _>>()?,
-            fields: fields
-                .into_iter()
-                .map(|value| {
-                    restore_required_packet(
-                        steps,
-                        value,
-                        parameters,
-                        arguments,
-                        frames,
-                        span,
-                        depth + 1,
-                    )
-                })
-                .collect::<Result<_, _>>()?,
-        },
-        Value::Variant {
-            declaration,
-            arguments: inputs,
-            index,
-            fields,
-        } => Value::Variant {
-            declaration,
-            index,
-            arguments: inputs
-                .into_iter()
-                .map(|ty| {
-                    restore_required_type_input(steps, ty, parameters, arguments, frames, span)
-                })
-                .collect::<Result<_, _>>()?,
-            fields: fields
-                .into_iter()
-                .map(|value| {
-                    restore_required_packet(
-                        steps,
-                        value,
-                        parameters,
-                        arguments,
-                        frames,
-                        span,
-                        depth + 1,
-                    )
-                })
-                .collect::<Result<_, _>>()?,
-        },
-        Value::Optional { ty, value } => Value::Optional {
-            ty: restore_required_type_input(steps, ty, parameters, arguments, frames, span)?,
-            value: value
-                .map(|value| {
-                    restore_required_packet(
-                        steps,
-                        *value,
-                        parameters,
-                        arguments,
-                        frames,
-                        span,
-                        depth + 1,
-                    )
-                    .map(Box::new)
-                })
-                .transpose()?,
-        },
-        Value::ErrorResult {
-            ty,
-            error: tag,
-            value,
-        } => Value::ErrorResult {
-            ty: restore_required_type_input(steps, ty, parameters, arguments, frames, span)?,
-            error: tag,
-            value: Box::new(restore_required_packet(
-                steps,
-                *value,
-                parameters,
-                arguments,
-                frames,
+    value
+        .restore_scoped_types(parameters, arguments, frames, steps)
+        .map_err(|kind| {
+            error(
                 span,
-                depth + 1,
-            )?),
-        },
-        Value::Newtype { ty, value } => Value::Newtype {
-            ty: restore_required_type_input(steps, ty, parameters, arguments, frames, span)?,
-            value: Box::new(restore_required_packet(
-                steps,
-                *value,
-                parameters,
-                arguments,
-                frames,
-                span,
-                depth + 1,
-            )?),
-        },
-        Value::FunctionInstance {
-            declaration,
-            arguments: inputs,
-        } => Value::FunctionInstance {
-            declaration,
-            arguments: inputs
-                .into_iter()
-                .map(|ty| {
-                    restore_required_type_input(steps, ty, parameters, arguments, frames, span)
-                })
-                .collect::<Result<_, _>>()?,
-        },
-        Value::AbstractValue { declaration, ty } => Value::AbstractValue {
-            declaration,
-            ty: restore_required_type_input(steps, ty, parameters, arguments, frames, span)?,
-        },
-        Value::Object(object) => {
-            use comptime_runtime::object::{Entry, Object};
-            let entries = object
-                .into_entries()
-                .into_iter()
-                .map(|entry| {
-                    let restore = |steps: &mut u64, entry: comptime_interpretor::ObjectValue| {
-                        Ok::<_, Error>(comptime_interpretor::ObjectValue {
-                            ty: restore_required_type_input(
-                                steps, entry.ty, parameters, arguments, frames, span,
-                            )?,
-                            value: restore_required_packet(
-                                steps,
-                                entry.value,
-                                parameters,
-                                arguments,
-                                frames,
-                                span,
-                                depth + 1,
-                            )?,
-                        })
-                    };
-                    Ok(match entry {
-                        Entry::Value(value) => Entry::Value(restore(steps, value)?),
-                        Entry::Property { key, value } => Entry::Property {
-                            key,
-                            value: restore(steps, value)?,
-                        },
-                    })
-                })
-                .collect::<Result<Vec<_>, Error>>()?;
-            Value::Object(Object::from_entries(entries))
-        }
-        Value::Closure(closure)
-            if !parameters.is_empty() && closure.declaration_instance().is_some() =>
-        {
-            // A capture-free declaration instance transports identity only.
-            // Do not retain its invocation-local specialized executable body.
-            let (declaration, inputs) = closure.declaration_instance().unwrap();
-            Value::FunctionInstance {
-                declaration,
-                arguments: inputs
-                    .iter()
-                    .map(|ty| {
-                        let mut fuel = usize::try_from(*steps).unwrap_or(usize::MAX);
-                        let before = fuel;
-                        let charged = nir::type_computations::charge_term(ty, &mut fuel);
-                        *steps -= (before - fuel) as u64;
-                        charged.map_err(|cause| error(span, cause.to_string()))?;
-                        restore_required_type_input(
-                            steps,
-                            ty.clone(),
-                            parameters,
-                            arguments,
-                            frames,
-                            span,
-                        )
-                    })
-                    .collect::<Result<_, _>>()?,
-            }
-        }
-        Value::Code(_)
-        | Value::Closure(_)
-        | Value::RuntimeTraitMethod(_)
-        | Value::Pointer(_)
-        | Value::Storage(_)
-        | Value::ComptimeReference(_)
-            if !parameters.is_empty() =>
-        {
-            return Err(error(
-                span,
-                "scoped invocation result retains executable or mutable state; restoration is not implemented",
-            ));
-        }
-        value => value,
-    })
+                format!("scoped invocation result restoration failed: {kind:?}"),
+            )
+        })
 }
 
 pub(super) fn restore_required_type_input(
@@ -376,7 +123,12 @@ mod tests {
         assert_eq!(original, packet(rigid.clone()));
 
         let storage = Storage::new(Value::Type(rigid.clone()));
-        assert!(restore(Value::Storage(storage.clone()), &mut 1000).is_err());
+        let Value::Storage(restored) = restore(Value::Storage(storage.clone()), &mut 1000).unwrap()
+        else {
+            panic!("storage")
+        };
+        assert_ne!(restored, storage);
+        assert_eq!(restored.read().unwrap(), Value::Type(arguments[0].clone()));
         assert_eq!(storage.read().unwrap(), Value::Type(rigid));
     }
 
@@ -422,7 +174,7 @@ mod tests {
             0,
         )
         .unwrap_err();
-        assert!(failure.message.contains("nesting limit"));
+        assert!(failure.message.contains("DepthExhausted"));
         assert!(
             restore_required_packet(
                 &mut 1000,
