@@ -11,6 +11,7 @@ use nir::program::{Expr, ExprKind as K, Function, Literal, LocalId};
 use nir::{Primitive, Sort, Term};
 use std::collections::{BTreeMap, BTreeSet};
 mod error_values;
+mod frozen;
 mod general;
 use general::fold_general_input;
 mod lists;
@@ -2272,6 +2273,10 @@ fn fold_input<'layout>(
     depth: usize,
 ) -> Result<Expr, String> {
     let heads = heads.into();
+    if let K::ComptimeValue(value) = &expr.kind {
+        return frozen::fold(heads, expr, value, fuel, depth);
+    }
+
     if matches!(
         expr.kind,
         K::Literal(Literal::PendingInteger { .. } | Literal::PendingFloat { .. })
@@ -2816,6 +2821,11 @@ fn constant<'layout>(
     }
     charge(fuel, 1)?;
     Ok(match (&expr.kind, &expr.ty) {
+        (K::ComptimeValue(value), _) => {
+            let decoded = frozen::fold(heads, expr, value, fuel, depth + 1)?;
+            constant(heads, &decoded, fuel, depth + 1)?
+        }
+
         (K::TypeList(fields), ty) => {
             let element = heads
                 .list_element(ty, fuel)?

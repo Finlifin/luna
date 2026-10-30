@@ -7463,3 +7463,41 @@ coverage of every definition builder or arbitrary dependent field layout.
 
 Formatting: `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`
 exited 0; `/tmp/luna-tools-dndmez0y/result.json`. `git diff --check` passed.
+
+### IIR staging reconstructs ordinary frozen collection inputs
+
+The new ordinary list encoding exposed an unconnected consumer: IIR's static
+constant folder recognized list constructor expressions and legacy Type-list
+nodes, but not ComptimeValue payloads. Its canonical-input boundary now decodes
+supported immutable frozen data into the existing ordinary constructor nodes.
+Both direct canonical admission and folding share that path.
+
+Reconstruction requires exact collection domains and registered list/tuple
+layouts. All elements pass the existing constructor checks before selection,
+so indexing cannot discard a malformed or unresolved sibling. Opaque Type
+heads remain intact. Nested lists, structural tuples/records, optionals and
+scalar data use their declared domains. Machine integer range/target checks
+and exact floating bit patterns are preserved. Reads never run a function,
+resolve a local or authorize a layout from a library name.
+
+Work is charged before copying the payload and separately for each copied
+field domain; depth and budget exhaustion remain recoverable. New tests cover
+length, concat, nested indexing, Type identity, domain mismatches, unfinished
+siblings, machine bounds, empty lists, canonical-input admission and retry.
+Unsupported frozen forms still reject at the static boundary; this does not
+add arbitrary nominal layout discovery or remove the legacy IR variant yet.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p iir -p materialization --no-fail-fast`:
+  all tests passed, exit 0; final `/tmp/luna-tools-rf1in_jd/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_lists --test type_lists --test normal_form_methods --test cmtt_type_inputs --no-fail-fast`:
+  61 passed, exit 0; `/tmp/luna-tools-tifv6v4j/result.json`. This preceded the
+  final per-field domain-copy budget charge; the final core suites above
+  include that charge and the expanded canonical-input/scalar regressions.
+
+No full language suite or native rebuild was run for this static staging change.
+
+Formatting: `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`
+exited 0; `/tmp/luna-tools-z7hhxz9_/result.json`. `git diff --check` passed.
+The final IIR/materialization run contains 117 passing tests.

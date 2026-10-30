@@ -253,3 +253,223 @@ fn mixed_completed_list_encodings_share_nested_operations_and_domain_checks() {
     assert!(fold_value_with_layouts(layouts, &selected, &mut 1).is_err());
     assert!(fold_value_with_layouts(layouts, &selected, &mut 100_000).is_ok());
 }
+
+fn frozen_list(element: Term, fields: Vec<Term>) -> Expr {
+    let ty = Term::NormalForm {
+        head: id(1),
+        sort: Sort::Type,
+        arguments: vec![element],
+    };
+    expr(
+        ty.clone(),
+        K::ComptimeValue(Term::NominalValue {
+            ty: Box::new(ty),
+            variant: None,
+            fields,
+        }),
+    )
+}
+
+#[test]
+fn frozen_lists_fold_index_length_concat_and_nested_values_without_losing_domains() {
+    let heads = [head()];
+    let layouts = Layouts::new(&heads, &[]);
+    let bool_ty = Term::Primitive(Primitive::Bool);
+    let values = frozen_list(bool_ty.clone(), vec![Term::Bool(true), Term::Bool(false)]);
+    let selected = index(values.clone(), bool_ty.clone(), "1");
+    assert_eq!(
+        fold_value_with_layouts(layouts, &selected, &mut 100_000).unwrap(),
+        boolean(false)
+    );
+    let length = expr(
+        Term::Primitive(Primitive::Integer),
+        K::ListLength(Box::new(values.clone())),
+    );
+    assert!(
+        matches!(fold_value_with_layouts(layouts, &length, &mut 100_000).unwrap().kind,
+        K::Literal(Literal::Integer(value)) if value == "2")
+    );
+    let joined = expr(
+        values.ty.clone(),
+        K::ListConcat(
+            Box::new(values.clone()),
+            Box::new(list(bool_ty.clone(), vec![boolean(true)])),
+        ),
+    );
+    assert_eq!(
+        fold_value_with_layouts(layouts, &joined, &mut 100_000).unwrap(),
+        list(
+            bool_ty.clone(),
+            vec![boolean(true), boolean(false), boolean(true)]
+        )
+    );
+    let K::ComptimeValue(payload) = &values.kind else {
+        unreachable!()
+    };
+    let nested = frozen_list(values.ty.clone(), vec![payload.clone()]);
+    let selected = index(index(nested, values.ty.clone(), "0"), bool_ty.clone(), "1");
+    assert_eq!(
+        fold_value_with_layouts(layouts, &selected, &mut 100_000).unwrap(),
+        boolean(false)
+    );
+    let opaque = Term::NormalForm {
+        head: id(77),
+        sort: Sort::Type,
+        arguments: vec![bool_ty],
+    };
+    let types = frozen_list(Term::Primitive(Primitive::Type), vec![opaque.clone()]);
+    let selected = index(types, Term::Primitive(Primitive::Type), "0");
+    assert_eq!(
+        fold_value_with_layouts(layouts, &selected, &mut 100_000)
+            .unwrap()
+            .kind,
+        K::TypeValue(opaque)
+    );
+}
+
+#[test]
+fn frozen_list_admission_checks_all_fields_identity_scope_and_budget_before_selection() {
+    let heads = [head()];
+    let layouts = Layouts::new(&heads, &[]);
+    let bool_ty = Term::Primitive(Primitive::Bool);
+    let valid = frozen_list(bool_ty.clone(), vec![Term::Bool(true)]);
+    let mut foreign = valid.clone();
+    let K::ComptimeValue(Term::NominalValue { ty, .. }) = &mut foreign.kind else {
+        unreachable!()
+    };
+    let Term::NormalForm { head, .. } = ty.as_mut() else {
+        unreachable!()
+    };
+    *head = id(99);
+    for values in [
+        foreign,
+        frozen_list(bool_ty.clone(), vec![Term::Bool(true), Term::Char('x')]),
+        frozen_list(
+            bool_ty.clone(),
+            vec![
+                Term::Bool(true),
+                Term::Bound {
+                    depth: 0,
+                    index: 0,
+                    sort: Sort::ComptimeValue,
+                },
+            ],
+        ),
+    ] {
+        assert!(
+            fold_value_with_layouts(layouts, &index(values, bool_ty.clone(), "0"), &mut 100_000)
+                .is_err()
+        );
+    }
+    assert!(fold_value_with_layouts(Layouts::new(&[], &[]), &valid, &mut 100_000).is_err());
+    for position in ["-1", "1", "999999999999999999999999999999999"] {
+        assert!(
+            fold_value_with_layouts(
+                layouts,
+                &index(valid.clone(), bool_ty.clone(), position),
+                &mut 100_000
+            )
+            .is_err()
+        );
+    }
+    assert!(fold_value_with_layouts(layouts, &valid, &mut 1).is_err());
+    assert!(fold_value_with_layouts(layouts, &valid, &mut 100_000).is_ok());
+    let empty = frozen_list(bool_ty, vec![]);
+    assert!(fold_value_with_layouts(layouts, &empty, &mut 100_000).is_ok());
+}
+
+#[test]
+fn frozen_list_fields_reconstruct_optional_record_tuple_and_machine_scalar_data() {
+    let heads = [head()];
+    let layouts = Layouts::new(&heads, &[]);
+    let byte = Term::Primitive(Primitive::U8);
+    let tuple = Term::Tuple(vec![byte.clone(), Term::Primitive(Primitive::Bool)]);
+    let record = Term::Record(vec![("pair".into(), tuple.clone())]);
+    let optional = Term::Optional(Box::new(record.clone()));
+    let value = Term::OptionalValue {
+        ty: Box::new(optional.clone()),
+        value: Some(Box::new(Term::RecordValue(vec![(
+            "pair".into(),
+            Term::TupleValue(vec![
+                Term::Integer(comptime_runtime::Integer::from_u128(255)),
+                Term::Bool(true),
+            ]),
+        )]))),
+    };
+    let values = frozen_list(optional.clone(), vec![value]);
+    let folded =
+        fold_value_with_layouts(layouts, &index(values, optional.clone(), "0"), &mut 100_000)
+            .unwrap();
+    let expected = expr(
+        optional,
+        K::OptionalPresent(Box::new(expr(
+            record,
+            K::AnonymousRecord {
+                fields: vec![expr(
+                    tuple,
+                    K::Tuple(vec![
+                        expr(byte.clone(), K::Literal(Literal::UnsignedInteger(255))),
+                        boolean(true),
+                    ]),
+                )],
+            },
+        ))),
+    );
+    assert_eq!(folded, expected);
+    let invalid = frozen_list(
+        byte.clone(),
+        vec![Term::Integer(comptime_runtime::Integer::from_u128(256))],
+    );
+    assert!(fold_value_with_layouts(layouts, &index(invalid, byte, "0"), &mut 100_000).is_err());
+}
+
+#[test]
+fn canonical_frozen_inputs_check_machine_domains_and_recover_after_failure() {
+    use iir::staging::canonical_input_with_layouts;
+    let heads = [head()];
+    let layouts = Layouts::new(&heads, &[]);
+    for (value, primitive, expected) in [
+        (Term::Bool(true), Primitive::Bool, Literal::Bool(true)),
+        (Term::Char('x'), Primitive::Char, Literal::Char('x')),
+        (
+            Term::Float16(0x3c00),
+            Primitive::F16,
+            Literal::Float16(0x3c00),
+        ),
+        (
+            Term::BFloat16(0x3f80),
+            Primitive::Bf16,
+            Literal::BFloat16(0x3f80),
+        ),
+        (
+            Term::Float32(0x80000000),
+            Primitive::F32,
+            Literal::Float32(0x80000000),
+        ),
+        (
+            Term::Float64(0x7ff0000000000000),
+            Primitive::F64,
+            Literal::Float64(0x7ff0000000000000),
+        ),
+    ] {
+        let value = expr(Term::Primitive(primitive), K::ComptimeValue(value));
+        canonical_input_with_layouts(layouts, &value, &mut 100_000).unwrap();
+        assert_eq!(
+            fold_value_with_layouts(layouts, &value, &mut 100_000)
+                .unwrap()
+                .kind,
+            K::Literal(expected)
+        );
+        let wrong = Expr {
+            ty: Term::Primitive(Primitive::Symbol),
+            ..value
+        };
+        assert!(canonical_input_with_layouts(layouts, &wrong, &mut 100_000).is_err());
+    }
+    let bool_ty = Term::Primitive(Primitive::Bool);
+    let bad = frozen_list(bool_ty.clone(), vec![Term::Bool(true), Term::Char('x')]);
+    assert!(canonical_input_with_layouts(layouts, &bad, &mut 100_000).is_err());
+    let valid = frozen_list(bool_ty, vec![Term::Bool(true)]);
+    assert!(canonical_input_with_layouts(layouts, &valid, &mut 1).is_err());
+    canonical_input_with_layouts(layouts, &valid, &mut 100_000).unwrap();
+}
