@@ -11,6 +11,7 @@ pub(super) struct Frame {
     waiting: Option<Waiting>,
     calls: BTreeMap<usize, PendingCall>,
     closures: BTreeMap<usize, PendingClosure>,
+    bit_updates: BTreeMap<usize, (Arc<comptime_compiler::bit_updates::Plan>, usize, usize)>,
     normal_types: BTreeMap<usize, super::normal_types::Inputs>,
     staged: Option<Box<staged_bytecode::State>>,
     pc: usize,
@@ -741,6 +742,7 @@ impl<'a> Interpreter<'a> {
             calls: BTreeMap::new(),
             normal_types: BTreeMap::new(),
             closures: BTreeMap::new(),
+            bit_updates: BTreeMap::new(),
             staged: None,
             pc: 0,
             scopes: Vec::new(),
@@ -792,6 +794,109 @@ impl<'a> Interpreter<'a> {
                 source: Some(source),
             };
             match &instruction.op {
+                Op::BeginBitUpdate { identity, plan } => {
+                    frame.slots[plan.local].as_ref().ok_or_else(missing)?;
+                    self.charge_preparation(plan.selections.len())?;
+                    if nir::program::bit_update_layout_error_in(
+                        &plan.storage,
+                        plan.layouts(),
+                        &plan.value,
+                        &plan.output,
+                        self.target,
+                    )
+                    .is_some()
+                    {
+                        return Err(self.failure(ErrorKind::Type, Some(source)));
+                    }
+                    let width = match &plan.storage {
+                        Term::Primitive(Primitive::BitVec(width)) => *width,
+                        Term::Primitive(p) => {
+                            p.unrestricted_scalar_width_in(self.target)
+                                .ok_or_else(missing)? as usize
+                        }
+                        _ => return Err(missing()),
+                    };
+                    frame
+                        .bit_updates
+                        .insert(*identity, (plan.clone(), 0, width));
+                }
+                Op::SelectBitRange { identity, index } => {
+                    use nir::program::BitSelectionLayout as L;
+                    let (plan, offset, width) =
+                        frame.bit_updates.get_mut(identity).ok_or_else(missing)?;
+                    let selection = plan.selections.get(*index).ok_or_else(missing)?;
+                    let mut inputs = Vec::new();
+                    for input in selection.inputs() {
+                        let value = frame.slots[input.register].take().ok_or_else(missing)?;
+                        if !self.has_type(&value, &input.ty) {
+                            let location = if matches!(selection, L::Index(_)) {
+                                input.source
+                            } else {
+                                source
+                            };
+                            return Err(self.failure(ErrorKind::Type, Some(location)));
+                        }
+                        inputs.push(value);
+                    }
+                    let mut inputs = inputs.into_iter();
+                    let position = |value: Value, location| -> Result<usize, Error> {
+                        let n = match value {
+                            Value::Integer(n) => n.to_u128().ok(),
+                            Value::UnsignedInteger(n) => Some(n),
+                            Value::SignedInteger(n) => u128::try_from(n).ok(),
+                            _ => None,
+                        }
+                        .and_then(|n| usize::try_from(n).ok());
+                        n.ok_or_else(|| self.failure(ErrorKind::IndexOutOfBounds, Some(location)))
+                    };
+                    let (lo, hi, expected) = match selection {
+                        L::Static { start, end } => (*start, *end, end.saturating_sub(*start)),
+                        L::Index(input) => {
+                            let lo = position(inputs.next().unwrap(), input.source)?;
+                            let hi = lo.checked_add(1).ok_or_else(|| {
+                                self.failure(ErrorKind::IndexOutOfBounds, Some(input.source))
+                            })?;
+                            (lo, hi, 1)
+                        }
+                        L::Window { start, end, width } => (
+                            position(inputs.next().unwrap(), start.source)?,
+                            position(inputs.next().unwrap(), end.source)?,
+                            *width,
+                        ),
+                    };
+                    if lo > hi || hi > *width {
+                        return Err(self.failure(ErrorKind::IndexOutOfBounds, Some(source)));
+                    }
+                    if hi - lo != expected {
+                        return Err(self.failure(ErrorKind::Type, Some(source)));
+                    }
+                    *offset = offset
+                        .checked_add(lo)
+                        .ok_or_else(|| self.failure(ErrorKind::IndexOutOfBounds, Some(source)))?;
+                    *width = expected;
+                }
+                Op::FinishBitUpdate { identity, value } => {
+                    let (plan, start, width) =
+                        frame.bit_updates.remove(identity).ok_or_else(missing)?;
+                    let end = start
+                        .checked_add(width)
+                        .ok_or_else(|| self.failure(ErrorKind::IndexOutOfBounds, Some(source)))?;
+                    let Value::BitVec(rhs) = frame.slots[*value].take().ok_or_else(missing)? else {
+                        return Err(self.failure(ErrorKind::Type, Some(source)));
+                    };
+                    let target = frame.slots[plan.local].as_mut().ok_or_else(missing)?;
+                    self.write_bit_place(
+                        target,
+                        &plan.fields,
+                        &plan.storage,
+                        start,
+                        end,
+                        rhs,
+                        &plan.output,
+                        source,
+                    )?;
+                }
+
                 Op::BitOperand {
                     value,
                     requires_bits,

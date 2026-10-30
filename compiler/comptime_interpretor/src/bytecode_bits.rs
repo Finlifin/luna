@@ -277,3 +277,105 @@ fn failed_bit_writeback_preserves_completed_rhs_writes() {
         }
     }
 }
+
+#[test]
+fn dynamic_bit_ranges_check_in_order_before_rhs_effects() {
+    use nir::program::BitSelection;
+    let package = Package::default();
+    let source = SourceRange { start: 50, end: 55 };
+    let root = LocalId { owner: 1, index: 0 };
+    let trace = LocalId { owner: 1, index: 1 };
+    let expr = |ty, kind| Expr {
+        source,
+        ty: Term::Primitive(ty),
+        kind,
+    };
+    let effect = |value: Expr, stamp| Expr {
+        source,
+        ty: value.ty.clone(),
+        kind: K::Block {
+            statements: vec![expr(
+                Primitive::Void,
+                K::Assign {
+                    place: Place {
+                        root: trace,
+                        fields: vec![],
+                    },
+                    value: Box::new(expr(
+                        Primitive::U8,
+                        K::Literal(Literal::UnsignedInteger(stamp)),
+                    )),
+                },
+            )],
+            result: Some(Box::new(value)),
+        },
+    };
+    for compiled in [false, true] {
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        // Shape failure runs no endpoints; range failure runs both endpoints
+        // but not the next selection or RHS; successful selection runs all.
+        for (lower, upper, width, valid, stamp) in [
+            (0, 9, 9, false, 0),
+            (7, 11, 4, false, 2),
+            (2, 6, 4, true, 4),
+        ] {
+            let body = expr(
+                Primitive::Void,
+                K::BitUpdate {
+                    place: Place {
+                        root,
+                        fields: vec![],
+                    },
+                    storage_type: Term::Primitive(Primitive::U8),
+                    selections: vec![
+                        BitSelection::Window {
+                            start: Box::new(effect(
+                                expr(Primitive::U8, K::Literal(Literal::UnsignedInteger(lower))),
+                                1,
+                            )),
+                            end: Box::new(effect(
+                                expr(Primitive::U8, K::Literal(Literal::UnsignedInteger(upper))),
+                                2,
+                            )),
+                            width,
+                        },
+                        BitSelection::Index(Box::new(effect(
+                            expr(Primitive::U8, K::Literal(Literal::UnsignedInteger(1))),
+                            3,
+                        ))),
+                    ],
+                    value: Box::new(effect(
+                        expr(
+                            Primitive::BitVec(1),
+                            K::Literal(Literal::BitVec {
+                                width: 1,
+                                words: vec![1],
+                            }),
+                        ),
+                        4,
+                    )),
+                },
+            );
+            let mut env = Environment::from([
+                (root, Value::UnsignedInteger(0)),
+                (trace, Value::UnsignedInteger(0)),
+            ]);
+            let result = if compiled {
+                let code = Arc::new(comptime_compiler::compile(&body, &mut 10000).unwrap());
+                assert!(code.to_string().contains("(select-bit-range "));
+                vm.execute_code(&code, &mut env)
+            } else {
+                vm.eval(&body, &mut env)
+            };
+            assert_eq!(result.is_ok(), valid);
+            assert_eq!(
+                vm.local_value(&env, trace, Some(source)).unwrap(),
+                Value::UnsignedInteger(stamp)
+            );
+            assert_eq!(
+                vm.local_value(&env, root, Some(source)).unwrap(),
+                Value::UnsignedInteger(if valid { 8 } else { 0 })
+            );
+        }
+    }
+}

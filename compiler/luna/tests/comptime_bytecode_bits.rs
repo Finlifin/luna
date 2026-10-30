@@ -229,3 +229,51 @@ fn bit_writeback_compiles_without_losing_rhs_updates_or_snapshots() {
         );
     }
 }
+
+#[test]
+fn dynamic_bit_writeback_freezes_ranges_before_rhs_and_recovers() {
+    let package = support::compile(
+        "typealias Word=.u16'builtin;typealias Integer=.Integer'builtin;
+        comptime fn snapshot(index:Integer)->Word {
+            var word:Word=0x1234;var i=index;
+            word'bitvec[i..(i + 4)] = do {i=10;word=0xABCD;0b1010};word
+        }
+        comptime fn nested(index:Integer)->Word {
+            var word:Word=0;word'bitvec[4..12][index] = 1;word
+        }
+        comptime fn empty(index:Integer)->Word {
+            var word:Word=0;word'bitvec[index..index] = do {word=0x1234;0};word
+        }",
+    );
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let mut tree = Interpreter::new(&package, Budget::default()).unwrap();
+    for (name, position, expected) in [
+        ("snapshot", 4, 0xabad),
+        ("nested", 2, 0x40),
+        ("empty", 16, 0x1234),
+    ] {
+        let id = support::id(&package, name);
+        for invalid in [-1, 17] {
+            let args = vec![Value::Integer(comptime_runtime::Integer::from_i128(
+                invalid,
+            ))];
+            assert_eq!(
+                vm.invoke(id, args.clone()).unwrap_err().kind,
+                tree.invoke(id, args).unwrap_err().kind
+            );
+        }
+        let before = vm.bytecode_invocations();
+        let args = vec![Value::Integer(comptime_runtime::Integer::from_i128(
+            position,
+        ))];
+        assert_eq!(
+            vm.invoke(id, args.clone()).unwrap(),
+            Value::UnsignedInteger(expected)
+        );
+        assert_eq!(vm.bytecode_invocations() - before, 1, "{name}");
+        assert_eq!(
+            tree.invoke(id, args).unwrap(),
+            Value::UnsignedInteger(expected)
+        );
+    }
+}

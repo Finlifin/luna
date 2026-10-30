@@ -20,6 +20,42 @@ pub enum BitSelection {
         width: usize,
     },
 }
+/// Expression-free selection shape shared by typed IR and bytecode admission.
+#[derive(Clone, Debug)]
+pub enum BitSelectionLayout<T> {
+    Static { start: usize, end: usize },
+    Index(T),
+    Window { start: T, end: T, width: usize },
+}
+impl<T> BitSelectionLayout<T> {
+    pub fn output_width(&self, input: usize) -> Option<usize> {
+        match self {
+            Self::Static { start, end } => (start <= end && *end <= input).then(|| end - start),
+            Self::Index(_) => Some(1),
+            Self::Window { width, .. } => (*width <= input).then_some(*width),
+        }
+    }
+    pub fn inputs(&self) -> impl Iterator<Item = &T> {
+        match self {
+            Self::Static { .. } => [None, None],
+            Self::Index(index) => [Some(index), None],
+            Self::Window { start, end, .. } => [Some(start), Some(end)],
+        }
+        .into_iter()
+        .flatten()
+    }
+}
+impl<T: fmt::Display> fmt::Display for BitSelectionLayout<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Static { start, end } => write!(f, "(static {start} {end})"),
+            Self::Index(index) => write!(f, "(index {index})"),
+            Self::Window { start, end, width } => {
+                write!(f, "(window {start} {end} (width {width}))")
+            }
+        }
+    }
+}
 impl BitSelection {
     pub fn expressions(&self) -> impl Iterator<Item = &Expr> {
         match self {
@@ -39,12 +75,22 @@ impl BitSelection {
         .into_iter()
         .flatten()
     }
-    pub fn output_width(&self, input: usize) -> Option<usize> {
+    pub fn layout(&self) -> BitSelectionLayout<&Term> {
         match self {
-            Self::Static { start, end } => (start <= end && *end <= input).then(|| end - start),
-            Self::Index(_) => Some(1),
-            Self::Window { width, .. } => (*width <= input).then_some(*width),
+            Self::Static { start, end } => BitSelectionLayout::Static {
+                start: *start,
+                end: *end,
+            },
+            Self::Index(index) => BitSelectionLayout::Index(&index.ty),
+            Self::Window { start, end, width } => BitSelectionLayout::Window {
+                start: &start.ty,
+                end: &end.ty,
+                width: *width,
+            },
         }
+    }
+    pub fn output_width(&self, input: usize) -> Option<usize> {
+        self.layout().output_width(input)
     }
 }
 impl fmt::Display for BitSelection {
@@ -5421,6 +5467,22 @@ pub fn bit_update_error_in(
     result: &Term,
     target: Option<crate::target::TargetData>,
 ) -> Option<&'static str> {
+    bit_update_layout_error_in(
+        storage,
+        selections.iter().map(BitSelection::layout),
+        value,
+        result,
+        target,
+    )
+}
+
+pub fn bit_update_layout_error_in<'a>(
+    storage: &Term,
+    selections: impl IntoIterator<Item = BitSelectionLayout<&'a Term>>,
+    value: &Term,
+    result: &Term,
+    target: Option<crate::target::TargetData>,
+) -> Option<&'static str> {
     let width = match storage {
         Term::Primitive(crate::Primitive::BitVec(width)) => Some(*width),
         Term::Primitive(p) => p.unrestricted_scalar_width_in(target).map(|n| n as usize),
@@ -5434,9 +5496,9 @@ pub fn bit_update_error_in(
         let Some(next) = selection.output_width(width) else {
             return Some("bit writeback selection is out of bounds");
         };
-        for expression in selection.expressions() {
-            divergent |= expression.ty == Term::Primitive(crate::Primitive::Never);
-            if matches!(expression.ty, Term::Primitive(p) if !matches!(p,crate::Primitive::Integer | crate::Primitive::Never) && target.map_or_else(|| p.fixed_integer_layout(), |target| target.integer_layout(p)).is_none())
+        for ty in selection.inputs() {
+            divergent |= **ty == Term::Primitive(crate::Primitive::Never);
+            if matches!(**ty, Term::Primitive(p) if !matches!(p,crate::Primitive::Integer | crate::Primitive::Never) && target.map_or_else(|| p.fixed_integer_layout(), |target| target.integer_layout(p)).is_none())
             {
                 return Some("bit writeback index must be an integer");
             }

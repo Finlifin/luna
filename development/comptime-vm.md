@@ -4231,3 +4231,36 @@ Validation in /home/fin/luna:
   exit 0, 16 selected tests, `/tmp/luna-tools-x2ihouf6/result.json`.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
   exit 0, `/tmp/luna-tools-chy6_xai/result.json`; `git diff --check`: exit 0.
+
+### Compile dynamic bit selections and writeback
+
+BitUpdate now compiles to an immutable typed-register plan plus begin, select
+and finish instructions. Admission checks the binding and the complete selection
+shape before endpoint effects. Each selection evaluates its endpoints in source
+order, checks the range, then composes the relative offset before the next
+selection runs. The RHS runs only after selection succeeds. Final writeback
+uses the frozen range and rereads current storage through the shared checked
+replacement helper, preserving RHS mutations without reevaluating indices.
+
+NIR exposes an expression-free BitSelectionLayout and common admission checker;
+existing NIR validation and the VM use the same width/type rules. Plans own
+registers, types and source locations, not expression trees. Layouts, inputs,
+plans and instructions all have structured S-expression displays. Frame-local
+range state does not enter code/result caches.
+
+Source coverage requires bytecode entry for dynamic windows, nested static/index
+selection, empty windows, RHS index/storage mutation and failure/recovery. NIR
+coverage observes endpoint order, preflight rejection without effects, range
+failure before later selections/RHS and successful nested offset composition.
+Runtime pointer writeback stays on its existing runtime path; comptime does not
+acquire pointer semantics from this implementation.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_bits`:
+  exit 0, `/tmp/luna-tools-jlb_w72k/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-lsmdf42v/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test execution writeback`:
+  exit 0, `/tmp/luna-tools-7axc13rv/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-1pw0d97i/result.json`; `git diff --check`: exit 0.

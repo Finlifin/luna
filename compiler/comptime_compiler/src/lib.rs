@@ -1,5 +1,6 @@
 //! Linear invocation code. Unsupported operations are detected before execution.
 //! Constants and default templates own bounded typed NIR copies; opcodes never evaluate trees.
+pub mod bit_updates;
 pub mod bits;
 pub mod closures;
 pub mod leaf_inputs;
@@ -37,6 +38,18 @@ impl fmt::Display for ErrorConversion {
 
 #[derive(Debug)]
 pub enum Op {
+    BeginBitUpdate {
+        identity: Register,
+        plan: Arc<bit_updates::Plan>,
+    },
+    SelectBitRange {
+        identity: Register,
+        index: usize,
+    },
+    FinishBitUpdate {
+        identity: Register,
+        value: Register,
+    },
     BitOperand {
         value: Register,
         requires_bits: bool,
@@ -415,6 +428,15 @@ impl fmt::Display for Program {
                 instruction.source.start, instruction.source.end
             )?;
             match &instruction.op {
+                Op::BeginBitUpdate { identity, plan } => {
+                    write!(f, "(begin-bit-update %{identity} {plan})")?
+                }
+                Op::SelectBitRange { identity, index } => {
+                    write!(f, "(select-bit-range %{identity} {index})")?
+                }
+                Op::FinishBitUpdate { identity, value } => {
+                    write!(f, "(finish-bit-update %{identity} %{value})")?
+                }
                 Op::BitOperand {
                     value,
                     requires_bits,
@@ -971,8 +993,8 @@ enum Root<'a> {
     Staged(&'a nir::program::NormalFormArgument),
     Contextual(&'a nir::program::NormalFormArgument, &'a Term),
 }
-fn compile_root(
-    root: Root<'_>,
+fn compile_root<'a>(
+    root: Root<'a>,
     fuel: &mut usize,
 ) -> Result<(Program, Option<normal_types::Shape>), Error> {
     let source = match root {
@@ -2175,6 +2197,70 @@ fn compile_root(
                             },
                         );
                         work.push(Work::Expression(value, src));
+                    }
+                    K::BitUpdate {
+                        place,
+                        storage_type,
+                        selections,
+                        value,
+                    } => {
+                        use nir::program::{BitSelection as S, BitSelectionLayout as L};
+                        *fuel = fuel
+                            .checked_sub(place.fields.len().saturating_add(selections.len()))
+                            .ok_or(Error::Budget(source))?;
+                        let local = *locals.entry(place.root).or_insert_with(&mut fresh);
+                        let identity = fresh();
+                        let rhs = fresh();
+                        let mut operands = Vec::new();
+                        let mut layouts = Vec::new();
+                        for selection in selections {
+                            let mut input = |expr: &'a Expr| -> Result<bit_updates::Input, Error> {
+                                let register = fresh();
+                                operands.push((expr, register));
+                                Ok(bit_updates::Input {
+                                    register,
+                                    ty: copy_term(&expr.ty, fuel, expr.source)?,
+                                    source: expr.source,
+                                })
+                            };
+                            layouts.push(match selection {
+                                S::Static { start, end } => L::Static {
+                                    start: *start,
+                                    end: *end,
+                                },
+                                S::Index(index) => L::Index(input(index)?),
+                                S::Window { start, end, width } => L::Window {
+                                    start: input(start)?,
+                                    end: input(end)?,
+                                    width: *width,
+                                },
+                            });
+                        }
+                        let plan = Arc::new(bit_updates::Plan {
+                            local,
+                            fields: place.fields.clone(),
+                            storage: copy_term(storage_type, fuel, source)?,
+                            value: copy_term(&value.ty, fuel, source)?,
+                            output: copy_term(&expr.ty, fuel, source)?,
+                            selections: layouts,
+                        });
+                        emit(&mut work, Op::Unit(dst));
+                        emit(
+                            &mut work,
+                            Op::FinishBitUpdate {
+                                identity,
+                                value: rhs,
+                            },
+                        );
+                        work.push(Work::Expression(value, rhs));
+                        for (index, selection) in plan.selections.iter().enumerate().rev() {
+                            emit(&mut work, Op::SelectBitRange { identity, index });
+                            for _ in selection.inputs() {
+                                let (expr, slot) = operands.pop().unwrap();
+                                work.push(Work::Expression(expr, slot));
+                            }
+                        }
+                        emit(&mut work, Op::BeginBitUpdate { identity, plan });
                     }
                     K::BitAssign {
                         place,
