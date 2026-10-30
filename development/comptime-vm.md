@@ -5892,3 +5892,52 @@ Validation from `/home/fin/luna`, exit 0 unless noted:
   all 3 tests passed, including the matrix of forbidden comptime storage in
   runtime code interfaces; `/tmp/luna-tools-kkvt3ihu/result.json`.
 - Formatting: `/tmp/luna-tools-bolpp_64/result.json`; git diff --check passed.
+
+## Ordinary dependent inputs in contextual signatures (2026-10-31)
+
+Before admitting ordinary dependent Type parameters in generators, contextual
+method contracts need to represent their binders. CodeFunctionSignature now
+retains a sparse parameter-position map of DeclarationParameter identities and
+sorts. These are ordinary data-input binders, not extra clause arguments or
+inference variables. Expression, pattern and data-returning contextual signatures
+share the representation, its S-expression dump and metered validation.
+
+Validation rejects code-category binders, wrong positions/sorts, duplicate
+identities and use of a binder in clause domains or its own/earlier input domains.
+`specialize_input` consumes one already evaluated input, substitutes all domain
+occurrences under the caller telescope and removes just that binder. It retains
+runtime context/port identities and opaque normal-form heads. Wrong sorts,
+invalid scopes and budget exhaustion leave the source signature unchanged;
+value-domain admission and source evaluation order remain caller responsibilities.
+
+The three contextual method-equivalence paths alpha-align these binders before
+comparing type leaves. A changed binder position or omitted binder cannot be
+hidden by otherwise identical code interfaces. Signatures without ordinary
+binders use a borrowed fast path, avoiding new signature clones on existing
+method comparisons. General signature mapping preserves binder ownership.
+
+This is a representation and contract-comparison stage, NOT frontend feature
+completion. Current source generator constructors still emit an empty binder
+map. The ignored expected-success ordinary-Type generator test remains pending.
+Next work must install earlier staged input bindings during signature formation,
+carry them through both generator representations and definition checking, and
+specialize from source-ordered evaluated arguments/defaults in the shared input
+preparation path. That path currently builds inference contexts before evaluating
+arguments; it cannot be fixed by eagerly executing Type arguments in a prepass.
+Stable source binders must also remain distinct from invocation-local Type
+stand-ins and inference variables.
+
+Validation from `/home/fin/luna`, all final checks exit 0:
+
+- `python3 -B development/check.py --timeout 900 -- check -p elaboration`:
+  `/tmp/luna-tools-8p0uc59t/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p nir --test code_interfaces`:
+  20 tests passed; `/tmp/luna-tools-mlwpy60t/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib interfaces::signatures`:
+  11 tests passed, including all three contextual signature categories;
+  `/tmp/luna-tools-_b60rd4p/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p iir --test types -p comptime_interpretor --test runtime_function_identities`:
+  9 IIR and 36 VM identity tests passed; `/tmp/luna-tools-qfw5ong0/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt_methods`:
+  all 144 source method tests passed; `/tmp/luna-tools-52fb3r7e/result.json`.
+- Formatting: `/tmp/luna-tools-evwvx0x4/result.json`; git diff --check passed.

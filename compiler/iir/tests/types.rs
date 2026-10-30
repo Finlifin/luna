@@ -516,6 +516,7 @@ fn type_list_constants_validate_embedded_types_and_domain_authority() {
     let mut forged = contract_package.clone();
     forged.interfaces[0].methods[0].signature = nir::code_interfaces::MethodSignature::Generator(
         nir::code_interfaces::CodeFunctionSignature {
+            input_binders: Default::default(),
             clause_domains: vec![],
             inputs: vec![],
             output: nir::code_interfaces::ExpressionCodeInterface {
@@ -534,6 +535,7 @@ fn type_list_constants_validate_embedded_types_and_domain_authority() {
     );
     forged.interfaces[0].methods[0].signature = nir::code_interfaces::MethodSignature::DataConsumer(
         nir::code_interfaces::DataFunctionSignature {
+            input_binders: Default::default(),
             clause_domains: vec![],
             inputs: vec![],
             output: primitive(Primitive::Bool),

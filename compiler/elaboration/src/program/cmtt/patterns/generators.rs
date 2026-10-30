@@ -508,6 +508,7 @@ impl Checker<'_, '_> {
     > {
         let definition = self.copy_pattern_generator(owner, span)?;
         let signature = nir::code_interfaces::PatternFunctionSignature {
+            input_binders: Default::default(),
             clause_domains: definition.clause_domains.clone(),
             inputs: definition
                 .inputs

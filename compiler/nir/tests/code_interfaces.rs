@@ -139,6 +139,7 @@ fn signature() -> nir::code_interfaces::CodeFunctionSignature {
     use nir::code_interfaces::{CodeFunctionSignature, CodeInput};
     let code = interface();
     CodeFunctionSignature {
+        input_binders: Default::default(),
         clause_domains: vec![],
         inputs: vec![
             (
@@ -233,7 +234,7 @@ fn whole_signature_budget_includes_inputs_and_nested_interfaces() {
 #[test]
 fn whole_signature_dump_keeps_categories_and_context_structure() {
     let text = signature().to_string();
-    assert!(text.starts_with("(code-function-signature (clauses) (inputs"));
+    assert!(text.starts_with("(code-function-signature (clauses) (input-binders) (inputs"));
     assert!(text.contains(" (data "));
     assert!(text.contains(" (code (code-interface "));
     assert!(text.contains("(output (code-interface "));
@@ -406,6 +407,7 @@ fn pattern_input_interfaces_preserve_category_names_and_type_dependencies() {
         outputs: BTreeMap::from([("value\"\n".into(), ty)]),
     };
     let signature = CodeFunctionSignature {
+        input_binders: Default::default(),
         clause_domains: vec![],
         inputs: vec![(
             LocalId { owner: 1, index: 1 },
@@ -454,6 +456,7 @@ fn pattern_method_signatures_preserve_output_category_names_and_type_identity() 
         sort: Sort::Type,
     };
     let signature = PatternFunctionSignature {
+        input_binders: Default::default(),
         clause_domains: vec![Term::Primitive(Primitive::Type)],
         inputs: vec![(LocalId { owner: 2, index: 1 }, CodeInput::Data(ty.clone()))],
         output: PatternCodeInterface {
@@ -496,6 +499,7 @@ fn consumer_signature() -> nir::code_interfaces::DataFunctionSignature {
     let code = interface();
     let subject = code.result.clone();
     DataFunctionSignature {
+        input_binders: Default::default(),
         clause_domains: vec![Term::Primitive(Primitive::Type)],
         inputs: vec![
             (
@@ -672,4 +676,153 @@ fn data_method_signatures_preserve_categories_and_dependencies() {
             .is_err()
     );
     assert_eq!(original, before);
+}
+
+fn dependent_signature() -> nir::code_interfaces::CodeFunctionSignature {
+    use nir::{DeclarationParameter, code_interfaces::CodeInput};
+    let mut value = signature();
+    value.inputs[0].1 = CodeInput::Data(Term::Primitive(Primitive::Type));
+    value.input_binders.insert(
+        0,
+        DeclarationParameter {
+            declaration: DeclarationId {
+                package: 1,
+                local: 3,
+            },
+            sort: Sort::Type,
+        },
+    );
+    value
+}
+
+#[test]
+fn ordinary_input_specialization_preserves_code_context_and_opaque_heads() {
+    let original = dependent_signature();
+    original.charge(&mut 10000).unwrap();
+    assert!(
+        original
+            .to_string()
+            .contains("(input-binders (binder (parameter 0)")
+    );
+    let mut fuel = 10000;
+    let completed = original
+        .specialize_input(0, &Term::Primitive(Primitive::Bool), &[], &mut fuel)
+        .unwrap();
+    assert!(completed.input_binders.is_empty());
+    assert_eq!(completed.output.ports, original.output.ports);
+    assert_eq!(completed.output.defaults, original.output.defaults);
+    assert_eq!(
+        completed.output.context[&LocalId { owner: 2, index: 1 }],
+        Term::Primitive(Primitive::Bool)
+    );
+    assert!(
+        matches!(&completed.output.result, Term::NormalForm {head, arguments, ..}
+        if *head == DeclarationId {package:1,local:4} && arguments == &[Term::Primitive(Primitive::Bool)])
+    );
+    assert_eq!(original.input_binders.len(), 1);
+    let used = 10000 - fuel;
+    assert!(
+        original
+            .specialize_input(0, &Term::Primitive(Primitive::Bool), &[], &mut (used - 1))
+            .is_err()
+    );
+    assert_eq!(
+        original
+            .specialize_input(0, &Term::Primitive(Primitive::Bool), &[], &mut used.clone())
+            .unwrap(),
+        completed
+    );
+}
+
+#[test]
+fn dependent_telescope_rejects_forward_references_bad_slots_and_wrong_sorts() {
+    use nir::code_interfaces::CodeInput;
+    let original = dependent_signature();
+    for kind in 0..4 {
+        let mut invalid = original.clone();
+        match kind {
+            0 => {
+                invalid
+                    .input_binders
+                    .insert(1, invalid.input_binders[&0].clone());
+            }
+            1 => {
+                invalid.input_binders.get_mut(&0).unwrap().sort = Sort::ComptimeValue;
+            }
+            2 => {
+                invalid.clause_domains.push(Term::Rigid {
+                    declaration: invalid.input_binders[&0].declaration,
+                    sort: Sort::Type,
+                });
+            }
+            _ => {
+                invalid.inputs[0].1 = CodeInput::Data(Term::Rigid {
+                    declaration: invalid.input_binders[&0].declaration,
+                    sort: Sort::Type,
+                });
+            }
+        }
+        assert!(invalid.charge(&mut 10000).is_err());
+    }
+    assert!(
+        original
+            .specialize_input(0, &Term::Bool(true), &[], &mut 10000)
+            .is_err()
+    );
+    assert!(
+        original
+            .specialize_input(
+                0,
+                &Term::Bound {
+                    depth: 0,
+                    index: 0,
+                    sort: Sort::Type
+                },
+                &[],
+                &mut 10000
+            )
+            .is_err()
+    );
+    assert!(
+        original
+            .specialize_input(
+                0,
+                &Term::Bound {
+                    depth: 0,
+                    index: 0,
+                    sort: Sort::Type
+                },
+                &[vec![Sort::Type]],
+                &mut 10000
+            )
+            .is_ok()
+    );
+}
+
+#[test]
+fn dependent_signature_alignment_renames_only_local_binders() {
+    let original = dependent_signature();
+    let mut renamed = original.clone();
+    let binder = renamed.input_binders.get_mut(&0).unwrap();
+    binder.declaration.local = 90;
+    let aligned = original
+        .align_input_binders(&renamed, &[], &mut 10000)
+        .unwrap();
+    assert_eq!(aligned.input_binders, renamed.input_binders);
+    assert_eq!(aligned.output.ports, original.output.ports);
+    assert!(aligned.output.result.mentions_rigid(DeclarationId {
+        package: 1,
+        local: 90
+    }));
+    assert!(!aligned.output.result.mentions_rigid(DeclarationId {
+        package: 1,
+        local: 3
+    }));
+    let mut missing = original.clone();
+    missing.input_binders.clear();
+    assert!(
+        original
+            .align_input_binders(&missing, &[], &mut 10000)
+            .is_err()
+    );
 }

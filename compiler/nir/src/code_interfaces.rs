@@ -4,7 +4,7 @@
 //! is not an ordinary callable result type, nor a runtime code object. Keeping
 //! these maps beside the result prevents method contracts from erasing the
 //! distinction between fixed dependencies and supplied context ports.
-use crate::{Term, program::LocalId, type_computations};
+use crate::{Sort, Term, program::LocalId, type_computations};
 use std::{collections::BTreeMap, fmt};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -151,6 +151,10 @@ pub struct CodeFunctionSignature<O = ExpressionCodeInterface> {
     /// Method-local clause domains in declaration order; Type domains bind
     /// types, all other domains bind comptime values.
     pub clause_domains: Vec<Term>,
+    /// Ordinary data inputs whose values bind dependencies in later domains.
+    /// Keys are parameter positions; declaration identities are local binders,
+    /// not inference variables or additional clause arguments.
+    pub input_binders: BTreeMap<usize, crate::DeclarationParameter>,
     pub inputs: Vec<(LocalId, CodeInput)>,
     pub output: O,
 }
@@ -229,6 +233,14 @@ impl<O: SignatureOutput> fmt::Display for CodeFunctionSignature<O> {
         for domain in &self.clause_domains {
             write!(f, " (domain {domain})")?;
         }
+        f.write_str(") (input-binders")?;
+        for (slot, binder) in &self.input_binders {
+            write!(
+                f,
+                " (binder (parameter {slot}) (declaration {}) (sort {:?}))",
+                binder.declaration, binder.sort
+            )?;
+        }
         f.write_str(") (inputs")?;
         for (binding, input) in &self.inputs {
             write!(f, " (input {binding} {input})")?;
@@ -260,7 +272,130 @@ impl<O: SignatureOutput> CodeFunctionSignature<O> {
                 CodeInput::Pattern(interface) => interface.charge(fuel)?,
             }
         }
-        self.output.charge_output(fuel)
+        self.output.charge_output(fuel)?;
+        self.validate_input_binders(fuel)
+    }
+
+    /// A telescope entry can depend only on earlier ordinary inputs. Clause
+    /// domains are outside this telescope; code values themselves are not Terms.
+    fn validate_input_binders(&self, fuel: &mut usize) -> Result<(), type_computations::Error> {
+        use type_computations::Error;
+        let mut seen = std::collections::BTreeSet::new();
+        for (slot, binder) in &self.input_binders {
+            *fuel = fuel.checked_sub(1).ok_or(Error::Budget)?;
+            let Some((_, CodeInput::Data(domain))) = self.inputs.get(*slot) else {
+                return Err(Error::Structure(
+                    "dependent binder must belong to a data input".into(),
+                ));
+            };
+            let sort = if domain == &Term::Primitive(crate::Primitive::Type) {
+                Sort::Type
+            } else {
+                Sort::ComptimeValue
+            };
+            if binder.sort != sort || !seen.insert(binder.declaration) {
+                return Err(Error::Structure(
+                    "duplicate or incorrectly sorted dependent input binder".into(),
+                ));
+            }
+            for term in self.clause_domains.iter().chain(
+                self.inputs[..=*slot]
+                    .iter()
+                    .flat_map(|(_, input)| input.type_terms()),
+            ) {
+                type_computations::charge_term(term, fuel)?;
+                if term.mentions_rigid(binder.declaration) {
+                    return Err(Error::Structure(
+                        "dependent input is used before its binding".into(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Apply one already evaluated ordinary input without evaluating any other
+    /// argument. Value-domain admission remains the caller's responsibility.
+    /// The original signature is retained on failure, including its binders.
+    pub fn specialize_input(
+        &self,
+        slot: usize,
+        value: &Term,
+        frames: &[Vec<Sort>],
+        fuel: &mut usize,
+    ) -> Result<Self, type_computations::Error> {
+        use type_computations::Error;
+        self.charge(fuel)?;
+        let binder = self
+            .input_binders
+            .get(&slot)
+            .ok_or_else(|| Error::Structure("input has no dependent binder".into()))?;
+        type_computations::charge_term(value, fuel)?;
+        value.check_scope(frames).map_err(Error::Scope)?;
+        if value.sort() != binder.sort {
+            return Err(Error::Structure(
+                "dependent input value has the wrong sort".into(),
+            ));
+        }
+        let parameters = std::slice::from_ref(binder);
+        let arguments = std::slice::from_ref(value);
+        let mut completed = self.try_map_types(|ty| {
+            crate::copy_budget::charge_type_substitution(ty, parameters, arguments, fuel)
+                .map_err(|_| Error::Budget)?;
+            ty.instantiate_parameters_in_scope(parameters, arguments, frames)
+                .map_err(Error::Scope)
+        })?;
+        completed.input_binders.remove(&slot);
+        completed.charge(fuel)?;
+        Ok(completed)
+    }
+
+    /// Alpha-align ordinary input binders before comparing two contextual method
+    /// contracts. This changes declaration references, never runtime LocalIds.
+    pub fn align_input_binders(
+        &self,
+        reference: &Self,
+        frames: &[Vec<Sort>],
+        fuel: &mut usize,
+    ) -> Result<std::borrow::Cow<'_, Self>, type_computations::Error>
+    where
+        O: Clone,
+    {
+        use type_computations::Error;
+        if self.input_binders.is_empty() && reference.input_binders.is_empty() {
+            return Ok(std::borrow::Cow::Borrowed(self));
+        }
+        self.charge(fuel)?;
+        reference.charge(fuel)?;
+        if self.input_binders.len() != reference.input_binders.len() {
+            return Err(Error::Structure(
+                "dependent input binding positions differ".into(),
+            ));
+        }
+        let mut parameters = Vec::new();
+        let mut arguments = Vec::new();
+        for ((slot, binder), (other_slot, other)) in
+            self.input_binders.iter().zip(&reference.input_binders)
+        {
+            if slot != other_slot || binder.sort != other.sort {
+                return Err(Error::Structure(
+                    "dependent input binding positions or sorts differ".into(),
+                ));
+            }
+            parameters.push(binder.clone());
+            arguments.push(Term::Rigid {
+                declaration: other.declaration,
+                sort: other.sort,
+            });
+        }
+        let mut aligned = self.try_map_types(|ty| {
+            crate::copy_budget::charge_type_substitution(ty, &parameters, &arguments, fuel)
+                .map_err(|_| Error::Budget)?;
+            ty.instantiate_parameters_in_scope(&parameters, &arguments, frames)
+                .map_err(Error::Scope)
+        })?;
+        aligned.input_binders = reference.input_binders.clone();
+        Ok(std::borrow::Cow::Owned(aligned))
     }
 
     /// Apply a declaration's completed substitution to every input and result.
@@ -291,6 +426,7 @@ impl<O: SignatureOutput> CodeFunctionSignature<O> {
                 .iter()
                 .map(&mut transform)
                 .collect::<Result<_, E>>()?,
+            input_binders: self.input_binders.clone(),
             inputs,
             output: self.output.try_map_output(transform)?,
         })

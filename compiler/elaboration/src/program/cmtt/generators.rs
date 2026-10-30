@@ -344,6 +344,7 @@ impl Checker<'_, '_> {
                     })
                     .collect(),
                 signature: CodeFunctionSignature {
+                    input_binders: Default::default(),
                     clause_domains: domains,
                     inputs,
                     output,

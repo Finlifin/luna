@@ -37,6 +37,9 @@ pub(super) fn equivalent_code(
     budget: Budget,
 ) -> bool {
     let mut fuel = budget.steps;
+    let Ok(actual) = actual.align_input_binders(expected, context.scope(), &mut fuel) else {
+        return false;
+    };
     if expected.charge(&mut fuel).is_err()
         || actual.charge(&mut fuel).is_err()
         || expected.inputs.len() != actual.inputs.len()
@@ -69,6 +72,9 @@ pub(super) fn equivalent_data(
     budget: Budget,
 ) -> bool {
     let mut fuel = budget.steps;
+    let Ok(actual) = actual.align_input_binders(expected, context.scope(), &mut fuel) else {
+        return false;
+    };
     if expected.charge(&mut fuel).is_err()
         || actual.charge(&mut fuel).is_err()
         || expected.inputs.len() != actual.inputs.len()
@@ -217,6 +223,9 @@ pub(super) fn equivalent_pattern(
     budget: Budget,
 ) -> bool {
     let mut fuel = budget.steps;
+    let Ok(actual) = actual.align_input_binders(expected, context.scope(), &mut fuel) else {
+        return false;
+    };
     if expected.charge(&mut fuel).is_err()
         || actual.charge(&mut fuel).is_err()
         || expected.inputs.len() != actual.inputs.len()
@@ -404,6 +413,7 @@ mod tests {
             result: ty.clone(),
         };
         CodeFunctionSignature {
+            input_binders: Default::default(),
             clause_domains: vec![],
             inputs: vec![
                 (id(0), CodeInput::Data(ty)),
@@ -412,6 +422,97 @@ mod tests {
             output,
         }
     }
+    #[test]
+    fn contextual_methods_alpha_align_ordinary_dependent_inputs() {
+        use nir::code_interfaces::{CodeFunctionSignature, CodeInput, PatternCodeInterface};
+        let make = |owner| {
+            let declaration = nir::DeclarationId {
+                package: 1,
+                local: owner,
+            };
+            let mut signature = code_signature(
+                owner,
+                Term::Rigid {
+                    declaration,
+                    sort: Sort::Type,
+                },
+            );
+            signature.inputs[0].1 = CodeInput::Data(Term::Primitive(nir::Primitive::Type));
+            signature.input_binders.insert(
+                0,
+                nir::DeclarationParameter {
+                    declaration,
+                    sort: Sort::Type,
+                },
+            );
+            signature
+        };
+        let expected = make(1);
+        let actual = make(2);
+        let context = Context::with_scope(vec![]);
+        assert!(equivalent_code(
+            &context,
+            &expected,
+            &actual,
+            Budget::default()
+        ));
+        let data = |signature: nir::code_interfaces::CodeFunctionSignature| CodeFunctionSignature {
+            clause_domains: signature.clause_domains,
+            input_binders: signature.input_binders,
+            inputs: signature.inputs,
+            output: signature.output.result,
+        };
+        assert!(equivalent_data(
+            &context,
+            &data(expected.clone()),
+            &data(actual.clone()),
+            Budget::default()
+        ));
+        let pattern =
+            |signature: nir::code_interfaces::CodeFunctionSignature| CodeFunctionSignature {
+                clause_domains: signature.clause_domains,
+                input_binders: signature.input_binders,
+                inputs: signature.inputs,
+                output: PatternCodeInterface {
+                    subject: signature.output.result.clone(),
+                    outputs: [("value".into(), signature.output.result)]
+                        .into_iter()
+                        .collect(),
+                },
+            };
+        assert!(equivalent_pattern(
+            &context,
+            &pattern(expected.clone()),
+            &pattern(actual.clone()),
+            Budget::default()
+        ));
+        let mut wrong = actual.clone();
+        wrong.input_binders.clear();
+        assert!(!equivalent_code(
+            &context,
+            &expected,
+            &wrong,
+            Budget::default()
+        ));
+        let mut wrong = actual;
+        wrong.output.result = boolean();
+        assert!(!equivalent_code(
+            &context,
+            &expected,
+            &wrong,
+            Budget::default()
+        ));
+        assert!(!equivalent_code(
+            &context,
+            &expected,
+            &expected,
+            Budget {
+                steps: 1,
+                ..Budget::default()
+            }
+        ));
+    }
+
     fn boolean() -> Term {
         Term::Primitive(nir::Primitive::Bool)
     }
@@ -425,6 +526,7 @@ mod tests {
             outputs: BTreeMap::from([("value".into(), boolean())]),
         };
         let expected = PatternFunctionSignature {
+            input_binders: Default::default(),
             clause_domains: vec![Term::Primitive(nir::Primitive::Type)],
             inputs: vec![(
                 LocalId { owner: 1, index: 0 },
@@ -501,6 +603,7 @@ mod tests {
         let make = |owner| {
             let signature = code_signature(owner, boolean());
             DataFunctionSignature {
+                input_binders: Default::default(),
                 clause_domains: signature.clause_domains,
                 inputs: signature.inputs,
                 output: boolean(),

@@ -314,6 +314,7 @@ fn generator_method_contract_cannot_enter_ordinary_interpreter_dispatch() {
             name: "build".into(),
             signature: nir::code_interfaces::MethodSignature::Generator(
                 nir::code_interfaces::CodeFunctionSignature {
+                    input_binders: Default::default(),
                     clause_domains: vec![],
                     inputs: vec![],
                     output: nir::code_interfaces::ExpressionCodeInterface {
@@ -334,6 +335,7 @@ fn generator_method_contract_cannot_enter_ordinary_interpreter_dispatch() {
     );
     package.traits[0].methods[0].signature = nir::code_interfaces::MethodSignature::DataConsumer(
         nir::code_interfaces::DataFunctionSignature {
+            input_binders: Default::default(),
             clause_domains: vec![],
             inputs: vec![],
             output: Term::Primitive(Primitive::Type),
