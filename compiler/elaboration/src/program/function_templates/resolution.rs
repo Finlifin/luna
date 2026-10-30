@@ -67,11 +67,19 @@ impl Rebind<'_, '_> {
                     if !source.names.iter().any(|name| {
                         matches!(name.fallback,
                     Ok(Some(id)) if self.definitions.contains_key(&id))
+                            || name
+                                .ambiguous_traits
+                                .iter()
+                                .flatten()
+                                .any(|id| self.definitions.contains_key(id))
                     }) {
                         return Ok(source.clone());
                     }
                     let mut plan = (**source).clone();
                     for name in &mut plan.names {
+                        for id in name.ambiguous_traits.iter_mut().flatten() {
+                            *id = self.definitions.get(id).copied().unwrap_or(*id);
+                        }
                         if let Ok(Some(id)) = &mut name.fallback {
                             *id = self.definitions.get(id).copied().unwrap_or(*id);
                         }

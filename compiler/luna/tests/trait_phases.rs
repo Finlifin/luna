@@ -1423,3 +1423,109 @@ fn generic_comptime_child_does_not_fall_back_to_less_specific_parent_phase() {
         "{failure}"
     );
 }
+
+#[test]
+fn irrelevant_ambiguous_trait_names_do_not_poison_member_discovery() {
+    let package = support::compile(
+        "
+        struct Subject {}
+        mod a {pub pure comptime trait Protocol {comptime fn unrelated(self)->bool;}}
+        mod b {pub pure comptime trait Protocol {comptime fn other(self)->bool;}}
+        use a.*;
+        use b.*;
+        pure comptime trait Reader {comptime fn read(self)->bool;}
+        comptime impl Reader for Subject {comptime fn read(self)->bool {true}}
+        comptime fn run()->bool {Subject{}.read()}
+        ",
+    );
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn relevant_ambiguous_trait_names_preserve_inherited_source_errors() {
+    for member in ["comptime fn read(self)->bool;", ""] {
+        let parent = if member.is_empty() { " :- Parent" } else { "" };
+        let source = format!(
+            "
+            struct Subject {{}}
+            pure comptime trait Parent {{comptime fn read(self)->bool;}}
+            mod a {{ pub pure comptime trait Protocol{parent} {{ {member} }} }}
+            mod b {{pub pure comptime trait Protocol {{}}}}
+            use a.*;
+            use b.*;
+            pure comptime trait Reader {{comptime fn read(self)->bool;}}
+            comptime impl Reader for Subject {{comptime fn read(self)->bool {{true}}}}
+            comptime fn run()->bool {{Subject{{}}.read()}}
+        "
+        );
+        let failure = compile(&source, Emit::Nir)
+            .err()
+            .expect("relevant ambiguity");
+        assert!(
+            failure.contains("ambiguous glob name `Protocol`"),
+            "{failure}"
+        );
+    }
+}
+
+#[test]
+fn lower_tier_ambiguous_trait_names_do_not_block_comptime_source() {
+    let package = support::compile(
+        "
+        struct Subject {}
+        mod a {pub trait Protocol {fn read(self)->bool;}}
+        mod b {pub trait Protocol {fn read(self)->bool;}}
+        use a.*;
+        use b.*;
+        pure comptime trait Reader {comptime fn read(self)->bool;}
+        comptime impl Reader for Subject {comptime fn read(self)->bool {true}}
+        comptime fn run()->bool {Subject{}.read()}
+        ",
+    );
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn runtime_member_discovery_excludes_ambiguous_comptime_only_traits() {
+    compile(
+        "
+        struct Subject {}
+        mod a {pub pure comptime trait Protocol {comptime fn read(self)->bool;}}
+        mod b {pub pure comptime trait Protocol {comptime fn read(self)->bool;}}
+        use a.*;
+        use b.*;
+        trait Reader {fn read(self)->bool;}
+        impl Reader for Subject {fn read(self)->bool {true}}
+        fn run()->bool {Subject{}.read()}
+        ",
+        Emit::Nir,
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+}
+
+#[test]
+fn ambiguous_nontrait_bindings_shadow_an_outer_trait_spelling() {
+    compile(
+        "
+        trait Protocol {fn read(self)->bool;}
+        struct Subject {}
+        trait Reader {fn read(self)->bool;}
+        impl Reader for Subject {fn read(self)->bool {true}}
+        mod a {pub struct Protocol {}}
+        mod b {pub struct Protocol {}}
+        mod client {
+            use a.*;
+            use b.*;
+            fn run()->bool {Subject{}.read()}
+        }
+        ",
+        Emit::Nir,
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+}

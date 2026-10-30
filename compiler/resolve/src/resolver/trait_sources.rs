@@ -73,6 +73,33 @@ impl TraitSourceIndex {
 }
 
 impl Resolver<'_> {
+    pub(super) fn ambiguous_trait_glob(
+        &self,
+        name: Symbol,
+        scope: ScopeId,
+        span: Span,
+    ) -> ResolveError {
+        let mut traits: Vec<_> = self
+            .scope_tree()
+            .get(scope)
+            .into_iter()
+            .flat_map(|scope| scope.items.glob_candidates.get(&name).into_iter().flatten())
+            .filter_map(|binding| match binding.kind {
+                BindingKind::Definition(id, _) if self.trait_sources.declarations.contains(&id) => {
+                    Some(id)
+                }
+                _ => None,
+            })
+            .collect();
+        traits.sort_by_key(|id| (id.pkg, id.index));
+        traits.dedup();
+        ResolveError::AmbiguousGlob {
+            name: name.to_string(),
+            traits,
+            span,
+        }
+    }
+
     /// Collect potential trait source names at this lexical position. Use normal
     /// name plans for shadowing, import provenance, ambiguity and privacy. A
     /// declaration in another module is not a source until an ordinary binding

@@ -8,6 +8,8 @@ pub struct TraitSourceName {
     pub name: Symbol,
     /// None denotes an ordinary binding that may shadow an outer trait.
     pub fallback: Result<Option<DefId>, String>,
+    /// Exact trait identities in an ambiguous spelling; None means no such evidence.
+    pub ambiguous_traits: Option<Vec<DefId>>,
     /// Original file/node identities, innermost first; not generated HIR ids.
     pub pending_exports: Vec<(u32, u32)>,
 }
@@ -29,6 +31,7 @@ impl TraitSourcePlan {
         spend(self.names.len().saturating_add(self.pending_exports.len()))?;
         for name in &self.names {
             spend(name.pending_exports.len())?;
+            spend(name.ambiguous_traits.as_ref().map_or(0, Vec::len))?;
             if let Err(error) = &name.fallback {
                 spend(error.len())?;
             }
@@ -52,7 +55,15 @@ impl fmt::Display for TraitSourcePlan {
                 Ok(None) => f.write_str("ordinary")?,
                 Err(error) => write!(f, "(error {error:?})")?,
             }
-            f.write_str(") (pending-exports")?;
+            f.write_str(")")?;
+            if let Some(traits) = &name.ambiguous_traits {
+                f.write_str(" (ambiguous-traits")?;
+                for id in traits {
+                    write!(f, " (def {} {})", id.pkg, id.index)?;
+                }
+                f.write_str(")")?;
+            }
+            f.write_str(" (pending-exports")?;
             sites(f, &name.pending_exports)?;
             f.write_str("))")?;
         }

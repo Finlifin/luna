@@ -90,10 +90,7 @@ impl<'a> Resolver<'a> {
                 }
                 if let Some(scope) = self.scope_tree().get(rib.scope_id) {
                     if scope.items.ambiguous_glob(name) {
-                        return Err(ResolveError::InvalidNodeType {
-                            message: format!("ambiguous glob name `{name}`"),
-                            span,
-                        });
+                        return Err(self.ambiguous_trait_glob(name, scope.id, span));
                     }
                     if let Some(binding) = self.lookup_in_scope(name, scope.id) {
                         self.check_access(&binding, scope_id, span)?;
@@ -105,10 +102,7 @@ impl<'a> Resolver<'a> {
             // 2. Walk up the scope tree.
             for scope in self.scope_tree().ancestors(scope_id) {
                 if scope.items.ambiguous_glob(name) {
-                    return Err(ResolveError::InvalidNodeType {
-                        message: format!("ambiguous glob name `{name}`"),
-                        span,
-                    });
+                    return Err(self.ambiguous_trait_glob(name, scope.id, span));
                 }
                 if let Some(binding) = self.lookup_in_scope(name, scope.id) {
                     self.check_access(&binding, scope_id, span)?;
@@ -220,10 +214,7 @@ impl<'a> Resolver<'a> {
             .items
             .ambiguous_glob(name)
         {
-            return Err(ResolveError::InvalidNodeType {
-                message: format!("ambiguous glob name `{name}`"),
-                span,
-            });
+            return Err(self.ambiguous_trait_glob(name, scope, span));
         }
         let binding = self.lookup_in_scope(name, scope).ok_or_else(|| {
             ResolveError::UnresolvedIdentifier {

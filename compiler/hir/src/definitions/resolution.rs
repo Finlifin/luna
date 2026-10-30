@@ -51,7 +51,14 @@ impl DefinitionBatch<'_, '_> {
                 plan.charge(fuel)
                     .map_err(|message| error(message, id.owner))?;
                 for name in &plan.names {
-                    if matches!(name.fallback, Ok(Some(definition)) if !definition.is_valid()) {
+                    if matches!(name.fallback, Ok(Some(definition)) if !definition.is_valid())
+                        || name
+                            .ambiguous_traits
+                            .iter()
+                            .flatten()
+                            .any(|id| !id.is_valid())
+                        || (name.ambiguous_traits.is_some() && name.fallback.is_ok())
+                    {
                         return Err(error("invalid trait source definition", id.owner));
                     }
                 }

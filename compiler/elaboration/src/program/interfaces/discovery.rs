@@ -86,6 +86,7 @@ impl Checker<'_, '_> {
                         }
                     }
                     Ok(None) => {}
+                    Err(_) if entry.ambiguous_traits.is_some() => {}
                     Err(message) => {
                         return Err(error(
                             span,
@@ -94,7 +95,12 @@ impl Checker<'_, '_> {
                     }
                 }
             }
-            if visible.is_empty() {
+            if visible.is_empty()
+                && !plan
+                    .names
+                    .iter()
+                    .any(|entry| entry.ambiguous_traits.is_some())
+            {
                 return Ok(None);
             }
             if !self.interfaces_ready {
@@ -115,6 +121,42 @@ impl Checker<'_, '_> {
             } else {
                 vec![false]
             } {
+                for entry in &plan.names {
+                    let Some(traits) = &entry.ambiguous_traits else {
+                        continue;
+                    };
+                    for id in traits {
+                        let owner = self.package.definition_owner(*id).ok_or_else(|| {
+                            error(span, "ambiguous trait has no definition owner")
+                        })?;
+                        let interface = declaration(self.package, &self.package_identities, owner);
+                        let contract = self
+                            .checked_traits
+                            .iter()
+                            .find(|t| t.declaration == interface)
+                            .ok_or_else(|| {
+                                error(span, "ambiguous trait has no checked contract")
+                            })?;
+                        if !comptime && contract.comptime_only {
+                            continue;
+                        }
+                        if self.inherited_member_tier_available(
+                            interface,
+                            name,
+                            preferred,
+                            span,
+                            &mut budget.steps,
+                        )? {
+                            let message = entry.fallback.as_ref().err().ok_or_else(|| {
+                                error(span, "invalid ambiguous trait source evidence")
+                            })?;
+                            return Err(error(
+                                span,
+                                format!("trait source `{}`: {message}", entry.name),
+                            ));
+                        }
+                    }
+                }
                 let mut sources = Vec::new();
                 let mut pending = false;
                 for id in candidates.declarations() {

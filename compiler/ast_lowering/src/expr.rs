@@ -173,6 +173,12 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 .into_iter()
                 .map(|name| hir::trait_sources::TraitSourceName {
                     name: name.name,
+                    ambiguous_traits: match &name.fallback {
+                        Err(resolve::ResolveError::AmbiguousGlob { traits, .. }) => {
+                            Some(traits.clone())
+                        }
+                        _ => None,
+                    },
                     pending_exports: sites(name.pending_outputs),
                     fallback: name
                         .fallback

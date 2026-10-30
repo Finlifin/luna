@@ -5748,3 +5748,31 @@ Validation from `/home/fin/luna`, exit 0:
   `/tmp/luna-tools-_h3yfqel/result.json`; `git diff --check` passed.
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes complete_shipped_sysroot_invokes_comptime_qualified_type_traits`:
   real sysroot invocation passed; `/tmp/luna-tools-tatcql84/result.json`.
+
+## Member-relevant ambiguous imports (2026-10-31)
+
+Lexical glob ambiguity now retains its conflicting trait declaration identities
+instead of only a diagnostic string. Lowering carries these identities into HIR;
+publication validates them, query budgets charge them, S-expression dumps expose
+them, and template cloning remaps local identities with other resolution evidence.
+
+Concrete member discovery checks these declarations and their inherited members
+within the active phase tier. A spelling collision that cannot supply this member
+no longer blocks an unrelated legal call. Runtime lookup excludes comptime-only
+interfaces, and an ordinary-tier spelling collision does not defeat an already
+selected comptime-only source. Relevant ambiguity remains a lexical error; this
+change does not make either ambiguous binding visible or select between them by
+implementation specificity. Errors without complete structured evidence and
+pending generated exports remain blocking. Private access checks are unchanged.
+
+Validation from `/home/fin/luna`, exit 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test trait_phases -p resolve --test trait_sources -p hir --test definitions`:
+  70 phase/source, 8 resolver and 24 HIR publication tests passed;
+  `/tmp/luna-tools-zyj8oyc0/result.json`. Cases include unrelated and inherited
+  relevant ambiguity, phase tiers, non-trait shadowing, invalid identities,
+  atomic publication and metered evidence.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  `/tmp/luna-tools-b0yxdf5f/result.json`; `git diff --check` passed.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes complete_shipped_sysroot_invokes_comptime_qualified_type_traits`:
+  real sysroot invocation passed; `/tmp/luna-tools-rodbu7zs/result.json`.

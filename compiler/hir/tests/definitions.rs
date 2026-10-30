@@ -851,6 +851,7 @@ fn resolution_evidence_is_checked_before_atomic_publication() {
             names: vec![hir::trait_sources::TraitSourceName {
                 name: symbol::Symbol::intern("Protocol"),
                 fallback: Ok(Some(container)),
+                ambiguous_traits: None,
                 pending_exports: vec![],
             }],
             pending_exports: vec![(3, 7)],
@@ -1187,4 +1188,45 @@ fn omitting_generation_sources_preserves_the_source_and_owner_frontier() {
     assert!(source.item(removed).is_some());
     assert!(source.body(body).is_some());
     assert_eq!(source.definition_owner(identity), Some(removed));
+}
+
+#[test]
+fn ambiguous_trait_evidence_validates_identity_and_charges_candidates() {
+    use hir::definitions::ResolutionEvidence;
+    for (fallback, candidates, valid) in [
+        (Err("ambiguous".to_owned()), vec![DefId::new(2, 8)], true),
+        (Ok(Some(DefId::new(2, 8))), vec![DefId::new(2, 8)], false),
+        (Err("ambiguous".to_owned()), vec![DefId::INVALID], false),
+    ] {
+        let arena = HirArena::new();
+        let mut package = Package::new();
+        let mut batch = DefinitionBatch::new(&mut package);
+        let owner = batch.reserve().unwrap();
+        batch
+            .define(module(&arena, owner, vec![]), None, None)
+            .unwrap();
+        let site = HirId::new(owner, ItemLocalId::new(1));
+        let plan = hir::trait_sources::TraitSourcePlan {
+            names: vec![hir::trait_sources::TraitSourceName {
+                name: symbol::Symbol::intern("Protocol"),
+                fallback,
+                ambiguous_traits: Some(candidates),
+                pending_exports: vec![],
+            }],
+            pending_exports: vec![],
+        };
+        assert!(plan.charge(&mut 1).is_err());
+        if valid {
+            assert!(plan.to_string().contains("(ambiguous-traits (def 2 8))"));
+        }
+        batch.set_resolution(vec![(
+            site,
+            ResolutionEvidence {
+                trait_sources: Some(std::sync::Arc::new(plan)),
+                ..ResolutionEvidence::default()
+            },
+        )]);
+        assert_eq!(batch.publish(&mut 1000).is_ok(), valid);
+        assert_eq!(batch.published().trait_sources.contains_key(&site), valid);
+    }
 }

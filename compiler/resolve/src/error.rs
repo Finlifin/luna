@@ -34,6 +34,12 @@ pub enum ResolveError {
     UnresolvedImportSegment { segment: String, span: Span },
     /// Invalid caller-supplied package identities or dependency edges.
     InvalidPackageGraph(String),
+    /// Ambiguous lexical spelling; trait identities support member relevance checks.
+    AmbiguousGlob {
+        name: String,
+        traits: Vec<symbol::DefId>,
+        span: Span,
+    },
     /// Generic internal error.
     InternalError(String),
 }
@@ -41,6 +47,7 @@ pub enum ResolveError {
 impl ResolveError {
     pub fn message(&self) -> String {
         match self {
+            Self::AmbiguousGlob { name, .. } => format!("ambiguous glob name `{name}`"),
             Self::ScopeCreationFailed { message, .. } => message.clone(),
             Self::ModuleNotFound { message, .. } => message.clone(),
             Self::InvalidNodeType { message, .. } => message.clone(),
@@ -61,7 +68,8 @@ impl ResolveError {
 
     pub fn span(&self) -> Span {
         match self {
-            Self::ScopeCreationFailed { span, .. }
+            Self::AmbiguousGlob { span, .. }
+            | Self::ScopeCreationFailed { span, .. }
             | Self::ModuleNotFound { span, .. }
             | Self::InvalidNodeType { span, .. }
             | Self::FileParsingFailed { span, .. }
@@ -87,6 +95,7 @@ impl FlurryError for ResolveError {
             Self::UnresolvedImportSegment { .. } => RESOLVE_ERROR_BASE + 8,
             Self::InternalError(_) => RESOLVE_ERROR_BASE + 9,
             Self::InvalidPackageGraph(_) => RESOLVE_ERROR_BASE + 10,
+            Self::AmbiguousGlob { .. } => RESOLVE_ERROR_BASE + 11,
         }
     }
 
@@ -102,6 +111,7 @@ impl FlurryError for ResolveError {
             Self::UnresolvedImportSegment { .. } => "unresolved_import_segment",
             Self::InternalError(_) => "internal_error",
             Self::InvalidPackageGraph(_) => "invalid_package_graph",
+            Self::AmbiguousGlob { .. } => "ambiguous_glob",
         }
     }
 

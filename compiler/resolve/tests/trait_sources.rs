@@ -118,6 +118,13 @@ fn ambiguous_globs_are_preserved_until_an_explicit_binding_shadows_them() {
                     .message()
                     .contains("ambiguous glob")
             );
+            match plan.names[0].fallback.as_ref().unwrap_err() {
+                resolve::ResolveError::AmbiguousGlob { traits, .. } => {
+                    assert_eq!(traits.len(), 2);
+                    assert_ne!(traits[0], traits[1]);
+                }
+                other => panic!("expected structured ambiguity, got {other:?}"),
+            }
             let mut rib = Rib::new(RibKind::Block, ScopeId::INVALID);
             rib.define(Symbol::intern("Protocol"), local(4));
             resolver.ribs_mut().push(rib);
