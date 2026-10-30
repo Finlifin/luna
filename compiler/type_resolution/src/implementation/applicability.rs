@@ -1813,39 +1813,6 @@ fn validate_head_arguments_with_domains(
             .unwrap_or(&nir::Term::Primitive(nir::Primitive::Type));
         let domain = substitution.instantiate_bounded(declared, fuel)?;
         nir::type_computations::charge_term(argument, fuel)?;
-        if let Term::TypeListValue(elements) = argument {
-            let package = layouts.ok_or_else(|| {
-                nir::NominalAdmissionError::from(
-                    "type-list argument requires normal-form representation evidence",
-                )
-            })?;
-            let Term::NormalForm {
-                head: declaration, ..
-            } = &domain
-            else {
-                return Err("type-list argument domain is not a bound meta.List<Type>".into());
-            };
-            let mut found = None;
-            for head in &package.normal_forms {
-                *fuel = fuel
-                    .checked_sub(1)
-                    .ok_or(nir::NominalAdmissionError::Budget)?;
-                if head.declaration == *declaration {
-                    if found.is_some() {
-                        return Err("ambiguous type-list representation evidence".into());
-                    }
-                    found = Some(head);
-                }
-            }
-            if binder.sort != Sort::ComptimeValue
-                || !found.is_some_and(|head| head.is_type_list_instance(&domain))
-                || elements.iter().any(|element| element.sort() != Sort::Type)
-                || argument.check_scope(&[]).is_err()
-            {
-                return Err("type-list argument lacks matching meta.List<Type> evidence".into());
-            }
-            continue;
-        }
         if binder.sort == nir::Sort::ComptimeValue
             && *argument
                 == (nir::Term::Rigid {
@@ -1874,69 +1841,26 @@ fn validate_head_arguments_with_domains(
                 return Err("implementation rigid argument domain mismatch".into());
             }
         }
-        if binder.sort == Sort::ComptimeValue && matches!(argument, Term::RecordValue(_)) {
-            let mut symbolic = |value: &Term, expected: &Term, fuel: &mut usize| {
-                let Term::Rigid {
-                    declaration,
-                    sort: Sort::ComptimeValue,
-                } = value
-                else {
-                    return false;
-                };
-                let Some(actual) = evidence.get(declaration) else {
-                    return false;
-                };
-                if nir::type_computations::charge_term(actual, fuel).is_err() {
-                    return false;
-                }
-                actual == expected
-                    || context.is_some_and(|(context, depth)| {
-                        equivalent_domains(context, actual, expected, depth, fuel)
-                    })
+        let symbolic = |value: &Term, expected: &Term, fuel: &mut usize| {
+            let Term::Rigid {
+                declaration,
+                sort: Sort::ComptimeValue,
+            } = value
+            else {
+                return false;
             };
-            nir::validate_record_index_with_admission_in(
-                argument,
-                &domain,
-                fuel,
-                |value, expected, fuel| {
-                    if matches!(value, Term::NominalValue { .. }) {
-                        nir::validate_declaration_arguments_with_evidence_in(
-                            &[binder.declaration],
-                            std::slice::from_ref(expected),
-                            std::slice::from_ref(value),
-                            fuel,
-                            |ty, variant, fuel| {
-                                let package = layouts.ok_or_else(|| {
-                                    nir::NominalAdmissionError::from(
-                                        "nominal record index requires declaration layouts",
-                                    )
-                                })?;
-                                nir::normal_forms::nominal_value_fields_budgeted(
-                                    package, ty, variant, fuel,
-                                )
-                                .ok_or_else(|| {
-                                    if *fuel == 0 {
-                                        nir::NominalAdmissionError::Budget
-                                    } else {
-                                        nir::NominalAdmissionError::from(
-                                            "invalid nominal record index layout",
-                                        )
-                                    }
-                                })
-                            },
-                            &mut symbolic,
-                            layouts.and_then(|package| package.target),
-                        )?;
-                        Ok(true)
-                    } else {
-                        Ok(symbolic(value, expected, fuel))
-                    }
-                },
-                layouts.and_then(|package| package.target),
-            )?;
-            continue;
-        }
-        nir::validate_declaration_arguments_with_layouts_in(
+            let Some(actual) = evidence.get(declaration) else {
+                return false;
+            };
+            if nir::type_computations::charge_term(actual, fuel).is_err() {
+                return false;
+            }
+            actual == expected
+                || context.is_some_and(|(context, depth)| {
+                    equivalent_domains(context, actual, expected, depth, fuel)
+                })
+        };
+        nir::validate_declaration_arguments_with_collections_in(
             &[binder.declaration],
             &[domain],
             std::slice::from_ref(argument),
@@ -1956,6 +1880,13 @@ fn validate_head_arguments_with_domains(
                         }
                     })
             },
+            symbolic,
+            |domain, fuel| {
+                let Some(package) = layouts else {
+                    return Ok(None);
+                };
+                nir::normal_forms::list_element_budgeted(package, domain, fuel)
+            },
             layouts.and_then(|package| package.target),
         )?;
     }
@@ -1965,6 +1896,193 @@ fn validate_head_arguments_with_domains(
 #[cfg(test)]
 mod captured_head_domains {
     use super::*;
+
+    #[test]
+    fn collection_arguments_share_recursive_value_admission_and_layout_evidence() {
+        use nir::Primitive as P;
+        use nir::normal_forms::{Head, Kind, Parameter, Role};
+        let id = |local| DeclarationId { package: 81, local };
+        let list = |element| Term::NormalForm {
+            head: id(50),
+            sort: Sort::Type,
+            arguments: vec![element],
+        };
+        let value = |domain: &Term, fields| Term::NominalValue {
+            ty: Box::new(domain.clone()),
+            variant: None,
+            fields,
+        };
+        let mut package = nir::program::Package {
+            normal_forms: vec![Head {
+                declaration: id(50),
+                role: Role::TypeList,
+                collector: None,
+                parameters: vec![Parameter {
+                    declaration: id(51),
+                    binding: nir::program::LocalId {
+                        owner: 50,
+                        index: 0,
+                    },
+                    kind: Kind::Type,
+                    ty: Term::Primitive(P::Type),
+                }],
+                requirements: vec![],
+            }],
+            ..Default::default()
+        };
+        let check = |domain: Term,
+                     argument: Term,
+                     package: Option<&nir::program::Package>,
+                     evidence: &BTreeMap<DeclarationId, Term>,
+                     fuel: &mut usize| {
+            let domains = [domain];
+            let binders = nir::declaration_parameters(&[id(1)], &domains).unwrap();
+            validate_head_arguments_with_domains(
+                &binders,
+                &domains,
+                &[argument],
+                evidence,
+                None,
+                package,
+                fuel,
+            )
+        };
+        let types = list(Term::Primitive(P::Type));
+        let bools = list(Term::Primitive(P::Bool));
+        let evidence = BTreeMap::from([(id(2), Term::Primitive(P::Bool))]);
+        let rigid = Term::Rigid {
+            declaration: id(2),
+            sort: Sort::ComptimeValue,
+        };
+        let nested = list(bools.clone());
+        let records = Term::Record(vec![("values".into(), types.clone())]);
+        let optional = Term::Optional(Box::new(bools.clone()));
+        let cases = [
+            (
+                types.clone(),
+                Term::TypeListValue(vec![Term::Primitive(P::U8)]),
+            ),
+            (types.clone(), value(&types, vec![Term::Primitive(P::U8)])),
+            (bools.clone(), value(&bools, vec![])),
+            (
+                bools.clone(),
+                value(&bools, vec![Term::Bool(true), rigid.clone()]),
+            ),
+            (
+                nested.clone(),
+                value(&nested, vec![value(&bools, vec![rigid.clone()])]),
+            ),
+            (
+                records,
+                Term::RecordValue(vec![(
+                    "values".into(),
+                    value(&types, vec![Term::Primitive(P::Bool)]),
+                )]),
+            ),
+            (
+                optional.clone(),
+                Term::OptionalValue {
+                    ty: Box::new(optional),
+                    value: Some(Box::new(value(&bools, vec![Term::Bool(false)]))),
+                },
+            ),
+        ];
+        for (domain, argument) in &cases {
+            check(
+                domain.clone(),
+                argument.clone(),
+                Some(&package),
+                &evidence,
+                &mut 10000,
+            )
+            .unwrap();
+            assert!(matches!(
+                check(
+                    domain.clone(),
+                    argument.clone(),
+                    Some(&package),
+                    &evidence,
+                    &mut 0
+                ),
+                Err(nir::NominalAdmissionError::Budget)
+            ));
+            check(
+                domain.clone(),
+                argument.clone(),
+                Some(&package),
+                &evidence,
+                &mut 10000,
+            )
+            .unwrap();
+            assert!(
+                check(
+                    domain.clone(),
+                    argument.clone(),
+                    None,
+                    &evidence,
+                    &mut 10000
+                )
+                .is_err()
+            );
+        }
+        for invalid in [
+            value(&bools, vec![Term::Primitive(P::Bool)]),
+            value(&types, vec![Term::Bool(true)]),
+            value(
+                &bools,
+                vec![Term::Bound {
+                    depth: 0,
+                    index: 0,
+                    sort: Sort::ComptimeValue,
+                }],
+            ),
+            Term::TypeListValue(vec![Term::Primitive(P::Bool)]),
+        ] {
+            assert!(
+                check(
+                    bools.clone(),
+                    invalid,
+                    Some(&package),
+                    &evidence,
+                    &mut 10000
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            check(
+                bools.clone(),
+                value(&bools, vec![rigid]),
+                Some(&package),
+                &BTreeMap::new(),
+                &mut 10000
+            )
+            .is_err()
+        );
+        package.normal_forms[0].role = Role::Opaque;
+        assert!(
+            check(
+                types.clone(),
+                value(&types, vec![]),
+                Some(&package),
+                &evidence,
+                &mut 10000
+            )
+            .is_err()
+        );
+        package.normal_forms[0].role = Role::TypeList;
+        package.normal_forms.push(package.normal_forms[0].clone());
+        assert!(
+            check(
+                types.clone(),
+                value(&types, vec![]),
+                Some(&package),
+                &evidence,
+                &mut 10000
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn completed_domains_admit_type_valued_indices_and_later_parameters() {

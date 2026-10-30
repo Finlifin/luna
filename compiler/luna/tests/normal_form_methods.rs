@@ -103,3 +103,41 @@ fn builtin_callable_aliases_preserve_associated_type_subjects() {
         );
     }
 }
+
+#[test]
+fn implementation_value_inputs_admit_registered_collections_recursively() {
+    let source = "typealias Type=.Type'builtin;
+        struct Collection where T,values:meta.List<T> {}
+        trait First where T {comptime fn first()->T;}
+        impl First<T> for Collection<T,values> where T,values:meta.List<T> {
+            comptime fn first()->T {values[0]}
+        }
+        comptime fn flag()->bool {Collection<bool,[true,false]>.as(First<bool>).first()}
+        comptime fn Item()->Type {Collection<Type,[bool,Type]>.as(First<Type>).first()}
+        comptime fn nested()->bool {
+            Collection<meta.List<bool>,[[true],[false]]>.as(First<meta.List<bool>>).first()[0]
+        }";
+    let package = compile(source).unwrap();
+    for (entry, expected) in [
+        ("flag", Value::Bool(true)),
+        (
+            "Item",
+            Value::Type(nir::Term::Primitive(nir::Primitive::Bool)),
+        ),
+        ("nested", Value::Bool(true)),
+    ] {
+        assert_eq!(
+            luna::invocation::invoke(&package, entry, 100_000).unwrap(),
+            expected
+        );
+    }
+    for invalid in [
+        source.replace(
+            "Collection<bool,[true,false]>",
+            "Collection<bool,[true,'x']>",
+        ),
+        source.replace(".as(First<bool>)", ".as(First<Type>)"),
+    ] {
+        assert!(compile(&invalid).is_err());
+    }
+}

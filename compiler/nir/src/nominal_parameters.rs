@@ -176,6 +176,25 @@ pub fn validate_with_evidence_in(
     .map(|_| ())
 }
 
+/// Admit immutable collections using independently registered element domains.
+/// The callback must charge lookup and domain copying to the shared fuel.
+/// Neither a frozen value's tag nor an opaque head's shape grants this evidence.
+pub fn validate_with_collections_in(
+    parameters: &[DeclarationId],
+    domains: &[Term],
+    arguments: &[Term],
+    fuel: &mut usize,
+    layout: impl FnMut(&Term, Option<u32>, &mut usize) -> Result<Vec<Term>, AdmissionError>,
+    declared: impl FnMut(&Term, &Term, &mut usize) -> bool,
+    collection: impl FnMut(&Term, &mut usize) -> Result<Option<Term>, AdmissionError>,
+    target: Option<crate::target::TargetData>,
+) -> Result<(), AdmissionError> {
+    admit_with_collections_in(
+        parameters, domains, arguments, fuel, layout, declared, collection, target,
+    )
+    .map(|_| ())
+}
+
 /// Structural declaration substitution in an explicit caller scope. This checks
 /// scopes and sorts, including a dependent domain becoming Type. It does not
 /// validate scalar ranges, aggregate payloads, requirements or capabilities;
@@ -472,8 +491,30 @@ pub fn admit_with_evidence_in<'a>(
     domains: &[Term],
     arguments: &'a [Term],
     fuel: &mut usize,
+    layout: impl FnMut(&Term, Option<u32>, &mut usize) -> Result<Vec<Term>, AdmissionError>,
+    declared: impl FnMut(&Term, &Term, &mut usize) -> bool,
+    target: Option<crate::target::TargetData>,
+) -> Result<AdmittedArguments<'a>, AdmissionError> {
+    admit_with_collections_in(
+        parameters,
+        domains,
+        arguments,
+        fuel,
+        layout,
+        declared,
+        |_, _| Ok(None),
+        target,
+    )
+}
+
+fn admit_with_collections_in<'a>(
+    parameters: &[DeclarationId],
+    domains: &[Term],
+    arguments: &'a [Term],
+    fuel: &mut usize,
     mut layout: impl FnMut(&Term, Option<u32>, &mut usize) -> Result<Vec<Term>, AdmissionError>,
     mut declared: impl FnMut(&Term, &Term, &mut usize) -> bool,
+    mut collection: impl FnMut(&Term, &mut usize) -> Result<Option<Term>, AdmissionError>,
     target: Option<crate::target::TargetData>,
 ) -> Result<AdmittedArguments<'a>, AdmissionError> {
     *fuel = fuel
@@ -539,6 +580,7 @@ pub fn admit_with_evidence_in<'a>(
                     fuel,
                     &mut layout,
                     &mut declared,
+                    &mut collection,
                     0,
                     target,
                 )?;
@@ -584,6 +626,7 @@ pub(crate) fn validate_symbolic_value_in(
         fuel,
         &mut layout,
         &mut declared,
+        &mut |_, _| Ok(None),
         0,
         target,
     )
@@ -595,6 +638,7 @@ fn validate_value(
     fuel: &mut usize,
     layout: &mut impl FnMut(&Term, Option<u32>, &mut usize) -> Result<Vec<Term>, AdmissionError>,
     declared: &mut impl FnMut(&Term, &Term, &mut usize) -> bool,
+    collection: &mut impl FnMut(&Term, &mut usize) -> Result<Option<Term>, AdmissionError>,
     depth: usize,
     target: Option<crate::target::TargetData>,
 ) -> Result<(), AdmissionError> {
@@ -623,9 +667,16 @@ fn validate_value(
             return Err("optional value index domain mismatch".into());
         }
         return match value {
-            Some(value) => {
-                validate_value(value, payload, fuel, layout, declared, depth + 1, target)
-            }
+            Some(value) => validate_value(
+                value,
+                payload,
+                fuel,
+                layout,
+                declared,
+                collection,
+                depth + 1,
+                target,
+            ),
             None => Ok(()),
         };
     }
@@ -639,7 +690,42 @@ fn validate_value(
                 }
             },
         )?;
-        return validate_value(value, payload, fuel, layout, declared, depth + 1, target);
+        return validate_value(
+            value,
+            payload,
+            fuel,
+            layout,
+            declared,
+            collection,
+            depth + 1,
+            target,
+        );
+    }
+    if matches!(domain, Term::NormalForm { .. })
+        && matches!(argument, Term::TypeListValue(_) | Term::NominalValue { .. })
+    {
+        if let Some(element) = collection(domain, fuel)? {
+            let fields =
+                crate::normal_forms::list_value_payload(domain, argument).ok_or_else(|| {
+                    AdmissionError::from("collection value domain or payload mismatch")
+                })?;
+            *fuel = fuel
+                .checked_sub(fields.len())
+                .ok_or(AdmissionError::Budget)?;
+            for value in fields {
+                validate_value(
+                    value,
+                    &element,
+                    fuel,
+                    layout,
+                    declared,
+                    collection,
+                    depth + 1,
+                    target,
+                )?;
+            }
+            return Ok(());
+        }
     }
     if let Term::NominalValue {
         ty,
@@ -655,7 +741,16 @@ fn validate_value(
                 let (_, domain, value) = crate::objects::entry_parts(entry)
                     .ok_or_else(|| AdmissionError::from("invalid Object entry encoding"))?;
                 crate::type_computations::charge_term(domain, fuel)?;
-                validate_value(value, domain, fuel, layout, declared, depth + 1, target)?;
+                validate_value(
+                    value,
+                    domain,
+                    fuel,
+                    layout,
+                    declared,
+                    collection,
+                    depth + 1,
+                    target,
+                )?;
             }
             return Ok(());
         }
@@ -668,7 +763,16 @@ fn validate_value(
         }
         for (value, domain) in fields.iter().zip(&expected) {
             crate::type_computations::charge_term(domain, fuel).map_err(AdmissionError::from)?;
-            validate_value(value, domain, fuel, layout, declared, depth + 1, target)?;
+            validate_value(
+                value,
+                domain,
+                fuel,
+                layout,
+                declared,
+                collection,
+                depth + 1,
+                target,
+            )?;
         }
         return Ok(());
     }
@@ -681,7 +785,16 @@ fn validate_value(
         }
         for (value, domain) in values.iter().zip(&domains) {
             crate::type_computations::charge_term(domain, fuel).map_err(AdmissionError::from)?;
-            validate_value(value, domain, fuel, layout, declared, depth + 1, target)?;
+            validate_value(
+                value,
+                domain,
+                fuel,
+                layout,
+                declared,
+                collection,
+                depth + 1,
+                target,
+            )?;
         }
         return Ok(());
     }
@@ -690,7 +803,16 @@ fn validate_value(
             return Err("nominal tuple index arity mismatch".into());
         }
         for (value, domain) in values.iter().zip(domains) {
-            validate_value(value, domain, fuel, layout, declared, depth + 1, target)?;
+            validate_value(
+                value,
+                domain,
+                fuel,
+                layout,
+                declared,
+                collection,
+                depth + 1,
+                target,
+            )?;
         }
         return Ok(());
     }
@@ -717,7 +839,16 @@ fn validate_value(
                 .iter()
                 .find_map(|(field, domain)| (field == name).then_some(domain))
                 .ok_or_else(|| AdmissionError::from("unknown nominal record index field"))?;
-            validate_value(value, domain, fuel, layout, declared, depth + 1, target)?;
+            validate_value(
+                value,
+                domain,
+                fuel,
+                layout,
+                declared,
+                collection,
+                depth + 1,
+                target,
+            )?;
         }
         return Ok(());
     }
@@ -732,6 +863,7 @@ fn validate_value(
                 fuel,
                 layout,
                 declared,
+                collection,
                 depth + 1,
                 target,
             )?;

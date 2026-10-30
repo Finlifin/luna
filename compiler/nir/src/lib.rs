@@ -61,6 +61,7 @@ pub use nominal_parameters::{
     validate_completed_in as validate_declaration_arguments_in,
     validate_completed_with_layouts as validate_declaration_arguments_with_layouts,
     validate_completed_with_layouts_in as validate_declaration_arguments_with_layouts_in,
+    validate_with_collections_in as validate_declaration_arguments_with_collections_in,
     validate_with_evidence as validate_declaration_arguments_with_evidence,
     validate_with_evidence_in as validate_declaration_arguments_with_evidence_in,
 };

@@ -1273,14 +1273,35 @@ impl<'a> Interpreter<'a> {
                 .get(&instance.implementation)
                 .copied()
                 .ok_or_else(invalid)?;
-            nir::validate_declaration_arguments_in(
+            nir::validate_declaration_arguments_with_collections_in(
                 &implementation.type_parameters,
                 &implementation.parameter_types,
                 &instance.arguments,
                 &mut trait_parameter_fuel,
+                |ty, variant, fuel| {
+                    nir::normal_forms::nominal_value_fields_budgeted(package, ty, variant, fuel)
+                        .ok_or_else(|| {
+                            if *fuel == 0 {
+                                nir::NominalAdmissionError::Budget
+                            } else {
+                                "dispatch input lacks nominal layout evidence".into()
+                            }
+                        })
+                },
+                |_, _, _| false,
+                |domain, fuel| nir::normal_forms::list_element_budgeted(package, domain, fuel),
                 package.target,
             )
-            .map_err(|_| invalid())?;
+            .map_err(|error| {
+                if error == nir::NominalAdmissionError::Budget {
+                    Error {
+                        kind: ErrorKind::StepsExhausted,
+                        source: None,
+                    }
+                } else {
+                    invalid()
+                }
+            })?;
             if implementation
                 .interface_instance()
                 .ok_or_else(invalid)?

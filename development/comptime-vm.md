@@ -6964,3 +6964,55 @@ No full workspace test suite was run.
 Public-library validation on the final implementation:
 `python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
 exit 0, five native tests passed; `/tmp/luna-tools-_7shvh4h/result.json`.
+
+
+## Collection-valued implementation inputs (2026-10-31)
+
+Declaration-value admission now accepts an optional collection-layout callback.
+It supplies an independently registered element domain, with lookup and copying
+charged to the same budget. Ordinary and legacy collection payloads use the
+shared exact-domain view, then recursively admit each element. This composes
+with record, optional, error and nominal fields and preserves scalar-domain,
+scope and symbolic declaration evidence checks. Existing callers without this
+callback gain no collection authority from a value's tag or head shape.
+
+Implementation matching uses this general admission path instead of directly
+accepting `TypeListValue`. Its separate record traversal was also redundant:
+the common recursion now checks symbolic leaves and nominal fields through the
+same evidence callbacks. A shared package metadata lookup rejects duplicate
+collection identities, missing roles and invalid domains without invoking heads
+or adding program-value propositions to PTC.
+
+Source invocation exposed a downstream gap: VM dispatch-instance setup used
+layout-free declaration admission even after implementation selection. It now
+provides the same nominal and collection evidence, retaining typed budget
+failure. The source test executes methods whose implementation inputs contain
+boolean lists, Type lists and nested boolean lists, and rejects wrong element
+domains and trait arguments. The public-library example adds the same path.
+The source fixture uses a nominal receiver; an attempted opaque normal-form
+receiver was rejected by existing subject-eligibility checking, which remains
+outside this change and needs separate semantic assessment.
+
+Unit coverage includes both encodings, empty values, nested collections,
+records, optionals, symbolic elements with and without declaration evidence,
+wrong domains/sorts, escaping bound inputs, absent and duplicate layouts, and
+budget failure followed by a successful fresh attempt. Frozen storage is still
+canonicalized by the existing encoder; this does not equate raw ordinary and
+legacy encodings or finish the Type-list representation migration. The callable
+input helper in `nir::function_parameters` still has a legacy-only branch to
+migrate separately.
+
+Validation from /home/fin/luna:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p type_resolution -p comptime_interpretor --no-fail-fast`:
+  exit 0, 1308 passed; `/tmp/luna-tools-78qbbuyy/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test normal_form_methods --test nominal_value_parameters --test normal_form_inference --test type_spreads --no-fail-fast`:
+  exit 0, 410 passed; `/tmp/luna-tools-kkq0e92p/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0; `/tmp/luna-tools-_wlsik39/result.json`; `git diff --check` passed.
+
+No full workspace test suite was run.
+
+Public-library validation on the final implementation:
+`python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
+exit 0, six native tests passed; `/tmp/luna-tools-62nacpnt/result.json`.

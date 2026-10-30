@@ -355,7 +355,7 @@ fn type_list_fields_with_layouts<'a>(
 
 // This is a representation view, not list-layout authority. Metadata owners
 // establish the role and supply the exact domain before borrowing the payload.
-fn list_value_payload<'a>(ty: &Term, value: &'a Term) -> Option<&'a [Term]> {
+pub(crate) fn list_value_payload<'a>(ty: &Term, value: &'a Term) -> Option<&'a [Term]> {
     match value {
         Term::NominalValue {
             ty: actual,
@@ -366,6 +366,35 @@ fn list_value_payload<'a>(ty: &Term, value: &'a Term) -> Option<&'a [Term]> {
         Term::TypeListValue(fields) if type_list_input_type(ty) => Some(fields),
         _ => None,
     }
+}
+
+/// Resolve a collection element domain from registered metadata, charging lookup
+/// and copying to the caller. Duplicate identities are invalid evidence.
+pub fn list_element_budgeted(
+    package: &Package,
+    domain: &Term,
+    fuel: &mut usize,
+) -> Result<Option<Term>, crate::NominalAdmissionError> {
+    let Term::NormalForm { head: identity, .. } = domain else {
+        return Ok(None);
+    };
+    let mut found = None;
+    for head in &package.normal_forms {
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or(crate::NominalAdmissionError::Budget)?;
+        if head.declaration == *identity {
+            if found.is_some() {
+                return Err("ambiguous collection layout evidence".into());
+            }
+            found = Some(head);
+        }
+    }
+    let Some(element) = found.and_then(|head| head.list_element(domain)) else {
+        return Ok(None);
+    };
+    crate::type_computations::charge_term(element, fuel)?;
+    Ok(Some(element.clone()))
 }
 
 /// Validate the currently supported telescope and its executable-body metadata.

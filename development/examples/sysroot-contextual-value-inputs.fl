@@ -128,3 +128,28 @@ test {
         Holder<Marker<Description {enabled: true, kind: bool}>> {flag: true});
     assumes recovered.flag;
 }
+
+{- Implementation inputs are ordinary comptime values. The selected method
+   keeps the list's element domain through dispatch and invocation.
+-}
+struct Catalog where T, items: meta.List<T> {}
+
+trait FirstItem where T {
+    comptime fn first() -> T;
+}
+
+impl FirstItem<T> for Catalog<T, items>
+where T, items: meta.List<T>
+{
+    comptime fn first() -> T {
+        items[0]
+    }
+}
+
+test {
+    const flag = Catalog<bool, [true, false]>.as(FirstItem<bool>).first();
+    const type_ok = Catalog<Type, [bool, u8]>.as(FirstItem<Type>).first() == bool;
+    const nested = Catalog<meta.List<bool>, [[true], [false]]>
+        .as(FirstItem<meta.List<bool>>).first()[0];
+    assumes flag and type_ok and nested;
+}
