@@ -7429,3 +7429,37 @@ Validation in `/home/fin/luna`:
 
 No full language suite or native backend rebuild was needed for this
 context-import-only change; source checks cover its CMTT and spread consumers.
+
+### Branch-selected list inputs feed checked struct publication
+
+The reflected-definition test failed before invoking the publication callback
+because its standalone source did not bind bool. Its primitive references now
+use explicit local bindings, and an early callback-count failure includes the
+underlying compilation error. Both selected layouts, invalid input and retry
+are again exercised; no compiler semantic workaround was needed.
+
+The real sysroot struct-builder example now selects a List<Type> through a
+comptime branch, indexes that value for one field, and passes it by named Es
+input to a Tuple field. Two published types exercise different layouts with
+runtime construction, projection and tuple destructuring. Reflection checks
+both field identities and distinct generated declarations. The selected
+library stage requires six native tests, so omitting the added cases cannot
+silently satisfy its acceptance count.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test reflected_definitions --test builder_invocations --no-fail-fast`:
+  79 builder tests passed; the initial reflected fixture failed before its
+  callback. `/tmp/luna-tools-6kw0p5g1/result.json`, exit 101.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test reflected_definitions`:
+  corrected fixture passed, exit 0; `/tmp/luna-tools-10hii0ux/result.json`.
+- `python3 -B -m unittest discover -s development -p test_library_check.py`:
+  13 runner tests passed, exit 0.
+- `python3 -B development/library_check.py --stage sysroot-builders --timeout 300`:
+  six native tests passed, exit 0; `/tmp/luna-library-r9sikw_0/summary.json`.
+
+This establishes the tested branch-selected publication path, not complete
+coverage of every definition builder or arbitrary dependent field layout.
+
+Formatting: `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`
+exited 0; `/tmp/luna-tools-dndmez0y/result.json`. `git diff --check` passed.

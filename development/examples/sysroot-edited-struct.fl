@@ -89,3 +89,40 @@ test transformed_fields {
     let second = columns.second_count();
     assumes second == 20;
 }
+
+{-
+    A runtime-like comptime branch selects an ordinary list value. Its exact
+    contents supply both a direct field Type and the named input of an opaque
+    Tuple head; publication must keep those two layouts in agreement.
+-}
+comptime fn SelectedRecord(flag: bool) -> Type {
+    let fields: meta.List<Type> = if flag { [bool, u8] } else { [u32, bool] };
+    let builder = meta.StructBuilder.new(.name = .SelectedRecord);
+    builder.add_field(.first, fields[0]);
+    builder.add_field(.packet, Tuple<.Es = fields>);
+    builder.Build()
+}
+
+typealias FlagRecord = SelectedRecord(true);
+typealias CountRecord = SelectedRecord(false);
+
+test selected_layouts {
+    let flag = FlagRecord { first: true, packet: (false, 17) };
+    let count = CountRecord { first: 29, packet: (31, true) };
+    assumes flag.first and count.first == 29;
+    let (enabled, byte) = flag.packet;
+    let (number, ready) = count.packet;
+    assumes not enabled and byte == 17 and number == 31 and ready;
+}
+
+comptime fn selected_layouts_match() -> bool {
+    let left = FlagRecord.struct_field_types();
+    let right = CountRecord.struct_field_types();
+    left[0] == bool and left[1] == Tuple<.Es = [bool, u8]>
+        and right[0] == u32 and right[1] == Tuple<.Es = [u32, bool]>
+        and FlagRecord != CountRecord
+}
+
+test selected_reflection {
+    inline if selected_layouts_match() { assumes true; } else { assumes false; };
+}

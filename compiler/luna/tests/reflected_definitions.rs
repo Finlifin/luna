@@ -30,9 +30,12 @@ fn source_comptime_selection_drives_generated_field_layouts_without_reparsing() 
     std::fs::write(
         &input,
         "
+        typealias bool = .bool'builtin;
+        typealias char = .char'builtin;
+        typealias Type = .Type'builtin;
         struct Flags { first:bool, second:bool }
-        struct Letter { code:.char'builtin }
-        pure comptime fn Selected(flag:bool)->.Type'builtin {
+        struct Letter { code:char }
+        pure comptime fn Selected(flag:bool)->Type {
             if flag {Flags} else {Letter}
         }
     ",
@@ -117,7 +120,7 @@ fn source_comptime_selection_drives_generated_field_layouts_without_reparsing() 
                 Ok(())
             },
         );
-        assert_eq!(calls, 1);
+        assert_eq!(calls, 1, "{:?}", result.as_ref().err());
         assert!(budget.steps < before);
         let Some(selected) = selected else {
             assert!(result.err().unwrap().contains("Type"));
