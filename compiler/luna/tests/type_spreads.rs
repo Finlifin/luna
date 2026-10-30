@@ -741,6 +741,7 @@ fn mixed_packet_values_can_precede_their_late_named_type() {
         luna::invocation::invoke(&package, "Run", 100_000).unwrap(),
         result
     );
+    assert_eq!(vm.bytecode_input_preparations(), 1);
 }
 
 #[test]
@@ -752,14 +753,16 @@ fn mixed_packet_preparations_are_local_to_each_loop_iteration() {
         comptime fn Run()->Type {{var n:Integer=3;var result:Type=bool;
             while n > 0 {{result=Sized<...packet(n)>;n=n - 1;}}result}}"
     ));
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     assert_eq!(
-        luna::invocation::invoke(&package, "Run", 100_000).unwrap(),
+        vm.invoke(id(&package, "Run"), vec![]).unwrap(),
         Value::Type(nir::Term::NormalForm {
             head: id(&package, "Sized"),
             sort: nir::Sort::Type,
             arguments: vec![nir::Term::Integer(comptime_runtime::Integer::from_u128(1))],
         })
     );
+    assert_eq!(vm.bytecode_input_preparations(), 3);
 }
 
 #[test]
@@ -2214,6 +2217,7 @@ fn trailing_empty_normal_input_packet_preserves_bottom_type() {
         Value::Bool(true)
     );
     assert_eq!(calls(&package, &vm), vec!["Run"]);
+    assert_eq!(vm.bytecode_input_preparations(), 1);
 }
 
 #[test]

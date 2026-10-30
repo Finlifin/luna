@@ -770,6 +770,7 @@ pub struct Interpreter<'a> {
     bytecode_default_evaluations: usize,
     bytecode_staged_inputs: usize,
     bytecode_contextual_inputs: usize,
+    bytecode_input_preparations: usize,
     bytecode_compilations: usize,
     bytecode_compilation_steps: u64,
     bytecode_cache: bytecode::CodeCache,
@@ -1634,6 +1635,7 @@ impl<'a> Interpreter<'a> {
             bytecode_default_evaluations: 0,
             bytecode_staged_inputs: 0,
             bytecode_contextual_inputs: 0,
+            bytecode_input_preparations: 0,
             bytecode_compilations: 0,
             bytecode_compilation_steps: 0,
             bytecode_cache: Default::default(),
@@ -3666,7 +3668,7 @@ impl<'a> Interpreter<'a> {
         for (position, slot) in order.into_iter().enumerate() {
             while preparations.peek().is_some_and(|p| p.before == position) {
                 let preparation = preparations.next().unwrap();
-                value!(self.eval(&preparation.expression, environment));
+                value!(self.evaluate_input_preparation(preparation, environment));
             }
             let parameter = &metadata.parameters[slot];
             let mut instantiated = plan.as_ref().map(|_| Box::new(arguments[slot].clone()));
@@ -3732,7 +3734,7 @@ impl<'a> Interpreter<'a> {
             }
         }
         for preparation in preparations {
-            value!(self.eval(&preparation.expression, environment));
+            value!(self.evaluate_input_preparation(preparation, environment));
         }
         let arguments = bindings
             .finish()
@@ -4580,7 +4582,7 @@ impl<'a> Interpreter<'a> {
         let mut preparations = preparations.iter().peekable();
         for position in 0..arguments.len() {
             while preparations.peek().is_some_and(|p| p.before == position) {
-                value!(self.eval(&preparations.next().unwrap().expression, environment));
+                value!(self.evaluate_input_preparation(preparations.next().unwrap(), environment));
             }
             let slot = order.as_ref().map_or(position, |order| order[position]);
             if let Some(specialized) = &mut specialized {
@@ -4726,7 +4728,7 @@ impl<'a> Interpreter<'a> {
             }
         }
         for preparation in preparations {
-            value!(self.eval(&preparation.expression, environment));
+            value!(self.evaluate_input_preparation(preparation, environment));
         }
         if ready.len() != arguments.len() {
             return Err(self.failure(ErrorKind::Type, Some(expr.source)));

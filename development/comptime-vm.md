@@ -2712,3 +2712,55 @@ Outer input-plan scheduling, binding export from preparation expressions and
 specialization still use the migration path. Ready and staged fragments currently
 compile per invocation; this is execution coverage, not a measured speedup or a
 claim that complete input plans are now linear VM programs.
+
+## Input preparation fragments export only committed packet bindings
+
+NF, nominal and alias plans now send supported packet-preparation expressions
+through the VM fragment driver. `NormalFormPreparation::local_bindings` supplies
+the same outer tuple-pattern contract to plan validation and export selection.
+The VM resolves export registers before execution, rejects binding collisions,
+and moves committed values back only after successful completion. Producer-local
+variables are not exported. Errors and transfers retain caller mutations without
+leaking packet bindings; the enclosing plan still removes its bindings on exit.
+Empty and trailing-empty packets execute even though they export no values.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir --test free_bindings`:
+  `/tmp/luna-tools-p7nv6jyu/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-e7i6srxd/result.json`, exit 0. New differential tests cover
+  successful export, temporary scope cleanup, return, missing input, failed
+  pattern match, collision rejection/recovery, budgets exhausted before and
+  after effects, enclosing NF cleanup and trailing-empty packet execution.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_spreads --test comptime_clause_inputs --test comptime_bytecode_types`:
+  `/tmp/luna-tools-ysuoovsz/result.json`, exit 0. Preparation counters verify
+  mixed packets, late Type inputs, repeated loop activations and empty tails.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters`:
+  final `/tmp/luna-tools-jg3pttgc/result.json`, exit 101: 254 passed, 11 failed.
+  The added dynamic alias preparation counter passed. All 11 failures report
+  `unknown trait method` in associated-value/capability elaboration.
+- The same nominal suite on baseline `2b908d71` produced the identical 11 failing
+  test names and 11 `unknown trait method` diagnostics:
+  `/tmp/luna-tools-5h4ne1fj/result.json`, exit 101. For this comparison only the
+  six task-owned tracked source/test files were temporarily replaced with their
+  HEAD contents; all were restored before the final check. Unrelated worktree
+  modifications were preserved throughout. This suite is not reported as green.
+- Final managed `cargo fmt --all`: `/tmp/luna-tools-knw8qfx6/result.json`, exit 0;
+  `git diff --check` passed.
+
+Initial test development found that a zero-step budget exhausted interpreter
+initialization rather than the tested fragment; the sweep now sets its budget
+immediately before evaluation (`/tmp/luna-tools-hpk4pplo/result.json` failure,
+subsequent checks above pass). Some initially chosen pure-Type/empty packet
+examples were already lowered to ordinary blocks and therefore had no preparation
+nodes. Their counter assertions were replaced with cases confirmed to use plans;
+NIR inspection established the distinction, without altering existing semantic
+assertions (`/tmp/luna-tools-g7a976dc/result.json`,
+`/tmp/luna-tools-47cow62z/result.json`, `/tmp/luna-tools-qclh2ecw/result.json`).
+
+Outer input-plan orchestration and specialization remain in the migration
+evaluator, and fragment compilation is still per invocation. The next VM step is
+to suspend/resume the plan itself using the existing ready, staged and preparation
+fragment channels. Separately, the confirmed baseline trait-method failures remain
+unfinished frontend work; this stage does not repair or mask them.

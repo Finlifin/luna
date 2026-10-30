@@ -2195,6 +2195,7 @@ fn dynamic_alias_pending_literals_preserve_packet_and_effect_order() {
     let mut vm =
         comptime_interpretor::Interpreter::for_comptime(&package, Default::default()).unwrap();
     let actual = vm.invoke(support::id(&package, "Build"), vec![]).unwrap();
+    assert_eq!(vm.bytecode_input_preparations(), 1);
     let calls = vm
         .events()
         .iter()

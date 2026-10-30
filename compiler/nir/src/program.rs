@@ -207,28 +207,35 @@ pub struct NormalFormPreparation {
     pub before: usize,
     pub expression: Expr,
 }
+impl NormalFormPreparation {
+    /// The only bindings exported by a packet producer belong to its outer
+    /// tuple pattern. Producer-local temporaries never enter the input plan.
+    pub fn local_bindings(&self) -> Option<Vec<LocalId>> {
+        let ExprKind::LetPattern {
+            pattern: Pattern::Tuple(fields),
+            guard: None,
+            otherwise: None,
+            ..
+        } = &self.expression.kind
+        else {
+            return None;
+        };
+        fields
+            .iter()
+            .map(|field| {
+                let Pattern::Binding { binding, inner } = field else {
+                    return None;
+                };
+                matches!(inner.as_ref(), Pattern::Wild).then_some(*binding)
+            })
+            .collect()
+    }
+}
 impl NormalFormInputPlan {
     pub fn local_bindings(&self) -> Option<Vec<LocalId>> {
         let mut bindings = self.bindings.clone();
         for preparation in &self.preparations {
-            let ExprKind::LetPattern {
-                pattern: Pattern::Tuple(fields),
-                guard: None,
-                otherwise: None,
-                ..
-            } = &preparation.expression.kind
-            else {
-                return None;
-            };
-            for field in fields {
-                let Pattern::Binding { binding, inner } = field else {
-                    return None;
-                };
-                if !matches!(inner.as_ref(), Pattern::Wild) {
-                    return None;
-                }
-                bindings.push(*binding);
-            }
+            bindings.extend(preparation.local_bindings()?);
         }
         Some(bindings)
     }
@@ -5352,24 +5359,7 @@ impl ExprKind {
         }
         let mut locals = bindings.clone().unwrap_or_default();
         for preparation in preparations {
-            let Self::LetPattern {
-                pattern: Pattern::Tuple(fields),
-                guard: None,
-                otherwise: None,
-                ..
-            } = &preparation.expression.kind
-            else {
-                return None;
-            };
-            for field in fields {
-                let Pattern::Binding { binding, inner } = field else {
-                    return None;
-                };
-                if !matches!(inner.as_ref(), Pattern::Wild) {
-                    return None;
-                }
-                locals.push(*binding);
-            }
+            locals.extend(preparation.local_bindings()?);
         }
         if locals
             .iter()

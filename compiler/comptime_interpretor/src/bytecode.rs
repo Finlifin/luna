@@ -410,6 +410,61 @@ impl<'a> Interpreter<'a> {
         self.bytecode_contextual_inputs
     }
 
+    pub(super) fn evaluate_input_preparation(
+        &mut self,
+        preparation: &nir::program::NormalFormPreparation,
+        environment: &mut Environment,
+    ) -> Result<Flow, Error> {
+        let source = preparation.expression.source;
+        if let K::LetPattern {
+            pattern: nir::program::Pattern::Tuple(fields),
+            ..
+        } = &preparation.expression.kind
+        {
+            self.effect_charge(fields.len(), Some(source))?;
+        }
+        let bindings = preparation
+            .local_bindings()
+            .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
+        if bindings
+            .iter()
+            .any(|binding| environment.contains_key(binding))
+            || bindings.iter().collect::<BTreeSet<_>>().len() != bindings.len()
+        {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        }
+        let Some(code) = self.invocation_code(&preparation.expression, None)? else {
+            return self.eval(&preparation.expression, environment);
+        };
+        let mut exports = Vec::with_capacity(bindings.len());
+        for binding in bindings {
+            self.tick(Some(source))?;
+            let index = code
+                .locals()
+                .binary_search_by_key(&binding, |(id, _)| *id)
+                .map_err(|_| self.failure(ErrorKind::MissingBinding, Some(source)))?;
+            exports.push((binding, code.locals()[index].1));
+        }
+        let mut frame = self.start_frame(&code, environment)?;
+        self.bytecode_input_preparations += 1;
+        let mut result = self.run_fragment(&mut frame);
+        if matches!(&result, Ok(Flow::Value(_))) {
+            if exports.iter().any(|(_, slot)| frame.slots[*slot].is_none()) {
+                result = Err(self.failure(ErrorKind::MissingBinding, Some(source)));
+            } else {
+                // Move committed packet bindings out with the imported caller
+                // values. Transfers and failures export no temporary bindings.
+                frame.imported.extend(exports);
+            }
+        }
+        *environment = frame.restore_environment();
+        result
+    }
+
+    pub fn bytecode_input_preparations(&self) -> usize {
+        self.bytecode_input_preparations
+    }
+
     pub(super) fn start_frame(
         &mut self,
         code: &Arc<Program>,
@@ -2790,3 +2845,7 @@ mod compilation_tests;
 #[cfg(test)]
 #[path = "normal_types/tests.rs"]
 mod normal_type_tests;
+
+#[cfg(test)]
+#[path = "input_preparation_tests.rs"]
+mod input_preparation_tests;
