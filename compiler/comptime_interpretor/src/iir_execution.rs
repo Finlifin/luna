@@ -110,7 +110,29 @@ impl<'a> Interpreter<'a> {
             kind: ErrorKind::InvalidCallPlan,
             source: None,
         })?;
+        let mut retained_callable_signatures = HashMap::new();
+        for identity in &graph.callable_identities {
+            let indexed = (|| {
+                fuel = fuel
+                    .checked_sub(1)
+                    .ok_or(nir::type_computations::Error::Budget)?;
+                for argument in &identity.key.arguments {
+                    nir::type_computations::charge_term(argument, &mut fuel)?;
+                }
+                retained_callable_signatures.insert(
+                    (identity.key.declaration, identity.key.arguments.as_slice()),
+                    &identity.signature,
+                );
+                Ok::<_, nir::type_computations::Error>(())
+            })();
+            budget.steps = fuel as u64;
+            indexed.map_err(|_| Error {
+                kind: ErrorKind::StepsExhausted,
+                source: None,
+            })?;
+        }
         Ok(Self {
+            retained_callable_signatures,
             bytecode_invocations: 0,
             bytecode_default_evaluations: 0,
             bytecode_staged_inputs: 0,

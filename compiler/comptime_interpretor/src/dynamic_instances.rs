@@ -18,13 +18,17 @@ impl Interpreter<'_> {
         fuel: &mut usize,
     ) -> Option<Term> {
         *fuel = fuel.checked_sub(1)?;
-        if let Some(graph) = self.graph {
-            *fuel = fuel.checked_sub(graph.callable_identities.len())?;
-            let identity = graph.callable_identities.iter().find(|identity| {
-                identity.key.declaration == declaration && identity.key.arguments == arguments
-            })?;
-            nir::type_computations::charge_term(&identity.signature, fuel).ok()?;
-            return Some(identity.signature.clone());
+        if self.graph.is_some() {
+            // Hash only bounded, complete instance inputs. The immutable graph
+            // owns the borrowed keys and signatures for this VM's lifetime.
+            for argument in arguments {
+                nir::type_computations::charge_term(argument, fuel).ok()?;
+            }
+            let signature = self
+                .retained_callable_signatures
+                .get(&(declaration, arguments))?;
+            nir::type_computations::charge_term(signature, fuel).ok()?;
+            return Some((*signature).clone());
         }
         if let Some(head) = self.normal_forms.get(&declaration) {
             if !arguments.is_empty() {
@@ -677,5 +681,119 @@ mod tests {
         outcome.set(ContractOutcome::Satisfied);
         vm.eval(&expression(&package), &mut env).unwrap();
         assert_eq!(vm.instances.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod retained_signature_tests {
+    use super::*;
+
+    fn signature() -> Term {
+        Term::Function {
+            parameters: vec![],
+            result: Box::new(Term::Primitive(Primitive::Bool)),
+        }
+    }
+    fn argument(index: u32) -> Term {
+        Term::Integer(comptime_runtime::Integer::from_u128(index as u128))
+    }
+    fn graph(count: u32) -> iir::Package {
+        iir::Package {
+            callable_identities: (0..count)
+                .map(|index| iir::CallableIdentity {
+                    key: iir::InstanceKey {
+                        declaration: DeclarationId {
+                            package: 17,
+                            local: 1,
+                        },
+                        arguments: vec![argument(index)],
+                    },
+                    signature: signature(),
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn retained_signature_lookup_depends_on_key_size_not_catalog_size() {
+        let declaration = DeclarationId {
+            package: 17,
+            local: 1,
+        };
+        let mut baseline = None;
+        for count in [2, 102, 2002] {
+            let graph = graph(count);
+            let vm = Interpreter::from_iir(
+                &graph,
+                Budget {
+                    steps: 1_000_000,
+                    depth: 128,
+                },
+            )
+            .unwrap();
+            let mut fuel = 100;
+            assert_eq!(
+                vm.normal_callable_signature(declaration, &[argument(1)], &[], &mut fuel),
+                Some(signature())
+            );
+            let used = 100 - fuel;
+            if let Some(baseline) = baseline {
+                assert_eq!(used, baseline);
+            } else {
+                baseline = Some(used);
+            }
+            // Different instances of the same declaration must not alias.
+            assert!(
+                vm.normal_callable_signature(declaration, &[argument(count)], &[], &mut 100)
+                    .is_none()
+            );
+            assert!(
+                vm.normal_callable_signature(declaration, &[], &[], &mut 100)
+                    .is_none()
+            );
+            assert!(
+                vm.normal_callable_signature(declaration, &[argument(1)], &[], &mut 1)
+                    .is_none()
+            );
+            assert!(
+                vm.normal_callable_signature(declaration, &[argument(1)], &[], &mut 100)
+                    .is_some()
+            );
+            assert!(vm.events().is_empty());
+        }
+    }
+
+    #[test]
+    fn retained_signature_index_is_world_local_and_bounds_query_hash_work() {
+        let first = graph(2);
+        let mut second = graph(2);
+        second.callable_identities[1].signature = signature().with_unsafe_call_requirement(true);
+        let a = Interpreter::from_iir(&first, Budget::default()).unwrap();
+        let b = Interpreter::from_iir(&second, Budget::default()).unwrap();
+        let declaration = first.callable_identities[1].key.declaration;
+        assert!(
+            !a.normal_callable_signature(declaration, &[argument(1)], &[], &mut 100)
+                .unwrap()
+                .is_unsafe_callable()
+        );
+        assert!(
+            b.normal_callable_signature(declaration, &[argument(1)], &[], &mut 100)
+                .unwrap()
+                .is_unsafe_callable()
+        );
+        assert!(
+            a.normal_callable_signature(
+                declaration,
+                &[Term::String("x".repeat(4096).into())],
+                &[],
+                &mut 100
+            )
+            .is_none()
+        );
+        assert!(
+            a.normal_callable_signature(declaration, &[argument(1)], &[], &mut 100)
+                .is_some()
+        );
     }
 }

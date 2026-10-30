@@ -816,6 +816,7 @@ pub struct Interpreter<'a> {
     instances: HashMap<(DeclarationId, Vec<Term>), Arc<Closure>>,
     functions: BTreeMap<DeclarationId, &'a nir::program::Function>,
     runtime_function_identities: BTreeMap<DeclarationId, &'a nir::program::RuntimeFunctionIdentity>,
+    retained_callable_signatures: HashMap<(DeclarationId, &'a [Term]), &'a Term>,
     normal_forms: BTreeMap<DeclarationId, &'a nir::normal_forms::Head>,
     structs: BTreeMap<DeclarationId, generated_structs::StructDefinition<'a>>,
     newtypes: BTreeMap<DeclarationId, &'a nir::newtypes::Newtype>,
@@ -1671,6 +1672,7 @@ impl<'a> Interpreter<'a> {
             instances: HashMap::new(),
             functions,
             runtime_function_identities,
+            retained_callable_signatures: HashMap::new(),
             normal_forms: package
                 .normal_forms
                 .iter()

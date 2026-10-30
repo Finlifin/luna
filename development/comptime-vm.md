@@ -5288,3 +5288,44 @@ Validation from `/home/fin/luna`:
 - `python3 -B development/check.py --timeout 900 -- run -p luna -- development/examples/sysroot-callable-type-inputs.fl --sysroot library --test-native`:
   exit 0, one native test passed with zero failures;
   `/tmp/luna-tools-snows9t7/result.json`.
+
+
+### Callable evidence indexes (2026-10-30)
+
+Callable identities are ordinary comptime inputs whose representation evidence
+must remain available through materialization. Looking up that evidence must not
+rescan every unrelated declaration for each nested input. DeclarationWorld now
+indexes borrowed functions, runtime identities and normal-form heads once during
+construction. Materialization shares those indexes for function selection and
+formation-contract lookup. Index construction consumes preparation allowance;
+ambiguous duplicate entries are rejected before publishing the world.
+
+The IIR reference VM likewise indexes retained signatures by declaration and
+complete instance arguments. Keys and signatures borrow the immutable graph;
+the index is private to that VM. Construction and queries charge argument
+structure before hashing, and signature copies remain budgeted. No invocation
+result or predicate outcome is cached, and metadata cannot authorize execution.
+The existing policy restricting invocation-result caching to Type outputs is
+unchanged.
+
+Regression tests vary unrelated catalogs from zero to 2,000 declarations and
+retained identities from two to 2,002 entries. Fixed queries consume the same
+lookup allowance at every size. They also cover world isolation, missing or
+incorrect inputs, duplicate declarations, bounded hashing and recovery after
+budget rejection. This demonstrates removal of catalog scans on these paths;
+it is not a wall-clock speedup claim or a claim that all VM lookup work is now
+constant-time. Input validation, substitution and signature copying still scale
+with the structures they process.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution --test callable_world --test associated`:
+  exit 0, 27 tests passed; `/tmp/luna-tools-3_kud6r9/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  exit 0, 312 tests passed; `/tmp/luna-tools-psltihkr/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test scoped_comptime_callables`:
+  exit 0, 7 tests passed; `/tmp/luna-tools-axp6id6d/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-ci84lu2n/result.json`.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- development/examples/sysroot-callable-type-inputs.fl --sysroot library --test-native`:
+  exit 0, one native test passed; `/tmp/luna-tools-j7qaan6w/result.json`.

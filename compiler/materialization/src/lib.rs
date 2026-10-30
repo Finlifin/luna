@@ -646,12 +646,7 @@ impl Builder<'_> {
             crate::associated::charge_projection_copy(argument, &mut self.fuel)
                 .map_err(|_| "dispatch instance argument type budget exhausted".to_owned())?;
         }
-        if let Some(identity) = self
-            .package
-            .runtime_function_identities
-            .iter()
-            .find(|f| f.declaration == id)
-        {
+        if let Some(identity) = self.world.runtime_function_identity(id) {
             if self.instances.is_some() {
                 return Err(
                     "runtime function identity has no executable definition for IIR".into(),
@@ -678,10 +673,8 @@ impl Builder<'_> {
             return Ok(());
         }
         let f = self
-            .package
-            .functions
-            .iter()
-            .find(|f| f.declaration == id)
+            .world
+            .function_declaration(id)
             .or_else(|| self.generated_functions.get(&id))
             .ok_or("missing dispatch function")?;
         if self.instances.is_some() && f.phase == n::FunctionPhase::NormalForm {
@@ -2274,12 +2267,7 @@ impl Builder<'_> {
                     },
                     signature,
                 });
-                if let Some(function) = self
-                    .package
-                    .functions
-                    .iter()
-                    .find(|f| f.declaration == *declaration)
-                {
+                if let Some(function) = self.world.function_declaration(*declaration) {
                     let binders = self.input_binders(&function.type_parameters);
                     self.formation_requirements_with_parameters(
                         &function.requirements,

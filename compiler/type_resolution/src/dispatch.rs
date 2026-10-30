@@ -14,6 +14,9 @@ pub struct DeclarationWorld<'a> {
     context: Context,
     assumptions: Vec<n::TraitRequirement>,
     declaration_parameter_sorts: BTreeMap<Id, nir::Sort>,
+    callable_functions: HashMap<Id, &'a n::Function>,
+    runtime_callables: HashMap<Id, &'a n::RuntimeFunctionIdentity>,
+    normal_heads: HashMap<Id, &'a nir::normal_forms::Head>,
 }
 impl<'a> DeclarationWorld<'a> {
     pub fn new(
@@ -56,6 +59,42 @@ impl<'a> DeclarationWorld<'a> {
         }
         let mut input_fuel = budget.steps;
         let domains = package.declaration_parameter_domains(&mut input_fuel)?;
+        // Immutable declaration metadata is indexed once per world. No function
+        // invocation result, predicate outcome or mutable state is cached here.
+        let mut callable_functions = HashMap::new();
+        let mut runtime_callables = HashMap::new();
+        let mut normal_heads = HashMap::new();
+        for function in &package.functions {
+            input_fuel = input_fuel
+                .checked_sub(1)
+                .ok_or("callable index budget exhausted")?;
+            if callable_functions
+                .insert(function.declaration, function)
+                .is_some()
+            {
+                return Err("duplicate callable declaration".into());
+            }
+        }
+        for identity in &package.runtime_function_identities {
+            input_fuel = input_fuel
+                .checked_sub(1)
+                .ok_or("callable index budget exhausted")?;
+            if runtime_callables
+                .insert(identity.declaration, identity)
+                .is_some()
+            {
+                return Err("duplicate runtime callable identity".into());
+            }
+        }
+        for head in &package.normal_forms {
+            input_fuel = input_fuel
+                .checked_sub(1)
+                .ok_or("callable index budget exhausted")?;
+            if normal_heads.insert(head.declaration, head).is_some() {
+                return Err("duplicate normal-form callable identity".into());
+            }
+        }
+
         let declaration_parameter_sorts = domains
             .iter()
             .map(|(id, domain)| {
@@ -80,9 +119,22 @@ impl<'a> DeclarationWorld<'a> {
                 context,
                 assumptions,
                 declaration_parameter_sorts,
+                callable_functions,
+                runtime_callables,
+                normal_heads,
             },
             input_fuel,
         ))
+    }
+    /// Borrow checked metadata without scanning or copying executable bodies.
+    pub fn function_declaration(&self, declaration: Id) -> Option<&'a n::Function> {
+        self.callable_functions.get(&declaration).copied()
+    }
+    pub fn runtime_function_identity(
+        &self,
+        declaration: Id,
+    ) -> Option<&'a n::RuntimeFunctionIdentity> {
+        self.runtime_callables.get(&declaration).copied()
     }
     pub fn index(&self) -> &Index {
         &self.index
@@ -119,13 +171,8 @@ impl<'a> DeclarationWorld<'a> {
         frames: &[Vec<nir::Sort>],
         fuel: &mut usize,
     ) -> Option<Term> {
-        *fuel = fuel.checked_sub(self.package.normal_forms.len())?;
-        if let Some(head) = self
-            .package
-            .normal_forms
-            .iter()
-            .find(|h| h.declaration == declaration)
-        {
+        *fuel = fuel.checked_sub(1)?;
+        if let Some(head) = self.normal_heads.get(&declaration) {
             if !arguments.is_empty() {
                 return None;
             }
@@ -135,30 +182,20 @@ impl<'a> DeclarationWorld<'a> {
             }
             return head.callable_type().ok();
         }
-        *fuel = fuel.checked_sub(self.package.runtime_function_identities.len())?;
-        let (parameters, signature, qualifiers) = if let Some(identity) = self
-            .package
-            .runtime_function_identities
-            .iter()
-            .find(|f| f.declaration == declaration)
-        {
-            (&identity.type_parameters, &identity.signature, None)
-        } else {
-            *fuel = fuel.checked_sub(self.package.functions.len())?;
-            let function = self
-                .package
-                .functions
-                .iter()
-                .find(|f| f.declaration == declaration)?;
-            (
-                &function.type_parameters,
-                &function.signature,
-                Some((
-                    function.phase == n::FunctionPhase::Comptime,
-                    function.is_unsafe,
-                )),
-            )
-        };
+        let (parameters, signature, qualifiers) =
+            if let Some(identity) = self.runtime_callables.get(&declaration) {
+                (&identity.type_parameters, &identity.signature, None)
+            } else {
+                let function = self.callable_functions.get(&declaration)?;
+                (
+                    &function.type_parameters,
+                    &function.signature,
+                    Some((
+                        function.phase == n::FunctionPhase::Comptime,
+                        function.is_unsafe,
+                    )),
+                )
+            };
         let domains = self.input_domains(parameters, fuel).ok()?;
         let descriptor = nir::normal_forms::Head {
             declaration,
@@ -188,16 +225,14 @@ impl<'a> DeclarationWorld<'a> {
             .check_arguments_in_scope_with_callables_budgeted_in(
                 arguments,
                 |id| {
-                    self.package
-                        .normal_forms
-                        .iter()
-                        .any(|h| h.declaration == id && h.role == nir::normal_forms::Role::Tuple)
+                    self.normal_heads
+                        .get(&id)
+                        .is_some_and(|h| h.role == nir::normal_forms::Role::Tuple)
                 },
                 |id| {
-                    self.package
-                        .normal_forms
-                        .iter()
-                        .any(|h| h.declaration == id && h.role == nir::normal_forms::Role::TypeList)
+                    self.normal_heads
+                        .get(&id)
+                        .is_some_and(|h| h.role == nir::normal_forms::Role::TypeList)
                 },
                 |ty, variant, fuel| {
                     nir::normal_forms::nominal_value_fields_budgeted(
