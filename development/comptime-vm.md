@@ -5519,3 +5519,40 @@ source grouping now preserves it after tier filtering. Initial fixture failures
 used an unavailable assert API and a call directly inside assumes; the final
 example evaluates the runtime call first and checks its bound result. These
 failures were repaired before the passing native and sysroot checks above.
+
+### Receiver-driven interface input discovery (2026-10-31)
+
+ImplementationHead now exposes infer_interface_from_subject for the next stage
+of concrete receiver member lookup. It matches a local receiver projection with
+the ordinary typed input matcher, including declared value domains and dependent
+domain staging. It then substitutes the inferred inputs into the original
+interface arguments. The output is only an InterfaceInstance, never applicability
+evidence or permission to dispatch. Callers must run full interface formation,
+requirements, capabilities and implementation competition through the existing
+world. In particular an unsatisfied requires clause may still yield a candidate
+source, which normal applicability correctly excludes.
+
+Input traversal and cloning are bounded before inference. Matching and output
+substitution have separate partitions of the remaining allowance. Unresolved
+parameters, opaque factory inputs and exhausted budgets stay pending. Output
+scope checks prevent malformed holes from escaping. No candidate-local bindings
+are installed in shared state. Names such as Tuple, List, OptionalOps or meta
+protocols have no special role.
+
+This API is not yet called by the frontend's concrete member lookup. The next
+integration must collect visible trait identities with lexical/import provenance,
+then infer each candidate's full interface and resolve applicability before
+applying source tiers. Public declarations in unrelated modules must not become
+candidates merely because they exist in the package. Missing interface inputs
+must remain pending rather than being guessed from the requested method.
+
+Validation from `/home/fin/luna`, exit 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution --test receiver_sources --test implementation --test inherent`:
+  9 discovery, 78 implementation and 7 inherent tests passed;
+  `/tmp/luna-tools-2eelxy2f/result.json`.
+  Includes Type/scalar receiver inputs, reordered outputs, ordinary record values,
+  unsatisfied requirements, opaque NF identity, unresolved inputs, budget failure
+  and recovery, independent interface identities and malformed output scope.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  `/tmp/luna-tools-u07rmf71/result.json`; `git diff --check` passed.

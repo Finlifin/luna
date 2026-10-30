@@ -486,6 +486,85 @@ fn unresolved(formula: Formula, context: &Context, budget: Budget) -> TypeAssess
     }
 }
 impl ImplementationHead {
+    /// Infer a potential interface instance using receiver information alone.
+    /// This is source discovery, not implementation applicability: the result
+    /// carries no TypeEvidence. Callers must query the complete interface through
+    /// the ordinary implementation world before selecting or invoking a member.
+    /// Unknown inputs remain pending; interface arguments never guess them.
+    pub fn infer_interface_from_subject(
+        &self,
+        subject: &Term,
+        context: &Context,
+        mut budget: Budget,
+        domains: &BTreeMap<DeclarationId, Term>,
+        layouts: Option<&nir::program::Package>,
+    ) -> Result<nir::program::InterfaceInstance, TypeAssessment> {
+        let interface = self.interface.ok_or_else(|| {
+            TypeAssessment::Pending("interface discovery requires a fixed trait head".into())
+        })?;
+        budget.steps = budget
+            .steps
+            .checked_sub(self.type_parameters.len())
+            .ok_or_else(|| {
+                TypeAssessment::Pending("interface discovery budget exhausted".into())
+            })?;
+        budget.steps = validate(self, subject, &[], budget).map_err(TypeAssessment::Pending)?;
+        // Match a local receiver projection of the head. Its incomplete proof
+        // never escapes: retaining the original argument equations would turn
+        // the values we are trying to discover into assumed query inputs.
+        let receiver = Self {
+            declaration: self.declaration,
+            interface: self.interface,
+            interface_arguments: Vec::new(),
+            parameter_types: self.parameter_types.clone(),
+            type_parameters: self.type_parameters.clone(),
+            requirements: self.requirements.clone(),
+            subject: self.subject.clone(),
+        };
+        let matching_steps = budget.steps / 2;
+        budget.steps -= matching_steps;
+        let matched = receiver.match_subject_types_with_domains(
+            subject,
+            &[],
+            context,
+            Budget {
+                steps: matching_steps,
+                ..budget
+            },
+            domains,
+            layouts,
+        )?;
+        let computation = |error: nir::type_computations::Error| match error {
+            nir::type_computations::Error::Budget => TypeAssessment::Pending(error.to_string()),
+            error => TypeAssessment::Invalid(error.to_string()),
+        };
+        let substitution = nir::DeclarationSubstitution::bounded(
+            &self.type_parameters,
+            &self.parameter_types,
+            matched.type_arguments(),
+            &[],
+            &mut budget.steps,
+        )
+        .map_err(computation)?;
+        let arguments = self
+            .interface_arguments
+            .iter()
+            .map(|argument| {
+                let value = substitution
+                    .instantiate_bounded(argument, &mut budget.steps)
+                    .map_err(computation)?;
+                value
+                    .check_scope(&[])
+                    .map_err(|error| TypeAssessment::Invalid(error.to_string()))?;
+                Ok(value)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(nir::program::InterfaceInstance {
+            declaration: interface,
+            arguments,
+        })
+    }
+
     pub fn match_types(
         &self,
         subject: &Term,
