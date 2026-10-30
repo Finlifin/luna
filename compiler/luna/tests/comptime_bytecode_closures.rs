@@ -53,4 +53,34 @@ fn closures_keep_private_capture_cells_across_compiled_invocations() {
             .count(),
         4
     );
+    // Both instances from make share immutable body code, never capture cells.
+    assert_eq!(vm.bytecode_compilations(), 7);
+}
+
+#[test]
+fn callback_loops_reuse_code_but_execute_every_state_change() {
+    let package = support::compile(
+        "typealias Integer=.Integer'builtin;
+        comptime fn run()->bool {
+            var flag=false;
+            let toggle:%{flag:bool} comptime fn()->bool=|| {flag=not flag;flag};
+            var index:Integer=0;
+            var result=false;
+            while index < 100 {
+                result=toggle();
+                index = index + 1;
+            }
+            not result and not flag
+        }",
+    );
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    for _ in 0..2 {
+        let before = vm.bytecode_invocations();
+        assert_eq!(
+            vm.invoke(support::id(&package, "run"), vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(vm.bytecode_invocations() - before, 101);
+        assert_eq!(vm.bytecode_compilations(), 2);
+    }
 }

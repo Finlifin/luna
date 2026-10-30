@@ -4070,3 +4070,36 @@ Validation in /home/fin/luna:
   exit 0, `/tmp/luna-tools-9ptfjsoz/result.json`.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
   exit 0, `/tmp/luna-tools-s35snhmc/result.json`; `git diff --check`: exit 0.
+
+### Reuse immutable owned invocation code
+
+Owned invocation bodies now share a bounded compilation cache alongside immutable
+package declarations. The owned lookup uses a process-local Arc address only as
+an index and validates a live weak identity before reusing code. It is not a
+language type identity or a persistent cache key. The cache does not hold a strong
+source-body reference or any live captured environment; copy-on-write replacement
+receives its own code. Unsupported lowering can be remembered, while compilation
+errors and budget exhaustion are never published as cache entries.
+
+Both entry classes share the existing work-weight quota. Replacement subtracts
+the old weight, and capacity eviction clears both classes. Invocation results,
+argument admission, contracts, effects and capture cells are not cached. Default
+expression execution retains its existing compilation path; this change routes
+owned invocation frames, including closure bodies, through code reuse.
+
+The callback-loop regression executes two rounds of 100 state-changing callback
+calls. It observes 202 compiled invocation frames but only two compilations
+(the wrapper and callback), with fresh capture cells on the second round. The
+independent-closure case also checks sharing of body code without sharing cells.
+Cache tests cover live identity, copy-on-write separation, source lifetime,
+unsupported-code reuse, exhausted compilation/retry, replacement accounting and
+joint declaration/owned capacity eviction. These are compilation-work results,
+not a wall-clock speedup claim or evidence of package-level world reuse.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-c7xvfpl8/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_closures --test comptime_bytecode_defaults --test comptime_bytecode_types --test comptime_list_operations`:
+  exit 0, `/tmp/luna-tools-qm2sb36z/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-4u2w4wrj/result.json`; `git diff --check`: exit 0.

@@ -198,8 +198,21 @@ impl<'a> Interpreter<'a> {
         let mut result = None;
         loop {
             if let Some(mut active) = execution.take() {
+                let owned = match &active {
+                    Execution::Invocation(activation) if activation.frame.stable_code.is_none() => {
+                        match &activation.frame.body {
+                            Body::Owned(body) => Some(body.clone()),
+                            Body::Package(_) => None,
+                        }
+                    }
+                    _ => None,
+                };
                 let (expression, identity, environment) = active.parts();
-                result = match self.invocation_code(expression, identity) {
+                let code = match owned {
+                    Some(body) => self.owned_invocation_code(&body),
+                    None => self.invocation_code(expression, identity),
+                };
+                result = match code {
                     Ok(Some(code)) => match self.start_frame(&code, environment) {
                         Ok(code_frame) => {
                             match &active {

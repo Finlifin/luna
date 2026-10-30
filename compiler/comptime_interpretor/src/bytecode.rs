@@ -350,30 +350,83 @@ impl Frame {
     }
 }
 
-/// Only immutable package bodies are admitted. Neither invocation results nor
+/// Only immutable code bodies are admitted. Neither invocation results nor
 /// captured environments are stored here. A missing program records unsupported
 /// lowering, so repeated calls do not repeatedly traverse a migration body.
 #[derive(Default)]
 pub(super) struct CodeCache {
     entries: BTreeMap<DeclarationId, Option<Arc<Program>>>,
+    owned: BTreeMap<usize, OwnedCode>,
     weight: usize,
+}
+
+struct OwnedCode {
+    body: std::sync::Weak<Expr>,
+    program: Option<Arc<Program>>,
 }
 
 impl CodeCache {
     fn insert(&mut self, id: DeclarationId, program: Option<Arc<Program>>) {
-        const LIMIT: usize = 100_000;
-        let weight = program.as_ref().map_or(1, |code| {
+        if let Some(previous) = self.entries.remove(&id) {
+            self.weight -= Self::program_weight(&previous);
+        }
+        if self.reserve(&program) {
+            self.entries.insert(id, program);
+        }
+    }
+
+    fn program_weight(program: &Option<Arc<Program>>) -> usize {
+        program.as_ref().map_or(1, |code| {
             1 + code.storage_work() + code.locals().len() + code.registers()
-        });
+        })
+    }
+
+    fn reserve(&mut self, program: &Option<Arc<Program>>) -> bool {
+        const LIMIT: usize = 100_000;
+        let weight = Self::program_weight(program);
         if weight > LIMIT {
-            return;
+            return false;
         }
         if self.weight + weight > LIMIT {
             self.entries.clear();
+            self.owned.clear();
             self.weight = 0;
         }
         self.weight += weight;
-        self.entries.insert(id, program);
+        true
+    }
+
+    fn owned(&mut self, body: &Arc<Expr>) -> Option<Option<Arc<Program>>> {
+        // This address is only an interpreter-local lookup index. A live weak
+        // identity check prevents stale allocation reuse from selecting code.
+        let key = Arc::as_ptr(body) as usize;
+        let entry = self.owned.get(&key)?;
+        if entry
+            .body
+            .upgrade()
+            .is_some_and(|source| Arc::ptr_eq(&source, body))
+        {
+            return Some(entry.program.clone());
+        }
+        let expired = self.owned.remove(&key).unwrap();
+        self.weight -= Self::program_weight(&expired.program);
+        None
+    }
+
+    fn insert_owned(&mut self, body: &Arc<Expr>, program: Option<Arc<Program>>) {
+        let key = Arc::as_ptr(body) as usize;
+        if let Some(previous) = self.owned.remove(&key) {
+            self.weight -= Self::program_weight(&previous.program);
+        }
+        if self.reserve(&program) {
+            self.owned.insert(
+                key,
+                OwnedCode {
+                    body: Arc::downgrade(body),
+                    program,
+                },
+            );
+        }
     }
 }
 
@@ -455,6 +508,21 @@ impl<'a> Interpreter<'a> {
         } else {
             Ok(self.compile_body(body)?.map(Arc::new))
         }
+    }
+
+    pub(super) fn owned_invocation_code(
+        &mut self,
+        body: &Arc<Expr>,
+    ) -> Result<Option<Arc<Program>>, Error> {
+        if !self.bytecode_invocation_available() {
+            return Ok(None);
+        }
+        if let Some(program) = self.bytecode_cache.owned(body) {
+            return Ok(program);
+        }
+        let program = self.compile_body(body)?.map(Arc::new);
+        self.bytecode_cache.insert_owned(body, program.clone());
+        Ok(program)
     }
 
     #[cfg(test)]
