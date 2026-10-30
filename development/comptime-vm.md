@@ -4130,3 +4130,29 @@ Validation in /home/fin/luna:
   exit 0, `/tmp/luna-tools-ip0zjlbp/result.json`; `git diff --check`: exit 0.
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test default_calls --test comptime_clause_inputs --test comptime_bytecode_closures --test library_meta_objects`:
   exit 0, `/tmp/luna-tools-yr08jax3/result.json`.
+
+### Compile BitVec selections and concatenation
+
+BitSlice, BitIndex, BitWindow and BitConcat now lower to linear bytecode.
+Operand preparation remains source ordered: a non-bit first operand fails
+before later expressions execute, while range checks follow endpoint evaluation.
+Tree interpretation and bytecode share value-level width, bounds and budget
+checks. Opcodes contain typed registers and immutable operation descriptors,
+with S-expression dumps; they do not recursively interpret source expressions.
+
+Source tests require actual bytecode entry and explicit expected values for
+indexing, windows, concatenation, zero-width values and a 512-bit input. Negative
+and excessive endpoints are compared with tree interpretation, followed by
+successful calls on the same interpreter. Direct NIR tests cover early operand
+failure and side effects. This stage does not compile BitConvert, TakeBits or
+bit-place writeback, and does not complete symbolic-width support.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-0hr41s1w/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_bits --test comptime_bytecode_closures --test comptime_bytecode_defaults`:
+  exit 0, `/tmp/luna-tools-pu2askh4/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test execution bitvec_runtime_`:
+  exit 0, 10 selected tests, `/tmp/luna-tools-8sg3q8fd/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-es20h1kg/result.json`; `git diff --check`: exit 0.

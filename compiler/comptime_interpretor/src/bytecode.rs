@@ -792,6 +792,28 @@ impl<'a> Interpreter<'a> {
                 source: Some(source),
             };
             match &instruction.op {
+                Op::BitOperand {
+                    value,
+                    requires_bits,
+                } => {
+                    let operand = frame.slots[*value].take().ok_or_else(missing)?;
+                    frame.slots[*value] =
+                        Some(self.prepare_bit_operand(operand, *requires_bits, source)?);
+                }
+                Op::Bits {
+                    destination,
+                    operation,
+                    inputs,
+                    output,
+                } => {
+                    let values = inputs
+                        .iter()
+                        .map(|(slot, _)| frame.slots[*slot].take().ok_or_else(missing))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let types = inputs.iter().map(|(_, ty)| ty).collect::<Vec<_>>();
+                    frame.slots[*destination] =
+                        Some(self.bit_values(*operation, &types, output, values, source)?);
+                }
                 Op::BeginClosure {
                     closure,
                     constructor,
@@ -3258,6 +3280,10 @@ mod object_borrow_tests;
 #[cfg(test)]
 #[path = "bytecode_closures.rs"]
 mod closure_tests;
+
+#[cfg(test)]
+#[path = "bytecode_bits.rs"]
+mod bit_tests;
 
 #[cfg(test)]
 #[path = "bytecode_lists.rs"]

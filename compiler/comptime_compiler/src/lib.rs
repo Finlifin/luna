@@ -1,5 +1,6 @@
 //! Linear invocation code. Unsupported operations are detected before execution.
 //! Constants and default templates own bounded typed NIR copies; opcodes never evaluate trees.
+pub mod bits;
 pub mod closures;
 pub mod leaf_inputs;
 pub mod lists;
@@ -36,6 +37,16 @@ impl fmt::Display for ErrorConversion {
 
 #[derive(Debug)]
 pub enum Op {
+    BitOperand {
+        value: Register,
+        requires_bits: bool,
+    },
+    Bits {
+        destination: Register,
+        operation: bits::Operation,
+        inputs: Vec<(Register, Term)>,
+        output: Term,
+    },
     BeginClosure {
         closure: Register,
         constructor: Arc<closures::Constructor>,
@@ -395,6 +406,22 @@ impl fmt::Display for Program {
                 instruction.source.start, instruction.source.end
             )?;
             match &instruction.op {
+                Op::BitOperand {
+                    value,
+                    requires_bits,
+                } => write!(f, "(bit-operand %{value} (requires-bits {requires_bits}))")?,
+                Op::Bits {
+                    destination,
+                    operation,
+                    inputs,
+                    output,
+                } => {
+                    write!(f, "(bits %{destination} {operation} (inputs")?;
+                    for (slot, ty) in inputs {
+                        write!(f, " (%{slot} {ty})")?;
+                    }
+                    write!(f, ") (output {output}))")?;
+                }
                 Op::BeginClosure {
                     closure,
                     constructor,
@@ -1081,6 +1108,59 @@ fn compile_root(
                     continue;
                 }
                 match &expr.kind {
+                    K::BitSlice { .. }
+                    | K::BitIndex(..)
+                    | K::BitWindow { .. }
+                    | K::BitConcat(..) => {
+                        use bits::Operation as B;
+                        let (operation, values): (_, Vec<&Expr>) = match &expr.kind {
+                            K::BitSlice { value, start, end } => (
+                                B::Slice {
+                                    start: *start,
+                                    end: *end,
+                                },
+                                vec![value],
+                            ),
+                            K::BitIndex(value, index) => (B::Index, vec![value, index]),
+                            K::BitWindow { value, start, end } => {
+                                (B::Window, vec![value, start, end])
+                            }
+                            K::BitConcat(left, right) => (B::Concat, vec![left, right]),
+                            _ => unreachable!(),
+                        };
+                        for ty in values
+                            .iter()
+                            .map(|value| &value.ty)
+                            .chain(std::iter::once(&expr.ty))
+                        {
+                            nir::type_computations::charge_term(ty, fuel)
+                                .map_err(|_| Error::Budget(source))?;
+                        }
+                        let slots: Vec<_> = values.iter().map(|_| fresh()).collect();
+                        emit(
+                            &mut work,
+                            Op::Bits {
+                                destination: dst,
+                                operation,
+                                inputs: slots
+                                    .iter()
+                                    .zip(&values)
+                                    .map(|(slot, value)| (*slot, value.ty.clone()))
+                                    .collect(),
+                                output: expr.ty.clone(),
+                            },
+                        );
+                        for (index, (value, slot)) in values.iter().zip(slots).enumerate().rev() {
+                            emit(
+                                &mut work,
+                                Op::BitOperand {
+                                    value: slot,
+                                    requires_bits: operation.requires_bits(index),
+                                },
+                            );
+                            work.push(Work::Expression(value, slot));
+                        }
+                    }
                     K::Closure {
                         parameters,
                         captures,
