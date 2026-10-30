@@ -350,3 +350,47 @@ fn shipped_meta_object_preserves_type_valued_indices_in_normal_inputs() {
         .unwrap();
     assert_true(output);
 }
+
+#[test]
+fn shipped_meta_object_values_dispatch_type_indexed_traits() {
+    let input = Inputs::new();
+    input.write(
+        "input.fl",
+        "
+        struct Key where T,value:T {payload:bool}
+        trait Read where T,value:T {fn read(self)->bool;}
+        impl Read<T,value> for Key<T,value> where T,value:T {
+            fn read(self)->bool {self.payload}
+        }
+        comptime fn get_key()->Key<Type,bool> {
+            let object=Object.append({},Key<Type,bool>{payload:true});
+            Object.value<Key<Type,bool>>(object,0) match {
+                value?=>value,
+                null=>Key<Type,bool>{payload:false},
+            }
+        }
+        fn run()->bool {
+            const payload=get_key().payload;
+            Key<Type,bool>{payload:payload}.as(Read<Type,bool>).read()
+        }
+    ",
+    );
+    let library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_luna"))
+        .arg(input.0.join("input.fl"))
+        .arg("--sysroot")
+        .arg(library)
+        .args([
+            "--build-target",
+            "x86_64",
+            "linux",
+            "64",
+            "--interpret",
+            "run",
+            "--fuel",
+            "4000000",
+        ])
+        .output()
+        .unwrap();
+    assert_true(output);
+}

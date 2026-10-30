@@ -51,6 +51,48 @@ impl ProgramContract {
             entry_snapshots: self.entry_snapshots.clone(),
         })
     }
+    /// Specialize declaration inputs while preserving ordinary contract scope.
+    pub fn instantiate_declaration_parameters(
+        &self,
+        parameters: &[DeclarationId],
+        domains: &[Term],
+        arguments: &[Term],
+        frames: &[Vec<crate::Sort>],
+        fuel: &mut usize,
+    ) -> Result<Self, crate::type_computations::Error> {
+        use crate::type_computations::Error;
+        let binders = crate::declaration_parameters(parameters, domains).map_err(Error::Scope)?;
+        let substitution =
+            crate::DeclarationSubstitution::bounded(parameters, domains, arguments, frames, fuel)?;
+        let mut expression = |value: &Expr| {
+            crate::copy_budget::charge_substitution(value, &binders, arguments, fuel)
+                .map_err(|_| Error::Budget)?;
+            let mut value = value.clone();
+            value
+                .rewrite_types(&mut |ty| substitution.instantiate(ty))
+                .map_err(Error::Scope)?;
+            Ok::<_, Error>(value)
+        };
+        let preconditions = self
+            .preconditions
+            .iter()
+            .map(&mut expression)
+            .collect::<Result<_, _>>()?;
+        let postconditions = self
+            .postconditions
+            .iter()
+            .map(&mut expression)
+            .collect::<Result<_, _>>()?;
+        *fuel = fuel
+            .checked_sub(self.entry_snapshots.len())
+            .ok_or(Error::Budget)?;
+        Ok(Self {
+            preconditions,
+            postconditions,
+            result_binding: self.result_binding,
+            entry_snapshots: self.entry_snapshots.clone(),
+        })
+    }
     pub fn is_empty(&self) -> bool {
         self.preconditions.is_empty() && self.postconditions.is_empty()
     }

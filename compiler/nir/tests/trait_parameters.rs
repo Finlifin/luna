@@ -1112,3 +1112,45 @@ fn platform_trait_indices_use_layout_target_for_scalar_and_record_leaves() {
         }
     }
 }
+
+#[test]
+fn type_valued_trait_indices_follow_completed_parameter_and_self_domains() {
+    let mut contract = declaration();
+    let type_domain = Term::Primitive(Primitive::Type);
+    let boolean = Term::Primitive(Primitive::Bool);
+    let arguments = [type_domain.clone(), boolean.clone()];
+    contract
+        .validate_arguments(&arguments, &[], &mut 1000)
+        .unwrap();
+    for invalid in [
+        vec![type_domain.clone(), Term::Bool(true)],
+        vec![boolean.clone(), boolean.clone()],
+    ] {
+        assert!(
+            contract
+                .validate_arguments(&invalid, &[], &mut 1000)
+                .is_err()
+        );
+    }
+    assert!(
+        contract
+            .validate_arguments(&arguments, &[], &mut 0)
+            .is_err()
+    );
+    contract
+        .validate_arguments(&arguments, &[], &mut 1000)
+        .unwrap();
+    contract.type_parameters.truncate(1);
+    contract.parameter_types = vec![Term::Rigid {
+        declaration: contract.self_parameter,
+        sort: Sort::Type,
+    }];
+    contract
+        .validate_arguments_for_subject(&type_domain, &[boolean.clone()], &[], &[], &mut 1000)
+        .unwrap();
+    assert!(
+        contract
+            .validate_arguments_for_subject(&boolean, &[boolean.clone()], &[], &[], &mut 1000)
+            .is_err()
+    );
+}

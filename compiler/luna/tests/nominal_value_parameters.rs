@@ -6169,3 +6169,17 @@ fn type_valued_indices_select_trait_implementations() {
         fn run()->bool {Key<Type,bool>{payload:true}.as(Read).read()}";
     assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
 }
+
+#[test]
+fn type_valued_indices_select_parameterized_trait_implementations() {
+    let source = "typealias Type=.Type'builtin;
+        struct Key where T,value:T {payload:bool}
+        trait Read where T,value:T {fn read(self)->bool;}
+        impl Read<T,value> for Key<T,value> where T,value:T {
+            fn read(self)->bool {self.payload}
+        }
+        fn run()->bool {Key<Type,bool>{payload:true}.as(Read<Type,bool>).read()}";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    let invalid = source.replace("as(Read<Type,bool>)", "as(Read<Type,char>)");
+    assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+}

@@ -423,3 +423,95 @@ fn dependent_comptime_value_domains_specialize_to_type_only_with_type_evidence()
     assert!(display.starts_with("(function-input-binding (signature (function"));
     assert!(display.contains("(string \"a\\\"b\\nc\")"), "{display}");
 }
+
+#[test]
+fn program_contract_substitution_preserves_scope_for_type_valued_indices() {
+    use nir::contracts::ProgramContract;
+    use nir::program::{Expr, ExprKind, SourceRange};
+    let ids = [
+        DeclarationId {
+            package: 91,
+            local: 1,
+        },
+        DeclarationId {
+            package: 91,
+            local: 2,
+        },
+    ];
+    let domains = [
+        p(Primitive::Type),
+        Term::Rigid {
+            declaration: ids[0],
+            sort: Sort::Type,
+        },
+    ];
+    let arguments = [p(Primitive::Type), p(Primitive::Bool)];
+    let make_type = |index| Term::Nominal {
+        declaration: DeclarationId {
+            package: 91,
+            local: 3,
+        },
+        arguments: vec![index, b(0, 0, Sort::Type)],
+    };
+    let source = SourceRange { start: 1, end: 2 };
+    let value = Expr {
+        source,
+        ty: p(Primitive::Type),
+        kind: ExprKind::TypeValue(make_type(Term::Rigid {
+            declaration: ids[1],
+            sort: Sort::ComptimeValue,
+        })),
+    };
+    let predicate = Expr {
+        source,
+        ty: p(Primitive::Bool),
+        kind: ExprKind::TypeEqual(Box::new(value.clone()), Box::new(value)),
+    };
+    let contract = ProgramContract {
+        preconditions: vec![predicate.clone()],
+        postconditions: vec![predicate],
+        ..Default::default()
+    };
+    let frames = [vec![Sort::Type]];
+    let result = contract
+        .instantiate_declaration_parameters(&ids, &domains, &arguments, &frames, &mut 1000)
+        .unwrap();
+    for predicate in result.preconditions.iter().chain(&result.postconditions) {
+        let ExprKind::TypeEqual(left, right) = &predicate.kind else {
+            panic!("lost predicate");
+        };
+        assert_eq!(
+            left.kind,
+            ExprKind::TypeValue(make_type(p(Primitive::Bool)))
+        );
+        assert_eq!(left, right);
+        assert_eq!(predicate.source, source);
+    }
+    assert!(
+        contract
+            .instantiate_declaration_parameters(&ids, &domains, &arguments, &[], &mut 1000)
+            .is_err()
+    );
+    assert!(
+        contract
+            .instantiate_declaration_parameters(
+                &ids,
+                &domains,
+                &[p(Primitive::Type), Term::Bool(true)],
+                &frames,
+                &mut 1000
+            )
+            .is_err()
+    );
+    assert!(
+        contract
+            .instantiate_declaration_parameters(&ids, &domains, &arguments, &frames, &mut 0)
+            .is_err()
+    );
+    assert_eq!(
+        contract
+            .instantiate_declaration_parameters(&ids, &domains, &arguments, &frames, &mut 1000)
+            .unwrap(),
+        result
+    );
+}

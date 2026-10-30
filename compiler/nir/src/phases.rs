@@ -749,33 +749,33 @@ pub fn machine_arithmetic_functions(
                                 return Err(error("trait method type argument count mismatch"));
                             }
                             let parameters: Vec<_> = contract
-                                .binders_with_self(&mut 100_000)
-                                .map_err(|_| error("invalid trait parameter domains"))?
+                                .parameters_with_self()
                                 .into_iter()
-                                .chain(method.type_parameters.iter().map(|id| {
-                                    crate::DeclarationParameter {
-                                        declaration: *id,
-                                        sort: if parameter_domains.get(id).is_some_and(|domain| {
-                                            *domain != Term::Primitive(Primitive::Type)
-                                        }) {
-                                            Sort::ComptimeValue
-                                        } else {
-                                            Sort::Type
-                                        },
-                                    }
-                                }))
+                                .chain(method.type_parameters.iter().copied())
+                                .collect();
+                            let domains: Vec<_> = parameters
+                                .iter()
+                                .map(|id| {
+                                    parameter_domains
+                                        .get(id)
+                                        .cloned()
+                                        .unwrap_or(Term::Primitive(Primitive::Type))
+                                })
                                 .collect();
                             let arguments: Vec<_> = std::iter::once(subject.clone())
                                 .chain(interface_arguments.iter().cloned())
                                 .chain(method_arguments.iter().cloned())
                                 .collect();
+                            let substitution = crate::DeclarationSubstitution::new(
+                                &parameters,
+                                &domains,
+                                &arguments,
+                                &caller_frames,
+                            )
+                            .map_err(|_| error("trait method domain substitution failed"))?;
                             let signature = method
                                 .signature
-                                .instantiate_parameters_in_scope(
-                                    &parameters,
-                                    &arguments,
-                                    &caller_frames,
-                                )
+                                .try_map_types(|ty| substitution.instantiate(ty))
                                 .map_err(|_| error("trait method contract substitution failed"))?;
                             if signature != expr.ty {
                                 return Err(error(

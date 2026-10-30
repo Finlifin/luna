@@ -244,10 +244,11 @@ impl DeclarationWorld<'_> {
             return Err("dispatch method type argument count mismatch".into());
         }
         let parameters: Vec<_> = contract
-            .binders_with_self(fuel)?
+            .parameters_with_self()
             .into_iter()
-            .chain(self.input_binders(&template.type_parameters))
+            .chain(template.type_parameters.iter().copied())
             .collect();
+        let parameter_domains = self.input_domains(&parameters, fuel)?;
         let arguments: Vec<_> = std::iter::once(instance.subject.clone())
             .chain(instance.interface_arguments.iter().cloned())
             .chain(method_arguments.iter().cloned())
@@ -276,25 +277,60 @@ impl DeclarationWorld<'_> {
         specialized.type_arguments = method_arguments.to_vec();
         specialized.type_parameters.clear();
         specialized.default = None;
+        let substitution = nir::DeclarationSubstitution::bounded(
+            &parameters,
+            &parameter_domains,
+            &arguments,
+            &[],
+            fuel,
+        )
+        .map_err(|e| e.to_string())?;
         specialized.signature = template
             .signature
-            .instantiate_parameters(&parameters, &arguments)
+            .try_map_types(|ty| substitution.instantiate_bounded(ty, fuel))
             .map_err(|e| e.to_string())?;
+        let frames = match template.signature.callable_signature() {
+            Ok(Term::Function { parameters, .. }) => {
+                vec![parameters.iter().map(|p| p.sort).collect()]
+            }
+            _ => vec![],
+        };
+        let scoped = nir::DeclarationSubstitution::bounded(
+            &parameters,
+            &parameter_domains,
+            &arguments,
+            &frames,
+            fuel,
+        )
+        .map_err(|e| e.to_string())?;
         specialized.program = template
             .program
-            .instantiate_parameters(&parameters, &arguments)
+            .instantiate_declaration_parameters(
+                &parameters,
+                &parameter_domains,
+                &arguments,
+                &frames,
+                fuel,
+            )
             .map_err(|e| e.to_string())?;
         specialized.requirements = template
             .requirements
             .iter()
-            .map(|r| r.instantiate_parameters(&parameters, &arguments))
+            .map(|r| scoped.instantiate_predicate_bounded(r, fuel))
             .collect::<Result<_, _>>()
             .map_err(|e| e.to_string())?;
         specialized.capabilities = template
             .capabilities
             .iter()
-            .map(|r| r.instantiate_parameters(&parameters, &arguments))
-            .collect::<Result<_, _>>()
+            .map(|r| {
+                let n::TypePredicate::Trait(value) = scoped
+                    .instantiate_predicate_bounded(&n::TypePredicate::Trait(r.clone()), fuel)?
+                else {
+                    unreachable!()
+                };
+                Ok(value)
+            })
+            .collect::<Result<_, nir::type_computations::Error>>()
             .map_err(|e| e.to_string())?;
         let method = n::MethodInstance {
             member,

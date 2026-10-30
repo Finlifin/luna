@@ -1726,17 +1726,17 @@ impl Checker<'_, '_> {
                     .find(|m| m.name == name)
                     .ok_or_else(|| error(span, "unknown trait method"))?;
                 self.check_method_contract(contract, interface, &subject, span)?;
+                let (parameters, arguments) = self.interface_substitution(interface, &subject);
                 return Ok(Some(n::Expr {
-                    ty: contract
-                        .signature
-                        .ordinary()
-                        .map_err(|e| error(span, e.to_string()))?
-                        .instantiate_parameters_in_scope(
-                            &self.interface_parameter_binders(interface, span)?,
-                            &self.interface_substitution(interface, &subject).1,
-                            &self.call_input_frames(),
-                        )
-                        .map_err(|e| error(span, e.to_string()))?,
+                    ty: self.instantiate_input_types(
+                        contract
+                            .signature
+                            .ordinary()
+                            .map_err(|e| error(span, e.to_string()))?,
+                        &parameters,
+                        &arguments,
+                        span,
+                    )?,
                     source: source(span),
                     kind: K::TraitMethod {
                         method_arguments: vec![],
@@ -1841,19 +1841,17 @@ impl Checker<'_, '_> {
                 .iter()
                 .find(|m| m.name == name)
                 .unwrap();
-            let (_, arguments) = self.interface_substitution(interface, &subject);
-            let parameters = self.interface_parameter_binders(interface, span)?;
+            let (parameters, arguments) = self.interface_substitution(interface, &subject);
             return Ok(Some(n::Expr {
-                ty: contract
-                    .signature
-                    .ordinary()
-                    .map_err(|e| error(span, e.to_string()))?
-                    .instantiate_parameters_in_scope(
-                        &parameters,
-                        &arguments,
-                        &self.call_input_frames(),
-                    )
-                    .map_err(|e| error(span, e.to_string()))?,
+                ty: self.instantiate_input_types(
+                    contract
+                        .signature
+                        .ordinary()
+                        .map_err(|e| error(span, e.to_string()))?,
+                    &parameters,
+                    &arguments,
+                    span,
+                )?,
                 source: source(span),
                 kind: K::TraitMethod {
                     method_arguments: vec![],

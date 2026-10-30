@@ -909,15 +909,22 @@ impl Builder<'_> {
             .iter()
             .find(|t| t.declaration == interface.declaration)
             .ok_or("missing dispatch interface")?;
-        let parameter_binders = contract.binders_with_self(&mut self.fuel)?;
+        let parameters = contract.parameters_with_self();
+        let parameter_domains = self.world.input_domains(&parameters, &mut self.fuel)?;
+        let inputs: Vec<_> = std::iter::once(subject.clone())
+            .chain(interface.arguments.iter().cloned())
+            .collect();
+        let substitution = nir::DeclarationSubstitution::bounded(
+            &parameters,
+            &parameter_domains,
+            &inputs,
+            &[],
+            &mut self.fuel,
+        )
+        .map_err(|e| e.to_string())?;
         for requirement in &contract.requirements {
-            let requirement = requirement
-                .instantiate_parameters(
-                    &parameter_binders,
-                    &std::iter::once(subject.clone())
-                        .chain(interface.arguments.iter().cloned())
-                        .collect::<Vec<_>>(),
-                )
+            let requirement = substitution
+                .instantiate_predicate_bounded(requirement, &mut self.fuel)
                 .map_err(|e| e.to_string())?;
             if !matches!(
                 self.prove_requirement(&requirement)?,
@@ -930,14 +937,15 @@ impl Builder<'_> {
             }
         }
         for capability in &contract.capabilities {
-            let capability = capability
-                .instantiate_parameters(
-                    &parameter_binders,
-                    &std::iter::once(subject.clone())
-                        .chain(interface.arguments.iter().cloned())
-                        .collect::<Vec<_>>(),
+            let n::TypePredicate::Trait(capability) = substitution
+                .instantiate_predicate_bounded(
+                    &n::TypePredicate::Trait(capability.clone()),
+                    &mut self.fuel,
                 )
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| e.to_string())?
+            else {
+                unreachable!()
+            };
             self.queue.push_back(Task::Interface(
                 capability.interface_instance(),
                 capability.subject,
@@ -950,10 +958,6 @@ impl Builder<'_> {
             // Unconditional interface signatures remain part of the exported
             // contract even when their bodies are unused. Conditional members
             // are added by specialize_method only when actually demanded.
-            let parameters = &parameter_binders;
-            let inputs: Vec<_> = std::iter::once(subject.clone())
-                .chain(interface.arguments.iter().cloned())
-                .collect();
             let mut methods = Vec::new();
             for template in &contract.methods {
                 // Runtime interface retention must not instantiate a different
@@ -971,11 +975,23 @@ impl Builder<'_> {
                 method.default = None;
                 method.signature = method
                     .signature
-                    .instantiate_parameters(parameters, &inputs)
+                    .try_map_types(|ty| substitution.instantiate_bounded(ty, &mut self.fuel))
                     .map_err(|e| e.to_string())?;
+                let frames = match template.signature.callable_signature() {
+                    Ok(Term::Function { parameters, .. }) => {
+                        vec![parameters.iter().map(|p| p.sort).collect()]
+                    }
+                    _ => vec![],
+                };
                 method.program = method
                     .program
-                    .instantiate_parameters(parameters, &inputs)
+                    .instantiate_declaration_parameters(
+                        &parameters,
+                        &parameter_domains,
+                        &inputs,
+                        &frames,
+                        &mut self.fuel,
+                    )
                     .map_err(|e| e.to_string())?;
                 self.normalize_method_contract(&mut method)?;
                 self.queue.push_back(Task::Type(
@@ -1019,14 +1035,17 @@ impl Builder<'_> {
         self.interfaces
             .insert((interface.clone(), subject.clone()), slot);
         for parent in &contract.parents {
-            let parameters = &parameter_binders;
-            let arguments: Vec<_> = std::iter::once(subject.clone())
-                .chain(interface.arguments.iter().cloned())
-                .collect();
+            let arguments = parent
+                .arguments
+                .iter()
+                .map(|ty| substitution.instantiate_bounded(ty, &mut self.fuel))
+                .collect::<Result<_, _>>()
+                .map_err(|e| e.to_string())?;
             self.queue.push_back(Task::Interface(
-                parent
-                    .instantiate_parameters(parameters, &arguments)
-                    .map_err(|e| e.to_string())?,
+                n::InterfaceInstance {
+                    declaration: parent.declaration,
+                    arguments,
+                },
                 subject.clone(),
             ));
         }

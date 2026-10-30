@@ -3339,3 +3339,38 @@ This closes the two source selection failures recorded above. Unresolved domains
 remain pending; staging does not invert opaque normal-form heads or authorize
 export of incomplete candidate state. Other fixed-sort consumers still need their
 own contract audit; this is not a claim that all dependent-type paths are complete.
+
+### Type-valued trait interface indices reach runtime dispatch
+
+Trait argument admission now completes declared domains (including `Self`) before
+checking argument sorts. Structural/value admission remains separate. Direct
+interface inputs whose declared value sort awaits domain completion retain a
+pending relation; staged head matching must establish and replay that relation.
+Elaboration, NIR phase checks, dispatch specialization, and retained runtime
+interface signatures now use declaration-domain substitution. Program contracts
+have a bounded domain-aware substitution entrypoint retaining ordinary input
+frames, predicate expressions and snapshot identities.
+
+The source regression executes `Read<Type,bool>` on `Key<Type,bool>` and rejects
+`Read<Type,char>`. The real-sysroot regression uses `Object.append` and typed
+`Object.value`, reads the payload in a function-local comptime declaration, then
+constructs the runtime value and dispatches the parameterized trait method. This
+does not claim implicit splicing of arbitrary comptime nominal values: the initial
+file-scope constant transfer was rejected for lacking a Splice protocol.
+
+Validation in `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p type_resolution -p luna --test calls --test trait_parameters --test implementation --test nominal_value_parameters --test trait_phases --test trait_purity --test sysroot_preludes`:
+  exit 0, `/tmp/luna-tools-9qxumqei/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p type_resolution -p materialization`:
+  exit 0, `/tmp/luna-tools-ot5qpbtt/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: exit 0,
+  `/tmp/luna-tools-yfz8dogh/result.json`; `git diff --check`: exit 0.
+
+Remaining audits include capability/parent traversal, staged method contracts and
+program-summary consumers still using fixed-sort substitutions. Passing this
+ordinary runtime dispatch path does not establish those paths.
+
+Final source recheck after adding the mismatched interface rejection and reusing
+the elaboration substitution inputs:
+`python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test sysroot_preludes --test trait_phases --test trait_purity`: exit 0,
+`/tmp/luna-tools-o6is6dk4/result.json` (273 + 9 + 30 + 21 cases).

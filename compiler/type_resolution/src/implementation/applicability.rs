@@ -731,6 +731,7 @@ impl ImplementationHead {
             })
         };
         let mut relations = Vec::new();
+        let mut pending_interface_domain = false;
         let template = match instantiate(&self.subject) {
             Ok(t) => t,
             Err(e) => return Err(TypeAssessment::Invalid(e.to_string())),
@@ -1001,6 +1002,16 @@ impl ImplementationHead {
                 }
                 continue;
             }
+            // A declared value input may become a Type input after another
+            // head relation completes its domain. Keep the interface relation
+            // pending until staged matching can replay it with that evidence.
+            if actual.sort() == Sort::Type
+                && matches!(template, Term::Rigid { declaration, sort: Sort::ComptimeValue }
+                    if parameters.iter().any(|parameter| parameter.declaration == *declaration))
+            {
+                pending_interface_domain = true;
+                continue;
+            }
             if template.sort() != Sort::Type || actual.sort() != Sort::Type {
                 return Err(TypeAssessment::Invalid(
                     "interface index domain mismatch".into(),
@@ -1033,7 +1044,7 @@ impl ImplementationHead {
         };
         candidate.advance_metered(ids.len(), &mut inference_budget);
         let mut proofs = Vec::new();
-        let mut pending = false;
+        let mut pending = pending_interface_domain;
         for id in ids {
             match candidate.state(id) {
                 Some(State::Solved(Outcome::Entailed(proof))) => proofs.push(proof.clone()),

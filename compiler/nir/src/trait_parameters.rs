@@ -515,38 +515,51 @@ impl Trait {
         if arguments.len() != binders.len() {
             return Err("trait interface argument count mismatch".into());
         }
-        for (index, argument) in arguments.iter().enumerate() {
-            crate::type_computations::charge_term(argument, fuel).map_err(|e| e.to_string())?;
-            argument.check_scope(scope).map_err(|e| e.to_string())?;
-            if argument.sort() != binders[index].sort {
-                return Err("trait interface argument sort mismatch".into());
+        if binders.iter().all(|binder| binder.sort == Sort::Type) {
+            for argument in arguments {
+                crate::type_computations::charge_term(argument, fuel).map_err(|e| e.to_string())?;
+                argument.check_scope(scope).map_err(|e| e.to_string())?;
+                if argument.sort() != Sort::Type {
+                    return Err("trait interface argument sort mismatch".into());
+                }
             }
-            if binders[index].sort == Sort::Type {
+            return Ok(());
+        }
+        let mut ids = Vec::with_capacity(binders.len() + 1);
+        let mut declared_domains = Vec::with_capacity(binders.len() + 1);
+        let mut inputs = Vec::with_capacity(binders.len() + 1);
+        ids.push(self.self_parameter);
+        declared_domains.push(Term::Primitive(Primitive::Type));
+        inputs.push(if let Some(subject) = subject {
+            crate::type_computations::charge_term(subject, fuel).map_err(|e| e.to_string())?;
+            subject.clone()
+        } else {
+            Term::Rigid {
+                declaration: self.self_parameter,
+                sort: Sort::Type,
+            }
+        });
+        for (index, argument) in arguments.iter().enumerate() {
+            let domain = self
+                .parameter_types
+                .get(index)
+                .unwrap_or(&Term::Primitive(Primitive::Type));
+            crate::type_computations::charge_term(domain, fuel).map_err(|e| e.to_string())?;
+            crate::type_computations::charge_term(argument, fuel).map_err(|e| e.to_string())?;
+            ids.push(self.type_parameters[index]);
+            declared_domains.push(domain.clone());
+            inputs.push(argument.clone());
+        }
+        let substitution =
+            crate::DeclarationSubstitution::bounded(&ids, &declared_domains, &inputs, scope, fuel)
+                .map_err(|e| e.to_string())?;
+        for (index, argument) in arguments.iter().enumerate() {
+            let domain = substitution
+                .instantiate_bounded(&declared_domains[index + 1], fuel)
+                .map_err(|e| e.to_string())?;
+            if domain == Term::Primitive(Primitive::Type) {
                 continue;
             }
-            let domain = crate::type_computations::instantiate_parameters_bounded(
-                &self.parameter_types[index],
-                &binders[..index],
-                &arguments[..index],
-                scope,
-                fuel,
-            )
-            .map_err(|e| e.to_string())?;
-            let domain = if let Some(subject) = subject {
-                crate::type_computations::instantiate_parameters_bounded(
-                    &domain,
-                    &[DeclarationParameter {
-                        declaration: self.self_parameter,
-                        sort: Sort::Type,
-                    }],
-                    std::slice::from_ref(subject),
-                    scope,
-                    fuel,
-                )
-                .map_err(|e| e.to_string())?
-            } else {
-                domain
-            };
             if matches!(
                 argument,
                 Term::OptionalValue { .. }
