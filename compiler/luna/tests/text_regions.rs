@@ -2537,3 +2537,21 @@ fn finite_named_callees_join_results_reads_and_independent_storage_effects() {
     assert!(infer(&package, "recursive", 10).is_err());
     assert!(infer(&package, "recursive", 2_000_000).is_ok());
 }
+
+#[test]
+fn type_valued_dependent_inputs_preserve_text_backing_regions() {
+    let package = support::compile(
+        "typealias Type=.Type'builtin; typealias str=.str'builtin;
+        fn echo(value:str)->str where T,index:T {value}
+        fn run(value:str)->str {echo<Type,bool>(value)}",
+    );
+    let before = package.clone();
+    let summary = infer(&package, "run", 100_000).unwrap();
+    assert_eq!(
+        summary.returned.as_ref().unwrap()[&vec![]],
+        BTreeSet::from([parameter(0, &[])])
+    );
+    assert_eq!(package, before);
+    assert!(infer(&package, "run", 0).is_err());
+    assert_eq!(infer(&package, "run", 100_000).unwrap(), summary);
+}

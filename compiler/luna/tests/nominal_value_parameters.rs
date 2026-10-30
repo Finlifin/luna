@@ -6216,3 +6216,33 @@ fn type_valued_trait_indices_preserve_runtime_preconditions() {
     let error = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
     assert!(error.contains("precondition"), "{error}");
 }
+
+#[test]
+fn type_valued_trait_indices_preserve_staged_preconditions() {
+    let source = "typealias Type=.Type'builtin;
+        struct Key where T,value:T {payload:bool}
+        trait Read where T,value:T {fn read(self,comptime allow:bool)->bool where requires allow;}
+        impl Read<T,value> for Key<T,value> where T,value:T {
+            fn read(self,comptime allow:bool)->bool {self.payload}
+        }
+        fn run()->bool {Key<Type,bool>{payload:true}.as(Read<Type,bool>).read(true)}";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    let invalid = source.replace(".read(true)", ".read(false)");
+    let error = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+    assert!(error.contains("precondition"), "{error}");
+}
+
+#[test]
+fn type_valued_trait_indices_preserve_pointer_method_contracts() {
+    let source = "typealias Type=.Type'builtin;
+        struct Key where T,value:T {payload:bool}
+        trait Read where T,value:T {fn read(self,allow:bool)->bool where requires allow;}
+        impl Read<T,value> for *Key<T,value> where T,value:T {
+            fn read(self,allow:bool)->bool {self.*.payload}
+        }
+        fn run()->bool {
+            let key=Key<Type,bool>{payload:true};
+            key.ref.as(Read<Type,bool>).read(true)
+        }";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+}

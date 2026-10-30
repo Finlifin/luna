@@ -175,15 +175,12 @@ pub fn prepare_method_invocation(
         defaults: vec![],
     };
 
-    let binders: Vec<_> = definition
-        .binders_with_self(fuel)?
+    let parameters: Vec<_> = definition
+        .parameters_with_self()
         .into_iter()
-        .chain(memory_binders(
-            Some(package),
-            &contract.type_parameters,
-            fuel,
-        )?)
+        .chain(contract.type_parameters.iter().copied())
         .collect();
+    let domains = memory_domains(package, &parameters, fuel)?;
     for ty in std::iter::once(subject)
         .chain(interface_arguments)
         .chain(method_arguments)
@@ -194,22 +191,17 @@ pub fn prepare_method_invocation(
         .chain(interface_arguments.iter().cloned())
         .chain(method_arguments.iter().cloned())
         .collect();
-    *fuel = fuel
-        .checked_sub(contract.program.entry_snapshots.len().saturating_add(1))
-        .ok_or("composed memory contract budget exhausted")?;
-    for expr in contract
-        .program
-        .preconditions
-        .iter()
-        .chain(&contract.program.postconditions)
-    {
-        nir::copy_budget::charge_substitution(expr, &binders, &inputs, fuel)
-            .map_err(|_| "composed memory predicate budget exhausted")?;
-    }
+    let frames = match contract.signature.callable_signature() {
+        Ok(Term::Function { parameters, .. }) => vec![parameters.iter().map(|p| p.sort).collect()],
+        _ => return Err("composed memory method lacks a function signature".into()),
+    };
+    let substitution =
+        nir::DeclarationSubstitution::bounded(&parameters, &domains, &inputs, &frames, fuel)
+            .map_err(|error| error.to_string())?;
     let mut program = contract
         .program
-        .instantiate_parameters(&binders, &inputs)
-        .map_err(|e| e.to_string())?;
+        .instantiate_declaration_parameters(&parameters, &domains, &inputs, &frames, fuel)
+        .map_err(|error| error.to_string())?;
     let plan = program
         .binding_alignment(
             &contract.parameter_bindings,
@@ -234,14 +226,11 @@ pub fn prepare_method_invocation(
     if parameters.iter().any(|p| p.sort != nir::Sort::Runtime) {
         return Err("method memory composition requires a runtime-only parameter frame".into());
     }
-    let frames = vec![parameters.iter().map(|p| p.sort).collect()];
     for requirement in &contract.requirements {
-        nir::copy_budget::charge_predicate_substitution(requirement, &binders, &inputs, fuel)
-            .map_err(|_| "composed memory type premise budget exhausted")?;
         composed.requirements.push(
-            requirement
-                .instantiate_parameters_in_scope(&binders, &inputs, &frames)
-                .map_err(|e| e.to_string())?,
+            substitution
+                .instantiate_predicate_bounded(requirement, fuel)
+                .map_err(|error| error.to_string())?,
         );
     }
     // Keep the implementation invocation as a call boundary. In particular,

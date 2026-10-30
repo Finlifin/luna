@@ -3439,3 +3439,41 @@ runtime flow-summary failure.
 
 Final formatting: `python3 -B development/command.py --timeout 120 -- cargo fmt --all`,
 exit 0, `/tmp/luna-tools-w9m33d4x/result.json`; `git diff --check`: exit 0.
+
+### Staged entry contracts and memory inference use completed input domains
+
+Staged trait materialization now specializes requirements, capabilities and
+program predicates through declaration-domain evidence before the existing local
+binding alignment. The source regression executes a Type-valued interface with
+a comptime ordinary input and rejects its false precondition. The original
+materialization failure is recorded in `/tmp/luna-tools-54ydaxg7/result.json`.
+
+Composed memory method contracts now use the same domain evidence. Their named
+body and callable/closure signatures, immutable value observations, operation
+identities and text-region body specialization no longer impose source binder
+sorts on completed Type-valued inputs. A memory query caches immutable declared
+domains, not argument-derived sorts. Its regression alternates scalar and Type
+inputs in the same query, rejects mismatched arguments, and checks failed scans
+and subsequent queries cannot reuse incomplete or stale evidence.
+
+The composed-method source regression removes the implementation's inherited
+precondition and still observes the interface's pointer read and rejection edge,
+without modifying the package. The text regression preserves the caller's backing
+region through `echo<Type,bool>` and checks budget recovery. The direct composed
+query originally failed (`/tmp/luna-tools-3trf0m3w/result.json`); merely executing a
+pointer call had not exposed that missing analysis path.
+
+Validation in `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 900 -- test -p program_verification -p materialization`:
+  exit 0, `/tmp/luna-tools-03fgnugt/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test method_memory_contracts --test staged_aggregate_contracts --test captured_memory --test effect_memory_transfers --test text_regions --test instantiation --test sysroot_preludes`:
+  exit 0, `/tmp/luna-tools-8ldq5d9t/result.json`, no exclusions.
+- Final additional text-origin regression:
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test text_regions type_valued_dependent_inputs -- --nocapture`:
+  exit 0, `/tmp/luna-tools-bhmrnraq/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: exit 0,
+  `/tmp/luna-tools-dsqud678/result.json`; `git diff --check`: exit 0.
+
+These results close the staged and composed-memory failures above. They do not
+claim every declaration-substitution consumer elsewhere in the compiler has
+been migrated or that arbitrary dependent program verification is complete.

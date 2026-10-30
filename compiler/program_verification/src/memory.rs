@@ -1967,7 +1967,7 @@ struct Infer<'a, 'cleanup> {
     fuel: &'a mut usize,
     package: Option<&'a Package>,
     parameters: &'a [DeclarationId],
-    declarations: Vec<nir::DeclarationParameter>,
+    substitution: nir::DeclarationSubstitution<'a>,
     arguments: &'a [Term],
     round: &'a mut Round<'cleanup>,
     effect_row: Vec<nir::effects::Operation>,
@@ -2734,14 +2734,10 @@ impl<'a> Infer<'a, '_> {
         match &expr.kind {
             K::ComptimeValue(value) => {
                 let domain = self.ty(&expr.ty)?;
-                let value = nir::type_computations::instantiate_parameters_bounded(
-                    value,
-                    &self.declarations,
-                    self.arguments,
-                    &[],
-                    self.fuel,
-                )
-                .map_err(|e| e.to_string())?;
+                let value = self
+                    .substitution
+                    .instantiate_bounded(value, self.fuel)
+                    .map_err(|error| error.to_string())?;
                 nir::comptime_values::validate(&value, &domain, self.fuel)
                     .map_err(|e| e.to_string())?;
                 if !value.is_structural_index_value() {
@@ -2828,8 +2824,9 @@ impl<'a> Infer<'a, '_> {
     fn ty(&mut self, ty: &Term) -> Result<Term, String> {
         self.step(0)?;
         bound_type(ty, self.fuel)?;
-        let ty = ty
-            .instantiate_parameters(&self.declarations, self.arguments)
+        let ty = self
+            .substitution
+            .instantiate_bounded(ty, self.fuel)
             .map_err(|error| error.to_string())?;
         bound_type(&ty, self.fuel)?;
         self.type_view(&ty)
@@ -3206,9 +3203,10 @@ impl<'a> Infer<'a, '_> {
         nir::visit::expression(definition, self.fuel, |expr, fuel| {
             bound_type(&expr.ty, fuel)
         })?;
-        let owned = definition
-            .instantiate_parameters(&self.declarations, self.arguments)
-            .map_err(|e| e.to_string())?;
+        let mut owned = definition.clone();
+        owned
+            .rewrite_types(&mut |ty| self.substitution.instantiate_bounded(ty, self.fuel))
+            .map_err(|error| error.to_string())?;
         self.local_code.push(LocalCode::Closure {
             definition: std::sync::Arc::new(owned),
             captures: std::sync::Arc::new(captures),
@@ -4503,9 +4501,10 @@ impl<'a> Infer<'a, '_> {
             }
         }
         nir::visit::expression(callee, self.fuel, |expr, fuel| bound_type(&expr.ty, fuel))?;
-        let definition = callee
-            .instantiate_parameters(&self.declarations, self.arguments)
-            .map_err(|e| e.to_string())?;
+        let mut definition = callee.clone();
+        definition
+            .rewrite_types(&mut |ty| self.substitution.instantiate_bounded(ty, self.fuel))
+            .map_err(|error| error.to_string())?;
         let code_inputs = borrow_code_inputs(&prepared_inputs);
         let summary = infer_closure_with_borrowed_in_round(
             package,
@@ -7575,7 +7574,7 @@ struct Round<'cleanup> {
     // All instances in one fixed point belong to the same immutable package.
     // This is declaration metadata, independent of code inputs or call state.
     cleanup_protocol_present: Option<bool>,
-    parameter_sorts: Option<BTreeMap<DeclarationId, nir::Sort>>,
+    parameter_domains: Option<BTreeMap<DeclarationId, Term>>,
     methods: MethodCallees,
     completed_types: HashMap<Term, Term>,
     effects: Vec<EffectInput>,
@@ -7591,37 +7590,44 @@ struct Round<'cleanup> {
 }
 
 impl Round<'_> {
-    fn binders(
+    fn domains(
         &mut self,
         package: Option<&Package>,
         parameters: &[DeclarationId],
         fuel: &mut usize,
-    ) -> Result<Vec<nir::DeclarationParameter>, String> {
+    ) -> Result<Vec<Term>, String> {
         *fuel = fuel
             .checked_sub(parameters.len())
-            .ok_or("memory binder budget exhausted")?;
-        if parameters.is_empty() {
-            return Ok(vec![]);
-        }
-        // A round belongs to one immutable package. Cache only completed
-        // declaration evidence, never argument-derived sorts or partial scans.
-        if self.parameter_sorts.is_none() {
+            .ok_or("memory domain budget exhausted")?;
+        if !parameters.is_empty() && self.parameter_domains.is_none() {
             if let Some(package) = package {
-                self.parameter_sorts = Some(package.declaration_parameter_sorts(fuel)?);
+                self.parameter_domains = Some(package.declaration_parameter_domains(fuel)?);
             }
         }
-        Ok(parameters
+        parameters
             .iter()
-            .map(|id| nir::DeclarationParameter {
-                declaration: *id,
-                sort: self
-                    .parameter_sorts
+            .map(|id| {
+                let domain = self
+                    .parameter_domains
                     .as_ref()
-                    .and_then(|sorts| sorts.get(id))
-                    .copied()
-                    .unwrap_or(nir::Sort::Type),
+                    .and_then(|domains| domains.get(id))
+                    .unwrap_or(&Term::Primitive(Primitive::Type));
+                bound_type(domain, fuel)?;
+                Ok(domain.clone())
             })
-            .collect())
+            .collect()
+    }
+    fn substitution<'a>(
+        &mut self,
+        package: Option<&Package>,
+        parameters: &[DeclarationId],
+        arguments: &'a [Term],
+        frames: &'a [Vec<nir::Sort>],
+        fuel: &mut usize,
+    ) -> Result<nir::DeclarationSubstitution<'a>, String> {
+        let domains = self.domains(package, parameters, fuel)?;
+        nir::DeclarationSubstitution::bounded(parameters, &domains, arguments, frames, fuel)
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -7649,6 +7655,28 @@ pub(super) fn memory_binders(
             sort: sorts.get(id).copied().unwrap_or(nir::Sort::Type),
         })
         .collect())
+}
+
+pub(super) fn memory_domains(
+    package: &Package,
+    parameters: &[DeclarationId],
+    fuel: &mut usize,
+) -> Result<Vec<Term>, String> {
+    *fuel = fuel
+        .checked_sub(parameters.len())
+        .ok_or("memory domain budget exhausted")?;
+    if parameters.is_empty() {
+        return Ok(vec![]);
+    }
+    let domains = package.declaration_parameter_domains(fuel)?;
+    parameters
+        .iter()
+        .map(|id| {
+            let domain = domains.get(id).unwrap_or(&Term::Primitive(Primitive::Type));
+            bound_type(domain, fuel)?;
+            Ok(domain.clone())
+        })
+        .collect()
 }
 
 pub fn infer(function: &Function, fuel: &mut usize) -> Result<Summary, String> {
@@ -7811,11 +7839,18 @@ fn selected_method_callee(
     // concrete instance has already resolved.
     let (body, body_arguments) = package.runtime_body_checked(method.body, &method.arguments)?;
     bound_type(&body.signature, fuel)?;
-    let binders = memory_binders(Some(package), &body.type_parameters, fuel)?;
-    let signature = body
-        .signature
-        .instantiate_parameters(&binders, body_arguments)
-        .map_err(|reason| reason.to_string())?;
+    let domains = memory_domains(package, &body.type_parameters, fuel)?;
+    let substitution = nir::DeclarationSubstitution::bounded(
+        &body.type_parameters,
+        &domains,
+        body_arguments,
+        &[],
+        fuel,
+    )
+    .map_err(|error| error.to_string())?;
+    let signature = substitution
+        .instantiate_bounded(&body.signature, fuel)
+        .map_err(|error| error.to_string())?;
     Ok(Expr {
         source: callee.source,
         // Dispatch has checked the declaration-side contract. This reference
@@ -8270,12 +8305,15 @@ fn derive_with_borrowed(
         return Err("memory summary needs a concrete runtime body".into());
     }
     bound_type(&function.signature, fuel)?;
-    let signature = function
-        .signature
-        .instantiate_parameters(
-            &round.binders(Some(package), &function.type_parameters, fuel)?,
-            body_arguments,
-        )
+    let substitution = round.substitution(
+        Some(package),
+        &function.type_parameters,
+        body_arguments,
+        &[],
+        fuel,
+    )?;
+    let signature = substitution
+        .instantiate_bounded(&function.signature, fuel)
         .map_err(|error| error.to_string())?;
     bound_type(&signature, fuel)?;
     let Term::Function { result, .. } = signature.callable_signature() else {
@@ -8372,12 +8410,15 @@ fn validate_code_premise(
             return Err("memory callable requires a concrete runtime instance".into());
         }
         bound_type(&function.signature, fuel)?;
-        let signature = function
-            .signature
-            .instantiate_parameters(
-                &round.binders(Some(package), &function.type_parameters, fuel)?,
-                body_arguments,
-            )
+        let substitution = round.substitution(
+            Some(package),
+            &function.type_parameters,
+            body_arguments,
+            &[],
+            fuel,
+        )?;
+        let signature = substitution
+            .instantiate_bounded(&function.signature, fuel)
             .map_err(|error| error.to_string())?;
         let signature = signature.with_unsafe_call_requirement(function.is_unsafe);
         if &signature != expected {
@@ -8426,10 +8467,10 @@ fn infer_body(
     {
         return Err("memory summary needs a concrete runtime body".into());
     }
-    let declarations = round.binders(package, &function.type_parameters, fuel)?;
-    let signature = function
-        .signature
-        .instantiate_parameters(&declarations, arguments)
+    let substitution =
+        round.substitution(package, &function.type_parameters, arguments, &[], fuel)?;
+    let signature = substitution
+        .instantiate_bounded(&function.signature, fuel)
         .map_err(|error| error.to_string())?;
     let Term::Function {
         parameters, result, ..
@@ -8455,13 +8496,15 @@ fn infer_body(
     }
     let frames = vec![parameters.iter().map(|p| p.sort).collect()];
     let mut type_context = crate::ptc::Context::with_scope(frames.clone());
+    let scoped =
+        round.substitution(package, &function.type_parameters, arguments, &frames, fuel)?;
     for requirement in &function.requirements {
         let formula = crate::ptc::Formula::from_predicate(requirement);
         if !crate::ptc::within_limits(&formula, 128, fuel) {
             return Err("memory type contract budget exhausted".into());
         }
-        let requirement = requirement
-            .instantiate_parameters_in_scope(&declarations, arguments, &frames)
+        let requirement = scoped
+            .instantiate_predicate_bounded(requirement, fuel)
             .map_err(|e| e.to_string())?;
         type_context.assume(crate::ptc::Formula::from_predicate(&requirement));
     }
@@ -8482,7 +8525,7 @@ fn infer_body(
         fuel,
         package,
         parameters: &function.type_parameters,
-        declarations,
+        substitution,
         arguments,
         round,
         effect_row: vec![],
@@ -8826,7 +8869,8 @@ pub fn infer_argument(
         fuel,
         package: Some(package),
         parameters: &[],
-        declarations: vec![],
+        substitution: nir::DeclarationSubstitution::new(&[], &[], &[], &[])
+            .map_err(|e| e.to_string())?,
         arguments: &[],
         round: &mut round,
         effect_row: vec![],
@@ -9623,10 +9667,10 @@ fn infer_closure_pass(
     for argument in specialization.1 {
         bound_type(argument, fuel)?;
     }
-    let declarations = round.binders(Some(package), specialization.0, fuel)?;
-    let closure_ty = definition
-        .ty
-        .instantiate_parameters(&declarations, specialization.1)
+    let substitution =
+        round.substitution(Some(package), specialization.0, specialization.1, &[], fuel)?;
+    let closure_ty = substitution
+        .instantiate_bounded(&definition.ty, fuel)
         .map_err(|error| error.to_string())?;
     let environment = match &closure_ty {
         Term::Closure { environment, .. } => environment.as_slice(),
@@ -9637,9 +9681,8 @@ fn infer_closure_pass(
     }
     for (capture, ty) in captures.iter().zip(environment) {
         bound_type(&capture.ty, fuel)?;
-        if capture
-            .ty
-            .instantiate_parameters(&declarations, specialization.1)
+        if substitution
+            .instantiate_bounded(&capture.ty, fuel)
             .map_err(|error| error.to_string())?
             != *ty
         {
@@ -9667,9 +9710,8 @@ fn infer_closure_pass(
     for capture in captures {
         capture_parameters.push(nir::Parameter {
             sort: nir::Sort::Runtime,
-            ty: capture
-                .ty
-                .instantiate_parameters(&declarations, specialization.1)
+            ty: substitution
+                .instantiate_bounded(&capture.ty, fuel)
                 .map_err(|e| e.to_string())?,
         });
     }
@@ -9707,7 +9749,7 @@ fn infer_closure_pass(
         fuel,
         package: Some(package),
         parameters: specialization.0,
-        declarations,
+        substitution,
         arguments: specialization.1,
         round,
         effect_row: vec![],
@@ -9802,14 +9844,15 @@ fn infer_closure_pass(
                 return Err("closure memory callable requires a concrete runtime instance".into());
             }
             bound_type(&function.signature, infer.fuel)?;
-            let signature = function
-                .signature
-                .instantiate_parameters(
-                    &infer
-                        .round
-                        .binders(Some(package), &function.type_parameters, infer.fuel)?,
-                    body_arguments,
-                )
+            let substitution = infer.round.substitution(
+                Some(package),
+                &function.type_parameters,
+                body_arguments,
+                &[],
+                infer.fuel,
+            )?;
+            let signature = substitution
+                .instantiate_bounded(&function.signature, infer.fuel)
                 .map_err(|error| error.to_string())?;
             let signature = signature.with_unsafe_call_requirement(function.is_unsafe);
             if signature != expected {
@@ -10071,7 +10114,7 @@ mod binder_cache_tests {
     use super::*;
 
     #[test]
-    fn round_reuses_complete_sort_evidence_and_charges_each_lookup() {
+    fn round_caches_declaration_domains_not_argument_derived_sorts() {
         let id = |local| DeclarationId { package: 1, local };
         let mut package = Package::default();
         package
@@ -10081,57 +10124,75 @@ mod binder_cache_tests {
                 parameters: vec![id(1), id(2)],
                 domains: vec![
                     Term::Primitive(Primitive::Type),
-                    Term::Primitive(Primitive::Bool),
+                    Term::Rigid {
+                        declaration: id(1),
+                        sort: nir::Sort::Type,
+                    },
                 ],
             });
         let parameters = [id(1), id(2)];
+        let rigid = Term::Rigid {
+            declaration: id(2),
+            sort: nir::Sort::ComptimeValue,
+        };
+        let value_inputs = [Term::Primitive(Primitive::Bool), Term::Bool(true)];
+        let type_inputs = [
+            Term::Primitive(Primitive::Type),
+            Term::Primitive(Primitive::Bool),
+        ];
         let mut round = Round::default();
-        assert!(round.binders(Some(&package), &parameters, &mut 2).is_err());
-        assert!(round.parameter_sorts.is_none());
-        let expected = memory_binders(Some(&package), &parameters, &mut 1000).unwrap();
-        assert_eq!(expected[0].sort, nir::Sort::Type);
-        assert_eq!(expected[1].sort, nir::Sort::ComptimeValue);
-        let mut fuel = 1000;
-        assert_eq!(
+        assert!(
             round
-                .binders(Some(&package), &parameters, &mut fuel)
-                .unwrap(),
-            expected
+                .substitution(Some(&package), &parameters, &type_inputs, &[], &mut 2)
+                .is_err()
         );
-        assert!(1000 - fuel > parameters.len());
-        for _ in 0..10 {
-            let mut fuel = parameters.len();
+        assert!(round.parameter_domains.is_none());
+        for inputs in [&value_inputs, &type_inputs, &value_inputs] {
+            let mut fuel = 1000;
+            let substitution = round
+                .substitution(Some(&package), &parameters, inputs, &[], &mut fuel)
+                .unwrap();
             assert_eq!(
-                round
-                    .binders(Some(&package), &parameters, &mut fuel)
-                    .unwrap(),
-                expected
+                substitution.instantiate_bounded(&rigid, &mut fuel).unwrap(),
+                inputs[1]
             );
-            assert_eq!(fuel, 0);
+            assert!(fuel < 1000);
         }
-        assert!(round.binders(Some(&package), &parameters, &mut 1).is_err());
-        assert_eq!(
-            round.binders(Some(&package), &parameters, &mut 2).unwrap(),
-            expected
+        let invalid = [
+            Term::Primitive(Primitive::Bool),
+            Term::Primitive(Primitive::Bool),
+        ];
+        assert!(
+            round
+                .substitution(Some(&package), &parameters, &invalid, &[], &mut 1000)
+                .is_err()
         );
-
-        // A new query must see changed declaration evidence and reject invalid
-        // metadata instead of borrowing a successful cache from another query.
-        package.function_parameters[0].domains[1] = Term::Primitive(Primitive::Type);
-        let fresh = Round::default()
-            .binders(Some(&package), &parameters, &mut 1000)
-            .unwrap();
-        assert_eq!(fresh[1].sort, nir::Sort::Type);
+        assert!(
+            round
+                .substitution(Some(&package), &parameters, &type_inputs, &[], &mut 1)
+                .is_err()
+        );
+        assert!(
+            round
+                .substitution(Some(&package), &parameters, &type_inputs, &[], &mut 1000)
+                .is_ok()
+        );
+        package.function_parameters[0].domains[1] = Term::Primitive(Primitive::Bool);
+        assert!(
+            Round::default()
+                .substitution(Some(&package), &parameters, &type_inputs, &[], &mut 1000)
+                .is_err()
+        );
         package
             .function_parameters
             .push(package.function_parameters[0].clone());
         let mut invalid = Round::default();
         assert!(
             invalid
-                .binders(Some(&package), &parameters, &mut 1000)
+                .substitution(Some(&package), &parameters, &value_inputs, &[], &mut 1000)
                 .is_err()
         );
-        assert!(invalid.parameter_sorts.is_none());
+        assert!(invalid.parameter_domains.is_none());
     }
 }
 

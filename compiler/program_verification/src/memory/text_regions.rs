@@ -1215,11 +1215,11 @@ impl Query<'_, '_> {
         nir::visit::expressions(body, self.fuel, |expr, fuel| bound_type(&expr.ty, fuel))?;
         charge(self.fuel, body.entry_snapshots.len())?;
         bound_type(&body.signature, self.fuel)?;
-        let binders =
+        let domains =
             self.metadata
-                .binders(Some(self.package), &body.type_parameters, self.fuel)?;
+                .domains(Some(self.package), &body.type_parameters, self.fuel)?;
         let body = body
-            .instantiate_parameters(&binders, arguments)
+            .instantiate_declaration_parameters(&domains, arguments, self.fuel)
             .map_err(|e| e.to_string())?;
         self.index_local_callables(&body)?;
         let Term::Function { parameters, result } = body.signature.callable_signature() else {
@@ -1543,11 +1543,11 @@ impl Query<'_, '_> {
             return Err("text descriptor call requires a concrete runtime body".into());
         }
         nir::visit::expressions(body, self.fuel, |expr, fuel| bound_type(&expr.ty, fuel))?;
-        let binders =
+        let domains =
             self.metadata
-                .binders(Some(self.package), &body.type_parameters, self.fuel)?;
+                .domains(Some(self.package), &body.type_parameters, self.fuel)?;
         let body = body
-            .instantiate_parameters(&binders, arguments)
+            .instantiate_declaration_parameters(&domains, arguments, self.fuel)
             .map_err(|e| e.to_string())?;
         let mut scope = Locals {
             bindings: BTreeMap::new(),

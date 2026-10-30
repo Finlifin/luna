@@ -470,3 +470,44 @@ fn repeated_method_queries_share_dispatch_evidence_within_the_memory_round() {
     // rescanned for each repeated call in one immutable package query.
     assert!(large_many - large_once <= small_many - small_once + 2048);
 }
+
+#[test]
+fn type_valued_interface_indices_preserve_composed_pointer_observations() {
+    let mut package = support::compile(
+        "typealias Type=.Type'builtin;
+        struct Host where T,value:T {}
+        trait Read where T,value:T {fn read(p:*bool)->bool where requires p.*;}
+        impl Read<T,value> for Host<T,value> where T,value:T {
+            fn read(p:*bool)->bool {true}
+        }
+        fn run(p:*bool)->bool where requires p.* {Host<Type,bool>.as(Read<Type,bool>).read(p)}",
+    );
+    let callee = method(&package);
+    let selected =
+        elaboration::materialization::resolve_method_instance(&package, &callee, &mut 100000)
+            .unwrap();
+    package
+        .functions
+        .iter_mut()
+        .find(|f| f.declaration == selected.body)
+        .unwrap()
+        .preconditions
+        .clear();
+    let before = package.clone();
+    let composed = memory::infer_method_in_package(&package, &callee, &mut 100000).unwrap();
+    assert!(composed.summary.may_reject);
+    assert!(
+        composed
+            .summary
+            .accesses
+            .iter()
+            .any(|a| a.target.parameter == 0 && a.read_value && !a.write)
+    );
+    assert!(!composed.summary.accesses.iter().any(|a| a.write));
+    assert_eq!(package, before);
+    assert!(memory::infer_method_in_package(&package, &callee, &mut 0).is_err());
+    assert_eq!(
+        memory::infer_method_in_package(&package, &callee, &mut 100000).unwrap(),
+        composed
+    );
+}

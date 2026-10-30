@@ -1733,10 +1733,11 @@ impl Builder<'_> {
                         .find(|f| f.declaration == body)
                         .ok_or("missing selected staged method body")?;
                     let parameters = interface_contract
-                        .binders_with_self(&mut self.fuel)?
+                        .parameters_with_self()
                         .into_iter()
-                        .chain(self.input_binders(&contract.type_parameters))
+                        .chain(contract.type_parameters.iter().copied())
                         .collect::<Vec<_>>();
+                    let domains = self.world.input_domains(&parameters, &mut self.fuel)?;
                     let inputs = std::iter::once(subject.clone())
                         .chain(instance.arguments.iter().cloned())
                         .chain(method_arguments.iter().cloned())
@@ -1747,21 +1748,35 @@ impl Builder<'_> {
                         }
                         _ => return Err("staged method needs a function signature".into()),
                     };
+                    let substitution = nir::DeclarationSubstitution::bounded(
+                        &parameters,
+                        &domains,
+                        &inputs,
+                        &frames,
+                        &mut self.fuel,
+                    )
+                    .map_err(|e| e.to_string())?;
                     let requirements = contract
                         .requirements
                         .iter()
-                        .map(|r| r.instantiate_parameters_in_scope(&parameters, &inputs, &frames))
+                        .map(|r| substitution.instantiate_predicate_bounded(r, &mut self.fuel))
                         .collect::<Result<Vec<_>, _>>()
                         .map_err(|e| e.to_string())?;
                     let capabilities = contract
                         .capabilities
                         .iter()
-                        .map(|r| r.instantiate_parameters_in_scope(&parameters, &inputs, &frames))
+                        .map(|r| substitution.instantiate_requirement_bounded(r, &mut self.fuel))
                         .collect::<Result<Vec<_>, _>>()
                         .map_err(|e| e.to_string())?;
                     let mut program = contract
                         .program
-                        .instantiate_parameters(&parameters, &inputs)
+                        .instantiate_declaration_parameters(
+                            &parameters,
+                            &domains,
+                            &inputs,
+                            &frames,
+                            &mut self.fuel,
+                        )
                         .map_err(|e| e.to_string())?;
                     let alignment = program
                         .binding_alignment(

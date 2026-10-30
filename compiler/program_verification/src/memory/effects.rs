@@ -956,8 +956,9 @@ impl<'a> Infer<'a, '_> {
             // Operation labels use exact instantiated type identity. A layout
             // view inferred for memory access must not rewrite a label's head.
             bound_type(argument, self.fuel)?;
-            let argument = argument
-                .instantiate_parameters(&self.declarations, self.arguments)
+            let argument = self
+                .substitution
+                .instantiate_bounded(argument, self.fuel)
                 .map_err(|e| e.to_string())?;
             bound_type(&argument, self.fuel)?;
             arguments.push(argument);
