@@ -191,6 +191,41 @@ impl Interpreter<'_> {
         Ok(Flow::Value(Value::Object(Object::from_entries(entries))))
     }
 
+    /// The receiver was checked in place. Copy only selected payloads while
+    /// retaining the same checkpoint identity and scope rules as local reads.
+    pub(super) fn slice_borrowed_object(
+        &mut self,
+        object: &Object<ObjectValue>,
+        start: Value,
+        end: Value,
+        source: SourceRange,
+    ) -> Result<Flow, Error> {
+        let count = object.entries().len();
+        let start = self.object_edit_index(start, count, true, source)?;
+        let end = self.object_edit_index(end, count, true, source)?;
+        if start > end {
+            return Err(self.failure(ErrorKind::IndexOutOfBounds, Some(source)));
+        }
+        self.integer_operation(Some(source), |budget| {
+            budget.consume(count.saturating_add(1))
+        })?;
+        let mut entries = Vec::with_capacity(end - start);
+        for entry in &object.entries()[start..end] {
+            let value = ObjectValue {
+                ty: entry.value().ty.clone(),
+                value: self.checkpoint_representation(&entry.value().value, source)?,
+            };
+            entries.push(match entry {
+                ObjectEntry::Value(_) => ObjectEntry::Value(value),
+                ObjectEntry::Property { key, .. } => ObjectEntry::Property {
+                    key: key.clone(),
+                    value,
+                },
+            });
+        }
+        Ok(Flow::Value(Value::Object(Object::from_entries(entries))))
+    }
+
     fn object_edit_index(
         &self,
         value: Value,

@@ -68,7 +68,7 @@ impl Object {
         Negative, reversed or out-of-range bounds fail the invocation.
     -}
     pub pure comptime fn slice(self, start: Integer, end: Integer) -> Object {
-        bindings.object_slice(self, start, end)
+        bindings.compiler_object_slice(self, start, end)
     }
 
     {-

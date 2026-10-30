@@ -255,12 +255,12 @@ pub enum Op {
         left: Register,
         right: Register,
     },
-    LocalObjectQuery {
+    LocalObjectAccess {
         destination: Register,
         access: Arc<objects::ObjectAccess>,
         receiver: Register,
         receiver_source: SourceRange,
-        selector: Option<leaf_inputs::Selector>,
+        selectors: Vec<leaf_inputs::Selector>,
     },
     PrepareBitVecType {
         input: Term,
@@ -750,19 +750,19 @@ impl fmt::Display for Program {
                     left,
                     right,
                 } => write!(f, "(list-concat %{destination} %{left} %{right})")?,
-                Op::LocalObjectQuery {
+                Op::LocalObjectAccess {
                     destination,
                     access,
                     receiver,
                     receiver_source,
-                    selector,
+                    selectors,
                 } => {
                     write!(
                         f,
-                        "(local-object-query %{destination} {access} (receiver %{receiver} (source {} {})) (selector",
+                        "(local-object-access %{destination} {access} (receiver %{receiver} (source {} {})) (selectors",
                         receiver_source.start, receiver_source.end
                     )?;
-                    if let Some(selector) = selector {
+                    for selector in selectors {
                         write!(f, " {selector}")?;
                     }
                     write!(f, "))")?;
@@ -2250,16 +2250,24 @@ fn compile_root<'a>(
                             ty: copy_term(&expr.ty, fuel, source)?,
                             input: copy_term(&subject.ty, fuel, subject.source)?,
                         });
-                        let local = match (&expr.kind, &subject.kind) {
-                            (K::ObjectQuery { query, .. }, K::Tuple(fields))
-                                if fields.len()
-                                    == if *query == nir::program::ObjectQueryKind::Length {
-                                        1
-                                    } else {
-                                        2
-                                    }
+                        let leaf_count = match &access.operation {
+                            objects::ObjectOperation::Query(query) => {
+                                Some(if *query == nir::program::ObjectQueryKind::Length {
+                                    1
+                                } else {
+                                    2
+                                })
+                            }
+                            objects::ObjectOperation::Edit(nir::program::ObjectEditKind::Slice) => {
+                                Some(3)
+                            }
+                            _ => None,
+                        };
+                        let local = match &subject.kind {
+                            K::Tuple(fields)
+                                if leaf_count == Some(fields.len())
                                     && matches!(fields[0].kind, K::Local(_))
-                                    && fields.get(1).is_none_or(|field| {
+                                    && fields[1..].iter().all(|field| {
                                         matches!(field.kind, K::Local(_) | K::Literal(_))
                                     }) =>
                             {
@@ -2272,8 +2280,8 @@ fn compile_root<'a>(
                                 unreachable!()
                             };
                             let receiver = *locals.entry(binding).or_insert_with(&mut fresh);
-                            let selector = fields
-                                .get(1)
+                            let selectors = fields[1..]
+                                .iter()
                                 .map(|field| match field.kind {
                                     K::Local(binding) => Ok(leaf_inputs::Selector::Local(
                                         *locals.entry(binding).or_insert_with(&mut fresh),
@@ -2291,15 +2299,15 @@ fn compile_root<'a>(
                                     }
                                     _ => unreachable!(),
                                 })
-                                .transpose()?;
+                                .collect::<Result<Vec<_>, Error>>()?;
                             emit(
                                 &mut work,
-                                Op::LocalObjectQuery {
+                                Op::LocalObjectAccess {
                                     destination: dst,
                                     access: access.clone(),
                                     receiver,
                                     receiver_source: fields[0].source,
-                                    selector,
+                                    selectors,
                                 },
                             );
                         } else {

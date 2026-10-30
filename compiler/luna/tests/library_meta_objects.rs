@@ -803,7 +803,7 @@ fn object_range_failures_leave_inputs_usable_and_vm_recovers() {
         );
         assert_eq!(
             vm.bytecode_invocations() - before,
-            if name == "range_slice" { 3 } else { 13 }
+            if name == "range_slice" { 2 } else { 10 }
         );
     }
     for body in [

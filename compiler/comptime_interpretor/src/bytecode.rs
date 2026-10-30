@@ -1507,34 +1507,34 @@ impl<'a> Interpreter<'a> {
                     };
                     frame.slots[*destination] = Some(value);
                 }
-                Op::LocalObjectQuery {
+                Op::LocalObjectAccess {
                     destination,
                     access,
                     receiver,
                     receiver_source,
-                    selector,
+                    selectors,
                 } => {
                     use comptime_compiler::leaf_inputs::Selector;
-                    use comptime_compiler::objects::ObjectOperation;
                     use leaf_inputs::LocalSelector;
-                    let ObjectOperation::Query(query) = access.operation else {
-                        return Err(self.failure(ErrorKind::Type, Some(source)));
-                    };
                     let receiver = frame.slots[*receiver].as_ref().ok_or_else(|| {
                         self.failure(ErrorKind::MissingBinding, Some(*receiver_source))
                     })?;
-                    let selector = selector.as_ref().map(|selector| match selector {
-                        Selector::Local(slot, source) => {
-                            LocalSelector::Value(frame.slots[*slot].as_ref(), *source)
-                        }
-                        Selector::Literal(expr) => LocalSelector::Literal(expr),
+                    if selectors.len() > 2 {
+                        return Err(self.failure(ErrorKind::Type, Some(source)));
+                    }
+                    let selectors = [0, 1].map(|index| {
+                        selectors.get(index).map(|selector| match selector {
+                            Selector::Local(slot, source) => {
+                                LocalSelector::Value(frame.slots[*slot].as_ref(), *source)
+                            }
+                            Selector::Literal(expr) => LocalSelector::Literal(expr),
+                        })
                     });
-                    let Flow::Value(value) = self.query_local_object(
-                        query,
-                        &access.ty,
+                    let Flow::Value(value) = self.access_local_object(
+                        access,
                         receiver,
                         *receiver_source,
-                        selector,
+                        selectors,
                         source,
                     )?
                     else {
@@ -2615,7 +2615,7 @@ mod tests {
         for body in bodies {
             let code = Arc::new(comptime_compiler::compile(&body, &mut 10000).unwrap());
             let instruction = if matches!(body.kind, K::ObjectQuery { .. }) {
-                "(local-object-query "
+                "(local-object-access "
             } else {
                 "(object-access "
             };

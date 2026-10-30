@@ -4,24 +4,26 @@ use super::*;
 use leaf_inputs::LocalSelector;
 
 impl Interpreter<'_> {
-    pub(super) fn query_local_object(
+    pub(super) fn access_local_object(
         &mut self,
-        query: nir::program::ObjectQueryKind,
-        ty: &Term,
+        access: &comptime_compiler::objects::ObjectAccess,
         receiver: &Value,
         receiver_source: SourceRange,
-        selector: Option<LocalSelector<'_>>,
+        selectors: [Option<LocalSelector<'_>>; 2],
         source: SourceRange,
     ) -> Result<Flow, Error> {
-        let independent = match &selector {
-            None | Some(LocalSelector::Literal(_)) => true,
-            Some(LocalSelector::Value(Some(Value::Integer(_) | Value::Symbol(_)), _)) => true,
-            _ => false,
-        };
+        use comptime_compiler::objects::ObjectOperation as O;
+        let independent = selectors.iter().flatten().all(|selector| {
+            matches!(
+                selector,
+                LocalSelector::Literal(_)
+                    | LocalSelector::Value(Some(Value::Integer(_) | Value::Symbol(_)), _)
+            )
+        });
         self.tick(Some(receiver_source))?;
         if independent
             && self.cleanup_schedule.is_none()
-            && *ty != Term::Primitive(Primitive::Never)
+            && access.ty != Term::Primitive(Primitive::Never)
             && matches!(
                 receiver,
                 Value::Object(_) | Value::Storage(_) | Value::ComptimeReference(_)
@@ -50,23 +52,44 @@ impl Interpreter<'_> {
                 .as_ref()
                 .map_or(receiver, |contents| contents.value());
             self.check_borrowed_representation(value, receiver_source, 0)?;
-            let selector = self.read_leaf_selector(selector)?;
-            // Account for packet construction even though this path retains no
-            // Object snapshot. No user computation runs under the receiver lock.
+            let mut selectors = selectors.into_iter();
+            let first = self.read_leaf_selector(selectors.next().unwrap())?;
+            let second = self.read_leaf_selector(selectors.next().unwrap())?;
             self.tick(Some(source))?;
             let Value::Object(object) = value else {
                 return Err(self.failure(ErrorKind::Type, Some(source)));
             };
-            return self.query_object(query, ty, object, selector, source);
+            return match access.operation {
+                O::Query(query) => self.query_object(query, &access.ty, object, first, source),
+                O::Edit(nir::program::ObjectEditKind::Slice) => self.slice_borrowed_object(
+                    object,
+                    first.ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?,
+                    second.ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?,
+                    source,
+                ),
+                _ => Err(self.failure(ErrorKind::Type, Some(source))),
+            };
         }
-        // A selector can reference a sibling in the same storage. Snapshot the
-        // receiver and release its lock before reading that selector.
+        // A selector may borrow the same storage. Snapshot first, release the
+        // receiver lock, and then read selectors in their original order.
         let receiver = self.invocation_slot_value(receiver, Some(receiver_source))?;
-        let selector = self.read_leaf_selector(selector)?;
-        self.tick(Some(source))?;
         let mut packet = vec![receiver];
-        packet.extend(selector);
-        self.complete_object_query(query, ty, Value::Tuple(packet), source)
+        for selector in selectors.into_iter().flatten() {
+            packet.extend(self.read_leaf_selector(Some(selector))?);
+        }
+        self.tick(Some(source))?;
+        match access.operation {
+            O::Query(query) => {
+                self.complete_object_query(query, &access.ty, Value::Tuple(packet), source)
+            }
+            O::Edit(operation) => self.complete_object_edit(
+                operation,
+                &access.ty,
+                &access.input,
+                Value::Tuple(packet),
+                source,
+            ),
+        }
     }
 
     pub(super) fn eval_object_query(

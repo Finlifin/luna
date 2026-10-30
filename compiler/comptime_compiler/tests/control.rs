@@ -501,7 +501,7 @@ fn object_query_compilation_keeps_computed_selectors_on_the_snapshot_path() {
             },
         };
         let dump = compile(&body, &mut 1000).unwrap().to_string();
-        assert_eq!(dump.contains("(local-object-query "), !computed, "{dump}");
+        assert_eq!(dump.contains("(local-object-access "), !computed, "{dump}");
         assert_eq!(dump.contains("(object-access "), computed, "{dump}");
         assert!(dump.contains("key\\\"\\\\\\n"), "{dump}");
         assert_eq!(dump, compile(&body, &mut 1000).unwrap().to_string());
@@ -792,4 +792,59 @@ fn metadata_code_meters_snapshot_copy_and_dumps_origin_and_unavailable_inputs() 
     );
     assert_eq!(dump, compile(&body, &mut 1000).unwrap().to_string());
     assert!(matches!(compile(&body, &mut 1), Err(Error::Budget(_))));
+}
+
+#[test]
+fn object_slice_borrows_only_when_both_boundaries_are_leaf_inputs() {
+    use nir::program::{Literal, ObjectEditKind};
+    let source = SourceRange { start: 1, end: 3 };
+    let receiver = Expr {
+        source,
+        ty: Term::Primitive(Primitive::Object),
+        kind: K::Local(LocalId { owner: 1, index: 0 }),
+    };
+    for computed in [None, Some(0), Some(1)] {
+        let mut fields = vec![receiver.clone()];
+        for index in 0..2 {
+            let mut boundary = Expr {
+                source,
+                ty: Term::Primitive(Primitive::Integer),
+                kind: K::Literal(Literal::Integer(index.to_string())),
+            };
+            if computed == Some(index) {
+                boundary = Expr {
+                    source,
+                    ty: boundary.ty.clone(),
+                    kind: K::Block {
+                        statements: vec![],
+                        result: Some(Box::new(boundary)),
+                    },
+                };
+            }
+            fields.push(boundary);
+        }
+        let body = Expr {
+            source,
+            ty: receiver.ty.clone(),
+            kind: K::ObjectEdit {
+                operation: ObjectEditKind::Slice,
+                subject: Box::new(Expr {
+                    source,
+                    ty: Term::Tuple(fields.iter().map(|v| v.ty.clone()).collect()),
+                    kind: K::Tuple(fields),
+                }),
+            },
+        };
+        let dump = compile(&body, &mut 10000).unwrap().to_string();
+        assert_eq!(
+            dump.contains("(local-object-access "),
+            computed.is_none(),
+            "{dump}"
+        );
+        assert_eq!(
+            dump.contains("(object-access "),
+            computed.is_some(),
+            "{dump}"
+        );
+    }
 }

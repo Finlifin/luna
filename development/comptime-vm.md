@@ -4853,3 +4853,67 @@ Validation in /home/fin/luna:
   exit 0, `/tmp/luna-tools-y5hzmze3/result.json`; the public methods execute in
   the actual sysroot, and their comptime observations stage into a passing native
   test. Existing unrelated compiler warnings remain; no full-workspace claim.
+
+### Borrow Object intervals without materializing discarded entries
+
+The local Object instruction now handles queries and Slice with up to two leaf
+selectors. It retains complete signature/representation validation. Only owned
+scalar or literal selectors may be read while the receiver is borrowed; selectors
+that can reference the same storage retain the snapshot fallback and release the
+receiver lock before reading. Computed selectors remain ordinary packet code, so
+user effects never execute under a receiver lock. Runtime selector transport uses
+a fixed two-slot array, without adding per-query vector allocations.
+
+Slice copies only selected entries after the full input check. Selected payloads
+use the existing checkpoint rules, preserving nested identity and scope checks.
+Even an empty slice rejects invalid unselected Type payloads. The public Object
+method invokes its bound primitive directly, avoiding an extra by-value forwarding
+wrapper; no definition-name exception, result caching or view semantics is added.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-n07fxdvc/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor object`:
+  exit 0, `/tmp/luna-tools-fue7f39e/result.json`; includes compiler selection of
+  leaf versus computed boundaries, dump shape, Object validation and edits.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test library_meta_objects --test comptime_bytecode_aggregates`:
+  exit 0, `/tmp/luna-tools-acz6aj3w/result.json`; public range cases now count
+  two compiled activations for slice and ten for composed replacement, reflecting
+  removal of the forwarding activation. Query side effects retain snapshots.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib local_object`:
+  exit 0, `/tmp/luna-tools-udtbtrk2/result.json`; shared-storage bound references,
+  locked receiver rejection, bounds/budget failure recovery, and invalid
+  unselected Type rejection on both tree and compiled carriers.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-bz9wkatx/result.json`; `git diff --check`: exit 0.
+
+Measurement command:
+`python3 -B development/comptime_bench.py --bench object_queries --repeat 3 --iterations 10`.
+Release build: `/tmp/luna-tools-hyup91ux/result.json`; measurement reports:
+`/tmp/luna-tools-s0snizif/result.json`, `/tmp/luna-tools-q8ky4a90/result.json`,
+`/tmp/luna-tools-avk_apr3/result.json`, all exit 0.
+
+The added Slice workload is printed as query=None. It performs 32 one-entry
+slices per invocation, with five warmups and ten timed invocations per process.
+Below are medians across three processes for a reference receiver. Both paths
+use the same build; a transparent receiver block forces the general snapshot
+path and adds evaluation ticks. This is a path comparison, not a historical
+baseline. Parsing, elaboration and setup are excluded; invocation input copying,
+execution, result checking and allocator instrumentation are included.
+
+| Input entries | Borrowed ms | Snapshot ms | Borrowed allocations | Snapshot allocations | Borrowed bytes | Snapshot bytes |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 0.007824 | 0.010876 | 118.1 | 182.1 | 19719 | 58375 |
+| 64 | 0.051737 | 0.114596 | 181.1 | 2261.1 | 34326 | 540406 |
+| 1024 | 0.726964 | 1.724899 | 1141.1 | 33941.1 | 257994 | 7921450 |
+
+For 1024 entries, the measured path takes about 42% of snapshot time and requests
+about 3.4% of its allocations. These are allocator calls and requested bytes, not
+retained memory. VM steps remain close: 452208 versus 452400. Full representation
+checking is still linear in input size on every read; this work does not fix
+quadratic repeated List admission or imply a whole-compiler speedup.
+
+Final sysroot check:
+`python3 -B development/check.py --timeout 900 -- run -p luna -- development/examples/sysroot-meta-object-methods.fl --sysroot library --test-native`:
+exit 0, `/tmp/luna-tools-stqodfdf/result.json`; public Object edits still stage
+into a passing native test. Existing unrelated compiler warnings remain.

@@ -37,14 +37,16 @@ fn primitive(ty: Primitive) -> Term {
     Term::Primitive(ty)
 }
 
-fn package(reads: usize, mode: &str, query: ObjectQueryKind, reference: bool) -> Package {
+fn package(reads: usize, mode: &str, query: Option<ObjectQueryKind>, reference: bool) -> Package {
     let source = SourceRange { start: 1, end: 2 };
     let binding = LocalId { owner: 1, index: 0 };
     let object_type = primitive(Primitive::Object);
-    let result = if query == ObjectQueryKind::Length {
+    let result = if query == Some(ObjectQueryKind::Length) {
         primitive(Primitive::Integer)
-    } else {
+    } else if query.is_some() {
         Term::Optional(Box::new(primitive(Primitive::Bool)))
+    } else {
+        object_type.clone()
     };
     let local = Expr {
         source,
@@ -66,25 +68,37 @@ fn package(reads: usize, mode: &str, query: ObjectQueryKind, reference: bool) ->
         }
     };
     let mut fields = vec![subject];
-    if query != ObjectQueryKind::Length {
+    if query != Some(ObjectQueryKind::Length) {
         fields.push(Expr {
             source,
             ty: primitive(Primitive::Integer),
             kind: K::Literal(nir::program::Literal::Integer("0".into())),
         });
     }
+    if query.is_none() {
+        fields.push(Expr {
+            source,
+            ty: primitive(Primitive::Integer),
+            kind: K::Literal(nir::program::Literal::Integer("1".into())),
+        });
+    }
+    let subject = Box::new(Expr {
+        source,
+        ty: Term::Tuple(fields.iter().map(|field| field.ty.clone()).collect()),
+        kind: K::Tuple(fields),
+    });
     let read = Expr {
         source,
         ty: result.clone(),
-        kind: K::ObjectQuery {
-            query,
-            subject: Box::new(Expr {
-                source,
-                ty: Term::Tuple(fields.iter().map(|field| field.ty.clone()).collect()),
-                kind: K::Tuple(fields),
-            }),
+        kind: match query {
+            Some(query) => K::ObjectQuery { query, subject },
+            None => K::ObjectEdit {
+                operation: nir::program::ObjectEditKind::Slice,
+                subject,
+            },
         },
     };
+
     let mut package = Package {
         functions: vec![Function {
             declaration: id(1),
@@ -165,7 +179,11 @@ fn main() {
     for reference in [false, true] {
         let entry = id(if reference { 2 } else { 1 });
         for width in [1, 64, 1024] {
-            for query in [ObjectQueryKind::Length, ObjectQueryKind::Value] {
+            for query in [
+                Some(ObjectQueryKind::Length),
+                Some(ObjectQueryKind::Value),
+                None,
+            ] {
                 for mode in ["borrowed", "general"] {
                     let reads = 32;
                     let package = package(reads, mode, query, reference);
@@ -188,13 +206,21 @@ fn main() {
                             })
                             .collect(),
                     ));
-                    let expected = if query == ObjectQueryKind::Length {
+                    let expected = if query == Some(ObjectQueryKind::Length) {
                         Value::Integer(comptime_runtime::Integer::from_u128(width as u128))
-                    } else {
+                    } else if query.is_some() {
                         Value::Optional {
                             ty: Term::Optional(Box::new(primitive(Primitive::Bool))),
                             value: Some(Box::new(Value::Bool(true))),
                         }
+                    } else {
+                        Value::Object(Object::from_entries(vec![Entry::Property {
+                            key: "field_0".into(),
+                            value: ObjectValue {
+                                ty: primitive(Primitive::Bool),
+                                value: Value::Bool(true),
+                            },
+                        }]))
                     };
                     for _ in 0..5 {
                         assert_eq!(vm.invoke(entry, vec![payload.clone()]).unwrap(), expected);
