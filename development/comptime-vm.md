@@ -7545,3 +7545,41 @@ speedup. Existing full-value validation costs remain.
 
 Formatting: `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`
 exited 0; `/tmp/luna-tools-nd2_lach/result.json`. `git diff --check` passed.
+
+### Observe Type projections without replacing generator storage
+
+Generator update/guard frames keep ordinary records and lists as local reads.
+A let binding can still own mutable fields: retaining a frozen aggregate in
+`generator_data` substitutes old values, loses sibling updates and removes
+addressable places. That attempted frame change was removed before delivery.
+
+Type-position observation now follows mixed record-field and ordinary-list
+index paths rooted in an observed local. Checked index expressions must have
+a statically known integer value; protocol calls and effectful/dynamic indices
+retain required invocation. The existing partial-value observer selects the
+Type identity, while existing write/call/escape invalidation remains in force.
+No aggregate becomes a specialization input or a replacement for ordinary reads.
+
+The local Type and completed dependency materializers no longer contain legacy
+Type-list-as-Type branches. Value::Type is admitted only in the Type domain;
+lists use ordinary list values and preserve their declared domain. Legacy IR
+readers elsewhere still exist; this is not completion of their removal.
+
+Regression coverage includes list/record annotations inside assignment frames,
+a failed guard whose mutation must reach the next arm, nested field/index paths,
+a static conditional index and mutation of a separate let-owned record.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --test cmtt_type_inputs --test contextual_spreads --test type_lists --test inline_control --no-fail-fast`:
+  901 passed, exit 0; `/tmp/luna-tools-2qg_k_57/result.json`.
+- After expanding the regression variants,
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt_type_inputs --test type_lists --no-fail-fast`:
+  52 passed, exit 0; `/tmp/luna-tools-mwp41dh2/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0; `/tmp/luna-tools-djs6ed08/result.json`. `git diff --check` passed.
+
+The earlier frozen-aggregate frame attempt caused 17 CMTT regressions; the final
+901-test run includes those cases and resolves them. No full language suite or
+performance benchmark was run. General dynamic Type computations in symbolic
+nested frames remain subject to the existing completed-input requirement.

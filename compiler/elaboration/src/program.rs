@@ -3640,7 +3640,7 @@ impl Checker<'_, '_> {
         if let Some(ty) = projected? {
             return Ok(ty);
         }
-        if let Some(ty) = self.observed_field_type(expr)? {
+        if let Some(ty) = self.observed_projection_type(expr)? {
             return Ok(ty);
         }
         if self.projected_constant_owner(expr)?.is_some() {

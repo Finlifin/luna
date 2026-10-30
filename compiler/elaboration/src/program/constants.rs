@@ -611,18 +611,13 @@ impl Checker<'_, '_> {
         // immutable module exports use the stricter closed-value boundary.
         if matches!(value, Value::Type(_)) {
             let symbol = self.required_normal_term(value, span)?;
-            let kind = match symbol {
-                Term::TypeListValue(elements) if self.is_type_list_type(&ty) => {
-                    K::TypeListValue(elements)
-                }
-                symbol if ty == p(P::Type) => K::TypeValue(symbol),
-                _ => {
-                    return Err(error(
-                        span,
-                        "local Type data does not match its declared domain",
-                    ));
-                }
-            };
+            if ty != p(P::Type) {
+                return Err(error(
+                    span,
+                    "local Type data does not match its declared domain",
+                ));
+            }
+            let kind = K::TypeValue(symbol);
             return Ok(n::Expr {
                 source: super::source(span),
                 ty,
@@ -719,23 +714,10 @@ impl Checker<'_, '_> {
         // as normal-form inputs, after required evaluation restores those slots.
         if matches!(value, Value::Type(_)) {
             let symbol = self.required_normal_term(value, span)?;
-            let kind = match &symbol {
-                Term::TypeListValue(elements) => {
-                    if !self.is_type_list_type(&ty) {
-                        return Err(error(
-                            span,
-                            "type-list dependency requires the bound meta.List<Type>",
-                        ));
-                    }
-                    K::TypeListValue(elements.clone())
-                }
-                _ => {
-                    if ty != p(P::Type) {
-                        return Err(error(span, "Type dependency requires a Type domain"));
-                    }
-                    K::TypeValue(symbol.clone())
-                }
-            };
+            if ty != p(P::Type) {
+                return Err(error(span, "Type dependency requires a Type domain"));
+            }
+            let kind = K::TypeValue(symbol.clone());
             return Ok((
                 n::Expr {
                     source: super::source(span),

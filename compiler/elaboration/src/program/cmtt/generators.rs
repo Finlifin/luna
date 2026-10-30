@@ -2864,9 +2864,6 @@ impl Checker<'_, '_> {
         self.required_steps -= (before - budget.steps) as u64;
         let kind = match known {
             Some(ty) if value.ty == p(P::Type) && ty.sort() == Sort::Type => K::TypeValue(ty),
-            Some(Term::TypeListValue(items)) if self.is_type_list_type(&value.ty) => {
-                K::TypeListValue(items)
-            }
             // An immutable schema may retain its checked structural value so
             // later field projections and aliases can recover contained Types.
             // known_normal_input never calls a factory or unfolds a head;

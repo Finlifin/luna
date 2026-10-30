@@ -366,3 +366,66 @@ fn contextual_inference_routes_ordinary_variadic_normal_form_values() {
         );
     }
 }
+
+#[test]
+fn immutable_structural_type_evidence_survives_generator_update_and_guard_frames() {
+    let source = "typealias Type=.Type'builtin;
+        comptime fn update()-><|-bool> {
+            let fields: TupleElements<Type> = [bool];
+            var result=false;
+            result=do {let value:fields[0]=true;value};
+            '(result)
+        }
+        comptime fn guarded()-><|-bool> {
+            let fields: TupleElements<Type> = [bool];
+            var seen=false;
+            let result=false match {
+                _ if do {let value:fields[0]=true;seen=value;false} => false,
+                _ => seen,
+            };
+            '(result)
+        }
+        fn run()->bool {~<update()> and ~<guarded()>}";
+    let record = source
+        .replace(
+            "typealias Type=.Type'builtin;",
+            "typealias Type=.Type'builtin; struct Schema {kind:Type}",
+        )
+        .replace(
+            "let fields: TupleElements<Type> = [bool];",
+            "let fields = Schema {kind:bool};",
+        )
+        .replace("fields[0]", "fields.kind");
+    let nested = source
+        .replace(
+            "typealias Type=.Type'builtin;",
+            "typealias Type=.Type'builtin; struct Schema {items:TupleElements<Type>}",
+        )
+        .replace(
+            "let fields: TupleElements<Type> = [bool];",
+            "let fields = Schema {items:[bool]};",
+        )
+        .replace("fields[0]", "fields.items[if true {0} else {1}]");
+    let live_state = source
+        .replace(
+            "typealias Type=.Type'builtin;",
+            "typealias Type=.Type'builtin; struct State {flag:bool}",
+        )
+        .replace(
+            "var result=false;",
+            "let state=State {flag:false}; var result=false;",
+        )
+        .replace("result=do {", "result=do {state.flag=true;")
+        .replacen("'(result)", "'(result and state.flag)", 1);
+    for input in [
+        source,
+        record.as_str(),
+        nested.as_str(),
+        live_state.as_str(),
+    ] {
+        assert_eq!(
+            support::run_iir_with_tuple(input, "run", vec![]),
+            Value::Bool(true)
+        );
+    }
+}

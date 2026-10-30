@@ -47,7 +47,7 @@ impl Checker<'_, '_> {
                 // permissions. A value member cannot become a Type receiver.
                 *completed = self.projected_member_type(base)?;
                 if completed.is_none() && matches!(base.kind, H::Projection(..)) {
-                    *completed = self.observed_field_type(base)?;
+                    *completed = self.observed_projection_type(base)?;
                     if completed.is_none() && self.local_field_domain(base)? == Some(p(P::Type)) {
                         *completed = Some(self.type_expr(base)?);
                     }
@@ -178,15 +178,18 @@ impl Checker<'_, '_> {
         Ok(Some(domain))
     }
 
-    /// Only inspect a field path rooted in an available observed local. Source
+    /// Only inspect a field/list path rooted in an available observed local. Source
     /// calls, dereferences and computed receivers keep their ordinary required
     /// invocation path; discovering a container must not run a producer twice.
-    pub(super) fn observed_field_type(&mut self, expr: &Expr<'_>) -> Result<Option<Term>, Error> {
-        if !matches!(expr.kind, H::Projection(..)) {
+    pub(super) fn observed_projection_type(
+        &mut self,
+        expr: &Expr<'_>,
+    ) -> Result<Option<Term>, Error> {
+        if !matches!(expr.kind, H::Projection(..) | H::Index(..)) {
             return Ok(None);
         }
         let mut root = expr;
-        while let H::Projection(base, _) = root.kind {
+        while let H::Projection(base, _) | H::Index(base, _) = root.kind {
             self.required_steps = self
                 .required_steps
                 .checked_sub(1)
@@ -203,8 +206,32 @@ impl Checker<'_, '_> {
             return Ok(None);
         }
         let value = self.expr(expr, None)?;
-        if !matches!(value.kind, K::Field { .. } | K::AnonymousField { .. }) {
-            return Ok(None);
+        // Observations prove a result identity, not permission to discard
+        // execution. Only a local projection chain with statically known
+        // indices can bypass required invocation; protocol calls cannot.
+        let mut base = &value;
+        loop {
+            self.required_steps = self
+                .required_steps
+                .checked_sub(1)
+                .ok_or_else(|| error(expr.span, "type projection observation budget exhausted"))?;
+            match &base.kind {
+                K::Field { value, .. } | K::AnonymousField { value, .. } => base = value,
+                K::TypeListIndex(value, index) => {
+                    let mut budget = comptime_runtime::Budget {
+                        steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
+                        max_limbs: 4096,
+                    };
+                    let known = self.known_normal_input(index, 0, &mut budget);
+                    self.required_steps = budget.steps as u64;
+                    if !matches!(known, Some(Term::Integer(_))) {
+                        return Ok(None);
+                    }
+                    base = value;
+                }
+                K::Local(_) => break,
+                _ => return Ok(None),
+            }
         }
         self.observed_expression_type(&value, expr.span)
     }
