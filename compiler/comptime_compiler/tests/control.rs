@@ -139,10 +139,11 @@ fn invocation_code_distinguishes_normal_form_application() {
         unreachable!()
     };
     callee.ty = Term::NormalFormFunction(Box::new(signature), None);
-    assert!(matches!(
-        compile(&body, &mut 1000),
-        Err(Error::Unsupported(_))
-    ));
+    let normal_dump = compile(&body, &mut 1000).unwrap().to_string();
+    assert!(normal_dump.contains("(normal-form (type "));
+    assert!(normal_dump.contains("(inputs 0)"));
+    assert_ne!(dump, normal_dump);
+    assert_eq!(normal_dump, compile(&body, &mut 1000).unwrap().to_string());
 }
 
 #[test]

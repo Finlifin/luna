@@ -31,10 +31,25 @@ enum Waiting {
 
 struct PendingCall {
     callee: Value,
-    arguments: Vec<Option<Value>>,
+    normal_head: Option<DeclarationId>,
+    arguments: Vec<Option<PreparedArgument>>,
     parameter_bindings: Vec<LocalId>,
     defaults: Environment,
     last_default: Option<usize>,
+}
+
+enum PreparedArgument {
+    Value(Value),
+    Normal(Term),
+}
+
+impl std::fmt::Display for PreparedArgument {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Value(value) => write!(f, "(value {value})"),
+            Self::Normal(term) => write!(f, "(normal-input {term})"),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -107,7 +122,11 @@ impl fmt::Display for Frame {
         }
         write!(f, ") (calls")?;
         for (id, call) in &self.calls {
-            write!(f, " ({id} (callee {}) (arguments", call.callee)?;
+            write!(f, " ({id} (callee {})", call.callee)?;
+            if let Some(head) = call.normal_head {
+                write!(f, " (normal-head {head})")?;
+            }
+            write!(f, " (arguments")?;
             for value in &call.arguments {
                 match value {
                     Some(value) => write!(f, " (ready {value})")?,
@@ -1334,20 +1353,39 @@ impl<'a> Interpreter<'a> {
                 Op::BeginCall {
                     call,
                     callee,
+                    callee_source,
+                    normal_form,
                     parameter_bindings,
                     prepare_defaults,
                 } => {
                     let callee = frame.slots[*callee].take().ok_or_else(missing)?;
-                    let parameters = self.call_parameters(&callee, source)?;
+                    let (normal_head, parameters, count) = if let Some((ty, count)) = normal_form {
+                        if !self.has_type(&callee, ty) {
+                            return Err(self.failure(ErrorKind::Type, Some(*callee_source)));
+                        }
+                        let Value::Function(head) = &callee else {
+                            return Err(self.failure(ErrorKind::Type, Some(*callee_source)));
+                        };
+                        let metadata = self.normal_forms.get(head).ok_or_else(missing)?;
+                        if !parameter_bindings.is_empty() || *count != metadata.parameters.len() {
+                            return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
+                        }
+                        (Some(*head), vec![], *count)
+                    } else {
+                        let parameters = self.call_parameters(&callee, source)?;
+                        let count = parameters.len();
+                        (None, parameters, count)
+                    };
                     if !parameter_bindings.is_empty() && *parameter_bindings != parameters {
                         return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
                     }
-                    self.effect_charge(parameters.len(), Some(source))?;
+                    self.effect_charge(count, Some(source))?;
                     frame.calls.insert(
                         *call,
                         PendingCall {
                             callee,
-                            arguments: (0..parameters.len()).map(|_| None).collect(),
+                            normal_head,
+                            arguments: (0..count).map(|_| None).collect(),
                             parameter_bindings: if *prepare_defaults {
                                 parameter_bindings.clone()
                             } else {
@@ -1373,6 +1411,11 @@ impl<'a> Interpreter<'a> {
                         );
                     }
                     let pending = frame.calls.get_mut(call).ok_or_else(missing)?;
+                    if pending.normal_head.is_some()
+                        && (*is_default || *passing != nir::program::ArgumentPassing::Value)
+                    {
+                        return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
+                    }
                     if *parameter >= pending.arguments.len()
                         || pending.arguments[*parameter].is_some()
                     {
@@ -1448,13 +1491,19 @@ impl<'a> Interpreter<'a> {
                     let value = frame.slots[*value].take().ok_or_else(missing)?;
                     let pending = frame.calls.get_mut(call).ok_or_else(missing)?;
                     let slot = pending.arguments.get_mut(*parameter).ok_or_else(missing)?;
+                    if pending.normal_head.is_some() {
+                        *slot = Some(PreparedArgument::Normal(
+                            self.residual_input_term(value, source)?,
+                        ));
+                        continue;
+                    }
                     let value = self.prepare_argument(*parameter, source, value)?;
                     if !pending.parameter_bindings.is_empty() {
                         pending
                             .defaults
                             .insert(pending.parameter_bindings[*parameter], value.clone());
                     }
-                    *slot = Some(value);
+                    *slot = Some(PreparedArgument::Value(value));
                 }
                 Op::Invoke { call, destination } => {
                     let pending = frame.calls.remove(call).ok_or_else(missing)?;
@@ -1463,6 +1512,29 @@ impl<'a> Interpreter<'a> {
                         .into_iter()
                         .collect::<Option<Vec<_>>>()
                         .ok_or_else(|| self.failure(ErrorKind::Arity, Some(source)))?;
+                    if let Some(head) = pending.normal_head {
+                        let inputs = arguments
+                            .into_iter()
+                            .map(|argument| match argument {
+                                PreparedArgument::Normal(term) => Ok(term),
+                                PreparedArgument::Value(_) => {
+                                    Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)))
+                                }
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        frame.slots[*destination] =
+                            Some(self.complete_normal_type(head, inputs, source)?);
+                        continue;
+                    }
+                    let arguments = arguments
+                        .into_iter()
+                        .map(|argument| match argument {
+                            PreparedArgument::Value(value) => Ok(value),
+                            PreparedArgument::Normal(_) => {
+                                Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)))
+                            }
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
                     frame.waiting = Some(Waiting::Call(*destination));
                     return Ok(Progress::Call {
                         callee: pending.callee,

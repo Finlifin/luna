@@ -394,3 +394,43 @@ fn shipped_meta_object_values_dispatch_type_indexed_traits() {
         .unwrap();
     assert_true(output);
 }
+
+#[test]
+fn shipped_type_factories_keep_identity_through_comptime_parameters() {
+    let input = Inputs::new();
+    input.write(
+        "input.fl",
+        "
+        comptime fn Apply(factory:pure comptime fn<Type> -> Type, input:Type) -> Type {
+            factory<input>
+        }
+        comptime fn Collect(factory:pure comptime fn<...Es:List<Type>> -> Type) -> Type {
+            factory<bool, u8>
+        }
+        const SEQUENCE=Apply(List, bool);
+        const PRODUCT=Collect(Tuple);
+        fn run()->bool {
+            const same = SEQUENCE == List<bool> and PRODUCT == Tuple<bool,u8>;
+            same
+        }
+    ",
+    );
+    let library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_luna"))
+        .arg(input.0.join("input.fl"))
+        .arg("--sysroot")
+        .arg(library)
+        .args([
+            "--build-target",
+            "x86_64",
+            "linux",
+            "64",
+            "--interpret",
+            "run",
+            "--fuel",
+            "4000000",
+        ])
+        .output()
+        .unwrap();
+    assert_true(output);
+}

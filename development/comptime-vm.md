@@ -3956,3 +3956,41 @@ Validation in /home/fin/luna:
   exit 0, `/tmp/luna-tools-f945ch2u/result.json`; `git diff --check`: exit 0.
 - `python3 -B development/check.py --timeout 900 -- test -p type_resolution`:
   exit 0, `/tmp/luna-tools-6klgr5oj/result.json`.
+
+### Dynamic normal-form callable bytecode
+
+Type-directed `Call` nodes whose callee has a normal-form callable signature now
+compile through the linear call protocol. Callee selection runs before arguments;
+each source-ordered argument is frozen to its ordinary residual input term before
+the next expression runs. Completion uses the existing normal-form domain and
+requirement checks and returns the opaque head application, never a head-body
+invocation. Computed callee expressions are compiled through the same expression
+worklist. No new AST evaluator or normal-form argument language was added.
+
+Call instructions retain the normal-form signature and expected input count.
+Pending bytecode calls distinguish ordinary argument values from frozen normal
+inputs, with S-expression dumps for both. Arity is checked before arguments;
+duplicate slots and illegal defaults fail at their source-order boundary. Invalid
+input domains are still rejected by the common completion routine. Existing
+ordinary call handling and fallback for other unsupported constructs remain.
+This closes dynamic normal-form application fallback, not the whole invocation
+VM migration. Source routing of dynamic named/default clauses is unchanged.
+
+The compiler regression previously required this construct to return Unsupported;
+it now checks the distinct, deterministic normal-form call dump. Differential
+execution tests cover computed callee effects, argument effects, duplicate slots,
+arity, illegal defaults, invalid domains and recovery. Source tests assert exactly
+one compiled invocation per wrapper and no head entry events, including failed
+and successful requires checks. The real shipped sysroot test passes List and
+Tuple as callable arguments and checks their original identities.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-n_hj10gm/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_types --test sysroot_preludes --test normal_form_inference --test normal_form_methods --test library_meta_objects`:
+  exit 0, `/tmp/luna-tools-b1mq67fh/result.json`.
+- After extending the source case with requires rejection/recovery:
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_types dynamic_type_factories_execute_in_bytecode_without_entering_their_heads`:
+  exit 0, `/tmp/luna-tools-w8olpj3k/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-rtllj14d/result.json`; `git diff --check`: exit 0.

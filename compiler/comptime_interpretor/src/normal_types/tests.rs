@@ -1494,3 +1494,145 @@ fn contextual_fragment_does_not_replace_nested_normal_form_identity() {
     );
     assert_eq!(vm.bytecode_contextual_inputs(), 1);
 }
+
+#[test]
+fn dynamic_normal_calls_compile_and_preserve_order_plan_checks_and_identity() {
+    use nir::program::{ArgumentPassing, CallArgument};
+    let head = DeclarationId {
+        package: 71,
+        local: 1,
+    };
+    let trace = LocalId {
+        owner: 71,
+        index: 0,
+    };
+    let factory = LocalId {
+        owner: 71,
+        index: 1,
+    };
+    let metadata = Head {
+        declaration: head,
+        collector: None,
+        role: Role::Opaque,
+        requirements: vec![],
+        parameters: (0..2)
+            .map(|index| Parameter {
+                declaration: DeclarationId {
+                    package: 71,
+                    local: 2 + index,
+                },
+                binding: LocalId { owner: 71, index },
+                kind: Kind::Value,
+                ty: Term::Primitive(Primitive::Bool),
+            })
+            .collect(),
+    };
+    let callable = metadata.callable_type().unwrap();
+    let package = Package {
+        normal_forms: vec![metadata],
+        ..Default::default()
+    };
+    let set = |value| {
+        expr(
+            Primitive::Void,
+            K::Assign {
+                place: Place {
+                    root: trace,
+                    fields: vec![],
+                },
+                value: Box::new(expr(Primitive::Bool, K::Literal(Literal::Bool(value)))),
+            },
+        )
+    };
+    let first = expr(
+        Primitive::Bool,
+        K::Block {
+            statements: vec![set(true)],
+            result: Some(Box::new(expr(
+                Primitive::Bool,
+                K::Literal(Literal::Bool(false)),
+            ))),
+        },
+    );
+    let callee = Expr {
+        source: SOURCE,
+        ty: callable.clone(),
+        kind: K::Block {
+            statements: vec![set(false)],
+            result: Some(Box::new(Expr {
+                source: SOURCE,
+                ty: callable,
+                kind: K::Local(factory),
+            })),
+        },
+    };
+    for compiled in [false, true] {
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        for case in 0..7 {
+            let mut arguments = vec![
+                CallArgument {
+                    parameter: 0,
+                    passing: ArgumentPassing::Value,
+                    is_default: false,
+                    value: first.clone(),
+                },
+                CallArgument {
+                    parameter: if case == 1 { 0 } else { 1 },
+                    passing: ArgumentPassing::Value,
+                    is_default: case == 3,
+                    value: expr(Primitive::Bool, K::Local(trace)),
+                },
+            ];
+            if case == 2 {
+                arguments.pop();
+            }
+            if case == 5 {
+                arguments[1].value = expr(Primitive::Char, K::Literal(Literal::Char('x')));
+            }
+            let body = expr(
+                Primitive::Type,
+                K::Call {
+                    callee: Box::new(callee.clone()),
+                    arguments,
+                    parameter_bindings: vec![],
+                },
+            );
+            let mut env =
+                Environment::from([(trace, Value::Bool(true)), (factory, Value::Function(head))]);
+            let result = if compiled {
+                let code = Arc::new(comptime_compiler::compile(&body, &mut 10000).unwrap());
+                assert!(code.to_string().contains("(normal-form (type "));
+                vm.execute_code(&code, &mut env)
+            } else {
+                vm.eval(&body, &mut env)
+            };
+            if matches!(case, 0 | 4 | 6) {
+                let Flow::Value(value) = result.unwrap() else {
+                    panic!("expected a Type value")
+                };
+                assert_eq!(
+                    value,
+                    Value::Type(Term::NormalForm {
+                        head,
+                        sort: nir::Sort::Type,
+                        arguments: vec![Term::Bool(false), Term::Bool(true)]
+                    })
+                );
+            } else {
+                assert_eq!(
+                    result.unwrap_err().kind,
+                    if case == 5 {
+                        ErrorKind::Type
+                    } else {
+                        ErrorKind::InvalidCallPlan
+                    }
+                );
+            }
+            assert_eq!(
+                vm.local_value(&env, trace, Some(SOURCE)).unwrap(),
+                Value::Bool(case != 2)
+            );
+            assert_eq!(vm.depth, 0);
+        }
+    }
+}

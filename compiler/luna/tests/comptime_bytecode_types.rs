@@ -830,3 +830,107 @@ fn normal_input_domains_use_type_valued_prior_value_parameters() {
         );
     }
 }
+
+#[test]
+fn dynamic_type_factories_execute_in_bytecode_without_entering_their_heads() {
+    let package = support::compile(
+        "typealias Type = .Type'builtin;
+        typealias u8 = .u8'builtin;
+        pure comptime fn Identity<T> -> Type { T }
+        pure comptime fn Alternate<T> -> Type { T }
+        pure comptime fn Tagged<T, value:T> -> Type { T }
+        pure comptime fn Limited<T> -> Type where requires T == bool { T }
+        comptime fn Apply(factory:pure comptime fn<Type> -> Type, input:Type) -> Type {
+            factory<input>
+        }
+        comptime fn Ordered() -> Type {
+            var count:u8 = 0;
+            let result = (do {count = count + 1; Identity})<do {count = count * 2; bool}>;
+            if count == 2 {result} else {Alternate<bool>}
+        }
+        comptime fn Dependent(factory:pure comptime fn<T:Type, value:T> -> Type) -> Type {
+            factory<bool, true>
+        }",
+    );
+    let identity = support::id(&package, "Identity");
+    let alternate = support::id(&package, "Alternate");
+    let tagged = support::id(&package, "Tagged");
+    let limited = support::id(&package, "Limited");
+    let context = elaboration::ptc::Context::from_package(&package).unwrap();
+    let solver = |predicate: &nir::program::TypePredicate| {
+        use elaboration::ptc::{Budget, Formula, Outcome};
+        match context.prove(Formula::from_predicate(predicate), Budget::default()) {
+            Outcome::Entailed(_) => ContractOutcome::Satisfied,
+            Outcome::NotEntailed(_) => ContractOutcome::Rejected,
+            _ => ContractOutcome::Unknown,
+        }
+    };
+    let mut vm = Interpreter::for_comptime(&package, Budget::default())
+        .unwrap()
+        .with_type_solver(&solver);
+    for (name, arguments, head, inputs) in [
+        (
+            "Apply",
+            vec![
+                Value::Function(identity),
+                Value::Type(Term::Primitive(Primitive::Bool)),
+            ],
+            identity,
+            vec![Term::Primitive(Primitive::Bool)],
+        ),
+        (
+            "Apply",
+            vec![
+                Value::Function(alternate),
+                Value::Type(Term::Primitive(Primitive::Bool)),
+            ],
+            alternate,
+            vec![Term::Primitive(Primitive::Bool)],
+        ),
+        (
+            "Ordered",
+            vec![],
+            identity,
+            vec![Term::Primitive(Primitive::Bool)],
+        ),
+        (
+            "Dependent",
+            vec![Value::Function(tagged)],
+            tagged,
+            vec![Term::Primitive(Primitive::Bool), Term::Bool(true)],
+        ),
+    ] {
+        let before = vm.bytecode_invocations();
+        assert_eq!(
+            vm.invoke(support::id(&package, name), arguments).unwrap(),
+            Value::Type(Term::NormalForm {
+                head,
+                sort: nir::Sort::Type,
+                arguments: inputs
+            })
+        );
+        assert_eq!(vm.bytecode_invocations() - before, 1, "{name}");
+    }
+    for ty in [Primitive::Char, Primitive::Bool] {
+        let before = vm.bytecode_invocations();
+        let result = vm.invoke(
+            support::id(&package, "Apply"),
+            vec![Value::Function(limited), Value::Type(Term::Primitive(ty))],
+        );
+        if ty == Primitive::Char {
+            assert_eq!(result.unwrap_err().kind, ErrorKind::TypeContractRejected);
+        } else {
+            assert_eq!(
+                result.unwrap(),
+                Value::Type(Term::NormalForm {
+                    head: limited,
+                    sort: nir::Sort::Type,
+                    arguments: vec![Term::Primitive(ty)]
+                })
+            );
+        }
+        assert_eq!(vm.bytecode_invocations() - before, 1);
+    }
+    assert!(!vm.events().iter().any(|event| matches!(event,
+        comptime_interpretor::Event::EnterFunction(id) if [identity, alternate, tagged, limited].contains(id))));
+}

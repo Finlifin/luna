@@ -243,6 +243,8 @@ pub enum Op {
     BeginCall {
         call: Register,
         callee: Register,
+        callee_source: SourceRange,
+        normal_form: Option<(Term, usize)>,
         parameter_bindings: Vec<LocalId>,
         prepare_defaults: bool,
     },
@@ -709,17 +711,24 @@ impl fmt::Display for Program {
                 Op::BeginCall {
                     call,
                     callee,
+                    callee_source,
+                    normal_form,
                     parameter_bindings,
                     prepare_defaults,
                 } => {
                     write!(
                         f,
-                        "(begin-call {call} {callee} (prepare-defaults {prepare_defaults}) (parameters"
+                        "(begin-call {call} {callee} (callee-source {} {}) (prepare-defaults {prepare_defaults}) (parameters",
+                        callee_source.start, callee_source.end
                     )?;
                     for binding in parameter_bindings {
                         write!(f, " {binding}")?;
                     }
-                    write!(f, "))")?;
+                    write!(f, ")")?;
+                    if let Some((ty, count)) = normal_form {
+                        write!(f, " (normal-form (type {ty}) (inputs {count}))")?;
+                    }
+                    write!(f, ")")?;
                 }
                 Op::CheckCallArgument {
                     call,
@@ -1049,11 +1058,12 @@ fn compile_root(
                         callee,
                         arguments,
                         parameter_bindings,
-                    } if !callee.ty.is_normal_form_callable()
-                        && matches!(
-                            callee.kind,
-                            K::Function(_) | K::FunctionInstance { .. } | K::Local(_)
-                        ) =>
+                    } if (callee.ty.is_normal_form_callable() && parameter_bindings.is_empty())
+                        || (!callee.ty.is_normal_form_callable()
+                            && matches!(
+                                callee.kind,
+                                K::Function(_) | K::FunctionInstance { .. } | K::Local(_)
+                            )) =>
                     {
                         *fuel = fuel
                             .checked_sub(arguments.len() + parameter_bindings.len())
@@ -1069,14 +1079,18 @@ fn compile_root(
                         );
                         for argument in arguments.iter().rev() {
                             let value = fresh();
-                            emit(
-                                &mut work,
+                            work.push(Work::Emit(
+                                if callee.ty.is_normal_form_callable() {
+                                    argument.value.source
+                                } else {
+                                    source
+                                },
                                 Op::StoreCallArgument {
                                     call,
                                     parameter: argument.parameter,
                                     value,
                                 },
-                            );
+                            ));
                             if argument.is_default {
                                 nir::copy_budget::charge_substitution(
                                     &argument.value,
@@ -1157,6 +1171,14 @@ fn compile_root(
                             Op::BeginCall {
                                 call,
                                 callee: target,
+                                callee_source: callee.source,
+                                normal_form: if callee.ty.is_normal_form_callable() {
+                                    nir::type_computations::charge_term(&callee.ty, fuel)
+                                        .map_err(|_| Error::Budget(source))?;
+                                    Some((callee.ty.clone(), arguments.len()))
+                                } else {
+                                    None
+                                },
                                 parameter_bindings: parameter_bindings.clone(),
                                 prepare_defaults: arguments.iter().any(|a| a.is_default),
                             },
