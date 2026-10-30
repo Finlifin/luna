@@ -5651,3 +5651,35 @@ Validation from `/home/fin/luna`, exit 0:
   child-member shadowing. Positive cases execute actual comptime invocations.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
   `/tmp/luna-tools-03sncj6o/result.json`; `git diff --check` passed.
+
+## Implicit type-side associated callables (2026-10-31)
+
+Type-side projections now retain lexical source evidence even when AST lowering
+leaves a nominal member unresolved. A shared recording helper serves both value
+projections and these type-side sites. Associated projection accepts an implicit
+source, first preserving a fixed capability source and otherwise applying the
+same visible-interface discovery used by methods. Inherent method lookup still
+precedes implicit trait discovery. Explicit views retain their original path.
+
+Methods and associated values participate in the same member-source namespace.
+An associated callable remains an ordinary stored value: invocation uses its
+function type, not parameter names/defaults recovered from its initializer's
+function declaration. A selected noncallable associated value produces a call
+error rather than allowing a lower-tier method to win. Inherited sources keep
+parent substitution and the visible child's capability checks.
+
+This closes type-side associated callable discovery. Value-side associated
+projection is not introduced here; pending-export resumption and query budget
+accounting remain open. No language documentation was changed for this wiring.
+
+Validation from `/home/fin/luna`, exit 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test trait_phases --test associated_signatures`:
+  62 phase/source tests and 9 associated signature tests passed;
+  `/tmp/luna-tools-16rg5we2/result.json`. New cases exercise actual comptime
+  callable values, generic and concrete inherited sources, rejected named
+  arguments, and rejection without fallback from a noncallable selected value.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  `/tmp/luna-tools-mnswg9mz/result.json`; `git diff --check` passed.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes complete_shipped_sysroot_invokes_comptime_qualified_type_traits`:
+  real sysroot invocation passed; `/tmp/luna-tools-fxcbgoen/result.json`.

@@ -60,9 +60,11 @@ impl Checker<'_, '_> {
         view: &Expr<'_>,
         name: &str,
         span: Span,
+        site: hir::HirId,
     ) -> Result<Option<n::Expr>, Error> {
-        let H::Cast(base, interface) = view.kind else {
-            return Ok(None);
+        let (base, explicit) = match view.kind {
+            H::Cast(base, interface) => (base, Some(interface)),
+            _ => (view, None),
         };
         let mut subject = if self.is_type_head(base)
             || self.local_field_domain(base)? == Some(p(P::Type))
@@ -70,7 +72,7 @@ impl Checker<'_, '_> {
         {
             self.type_expr(base)?
         } else if let H::Projection(view, field) = &base.kind {
-            match self.associated_projection(view, field.name.as_str(), base.span)? {
+            match self.associated_projection(view, field.name.as_str(), base.span, base.hir_id)? {
                 Some(n::Expr {
                     kind: K::TypeValue(ty),
                     ..
@@ -80,7 +82,25 @@ impl Checker<'_, '_> {
         } else {
             return Ok(None);
         };
-        let mut requested = self.interface_expr_for(interface, &subject)?;
+        let mut requested = if let Some(interface) = explicit {
+            self.interface_expr_for(interface, &subject)?
+        } else if let Some(interface) = self.context_member_interface(&subject, name, span)? {
+            interface
+        } else {
+            // Inherent methods precede implicit trait discovery. This probe
+            // selects metadata only; it does not evaluate a receiver or body.
+            if self
+                .selected_method(subject.clone(), None, name, span)?
+                .is_some()
+            {
+                return Ok(None);
+            }
+            let Some(interface) = self.discovered_member_interface(&subject, name, site, span)?
+            else {
+                return Ok(None);
+            };
+            interface
+        };
         // The declaration is checked separately under its abstract binders.
         // While evaluating a selected initializer, queries use its concrete
         // (or implementation-generic) Self and interface arguments.

@@ -158,6 +158,40 @@ fn binary_operator(kind: NodeKind) -> Option<BinOp> {
 }
 
 impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
+    fn record_trait_sources(&mut self, hir_id: hir::HirId, span: Span) {
+        let source_plan = self.resolver.visible_trait_sources(self.file_scope, span);
+        let sites = |values: Vec<resolve::ids::AstNodeRef>| {
+            values
+                .into_iter()
+                .map(|site| (site.file.raw(), site.node))
+                .collect()
+        };
+        let plan = hir::trait_sources::TraitSourcePlan {
+            pending_exports: sites(source_plan.pending_exports),
+            names: source_plan
+                .names
+                .into_iter()
+                .map(|name| hir::trait_sources::TraitSourceName {
+                    name: name.name,
+                    pending_exports: sites(name.pending_outputs),
+                    fallback: name
+                        .fallback
+                        .map(|resolution| match resolution.kind {
+                            BindingKind::Definition(id, _) => Some(id),
+                            _ => None,
+                        })
+                        .map_err(|error| error.message()),
+                })
+                .collect(),
+        };
+        let shared = match &self.last_trait_sources {
+            Some(previous) if **previous == plan => previous.clone(),
+            _ => std::sync::Arc::new(plan),
+        };
+        self.last_trait_sources = Some(shared.clone());
+        self.package.trait_sources.insert(hir_id, shared);
+    }
+
     /// Lower an AST node in expression position into an HIR [`Expr`].
     pub(crate) fn lower_expr(&mut self, ctx: ExprContext, node: NodeIndex) -> Expr<'hir> {
         let kind = self.ast.get_node(node).expect("valid expression node").0;
@@ -516,8 +550,10 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                                 {
                                     // Variants are selected from the completed nominal
                                     // descriptor during elaboration, including forward defs.
+                                    let hir_id = self.next_hir_id();
+                                    self.record_trait_sources(hir_id, span);
                                     return Expr {
-                                        hir_id: self.next_hir_id(),
+                                        hir_id,
                                         kind: ExprKind::Projection(
                                             self.arena.alloc_expr(base_expr),
                                             field,
@@ -534,37 +570,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 let base_ref = self.arena.alloc_expr(base_expr);
                 let field_ident = self.node_to_ident(children[1]);
                 let hir_id = self.next_hir_id();
-                let source_plan = self.resolver.visible_trait_sources(self.file_scope, span);
-                let sites = |values: Vec<resolve::ids::AstNodeRef>| {
-                    values
-                        .into_iter()
-                        .map(|site| (site.file.raw(), site.node))
-                        .collect()
-                };
-                let plan = hir::trait_sources::TraitSourcePlan {
-                    pending_exports: sites(source_plan.pending_exports),
-                    names: source_plan
-                        .names
-                        .into_iter()
-                        .map(|name| hir::trait_sources::TraitSourceName {
-                            name: name.name,
-                            pending_exports: sites(name.pending_outputs),
-                            fallback: name
-                                .fallback
-                                .map(|resolution| match resolution.kind {
-                                    BindingKind::Definition(id, _) => Some(id),
-                                    _ => None,
-                                })
-                                .map_err(|error| error.message()),
-                        })
-                        .collect(),
-                };
-                let shared = match &self.last_trait_sources {
-                    Some(previous) if **previous == plan => previous.clone(),
-                    _ => std::sync::Arc::new(plan),
-                };
-                self.last_trait_sources = Some(shared.clone());
-                self.package.trait_sources.insert(hir_id, shared);
+                self.record_trait_sources(hir_id, span);
                 let candidates = self
                     .resolver
                     .accessible_type_members(field_ident.name, self.file_scope);

@@ -1532,7 +1532,7 @@ impl Checker<'_, '_> {
         {
             self.type_expr(base)?
         } else if let H::Projection(view, field) = &base.kind {
-            match self.associated_projection(view, field.name.as_str(), base.span)? {
+            match self.associated_projection(view, field.name.as_str(), base.span, base.hir_id)? {
                 Some(n::Expr {
                     kind: K::TypeValue(ty),
                     ..
@@ -2960,7 +2960,7 @@ impl Checker<'_, '_> {
             // Associated values may themselves be callable. Resolve the shared
             // member namespace before asking for a method declaration.
             if let Some(value) =
-                self.associated_projection(base, name.name.as_str(), callee.span)?
+                self.associated_projection(base, name.name.as_str(), callee.span, callee.hir_id)?
             {
                 // This is an ordinary stored callable, not a declaration-side
                 // parameter entry. Preserve its identity inside a value scope

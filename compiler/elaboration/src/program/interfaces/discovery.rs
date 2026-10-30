@@ -4,7 +4,7 @@ use super::*;
 impl Checker<'_, '_> {
     // Inspect declaration edges before inferring inputs: an unresolved impl
     // matters only to tiers that can actually supply the requested member.
-    fn inherited_method_tier_available(
+    fn inherited_member_tier_available(
         &self,
         root: nir::DeclarationId,
         name: &str,
@@ -26,11 +26,13 @@ impl Checker<'_, '_> {
                 .iter()
                 .find(|t| t.declaration == id)
                 .ok_or_else(|| error(span, "unknown interface in member lookup"))?;
-            if contract.methods.iter().any(|m| m.name == name) {
+            if contract.methods.iter().any(|m| m.name == name)
+                || contract.associated.iter().any(|a| a.name == name)
+            {
                 if contract.comptime_only == preferred {
                     return Ok(true);
                 }
-            } else if !contract.associated.iter().any(|a| a.name == name) {
+            } else {
                 *fuel = fuel
                     .checked_sub(contract.parents.len())
                     .ok_or_else(|| error(span, "member source search budget exhausted"))?;
@@ -134,7 +136,7 @@ impl Checker<'_, '_> {
                         return Err(error(span, "visible trait has no checked contract"));
                     };
                     if (!comptime && contract.comptime_only)
-                        || !self.inherited_method_tier_available(
+                        || !self.inherited_member_tier_available(
                             interface,
                             name,
                             preferred,
@@ -181,7 +183,11 @@ impl Checker<'_, '_> {
                             self.checked_traits.iter().any(|contract| {
                                 contract.declaration == origin.declaration
                                     && contract.comptime_only == preferred
-                                    && contract.methods.iter().any(|method| method.name == name)
+                                    && (contract.methods.iter().any(|method| method.name == name)
+                                        || contract
+                                            .associated
+                                            .iter()
+                                            .any(|member| member.name == name))
                             })
                         })
                         .collect();

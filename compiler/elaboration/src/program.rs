@@ -3656,7 +3656,7 @@ impl Checker<'_, '_> {
         }
         if let H::Projection(value, field) = &expr.kind {
             if let Some(value) =
-                self.associated_projection(value, field.name.as_str(), expr.span)?
+                self.associated_projection(value, field.name.as_str(), expr.span, expr.hir_id)?
             {
                 let K::TypeValue(ty) = value.kind else {
                     return Err(error(

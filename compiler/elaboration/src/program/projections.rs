@@ -1307,7 +1307,9 @@ impl Checker<'_, '_> {
         {
             return Ok(value);
         }
-        if let Some(value) = self.associated_projection(value, field.name.as_str(), expr.span)? {
+        if let Some(value) =
+            self.associated_projection(value, field.name.as_str(), expr.span, expr.hir_id)?
+        {
             if let Some(expected) = expected {
                 self.require(&value.ty, expected, expr.span)?;
             }

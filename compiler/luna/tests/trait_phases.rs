@@ -1241,3 +1241,107 @@ fn concrete_receiver_child_declaration_shadows_inherited_member() {
         comptime_interpretor::Value::Bool(true)
     );
 }
+
+#[test]
+fn implicit_associated_callable_uses_comptime_source_priority() {
+    let source = phase_source(
+        "
+        comptime fn accept(value:bool)->bool {value}
+        comptime fn reject(value:bool)->bool {not value}
+        struct Subject {}
+        trait Ordinary {^staged assoc action:comptime fn(bool)->bool;}
+        pure comptime trait Staged {assoc action:comptime fn(bool)->bool;}
+        comptime impl Ordinary for Subject {assoc action:comptime fn(bool)->bool = reject;}
+        comptime impl Staged for Subject {assoc action:comptime fn(bool)->bool = accept;}
+        comptime fn run()->bool {Subject.action(true)}
+    ",
+    );
+    let package = support::compile(&source);
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn implicit_associated_callable_inherits_generic_capability_source() {
+    let package = support::compile(
+        "
+        comptime fn accept(value:bool)->bool {value}
+        struct Subject {}
+        pure comptime trait Parent {assoc action:comptime fn(bool)->bool;}
+        pure comptime trait Child :- Parent {}
+        comptime impl Parent for Subject {assoc action:comptime fn(bool)->bool = accept;}
+        comptime impl Child for Subject {}
+        comptime fn apply(value:bool)->bool where T :- Child {T.action(value)}
+        comptime fn run()->bool {apply<Subject>(true)}
+    ",
+    );
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn implicit_associated_callable_inherits_visible_concrete_child() {
+    let package = support::compile(
+        "
+        comptime fn accept(value:bool)->bool {value}
+        struct Subject {}
+        mod protocols {
+            pub pure comptime trait Parent {assoc action:comptime fn(bool)->bool;}
+            pub pure comptime trait Child :- Parent {}
+            comptime impl Parent for Subject {assoc action:comptime fn(bool)->bool = accept;}
+            comptime impl Child for Subject {}
+        }
+        use protocols.Child;
+        comptime fn run()->bool {Subject.action(true)}
+    ",
+    );
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn implicit_associated_callable_does_not_recover_declaration_parameter_names() {
+    let failure = compile(
+        "
+        comptime fn accept(value:bool)->bool {value}
+        struct Subject {}
+        pure comptime trait Protocol {assoc action:comptime fn(bool)->bool;}
+        comptime impl Protocol for Subject {assoc action:comptime fn(bool)->bool = accept;}
+        comptime fn run()->bool {Subject.action(.value=true)}
+    ",
+        Emit::Nir,
+    )
+    .err()
+    .expect("stored callable has no parameter names");
+    assert!(
+        failure.contains("named") || failure.contains("parameter name"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn implicit_associated_noncallable_does_not_fall_back_to_ordinary_method() {
+    let source = phase_source(
+        "
+        struct Subject {}
+        trait Ordinary {^staged comptime fn action(value:bool)->bool;}
+        pure comptime trait Staged {assoc action:bool;}
+        comptime impl Ordinary for Subject {comptime fn action(value:bool)->bool {value}}
+        comptime impl Staged for Subject {assoc action:bool = true;}
+        comptime fn run()->bool {Subject.action(true)}
+    ",
+    );
+    let failure = compile(&source, Emit::Nir)
+        .err()
+        .expect("selected value is not callable");
+    assert!(
+        failure.contains("callable") || failure.contains("function"),
+        "{failure}"
+    );
+}
