@@ -294,7 +294,7 @@ fn match_dump_keeps_pattern_bindings_guards_and_exhaustion_explicit() {
     });
     let dump = compile(&body, &mut 1000).unwrap().to_string();
     assert!(dump.contains("(match-pattern "));
-    assert!(dump.contains("(bindings (binding "));
+    assert!(dump.contains("(pattern-bind "));
     assert!(dump.contains("(non-exhaustive-match)"));
     assert_eq!(dump.matches("(branch ").count(), 2);
     assert_eq!(dump, compile(&body, &mut 1000).unwrap().to_string());
@@ -302,25 +302,40 @@ fn match_dump_keeps_pattern_bindings_guards_and_exhaustion_explicit() {
 }
 
 #[test]
-fn deep_owned_patterns_refuse_the_carrier_without_misreporting_fuel() {
+fn deep_pattern_control_is_linear_while_owned_structures_keep_the_depth_bound() {
     use nir::program::{MatchArm, Pattern};
-    let mut pattern = Pattern::Wild;
-    for _ in 0..200 {
-        pattern = Pattern::Or(vec![pattern]);
+    for structural in [false, true] {
+        let mut pattern = Pattern::Wild;
+        for _ in 0..200 {
+            pattern = if structural {
+                Pattern::Tuple(vec![pattern])
+            } else {
+                Pattern::Or(vec![pattern])
+            };
+        }
+        let body = expr(K::Match {
+            value: Box::new(expr(K::Unit)),
+            arms: vec![MatchArm {
+                pattern,
+                guard: None,
+                body: expr(K::Unit),
+            }],
+        });
+        let result = compile(&body, &mut 10000);
+        if structural {
+            assert!(matches!(result, Err(Error::Unsupported(_))));
+        } else {
+            assert_eq!(
+                result
+                    .unwrap()
+                    .to_string()
+                    .matches("(commit-scope)")
+                    .count(),
+                200
+            );
+        }
+        assert!(matches!(compile(&body, &mut 5), Err(Error::Budget(_))));
     }
-    let body = expr(K::Match {
-        value: Box::new(expr(K::Unit)),
-        arms: vec![MatchArm {
-            pattern,
-            guard: None,
-            body: expr(K::Unit),
-        }],
-    });
-    assert!(matches!(
-        compile(&body, &mut 10000),
-        Err(Error::Unsupported(_))
-    ));
-    assert!(matches!(compile(&body, &mut 5), Err(Error::Budget(_))));
 }
 
 #[test]

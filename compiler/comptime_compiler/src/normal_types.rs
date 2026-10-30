@@ -388,6 +388,7 @@ pub(super) fn compile_input<'a>(
                                 next,
                                 locals,
                                 fresh,
+                                labels,
                                 fuel,
                                 *source,
                             )?

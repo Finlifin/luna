@@ -4454,3 +4454,45 @@ parameters.md define default evaluation and ordinary higher-order identities,
 but do not settle whether different default computations can inhabit the same
 optional-parameter callable type. Asked the author; no local-source tracking or
 implicit protocol erasure was introduced while that decision is pending.
+
+### Compile candidate-local alternatives, observations and binding remaps
+
+Pattern lowering now linearizes Or, Binding, Observe and Remap around sequential
+computations. Each alternative gets its own scope; failure restores candidate
+bindings before the next alternative, while success commits into the containing
+candidate. An outer guard failure goes to the next arm, never back into an
+already successful Or. Remap validates duplicate sources/targets before inner
+computation, then requires actual exports of that successful candidate and
+performs simultaneous replacement. Ambient locals cannot impersonate exports.
+Observation aliases are admitted only when absent and are removed on every exit.
+
+VM scopes now journal old pattern bindings separately from ordinary local
+initialization. Commit merges the journal into its parent; failure, scope unwind,
+early transfer and frame restoration roll it back. Ordinary assignment effects
+are not journaled. This also fixes restoration of an existing local temporarily
+shadowed by a pattern. The bytecode route remains comptime-only without runtime
+cleanup schedules; runtime origin/rank responsibility stays in its own matcher.
+Instructions, rollback state and export registers appear in S-expression dumps.
+
+Structural fields still use atomic structural matching. Computation nested inside
+those fields remains a whole-body fallback before effects. The staged fallback
+regression now uses a Tuple field containing Then, since Observe is supported.
+Deep Or chains use the metered worklist; deeply owned structural patterns keep
+the existing representation-depth fallback. No semantic acceptance was weakened.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-2h_a4nly/result.json`. Earlier compiler assertions
+  describing Binding as an owned leaf and Or as a recursive carrier were updated
+  alongside independent structural depth and fuel checks.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib bytecode::pattern_tests`:
+  exit 0, `/tmp/luna-tools-k9965asv/result.json`; four tests compare tree and VM
+  rollback, effects, simultaneous remaps, illegal exports, aliases and abnormal
+  exits, including recovery in the same interpreter.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_patterns --test comptime_bytecode_defaults --test comptime_bytecode_types --test negated_nominal_patterns`:
+  exit 0, `/tmp/luna-tools-i7_qmwwp/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_patterns --test comptime_bytecode_bindings --test comptime_bytecode_matching --test comptime_bytecode_closures`:
+  exit 0, `/tmp/luna-tools-g6kuzduw/result.json`; includes the explicit outer-guard
+  no-retry regression and checks actual compiled entry counts.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-93wi7eyn/result.json`; `git diff --check`: exit 0.

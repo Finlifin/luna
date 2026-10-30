@@ -276,10 +276,7 @@ fn staged_patterns_compile_or_fall_back_before_operand_effects() {
             next: Box::new(Pattern::Wild),
         };
         let pattern = if nested {
-            Pattern::Observe {
-                binding: LocalId { owner: 7, index: 1 },
-                inner: Box::new(sequential),
-            }
+            Pattern::Tuple(vec![sequential])
         } else {
             sequential
         };
@@ -302,7 +299,15 @@ fn staged_patterns_compile_or_fall_back_before_operand_effects() {
                 result: Some(Box::new(expr(
                     Primitive::Bool,
                     K::Match {
-                        value: Box::new(boolean(true)),
+                        value: Box::new(if nested {
+                            Expr {
+                                source: SOURCE,
+                                ty: Term::Tuple(vec![Term::Primitive(Primitive::Bool)]),
+                                kind: K::Tuple(vec![boolean(true)]),
+                            }
+                        } else {
+                            boolean(true)
+                        }),
                         arms: vec![MatchArm {
                             pattern,
                             guard: None,

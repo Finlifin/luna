@@ -21,7 +21,72 @@ pub(super) struct Frame {
     staged: Option<Box<staged_bytecode::State>>,
     pc: usize,
     slots: Vec<Option<Value>>,
-    scopes: Vec<Vec<usize>>,
+    scopes: Vec<PatternScope>,
+}
+
+#[derive(Default)]
+struct PatternScope {
+    locals: Vec<usize>,
+    previous: BTreeMap<usize, Option<Value>>,
+    exports: BTreeSet<usize>,
+}
+
+impl Frame {
+    fn pattern_binding(
+        &mut self,
+        slot: usize,
+        value: Option<Value>,
+        exported: bool,
+    ) -> Result<(), Error> {
+        let scope = self.scopes.last_mut().ok_or(Error {
+            kind: ErrorKind::InvalidControlFlow,
+            source: None,
+        })?;
+        scope
+            .previous
+            .entry(slot)
+            .or_insert_with(|| self.slots[slot].clone());
+        if exported {
+            scope.exports.insert(slot);
+        } else {
+            scope.exports.remove(&slot);
+        }
+        self.slots[slot] = value;
+        Ok(())
+    }
+
+    fn leave_scope(&mut self) -> Result<(), Error> {
+        let scope = self.scopes.pop().ok_or(Error {
+            kind: ErrorKind::InvalidControlFlow,
+            source: None,
+        })?;
+        for slot in scope.locals {
+            self.slots[slot] = None;
+        }
+        for (slot, previous) in scope.previous {
+            self.slots[slot] = previous;
+        }
+        Ok(())
+    }
+
+    fn commit_scope(&mut self) -> Result<(), Error> {
+        let scope = self.scopes.pop().ok_or(Error {
+            kind: ErrorKind::InvalidControlFlow,
+            source: None,
+        })?;
+        if let Some(parent) = self.scopes.last_mut() {
+            parent.locals.extend(scope.locals);
+            for (slot, previous) in scope.previous {
+                parent.previous.entry(slot).or_insert(previous);
+                if scope.exports.contains(&slot) {
+                    parent.exports.insert(slot);
+                } else {
+                    parent.exports.remove(&slot);
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 enum Waiting {
@@ -105,10 +170,22 @@ impl fmt::Display for Frame {
         write!(f, ") (scopes")?;
         for scope in &self.scopes {
             write!(f, " (scope")?;
-            for slot in scope {
+            for slot in &scope.locals {
                 write!(f, " {slot}")?;
             }
-            write!(f, ")")?;
+            write!(f, " (pattern-previous")?;
+            for (slot, value) in &scope.previous {
+                write!(f, " (%{slot}")?;
+                if let Some(value) = value {
+                    write!(f, " {value}")?;
+                }
+                write!(f, ")")?;
+            }
+            write!(f, ") (exports")?;
+            for slot in &scope.exports {
+                write!(f, " %{slot}")?;
+            }
+            write!(f, "))")?;
         }
         write!(f, ") (imported")?;
         for (binding, slot) in &self.imported {
@@ -386,6 +463,9 @@ impl Frame {
     }
 
     pub(super) fn restore_environment(mut self) -> Environment {
+        while !self.scopes.is_empty() {
+            self.leave_scope().expect("existing scope");
+        }
         for (binding, slot) in self.imported {
             if let Some(value) = self.slots[slot].take() {
                 self.environment.insert(binding, value);
@@ -1639,29 +1719,78 @@ impl<'a> Interpreter<'a> {
                         }
                     }
                     let subject = frame.slots[*value].as_ref().ok_or_else(missing)?;
-                    let (matched, _) =
+                    let (matched, exports) =
                         self.match_pattern_with_bindings(pattern, subject, &mut candidate)?;
                     let Flow::Value(Value::Bool(matched)) = matched else {
                         return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source)));
                     };
                     if matched {
                         for (id, slot) in bindings {
-                            if let Some(value) = candidate.remove(id) {
-                                if frame.slots[*slot].is_none() {
-                                    frame.scopes.last_mut().ok_or_else(missing)?.push(*slot);
-                                }
-                                frame.slots[*slot] = Some(value);
-                            } else {
-                                frame.slots[*slot] = None;
-                            }
+                            let value = candidate.remove(id);
+                            frame.pattern_binding(*slot, value, exports.0.contains_key(id))?;
                         }
                     }
                     frame.slots[*destination] = Some(Value::Bool(matched));
                 }
-                Op::CommitScope => {
-                    let bindings = frame.scopes.pop().ok_or_else(missing)?;
-                    if let Some(parent) = frame.scopes.last_mut() {
-                        parent.extend(bindings);
+                Op::CommitScope => frame.commit_scope()?,
+                Op::BindPattern {
+                    local,
+                    value,
+                    observe,
+                } => {
+                    let value = frame.slots[*value].as_ref().ok_or_else(missing)?.clone();
+                    if *observe {
+                        if frame.slots[*local].is_some() {
+                            return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
+                        }
+                        if matches!(
+                            value,
+                            Value::TypeParameter(_) | Value::Type(Term::Rigid { .. })
+                        ) {
+                            return Err(
+                                self.failure(ErrorKind::TypeContractUnresolved, Some(source))
+                            );
+                        }
+                    }
+                    frame.pattern_binding(*local, Some(value), !observe)?;
+                }
+                Op::ClearPatternAlias { local } => frame.pattern_binding(*local, None, false)?,
+                Op::CheckPatternRemap(pairs) => {
+                    let mut sources = BTreeSet::new();
+                    let mut targets = BTreeSet::new();
+                    for (from, to) in pairs.iter() {
+                        self.tick(Some(source))?;
+                        if !sources.insert(*from) || !targets.insert(*to) {
+                            return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
+                        }
+                    }
+                }
+                Op::RemapPattern(pairs) => {
+                    let scope = frame.scopes.last().ok_or_else(missing)?;
+                    self.effect_charge(scope.previous.len() + pairs.len() * 2, Some(source))?;
+                    let sources: BTreeSet<_> = pairs.iter().map(|(from, _)| *from).collect();
+                    let targets: BTreeSet<_> = pairs.iter().map(|(_, to)| *to).collect();
+                    if sources.iter().any(|slot| !scope.exports.contains(slot))
+                        || targets
+                            .iter()
+                            .any(|slot| scope.exports.contains(slot) && !sources.contains(slot))
+                    {
+                        return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
+                    }
+                    let values = pairs
+                        .iter()
+                        .map(|(from, to)| {
+                            frame.slots[*from]
+                                .clone()
+                                .map(|value| (*to, value))
+                                .ok_or_else(missing)
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    for (slot, value) in values {
+                        frame.pattern_binding(slot, Some(value), true)?;
+                    }
+                    for from in sources.difference(&targets) {
+                        frame.pattern_binding(*from, None, false)?;
                     }
                 }
                 Op::InvalidControlFlow => {
@@ -2107,24 +2236,14 @@ impl<'a> Interpreter<'a> {
                     };
                     frame.slots[*destination] = Some(value);
                 }
-                Op::EnterScope => frame.scopes.push(Vec::new()),
-                Op::LeaveScope => {
-                    let locals = frame
-                        .scopes
-                        .pop()
-                        .ok_or_else(|| self.failure(ErrorKind::InvalidControlFlow, Some(source)))?;
-                    for slot in locals {
-                        frame.slots[slot] = None;
-                    }
-                }
+                Op::EnterScope => frame.scopes.push(PatternScope::default()),
+                Op::LeaveScope => frame.leave_scope()?,
                 Op::Unwind(depth) => {
                     if *depth > frame.scopes.len() {
                         return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source)));
                     }
                     while frame.scopes.len() > *depth {
-                        for slot in frame.scopes.pop().unwrap() {
-                            frame.slots[slot] = None;
-                        }
+                        frame.leave_scope()?;
                     }
                 }
                 Op::PrepareScalar(scalar) => {
@@ -2167,7 +2286,7 @@ impl<'a> Interpreter<'a> {
                     if *initialize {
                         if frame.slots[*local].is_none() {
                             if let Some(scope) = frame.scopes.last_mut() {
-                                scope.push(*local);
+                                scope.locals.push(*local);
                             }
                         }
                         frame.slots[*local] = Some(value);
@@ -3636,3 +3755,7 @@ mod input_preparation_tests;
 #[cfg(test)]
 #[path = "bytecode_observations.rs"]
 mod observation_tests;
+
+#[cfg(test)]
+#[path = "bytecode_patterns.rs"]
+mod pattern_tests;

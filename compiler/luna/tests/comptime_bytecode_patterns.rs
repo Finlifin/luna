@@ -107,3 +107,60 @@ fn contextual_normal_inputs_resume_pattern_calls_before_domain_conversion() {
         }
     }
 }
+
+#[test]
+fn or_candidates_resume_calls_and_remap_only_the_selected_bindings() {
+    let package = support::compile(
+        "comptime fn flip(value:bool)->bool {not value}
+        comptime fn run(flag:bool)->bool {
+            var first=false;
+            var second=false;
+            flag match {
+                ((x and do {first=true;flip(x)} is (y if y))
+                    or (x and do {second=true;x} is y))
+                    => y and first and (second==flag),
+            }
+        }
+        comptime fn bound(flag:bool)->bool {
+            let ((x and flip(x) is (y if y)) or (x and x is y))=flag;
+            y
+        }",
+    );
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let mut tree = Interpreter::new(&package, Budget::default()).unwrap();
+    for flag in [true, false, true, false] {
+        for name in ["run", "bound"] {
+            let id = support::id(&package, name);
+            let before = vm.bytecode_invocations();
+            assert_eq!(
+                vm.invoke(id, vec![Value::Bool(flag)]).unwrap(),
+                Value::Bool(true)
+            );
+            assert_eq!(
+                tree.invoke(id, vec![Value::Bool(flag)]).unwrap(),
+                Value::Bool(true)
+            );
+            assert_eq!(vm.bytecode_invocations() - before, 2, "{name}");
+        }
+    }
+}
+
+#[test]
+fn failed_outer_guard_does_not_retry_a_successful_or_candidate() {
+    let package = support::compile(
+        "comptime fn run()->bool {
+            var second=false;
+            let result=true match {
+                ((_ and false is y) or (_ and do {second=true;true} is y)) if y => true,
+                _ => false,
+            };
+            not result and not second
+        }",
+    );
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke(support::id(&package, "run"), vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(vm.bytecode_invocations(), 1);
+}

@@ -40,6 +40,16 @@ impl fmt::Display for ErrorConversion {
 
 #[derive(Debug)]
 pub enum Op {
+    BindPattern {
+        local: Register,
+        value: Register,
+        observe: bool,
+    },
+    ClearPatternAlias {
+        local: Register,
+    },
+    CheckPatternRemap(Arc<Vec<(Register, Register)>>),
+    RemapPattern(Arc<Vec<(Register, Register)>>),
     BeginInstance {
         destination: Register,
         constructor: Arc<instances::Constructor>,
@@ -454,6 +464,27 @@ impl fmt::Display for Program {
                 instruction.source.start, instruction.source.end
             )?;
             match &instruction.op {
+                Op::BindPattern {
+                    local,
+                    value,
+                    observe,
+                } => write!(f, "(pattern-bind %{local} %{value} (observe {observe}))")?,
+                Op::ClearPatternAlias { local } => write!(f, "(pattern-clear-alias %{local})")?,
+                Op::CheckPatternRemap(pairs) | Op::RemapPattern(pairs) => {
+                    write!(
+                        f,
+                        "({}",
+                        if matches!(instruction.op, Op::CheckPatternRemap(_)) {
+                            "check-pattern-remap"
+                        } else {
+                            "pattern-remap"
+                        }
+                    )?;
+                    for (from, to) in pairs.iter() {
+                        write!(f, " (%{from} %{to})")?;
+                    }
+                    write!(f, ")")?;
+                }
                 Op::BeginInstance {
                     destination,
                     constructor,
@@ -2091,6 +2122,7 @@ fn compile_root<'a>(
                                 next,
                                 &mut locals,
                                 &mut fresh,
+                                &mut labels,
                                 fuel,
                                 source,
                             )?);
@@ -2254,6 +2286,7 @@ fn compile_root<'a>(
                             failed,
                             &mut locals,
                             &mut fresh,
+                            &mut labels,
                             fuel,
                             source,
                         )?);
