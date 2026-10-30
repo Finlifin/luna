@@ -56,6 +56,7 @@ mod definition_diagnostics;
 pub use definition_diagnostics::DefinitionBuildError;
 mod enum_build;
 pub use enum_build::{EnumBuildRequest, PreparedEnumBuild};
+mod definition_build;
 mod struct_build;
 pub use struct_build::{PreparedStructBuild, StructBuildRequest};
 mod reflection;
@@ -3282,8 +3283,7 @@ impl<'a> Interpreter<'a> {
             K::TypeEqual(..) => self.eval_type_equal(expr, environment),
             K::TemplateEqual(..) => self.eval_template_equal(expr, environment),
             K::ListLength(_) | K::ListConcat(..) => self.eval_list_operation(expr, environment),
-            K::BuildStruct(request) => self.eval_struct_build(expr, request, environment),
-            K::BuildEnum(request) => self.eval_enum_build(expr, request, environment),
+            K::BuildStruct(_) | K::BuildEnum(_) => self.eval_definition_build(expr, environment),
             K::EnumStructure { .. } => self.eval_observation(expr, environment),
             K::ComptimeFunctionInstance { .. } => {
                 self.eval_comptime_function_instance(expr, environment)

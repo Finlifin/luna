@@ -162,31 +162,15 @@ impl<'a> Interpreter<'a> {
         self
     }
 
-    pub(super) fn eval_enum_build(
+    pub(super) fn build_enum_value(
         &mut self,
-        expr: &Expr,
-        request: &Expr,
-        environment: &mut Environment,
-    ) -> Result<Flow, Error> {
+        value: Value,
+        source: SourceRange,
+    ) -> Result<Value, Error> {
         let fail = || Error {
             kind: ErrorKind::Type,
-            source: Some(expr.source),
+            source: Some(source),
         };
-        if !self.comptime_only {
-            return Err(self.failure(ErrorKind::PhaseMismatch, Some(expr.source)));
-        }
-        if expr.ty != Term::Primitive(Primitive::Type)
-            && expr.ty != Term::Primitive(Primitive::Never)
-        {
-            return Err(fail());
-        }
-        let value = match self.eval(request, environment)? {
-            Flow::Value(value) => value,
-            flow => return Ok(flow),
-        };
-        if expr.ty != Term::Primitive(Primitive::Type) {
-            return Err(fail());
-        }
         let Value::Tuple(values) = value else {
             return Err(fail());
         };
@@ -213,9 +197,9 @@ impl<'a> Interpreter<'a> {
         else {
             return Err(fail());
         };
-        let groups = self.enum_paths(groups, expr.source)?;
-        let names = self.enum_paths(names, expr.source)?;
-        let shapes = self.enum_symbols(shapes, expr.source)?;
+        let groups = self.enum_paths(groups, source)?;
+        let names = self.enum_paths(names, source)?;
+        let shapes = self.enum_symbols(shapes, source)?;
         let nested = |value, element| -> Result<Vec<Value>, Error> {
             let Value::List { ty, values } = value else {
                 return Err(fail());
@@ -235,7 +219,7 @@ impl<'a> Interpreter<'a> {
         {
             return Err(fail());
         }
-        self.integer_operation(Some(expr.source), |budget| {
+        self.integer_operation(Some(source), |budget| {
             budget.consume(name.len().saturating_add(names.len()))
         })?;
         let mut variants = Vec::with_capacity(names.len());
@@ -249,10 +233,10 @@ impl<'a> Interpreter<'a> {
             if !seen.insert(name.clone()) {
                 return Err(self.failure(
                     ErrorKind::InvalidDefinition(DefinitionBuildError::DuplicateVariant { name }),
-                    Some(expr.source),
+                    Some(source),
                 ));
             }
-            let names = self.enum_symbols(field_names, expr.source)?;
+            let names = self.enum_symbols(field_names, source)?;
             let Value::TypeList(fields) = field_types else {
                 return Err(fail());
             };
@@ -270,7 +254,7 @@ impl<'a> Interpreter<'a> {
                                         name: field.clone(),
                                     },
                                 ),
-                                Some(expr.source),
+                                Some(source),
                             ));
                         }
                     }
@@ -284,7 +268,7 @@ impl<'a> Interpreter<'a> {
                             names: names.len(),
                             types: fields.len(),
                         }),
-                        Some(expr.source),
+                        Some(source),
                     ));
                 }
             };
@@ -299,20 +283,20 @@ impl<'a> Interpreter<'a> {
         }
         let (encoding, codes) = match codes {
             Some(Value::Tuple(parts)) => (
-                Some(self.fixed_enum_encoding(parts, &variants, expr.source)?),
+                Some(self.fixed_enum_encoding(parts, &variants, source)?),
                 None,
             ),
             other => (None, other),
         };
         let symbol_encoding = if let Some(codes) = codes {
-            let codes = self.enum_symbols(codes, expr.source)?;
+            let codes = self.enum_symbols(codes, source)?;
             if codes.len() != variants.len() {
                 return Err(self.failure(
                     ErrorKind::InvalidDefinition(DefinitionBuildError::SymbolCodeCount {
                         variants: variants.len(),
                         codes: codes.len(),
                     }),
-                    Some(expr.source),
+                    Some(source),
                 ));
             }
             let mut entries = Vec::with_capacity(variants.len());
@@ -322,18 +306,16 @@ impl<'a> Interpreter<'a> {
                         ErrorKind::InvalidDefinition(DefinitionBuildError::SymbolPayload {
                             name: variant.name.clone(),
                         }),
-                        Some(expr.source),
+                        Some(source),
                     ));
                 }
-                self.integer_operation(Some(expr.source), |budget| {
-                    budget.consume(variant.name.len())
-                })?;
+                self.integer_operation(Some(source), |budget| budget.consume(variant.name.len()))?;
                 entries.push(nir::enum_encoding::SymbolVariant {
                     name: variant.name.clone(),
                     value: code,
                 });
             }
-            let result = self.integer_operation(Some(expr.source), |budget| {
+            let result = self.integer_operation(Some(source), |budget| {
                 match nir::enum_encoding::SymbolRepresentation::new(entries, budget) {
                     Err(nir::enum_encoding::Error::Bits(
                         comptime_runtime::bitvec::Error::Resource(error),
@@ -346,7 +328,7 @@ impl<'a> Interpreter<'a> {
                     ErrorKind::InvalidDefinition(DefinitionBuildError::SymbolEncoding {
                         reason: error.to_string(),
                     }),
-                    Some(expr.source),
+                    Some(source),
                 )
             })?)
         } else {
@@ -358,7 +340,7 @@ impl<'a> Interpreter<'a> {
             variants,
             encoding,
             symbol_encoding,
-            source: expr.source,
+            source: source,
         };
         let builder = self.enum_builder.ok_or_else(fail)?;
         let before = self.budget.steps;
@@ -367,7 +349,7 @@ impl<'a> Interpreter<'a> {
         let prepared = builder(&request, &mut remaining);
         self.budget.steps = before.min(remaining);
         let prepared = prepared?;
-        self.integer_operation(Some(expr.source), |budget| {
+        self.integer_operation(Some(source), |budget| {
             budget.consume(prepared.definitions.len())
         })?;
         let definition = prepared
@@ -388,7 +370,7 @@ impl<'a> Interpreter<'a> {
             .and_then(|()| charge_fixed_encoding(definition.encoding.as_ref(), &mut fuel))
             .and_then(|()| charge_symbol_encoding(definition.symbol_encoding.as_ref(), &mut fuel));
         self.budget.steps -= (before - fuel) as u64;
-        charged.map_err(|_| self.failure(ErrorKind::StepsExhausted, Some(expr.source)))?;
+        charged.map_err(|_| self.failure(ErrorKind::StepsExhausted, Some(source)))?;
         // Only the encoding explicitly requested by the caller is authorized.
         // Generic metadata is a different descriptor, even if admission accepts it.
         if definition.name != request.name
@@ -414,7 +396,7 @@ impl<'a> Interpreter<'a> {
                     error
                 }
             })?;
-        Ok(Flow::Value(Value::Type(result)))
+        Ok(Value::Type(result))
     }
 
     fn enum_paths(&mut self, value: Value, source: SourceRange) -> Result<Vec<String>, Error> {

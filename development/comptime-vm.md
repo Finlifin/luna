@@ -4616,3 +4616,46 @@ Validation in /home/fin/luna:
   subject effects, phase rejection and early return.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
   exit 0, `/tmp/luna-tools-ug11qhkt/result.json`; `git diff --check`: exit 0.
+
+### Compile checked struct and enum publication
+
+BuildStruct and BuildEnum now lower to explicit definition-build admission and
+publication instructions. The packet is ordinary expression code: nested calls
+resume on the invocation stack, and early return leaves before any publisher
+request. Tree execution shares the same admission and value-publication helpers.
+The descriptors carry only the construction kind and result Type, with stable
+S-expression dumps; no request values, publisher closures, prepared candidates or
+published identities enter the immutable code cache.
+
+This preserves the existing two-step host publication contract. Request decoding,
+duplicate/path/shape/encoding checks and Type admission precede host preparation.
+The host receives reserved remaining work and cannot refund it. Returned metadata
+must match the request before installation/commit; rejected descriptors, failed
+commits and abandoned candidates do not publish a partial definition. Symbol and
+fixed-width enum encodings retain their distinct validation and identities.
+
+The host publisher remains a synchronous compiler service using ordinary checked
+elaboration; it is not arbitrary source evaluation inside a VM instruction.
+This closes the previously recorded BuildStruct/BuildEnum tree fallback. It does
+not implement new fn/trait/impl builders or claim a measured performance gain.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-2w8_rm9_/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib enum_build`:
+  exit 0, `/tmp/luna-tools-f7fqa05y/result.json`; the existing 13 publisher-boundary
+  tests now run with fresh fixtures in both tree and bytecode modes, including
+  forged host metadata, commit failure, encoding checks and budget reservation.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test source_reflection --test builder_invocations`:
+  exit 0, `/tmp/luna-tools-9kg0ed3a/result.json`; 73 builder and 14 reflection
+  cases, covering live publication and downstream use of generated declarations.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test source_reflection source_struct_build_uses_checked_publication_without_replaying_argument_effects`:
+  exit 0, `/tmp/luna-tools-rha8r3m6/result.json`; the strengthened input-packet
+  test executes one nested Type-returning call, retains argument effect order,
+  and counts every entered function as a compiled invocation.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-pmxwtz0u/result.json`; `git diff --check`: exit 0.
+- `python3 -B development/library_check.py --stage sysroot-builders --stage sysroot-enum-builder --timeout 900`:
+  exit 0, `/tmp/luna-library-t40jvoi5/summary.json`; all four struct and three
+  enum native cases pass through the actual sysroot, including field transforms,
+  reflection and batch composition of generated definitions.

@@ -3,6 +3,7 @@
 pub mod bit_updates;
 pub mod bits;
 pub mod closures;
+pub mod definitions;
 pub mod instances;
 pub mod leaf_inputs;
 pub mod lists;
@@ -92,6 +93,12 @@ pub enum Op {
     CheckPredicate {
         value: Register,
         condition_source: SourceRange,
+    },
+    CheckDefinitionBuild(Arc<definitions::Build>),
+    BuildDefinition {
+        destination: Register,
+        value: Register,
+        build: Arc<definitions::Build>,
     },
     CheckObservation(Arc<observations::Observation>),
     Observe {
@@ -577,6 +584,12 @@ impl fmt::Display for Program {
                     "(check-predicate %{value} (condition-source {} {}))",
                     condition_source.start, condition_source.end
                 )?,
+                Op::CheckDefinitionBuild(build) => write!(f, "(check-definition-build {build})")?,
+                Op::BuildDefinition {
+                    destination,
+                    value,
+                    build,
+                } => write!(f, "(build-definition %{destination} %{value} {build})")?,
                 Op::CheckObservation(observation) => {
                     write!(f, "(check-observation {observation})")?
                 }
@@ -1347,6 +1360,27 @@ fn compile_root<'a>(
                                 constructor,
                             },
                         );
+                    }
+                    K::BuildStruct(request) | K::BuildEnum(request) => {
+                        let build = Arc::new(definitions::Build {
+                            kind: if matches!(expr.kind, K::BuildStruct(_)) {
+                                definitions::Kind::Struct
+                            } else {
+                                definitions::Kind::Enum
+                            },
+                            output: copy_term(&expr.ty, fuel, source)?,
+                        });
+                        let value = fresh();
+                        emit(
+                            &mut work,
+                            Op::BuildDefinition {
+                                destination: dst,
+                                value,
+                                build: build.clone(),
+                            },
+                        );
+                        work.push(Work::Expression(request, value));
+                        emit(&mut work, Op::CheckDefinitionBuild(build));
                     }
                     K::EnumName(_)
                     | K::SymbolName(_)

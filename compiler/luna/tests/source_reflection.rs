@@ -264,12 +264,13 @@ fn source_struct_build_uses_checked_publication_without_replaying_argument_effec
         "
         typealias Type = .Type'builtin;
         typealias Integer = .Integer'builtin;
+        comptime fn Selected(value:Type)->Type {value}
         comptime fn run() -> bool {
             var count: Integer = 0;
             let built = .build_struct'builtin(
                 do { count = count * 10 + 1; .Generated },
                 do { count = count * 10 + 2; [.flag] },
-                do { count = count * 10 + 3; [bool] });
+                do { count = count * 10 + 3; [Selected(bool)] });
             count == 123 and meta.struct_field_types(built)[0] == bool
                 and meta.struct_field_names(built)[0] == .flag
         }
@@ -340,6 +341,17 @@ fn source_struct_build_uses_checked_publication_without_replaying_argument_effec
         .unwrap()
         .with_struct_builder(&builder);
     assert_eq!(vm.invoke(entry, vec![]).unwrap(), Value::Bool(true));
+    assert_eq!(
+        vm.bytecode_invocations(),
+        support::calls(&package, &vm).len()
+    );
+    assert_eq!(
+        support::calls(&package, &vm)
+            .iter()
+            .filter(|name| **name == "Selected")
+            .count(),
+        1
+    );
     assert_eq!(calls.get(), 1);
     assert_eq!(commits.get(), 1);
     assert_eq!(published.borrow().num_defs(), 1);

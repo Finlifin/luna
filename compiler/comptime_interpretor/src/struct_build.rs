@@ -63,31 +63,15 @@ impl<'a> Interpreter<'a> {
         self
     }
 
-    pub(super) fn eval_struct_build(
+    pub(super) fn build_struct_value(
         &mut self,
-        expr: &Expr,
-        request: &Expr,
-        environment: &mut Environment,
-    ) -> Result<Flow, Error> {
+        value: Value,
+        source: SourceRange,
+    ) -> Result<Value, Error> {
         let fail = || Error {
             kind: ErrorKind::Type,
-            source: Some(expr.source),
+            source: Some(source),
         };
-        if !self.comptime_only {
-            return Err(self.failure(ErrorKind::PhaseMismatch, Some(expr.source)));
-        }
-        if expr.ty != Term::Primitive(Primitive::Type)
-            && expr.ty != Term::Primitive(Primitive::Never)
-        {
-            return Err(fail());
-        }
-        let value = match self.eval(request, environment)? {
-            Flow::Value(value) => value,
-            flow => return Ok(flow),
-        };
-        if expr.ty != Term::Primitive(Primitive::Type) {
-            return Err(fail());
-        }
         let Value::Tuple(values) = value else {
             return Err(fail());
         };
@@ -113,10 +97,10 @@ impl<'a> Interpreter<'a> {
                     names: names.len(),
                     types: types.len(),
                 }),
-                Some(expr.source),
+                Some(source),
             ));
         }
-        self.integer_operation(Some(expr.source), |budget| {
+        self.integer_operation(Some(source), |budget| {
             budget.consume(name.len().saturating_add(names.len()))
         })?;
         let mut fields = Vec::with_capacity(names.len());
@@ -125,7 +109,7 @@ impl<'a> Interpreter<'a> {
             let Value::Symbol(field_name) = field_name else {
                 return Err(fail());
             };
-            self.integer_operation(Some(expr.source), |budget| {
+            self.integer_operation(Some(source), |budget| {
                 budget.consume(field_name.len().saturating_add(1))
             })?;
             if !seen.insert(field_name.clone()) {
@@ -134,7 +118,7 @@ impl<'a> Interpreter<'a> {
                         owner: name.to_string(),
                         name: field_name.to_string(),
                     }),
-                    Some(expr.source),
+                    Some(source),
                 ));
             }
             self.admit_type(&ty, 0)?;
@@ -146,7 +130,7 @@ impl<'a> Interpreter<'a> {
         let request = StructBuildRequest {
             name: name.to_string(),
             fields,
-            source: expr.source,
+            source: source,
         };
         // Reserve the allowance before entering host code. Unwind cannot refund
         // unknown work, and a successful host cannot replenish the VM's budget.
@@ -157,7 +141,7 @@ impl<'a> Interpreter<'a> {
         let prepared = builder(&request, &mut remaining);
         self.budget.steps = before.min(remaining);
         let prepared = prepared?;
-        self.integer_operation(Some(expr.source), |budget| {
+        self.integer_operation(Some(source), |budget| {
             budget.consume(prepared.definitions.len())
         })?;
         let definition = prepared
@@ -165,7 +149,7 @@ impl<'a> Interpreter<'a> {
             .iter()
             .find(|item| item.declaration == prepared.result)
             .ok_or_else(fail)?;
-        self.integer_operation(Some(expr.source), |budget| {
+        self.integer_operation(Some(source), |budget| {
             budget.consume(
                 definition
                     .name
@@ -174,12 +158,12 @@ impl<'a> Interpreter<'a> {
             )
         })?;
         for (name, ty) in &definition.fields {
-            self.integer_operation(Some(expr.source), |budget| budget.consume(name.len()))?;
+            self.integer_operation(Some(source), |budget| budget.consume(name.len()))?;
             let before = self.budget.steps as usize;
             let mut fuel = before;
             let charged = nir::type_computations::charge_term(ty, &mut fuel);
             self.budget.steps -= (before - fuel) as u64;
-            charged.map_err(|_| self.failure(ErrorKind::StepsExhausted, Some(expr.source)))?;
+            charged.map_err(|_| self.failure(ErrorKind::StepsExhausted, Some(source)))?;
         }
         // A concrete field descriptor cannot authorize extra declaration inputs
         // or constraints merely because the host returned an admissible type.
@@ -206,6 +190,6 @@ impl<'a> Interpreter<'a> {
                 StructPublicationError::Admission(error)
                 | StructPublicationError::Commit(error) => error,
             })?;
-        Ok(Flow::Value(Value::Type(result)))
+        Ok(Value::Type(result))
     }
 }
