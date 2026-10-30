@@ -4579,3 +4579,40 @@ Validation in /home/fin/luna:
   head; corrected coverage uses supported source evidence plus direct NIR tests.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
   exit 0, `/tmp/luna-tools-c5tvyian/result.json`; `git diff --check`: exit 0.
+
+### Compile checked structure observations
+
+Struct field names/types and all five enum structure queries now use the shared
+observation admission/value path. The compiler emits admission, the subject's
+ordinary expression code, and one observation. Subject calls therefore suspend
+and resume on the invocation stack instead of forcing the containing body to the
+tree evaluator. Queries preserve declaration order, applied parameter domains,
+opaque field Types and the existing live generated-definition world.
+
+Admission still checks comptime phase and the exact nested result-list domains
+before subject evaluation. Never operands preserve early return. Reflection and
+immutable result admission retain their budgets, formation constraints, selected
+associated-type checks and diagnostics. No reflected result or declaration-world
+snapshot is embedded in cached code; this is not layout or access authorization.
+The new observation kinds have S-expression dumps through the existing adapter.
+
+The compiler publisher and BuildStruct/BuildEnum operations themselves still use
+the tree path. This stage accelerates their reflection inputs and consumers; it
+does not claim that the whole definition-builder pipeline is compiled.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-u_uvlsl7/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib reflection`:
+  exit 0, `/tmp/luna-tools-gqsu0pxf/result.json`; struct-node domain rejection,
+  budget exhaustion and recovery exercise both tree and bytecode execution.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test source_reflection --test comptime_bytecode_observations`:
+  exit 0, `/tmp/luna-tools-1khnt0sh/result.json`; all seven structure queries
+  and subject calls are counted as compiled invocations, including early return
+  and recovery. The outdated manual package fixture omitted ordinary bool/attrs
+  dependencies; it now uses the actual sysroot with an explicit target.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test builder_invocations enum_reflection`:
+  exit 0, `/tmp/luna-tools-2etenclp/result.json`; live generated enum observation,
+  subject effects, phase rejection and early return.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-ug11qhkt/result.json`; `git diff --check`: exit 0.

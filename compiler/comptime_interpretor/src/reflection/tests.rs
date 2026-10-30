@@ -354,7 +354,15 @@ fn source_struct_field_nodes_validate_domains_meter_work_and_recover() {
         }],
     });
     let source = SourceRange { start: 15, end: 25 };
-    for names in [false, true] {
+    for (names, compiled) in [(false, false), (true, false), (false, true), (true, true)] {
+        let execute = |vm: &mut Interpreter<'_>, expr: &Expr| {
+            if compiled {
+                let code = Arc::new(comptime_compiler::compile(expr, &mut 10000).unwrap());
+                vm.execute_code(&code, &mut Environment::new())
+            } else {
+                vm.eval(expr, &mut Environment::new())
+            }
+        };
         let ty = Term::NormalForm {
             head: id(10),
             sort: Sort::Type,
@@ -380,7 +388,7 @@ fn source_struct_field_nodes_validate_domains_meter_work_and_recover() {
         };
         let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         let before = vm.remaining_steps();
-        let Flow::Value(value) = vm.eval(&query, &mut Environment::new()).unwrap() else {
+        let Flow::Value(value) = execute(&mut vm, &query).unwrap() else {
             panic!()
         };
         assert!(vm.remaining_steps() < before);
@@ -406,22 +414,19 @@ fn source_struct_field_nodes_validate_domains_meter_work_and_recover() {
         }
         let mut malformed = query.clone();
         malformed.ty = p(Primitive::Bool);
-        let error = vm.eval(&malformed, &mut Environment::new()).unwrap_err();
+        let error = execute(&mut vm, &malformed).unwrap_err();
         assert_eq!(error.kind, ErrorKind::Type);
         assert_eq!(error.source, Some(source));
         vm.budget.steps = 1;
         assert_eq!(
-            vm.eval(&query, &mut Environment::new()).unwrap_err().kind,
+            execute(&mut vm, &query).unwrap_err().kind,
             ErrorKind::StepsExhausted
         );
         vm.budget.steps = 100_000;
-        assert!(vm.eval(&query, &mut Environment::new()).is_ok());
+        assert!(execute(&mut vm, &query).is_ok());
         let mut runtime = Interpreter::new(&package, Budget::default()).unwrap();
         assert_eq!(
-            runtime
-                .eval(&query, &mut Environment::new())
-                .unwrap_err()
-                .kind,
+            execute(&mut runtime, &query).unwrap_err().kind,
             ErrorKind::PhaseMismatch
         );
     }

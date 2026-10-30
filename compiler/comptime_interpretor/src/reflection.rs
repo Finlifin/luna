@@ -40,47 +40,25 @@ impl fmt::Display for StructReflection {
 }
 
 impl Interpreter<'_> {
-    pub(super) fn eval_struct_fields(
+    pub(super) fn observe_struct_fields(
         &mut self,
-        expr: &Expr,
-        environment: &mut Environment,
-    ) -> Result<Flow, Error> {
-        if !self.comptime_only {
-            return Err(self.failure(ErrorKind::PhaseMismatch, Some(expr.source)));
-        }
-        let (subject, names) = match &expr.kind {
-            K::StructFieldTypes(subject) => (subject, false),
-            K::StructFieldNames(subject) => (subject, true),
-            _ => unreachable!(),
-        };
-        let never = Term::Primitive(Primitive::Never);
-        let element = Term::Primitive(if names {
-            Primitive::Symbol
-        } else {
-            Primitive::Type
-        });
-        if (subject.ty != Term::Primitive(Primitive::Type) && subject.ty != never)
-            || (subject.ty == never && expr.ty != never)
-            || (subject.ty != never && self.list_element(&expr.ty) != Some(&element))
-        {
-            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-        }
-        let subject = match self.eval(subject, environment)? {
-            Flow::Value(value) => value,
-            flow => return Ok(flow),
-        };
+        subject: Value,
+        output: &Term,
+        names: bool,
+        source: SourceRange,
+    ) -> Result<Value, Error> {
         let Value::Type(subject) = subject else {
-            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+            return Err(self.failure(ErrorKind::Type, Some(source)));
         };
         let reflected = self.reflect_struct(&subject).map_err(|mut error| {
             if error.source.is_none() {
-                error.source = Some(expr.source);
+                error.source = Some(source);
             }
             error
         })?;
         let value = if names {
             Value::List {
-                ty: expr.ty.clone(),
+                ty: output.clone(),
                 values: reflected
                     .fields
                     .into_iter()
@@ -90,8 +68,8 @@ impl Interpreter<'_> {
         } else {
             Value::TypeList(reflected.fields.into_iter().map(|field| field.ty).collect())
         };
-        self.validate_immutable_input(&value, &expr.ty)?;
-        Ok(Flow::Value(value))
+        self.validate_immutable_input(&value, output)?;
+        Ok(value)
     }
 
     fn reflection_type(&mut self, ty: &Term) -> Result<Term, Error> {

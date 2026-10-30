@@ -142,6 +142,7 @@ fn ordinary_package_observes_fields_through_meta_without_builtin_access() {
     std::fs::write(
         &input,
         "
+        use builtin.bool;
         struct Flags { enabled: bool }
         comptime fn run() -> bool {
             let names = meta.struct_field_names(Flags);
@@ -151,42 +152,13 @@ fn ordinary_package_observes_fields_through_meta_without_builtin_access() {
     ",
     )
     .unwrap();
-    let library =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/meta/lib.fl");
+    let library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_luna"))
-        .args(["--packages-v1", "--package", "1", "101", "app"])
         .arg(&input)
-        .args(["--builtin-impl-package", "2"])
-        .args(["--package", "2", "202", "meta"])
+        .arg("--sysroot")
         .arg(&library)
-        .args(["--package", "3", "303", "builtin"])
-        .arg(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../library/builtin/primitives.fl"),
-        )
-        .args(["--dependency", "2", "builtin", "3"])
-        .args(nir::intrinsics::Operation::ALL.iter().flat_map(|op| {
-            [
-                "--comptime-intrinsic".to_owned(),
-                format!(
-                    "{}=meta.numeric.scalar_math.target.Scalar.{}",
-                    op.name(),
-                    op.name()
-                ),
-            ]
-        }))
-        .args([
-            "--dependency",
-            "1",
-            "meta",
-            "2",
-            "--primary",
-            "1",
-            "--meta-list-type",
-            "meta.List",
-            "--invoke-comptime",
-            "run",
-        ])
+        .args(["--build-target", "x86_64", "linux", "64"])
+        .args(["--invoke-comptime", "run"])
         .output()
         .unwrap();
     std::fs::remove_dir_all(directory).unwrap();
@@ -660,5 +632,70 @@ fn computed_type_receivers_keep_dynamic_inputs_and_evaluate_once() {
             luna::invocation::invoke(&package, entry, 500_000).unwrap(),
             Value::Bool(true)
         );
+    }
+}
+
+#[test]
+fn structure_observations_and_subject_calls_execute_as_bytecode() {
+    let package = compile(
+        "typealias Type=.Type'builtin;
+        struct Record where T {first:T,second:bool}
+        enum Event where T {net.{idle,data(T),record {value:T}},stopped,empty.{}}
+        comptime fn Selected(value:Type)->Type {value}
+        comptime fn run()->bool {
+            let fields=meta.struct_field_types(Selected(Record<bool>));
+            let names=Selected(Record<bool>).struct_field_names();
+            let groups=meta.enum_group_paths(Selected(Event<bool>));
+            let paths=meta.enum_variant_paths(Selected(Event<bool>));
+            let shapes=meta.enum_variant_shapes(Selected(Event<bool>));
+            let labels=meta.enum_variant_field_names(Selected(Event<bool>));
+            let types=Selected(Event<bool>).enum_variant_field_types();
+            fields.length()==2 and fields[0]==bool and fields[1]==bool
+                and names[0]==.first and names[1]==.second
+                and groups.length()==2 and groups[0][0]==.net and groups[1][0]==.empty
+                and paths[1][0]==.net and paths[1][1]==.data
+                and shapes[0]==.unit and shapes[1]==.tuple and shapes[2]==.named
+                and labels[2][0]==.value and types[1][0]==bool and types[2][0]==bool
+        }
+        comptime fn early()->bool {meta.enum_group_paths(do {return true;});false}
+        comptime fn bad()->bool {meta.struct_field_types(bool);false}",
+    )
+    .unwrap();
+    let mut vm = comptime_interpretor::Interpreter::for_comptime(
+        &package,
+        comptime_interpretor::Budget {
+            steps: 2_000_000,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for name in ["run", "early", "bad", "run"] {
+        let before = vm.bytecode_invocations();
+        let before_events = support::calls(&package, &vm).len();
+        let result = vm.invoke(support::id(&package, name), vec![]);
+        if name == "bad" {
+            assert_eq!(
+                result.unwrap_err().kind,
+                comptime_interpretor::ErrorKind::Type
+            );
+        } else {
+            assert_eq!(result.unwrap(), Value::Bool(true));
+        }
+        let calls = support::calls(&package, &vm);
+        assert_eq!(
+            vm.bytecode_invocations() - before,
+            calls.len() - before_events,
+            "{name}: {:?}",
+            &calls[before_events..]
+        );
+        if name == "run" {
+            assert_eq!(
+                calls[before_events..]
+                    .iter()
+                    .filter(|name| **name == "Selected")
+                    .count(),
+                7
+            );
+        }
     }
 }

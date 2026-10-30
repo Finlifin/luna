@@ -3284,14 +3284,14 @@ impl<'a> Interpreter<'a> {
             K::ListLength(_) | K::ListConcat(..) => self.eval_list_operation(expr, environment),
             K::BuildStruct(request) => self.eval_struct_build(expr, request, environment),
             K::BuildEnum(request) => self.eval_enum_build(expr, request, environment),
-            K::EnumStructure { .. } => self.eval_enum_structure(expr, environment),
+            K::EnumStructure { .. } => self.eval_observation(expr, environment),
             K::ComptimeFunctionInstance { .. } => {
                 self.eval_comptime_function_instance(expr, environment)
             }
             K::ObjectEdit { .. } => self.eval_object_edit(expr, environment),
             K::ObjectQuery { .. } => self.eval_object_query(expr, environment),
             K::StructFieldTypes(_) | K::StructFieldNames(_) => {
-                self.eval_struct_fields(expr, environment)
+                self.eval_observation(expr, environment)
             }
             K::TypeListIndex(..) => self.eval_type_list_index(expr, environment),
             K::TupleType(..) => self.eval_tuple_type(expr, environment),

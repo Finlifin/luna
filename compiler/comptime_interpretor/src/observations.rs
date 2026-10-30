@@ -63,6 +63,9 @@ impl Interpreter<'_> {
     ) -> Result<Flow, Error> {
         use comptime_compiler::observations::{Kind as O, Observation};
         let (kind, operand) = match &expr.kind {
+            K::StructFieldTypes(operand) => (O::StructFields { names: false }, operand.as_ref()),
+            K::StructFieldNames(operand) => (O::StructFields { names: true }, operand.as_ref()),
+            K::EnumStructure { subject, query } => (O::EnumStructure(*query), subject.as_ref()),
             K::EnumName(operand) => (O::EnumName, operand.as_ref()),
             K::SymbolName(operand) => (O::SymbolName, operand.as_ref()),
             K::TextQuery { subject, query } => (O::Text(*query), subject.as_ref()),
@@ -88,6 +91,35 @@ impl Interpreter<'_> {
         let input: &Term = observation.input.borrow();
         let output: &Term = observation.output.borrow();
         match observation.kind {
+            O::StructFields { .. } | O::EnumStructure(_) => {
+                if !self.comptime_only {
+                    return Err(self.failure(ErrorKind::PhaseMismatch, Some(source)));
+                }
+                let never = Term::Primitive(Primitive::Never);
+                let element = Term::Primitive(match observation.kind {
+                    O::StructFields { names: false }
+                    | O::EnumStructure(nir::program::EnumStructureQuery::FieldTypes) => {
+                        Primitive::Type
+                    }
+                    _ => Primitive::Symbol,
+                });
+                let result_element = self.list_element(output);
+                let expected_element = match observation.kind {
+                    O::EnumStructure(query)
+                        if query != nir::program::EnumStructureQuery::Shapes =>
+                    {
+                        result_element.and_then(|ty| self.list_element(ty))
+                    }
+                    _ => result_element,
+                };
+                if (*input != Term::Primitive(Primitive::Type) && *input != never)
+                    || (*input == never && *output != never)
+                    || (*input != never && expected_element != Some(&element))
+                {
+                    return Err(self.failure(ErrorKind::Type, Some(source)));
+                }
+            }
+
             O::EnumName => {
                 if *output != Term::Primitive(Primitive::Str)
                     || !matches!(*input, Term::Nominal { .. })
@@ -140,6 +172,8 @@ impl Interpreter<'_> {
         let input: &Term = observation.input.borrow();
         let output: &Term = observation.output.borrow();
         match observation.kind {
+            O::StructFields { names } => self.observe_struct_fields(value, output, names, source),
+            O::EnumStructure(query) => self.observe_enum_structure(value, output, query, source),
             O::EnumName => {
                 if !self.has_type(&value, input) {
                     return Err(self.failure(ErrorKind::Type, Some(source)));

@@ -1348,9 +1348,23 @@ fn compile_root<'a>(
                             },
                         );
                     }
-                    K::EnumName(_) | K::SymbolName(_) | K::TextQuery { .. } => {
+                    K::EnumName(_)
+                    | K::SymbolName(_)
+                    | K::TextQuery { .. }
+                    | K::StructFieldTypes(_)
+                    | K::StructFieldNames(_)
+                    | K::EnumStructure { .. } => {
                         use observations::{Kind as O, Observation};
                         let (kind, operand) = match &expr.kind {
+                            K::StructFieldTypes(operand) => {
+                                (O::StructFields { names: false }, operand.as_ref())
+                            }
+                            K::StructFieldNames(operand) => {
+                                (O::StructFields { names: true }, operand.as_ref())
+                            }
+                            K::EnumStructure { subject, query } => {
+                                (O::EnumStructure(*query), subject.as_ref())
+                            }
                             K::EnumName(operand) => (O::EnumName, operand.as_ref()),
                             K::SymbolName(operand) => (O::SymbolName, operand.as_ref()),
                             K::TextQuery { subject, query } => (O::Text(*query), subject.as_ref()),

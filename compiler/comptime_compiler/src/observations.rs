@@ -4,12 +4,18 @@ use super::*;
 #[derive(Clone, Copy, Debug)]
 pub enum Kind {
     EnumName,
+    StructFields { names: bool },
+    EnumStructure(nir::program::EnumStructureQuery),
     SymbolName,
     Text(nir::program::TextQueryKind),
 }
 impl fmt::Display for Kind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::StructFields { names } => {
+                write!(f, "struct-field-{}", if *names { "names" } else { "types" })
+            }
+            Self::EnumStructure(query) => write!(f, "(enum-structure {query})"),
             Self::EnumName => write!(f, "enum-name"),
             Self::SymbolName => write!(f, "symbol-name"),
             Self::Text(query) => write!(f, "(text {query})"),

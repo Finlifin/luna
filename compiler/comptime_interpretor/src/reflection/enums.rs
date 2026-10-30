@@ -186,58 +186,32 @@ impl Interpreter<'_> {
 mod tests;
 
 impl Interpreter<'_> {
-    pub(crate) fn eval_enum_structure(
+    pub(crate) fn observe_enum_structure(
         &mut self,
-        expr: &Expr,
-        environment: &mut Environment,
-    ) -> Result<Flow, Error> {
+        value: Value,
+        output: &Term,
+        query: nir::program::EnumStructureQuery,
+        source: SourceRange,
+    ) -> Result<Value, Error> {
         use nir::program::EnumStructureQuery as Q;
-        let K::EnumStructure { subject, query } = &expr.kind else {
-            unreachable!()
-        };
         let fail = || Error {
             kind: ErrorKind::Type,
-            source: Some(expr.source),
-        };
-        if !self.comptime_only {
-            return Err(self.failure(ErrorKind::PhaseMismatch, Some(expr.source)));
-        }
-        let never = Term::Primitive(Primitive::Never);
-        let element = Term::Primitive(if *query == Q::FieldTypes {
-            Primitive::Type
-        } else {
-            Primitive::Symbol
-        });
-        let result_element = self.list_element(&expr.ty);
-        let expected_element = if *query == Q::Shapes {
-            result_element
-        } else {
-            result_element.and_then(|ty| self.list_element(ty))
-        };
-        if (subject.ty != Term::Primitive(Primitive::Type) && subject.ty != never)
-            || (subject.ty == never && expr.ty != never)
-            || (subject.ty != never && expected_element != Some(&element))
-        {
-            return Err(fail());
-        }
-        let value = match self.eval(subject, environment)? {
-            Flow::Value(value) => value,
-            flow => return Ok(flow),
+            source: Some(source),
         };
         let Value::Type(subject) = value else {
             return Err(fail());
         };
-        let inner = self.list_element(&expr.ty).ok_or_else(fail)?.clone();
+        let inner = self.list_element(output).ok_or_else(fail)?.clone();
         let reflected = self.reflect_enum(&subject).map_err(|mut error| {
-            error.source = Some(expr.source);
+            error.source = Some(source);
             error
         })?;
-        let count = if *query == Q::GroupPaths {
+        let count = if query == Q::GroupPaths {
             reflected.groups.len()
         } else {
             reflected.variants.len()
         };
-        self.integer_operation(Some(expr.source), |budget| budget.consume(count))?;
+        self.integer_operation(Some(source), |budget| budget.consume(count))?;
         let symbols = |names: Vec<String>| Value::List {
             ty: inner.clone(),
             values: names
@@ -248,7 +222,7 @@ impl Interpreter<'_> {
         let mut values = Vec::with_capacity(count);
         match query {
             Q::GroupPaths | Q::VariantPaths => {
-                let paths = if *query == Q::GroupPaths {
+                let paths = if query == Q::GroupPaths {
                     reflected.groups
                 } else {
                     reflected
@@ -258,7 +232,7 @@ impl Interpreter<'_> {
                         .collect()
                 };
                 for path in paths {
-                    self.integer_operation(Some(expr.source), |budget| {
+                    self.integer_operation(Some(source), |budget| {
                         budget.consume(path.len().saturating_add(1))
                     })?;
                     values.push(symbols(path.split('.').map(str::to_owned).collect()));
@@ -291,10 +265,10 @@ impl Interpreter<'_> {
             }
         }
         let value = Value::List {
-            ty: expr.ty.clone(),
+            ty: output.clone(),
             values,
         };
-        self.validate_immutable_input(&value, &expr.ty)?;
-        Ok(Flow::Value(value))
+        self.validate_immutable_input(&value, output)?;
+        Ok(value)
     }
 }
