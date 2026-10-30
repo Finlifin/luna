@@ -64,9 +64,13 @@ pub enum InputContext {
     Unknown,
     /// An unresolved comptime value index, not an unresolved Type.
     UnknownValue,
+    /// An unresolved value whose domain is itself an unresolved clause input.
+    /// Its sort may become Type when the earlier domain input is completed.
+    UnknownDependentValue,
 }
 pub struct CallCandidate {
     parameter_sorts: Vec<Sort>,
+    dependent_value_parameters: Vec<usize>,
     engine: Engine,
     types: Vec<I>,
     signature: I,
@@ -451,6 +455,7 @@ impl Scheme {
         engine.advance(relations.len(), budget);
         let mut candidate = CallCandidate {
             parameter_sorts,
+            dependent_value_parameters: vec![],
             views: Default::default(),
             engine,
             types: types.clone(),
@@ -531,6 +536,7 @@ impl Scheme {
         let (mut engine, _) = root.match_many(&relations, budget).map_err(Error::Match)?;
         engine.advance(relations.len(), budget);
         Ok(CallCandidate {
+            dependent_value_parameters: vec![],
             parameter_sorts,
             views: Default::default(),
             engine,
@@ -602,6 +608,7 @@ impl CallCandidate {
         }
         fn build(
             context: &InputContext,
+            settled: Option<&Term>,
             engine: &mut Engine,
             components: &mut Vec<I>,
             nesting: u32,
@@ -615,6 +622,10 @@ impl CallCandidate {
             match context {
                 InputContext::Optional(payload) => Ok(Term::Optional(Box::new(build(
                     payload,
+                    match settled {
+                        Some(Term::Optional(inner)) => Some(inner.as_ref()),
+                        _ => None,
+                    },
                     engine,
                     components,
                     nesting,
@@ -631,7 +642,18 @@ impl CallCandidate {
                     }
                     Ok(Term::error_result(
                         errors.clone(),
-                        build(result, engine, components, nesting, depth + 1, fuel)?,
+                        build(
+                            result,
+                            match settled {
+                                Some(Term::ErrorResult { result, .. }) => Some(result.as_ref()),
+                                _ => None,
+                            },
+                            engine,
+                            components,
+                            nesting,
+                            depth + 1,
+                            fuel,
+                        )?,
                     ))
                 }
                 InputContext::Computation { effects, result } => {
@@ -644,12 +666,31 @@ impl CallCandidate {
                         .map_err(Error::Obligations)?;
                     Ok(Term::computation(
                         effects.clone(),
-                        build(result, engine, components, nesting, depth + 1, fuel)?,
+                        build(
+                            result,
+                            match settled {
+                                Some(Term::Computation { result, .. }) => Some(result.as_ref()),
+                                _ => None,
+                            },
+                            engine,
+                            components,
+                            nesting,
+                            depth + 1,
+                            fuel,
+                        )?,
                     ))
                 }
                 InputContext::Known(ty) => leaf(Some(ty), engine, components, nesting, fuel),
                 InputContext::Unknown => leaf(None, engine, components, nesting, fuel),
-                InputContext::UnknownValue => {
+                InputContext::UnknownDependentValue
+                    if settled.is_some_and(|term| term.sort() == Sort::Type) =>
+                {
+                    // A dependent value domain may have completed to Type since
+                    // the caller exported this partial context. Unknown carries
+                    // no value evidence; use the candidate's completed sort.
+                    leaf(None, engine, components, nesting, fuel)
+                }
+                InputContext::UnknownValue | InputContext::UnknownDependentValue => {
                     let index = components.len();
                     components.push(I::Meta(engine.fresh(Sort::ComptimeValue)));
                     Ok(Term::Bound {
@@ -671,7 +712,15 @@ impl CallCandidate {
                         declaration: *declaration,
                         arguments: arguments
                             .iter()
-                            .map(|argument| {
+                            .enumerate()
+                            .map(|(slot, argument)| {
+                                let settled = match settled {
+                                    Some(Term::Nominal {
+                                        declaration: head,
+                                        arguments,
+                                    }) if head == declaration => arguments.get(slot),
+                                    _ => None,
+                                };
                                 if let InputContext::Known(value) = argument {
                                     if value.sort() == Sort::ComptimeValue {
                                         crate::associated::charge_projection_copy(value, fuel)
@@ -688,7 +737,15 @@ impl CallCandidate {
                                         });
                                     }
                                 }
-                                build(argument, engine, components, nesting, depth + 1, fuel)
+                                build(
+                                    argument,
+                                    settled,
+                                    engine,
+                                    components,
+                                    nesting,
+                                    depth + 1,
+                                    fuel,
+                                )
                             })
                             .collect::<Result<_, _>>()?,
                     })
@@ -696,7 +753,21 @@ impl CallCandidate {
                 InputContext::Tuple(fields) => Ok(Term::Tuple(
                     fields
                         .iter()
-                        .map(|field| build(field, engine, components, nesting, depth + 1, fuel))
+                        .enumerate()
+                        .map(|(slot, field)| {
+                            build(
+                                field,
+                                match settled {
+                                    Some(Term::Tuple(fields)) => fields.get(slot),
+                                    _ => None,
+                                },
+                                engine,
+                                components,
+                                nesting,
+                                depth + 1,
+                                fuel,
+                            )
+                        })
                         .collect::<Result<_, _>>()?,
                 )),
                 InputContext::NormalTuple { head, fields } => {
@@ -709,8 +780,28 @@ impl CallCandidate {
                         arguments: vec![Term::TypeListValue(
                             fields
                                 .iter()
-                                .map(|field| {
-                                    build(field, engine, components, nesting, depth + 1, fuel)
+                                .enumerate()
+                                .map(|(slot, field)| {
+                                    let field_hint = match settled {
+                                        Some(Term::NormalForm {
+                                            head: actual,
+                                            arguments,
+                                            ..
+                                        }) if actual == head => match arguments.as_slice() {
+                                            [Term::TypeListValue(fields)] => fields.get(slot),
+                                            _ => None,
+                                        },
+                                        _ => None,
+                                    };
+                                    build(
+                                        field,
+                                        field_hint,
+                                        engine,
+                                        components,
+                                        nesting,
+                                        depth + 1,
+                                        fuel,
+                                    )
                                 })
                                 .collect::<Result<_, _>>()?,
                         )],
@@ -719,9 +810,25 @@ impl CallCandidate {
                 InputContext::Record(fields) => Ok(Term::Record(
                     fields
                         .iter()
-                        .map(|(name, field)| {
-                            build(field, engine, components, nesting, depth + 1, fuel)
-                                .map(|ty| (name.clone(), ty))
+                        .enumerate()
+                        .map(|(slot, (name, field))| {
+                            let field_hint = match settled {
+                                Some(Term::Record(fields)) => fields
+                                    .get(slot)
+                                    .filter(|(actual, _)| actual == name)
+                                    .map(|(_, ty)| ty),
+                                _ => None,
+                            };
+                            build(
+                                field,
+                                field_hint,
+                                engine,
+                                components,
+                                nesting,
+                                depth + 1,
+                                fuel,
+                            )
+                            .map(|ty| (name.clone(), ty))
                         })
                         .collect::<Result<_, _>>()?,
                 )),
@@ -745,7 +852,18 @@ impl CallCandidate {
                     let result = if let Some(result) = &callable.result {
                         leaf(Some(result), engine, components, nesting + 1, fuel)?
                     } else if let Some(context) = &callable.result_context {
-                        build(context, engine, components, nesting + 1, depth + 1, fuel)?
+                        build(
+                            context,
+                            settled.and_then(|ty| match ty.callable_signature() {
+                                Term::Function { result, .. } => Some(result.as_ref()),
+                                _ => None,
+                            }),
+                            engine,
+                            components,
+                            nesting + 1,
+                            depth + 1,
+                            fuel,
+                        )?
                     } else {
                         leaf(None, engine, components, nesting + 1, fuel)?
                     };
@@ -783,7 +901,20 @@ impl CallCandidate {
         let mut trial = self.engine.trial();
         let mut components = Vec::new();
         let mut fuel = budget.steps;
-        let template = build(context, &mut trial, &mut components, 0, 0, &mut fuel)?;
+        let settled = self.inspect_component(target.clone())?;
+        if let Some(settled) = &settled {
+            nir::type_computations::charge_term(settled, &mut fuel)
+                .map_err(|_| Error::Match(MatchError::BudgetExhausted))?;
+        }
+        let template = build(
+            context,
+            settled.as_ref(),
+            &mut trial,
+            &mut components,
+            0,
+            0,
+            &mut fuel,
+        )?;
         let (mut engine, _) = trial
             .match_many(
                 &[(
@@ -1096,7 +1227,18 @@ impl CallCandidate {
                 arguments,
             } => (template, Some(arguments)),
             I::Stable(template) => (template, None),
-            I::Meta(_) => return Ok(InputContext::Unknown),
+            I::Meta(id) => {
+                for &index in &self.dependent_value_parameters {
+                    *fuel = fuel.checked_sub(1).ok_or_else(|| {
+                        Error::TypeView("input checking context budget exhausted".into())
+                    })?;
+                    if matches!(self.engine.inspect(&self.types[index]).map_err(Error::Obligations)?, I::Meta(other) if other == id)
+                    {
+                        return Ok(InputContext::UnknownDependentValue);
+                    }
+                }
+                return Ok(InputContext::Unknown);
+            }
         };
         let mut field_context = |field: Term| -> Result<InputContext, Error> {
             let sort = field.sort();

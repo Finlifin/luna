@@ -2688,3 +2688,118 @@ fn dependent_call_domain_staging_preserves_caller_type_bindings() {
             .is_err()
     );
 }
+
+#[test]
+fn dependent_value_contexts_follow_completed_domains_without_erasing_evidence() {
+    use type_resolution::calls::InputContext as C;
+    let ids = [
+        DeclarationId {
+            package: 503,
+            local: 1,
+        },
+        DeclarationId {
+            package: 503,
+            local: 2,
+        },
+    ];
+    let head = DeclarationId {
+        package: 503,
+        local: 3,
+    };
+    let nominal = |arguments| Term::Nominal {
+        declaration: head,
+        arguments,
+    };
+    let mut consumer = scheme(
+        vec![nominal(vec![
+            generic(0),
+            Term::Bound {
+                depth: 1,
+                index: 1,
+                sort: Sort::ComptimeValue,
+            },
+        ])],
+        primitive(P::Bool),
+        2,
+    );
+    consumer.parameter_sorts = vec![Sort::Type, Sort::ComptimeValue];
+    let domains = [
+        primitive(P::Type),
+        Term::Rigid {
+            declaration: ids[0],
+            sort: Sort::Type,
+        },
+    ];
+    let mut world = type_resolution::ptc::Context::default();
+    world.admit_nominal_constructor(head);
+    let pending = consumer
+        .infer_declared_sparse_types_mode(
+            &ids,
+            &domains,
+            &[None],
+            None,
+            None,
+            &world,
+            Budget::default(),
+            false,
+            &[],
+        )
+        .unwrap();
+    let hint = pending.parameter_input_context(0).unwrap();
+    assert!(matches!(&hint, C::Nominal {arguments, ..}
+        if matches!(arguments.as_slice(), [C::Unknown, C::UnknownDependentValue])));
+    assert!(pending.finish().is_err());
+
+    let complete = nominal(vec![primitive(P::Type), primitive(P::Bool)]);
+    let shapes = [
+        (complete.clone(), hint.clone()),
+        (
+            Term::Optional(Box::new(complete.clone())),
+            C::Optional(Box::new(hint.clone())),
+        ),
+        (
+            Term::Tuple(vec![complete.clone()]),
+            C::Tuple(vec![hint.clone()]),
+        ),
+        (
+            Term::Record(vec![("item".into(), complete.clone())]),
+            C::Record(vec![("item".into(), hint.clone())]),
+        ),
+    ];
+    let producer = scheme(vec![generic(0)], generic(0), 1);
+    for (ty, shape) in shapes {
+        let mut candidate = producer
+            .infer_partial_types_in_context(&[Some(ty.clone())], None, &world, Budget::default())
+            .unwrap();
+        assert!(
+            candidate
+                .constrain_result_context(
+                    &shape,
+                    Budget {
+                        steps: 1,
+                        ..Budget::default()
+                    }
+                )
+                .is_err()
+        );
+        candidate
+            .constrain_result_context(&shape, Budget::default())
+            .unwrap();
+        assert_eq!(candidate.finish().unwrap().result, ty);
+    }
+    // A known value is a constraint, even when another call has completed its
+    // corresponding dependent input to Type. It is never weakened to a hole.
+    let wrong = C::Nominal {
+        declaration: head,
+        arguments: vec![C::Known(primitive(P::Type)), C::Known(Term::Bool(true))],
+    };
+    let mut candidate = producer
+        .infer_partial_types_in_context(&[Some(complete)], None, &world, Budget::default())
+        .unwrap();
+    assert!(
+        candidate
+            .constrain_result_context(&wrong, Budget::default())
+            .and_then(|_| candidate.finish().map(|_| ()))
+            .is_err()
+    );
+}

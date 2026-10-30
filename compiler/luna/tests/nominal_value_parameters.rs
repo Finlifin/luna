@@ -6811,3 +6811,22 @@ fn contextual_data_consumers_register_dependent_value_clauses() {
         }";
     assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
 }
+
+#[test]
+fn contextual_data_calls_supply_generator_arguments_with_dependent_domains() {
+    let source = "typealias Type=.Type'builtin;
+        struct Tagged where T,index:T {value:bool}
+        comptime fn inspect(code:<|-Tagged<T,index>>)->Tagged<T,index> where T,index:T {
+            Tagged<T,index>{value:true}
+        }
+        comptime fn build(value:Tagged<T,index>)-><|-Tagged<T,index>> where T,index:T {
+            '(Tagged<T,index>{value:true})
+        }
+        fn run()->bool {
+            let value:Tagged<Type,bool> = ~<build(inspect('(Tagged<Type,bool>{value:false})))>;
+            value.value
+        }";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    let wrong = source.replace("let value:Tagged<Type,bool>", "let value:Tagged<Type,Type>");
+    assert!(support::compile_with_tuple_protocols(&wrong, &Default::default()).is_err());
+}

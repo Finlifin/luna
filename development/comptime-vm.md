@@ -3917,3 +3917,42 @@ Validation in /home/fin/luna:
   exit 0, `/tmp/luna-tools-1u27a69a/result.json`, no exclusions.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
   exit 0, `/tmp/luna-tools-0b3og_ud/result.json`; `git diff --check`: exit 0.
+
+### Nested contextual data arguments and dependent result contexts
+
+The direct argument example recorded above now executes at the shared
+source-ordered generator input boundary, including when the caller provides a
+partial result context. Contextual consumers pass that context into their normal
+call candidate; ordinary expression checking still never executes these calls.
+The original failure is reproduced by the new source test in
+`/tmp/luna-tools-7lswj5xi/result.json` (exit 101).
+
+Completing this path exposed a distinct inference issue: a partial context for
+`Tagged<T,index:T>` exported the same unknown-value marker as a fixed value
+domain. When the nested call inferred `T=Type`, importing that marker created a
+stale comptime-value constraint against a Type argument and left inference
+waiting (`/tmp/luna-tools-hw9vor5f/result.json`, exit 101).
+Domain staging now records inputs whose domain remains an unresolved clause
+input. Only those slots export a dependent unknown-value context. Importing the
+context uses a settled candidate component's sort when available, preserving
+nested shape and all known evidence. Fixed-domain unknown values retain their
+original sort; the existing rejection regression remains unchanged. Failed
+context constraints and budget exhaustion do not mutate the candidate.
+
+Source regressions cover dependent Type indices, incompatible expected indices,
+source-order mutation with each nested argument evaluated once, postcondition
+failure, and unused definitions that must not execute their calls. Solver tests
+cover optional, tuple, and record nesting, budget failure/recovery, and rejection
+of conflicting known values. This is not general scheduling for contextual calls
+inside arbitrary ordinary expressions, nor a replacement of construction
+interpretation by the eventual unified invocation VM; those remain open work.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution --test calls`:
+  exit 0, `/tmp/luna-tools-m_eyrl2p/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test cmtt --test cmtt_methods --test cmtt_phase_boundaries --test sysroot_preludes`:
+  exit 0, `/tmp/luna-tools-3np6ano2/result.json`, no exclusions.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-f945ch2u/result.json`; `git diff --check`: exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution`:
+  exit 0, `/tmp/luna-tools-6klgr5oj/result.json`.

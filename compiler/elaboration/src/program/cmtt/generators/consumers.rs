@@ -284,6 +284,11 @@ impl Checker<'_, '_> {
         expected: Option<&Term>,
         type_plan: Option<GeneratorTypePlan>,
     ) -> Result<(Generator<Term>, Vec<Option<Argument>>), Error> {
+        let result_context = self
+            .structural_result_context
+            .as_ref()
+            .filter(|(id, _)| *id == site.hir_id)
+            .map(|(_, context)| context.clone());
         let prepared = if arguments
             .iter()
             .any(|argument| matches!(argument, Arg::Expand(_)))
@@ -297,7 +302,7 @@ impl Checker<'_, '_> {
                     inputs,
                     expected.cloned(),
                     Term::clone,
-                    None,
+                    result_context.as_ref(),
                     packets,
                     type_plan,
                 )
@@ -311,7 +316,7 @@ impl Checker<'_, '_> {
                 arguments,
                 expected.cloned(),
                 Term::clone,
-                None,
+                result_context.as_ref(),
                 &mut spreads::SpreadPlan::default(),
                 type_plan,
             )?

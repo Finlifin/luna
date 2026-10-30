@@ -10855,6 +10855,34 @@ fn contextual_data_trait_calls_evaluate_public_arguments_once_in_source_order() 
 }
 
 #[test]
+fn nested_contextual_data_arguments_preserve_order_and_contracts() {
+    let source = "
+        comptime fn inspect(code:<|-bool>, value:bool)->result:bool
+        where ensures result == value
+        {value}
+        comptime fn collect(code:<|-bool>, first:bool, second:bool)->bool {
+            first and not second
+        }
+        comptime fn forward(code:<|-bool>)->bool {
+            var flag=false;
+            const result=collect(code,
+                inspect(code, do {flag=not flag;flag}),
+                inspect(code, do {flag=not flag;flag}));
+            result and not flag
+        }
+        fn run()->bool {const result=forward('(true));result}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let invalid = source.replace("ensures result == value", "ensures result != value");
+    let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+    assert!(failure.contains("postcondition rejected"), "{failure}");
+    let unused = invalid.replace(
+        "fn run()->bool {const result=forward('(true));result}",
+        "fn run()->bool {true}",
+    );
+    assert_eq!(run(&unused, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
 fn contextual_data_trait_calls_select_value_indexed_implementations() {
     let source = "trait Inspect where enabled:bool {
             comptime fn inspect(code:<|-bool>)->bool;

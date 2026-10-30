@@ -123,6 +123,7 @@ impl Scheme {
             };
             frames.push(sorts.clone());
             let mut replacements = Vec::with_capacity(ids.len());
+            let mut dependent_value_parameters = Vec::new();
             for index in 0..ids.len() {
                 let substitution = nir::DeclarationSubstitution::bounded(
                     &ids[..index],
@@ -140,6 +141,9 @@ impl Scheme {
                 } else {
                     Sort::ComptimeValue
                 };
+                if matches!(domain, Term::Bound { depth: 0, .. }) {
+                    dependent_value_parameters.push(index);
+                }
                 frames.last_mut().unwrap()[index] = sorts[index];
                 replacements.push(match &known[index] {
                     Some(value) => value.abstract_parameters(&[])?,
@@ -151,6 +155,7 @@ impl Scheme {
                 });
             }
             if sorts == current.parameter_sorts {
+                candidate.dependent_value_parameters = dependent_value_parameters;
                 return Ok(candidate);
             }
             let substitution = nir::DeclarationSubstitution::bounded(

@@ -375,8 +375,19 @@ impl Checker<'_, '_> {
         expected: Option<&Term>,
         context: Option<&crate::calls::InputContext>,
     ) -> Result<(comptime_interpretor::Value, Term), Error> {
-        if self.data_consumer_call(value).is_some() && context.is_none() {
-            return self.required_data_consumer(value, expected);
+        if self.data_consumer_call(value).is_some() {
+            // This argument has reached its source-ordered construction boundary.
+            // Retain partial result evidence without sending the call through
+            // ordinary expression checking, which must not execute consumers.
+            let saved = self.structural_result_context.take();
+            self.structural_result_context = context.map(|context| (value.hir_id, context.clone()));
+            let expected = match context {
+                Some(crate::calls::InputContext::Known(ty)) => Some(ty),
+                _ => expected,
+            };
+            let result = self.required_data_consumer(value, expected);
+            self.structural_result_context = saved;
+            return result;
         }
         if self.generator_data.is_empty() {
             let Some(context) = context else {
