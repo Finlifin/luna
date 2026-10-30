@@ -1764,8 +1764,8 @@ fn model_atom(
             // Classification is independent of Tuple elements, but a concrete
             // counterexample must not hide unresolved value-list inputs.
             let closed_tuple = matches!(&query.ty,Term::NormalForm {head,sort:Sort::Type,arguments}
-                if tuple_heads.contains(head) && matches!(arguments.as_slice(),[Term::TypeListValue(fields)]
-                    if fields.iter().all(|field|closed_type(field,nominal))));
+                if tuple_heads.contains(head) && matches!(arguments.as_slice(), [input]
+                    if closed_classification_input(input, nominal, 0)));
             if closed_tuple {
                 evaluate_kind_with_heads(query.kind, &query.ty, nominal, tuple_heads)
             } else {
@@ -1786,6 +1786,43 @@ fn model_atom(
             Some(a == b)
         }
     }
+}
+
+// Kind witnesses need a completed input, not a model of its producing code.
+// This structural closure check never compares opaque results or supplies
+// equations for values. Formation/domain admission belongs to the caller.
+fn closed_classification_input(
+    term: &Term,
+    nominal: &BTreeSet<DeclarationId>,
+    depth: usize,
+) -> bool {
+    if depth >= 128 {
+        return false;
+    }
+    if term.scalar_index_domain().is_some() {
+        return true;
+    }
+    let children = match term {
+        Term::NormalForm {
+            sort: Sort::Type,
+            arguments,
+            ..
+        }
+        | Term::TypeListValue(arguments)
+        | Term::TupleValue(arguments) => arguments.iter().collect(),
+        Term::NominalValue { ty, fields, .. } => {
+            std::iter::once(ty.as_ref()).chain(fields).collect()
+        }
+        Term::OptionalValue { .. } | Term::ErrorValue { .. } | Term::RecordValue(_) => {
+            subterms(term)
+        }
+        // Existing closed type constructors retain their established admission
+        // boundary. Pending projections, concatenations and inputs stay opaque.
+        _ => return closed_type(term, nominal),
+    };
+    children
+        .into_iter()
+        .all(|child| closed_classification_input(child, nominal, depth + 1))
 }
 
 fn reify(
@@ -2358,6 +2395,99 @@ mod tuple_classification_tests {
         assert!(matches!(
             context.prove(Formula::kind(open, TypeKind::Boolean), Budget::default()),
             Outcome::Unknown { .. }
+        ));
+    }
+
+    #[test]
+    fn tuple_kind_witnesses_accept_ordinary_closed_inputs_without_value_equations() {
+        let id = |local| DeclarationId { package: 83, local };
+        let list = Term::NormalForm {
+            head: id(1),
+            sort: Sort::Type,
+            arguments: vec![Term::Primitive(Primitive::Type)],
+        };
+        let tuple = |fields| Term::NormalForm {
+            head: id(2),
+            sort: Sort::Type,
+            arguments: vec![Term::NominalValue {
+                ty: Box::new(list.clone()),
+                variant: None,
+                fields,
+            }],
+        };
+        let mut context = Context::default();
+        context.admit_tuple_head(id(2));
+        let boolean = Term::Primitive(Primitive::Bool);
+        let opaque = Term::NormalForm {
+            head: id(3),
+            sort: Sort::Type,
+            arguments: vec![boolean.clone()],
+        };
+        for fields in [vec![], vec![boolean.clone()], vec![opaque.clone()]] {
+            let input = tuple(fields);
+            let outcome = context.prove(
+                Formula::kind(input.clone(), TypeKind::Boolean),
+                Budget::default(),
+            );
+            let Outcome::NotEntailed(witness) = outcome else {
+                panic!("{outcome}")
+            };
+            context.verify_witness(&witness, Budget::default()).unwrap();
+            assert!(
+                Context::default()
+                    .verify_witness(&witness, Budget::default())
+                    .is_err()
+            );
+            let mut forged = witness.clone();
+            forged.goal = Formula::kind(input, TypeKind::Tuple);
+            assert!(context.verify_witness(&forged, Budget::default()).is_err());
+        }
+        let open = tuple(vec![Term::Rigid {
+            declaration: id(4),
+            sort: Sort::Type,
+        }]);
+        assert!(matches!(
+            context.prove(Formula::kind(open, TypeKind::Boolean), Budget::default()),
+            Outcome::Unknown { .. }
+        ));
+        assert!(!matches!(
+            context.prove(Formula::equal(opaque, boolean.clone()), Budget::default()),
+            Outcome::Entailed(_)
+        ));
+        let data = Term::NominalValue {
+            ty: Box::new(list.clone()),
+            variant: None,
+            fields: vec![boolean.clone()],
+        };
+        assert!(matches!(
+            context.prove(Formula::equal(data.clone(), data), Budget::default()),
+            Outcome::IllFormed(_)
+        ));
+        let pending = Term::NormalForm {
+            head: id(2),
+            sort: Sort::Type,
+            arguments: vec![Term::TypeListConcat(vec![Term::TypeListValue(vec![
+                boolean.clone(),
+            ])])],
+        };
+        assert!(matches!(
+            context.prove(Formula::kind(pending, TypeKind::Boolean), Budget::default()),
+            Outcome::Unknown { .. }
+        ));
+        let goal = Formula::kind(tuple(vec![boolean]), TypeKind::Boolean);
+        assert!(matches!(
+            context.prove(
+                goal.clone(),
+                Budget {
+                    steps: 0,
+                    ..Budget::default()
+                }
+            ),
+            Outcome::Unknown { .. }
+        ));
+        assert!(matches!(
+            context.prove(goal, Budget::default()),
+            Outcome::NotEntailed(_)
         ));
     }
 

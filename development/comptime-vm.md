@@ -6544,3 +6544,34 @@ flows through LLVM (including the shipped example at every optimization level);
 the new ordinary typed list payload is directly exercised by the VM/IIR tests.
 Final `cargo fmt --all -- --check` through development/command.py exited 0:
 `/tmp/luna-tools-ns50ekxh/result.json`.
+
+
+## Closed ordinary inputs in tuple-kind witnesses (2026-10-31)
+
+PTC already classified registered tuple heads independently of their collector
+encoding, but concrete counterexample verification only recognized legacy
+TypeListValue inputs. Kind witness checks now inspect closure of immutable
+input trees, including ordinary nominal list values and closed opaque Type
+values. This is a kind-classification precondition, not evaluation of producers,
+normal-form equality, injectivity, or a new category of value propositions.
+Formation/domain admission remains the caller's responsibility.
+
+Pending projections, symbolic inputs and concatenations remain unavailable to
+this concrete witness path. Existing type-model equality/reification is
+unchanged. Regression cases cover empty/nonempty lists, a closed opaque Type
+field, witness replay and forged goals, removed tuple authority, unresolved
+inputs, budget recovery and rejection of standalone value equality.
+
+Validation from /home/fin/luna:
+
+- `python3 -B development/check.py --timeout 900 -- test -p ptc -p type_resolution --no-fail-fast`:
+  exit 0, 384 passed; `/tmp/luna-tools-sk_cp6_g/result.json`.
+- Source integration command:
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test normal_form_methods --test normal_form_inference --test type_spreads --no-fail-fast`;
+  exit 0, 101 passed; `/tmp/luna-tools-nm0hii1q/result.json`.
+- Formatting: `python3 -B development/command.py --timeout 120 -- cargo fmt --all`,
+  exit 0, `/tmp/luna-tools-v4rgnaz1/result.json`; `git diff --check` passed.
+
+This removes the remaining kind-counterexample dependency on legacy list
+payloads. It does not switch canonical list writers or remove all legacy term
+variants. No full workspace suite was run.
