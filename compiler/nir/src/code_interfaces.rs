@@ -337,6 +337,18 @@ impl<O: SignatureOutput> CodeFunctionSignature<O> {
                 "dependent input value has the wrong sort".into(),
             ));
         }
+        // The supplied value belongs to the caller. Never reinterpret one of
+        // its free declarations as a remaining callee-local input binder.
+        for (other_slot, other) in &self.input_binders {
+            if *other_slot != slot {
+                type_computations::charge_term(value, fuel)?;
+                if value.mentions_rigid(other.declaration) {
+                    return Err(Error::Structure(
+                        "input substitution would capture a caller declaration".into(),
+                    ));
+                }
+            }
+        }
         let parameters = std::slice::from_ref(binder);
         let arguments = std::slice::from_ref(value);
         let mut completed = self.try_map_types(|ty| {
@@ -372,6 +384,14 @@ impl<O: SignatureOutput> CodeFunctionSignature<O> {
                 "dependent input binding positions differ".into(),
             ));
         }
+        *fuel = fuel
+            .checked_sub(self.input_binders.len())
+            .ok_or(Error::Budget)?;
+        let local_declarations: std::collections::BTreeSet<_> = self
+            .input_binders
+            .values()
+            .map(|binder| binder.declaration)
+            .collect();
         let mut parameters = Vec::new();
         let mut arguments = Vec::new();
         for ((slot, binder), (other_slot, other)) in
@@ -381,6 +401,18 @@ impl<O: SignatureOutput> CodeFunctionSignature<O> {
                 return Err(Error::Structure(
                     "dependent input binding positions or sorts differ".into(),
                 ));
+            }
+            // Reference-side names can already denote free declarations here.
+            // Renaming a local binder onto one would manufacture type equality.
+            if !local_declarations.contains(&other.declaration) {
+                for term in self.type_terms() {
+                    type_computations::charge_term(term, fuel)?;
+                    if term.mentions_rigid(other.declaration) {
+                        return Err(Error::Structure(
+                            "input binder alignment would capture a free declaration".into(),
+                        ));
+                    }
+                }
             }
             parameters.push(binder.clone());
             arguments.push(Term::Rigid {

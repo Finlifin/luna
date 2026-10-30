@@ -5941,3 +5941,31 @@ Validation from `/home/fin/luna`, all final checks exit 0:
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt_methods`:
   all 144 source method tests passed; `/tmp/luna-tools-52fb3r7e/result.json`.
 - Formatting: `/tmp/luna-tools-evwvx0x4/result.json`; git diff --check passed.
+
+## Capture-free contextual input substitution (2026-10-31)
+
+The new dependent-signature boundary now rejects capture of free declarations.
+Alpha-aligning an implementation binder B to an interface binder A must not
+merge an existing outer A in the implementation with that local binder. Before
+renaming, alignment checks target declarations against the source's free type
+occurrences. Legitimate simultaneous permutations of local binders remain valid.
+The membership set avoids repeatedly scanning every binder for each rename;
+inspection of type terms remains charged to the shared query budget.
+
+Specializing an evaluated input similarly rejects a caller value containing an
+identity still owned by another callee input binder. The caller must establish
+fresh binder identities before transport when such scopes collide; substitution
+must never silently reclassify a caller's declaration. Rejection leaves the
+source signature intact. This is a correctness prerequisite for frontend input
+admission, which remains pending as recorded above.
+
+Validation from `/home/fin/luna`, exit 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir --test code_interfaces`:
+  23 tests passed; `/tmp/luna-tools-1nqiyjxy/result.json`. New cases cover free
+  declaration capture, caller-value capture under an opaque head and a legal
+  simultaneous permutation of two local binders.
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib interfaces::signatures`:
+  12 tests passed; `/tmp/luna-tools-ytwnhe54/result.json`. A contract regression
+  rejects the false equivalence between (B, outer A) and (A, A).
+- Formatting: `/tmp/luna-tools-m5a4g0v4/result.json`; git diff --check passed.

@@ -513,6 +513,55 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn contextual_contracts_do_not_confuse_outer_and_input_type_identities() {
+        use nir::{DeclarationId, DeclarationParameter, code_interfaces::CodeInput};
+        let expected_id = DeclarationId {
+            package: 99,
+            local: 1,
+        };
+        let actual_id = DeclarationId {
+            package: 99,
+            local: 2,
+        };
+        let rigid = |declaration| Term::Rigid {
+            declaration,
+            sort: Sort::Type,
+        };
+        let mut expected =
+            code_signature(1, Term::Tuple(vec![rigid(expected_id), rigid(expected_id)]));
+        expected.inputs[0].1 = CodeInput::Data(Term::Primitive(nir::Primitive::Type));
+        expected.input_binders.insert(
+            0,
+            DeclarationParameter {
+                declaration: expected_id,
+                sort: Sort::Type,
+            },
+        );
+        let mut actual = code_signature(2, Term::Tuple(vec![rigid(actual_id), rigid(expected_id)]));
+        actual.inputs[0].1 = CodeInput::Data(Term::Primitive(nir::Primitive::Type));
+        actual.input_binders.insert(
+            0,
+            DeclarationParameter {
+                declaration: actual_id,
+                sort: Sort::Type,
+            },
+        );
+        let context = Context::with_scope(vec![]);
+        assert!(!equivalent_code(
+            &context,
+            &expected,
+            &actual,
+            Budget::default()
+        ));
+        assert!(equivalent_code(
+            &context,
+            &expected,
+            &expected,
+            Budget::default()
+        ));
+    }
+
     fn boolean() -> Term {
         Term::Primitive(nir::Primitive::Bool)
     }

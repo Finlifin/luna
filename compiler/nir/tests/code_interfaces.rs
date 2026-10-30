@@ -826,3 +826,140 @@ fn dependent_signature_alignment_renames_only_local_binders() {
             .is_err()
     );
 }
+
+#[test]
+fn binder_alignment_does_not_capture_a_free_declaration() {
+    let mut actual = dependent_signature();
+    let free = DeclarationId {
+        package: 9,
+        local: 1,
+    };
+    actual.output.result = Term::Tuple(vec![
+        actual.output.result.clone(),
+        Term::Rigid {
+            declaration: free,
+            sort: Sort::Type,
+        },
+    ]);
+    let mut reference = dependent_signature();
+    reference.input_binders.get_mut(&0).unwrap().declaration = free;
+    assert!(
+        actual
+            .align_input_binders(&reference, &[], &mut 10000)
+            .is_err()
+    );
+    assert!(actual.output.result.mentions_rigid(free));
+    assert_eq!(
+        actual.input_binders[&0].declaration,
+        DeclarationId {
+            package: 1,
+            local: 3
+        }
+    );
+    assert!(actual.align_input_binders(&actual, &[], &mut 10000).is_ok());
+}
+
+#[test]
+fn input_specialization_does_not_capture_caller_data_in_remaining_binders() {
+    use nir::{DeclarationParameter, code_interfaces::CodeInput};
+    let mut signature = dependent_signature();
+    let second = DeclarationId {
+        package: 9,
+        local: 2,
+    };
+    signature.inputs.push((
+        LocalId { owner: 9, index: 2 },
+        CodeInput::Data(Term::Primitive(Primitive::Type)),
+    ));
+    signature.input_binders.insert(
+        2,
+        DeclarationParameter {
+            declaration: second,
+            sort: Sort::Type,
+        },
+    );
+    let colliding = Term::NormalForm {
+        head: DeclarationId {
+            package: 9,
+            local: 3,
+        },
+        sort: Sort::Type,
+        arguments: vec![Term::Rigid {
+            declaration: second,
+            sort: Sort::Type,
+        }],
+    };
+    assert!(
+        signature
+            .specialize_input(0, &colliding, &[], &mut 10000)
+            .is_err()
+    );
+    let completed = signature
+        .specialize_input(0, &Term::Primitive(Primitive::Bool), &[], &mut 10000)
+        .unwrap();
+    assert_eq!(completed.input_binders.len(), 1);
+    assert_eq!(completed.input_binders[&2].declaration, second);
+    assert_eq!(signature.input_binders.len(), 2);
+}
+
+#[test]
+fn simultaneous_binder_permutations_remain_valid() {
+    use nir::{
+        DeclarationParameter,
+        code_interfaces::{CodeFunctionSignature, CodeInput},
+    };
+    let a = DeclarationId {
+        package: 8,
+        local: 1,
+    };
+    let b = DeclarationId {
+        package: 8,
+        local: 2,
+    };
+    let make = |first, second| CodeFunctionSignature {
+        clause_domains: vec![],
+        input_binders: [
+            (
+                0,
+                DeclarationParameter {
+                    declaration: first,
+                    sort: Sort::Type,
+                },
+            ),
+            (
+                1,
+                DeclarationParameter {
+                    declaration: second,
+                    sort: Sort::Type,
+                },
+            ),
+        ]
+        .into_iter()
+        .collect(),
+        inputs: (0..2)
+            .map(|index| {
+                (
+                    LocalId { owner: 1, index },
+                    CodeInput::Data(Term::Primitive(Primitive::Type)),
+                )
+            })
+            .collect(),
+        output: Term::Tuple(vec![
+            Term::Rigid {
+                declaration: first,
+                sort: Sort::Type,
+            },
+            Term::Rigid {
+                declaration: second,
+                sort: Sort::Type,
+            },
+        ]),
+    };
+    let original = make(a, b);
+    let swapped = make(b, a);
+    let aligned = original
+        .align_input_binders(&swapped, &[], &mut 10000)
+        .unwrap();
+    assert_eq!(aligned.as_ref(), &swapped);
+    assert_eq!(original.output, make(a, b).output);
+}
