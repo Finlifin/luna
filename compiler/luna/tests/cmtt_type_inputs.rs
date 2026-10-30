@@ -138,3 +138,68 @@ fn open_code_bindings_retain_callable_declaration_domains_for_phase_checks() {
         fn run()->bool {pick(bool,true)}";
     assert_eq!(run(source, "run", vec![]), Value::Bool(true));
 }
+
+#[test]
+fn immutable_packets_preserve_type_values_in_contextual_calls() {
+    let source = "typealias Type=.Type'builtin;
+        comptime fn select_value(comptime T:Type,value:T)-><|-T> {'(value)}
+        comptime fn forward(comptime T:Type,value:T)-><|-T> {
+            const packet=(T,value);select_value(...packet)
+        }
+        fn run()->bool {~<forward(bool,true)> and ~<forward(.char'builtin,'p')> == 'p'}";
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn packet_type_evidence_flows_to_pattern_and_data_consumers() {
+    let source = "typealias Type=.Type'builtin;
+        comptime fn pattern(comptime T:Type)-><T -| value:T> {'<value>}
+        comptime fn inspect(comptime T:Type,item:T,code:<|-bool>)->T {item}
+        comptime fn forward(comptime T:Type,item:T)-><|-T> {
+            const packet=(T,item);const result=inspect(...packet,'(true));'(result)
+        }
+        comptime fn binding(comptime T:Type)-><T -| value:T> {
+            const packet=(T,);pattern(...packet)
+        }
+        fn run()->bool {let ~<binding(bool)> = ~<forward(bool,true)>;value}";
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn packet_evidence_does_not_execute_unknown_siblings() {
+    let source = "typealias Type=.Type'builtin;typealias Count=.Integer'builtin;
+        comptime fn select_value(comptime T:Type,value:T)-><|-T> {'(value)}
+        comptime fn forward()-><|-bool> {
+            var count:Count=0;
+            const packet=(bool,do {count+=1;true});
+            const code=select_value(...packet);
+            let once=count == 1;'(~<code> and once)
+        }
+        fn run()->bool {~<forward()>}";
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn unknown_packet_type_values_are_not_inferred_from_peer_arguments() {
+    let source = "typealias Type=.Type'builtin;
+        comptime fn select_value(comptime T:Type,value:T)-><|-T> {'(value)}
+        comptime fn forward(flag:bool)-><|-bool> {
+            const packet=(if flag {bool} else {.char'builtin},true);
+            select_value(...packet)
+        }
+        fn run()->bool {~<forward(true)>}";
+    let failure = support::compile_with_tuple_protocols(source, &Default::default()).unwrap_err();
+    assert!(
+        failure.contains("dependent contextual input requires a completed Type value"),
+        "{failure}"
+    );
+}

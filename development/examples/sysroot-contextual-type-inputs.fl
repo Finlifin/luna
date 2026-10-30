@@ -34,3 +34,25 @@ test {
     assumes not no;
     assumes letter == 'a';
 }
+
+{- A packet retains known Type fields while ordinary data remains invocation
+   work. Both generated expression and pattern interfaces use the same input.
+-}
+comptime fn packet_expression(comptime T: Type) -> <value: T |- T> {
+    const packet = (T,);
+    identity_code(...packet)
+}
+
+comptime fn packet_pattern(comptime T: Type) -> <T -| result: T> {
+    const packet = (T,);
+    binding_code(...packet)
+}
+
+test {
+    let input = true;
+    let ~<packet_pattern(bool)> = ~[value=input]<packet_expression(bool)>;
+    assumes result;
+    let input_letter = 'p';
+    let letter = ~[value=input_letter]<packet_expression(char)>;
+    assumes letter == 'p';
+}

@@ -6080,3 +6080,44 @@ Validation from `/home/fin/luna`:
   LLVM host pipeline, not an inline imitation of its primitive bindings.
 - Formatting: `/tmp/luna-tools-jywad5mo/result.json`, exit 0; final format and
   diff checks accompany the commit. No full workspace test run was performed.
+
+## Type evidence in contextual spread packets (2026-10-31)
+
+Contextual calls now retain known Type fields in checked spread packets. The
+same argument pipeline feeds expression generators, pattern generators and
+data consumers. Immutable aggregate initializers retain partial structural
+observations: an unknown ordinary-data sibling does not erase a known Type
+identity. Packet extraction reads these observations without invoking the
+producer or treating the field's Type domain as its value. The actual packet
+still executes once at its source position during invocation.
+
+Observations use the existing bounded partial-value analysis and are discarded
+with schema snapshots at writes, calls and address escape. This is conservative
+until alias-sensitive observations exist. A packet whose Type result remains
+unknown during definition checking is still rejected; inference from a peer
+argument cannot supply that missing value. Ordinary Type parameter default
+completion remains a separate unfinished stage.
+
+Validation from `/home/fin/luna`:
+
+- Before the fix, the two new expression/pattern/data packet tests failed with
+  `dependent contextual input requires a completed Type value`:
+  `/tmp/luna-tools-cdoy26a9/result.json`, exit 101.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt_type_inputs --test cmtt packet --no-fail-fast`:
+  `/tmp/luna-tools-zyda2yd5/result.json`, exit 0; 37 existing packet tests and
+  four new tests passed, including single evaluation and unknown-value refusal.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt_type_inputs --test cmtt --no-fail-fast`:
+  `/tmp/luna-tools-6tertmuf/result.json`, exit 101; 14 Type-input tests passed,
+  with 580 existing CMTT tests passing and only the same three documented
+  Type-list/layout baseline failures. No expectation or ignore was weakened.
+- The first real-sysroot example attempt rejected an undeclared quote context:
+  `/tmp/luna-tools-37o7hp02/result.json`, exit 1. The example now declares its
+  runtime context and supplies the substitution at the runtime use site.
+- Corrected public-interface example:
+  `python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-type-inputs.fl --sysroot library`:
+  `/tmp/luna-tools-xkobdik1/result.json`, exit 0; both LLVM native tests passed
+  against the complete sysroot, covering bool and char expression contexts
+  and pattern output bindings.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  `/tmp/luna-tools-r2ldjmm2/result.json`, exit 0. `git diff --check` passed.
+  No full workspace test run was performed.

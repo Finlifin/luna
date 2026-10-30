@@ -2433,6 +2433,9 @@ impl Checker<'_, '_> {
             .required_steps
             .checked_sub(self.generator_data.len() as u64)
             .ok_or_else(|| error(span, "generator schema invalidation budget exhausted"))?;
+        // Structural observations carry no alias proof. Invalidate them with
+        // the materialized schema snapshots at writes, calls and escapes.
+        self.partial_staged_bindings.clear();
         for value in self.generator_data.values_mut() {
             if value.as_ref().is_some_and(|value| {
                 matches!(
@@ -2736,6 +2739,7 @@ impl Checker<'_, '_> {
             ));
         }
         let mut known_types = if self.checking_code_generator && !decl.mutable {
+            self.record_observed_initializer(&pattern, &value, decl.span)?;
             self.known_pattern_types(&pattern, &value, decl.span)?
         } else {
             BTreeMap::new()

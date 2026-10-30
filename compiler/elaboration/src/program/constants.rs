@@ -1824,6 +1824,33 @@ impl Checker<'_, '_> {
         result.map_err(|message: String| error(span, message))
     }
 
+    /// Project Type identities from checked tuple evidence without evaluating
+    /// its producer. A field's Type domain alone never supplies its value.
+    pub(super) fn observed_tuple_type_inputs(
+        &mut self,
+        value: &n::Expr,
+        domains: &[Term],
+        span: Span,
+    ) -> Result<Vec<Option<Term>>, Error> {
+        let evidence = self.observed_tuple_elements(value, domains.len(), span)?;
+        let mut result = Vec::with_capacity(domains.len());
+        for (index, domain) in domains.iter().enumerate() {
+            let known = evidence.as_ref().and_then(|fields| fields.get(index));
+            let ty = if *domain == p(P::Type) {
+                match known.map(|field| &field.data) {
+                    Some(PartialStagedData::Known(ty)) if ty.sort() == Sort::Type => {
+                        Some(self.copy_alias_type(ty, span)?)
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            result.push(ty);
+        }
+        Ok(result)
+    }
+
     /// Ordinary iteration bindings still own storage and capture by the usual
     /// rules. Do not publish these facts as specialization inputs or substitute
     /// their executable local reads with constant expressions.
