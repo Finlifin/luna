@@ -186,6 +186,23 @@ impl Checker<'_, '_> {
         name: &str,
         span: Span,
     ) -> Result<Option<n::InterfaceInstance>, Error> {
+        let mut sources = self.inherited_member_sources(subject, root, name, span)?;
+        if sources.len() > 1 {
+            return Err(error(
+                span,
+                "ambiguous inherited member; specify its interface source",
+            ));
+        }
+        Ok(sources.pop())
+    }
+
+    fn inherited_member_sources(
+        &self,
+        subject: &Term,
+        root: &n::InterfaceInstance,
+        name: &str,
+        span: Span,
+    ) -> Result<Vec<n::InterfaceInstance>, Error> {
         let mut pending = vec![root.clone()];
         let frames = self.call_input_frames();
         let mut seen = HashSet::new();
@@ -226,13 +243,7 @@ impl Checker<'_, '_> {
                 }
             }
         }
-        if sources.len() > 1 {
-            return Err(error(
-                span,
-                "ambiguous inherited member; specify its interface source",
-            ));
-        }
-        Ok(sources.pop())
+        Ok(sources)
     }
     pub(super) fn default_interface(&self) -> Option<n::InterfaceInstance> {
         self.signature_owner
@@ -307,6 +318,25 @@ impl Checker<'_, '_> {
                 .is_some()
         }
     }
+    fn comptime_member_context(&self) -> bool {
+        self.in_required_comptime
+            || self.in_staged_input
+            || (!self.in_code_body
+                && self
+                    .captures
+                    .last()
+                    .map(|frame| frame.comptime)
+                    .unwrap_or_else(|| {
+                        self.signature_owner
+                            .and_then(|owner| self.package.item(owner))
+                            .is_some_and(|item| {
+                                matches!(&item.kind,
+                        ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)
+                        if sig.modifiers.is_comptime || sig.modifiers.is_normal_form_head)
+                            })
+                    }))
+    }
+
     pub(super) fn context_member_interface(
         &self,
         subject: &Term,
@@ -314,6 +344,8 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<Option<n::InterfaceInstance>, Error> {
         let mut sources = Vec::new();
+        let mut pending_sources = Vec::new();
+        let mut inherited_ambiguities = Vec::new();
         let frames = self.call_input_frames();
         for capability in crate::capabilities::capability_sources_with_layouts(
             &self.checked_traits,
@@ -325,29 +357,73 @@ impl Checker<'_, '_> {
         )
         .map_err(|message| error(span, message))?
         {
-            if capability.subject != *subject
-                && !matches!(
-                    self.context.prove(
-                        Formula::equal(capability.subject.clone(), subject.clone()),
-                        Budget::default()
-                    ),
-                    Outcome::Entailed(_)
-                )
-            {
-                continue;
+            let proven = if capability.subject == *subject {
+                true
+            } else {
+                match self.context.prove(
+                    Formula::equal(capability.subject.clone(), subject.clone()),
+                    Budget::default(),
+                ) {
+                    Outcome::Entailed(_) => true,
+                    Outcome::NotEntailed(_) => continue,
+                    Outcome::Unknown { .. } => false,
+                    Outcome::IllFormed(message) => return Err(error(span, message)),
+                }
+            };
+            let inherited = self.inherited_member_sources(
+                subject,
+                &capability.interface_instance(),
+                name,
+                span,
+            )?;
+            if proven && inherited.len() > 1 {
+                inherited_ambiguities.push(inherited.clone());
             }
-            if let Some(source) =
-                self.inherited_member_source(subject, &capability.interface_instance(), name, span)?
-            {
-                if !sources.iter().any(|old| self.same_interface(old, &source)) {
-                    sources.push(source);
+            for source in inherited {
+                let target = if proven {
+                    &mut sources
+                } else {
+                    &mut pending_sources
+                };
+                if !target.iter().any(|old| self.same_interface(old, &source)) {
+                    target.push(source);
                 }
             }
+        }
+        let comptime_only = |source: &n::InterfaceInstance| {
+            self.checked_traits.iter().any(|contract| {
+                contract.declaration == source.declaration && contract.comptime_only
+            })
+        };
+        if self.comptime_member_context() {
+            if sources.iter().chain(&pending_sources).any(comptime_only) {
+                sources.retain(comptime_only);
+                pending_sources.retain(comptime_only);
+            }
+        } else {
+            sources.retain(|source| !comptime_only(source));
+            pending_sources.retain(|source| !comptime_only(source));
+        }
+        if !pending_sources.is_empty() {
+            return Err(error(
+                span,
+                "capability member source remains unresolved; cannot select a fallback",
+            ));
         }
         if sources.len() > 1 {
             return Err(error(
                 span,
-                "ambiguous capability member; specify its interface source",
+                if inherited_ambiguities.iter().any(|group| {
+                    sources
+                        .iter()
+                        .filter(|source| group.iter().any(|old| self.same_interface(old, source)))
+                        .count()
+                        > 1
+                }) {
+                    "ambiguous inherited member; specify its interface source"
+                } else {
+                    "ambiguous capability member; specify its interface source"
+                },
             ));
         }
         Ok(sources.pop())

@@ -2,6 +2,17 @@
 
 list.fl 将列表操作 impl 到 meta.List；object.fl 提供有序 Object 查询与编辑；integer.fl 提供编译期整数操作。List 的编译器绑定 normal-form 头仍在包根，避免更改公开 meta.List 身份。
 
+## 可选值与错误限定值
+
+`ComptimeOptionalOps` 与 `ComptimeErrorResultOps` 已采用 `pure comptime trait`，
+成员无需逐项标注 phase。方法仍显式声明 `comptime fn`；接口限定不承诺无副作用。
+它们与 builtin 的 runtime 协议保留相同方法名，且拥有各自独立的接口身份。
+
+泛型约束同时提供两份接口时，comptime 正文优先选择仅限 comptime 的接口，
+runtime 正文采用普通接口；显式 `.as(Trait)` 保留指定来源。具体接收者的自动
+可见接口搜索尚未接通，目前仍用显式接口视角，或通过声明完整约束的泛型函数调用。
+真实 sysroot 用例见 `development/examples/sysroot-qualified-phases.fl`。
+
 ## 前缀累积
 
 `values.scan(initial, combine)` 返回依次处理每个元素后的状态；

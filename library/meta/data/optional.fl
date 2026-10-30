@@ -3,27 +3,16 @@
 
 use builtin.{Type, bool};
 
-pub trait ComptimeOptionalOps where T {
-
-    ^attrs.comptime_phase
+pub pure comptime trait ComptimeOptionalOps where T {
     comptime fn is_some(self) -> bool;
-    ^attrs.comptime_phase
     comptime fn is_none(self) -> bool;
-    ^attrs.comptime_phase
     comptime fn unwrap_or(self, fallback: T) -> T;
-    ^attrs.comptime_phase
     comptime fn unwrap_or_else(self, fallback: %c comptime fn() -> T) -> T where c: Type.vars.Closure;
-    ^attrs.comptime_phase
     comptime fn map(self, f: %c comptime fn(T) -> U) -> ?U where U, c: Type.vars.Closure;
-    ^attrs.comptime_phase
     comptime fn and_then(self, f: %c comptime fn(T) -> ?U) -> ?U where U, c: Type.vars.Closure;
-    ^attrs.comptime_phase
     comptime fn filter(self, pred: %c comptime fn(T) -> bool) -> ?T where c: Type.vars.Closure;
-    ^attrs.comptime_phase
     comptime fn inspect(self, observer: %c comptime fn(T)) -> ?T where c: Type.vars.Closure;
-    ^attrs.comptime_phase
     comptime fn or_else(self, fallback: %c comptime fn() -> ?T) -> ?T where c: Type.vars.Closure;
-    ^attrs.comptime_phase
     comptime fn zip_with(self, other: ?U, combine: %c comptime fn(T, U) -> V) -> ?V where U, V, c: Type.vars.Closure;
 }
 

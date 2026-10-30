@@ -814,3 +814,162 @@ fn comptime_only_child_requires_comptime_parent_contribution() {
         }
     }
 }
+
+#[test]
+fn comptime_capability_members_prefer_comptime_only_trait_in_either_bound_order() {
+    for bounds in ["Ordinary + Staged", "Staged + Ordinary"] {
+        let source = format!(
+            "
+            trait Ordinary {{comptime fn read(self)->bool;}}
+            pure comptime trait Staged {{comptime fn read(self)->bool;}}
+            struct Subject {{}}
+            impl Ordinary for Subject {{comptime fn read(self)->bool {{false}}}}
+            comptime impl Staged for Subject {{comptime fn read(self)->bool {{true}}}}
+            comptime fn choose(value:T)->bool where T :- {bounds} {{value.read()}}
+            comptime fn run()->bool {{choose(Subject {{}})}}
+        "
+        );
+        let package = support::compile(&source);
+        assert_eq!(
+            luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+            comptime_interpretor::Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn explicit_capability_source_and_definition_time_binding_keep_their_identity() {
+    for expression in ["value.as(Ordinary).read()", "value.read()"] {
+        let bounds = if expression.contains(".as(") {
+            "Ordinary + Staged"
+        } else {
+            "Ordinary"
+        };
+        let source = format!(
+            "
+            trait Ordinary {{comptime fn read(self)->bool;}}
+            pure comptime trait Staged {{comptime fn read(self)->bool;}}
+            struct Subject {{}}
+            impl Ordinary for Subject {{comptime fn read(self)->bool {{false}}}}
+            comptime impl Staged for Subject {{comptime fn read(self)->bool {{true}}}}
+            comptime fn choose(value:T)->bool where T :- {bounds} {{{expression}}}
+            comptime fn run()->bool {{choose(Subject {{}})}}
+        "
+        );
+        let package = support::compile(&source);
+        assert_eq!(
+            luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+            comptime_interpretor::Value::Bool(false)
+        );
+    }
+}
+
+#[test]
+fn same_tier_comptime_capability_sources_remain_ambiguous() {
+    for bounds in ["First + Second", "Second + First"] {
+        let source = format!(
+            "
+            pure comptime trait First {{comptime fn read(self)->bool;}}
+            pure comptime trait Second {{comptime fn read(self)->bool;}}
+            comptime fn choose(value:T)->bool where T :- {bounds} {{value.read()}}
+        "
+        );
+        let failure = compile(&source, Emit::Nir)
+            .err()
+            .expect("ambiguous sources");
+        assert!(failure.contains("ambiguous capability member"), "{failure}");
+    }
+}
+
+#[test]
+fn chosen_comptime_capability_source_does_not_fall_back_after_signature_failure() {
+    let source = "
+        trait Ordinary {comptime fn read(self)->bool;}
+        pure comptime trait Staged {comptime fn read(self, flag:bool)->bool;}
+        comptime fn choose(value:T)->bool where T :- Ordinary + Staged {value.read()}
+    ";
+    let failure = compile(source, Emit::Nir)
+        .err()
+        .expect("missing selected argument");
+    assert!(
+        !failure.contains("ambiguous capability member"),
+        "{failure}"
+    );
+    assert!(failure.contains("argument"), "{failure}");
+}
+
+#[test]
+fn runtime_capability_lookup_excludes_comptime_only_sources() {
+    let source = "
+        trait Ordinary {fn read(self)->bool;}
+        pure comptime trait Staged {fn read(self)->bool;}
+        fn choose(value:T)->bool where T :- Ordinary + Staged {value.read()}
+    ";
+    let Artifact::Nir(package) = compile(source, Emit::Nir).unwrap() else {
+        panic!()
+    };
+    let ordinary = package
+        .traits
+        .iter()
+        .find(|t| t.name == "Ordinary")
+        .unwrap();
+    let function = package
+        .functions
+        .iter()
+        .find(|f| f.name == "choose")
+        .unwrap();
+    assert!(
+        function.body.to_string().contains(&format!(
+            "(interface (interface-instance {}",
+            ordinary.declaration
+        )),
+        "{}",
+        function.body
+    );
+}
+
+#[test]
+fn member_phase_attribute_does_not_grant_interface_source_priority() {
+    let source = phase_source(
+        "
+        trait Ordinary {comptime fn read(self)->bool;}
+        trait StagedMember {^staged comptime fn read(self)->bool;}
+        comptime fn choose(value:T)->bool where T :- Ordinary + StagedMember {value.read()}
+    ",
+    );
+    let failure = compile(&source, Emit::Nir).err().expect("same source tier");
+    assert!(failure.contains("ambiguous capability member"), "{failure}");
+}
+
+#[test]
+fn implicit_inherited_sources_use_priority_but_explicit_parent_view_keeps_ambiguity() {
+    let prefix = "
+        trait Ordinary {comptime fn read(self)->bool;}
+        pure comptime trait Staged {comptime fn read(self)->bool;}
+        pure comptime trait Child :- Ordinary + Staged {}
+    ";
+    compile(
+        &format!("{prefix} comptime fn choose(value:T)->bool where T :- Child {{value.read()}}"),
+        Emit::Nir,
+    )
+    .unwrap();
+    let failure = compile(
+        &format!(
+            "{prefix} comptime fn choose(value:T)->bool where T :- Child {{value.as(Child).read()}}"
+        ),
+        Emit::Nir,
+    )
+    .err()
+    .expect("explicit ambiguity");
+    assert!(failure.contains("ambiguous inherited member"), "{failure}");
+}
+
+#[test]
+fn quoted_runtime_member_lookup_does_not_inherit_its_generator_stage() {
+    let source = "
+        trait Ordinary {fn read(self)->bool;}
+        pure comptime trait Staged {fn read(self)->bool;}
+        comptime fn build()-><value:T|-bool> where T :- Ordinary + Staged {'(value.read())}
+    ";
+    compile(source, Emit::Nir).unwrap();
+}

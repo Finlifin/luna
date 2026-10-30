@@ -3,25 +3,15 @@
 
 use builtin.{Type, bool};
 
-pub trait ComptimeErrorResultOps where T, E {
-
-    ^attrs.comptime_phase
+pub pure comptime trait ComptimeErrorResultOps where T, E {
     comptime fn is_ok(self) -> bool;
-    ^attrs.comptime_phase
     comptime fn is_err(self) -> bool;
-    ^attrs.comptime_phase
     comptime fn inspect(self, observer: %c comptime fn(T)) -> !E T where c: Type.vars.Closure;
-    ^attrs.comptime_phase
     comptime fn inspect_err(self, observer: %c comptime fn(E)) -> !E T where c: Type.vars.Closure;
-    ^attrs.comptime_phase
     comptime fn map(self, f: %c comptime fn(T) -> U) -> !E U where U, c: Type.vars.Closure;
-    ^attrs.comptime_phase
     comptime fn map_err(self, f: %c comptime fn(E) -> F) -> !F T where F, c: Type.vars.Closure;
-    ^attrs.comptime_phase
     comptime fn and_then(self, f: %c comptime fn(T) -> !E U) -> !E U where U, c: Type.vars.Closure;
-    ^attrs.comptime_phase
     comptime fn or_else(self, f: %c comptime fn(E) -> !F T) -> !F T where F, c: Type.vars.Closure;
-    ^attrs.comptime_phase
     comptime fn unwrap_or_else(self, fallback: %c comptime fn(E) -> T) -> T where c: Type.vars.Closure;
 }
 

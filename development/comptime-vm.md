@@ -5471,3 +5471,51 @@ Validation from `/home/fin/luna`, exit 0:
   `/tmp/luna-tools-v1qiaipm/result.json`.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
   `/tmp/luna-tools-vb42j4jk/result.json`; `git diff --check` passed.
+
+### Capability-source priority and qualified-value protocols (2026-10-31)
+
+Unqualified member lookup from declared capability evidence now prefers
+comptime-only interfaces in comptime expressions. Runtime expressions exclude
+those sources. The stage includes closure capture frames, required computations,
+and quoted-runtime boundaries, rather than just the enclosing function modifier.
+Inherited sources are collected before tier selection; explicit views still
+require a unique inherited source without applying implicit priority. Same-tier
+ambiguity and complete interface-instance identity remain intact. Unknown subject
+matching retains a pending source instead of authorizing fallback; source query
+errors and budgets propagate. Once selected, signature errors do not trigger
+another source search. Generic instantiation retains definition-time selection.
+
+Meta's ComptimeOptionalOps and ComptimeErrorResultOps are now pure comptime traits,
+without redundant member attributes. The actual sysroot example exercises both
+interfaces through generic functions with both runtime and comptime bounds,
+plus explicit views, callback behavior and native execution. No compiler special
+case identifies these library protocols by name.
+
+This implements priority among declared capability sources. Concrete receiver
+lookup still needs a visibility-aware trait candidate collection and interface
+argument inference path; direct calls there still need an explicit view. Deferred
+parent-phase evidence remains separate unfinished work. No claim is made that
+all unqualified trait lookup or the whole feature is complete.
+
+Validation from `/home/fin/luna`, exit 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test trait_phases`:
+  45 tests; `/tmp/luna-tools-1uw2fm9s/result.json`. Includes bound order, same-tier
+  ambiguity, ordinary member attributes, explicit views, definition stability,
+  signature failure, inherited sources and quoted runtime stage selection.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test elaboration inherited_`:
+  four tests; `/tmp/luna-tools-kc5izsm0/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test elaboration capability`:
+  five tests; `/tmp/luna-tools-_grqi8v_/result.json`.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- development/examples/sysroot-qualified-phases.fl --sysroot library --test-native`:
+  one native test; `/tmp/luna-tools-4mwvgwo2/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes complete_shipped_sysroot_invokes_comptime_qualified_type_traits`:
+  one test; `/tmp/luna-tools-jkta3ypq/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  `/tmp/luna-tools-kx30t884/result.json`; `git diff --check` passed.
+
+During development, inherited ambiguity initially lost its specific diagnostic;
+source grouping now preserves it after tier filtering. Initial fixture failures
+used an unavailable assert API and a call directly inside assumes; the final
+example evaluates the runtime call first and checks its bound result. These
+failures were repaired before the passing native and sysroot checks above.

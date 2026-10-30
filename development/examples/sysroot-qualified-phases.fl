@@ -5,6 +5,32 @@ comptime fn invert(value: bool) -> bool { not value }
 comptime fn forbidden() -> bool { assumes false; false }
 comptime fn recover(failure: u8) -> bool { failure == 7 }
 
+{- Both protocols are available in these generic definitions. The expression
+   stage selects the interface; instantiation keeps that selected identity. -}
+comptime fn staged_presence(value: T) -> bool
+where T :- OptionalOps<bool> + ComptimeOptionalOps<bool>
+{
+    value.is_some()
+}
+
+fn runtime_presence(value: T) -> bool
+where T :- OptionalOps<bool> + ComptimeOptionalOps<bool>
+{
+    value.is_some()
+}
+
+comptime fn staged_success(value: T) -> bool
+where T :- ErrorResultOps<bool, u8> + ComptimeErrorResultOps<bool, u8>
+{
+    value.is_ok()
+}
+
+fn runtime_success(value: T) -> bool
+where T :- ErrorResultOps<bool, u8> + ComptimeErrorResultOps<bool, u8>
+{
+    value.is_ok()
+}
+
 comptime fn inspect() -> bool {
     let present: ?bool = true;
     let absent: ?bool = null;
@@ -12,7 +38,8 @@ comptime fn inspect() -> bool {
     let failure: !u8 bool = error 7;
     let mapped = present.as(ComptimeOptionalOps<bool>).map(invert);
     let flipped = success.as(ComptimeErrorResultOps<bool, u8>).map(invert);
-    present.as(ComptimeOptionalOps<bool>).unwrap_or_else(forbidden)
+    staged_presence(present) and staged_success(success)
+        and present.as(ComptimeOptionalOps<bool>).unwrap_or_else(forbidden)
         and absent.as(ComptimeOptionalOps<bool>).is_none()
         and not mapped.as(ComptimeOptionalOps<bool>).unwrap_or(true)
         and not flipped.as(ComptimeErrorResultOps<bool, u8>).unwrap_or_else(recover)
@@ -22,6 +49,11 @@ comptime fn inspect() -> bool {
 fn run() -> bool {
     let present: ?bool = true;
     let success: !u8 bool = true;
-    present.as(OptionalOps<bool>).is_some()
-        and success.as(ErrorResultOps<bool, u8>).is_ok()
+    runtime_presence(present) and runtime_success(success)
+}
+
+test {
+    const staged = inspect();
+    let runtime = run();
+    assumes staged and runtime;
 }
