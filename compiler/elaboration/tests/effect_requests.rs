@@ -326,3 +326,73 @@ fn request_substitution_expansion_is_bounded_before_copying_result_dependencies(
         )
     );
 }
+
+#[test]
+fn formation_completes_dependent_input_domains_before_substitution() {
+    use nir::program::TypePredicate;
+    let t = Term::Rigid {
+        declaration: id(10),
+        sort: Sort::Type,
+    };
+    let input = Term::Rigid {
+        declaration: id(11),
+        sort: Sort::ComptimeValue,
+    };
+    let nominal = |arguments| Term::Nominal {
+        declaration: id(12),
+        arguments,
+    };
+    let expected = nominal(vec![ty(P::Type), ty(P::Bool)]);
+    let mut operation = declaration(vec![], nominal(vec![t.clone(), input.clone()]));
+    operation.type_parameters = vec![id(10), id(11)];
+    operation.parameter_types = vec![ty(P::Type), t.clone()];
+    operation.requirements = vec![TypePredicate::Equal(
+        nominal(vec![t, input]),
+        expected.clone(),
+    )];
+    let index = Index::default();
+    let mut context = Context::default();
+    context.admit_nominal_constructor(id(12));
+    let world = world(&index, &context);
+    let arguments = [ty(P::Type), ty(P::Bool)];
+    let formed = instantiate(&operation, &arguments, &world, Budget::default()).unwrap();
+    assert_eq!(
+        formed.signature(),
+        &Term::Function {
+            parameters: vec![],
+            result: Box::new(expected)
+        }
+    );
+    assert_eq!(formed.operation().arguments, arguments);
+    assert!(matches!(
+        instantiate(
+            &operation,
+            &[ty(P::Bool), ty(P::Type)],
+            &world,
+            Budget::default()
+        ),
+        Err(Error::InvalidInput)
+    ));
+    assert!(matches!(
+        instantiate(
+            &operation,
+            &[ty(P::Type), ty(P::Char)],
+            &world,
+            Budget::default()
+        ),
+        Err(Error::FormationNotEstablished)
+    ));
+    assert!(matches!(
+        instantiate(
+            &operation,
+            &arguments,
+            &world,
+            Budget {
+                steps: 1,
+                max_depth: 1
+            }
+        ),
+        Err(Error::BudgetExhausted)
+    ));
+    assert!(instantiate(&operation, &arguments, &world, Budget::default()).is_ok());
+}

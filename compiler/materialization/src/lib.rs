@@ -2622,11 +2622,7 @@ impl Builder<'_> {
                         )
                         .map_err(|e| e.to_string())?;
                         let signature = declaration
-                            .signature
-                            .instantiate_parameters(
-                                &declaration.parameter_binders().map_err(|e| e.to_string())?,
-                                &operation.arguments,
-                            )
+                            .instantiate_signature(&operation.arguments, &mut self.fuel)
                             .map_err(|e| e.to_string())?;
                         let abi = declaration.abi;
                         let signature = self.normalized_type(&signature)?;

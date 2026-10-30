@@ -6605,3 +6605,56 @@ fn dependent_call_staging_combines_ordinary_type_arguments() {
         fn run()->bool {select(bool,Tagged<Type,bool>{value:true},true)}";
     assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
 }
+
+#[test]
+fn dependent_effect_inputs_infer_type_valued_indices() {
+    let source = "typealias Type=.Type'builtin;
+        struct Tagged where T,index:T {value:bool}
+        effect read(value:Tagged<T,index>)->bool where T,index:T;
+        fn run()->bool {read(Tagged<Type,bool>{value:true})# {read<Type,bool>(value)=>value.value,}}";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    let wrong = source.replace("read<Type,bool>(value)", "read<Type,Type>(value)");
+    assert!(support::compile_with_protocols(&wrong, &Default::default()).is_err());
+    let explicit = source.replace("{read(Tagged", "{read<Type,bool>(Tagged");
+    assert_eq!(
+        support::run_iir(&explicit, "run", vec![]),
+        Value::Bool(true)
+    );
+    let group = source
+        .replace(
+            "effect read(value:Tagged<T,index>)->bool where T,index:T;",
+            "effect enum Channel where T,index:T {read(value:Tagged<T,index>)->bool,}",
+        )
+        .replace("{read(Tagged", "{Channel.read(Tagged")
+        .replace("read<Type,bool>(value)", "Channel<Type,bool>.read(value)");
+    assert_eq!(support::run_iir(&group, "run", vec![]), Value::Bool(true));
+    let scalar = source
+        .replace("Tagged<Type,bool>", "Tagged<bool,true>")
+        .replace("read<Type,bool>", "read<bool,true>");
+    assert_eq!(support::run_iir(&scalar, "run", vec![]), Value::Bool(true));
+    let constrained = source.replace(
+        "where T,index:T;",
+        "where T,index:T, requires Tagged<T,index> == Tagged<Type,bool>;",
+    );
+    assert_eq!(
+        support::run_iir(&constrained, "run", vec![]),
+        Value::Bool(true)
+    );
+    let wrong_requirement = constrained
+        .replace("read(Tagged<Type,bool>", "read(Tagged<Type,Type>")
+        .replace("read<Type,bool>(value)", "read<Type,Type>(value)");
+    assert!(support::compile_with_protocols(&wrong_requirement, &Default::default()).is_err());
+}
+
+#[test]
+fn dependent_effect_inputs_use_result_context_and_group_defaults() {
+    let source = "typealias Type=.Type'builtin;
+        struct Tagged where T,index:T {value:bool}
+        effect enum Channel where T,index:T,.copy:T=index {read()->Tagged<T,index>,}
+        fn request()->#[Channel<Type,bool>.read] Tagged<Type,bool> {Channel.read()#}
+        fn run()->bool {
+            let value=request()# {Channel<Type,bool>.read()=>Tagged<Type,bool>{value:true},};
+            value.value
+        }";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+}

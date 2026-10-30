@@ -80,6 +80,10 @@ impl Checker<'_, '_> {
                 .abstract_parameters(&self.input_binders(&binders))
                 .map_err(|e| error(span, e.to_string()))?,
         };
+        let input_domains = binders
+            .iter()
+            .map(|id| self.trait_input_domain(*id).unwrap_or_else(|| p(P::Type)))
+            .collect::<Vec<_>>();
         let caller_scope = self.call_inference_domains();
         let mut checked: Vec<Option<n::Expr>> = vec![None; inputs.len()];
         let mut defaults = BTreeMap::new();
@@ -89,7 +93,9 @@ impl Checker<'_, '_> {
                 .map(|value| value.as_ref().and_then(arguments::inference_type).cloned())
                 .collect();
             let mut candidate = scheme
-                .infer_sparse_scoped_types_mode(
+                .infer_declared_sparse_types_mode(
+                    &binders,
+                    &input_domains,
                     &actual,
                     expected,
                     None,

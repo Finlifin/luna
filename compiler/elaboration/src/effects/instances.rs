@@ -148,15 +148,9 @@ pub fn instantiate_with_evidence<'a, 'w>(
     for domain in &declaration.parameter_types {
         charge(domain, &mut fuel, depth)?;
     }
-    let binders =
-        nir::declaration_parameters(&declaration.type_parameters, &declaration.parameter_types)
-            .map_err(|_| Error::InvalidInput)?;
     let before = fuel;
-    for (argument, binder) in arguments.iter().zip(&binders) {
+    for argument in arguments {
         charge(argument, &mut fuel, depth)?;
-        if argument.sort() != binder.sort {
-            return Err(Error::InvalidInput);
-        }
         argument.check_scope(&[]).map_err(|_| Error::InvalidInput)?;
     }
     let argument_cost = before - fuel;
@@ -174,6 +168,17 @@ pub fn instantiate_with_evidence<'a, 'w>(
         } else {
             Error::InvalidInput
         }
+    })?;
+    let substitution = nir::DeclarationSubstitution::bounded(
+        &declaration.type_parameters,
+        &declaration.parameter_types,
+        arguments,
+        &[],
+        &mut fuel,
+    )
+    .map_err(|error| match error {
+        nir::type_computations::Error::Budget => Error::BudgetExhausted,
+        _ => Error::InvalidInput,
     })?;
     let before = fuel;
     charge(&declaration.signature, &mut fuel, depth)?;
@@ -214,24 +219,26 @@ pub fn instantiate_with_evidence<'a, 'w>(
         .signature
         .check_scope(&[])
         .map_err(|_| Error::InvalidInput)?;
-    let signature = declaration
-        .signature
-        .instantiate_parameters(&binders, arguments)
+    let signature = substitution
+        .instantiate(&declaration.signature)
         .map_err(|_| Error::InvalidInput)?;
     let mut predicates = declaration
         .requirements
         .iter()
         .map(|predicate| {
-            predicate
-                .instantiate_parameters(&binders, arguments)
+            substitution
+                .instantiate_predicate(predicate)
                 .map_err(|_| Error::InvalidInput)
         })
         .collect::<Result<Vec<_>, _>>()?;
     for requirement in &declaration.capabilities {
         predicates.push(TypePredicate::Trait(
-            requirement
-                .instantiate_parameters(&binders, arguments)
-                .map_err(|_| Error::InvalidInput)?,
+            substitution
+                .instantiate_requirement_bounded(requirement, &mut fuel)
+                .map_err(|error| match error {
+                    nir::type_computations::Error::Budget => Error::BudgetExhausted,
+                    _ => Error::InvalidInput,
+                })?,
         ));
     }
     // Composition may be deeper than either template or arguments alone.

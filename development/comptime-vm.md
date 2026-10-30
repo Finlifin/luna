@@ -3805,3 +3805,38 @@ Validation in /home/fin/luna:
 Remaining scope: effect input inference, spread-specific inference and CMTT
 entrypoints still contain fixed-sort Scheme consumers. This is not a claim that
 all dependent inference paths are complete.
+
+### Effect formation and inference complete dependent Type inputs
+
+Effect request inference now uses declaration-domain staging. Formation admits
+arguments against completed domains and specializes signatures, type predicates
+and capability requirements through DeclarationSubstitution; it no longer rejects
+Type-valued indices solely because their source binder was comptime-value.
+
+A shared bounded effect-signature specialization method is used by IIR
+materialization and memory/move effect analysis. Formation, allowed-row identity,
+handler routing, ABI restrictions and resource obligations remain distinct
+checks. The initial source reproduction failed during formation in
+`/tmp/luna-tools-wi4stvme/result.json`; after fixing formation it reached the
+fixed-sort materialization failure in `/tmp/luna-tools-nphe29u1/result.json`.
+
+Defaults now wait for parameter-domain dependencies as well as expression reads.
+The effect-group result-context case exposed the missing T dependency of a
+`.copy:T=index` default in `/tmp/luna-tools-hdq_r4mn/result.json`. Completing the
+shared dependency calculation fixes this without treating the installed handler
+row as an inference source.
+
+Source cases execute inferred and explicit operations, effect groups, scalar
+indices, result context and dependent group defaults. They reject a different
+handler identity and a false declaration requirement. Formation tests check
+completed signature identity, invalid domains, false predicates, exhausted
+budgets and recovery. This does not integrate spread-specific or CMTT inference
+consumers with domain staging.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p elaboration -p materialization -p program_verification`:
+  exit 0, `/tmp/luna-tools-xy5j590t/result.json`, no exclusions.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test default_calls --test effect_contracts --test effect_spreads --test effect_memory_transfers --test sysroot_preludes`:
+  exit 0, `/tmp/luna-tools-49f0s0iu/result.json`, no exclusions.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-up0nigo1/result.json`; `git diff --check`: exit 0.

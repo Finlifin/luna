@@ -865,7 +865,17 @@ impl<'h> Checker<'_, 'h> {
         let result = (|| {
             let domain = self.type_expr(domain)?;
             if domain != p(P::Type) {
-                let dependencies = std::cell::RefCell::new(BTreeSet::new());
+                // A default needs its domain as well as the values read by its
+                // expression. In particular, index:T can become a Type input
+                // only after T is supplied; substituting index alone loses that
+                // domain evidence.
+                let dependencies = std::cell::RefCell::new(
+                    inferred
+                        .iter()
+                        .copied()
+                        .filter(|id| domain.mentions_rigid(*id))
+                        .collect::<BTreeSet<_>>(),
+                );
                 super::required::signature_inputs_ready_with_clauses(value, 0, &|_| true, &|id| {
                     let id = DeclarationId {
                         package: semantic_package(&self.package_identities, id.pkg),

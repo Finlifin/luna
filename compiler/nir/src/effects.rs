@@ -108,6 +108,23 @@ impl Declaration {
     pub fn parameter_binders(&self) -> Result<Vec<crate::DeclarationParameter>, crate::TypeError> {
         crate::declaration_parameters(&self.type_parameters, &self.parameter_types)
     }
+
+    /// Specialize a closed operation signature using completed input domains.
+    /// Formation contracts and value admission are checked separately.
+    pub fn instantiate_signature(
+        &self,
+        arguments: &[Term],
+        fuel: &mut usize,
+    ) -> Result<Term, crate::type_computations::Error> {
+        crate::DeclarationSubstitution::bounded(
+            &self.type_parameters,
+            &self.parameter_types,
+            arguments,
+            &[],
+            fuel,
+        )?
+        .instantiate_bounded(&self.signature, fuel)
+    }
 }
 impl fmt::Display for Declaration {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

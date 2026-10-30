@@ -2663,13 +2663,7 @@ pub fn effect_result_slots(
             crate::associated::charge_projection_copy(arg, fuel).map_err(|e| error(source, e))?;
         }
         let signature = declaration
-            .signature
-            .instantiate_parameters(
-                &declaration
-                    .parameter_binders()
-                    .map_err(|e| error(source, e.to_string()))?,
-                &operation.arguments,
-            )
+            .instantiate_signature(&operation.arguments, fuel)
             .map_err(|e| error(source, e.to_string()))?;
         let Term::Function { parameters, result } = signature else {
             return Err(error(source, "effect result signature missing"));

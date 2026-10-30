@@ -423,11 +423,7 @@ pub(super) fn validate_inputs(
         }
         bound_type(&declaration.signature, fuel)?;
         let signature = declaration
-            .signature
-            .instantiate_parameters(
-                &declaration.parameter_binders().map_err(|e| e.to_string())?,
-                &input.operation.arguments,
-            )
+            .instantiate_signature(&input.operation.arguments, fuel)
             .map_err(|e| e.to_string())?;
         bound_type(&signature, fuel)?;
         if declaration.abi != input.abi || signature != input.signature {
@@ -1042,11 +1038,7 @@ impl<'a> Infer<'a, '_> {
                     bound_type(argument, self.fuel)?;
                 }
                 let signature = declaration
-                    .signature
-                    .instantiate_parameters(
-                        &declaration.parameter_binders().map_err(|e| e.to_string())?,
-                        &operation.arguments,
-                    )
+                    .instantiate_signature(&operation.arguments, self.fuel)
                     .map_err(|e| e.to_string())?;
                 bound_type(&signature, self.fuel)?;
                 if !data_passing_signature(self.package, &signature, self.fuel)? {
