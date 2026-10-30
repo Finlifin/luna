@@ -72,3 +72,39 @@ Type 参数也可供 requires 中的描述函数调用使用，例如先声明
 再约束 `Layout<describe(T)> == Layout<[Descriptor {kind: T}]>`。
 这里比较的是两个 Type；描述数据只是构造 Type 的输入，不会把程序状态命题
 交给 PTC。不同描述实参也不能反过来证明不透明工厂的结果不等。
+
+## Object 描述的 enum 具名 payload
+
+`EnumBuilder` 与 `StructBuilder` 共享有序字段描述解析，不需要为 enum 手工
+维护名字／Type 两份列表：
+
+- `add_named_from_object(name, fields, .group = []) -> bool` 追加一个具名 variant。
+- `insert_named_from_object(index, name, fields, .group = []) -> bool` 在声明顺序位置插入。
+- `replace_named_from_object(index, name, fields, .group = []) -> bool` 替换指定 variant。
+
+```flurry
+comptime fn EventType() -> Type {
+    let draft = meta.EnumBuilder.new(.name = .Event);
+    draft.add_group(.net);
+    let accepted = draft.add_named_from_object(.packet,
+        {ready: bool, count: u32}, .group = [.net]);
+    assumes accepted;
+    draft.Build()
+}
+
+typealias Event = EventType();
+```
+
+所有条目必须具名且值属于 Type 域。位置项、普通值和 `?Type` 值返回 false；
+非法插入／替换位置也返回 false。解析和范围检查在修改草稿前完成，失败保留
+原有 variant、payload 和分组，允许随后修复；已经保存的草稿快照不受影响。
+空 Object 生成空的 **named** payload，不自动改为 unit variant。
+
+描述保留字段顺序、重复名字和 normal-form Type 身份。成功返回只表示草稿
+编辑完成；Build 仍检查重复字段、分组路径和 runtime 存储合法性。不会自动
+创建 `.group` 指定的分组，也不把发布错误或预算耗尽改成 false。
+共享解析位于 `definitions/fields.fl`，没有另加原始 builtin 访问或编译器特判。
+
+真实 sysroot 示例：`development/examples/sysroot-object-enum-builder.fl`。
+运行 `python3 -B development/library_check.py --stage sysroot-object-enum-builder`
+可检查生成类型的构造、空 named payload 和带分组的 pattern matching。

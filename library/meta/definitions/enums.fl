@@ -2,6 +2,8 @@ use bindings;
 use builtin.{Integer, Symbol, Type};
 
 use List;
+use bindings.Object;
+use definitions.fields.FieldDescription;
 
 {-
   A concrete enum draft. Variant paths and groups retain declaration order;
@@ -55,6 +57,36 @@ impl EnumBuilder {
         self.shapes.append(.named);
         self.field_names.append(names);
         self.field_types.append(fields);
+    }
+
+    {-
+        Named payloads can use ordered Object field descriptions. Parse the
+        entire description before editing the draft. Invalid descriptions or
+        indices leave it unchanged; Build still checks duplicate field names,
+        group paths and runtime storage admissibility.
+    -}
+    pub comptime fn add_named_from_object(self, name: Symbol, fields: Object,
+        .group: List<Symbol> = []) -> bool {
+        let end = self.variant_names.length();
+        self.insert_named_from_object(end, name, fields, .group = group)
+    }
+
+    pub comptime fn insert_named_from_object(self, index: Integer, name: Symbol,
+        fields: Object, .group: List<Symbol> = []) -> bool {
+        let description = FieldDescription.from_object(fields) match {
+            value? => value,
+            null => return false,
+        };
+        self.insert_named(index, name, description.names, description.types, .group = group)
+    }
+
+    pub comptime fn replace_named_from_object(self, index: Integer, name: Symbol,
+        fields: Object, .group: List<Symbol> = []) -> bool {
+        let description = FieldDescription.from_object(fields) match {
+            value? => value,
+            null => return false,
+        };
+        self.replace_named(index, name, description.names, description.types, .group = group)
     }
 
     {-

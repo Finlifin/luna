@@ -1,0 +1,34 @@
+use builtin.{Integer, Symbol, Type};
+use List;
+use bindings.Object;
+
+{- Shared, unpublished field descriptions. Parsing preserves entry order and
+   duplicate names; checked definition publication validates storage and names.
+-}
+pub struct FieldDescription {
+    names: List<Symbol>,
+    types: List<Type>,
+}
+
+impl FieldDescription {
+    pub comptime fn from_object(fields: Object) -> ?Self {
+        var names: List<Symbol> = [];
+        var types: List<Type> = [];
+        let length = fields.length();
+        var index: Integer = 0;
+        while index < length {
+            let name = fields.key(index) match {
+                name? => name,
+                null => return null,
+            };
+            let field_type = fields.value<Type>(index) match {
+                T? => T,
+                null => return null,
+            };
+            names.append(name);
+            types.append(field_type);
+            index += 1;
+        };
+        Self { names: names, types: types }
+    }
+}

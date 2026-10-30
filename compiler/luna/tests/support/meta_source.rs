@@ -15,6 +15,7 @@ concat!(
     "} mod reflection {mod structure {\n",
     include_str!("../../../../library/meta/reflection/structure.fl"), "\n}}\n",
     "mod definitions {\n",
+    "mod fields {\n", include_str!("../../../../library/meta/definitions/fields.fl"), "\n}\n",
     "mod structs {\n", include_str!("../../../../library/meta/definitions/structs.fl"), "\n}\n",
     "mod enums {\n", include_str!("../../../../library/meta/definitions/enums.fl"), "\n}\n",
     "}\n",

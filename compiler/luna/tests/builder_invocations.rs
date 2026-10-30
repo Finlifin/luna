@@ -2794,3 +2794,75 @@ fn struct_builder_object_duplicates_reach_checked_publication() {
         .expect("duplicate fields must fail");
     assert!(error.contains("duplicate"), "{error}");
 }
+
+#[test]
+fn enum_builder_object_payloads_preserve_order_groups_and_type_identity() {
+    let fixture = Fixture::new(
+        "typealias Type = .Type'builtin;
+        pure comptime fn Identity<T> -> Type { T }
+        comptime fn inspect() -> bool {
+            let draft = meta.EnumBuilder.new();
+            draft.add_group(.net);
+            let added = draft.add_named_from_object(.packet,
+                {flag: bool, wrapped: Identity<bool>}, .group = [.net]);
+            let snapshot = draft;
+            let inserted = draft.insert_named_from_object(0, .empty, {});
+            let replaced = draft.replace_named_from_object(1, .data,
+                {wrapped: Identity<bool>, ready: bool}, .group = [.net]);
+            let result = draft.Build();
+            let paths = result.enum_variant_paths();
+            let names = result.enum_variant_field_names();
+            let types = result.enum_variant_field_types();
+            let old = snapshot.Build();
+            added and inserted and replaced and paths.length() == 2
+                and paths[0][0] == .empty and paths[1][0] == .net and paths[1][1] == .data
+                and names[0].length() == 0 and names[1][0] == .wrapped and names[1][1] == .ready
+                and types[1][0] == Identity<bool> and types[1][1] == bool
+                and old.enum_variant_paths().length() == 1
+                and old.enum_variant_field_names()[0][0] == .flag
+        }",
+    );
+    assert_eq!(fixture.invoke_meta("inspect").unwrap().1, Value::Bool(true));
+}
+
+#[test]
+fn enum_builder_object_payload_rejection_preserves_the_draft() {
+    let fixture = Fixture::new(
+        "typealias Type = .Type'builtin;
+        comptime fn inspect() -> bool {
+            let draft = meta.EnumBuilder.new();draft.add_unit(.original);
+            let a = draft.add_named_from_object(.bad, {accepted: bool, true});
+            let b = draft.replace_named_from_object(0, .bad, {accepted: bool, wrong: true});
+            let optional: ?Type = bool;
+            let c = draft.insert_named_from_object(0, .bad, {wrapped: optional});
+            let d = draft.insert_named_from_object(-1, .bad, {});
+            let e = draft.replace_named_from_object(1, .bad, {});
+            let original = draft.Build();
+            let recovered = draft.add_named_from_object(.empty, {});
+            not a and not b and not c and not d and not e
+                and original.enum_variant_paths().length() == 1
+                and original.enum_variant_paths()[0][0] == .original
+                and original.enum_variant_shapes()[0] == .unit
+                and recovered and draft.Build().enum_variant_paths().length() == 2
+        }",
+    );
+    assert_eq!(fixture.invoke_meta("inspect").unwrap().1, Value::Bool(true));
+}
+
+#[test]
+fn enum_builder_object_payload_duplicates_reach_checked_publication() {
+    let fixture = Fixture::new(
+        "typealias Type = .Type'builtin;
+        comptime fn Build() -> Type {
+            let draft = meta.EnumBuilder.new();
+            let accepted = draft.add_named_from_object(.packet, {flag: bool, flag: bool});
+            if not accepted { return bool; };
+            draft.Build()
+        }",
+    );
+    let error = fixture
+        .invoke_meta("Build")
+        .err()
+        .expect("duplicate fields must fail");
+    assert!(error.contains("duplicate"), "{error}");
+}

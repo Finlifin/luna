@@ -3,6 +3,7 @@ use builtin.{Integer, Symbol, Type};
 
 use List;
 use bindings.Object;
+use definitions.fields.FieldDescription;
 
 {-
   Private construction data for a concrete struct. Fields retain their supplied
@@ -39,24 +40,11 @@ impl StructBuilder {
     }
 
     pub comptime fn add_fields_from_object(self, fields: Object) -> bool {
-        var names: List<Symbol> = [];
-        var types: List<Type> = [];
-        let length = fields.length();
-        var index: Integer = 0;
-        while index < length {
-            let name = fields.key(index) match {
-                name? => name,
-                null => return false,
-            };
-            let field_type = fields.value<Type>(index) match {
-                T? => T,
-                null => return false,
-            };
-            names.append(name);
-            types.append(field_type);
-            index += 1;
+        let description = FieldDescription.from_object(fields) match {
+            value? => value,
+            null => return false,
         };
-        self.add_fields(names, types)
+        self.add_fields(description.names, description.types)
     }
 
     pub comptime fn add_field(self, name: Symbol, field_type: Type) {
