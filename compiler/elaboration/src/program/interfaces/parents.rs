@@ -203,13 +203,29 @@ impl Checker<'_, '_> {
         name: &str,
         span: Span,
     ) -> Result<Vec<n::InterfaceInstance>, Error> {
+        self.inherited_member_sources_metered(
+            subject,
+            root,
+            name,
+            span,
+            &mut Budget::default().steps,
+        )
+    }
+
+    pub(super) fn inherited_member_sources_metered(
+        &self,
+        subject: &Term,
+        root: &n::InterfaceInstance,
+        name: &str,
+        span: Span,
+        fuel: &mut usize,
+    ) -> Result<Vec<n::InterfaceInstance>, Error> {
         let mut pending = vec![root.clone()];
         let frames = self.call_input_frames();
         let mut seen = HashSet::new();
         let mut sources = Vec::new();
-        let mut fuel = Budget::default().steps;
         while let Some(instance) = pending.pop() {
-            fuel = fuel
+            *fuel = fuel
                 .checked_sub(1)
                 .ok_or_else(|| error(span, "member source search budget exhausted"))?;
             if !seen.insert(instance.clone()) {
@@ -232,12 +248,12 @@ impl Checker<'_, '_> {
             } else {
                 let (_, arguments) = self.interface_substitution(&instance, subject);
                 let substitution = interface
-                    .input_substitution(&arguments, &frames, &mut fuel)
+                    .input_substitution(&arguments, &frames, fuel)
                     .map_err(|e| error(span, e.to_string()))?;
                 for parent in &interface.parents {
                     pending.push(
                         substitution
-                            .instantiate_interface_bounded(parent, &mut fuel)
+                            .instantiate_interface_bounded(parent, fuel)
                             .map_err(|e| error(span, e.to_string()))?,
                     );
                 }

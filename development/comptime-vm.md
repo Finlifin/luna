@@ -5625,3 +5625,29 @@ Validation from `/home/fin/luna`, exit 0:
   `/tmp/luna-tools-w1k6y6t0/result.json`.
 - `python3 -B development/check.py --timeout 900 -- run -p luna -- development/examples/sysroot-qualified-phases.fl --sysroot library --test-native`:
   one native test passed; `/tmp/luna-tools-ergrhy7l/result.json`.
+
+## Inherited concrete method sources (2026-10-31)
+
+Concrete receiver discovery now traverses visible traits' parent contracts.
+A declaration-edge prepass identifies relevant member tiers before attempting
+receiver inference. The instantiated traversal shares the outer search fuel,
+transports parent arguments and preserves child-member shadowing. The full
+capability query must establish the visible child instance before any inherited
+origin becomes eligible. A parent implementation by itself cannot grant the
+child view. Priority is attached to the actual declaring interface; diamond
+paths to the same complete interface instance are deduplicated, while distinct
+same-tier origins remain ambiguous.
+
+The preceding inherited-only method discovery limitation is now resolved.
+Associated callable discovery, pending-export resumption, and query fuel
+reservation remain outstanding as described above.
+
+Validation from `/home/fin/luna`, exit 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test trait_phases`:
+  all 57 tests passed; `/tmp/luna-tools-bn_g6dox/result.json`. Six new source
+  cases cover generic parent substitution, diamond deduplication, absent child
+  evidence, declaring-interface priority, distinct inherited ambiguity and
+  child-member shadowing. Positive cases execute actual comptime invocations.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  `/tmp/luna-tools-03sncj6o/result.json`; `git diff --check` passed.

@@ -1104,3 +1104,140 @@ fn concrete_receiver_import_aliases_keep_one_interface_identity() {
         comptime_interpretor::Value::Bool(true)
     );
 }
+
+#[test]
+fn concrete_receiver_discovers_inherited_method_through_imported_child() {
+    let package = support::compile(
+        "
+        struct Subject {}
+        mod protocols {
+            pub pure comptime trait Parent where T {comptime fn read(self)->bool;}
+            pub pure comptime trait Child :- Parent<T> where T {}
+            comptime impl Parent<bool> for Subject {comptime fn read(self)->bool {true}}
+            comptime impl Child<bool> for Subject {}
+        }
+        use protocols.Child;
+        comptime fn run()->bool {Subject{}.read()}
+    ",
+    );
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn concrete_receiver_inherited_diamond_deduplicates_origin() {
+    let package = support::compile(
+        "
+        struct Subject {}
+        mod protocols {
+            pub pure comptime trait Parent {comptime fn read(self)->bool;}
+            pub pure comptime trait Left :- Parent {}
+            pub pure comptime trait Right :- Parent {}
+            pub pure comptime trait Child :- Left + Right {}
+            comptime impl Parent for Subject {comptime fn read(self)->bool {true}}
+            comptime impl Left for Subject {}
+            comptime impl Right for Subject {}
+            comptime impl Child for Subject {}
+        }
+        use protocols.Child;
+        comptime fn run()->bool {Subject{}.read()}
+    ",
+    );
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn concrete_receiver_parent_impl_does_not_grant_child_visibility() {
+    let failure = compile(
+        "
+        struct Subject {}
+        mod protocols {
+            pub pure comptime trait Parent {comptime fn read(self)->bool;}
+            pub pure comptime trait Child :- Parent {}
+            comptime impl Parent for Subject {comptime fn read(self)->bool {true}}
+        }
+        use protocols.Child;
+        comptime fn run()->bool {Subject{}.read()}
+    ",
+        Emit::Nir,
+    )
+    .err()
+    .expect("child not implemented");
+    assert!(failure.contains("unknown struct field read"), "{failure}");
+}
+
+#[test]
+fn concrete_receiver_inherited_sources_use_declaring_interface_phase() {
+    let source = phase_source(
+        "
+        struct Subject {}
+        mod protocols {
+            pub trait Ordinary {^staged comptime fn read(self)->bool;}
+            pub pure comptime trait Staged {comptime fn read(self)->bool;}
+            pub pure comptime trait Child :- Ordinary + Staged {}
+            comptime impl Ordinary for Subject {comptime fn read(self)->bool {false}}
+            comptime impl Staged for Subject {comptime fn read(self)->bool {true}}
+            comptime impl Child for Subject {}
+        }
+        use protocols.Child;
+        comptime fn run()->bool {Subject{}.read()}
+    ",
+    );
+    let package = support::compile(&source);
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn concrete_receiver_distinct_inherited_origins_remain_ambiguous() {
+    let failure = compile(
+        "
+        struct Subject {}
+        mod protocols {
+            pub pure comptime trait First {comptime fn read(self)->bool;}
+            pub pure comptime trait Second {comptime fn read(self)->bool;}
+            pub pure comptime trait Child :- First + Second {}
+            comptime impl First for Subject {comptime fn read(self)->bool {true}}
+            comptime impl Second for Subject {comptime fn read(self)->bool {false}}
+            comptime impl Child for Subject {}
+        }
+        use protocols.Child;
+        comptime fn run()->bool {Subject{}.read()}
+    ",
+        Emit::Nir,
+    )
+    .err()
+    .expect("inherited ambiguity");
+    assert!(
+        failure.contains("ambiguous visible trait member"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn concrete_receiver_child_declaration_shadows_inherited_member() {
+    let package = support::compile(
+        "
+        struct Subject {}
+        mod protocols {
+            pub pure comptime trait Parent {comptime fn read(self)->bool;}
+            pub pure comptime trait Child :- Parent {comptime fn read(self)->bool;}
+            comptime impl Parent for Subject {comptime fn read(self)->bool {false}}
+            comptime impl Child for Subject {comptime fn read(self)->bool {true}}
+        }
+        use protocols.Child;
+        comptime fn run()->bool {Subject{}.read()}
+    ",
+    );
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}

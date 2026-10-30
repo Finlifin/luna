@@ -2,6 +2,44 @@
 use super::*;
 
 impl Checker<'_, '_> {
+    // Inspect declaration edges before inferring inputs: an unresolved impl
+    // matters only to tiers that can actually supply the requested member.
+    fn inherited_method_tier_available(
+        &self,
+        root: nir::DeclarationId,
+        name: &str,
+        preferred: bool,
+        span: Span,
+        fuel: &mut usize,
+    ) -> Result<bool, Error> {
+        let mut pending = vec![root];
+        let mut seen = BTreeSet::new();
+        while let Some(id) = pending.pop() {
+            *fuel = fuel
+                .checked_sub(1)
+                .ok_or_else(|| error(span, "member source search budget exhausted"))?;
+            if !seen.insert(id) {
+                continue;
+            }
+            let contract = self
+                .checked_traits
+                .iter()
+                .find(|t| t.declaration == id)
+                .ok_or_else(|| error(span, "unknown interface in member lookup"))?;
+            if contract.methods.iter().any(|m| m.name == name) {
+                if contract.comptime_only == preferred {
+                    return Ok(true);
+                }
+            } else if !contract.associated.iter().any(|a| a.name == name) {
+                *fuel = fuel
+                    .checked_sub(contract.parents.len())
+                    .ok_or_else(|| error(span, "member source search budget exhausted"))?;
+                pending.extend(contract.parents.iter().map(|parent| parent.declaration));
+            }
+        }
+        Ok(false)
+    }
+
     pub(super) fn discovered_member_interface(
         &mut self,
         subject: &Term,
@@ -95,8 +133,14 @@ impl Checker<'_, '_> {
                     else {
                         return Err(error(span, "visible trait has no checked contract"));
                     };
-                    if contract.comptime_only != preferred
-                        || !contract.methods.iter().any(|method| method.name == name)
+                    if (!comptime && contract.comptime_only)
+                        || !self.inherited_method_tier_available(
+                            interface,
+                            name,
+                            preferred,
+                            span,
+                            &mut budget.steps,
+                        )?
                     {
                         continue;
                     }
@@ -124,7 +168,24 @@ impl Checker<'_, '_> {
                             continue;
                         }
                     };
-                    if sources.iter().any(|old| self.same_interface(old, &source)) {
+                    let inherited = self.inherited_member_sources_metered(
+                        subject,
+                        &source,
+                        name,
+                        span,
+                        &mut budget.steps,
+                    )?;
+                    let inherited: Vec<_> = inherited
+                        .into_iter()
+                        .filter(|origin| {
+                            self.checked_traits.iter().any(|contract| {
+                                contract.declaration == origin.declaration
+                                    && contract.comptime_only == preferred
+                                    && contract.methods.iter().any(|method| method.name == name)
+                            })
+                        })
+                        .collect();
+                    if inherited.is_empty() {
                         continue;
                     }
                     let allowance = Budget {
@@ -136,7 +197,13 @@ impl Checker<'_, '_> {
                         .resolve_trait_capability(&source, subject, allowance)
                         .map_err(|message| error(span, message))?;
                     match resolution.selection {
-                        crate::implementation::Selection::Selected(_) => sources.push(source),
+                        crate::implementation::Selection::Selected(_) => {
+                            for origin in inherited {
+                                if !sources.iter().any(|old| self.same_interface(old, &origin)) {
+                                    sources.push(origin);
+                                }
+                            }
+                        }
                         crate::implementation::Selection::NoApplicableCandidate => {}
                         _ => pending = true,
                     }
