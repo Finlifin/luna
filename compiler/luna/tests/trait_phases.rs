@@ -1,4 +1,6 @@
 //! Source membership phases remain independent of function execution stages.
+#[path = "support/primitive_bindings.rs"]
+mod primitive_bindings;
 #[path = "support/execution.rs"]
 #[allow(dead_code)]
 mod support;
@@ -13,7 +15,7 @@ fn compile(source: &str, emit: Emit) -> Result<Artifact, String> {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::write(&path, source).unwrap();
+    primitive_bindings::write_fixture(&path, source).unwrap();
     let result = frontend::compile(&Options {
         dispatch_fuel: None,
         comptime_intrinsics: Vec::new(),
