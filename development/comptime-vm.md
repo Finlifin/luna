@@ -7067,3 +7067,47 @@ Final public-library validation:
 exit 0, seven native tests passed; `/tmp/luna-tools-ntfmesq4/result.json`.
 No full workspace test suite was run. The pending local-constant reproduction
 is explicitly outside this passing native example.
+
+
+## Required local constants wait for runtime clause instances (2026-10-31)
+
+The preceding local-constant reproduction exposed a staging classification gap:
+body work was suspended for ordinary comptime parameters, but not for declaration
+clause inputs. Runtime free functions with clause inputs and staged body work now
+enter the existing open-definition checking and concrete instantiation path.
+This is independent of List or any particular initializer shape. Comptime bodies
+already evaluate their local constants per invocation and keep that path; receiver
+definitions retain their separate existing checking path because open receiver
+instantiation is not yet supported by this machinery.
+
+A second gap appeared when such a definition was stored in a local callable.
+Known signature metadata previously allowed a body-free runtime identity to
+escape to IIR. In runtime value contexts, an open callable with no outstanding
+ordinary staged inputs now materializes its executable instance even when its
+signature was already complete. Explicit and fully inferred clause selections
+share the same decision. Staged contexts can still transport pending identities;
+this does not supply missing ordinary comptime arguments.
+
+The source regression checks list and scalar clause constants across separate
+instances, stored callable invocation, out-of-range and empty inputs, rejection
+of runtime reads in required constant initializers, and preservation of existing
+generic receiver Type constants and comptime body checking. Both reference
+execution and IIR construction succeed. The original local-const reproduction
+is retained as a regression, and the public-library example now includes its
+actual body and expected results rather than the earlier transport-only case.
+
+Validation from /home/fin/luna:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test clause_staged_constants --test open_functions --test comptime_clause_inputs --test runtime_purity --no-fail-fast`:
+  exit 0, 501 passed; `/tmp/luna-tools-ked8i0jz/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0; `/tmp/luna-tools-5axkfcd3/result.json`; `git diff --check` passed.
+
+No full workspace test suite was run. Canonical list storage migration remains
+unfinished; this stage fixes the concrete free-function staging gap found during
+that migration, not every form of deferred definition body.
+
+Final public-library validation:
+`python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
+exit 0, eight native tests passed, including the formerly failing local-const
+body; `/tmp/luna-tools-nxv7876y/result.json`.

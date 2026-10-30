@@ -2271,16 +2271,22 @@ impl Checker<'_, '_> {
             } else {
                 open_functions::Annotation::Known(p(P::Void))
             };
-            // Staged body work waits for inputs even when the callable itself
-            // is comptime; a closed signature does not complete those inputs.
+            // A closed signature does not complete staged body inputs. Runtime
+            // free functions also receive inputs through declaration clauses.
+            // Comptime bodies already execute local constants per invocation;
+            // receiver definitions retain their separate checking path.
             if result_annotation.is_pending()
                 || annotations
                     .iter()
                     .any(|(_, annotation)| annotation.is_pending())
                 || (!sig.modifiers.is_normal_form_head
-                    && parameters
+                    && (parameters
                         .iter()
                         .any(|parameter| parameter.sort != Sort::Runtime)
+                        || (!sig.modifiers.is_comptime
+                            && !self.self_containers.contains_key(&owner)
+                            && !self.self_types.contains_key(&owner)
+                            && !self.type_parameters[&owner].is_empty()))
                     && self.has_staged_body_work(owner)?)
             {
                 self.register_open_function(owner, annotations, result_annotation, item.span)?;
@@ -5317,10 +5323,7 @@ impl Checker<'_, '_> {
                 arguments::require_function_value_parameters(signature.params, expr.span)?;
             }
         }
-        if !allow_optional
-            && self.open_functions.contains_key(&owner)
-            && self.known_callable_signature(owner).is_none()
-        {
+        if !allow_optional && self.open_value_needs_instance(owner) {
             return self.open_function_value(expr, owner, &arguments, expected);
         }
         let scope = self.call_inference_domains();
@@ -5482,8 +5485,7 @@ impl Checker<'_, '_> {
         let (generic_parameters, template, pending_defaults) =
             self.function_type_plan(owner, &fixed, expr.span)?;
         if generic_parameters.is_empty() {
-            let pending_open = self.open_functions.contains_key(&owner)
-                && self.known_callable_signature(owner).is_none();
+            let pending_open = self.open_value_needs_instance(owner);
             let value = self.function_instance(expr, owner, template, None, !pending_open)?;
             return self.callable_value_view(value, expected, expr.span);
         }

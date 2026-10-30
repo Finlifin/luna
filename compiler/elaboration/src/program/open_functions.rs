@@ -531,8 +531,21 @@ impl Checker<'_, '_> {
         ))
     }
 
-    /// Finish clause-dependent annotations before publishing a callable value.
-    /// This does not supply ordinary staged inputs or erase parameter protocols.
+    /// Runtime callable storage needs an executable body, even if the signature
+    /// is already known. Staged contexts may still transport a pending identity.
+    pub(super) fn open_value_needs_instance(&self, owner: OwnerId) -> bool {
+        self.open_functions.get(&owner).is_some_and(|definition| {
+            self.known_callable_signature(owner).is_none()
+                || (self.runtime_value_context()
+                    && definition
+                        .parameters
+                        .iter()
+                        .all(|(sort, _)| *sort == Sort::Runtime))
+        })
+    }
+
+    /// Finish clause-dependent annotations and body work before publishing a
+    /// callable value. Ordinary staged inputs and parameter protocols remain.
     pub(super) fn open_function_value(
         &mut self,
         expr: &Expr<'_>,

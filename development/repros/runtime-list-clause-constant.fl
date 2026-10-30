@@ -1,6 +1,5 @@
-{- Pending: defer this required local constant until the callable's clause
-   inputs arrive. Run with the real sysroot; the current frontend evaluates
-   flags[0] while flags is still symbolic and reports interpretation Type.
+{- Regression: required local constants wait for the callable's clause
+   inputs. Run with the real sysroot; each callable keeps its own list input.
 -}
 fn selected_flag() -> bool
 where flags: meta.List<bool>

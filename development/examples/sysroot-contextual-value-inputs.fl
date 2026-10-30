@@ -167,3 +167,19 @@ test {
     let second_value = second(false);
     assumes first_value and not second_value;
 }
+
+
+fn selected_constant() -> bool
+where flags: meta.List<bool>
+{
+    const flag = flags[0];
+    flag
+}
+
+test {
+    let first = selected_constant<[true, false]>;
+    let second = selected_constant<[false, true]>;
+    let first_value = first();
+    let second_value = second();
+    assumes first_value and not second_value;
+}
