@@ -277,62 +277,6 @@ impl<'a> Interpreter<'a> {
         result
     }
 
-    fn run_fragment(&mut self, frame: &mut Frame) -> Result<Flow, Error> {
-        let mut defaults: Vec<Frame> = Vec::new();
-        let mut delivered = None;
-        loop {
-            let active = defaults.last_mut().unwrap_or(frame);
-            let outcome = match delivered.take() {
-                Some(result) => result,
-                None => match self.resume_frame(active, 1024) {
-                    Ok(Progress::Suspended) => continue,
-                    Ok(Progress::Call { callee, arguments }) => {
-                        match self.invoke_value_scoped(callee, arguments, None) {
-                            Ok(value) => match active.deliver(value) {
-                                Ok(()) => continue,
-                                Err(error) => Err(error),
-                            },
-                            Err(error) => Err(error),
-                        }
-                    }
-                    Ok(Progress::Default {
-                        expression,
-                        mut environment,
-                    }) => {
-                        let result = match self.invocation_code(&expression, None) {
-                            Ok(Some(code)) => match self.start_frame(&code, &mut environment) {
-                                Ok(child) => {
-                                    self.bytecode_default_evaluations += 1;
-                                    defaults.push(child);
-                                    continue;
-                                }
-                                Err(error) => Err(error),
-                            },
-                            Ok(None) => self.eval(&expression, &mut environment),
-                            Err(error) => Err(error),
-                        };
-                        match active.receive(result, Some(environment)) {
-                            Ok(None) => continue,
-                            Ok(Some(flow)) => Ok(flow),
-                            Err(error) => Err(error),
-                        }
-                    }
-                    Ok(Progress::Complete(flow)) => Ok(flow),
-                    Err(error) => Err(error),
-                },
-            };
-            let Some(child) = defaults.pop() else {
-                return outcome;
-            };
-            let parent = defaults.last_mut().unwrap_or(frame);
-            match parent.receive(outcome, Some(child.restore_environment())) {
-                Ok(None) => {}
-                Ok(Some(flow)) => delivered = Some(Ok(flow)),
-                Err(error) => delivered = Some(Err(error)),
-            }
-        }
-    }
-
     /// Staged input fragments actually started, including failed evaluations.
     pub fn bytecode_staged_inputs(&self) -> usize {
         self.bytecode_staged_inputs

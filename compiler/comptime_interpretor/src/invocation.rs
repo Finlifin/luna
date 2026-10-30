@@ -83,93 +83,109 @@ impl<'a> Interpreter<'a> {
         context: Option<(iir::InstanceKey, Vec<iir::cleanup::ContextKey>)>,
     ) -> Result<Value, Error> {
         let activation = self.begin_invocation(function, arguments, context)?;
-        self.run_invocations(activation)
+        match self.run_executions(Some(Execution::Invocation(activation)), None)? {
+            Flow::Value(value) => Ok(value),
+            _ => Err(self.failure(ErrorKind::InvalidControlFlow, None)),
+        }
     }
 
-    // Native recursion is retained only at migration and contract boundaries.
-    // Compiled caller/callee chains suspend their owned frames in this stack.
-    fn run_invocations(&mut self, activation: Box<Activation<'a>>) -> Result<Value, Error> {
-        let mut execution = Execution::Invocation(activation);
+    pub(super) fn run_fragment(&mut self, frame: &mut bytecode::Frame) -> Result<Flow, Error> {
+        self.run_executions(None, Some(frame))
+    }
+
+    // Function bodies, defaults and a borrowed fragment root share one driver.
+    // Native recursion remains only at migration and contract boundaries.
+    fn run_executions(
+        &mut self,
+        mut execution: Option<Execution<'a>>,
+        mut root: Option<&mut bytecode::Frame>,
+    ) -> Result<Flow, Error> {
         let mut stack: Vec<(Execution<'a>, bytecode::Frame)> = Vec::new();
+        let mut result = None;
         loop {
-            let (expression, identity, environment) = execution.parts();
-            let code = self.invocation_code(expression, identity);
-            let mut result = match code {
-                Ok(Some(code)) => match self.start_frame(&code, environment) {
-                    Ok(code_frame) => {
-                        match &execution {
-                            Execution::Invocation(_) => self.bytecode_invocations += 1,
-                            Execution::Default { .. } => self.bytecode_default_evaluations += 1,
+            if let Some(mut active) = execution.take() {
+                let (expression, identity, environment) = active.parts();
+                result = match self.invocation_code(expression, identity) {
+                    Ok(Some(code)) => match self.start_frame(&code, environment) {
+                        Ok(code_frame) => {
+                            match &active {
+                                Execution::Invocation(_) => self.bytecode_invocations += 1,
+                                Execution::Default { .. } => self.bytecode_default_evaluations += 1,
+                            }
+                            stack.push((active, code_frame));
+                            None
                         }
-                        stack.push((execution, code_frame));
-                        None
+                        Err(error) => Some(self.complete_execution(active, Err(error))),
+                    },
+                    Ok(None) => {
+                        let flow = self.eval(expression, environment);
+                        Some(self.complete_execution(active, flow))
                     }
-                    Err(error) => Some(self.complete_execution(execution, Err(error))),
-                },
-                Ok(None) => {
-                    let result = self.eval(expression, environment);
-                    Some(self.complete_execution(execution, result))
-                }
-                Err(error) => Some(self.complete_execution(execution, Err(error))),
-            };
-            loop {
-                if let Some(delivered) = result.take() {
-                    let Some((_, parent)) = stack.last_mut() else {
-                        return match delivered.flow? {
-                            Flow::Value(value) => Ok(value),
-                            _ => Err(self.failure(ErrorKind::InvalidControlFlow, None)),
-                        };
-                    };
-                    let propagation = match parent.receive(delivered.flow, delivered.defaults) {
-                        Ok(None) => None,
-                        Ok(Some(flow)) => Some(Ok(flow)),
-                        Err(error) => Some(Err(error)),
-                    };
-                    if let Some(flow) = propagation {
-                        // Defaults can exit their enclosing invocation as well as
-                        // fail. Restore every suspended environment before delivery.
-                        let (mut parent, code) = stack.pop().unwrap();
+                    Err(error) => Some(self.complete_execution(active, Err(error))),
+                };
+            }
+            if let Some(delivered) = result.take() {
+                let Some(parent) = stack
+                    .last_mut()
+                    .map(|(_, code)| code)
+                    .or_else(|| root.as_deref_mut())
+                else {
+                    return delivered.flow;
+                };
+                let propagation = match parent.receive(delivered.flow, delivered.defaults) {
+                    Ok(None) => None,
+                    Ok(Some(flow)) => Some(Ok(flow)),
+                    Err(error) => Some(Err(error)),
+                };
+                if let Some(flow) = propagation {
+                    // Defaults may return from their enclosing invocation.
+                    // Restore each activation before propagating a transfer/error.
+                    if let Some((mut parent, code)) = stack.pop() {
                         *parent.parts().2 = code.restore_environment();
                         result = Some(self.complete_execution(parent, flow));
                         continue;
                     }
+                    return flow;
                 }
-                let (_, code) = stack.last_mut().expect("active execution");
-                match self.resume_frame(code, 1024) {
-                    Ok(bytecode::Progress::Suspended) => {}
-                    Ok(bytecode::Progress::Default {
+            }
+            let code = stack
+                .last_mut()
+                .map(|(_, code)| code)
+                .or_else(|| root.as_deref_mut())
+                .expect("active execution");
+            match self.resume_frame(code, 1024) {
+                Ok(bytecode::Progress::Suspended) => {}
+                Ok(bytecode::Progress::Default {
+                    expression,
+                    environment,
+                }) => {
+                    execution = Some(Execution::Default {
                         expression,
                         environment,
-                    }) => {
-                        execution = Execution::Default {
-                            expression,
-                            environment,
-                        };
-                        break;
-                    }
-                    Ok(bytecode::Progress::Call { callee, arguments }) => {
-                        match self.begin_invocation(callee, arguments, None) {
-                            Ok(child) => {
-                                execution = Execution::Invocation(child);
-                                break;
-                            }
-                            Err(error) => {
-                                result = Some(Completion {
-                                    flow: Err(error),
-                                    defaults: None,
-                                })
-                            }
+                    });
+                }
+                Ok(bytecode::Progress::Call { callee, arguments }) => {
+                    match self.begin_invocation(callee, arguments, None) {
+                        Ok(child) => execution = Some(Execution::Invocation(child)),
+                        Err(error) => {
+                            result = Some(Completion {
+                                flow: Err(error),
+                                defaults: None,
+                            })
                         }
                     }
-                    outcome => {
-                        let (mut completed, code) = stack.pop().unwrap();
+                }
+                outcome => {
+                    let flow = match outcome {
+                        Ok(bytecode::Progress::Complete(flow)) => Ok(flow),
+                        Err(error) => Err(error),
+                        _ => unreachable!("handled suspension"),
+                    };
+                    if let Some((mut completed, code)) = stack.pop() {
                         *completed.parts().2 = code.restore_environment();
-                        let flow = match outcome {
-                            Ok(bytecode::Progress::Complete(flow)) => Ok(flow),
-                            Err(error) => Err(error),
-                            _ => unreachable!("handled suspension"),
-                        };
                         result = Some(self.complete_execution(completed, flow));
+                    } else {
+                        return flow;
                     }
                 }
             }
@@ -609,6 +625,105 @@ mod tests {
     use super::*;
 
     #[test]
+    fn fragment_calls_unwind_nested_activations_and_preserve_the_root_environment() {
+        use nir::program::Place;
+        let source = SourceRange { start: 1, end: 2 };
+        let local = |index| LocalId { owner: 83, index };
+        let boolean = Term::Primitive(Primitive::Bool);
+        let signature = Term::ComptimeFunction(Box::new(Term::Function {
+            parameters: vec![],
+            result: Box::new(boolean.clone()),
+        }));
+        let expr = |ty, kind| Expr { ty, source, kind };
+        let call = || {
+            expr(
+                boolean.clone(),
+                K::Call {
+                    callee: Box::new(expr(signature.clone(), K::Local(local(0)))),
+                    arguments: vec![],
+                    parameter_bindings: vec![],
+                },
+            )
+        };
+        let closure = |body, captured: Option<Value>| {
+            let capture_order = captured
+                .as_ref()
+                .map(|_| vec![local(0)])
+                .unwrap_or_default();
+            Value::Closure(Arc::new(Closure {
+                definition_source: None,
+                origin: None,
+                instance_arguments: None,
+                parameters: vec![],
+                environment: captured
+                    .map(|value| Environment::from([(local(0), value)]))
+                    .unwrap_or_default(),
+                capture_order,
+                body: Arc::new(body),
+                ty: signature.clone(),
+            }))
+        };
+        let body = expr(
+            boolean.clone(),
+            K::Block {
+                statements: vec![expr(
+                    Term::Primitive(Primitive::Void),
+                    K::Assign {
+                        place: Place {
+                            root: local(1),
+                            fields: vec![],
+                        },
+                        value: Box::new(expr(boolean.clone(), K::Literal(Literal::Bool(true)))),
+                    },
+                )],
+                result: Some(Box::new(call())),
+            },
+        );
+        let code = Arc::new(comptime_compiler::compile(&body, &mut 10000).unwrap());
+        let package = Package::default();
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        vm.effect_state.invocation = 71;
+        vm.effect_state.resume = Some(19);
+        vm.pattern_binding_orders.insert((1, 2), vec![local(1)]);
+        for fail in [true, false, true, false] {
+            let leaf = expr(
+                boolean.clone(),
+                if fail {
+                    K::Unit
+                } else {
+                    K::Literal(Literal::Bool(true))
+                },
+            );
+            let mut value = closure(leaf, None);
+            for _ in 0..8 {
+                value = closure(call(), Some(value));
+            }
+            let mut environment =
+                Environment::from([(local(0), value), (local(1), Value::Bool(false))]);
+            let mut frame = vm.start_frame(&code, &mut environment).unwrap();
+            let before = vm.bytecode_invocations();
+            let result = vm.run_fragment(&mut frame);
+            environment = frame.restore_environment();
+            if fail {
+                assert_eq!(result.unwrap_err().kind, ErrorKind::Type);
+            } else {
+                assert!(matches!(result.unwrap(), Flow::Value(Value::Bool(true))));
+            }
+            assert_eq!(vm.bytecode_invocations() - before, 9);
+            assert_eq!(environment.get(&local(1)), Some(&Value::Bool(true)));
+            assert_eq!(environment.len(), 2);
+            assert_eq!(vm.depth, 0);
+            assert_eq!(vm.effect_state.invocation, 71);
+            assert_eq!(vm.effect_state.resume, Some(19));
+            assert_eq!(
+                vm.pattern_binding_orders.get(&(1, 2)),
+                Some(&vec![local(1)])
+            );
+            assert!(vm.prepared_frames.is_empty());
+        }
+    }
+
+    #[test]
     fn nested_activations_restore_callers_without_reusing_effect_identities() {
         let package = Package::default();
         let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
@@ -732,7 +847,11 @@ mod tests {
         );
         assert_eq!(vm.depth, 1);
         assert_eq!(vm.effect_state.invocation, parent_identity);
-        assert_eq!(vm.run_invocations(parent).unwrap(), Value::Bool(true));
+        assert!(matches!(
+            vm.run_executions(Some(Execution::Invocation(parent)), None)
+                .unwrap(),
+            Flow::Value(Value::Bool(true))
+        ));
         assert_eq!(vm.depth, 0);
         assert_eq!(vm.effect_state.invocation, 0);
     }

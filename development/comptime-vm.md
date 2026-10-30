@@ -2797,3 +2797,32 @@ Validation from `/home/fin/luna`:
 The 11 associated-call failures recorded in the preceding stage were separately
 fixed by `17d321f4`; the nominal-value suite now passes all 265 cases. This does
 not imply that all frontend or VM work is complete.
+
+## One driver for compiled fragments, defaults and invocations
+
+The fragment evaluator no longer recursively enters a second invocation driver
+when a compiled operand calls a function. `run_executions` now drives both ordinary
+invocations and borrowed fragment roots using the same activation/default stack.
+Completion restores every child environment and invocation context before delivery;
+fragment roots retain their frame so staged results and preparation exports remain
+available to their callers. Unsupported bodies still select the migration route
+before their execution. No new opcode interprets NIR recursively.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-nct9e88q/result.json`, exit 0. Added a fragment-root regression
+  with nine compiled closure activations, alternating failed result delivery and
+  success on the same interpreter. It checks root mutations, caller effect state,
+  logical depth, pattern state and activation cleanup after both outcomes.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode --test comptime_bytecode_defaults --test comptime_bytecode_types --test comptime_bytecode_references --test type_spreads --test comptime_clause_inputs`:
+  `/tmp/luna-tools-5sm31wv0/result.json`, exit 0. Covers nested defaults, failed
+  default entry, early returns, references and contextual input fragments.
+- Managed `cargo fmt --all`: `/tmp/luna-tools-y0qpbufe/result.json`, exit 0;
+  `git diff --check` passed.
+
+The outer normal-plan scheduler is still driven from the migration evaluator;
+nominal/alias scheduling and a stack-integrated plan continuation are unfinished.
+This change removes a duplicate driver and a native call boundary between compiled
+fragments and compiled invocations, not every native recursion boundary. Contract
+and unsupported-body evaluation still use their existing migration paths.
