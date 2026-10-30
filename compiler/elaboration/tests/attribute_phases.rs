@@ -13,6 +13,7 @@ fn package(arena: &HirArena) -> Package<'_> {
     for id in 0..4 {
         let kind = if id == 0 {
             ItemKind::Trait(TraitDef {
+                comptime_only: false,
                 super_traits: None,
                 clause_params: &[],
                 clause_constraints: &[],

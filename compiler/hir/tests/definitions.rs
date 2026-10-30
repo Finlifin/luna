@@ -204,6 +204,7 @@ fn forward_containers_and_different_definition_kinds_publish_together() {
             nested_items: vec![],
         }),
         ItemKind::Trait(TraitDef {
+            comptime_only: false,
             super_traits: None,
             clause_params: &[],
             clause_constraints: &[],

@@ -503,7 +503,7 @@ impl Display for ImplDef<'_> {
 
 impl Display for TraitDef<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        form!(f, "trait-definition", "super-traits" => Maybe(self.super_traits), "clause-params" => List(self.clause_params), "constraints" => List(self.clause_constraints), "items" => Owners(&self.items))
+        form!(f, "trait-definition", "comptime-only" => self.comptime_only, "super-traits" => Maybe(self.super_traits), "clause-params" => List(self.clause_params), "constraints" => List(self.clause_constraints), "items" => Owners(&self.items))
     }
 }
 

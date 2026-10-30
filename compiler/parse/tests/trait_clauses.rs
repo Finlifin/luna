@@ -126,3 +126,28 @@ fn infix_spacing_diagnostics_preserve_prefix_types_and_statement_boundaries() {
         declaration(source).unwrap_or_else(|failure| panic!("{source}\n{failure}"));
     }
 }
+
+#[test]
+fn comptime_only_trait_is_a_paired_declaration_modifier() {
+    for source in [
+        "pure comptime trait Stage {}",
+        "pub pure comptime trait Stage :- Parent + Other where T { comptime fn run(self)->T; }",
+    ] {
+        let (ast, mut root) = declaration(source).unwrap();
+        if ast.get_node_kind(root) == Some(NodeKind::Pub) {
+            root = ast.get_children(root)[0];
+        }
+        assert_eq!(ast.get_node_kind(root), Some(NodeKind::AttributeSetTrue));
+        let inner = ast.get_children(root)[1];
+        assert_eq!(ast.get_node_kind(inner), Some(NodeKind::TraitDef));
+    }
+    for source in [
+        "comptime trait Stage {}",
+        "pure trait Stage {}",
+        "comptime pure trait Stage {}",
+        "pure pure comptime trait Stage {}",
+        "unsafe pure comptime trait Stage {}",
+    ] {
+        assert!(declaration(source).is_err(), "accepted: {source}");
+    }
+}

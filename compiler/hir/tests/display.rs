@@ -1358,6 +1358,7 @@ fn item_definitions_include_fields_variants_nested_owners_and_import_styles() {
         ),
         (
             ItemKind::Trait(TraitDef {
+                comptime_only: false,
                 super_traits: None,
                 clause_params: &clauses,
                 clause_constraints: &constraints,

@@ -95,6 +95,7 @@ fn generated_phase_publication_after_repair(phase: ImplementationPhase) {
         &mut 100,
         |_, _| {
             Ok(TraitDef {
+                comptime_only: false,
                 super_traits: None,
                 clause_params: &[],
                 clause_constraints: &[],
@@ -447,6 +448,7 @@ fn check_associated_publication(comptime: bool) {
             &mut 100,
             |_, _| {
                 Ok(TraitDef {
+                    comptime_only: false,
                     super_traits: None,
                     clause_params: &[],
                     clause_constraints: &[],
@@ -615,4 +617,45 @@ fn check_associated_publication(comptime: bool) {
             comptime_interpretor::Value::Bool(!override_default)
         );
     }
+}
+
+#[test]
+fn generated_comptime_only_trait_cannot_publish_as_an_ordinary_trait() {
+    let arena = HirArena::new();
+    let mut package = Package::new();
+    let mut batch = DefinitionBatch::new(&mut package);
+    let protocol = batch.reserve().unwrap();
+    let definition = assemble_trait(
+        &arena,
+        protocol,
+        name("Stage"),
+        DUMMY_SP,
+        &mut 100,
+        |_, _| {
+            Ok(TraitDef {
+                comptime_only: true,
+                super_traits: None,
+                clause_params: &[],
+                clause_constraints: &[],
+                items: vec![],
+            })
+        },
+    )
+    .unwrap();
+    batch.define(definition, None, None).unwrap();
+    let failure = publish(
+        &mut batch,
+        &mut 1000,
+        &BTreeMap::from([(0, 73)]),
+        &Protocols::default(),
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        failure
+            .to_string()
+            .contains("comptime-only trait member resolution"),
+        "{failure}"
+    );
+    assert_eq!(batch.published().num_defs(), 0);
 }

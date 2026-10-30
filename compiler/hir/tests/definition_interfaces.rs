@@ -83,6 +83,7 @@ fn trait_assembly_preserves_composite_super_traits_and_member_order() {
             }]);
             nodes.register(Node::ClauseConstraint(&constraints[0]), fuel)?;
             Ok(TraitDef {
+                comptime_only: false,
                 super_traits: Some(supers),
                 clause_params: parameters,
                 clause_constraints: constraints,
@@ -134,6 +135,7 @@ fn assembly_budget_and_unfinished_nodes_reject_without_publishing_a_descriptor()
         |_, _| {
             called = true;
             Ok(TraitDef {
+                comptime_only: false,
                 super_traits: None,
                 clause_params: &[],
                 clause_constraints: &[],
@@ -152,6 +154,7 @@ fn assembly_budget_and_unfinished_nodes_reject_without_publishing_a_descriptor()
         |nodes, fuel| {
             nodes.reserve(nodes.root(), fuel)?;
             Ok(TraitDef {
+                comptime_only: false,
                 super_traits: None,
                 clause_params: &[],
                 clause_constraints: &[],
@@ -169,6 +172,7 @@ fn assembly_budget_and_unfinished_nodes_reject_without_publishing_a_descriptor()
             &mut { fuel },
             |_, _| {
                 Ok(TraitDef {
+                    comptime_only: false,
                     super_traits: None,
                     clause_params: &[],
                     clause_constraints: &[],
@@ -314,5 +318,38 @@ fn associated_assembly_registers_optional_parameters_and_rejects_bad_indices() {
         assert!(matches!(entry.node, Node::Param(_)));
         assert_eq!(entry.parent, ItemLocalId::new(0));
         assert!(declaration.default.is_none());
+    }
+}
+
+#[test]
+fn trait_assembly_preserves_comptime_only_identity_and_dump() {
+    for comptime_only in [false, true] {
+        let arena = HirArena::new();
+        let info = assemble_trait(
+            &arena,
+            owner(1),
+            name("Stage"),
+            DUMMY_SP,
+            &mut 100,
+            |_, _| {
+                Ok(TraitDef {
+                    comptime_only,
+                    super_traits: None,
+                    clause_params: &[],
+                    clause_constraints: &[],
+                    items: vec![],
+                })
+            },
+        )
+        .unwrap();
+        let ItemKind::Trait(definition) = &info.node.expect_item().kind else {
+            panic!()
+        };
+        assert_eq!(definition.comptime_only, comptime_only);
+        assert!(
+            definition
+                .to_string()
+                .contains(&format!("(comptime-only {comptime_only})"))
+        );
     }
 }

@@ -253,6 +253,12 @@ impl Checker<'_, '_> {
             let ItemKind::Trait(def) = &item.kind else {
                 continue;
             };
+            if def.comptime_only {
+                return Err(error(
+                    item.span,
+                    "elaboration is not implemented for comptime-only trait member resolution",
+                ));
+            }
             self.signature_owner = Some(owner);
             let mut names = BTreeSet::new();
             let mut associated = Vec::new();

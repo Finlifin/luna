@@ -5405,3 +5405,37 @@ Validation from `/home/fin/luna`:
   exit 0, one native test passed; `/tmp/luna-tools-k5gbrjvz/result.json`.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
   exit 0; `/tmp/luna-tools-jjqtels8/result.json`.
+
+### Comptime-only trait declaration identity (2026-10-30)
+
+The paired `pure comptime trait` prefix now lowers to `TraitDef.comptime_only`.
+The HIR dump and definition assembly API retain this identity independently of
+member function purity and execution stage. Lone/reordered/duplicated keyword
+prefixes are rejected. Generated and source interfaces use the same descriptor.
+
+This is the declaration foundation, not executable support. Interface admission
+explicitly rejects this identity until NIR phase identity, member source priority,
+implementation/derivation checks and library migration are connected. Generated
+publication rejects atomically as well; it cannot erase the flag and publish an
+ordinary trait. No library declarations have been migrated prematurely.
+
+Validation from `/home/fin/luna` (all following commands exited 0):
+
+- `python3 -B development/check.py --timeout 900 -- test -p parse --test trait_clauses`:
+  `/tmp/luna-tools-z0tzj3lz/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p hir --test definition_interfaces`:
+  `/tmp/luna-tools-mt8vmryh/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p hir --test display item_definitions_include_fields_variants_nested_owners_and_import_styles`:
+  `/tmp/luna-tools-7lifunpt/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test trait_phases`:
+  `/tmp/luna-tools-2umgvp5s/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --test generated_traits --test attribute_phases --test derivation`:
+  `/tmp/luna-tools-8zf1m2rp/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  `/tmp/luna-tools-2voell5r/result.json`; `git diff --check` also passed.
+
+The broader `test -p parse -p hir` attempt exited 101 at the existing empty-package
+HIR dump expectation (`/tmp/luna-tools-2lila6wq/result.json`). HEAD already emits
+`source-origins` while that assertion omits it; this change does not alter package
+dumping. The focused declaration/dump checks above pass. Initial local failures
+in the new parser fixture and Rust test harness were corrected before these runs.

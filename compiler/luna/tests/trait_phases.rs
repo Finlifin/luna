@@ -636,3 +636,46 @@ fn member_prefix_attributes_can_use_the_enclosing_impl_self() {
         comptime_interpretor::Value::Bool(true)
     );
 }
+
+#[test]
+fn comptime_only_trait_identity_survives_lowering_without_changing_functions() {
+    let source = "
+        trait Ordinary {}
+        pub pure comptime trait Stage {
+            fn deferred(self)->bool;
+            comptime fn run(self)->bool;
+            pure comptime fn stable(self)->bool {true}
+        }
+    ";
+    let Artifact::Hir(text) = compile(source, Emit::Hir).unwrap() else {
+        panic!()
+    };
+    assert_eq!(
+        text.matches("(trait-definition (comptime-only true)")
+            .count(),
+        1,
+        "{text}"
+    );
+    assert_eq!(
+        text.matches("(trait-definition (comptime-only false)")
+            .count(),
+        1,
+        "{text}"
+    );
+    assert!(!text.contains("__flurry_kw_"), "{text}");
+    for modifiers in [
+        "(pure false) (comptime false)",
+        "(pure false) (comptime true)",
+        "(pure true) (comptime true)",
+    ] {
+        assert!(text.contains(modifiers), "{modifiers}: {text}");
+    }
+    // The new identity must not silently be compiled with ordinary trait lookup.
+    let failure = compile(source, Emit::Nir)
+        .err()
+        .expect("unsupported resolution");
+    assert!(
+        failure.contains("comptime-only trait member resolution"),
+        "{failure}"
+    );
+}

@@ -62,6 +62,7 @@ fn fixture<'h>(arena: &'h HirArena, target_package: u32) -> Package<'h> {
             "Flag",
             interface_id,
             ItemKind::Trait(hir::TraitDef {
+                comptime_only: false,
                 super_traits: None,
                 clause_params: &[],
                 clause_constraints: &[],

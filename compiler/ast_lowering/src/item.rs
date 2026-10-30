@@ -178,7 +178,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             NodeKind::NormalFormHeadDef => self.lower_normal_form_head_def(node),
             NodeKind::StructDef => self.lower_struct_def(node),
             NodeKind::EnumDef => self.lower_enum_def(node),
-            NodeKind::TraitDef => self.lower_trait_def(node),
+            NodeKind::TraitDef => self.lower_trait_def(node, false),
             NodeKind::DeriverDef => self.lower_callable(node, FnModifiers::default(), None),
             NodeKind::DeriveDef => self.lower_derive_request(node, ImplementationPhase::Runtime),
             NodeKind::ImplDef => self.lower_impl_def(node, ImplementationPhase::Runtime),
@@ -189,6 +189,14 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
 
             // Attribute-wrapped definitions
             NodeKind::Attribute | NodeKind::AttributeSetTrue => {
+                if kind == NodeKind::AttributeSetTrue
+                    && self.ast.get_node_kind(children[0]) == Some(NodeKind::Id)
+                    && self.node_to_ident(children[0]).name.as_str()
+                        == "__flurry_kw_comptime_only_trait"
+                    && self.ast.get_node_kind(children[1]) == Some(NodeKind::TraitDef)
+                {
+                    return self.lower_trait_def(children[1], true);
+                }
                 if self.ast.get_node_kind(children[0]) == Some(NodeKind::Id)
                     && self.node_to_ident(children[0]).name.as_str() == "intrinsic_enum"
                 {
@@ -1758,7 +1766,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
     }
 
     /// Lower `TraitDef`: a, b, N, c  (id, super_trait, clauses, body)
-    fn lower_trait_def(&mut self, node: NodeIndex) -> OwnerId {
+    fn lower_trait_def(&mut self, node: NodeIndex, comptime_only: bool) -> OwnerId {
         let Some((NodeKind::TraitDef, span, children)) = self.ast.get_node(node) else {
             unreachable!(
                 "not a valid trait def node or no such node index {:?}",
@@ -1802,6 +1810,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             Some(self.arena.alloc_expr(expr) as &_)
         };
         let trait_def = TraitDef {
+            comptime_only,
             super_traits,
             clause_params,
             clause_constraints,

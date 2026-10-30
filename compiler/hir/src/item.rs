@@ -295,6 +295,8 @@ pub struct ImplDef<'hir> {
 /// Definition body of a `trait` item.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TraitDef<'hir> {
+    /// Interface membership is exclusively comptime; not function purity.
+    pub comptime_only: bool,
     pub super_traits: Option<&'hir Expr<'hir>>,
     pub clause_params: &'hir [ClauseParam<'hir>],
     pub clause_constraints: &'hir [ClauseConstraint<'hir>],

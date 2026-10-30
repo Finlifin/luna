@@ -964,6 +964,26 @@ impl Parser<'_> {
     /// Parse a definition prefixed by keyword modifiers (pure, comptime, inline, unsafe, etc.)
     /// These become AttributeSetTrue nodes wrapping the inner definition.
     pub fn try_keyword_modified_definition(&mut self) -> ParseResult {
+        // This paired declaration modifier records interface phase identity,
+        // independently of the keyword modifiers on its member functions.
+        if self.peek(&[TokenKind::Pure, TokenKind::Comptime, TokenKind::Trait]) {
+            return self.scoped(|p| {
+                p.eat_tokens(2);
+                let inner = p.try_trait()?;
+                let sym = lex::Symbol::intern("__flurry_kw_comptime_only_trait");
+                let (hi, lo) = sym.to_raw_parts();
+                let marker = NodeBuilder::new(NodeKind::Id, p.current_span())
+                    .add_single_child(hi)
+                    .add_single_child(lo)
+                    .build(&mut p.ast);
+                Ok(
+                    NodeBuilder::new(NodeKind::AttributeSetTrue, p.current_span())
+                        .add_single_child(marker)
+                        .add_single_child(inner)
+                        .build(&mut p.ast),
+                )
+            });
+        }
         if self.peek(&[
             TokenKind::Pure,
             TokenKind::Comptime,
@@ -999,6 +1019,17 @@ impl Parser<'_> {
 
             // Parse the inner definition or another keyword modifier
             let inner = p.try_statement_or_definition()?;
+            let mut declaration = inner;
+            while p.ast.get_node_kind(declaration) == Some(NodeKind::AttributeSetTrue) {
+                declaration = p.ast.get_children(declaration)[1];
+            }
+            if p.ast.get_node_kind(declaration) == Some(NodeKind::TraitDef) {
+                return Err(ParseError::invalid_syntax(
+                    "Trait modifiers must be the paired `pure comptime` prefix".into(),
+                    token.kind,
+                    p.current_span(),
+                ));
+            }
             if inner == 0 {
                 return Err(ParseError::invalid_syntax(
                     format!("Expected a definition after `{}`", token.kind.lexme()),
