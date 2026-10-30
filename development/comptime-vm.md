@@ -3553,3 +3553,36 @@ Validation in `/home/fin/luna`:
 
 Remaining declaration-only and contextual-code substitution consumers are not
 claimed complete by this stage.
+
+### Retained effect heads: inference proposals versus inverse equations
+
+The effect-inference failure from the previous stage was an obsolete rejection
+expectation, not a missing requirement to forbid all matching below a normal-form
+head. The authority is docs/type/type-identity.md (retained head identity and the
+separate matching relation), docs/type/type-patterns.md (observing retained head
+arguments), and docs/compilation/elaboration.md (call-local inference variables
+versus rigid definition inputs). No language rule was changed for a test.
+
+The matcher already proposes substitutions from syntactically equal retained
+heads and keeps the original application equality as an obligation. It does not
+unfold a body or assert an inverse theorem. The repaired regression distinguishes
+that valid proposal from three failures: a bare result type, a different head,
+and an incompatible expected result. It also checks that an assumed equality
+between two head applications does not prove equality of their rigid arguments.
+The original scheme remains unchanged after both successful and failed queries.
+
+A source integration regression infers a user-defined normal-form input through
+a callback's effect signature, executes the matching handler through IIR, and
+rejects replacing the retained handler label with the function body's bare type.
+No compiler implementation or semantic documentation needed modification.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --test effect_inference`:
+  exit 0, `/tmp/luna-tools-2xfiu9yw/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test normal_form_inference`:
+  exit 0, `/tmp/luna-tools-wrnnnv5v/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration`:
+  exit 0, `/tmp/luna-tools-dn5x_plh/result.json`, no exclusions. This closes
+  the expanded-suite failure recorded in the previous stage.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-gr7qgzqm/result.json`; `git diff --check`: exit 0.

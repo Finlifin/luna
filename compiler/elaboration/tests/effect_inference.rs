@@ -151,7 +151,7 @@ fn repeated_identical_labels_infer_without_coalescing_occurrences() {
 }
 
 #[test]
-fn failed_effect_inference_does_not_unfold_opaque_inputs_or_mutate_scheme() {
+fn retained_effect_heads_propose_inputs_without_unfolding_or_inverse_equalities() {
     let opaque = |input| Term::NormalForm {
         head: DeclarationId {
             package: 2,
@@ -167,11 +167,40 @@ fn failed_effect_inference_does_not_unfold_opaque_inputs_or_mutate_scheme() {
     );
     let original = signature.signature.clone();
     let actual = comp(vec![op(1, vec![opaque(ty(P::Char))])], ty(P::Bool));
+    let inferred = signature
+        .infer_types(&[actual.clone()], None, Budget::default())
+        .unwrap()
+        .finish()
+        .unwrap();
+    assert_eq!(inferred.type_arguments, [ty(P::Char)]);
+    for rejected in [
+        comp(vec![op(1, vec![ty(P::Char)])], ty(P::Bool)),
+        comp(
+            vec![op(
+                1,
+                vec![Term::NormalForm {
+                    head: DeclarationId {
+                        package: 2,
+                        local: 2,
+                    },
+                    arguments: vec![ty(P::Char)],
+                    sort: Sort::Type,
+                }],
+            )],
+            ty(P::Bool),
+        ),
+    ] {
+        assert!(
+            signature
+                .infer_types(&[rejected], None, Budget::default())
+                .and_then(|candidate| candidate.finish())
+                .is_err()
+        );
+    }
     assert!(
         signature
-            .infer_types(&[actual.clone()], None, Budget::default())
-            .unwrap()
-            .finish()
+            .infer_types(&[actual.clone()], Some(&ty(P::Bool)), Budget::default())
+            .and_then(|candidate| candidate.finish())
             .is_err()
     );
     let mut context = Context::default();
@@ -191,6 +220,21 @@ fn failed_effect_inference_does_not_unfold_opaque_inputs_or_mutate_scheme() {
         .unwrap();
     assert_eq!(instance.type_arguments, [ty(P::Char)]);
     assert_eq!(signature.signature, original);
+    let rigid = |local| Term::Rigid {
+        declaration: DeclarationId { package: 3, local },
+        sort: Sort::Type,
+    };
+    context.assume(elaboration::ptc::Formula::equal(
+        opaque(rigid(1)),
+        opaque(rigid(2)),
+    ));
+    assert!(!matches!(
+        context.prove(
+            elaboration::ptc::Formula::equal(rigid(1), rigid(2)),
+            Budget::default()
+        ),
+        elaboration::ptc::Outcome::Entailed(_)
+    ));
 }
 
 #[test]
