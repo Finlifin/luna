@@ -3251,3 +3251,15 @@ Validation from `/home/fin/luna`:
   instantiation, 31 staged aggregate and 8 sysroot cases passed.
 - Managed formatting: `/tmp/luna-tools-62uq4jx5/result.json`, exit 0;
   `git diff --check` passed. The earlier template fixture failures remain separate.
+
+## Template fixture bindings restored
+
+The test_templates compile entry now uses the existing standalone fixture writer
+for both its main source and sibling modules. This appends an ordinary bool
+binding when needed, retaining source offsets and existing explicit bindings.
+Production primitive lookup and all test expectations are unchanged.
+
+`python3 -B development/check.py --timeout 900 -- test -p luna --test test_templates`
+from `/home/fin/luna`: `/tmp/luna-tools-fzhxygw6/result.json`, exit 0, all 81 cases
+passed without exclusions. This resolves the 67 earlier fixture failures rather
+than changing template semantics. `git diff --check` passed.

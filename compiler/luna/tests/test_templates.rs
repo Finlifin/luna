@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static NEXT: AtomicU64 = AtomicU64::new(0);
 #[path = "support/execution.rs"]
 mod execution_support;
+#[path = "support/primitive_bindings.rs"]
+mod primitive_bindings;
 
 #[test]
 fn signature_templates_preserve_closure_environment_types_and_dependencies() {
@@ -596,9 +598,9 @@ fn compile_with_constructors(
     ));
     std::fs::create_dir(&directory).unwrap();
     let path = directory.join("main.fl");
-    std::fs::write(&path, source).unwrap();
+    primitive_bindings::write_fixture(&path, source).unwrap();
     for (name, contents) in modules {
-        std::fs::write(directory.join(name), contents).unwrap();
+        primitive_bindings::write_fixture(directory.join(name), contents).unwrap();
     }
     let result = frontend::compile(&Options {
         dispatch_fuel: None,
