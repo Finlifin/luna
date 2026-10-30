@@ -3110,3 +3110,18 @@ passes, nor that all trait/IIR substitution consumers have been migrated.
 - Final sysroot check:
   `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_meta_object_preserves_type_valued_indices_in_normal_inputs`:
   `/tmp/luna-tools-r76hdp6c/result.json`, exit 0. `git diff --check` passed.
+
+## Sysroot fixture follow-up
+
+The four outstanding sysroot failures are resolved. Minimal builtin fixtures now
+bind bool as an ordinary builtin symbol and export it through their preludes;
+the iterator fixture also exports its existing primitive bindings. The composite
+native case selects `OptionalOps<bool>` explicitly, reflecting the author's
+runtime/comptime trait split instead of the superseded inherent optional method.
+The tuple, optional, LLVM math and inline iteration checks remain intact.
+
+`python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes`
+from `/home/fin/luna` completed with exit 0; all eight cases passed, including
+native host execution and the real meta Object/NF integration. Evidence:
+`/tmp/luna-tools-_1k2pcrb/result.json`. `git diff --check` passed. This corrects
+stale fixtures, not compiler semantics or expected program behavior.

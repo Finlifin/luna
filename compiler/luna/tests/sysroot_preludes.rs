@@ -54,7 +54,7 @@ fn source_configured_iterator_runs_ordinary_for_from_prelude() {
     let input = Inputs::new();
     input.write(
         "library/builtin/lib.fl",
-        "pub use iterator.*; pub use resources.*; pub mod prelude {pub use iterator.Iterator;}",
+        "pub use primitives.*; pub use iterator.*; pub use resources.*; pub mod prelude {pub use primitives.*; pub use iterator.Iterator;}",
     );
     input.write(
         "library/builtin/primitives.fl",
@@ -114,7 +114,7 @@ fn complete_shipped_sysroot_runs_tuple_optional_math_and_iteration() {
             let pair:Tuple<bool,bool> = (true,false);
             let (yes,no)=pair;
             let query:?bool=yes;
-            let present=query.is_some();
+            let present=query.as(OptionalOps<bool>).is_some();
             let value:?bool=yes;
             let number:f64=4.0;
             let root=math.sqrt(number);
@@ -210,8 +210,9 @@ fn five_default_preludes_deduplicate_identity_and_std_stays_explicit() {
     input.write(
         "library/builtin/lib.fl",
         "
+        pub typealias bool = .bool'builtin;
         pub mod math {pub fn answer()->bool {true}}
-        pub mod prelude {pub fn base()->bool {true} pub use .math;}
+        pub mod prelude {pub use .bool; pub fn base()->bool {true} pub use .math;}
     ",
     );
     input.write(
@@ -256,7 +257,7 @@ fn optional_provider_absence_is_distinct_from_a_broken_present_provider() {
     let input = Inputs::new();
     input.write(
         "library/builtin/lib.fl",
-        "pub mod prelude {pub fn base()->bool {true}}",
+        "pub typealias bool = .bool'builtin; pub mod prelude {pub use .bool; pub fn base()->bool {true}}",
     );
     input.write("library/std/lib.fl", "pub mod prelude {}");
     assert_true(input.run("fn run()->bool {base()}"));
