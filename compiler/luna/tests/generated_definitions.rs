@@ -199,7 +199,7 @@ fn source_types_and_functions_feed_generated_definitions_and_runtime_execution()
     let input = directory.join("lib.fl");
     std::fs::write(
         &input,
-        "trait Copy {} trait Drop { fn drop(*self); } struct Source { flag:bool } pure fn source()->Source { Source { flag:true } }",
+        "typealias bool = .bool'builtin; trait Copy {} trait Drop { fn drop(*self); } struct Source { flag:bool } pure fn source()->Source { Source { flag:true } }",
     )
     .unwrap();
     let packages = [SourcePackage {
@@ -223,7 +223,8 @@ fn source_types_and_functions_feed_generated_definitions_and_runtime_execution()
             Ok(())
         },
     );
-    assert!(exhausted.err().unwrap().contains("budget exhausted"));
+    let failure = exhausted.err().unwrap();
+    assert!(failure.contains("budget exhausted"), "{failure}");
     assert!(!called);
     for mode in 0..3 {
         let rejected = compile_with_definitions(
@@ -409,12 +410,12 @@ fn source_types_and_functions_feed_generated_definitions_and_runtime_execution()
     let provider_entry = provider_dir.join("lib.fl");
     std::fs::write(
         &provider_entry,
-        "pub struct Source { flag:bool } pub pure fn source()->Source { Source { flag:true } }",
+        "typealias bool = .bool'builtin; pub struct Source { flag:bool } pub pure fn source()->Source { Source { flag:true } }",
     )
     .unwrap();
     std::fs::write(
         &packages[0].entry,
-        "trait Copy {} trait Drop {fn drop(*self);} use provider.Source; use provider.source;",
+        "typealias bool = .bool'builtin; trait Copy {} trait Drop {fn drop(*self);} use provider.Source; use provider.source;",
     )
     .unwrap();
     let packages = [
@@ -504,19 +505,19 @@ fn generated_definitions_share_configured_preludes_without_importing_std() {
             42,
             420,
             "meta",
-            "pub pure fn meta_ready()->bool {true} pub mod prelude {pub use .meta_ready;}",
+            "typealias bool = .bool'builtin; pub pure fn meta_ready()->bool {true} pub mod prelude {pub use .meta_ready;}",
         ),
         (
             43,
             430,
             "attrs",
-            "pub pure fn attrs_ready()->bool {true} pub mod prelude {pub use .attrs_ready;}",
+            "typealias bool = .bool'builtin; pub pure fn attrs_ready()->bool {true} pub mod prelude {pub use .attrs_ready;}",
         ),
         (
             44,
             440,
             "std",
-            "pub pure fn std_ready()->bool {true} pub mod prelude {pub use .std_ready;}",
+            "typealias bool = .bool'builtin; pub pure fn std_ready()->bool {true} pub mod prelude {pub use .std_ready;}",
         ),
     ] {
         let root = directory.join(name);
@@ -537,7 +538,7 @@ fn generated_definitions_share_configured_preludes_without_importing_std() {
     }];
     let source = |extra: &str, condition: &str| {
         format!(
-            "{extra} struct Source {{flag:bool}} pure fn source()->Source {{Source {{flag: {condition}}}}}"
+            "typealias bool = .bool'builtin; {extra} struct Source {{flag:bool}} pure fn source()->Source {{Source {{flag: {condition}}}}}"
         )
     };
     std::fs::write(
@@ -596,8 +597,10 @@ fn generated_definitions_share_configured_preludes_without_importing_std() {
             assert_eq!(calls, 0);
             continue;
         }
+        let result =
+            result.unwrap_or_else(|failure| panic!("definition compilation failed: {failure}"));
         assert_eq!(calls, 1);
-        let (Artifact::Nir(package), _) = result.unwrap() else {
+        let (Artifact::Nir(package), _) = result else {
             panic!("expected NIR")
         };
         assert_eq!(
