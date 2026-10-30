@@ -1976,3 +1976,39 @@ fn unsafe_quote_calls_are_checked_before_expansion_erases_the_call() {
         assert!(error.contains("unsafe"), "{error}");
     }
 }
+
+#[test]
+fn quote_trait_type_valued_indices_preserve_contracts_and_expansion() {
+    for implementation in [
+        "impl Read<Type,bool> for Host {}",
+        "impl Read<Type,bool> for Host {quote fn read(self,value:bool)->bool {value}}",
+    ] {
+        let source = format!(
+            "typealias Type=.Type'builtin;
+            trait Read where T,index:T {{
+                quote fn read(self,value:bool)->bool where requires value {{value}}
+            }}
+            struct Host {{}}
+            {implementation}
+            fn run()->bool {{Host{{}}.as(Read<Type,bool>).read(true)}}"
+        );
+        let (value, calls) = execute(&source, vec![]);
+        assert_eq!(value, comptime_interpretor::Value::Bool(true));
+        assert_eq!(calls, ["run"]);
+        let invalid = source.replace(".read(true)", ".read(false)");
+        assert!(compile(&invalid, Emit::Nir).is_err());
+    }
+}
+
+#[test]
+fn quote_type_valued_indices_evaluate_ordinary_inputs_once() {
+    let source = "typealias Type=.Type'builtin;
+        quote fn keep(value:bool)->bool where T,index:T {value and value}
+        fn input()->bool {true}
+        fn run()->bool {keep<Type,bool>(input())}";
+    let (value, calls) = execute(source, vec![]);
+    assert_eq!(value, comptime_interpretor::Value::Bool(true));
+    assert_eq!(calls, ["run", "input"]);
+    let invalid = source.replace("keep<Type,bool>", "keep<bool,bool>");
+    assert!(compile(&invalid, Emit::Nir).is_err());
+}

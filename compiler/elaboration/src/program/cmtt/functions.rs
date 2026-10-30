@@ -100,7 +100,7 @@ fn at(source: n::SourceRange) -> Span {
 }
 struct Expansion<'a> {
     selection: Option<&'a n::Package>,
-    parameter_sorts: Option<BTreeMap<DeclarationId, nir::Sort>>,
+    parameter_domains: Option<BTreeMap<DeclarationId, Term>>,
     templates: BTreeMap<DeclarationId, &'a n::Function>,
     next: &'a mut u32,
     fuel: &'a mut u64,
@@ -126,11 +126,7 @@ struct PreparedTemplate {
     statements: Vec<n::Expr>,
 }
 impl Expansion<'_> {
-    fn binders(
-        &mut self,
-        ids: &[DeclarationId],
-        span: Span,
-    ) -> Result<Vec<nir::DeclarationParameter>, Error> {
+    fn domains(&mut self, ids: &[DeclarationId], span: Span) -> Result<Vec<Term>, Error> {
         if ids.is_empty() {
             return Ok(vec![]);
         }
@@ -139,23 +135,24 @@ impl Expansion<'_> {
             fuel = fuel
                 .checked_sub(ids.len())
                 .ok_or_else(|| "quote parameter budget exhausted".to_string())?;
-            if self.parameter_sorts.is_none() {
-                self.parameter_sorts = Some(match self.selection {
-                    Some(package) => package.declaration_parameter_sorts(&mut fuel)?,
+            if self.parameter_domains.is_none() {
+                self.parameter_domains = Some(match self.selection {
+                    Some(package) => package.declaration_parameter_domains(&mut fuel)?,
                     None => BTreeMap::new(),
                 });
             }
-            let sorts = self.parameter_sorts.as_ref().unwrap();
-            Ok(ids
-                .iter()
-                .map(|id| nir::DeclarationParameter {
-                    declaration: *id,
-                    sort: sorts.get(id).copied().unwrap_or(nir::Sort::Type),
+            let domains = self.parameter_domains.as_ref().unwrap();
+            ids.iter()
+                .map(|id| {
+                    let domain = domains.get(id).unwrap_or(&Term::Primitive(P::Type));
+                    nir::type_computations::charge_term(domain, &mut fuel)
+                        .map_err(|e| e.to_string())?;
+                    Ok(domain.clone())
                 })
-                .collect())
+                .collect::<Result<Vec<_>, String>>()
         })();
         *self.fuel = fuel as u64;
-        result.map_err(|reason: String| error(span, reason))
+        result.map_err(|reason| error(span, reason))
     }
     fn fresh(&mut self, span: Span) -> Result<n::LocalId, Error> {
         let id = n::LocalId {
@@ -453,11 +450,24 @@ impl Expansion<'_> {
             .chain(interface_arguments.iter().cloned())
             .chain(method_arguments.iter().cloned())
             .collect::<Vec<_>>();
-        let binders = self.binders(&declarations, at(expression.source))?;
-        let mut program = method
-            .program
-            .instantiate_parameters(&binders, &arguments)
-            .map_err(|failure| error(at(expression.source), failure.to_string()))?;
+        let domains = self.domains(&declarations, at(expression.source))?;
+        let frames = match template.signature.callable_signature() {
+            Term::Function { parameters, .. } if !parameters.is_empty() => {
+                vec![parameters.iter().map(|parameter| parameter.sort).collect()]
+            }
+            _ => Vec::new(),
+        };
+        let mut fuel = usize::try_from(*self.fuel).unwrap_or(usize::MAX);
+        let program = method.program.instantiate_declaration_parameters(
+            &declarations,
+            &domains,
+            &arguments,
+            &frames,
+            &mut fuel,
+        );
+        *self.fuel = fuel as u64;
+        let mut program =
+            program.map_err(|failure| error(at(expression.source), failure.to_string()))?;
         if method.parameter_bindings.len() != template.parameters.len() {
             return Err(error(
                 at(expression.source),
@@ -560,9 +570,12 @@ impl Expansion<'_> {
                 .map_err(|failure| error(span, failure.to_string()))?;
         }
         *self.fuel = fuel as u64;
-        let binders = self.binders(&source_template.type_parameters, span)?;
-        let mut template = source_template
-            .instantiate_parameters(&binders, &types)
+        let domains = self.domains(&source_template.type_parameters, span)?;
+        let mut fuel = usize::try_from(*self.fuel).unwrap_or(usize::MAX);
+        let template =
+            source_template.instantiate_declaration_parameters(&domains, &types, &mut fuel);
+        *self.fuel = fuel as u64;
+        let mut template = template
             .map_err(|failure| error(span, format!("quote fn instantiation: {failure}")))?;
         self.merge_entry_contract(expression, &mut template)?;
         if let Some(package) = self.selection {
@@ -1106,10 +1119,10 @@ pub(in crate::program) fn expand_retained_quote_functions(
         *fuel = remaining as u64;
         result.map_err(|message| error(at(function.body.source), message))?;
     }
-    let sorts = output.declaration_parameter_sorts(&mut remaining);
+    let domains = output.declaration_parameter_domains(&mut remaining);
     *fuel = remaining as u64;
-    let sorts = sorts.map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
-    let selection = if sorts.values().any(|sort| *sort == nir::Sort::ComptimeValue)
+    let domains = domains.map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
+    let selection = if domains.values().any(|domain| *domain != p(P::Type))
         || output
             .traits
             .iter()
@@ -1133,7 +1146,7 @@ pub(in crate::program) fn expand_retained_quote_functions(
         .map(|template| (template.declaration, template))
         .collect();
     let mut expansion = Expansion {
-        parameter_sorts: Some(sorts),
+        parameter_domains: Some(domains),
         selection: selection.as_ref(),
         templates,
         next,
@@ -1192,7 +1205,7 @@ pub(crate) fn expand_materialized_quotes(
     let mut packets = BTreeSet::new();
     let mut empty = BTreeMap::new();
     let mut expansion = Expansion {
-        parameter_sorts: None,
+        parameter_domains: None,
         selection: Some(package),
         templates,
         next,
@@ -1236,7 +1249,7 @@ pub(crate) fn expand_bound_quote(
     let mut packets = BTreeSet::new();
     let mut empty = BTreeMap::new();
     let mut expansion = Expansion {
-        parameter_sorts: None,
+        parameter_domains: None,
         selection: Some(package),
         templates,
         next,
@@ -1272,7 +1285,7 @@ pub(crate) fn inline_template(
 ) -> Result<(), String> {
     let mut remaining = *fuel as u64;
     let mut expansion = Expansion {
-        parameter_sorts: None,
+        parameter_domains: None,
         selection,
         templates: BTreeMap::new(),
         next,

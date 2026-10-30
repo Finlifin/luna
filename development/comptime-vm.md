@@ -3693,3 +3693,27 @@ Validation in /home/fin/luna:
   exit 0, `/tmp/luna-tools-8p_b8c5z/result.json`, all 104 cases without exclusions.
 - `git diff --check`: exit 0.
 This resolves the fixture failures recorded in the previous stage.
+
+### Quote expansion specializes declaration domains
+
+Quote expansion now caches immutable declaration input domains instead of source
+sorts. Template specialization uses the bounded Function domain substitution,
+and public trait program contracts are specialized in the completed method's
+ordinary input frame before existing binding remapping. Domain collection,
+selected domain copies and substitutions consume the expansion budget.
+
+The new source cases cover default and explicit quote implementations with
+Type-valued interface indices, nonempty inherited preconditions, and a direct
+quote function that references an ordinary input twice. IIR event observations
+show one evaluation of that input and no quote runtime call. Invalid input
+domains and false interface preconditions remain rejected. The original template
+failure is `/tmp/luna-tools-6yo_x2_k/result.json`.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test quote_functions --test cmtt_methods --test cmtt_phase_boundaries --test nominal_value_parameters --test sysroot_preludes`:
+  exit 0, `/tmp/luna-tools-rfopj35w/result.json`, no exclusions.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-kt2kvfrz/result.json`; `git diff --check`: exit 0.
+
+This closes the exercised quote expansion paths, not all remaining declaration
+substitution consumers or the full CMTT implementation.
