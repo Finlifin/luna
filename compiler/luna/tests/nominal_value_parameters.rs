@@ -6201,3 +6201,18 @@ fn type_valued_indices_preserve_parent_trait_method_sources() {
         }";
     assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
 }
+
+#[test]
+fn type_valued_trait_indices_preserve_runtime_preconditions() {
+    let source = "typealias Type=.Type'builtin;
+        struct Key where T,value:T {payload:bool}
+        trait Read where T,value:T {fn read(self,allow:bool)->bool where requires allow;}
+        impl Read<T,value> for Key<T,value> where T,value:T {
+            fn read(self,allow:bool)->bool {self.payload}
+        }
+        fn run()->bool {Key<Type,bool>{payload:true}.as(Read<Type,bool>).read(true)}";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    let invalid = source.replace(".read(true)", ".read(false)");
+    let error = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+    assert!(error.contains("precondition"), "{error}");
+}

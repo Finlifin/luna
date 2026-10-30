@@ -3374,17 +3374,23 @@ impl Walker<'_> {
                 .find(|m| m.declaration == *member)
                 .ok_or(Reason::InvalidSignature)?;
             let parameters: Vec<_> = definition
-                .binders_with_self(&mut self.limits.arithmetic.steps)
-                .map_err(|_| Reason::InvalidSignature)?
+                .parameters_with_self()
                 .into_iter()
-                .chain(
-                    super::memory::memory_binders(
-                        self.package,
-                        &method.type_parameters,
-                        &mut self.limits.arithmetic.steps,
-                    )
-                    .map_err(|_| Reason::InvalidSignature)?,
-                )
+                .chain(method.type_parameters.iter().copied())
+                .collect();
+            let declared_domains = self
+                .package
+                .ok_or(Reason::InvalidSignature)?
+                .declaration_parameter_domains(&mut self.limits.arithmetic.steps)
+                .map_err(|_| Reason::InvalidSignature)?;
+            let domains: Vec<_> = parameters
+                .iter()
+                .map(|id| {
+                    declared_domains
+                        .get(id)
+                        .cloned()
+                        .unwrap_or(Term::Primitive(nir::Primitive::Type))
+                })
                 .collect();
             let arguments: Vec<_> = std::iter::once(subject.clone())
                 .chain(interface_arguments.clone())
@@ -3392,8 +3398,19 @@ impl Walker<'_> {
                 .collect();
             Some(
                 method
-                    .program_summary_parameters(&parameters, &arguments)
-                    .map_err(|_| Reason::InvalidSignature)?,
+                    .program_summary_declaration_inputs(
+                        &parameters,
+                        &domains,
+                        &arguments,
+                        &self.input_frames,
+                        &mut self.limits.arithmetic.steps,
+                    )
+                    .map_err(|error| match error {
+                        nir::type_computations::Error::Budget => {
+                            Reason::Unknown(comptime_runtime::Error::BudgetExhausted.into())
+                        }
+                        _ => Reason::InvalidSignature,
+                    })?,
             )
         } else {
             None

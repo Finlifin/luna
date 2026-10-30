@@ -3404,3 +3404,38 @@ not arbitrary runtime/comptime dispatch completion.
 Final source verification:
 `python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test trait_phases --test trait_purity --test sysroot_preludes`:
 exit 0, `/tmp/luna-tools-_jqbk15q/result.json`.
+
+### Runtime trait program summaries retain dependent domains and scope
+
+Added a bounded method-summary constructor using declaration input domains. It
+instantiates the callable signature in caller scope, then shifts substituted
+caller inputs beneath the method's ordinary input frame for program predicates,
+type requirements and capabilities. Program contracts, local/result identities,
+snapshots and retained method parameters survive summary construction. Flow
+analysis now uses these summaries and distinguishes exhausted substitution fuel
+from malformed signatures.
+
+The source regression exercises `Read<Type,bool>` with a runtime precondition:
+`read(true)` executes through IIR and `read(false)` is rejected for its
+precondition. Previously the valid call failed with `invalid-signature`
+(`/tmp/luna-tools-3tgeadzt/result.json`). The NIR regression checks that a caller
+Type input and a method-local Type input remain distinct in the actual predicate
+expression as well as capability arguments, with scope rejection and budget
+recovery. No program-state proposition is routed through PTC.
+
+Validation in `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p program_verification`:
+  exit 0, `/tmp/luna-tools-y6vifml_/result.json`.
+- After the flow budget diagnostic mapping:
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test trait_purity --test staged_aggregate_contracts --test sysroot_preludes`:
+  exit 0, `/tmp/luna-tools-n9a8286g/result.json` (275 + 21 + 31 + 9 cases).
+- Final predicate capture regression:
+  `python3 -B development/check.py --timeout 900 -- test -p nir --test calls`:
+  exit 0, `/tmp/luna-tools-6yt1tlrs/result.json`.
+
+Remaining: staged method specialization and memory-method contract consumers
+still need domain-aware substitution audits; this stage closes the ordinary
+runtime flow-summary failure.
+
+Final formatting: `python3 -B development/command.py --timeout 120 -- cargo fmt --all`,
+exit 0, `/tmp/luna-tools-w9m33d4x/result.json`; `git diff --check`: exit 0.

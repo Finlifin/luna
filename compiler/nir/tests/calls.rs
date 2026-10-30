@@ -260,6 +260,94 @@ fn method_contract_summary_preserves_and_instantiates_local_binders() {
             .program_summary(&[id(1), id(4)], &arguments)
             .is_err()
     );
+    // The caller's Type input and the method's own input occupy distinct frames.
+    let mut dependent = indexed.clone();
+    dependent.signature = Term::Function {
+        parameters: vec![Parameter {
+            sort: Sort::Type,
+            ty: p(Primitive::Type),
+        }],
+        result: Box::new(p(Primitive::Bool)),
+    }
+    .into();
+    let domains = [
+        p(Primitive::Type),
+        Term::Rigid {
+            declaration: id(1),
+            sort: Sort::Type,
+        },
+    ];
+    let inputs = [p(Primitive::Type), b(0, 0, Sort::Type)];
+    let caller_frames = [vec![Sort::Type]];
+    let type_value = |input| nir::program::Expr {
+        source: nir::program::SourceRange { start: 3, end: 7 },
+        ty: p(Primitive::Type),
+        kind: nir::program::ExprKind::TypeValue(Term::Nominal {
+            declaration: id(9),
+            arguments: vec![input],
+        }),
+    };
+    dependent.program.preconditions.push(nir::program::Expr {
+        source: nir::program::SourceRange { start: 3, end: 7 },
+        ty: p(Primitive::Bool),
+        kind: nir::program::ExprKind::TypeEqual(
+            Box::new(type_value(Term::Rigid {
+                declaration: id(4),
+                sort: Sort::ComptimeValue,
+            })),
+            Box::new(type_value(b(0, 0, Sort::Type))),
+        ),
+    });
+    let summary = dependent
+        .program_summary_declaration_inputs(
+            &[id(1), id(4)],
+            &domains,
+            &inputs,
+            &caller_frames,
+            &mut 1000,
+        )
+        .unwrap();
+    assert_eq!(summary.capabilities[0].subject, p(Primitive::Type));
+    assert_eq!(
+        summary.capabilities[0].interface_arguments,
+        vec![b(1, 0, Sort::Type)]
+    );
+    assert!(summary.type_parameters.is_empty());
+    assert_eq!(
+        summary.preconditions[0].kind,
+        nir::program::ExprKind::TypeEqual(
+            Box::new(type_value(b(1, 0, Sort::Type))),
+            Box::new(type_value(b(0, 0, Sort::Type))),
+        )
+    );
+    assert!(
+        dependent
+            .program_summary_declaration_inputs(&[id(1), id(4)], &domains, &inputs, &[], &mut 1000,)
+            .is_err()
+    );
+    assert!(
+        dependent
+            .program_summary_declaration_inputs(
+                &[id(1), id(4)],
+                &domains,
+                &inputs,
+                &caller_frames,
+                &mut 0,
+            )
+            .is_err()
+    );
+    assert_eq!(
+        dependent
+            .program_summary_declaration_inputs(
+                &[id(1), id(4)],
+                &domains,
+                &inputs,
+                &caller_frames,
+                &mut 1000,
+            )
+            .unwrap(),
+        summary
+    );
     let dump = contract.to_string();
     assert!(dump.contains("(pure true)"));
     assert!(dump.contains("(type-parameters "));

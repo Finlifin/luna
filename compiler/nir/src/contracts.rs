@@ -119,6 +119,113 @@ impl fmt::Display for ProgramContract {
     }
 }
 impl MethodContract {
+    /// Specialize an interface summary using declaration domains, keeping
+    /// caller type frames and the method's ordinary input frame distinct.
+    pub fn program_summary_declaration_inputs(
+        &self,
+        parameters: &[DeclarationId],
+        domains: &[Term],
+        arguments: &[Term],
+        caller_frames: &[Vec<crate::Sort>],
+        fuel: &mut usize,
+    ) -> Result<Function, crate::type_computations::Error> {
+        use crate::type_computations::Error;
+        let signature = self.signature.ordinary().map_err(Error::Scope)?;
+        let substitution = crate::DeclarationSubstitution::bounded(
+            parameters,
+            domains,
+            arguments,
+            caller_frames,
+            fuel,
+        )?;
+        let completed_signature = substitution.instantiate_bounded(signature, fuel)?;
+        let mut frames = caller_frames.to_vec();
+        let scoped_arguments =
+            if let Term::Function { parameters, .. } = signature.callable_signature() {
+                *fuel = fuel.checked_sub(parameters.len()).ok_or(Error::Budget)?;
+                frames.push(parameters.iter().map(|p| p.sort).collect());
+                arguments
+                    .iter()
+                    .map(|argument| {
+                        crate::type_computations::charge_term(argument, fuel)?;
+                        argument.abstract_parameters(&[]).map_err(Error::Scope)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            } else {
+                return Err(Error::Scope(crate::TypeError::InvalidFunctionSignature));
+            };
+        let scoped = crate::DeclarationSubstitution::bounded(
+            parameters,
+            domains,
+            &scoped_arguments,
+            &frames,
+            fuel,
+        )?;
+        let program = self.program.instantiate_declaration_parameters(
+            parameters,
+            domains,
+            &scoped_arguments,
+            &frames,
+            fuel,
+        )?;
+        let capabilities = self
+            .capabilities
+            .iter()
+            .map(|r| scoped.instantiate_requirement_bounded(r, fuel))
+            .collect::<Result<_, _>>()?;
+        let requirements = self
+            .requirements
+            .iter()
+            .map(|r| scoped.instantiate_predicate_bounded(r, fuel))
+            .collect::<Result<_, _>>()?;
+        *fuel = fuel
+            .checked_sub(
+                self.name
+                    .len()
+                    .saturating_add(self.parameter_bindings.len())
+                    .saturating_add(
+                        self.type_parameters
+                            .len()
+                            .saturating_mul(parameters.len().saturating_add(1)),
+                    ),
+            )
+            .ok_or(Error::Budget)?;
+        let phase = if completed_signature.is_comptime_callable() {
+            FunctionPhase::Comptime
+        } else {
+            FunctionPhase::Runtime
+        };
+        crate::type_computations::charge_term(completed_signature.callable_signature(), fuel)?;
+        let signature = completed_signature.callable_signature().clone();
+        Ok(Function {
+            declaration: self.declaration,
+            name: self.name.clone(),
+            phase,
+            inline: false,
+            pure: self.pure,
+            is_unsafe: self.is_unsafe,
+            signature,
+            parameters: self.parameter_bindings.clone(),
+            preconditions: program.preconditions,
+            postconditions: program.postconditions,
+            result_binding: program.result_binding,
+            entry_snapshots: program.entry_snapshots,
+            capabilities,
+            requirements,
+            type_parameters: self
+                .type_parameters
+                .iter()
+                .copied()
+                .filter(|id| !parameters.contains(id))
+                .collect(),
+            defaults: vec![],
+            body: Expr {
+                source: SourceRange { start: 0, end: 0 },
+                ty: Term::Primitive(crate::Primitive::Void),
+                kind: K::Unit,
+            },
+        })
+    }
     /// An interface-only callable summary. The unit body is never invoked.
     pub fn program_summary(
         &self,
