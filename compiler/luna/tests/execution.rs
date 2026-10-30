@@ -35404,6 +35404,88 @@ fn bound_tuple_callable_cleanup_contexts_follow_nested_fields() {
 }
 
 #[test]
+fn symbolic_value_list_spreads_in_annotations_specialize_without_unfolding() {
+    let source = "typealias Type=.Type'builtin;
+        pure comptime fn List<T>->Type {T}
+        pure comptime fn Indexed<...items:List<bool>>->Type {bool}
+        pure comptime fn FunctionOf<values:List<bool>>->Type {
+            let callback:comptime fn(Indexed<true,...values,false,...values>)->bool=|value|true;
+            callback'type
+        }";
+    let package = compile_with_source_bindings(
+        source,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            meta_list: Some("input.List"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        package
+            .to_string()
+            .contains("(list-concat (type (normal-form")
+    );
+    let template = package
+        .functions
+        .iter()
+        .find(|f| f.name == "FunctionOf")
+        .unwrap();
+    let metadata = package
+        .normal_forms
+        .iter()
+        .find(|h| h.declaration == template.declaration)
+        .unwrap();
+    let domain = nir::Term::NormalForm {
+        head: id(&package, "List"),
+        sort: nir::Sort::Type,
+        arguments: vec![nir::Term::Primitive(nir::Primitive::Bool)],
+    };
+    let frozen = |fields| nir::Term::NominalValue {
+        ty: Box::new(domain.clone()),
+        variant: None,
+        fields,
+    };
+    for elements in [vec![], vec![nir::Term::Bool(false), nir::Term::Bool(true)]] {
+        let specialized = template
+            .instantiate_parameters(
+                &[nir::DeclarationParameter {
+                    declaration: metadata.parameters[0].declaration,
+                    sort: nir::Sort::ComptimeValue,
+                }],
+                &[frozen(elements.clone())],
+            )
+            .unwrap();
+        let mut fields = vec![nir::Term::Bool(true)];
+        fields.extend(elements.clone());
+        fields.push(nir::Term::Bool(false));
+        fields.extend(elements);
+        let expected = nir::Term::ComptimeFunction(Box::new(nir::Term::Function {
+            parameters: vec![nir::Parameter {
+                sort: nir::Sort::Runtime,
+                ty: nir::Term::NormalForm {
+                    head: id(&package, "Indexed"),
+                    sort: nir::Sort::Type,
+                    arguments: vec![frozen(fields)],
+                },
+            }],
+            result: Box::new(nir::Term::Primitive(nir::Primitive::Bool)),
+        }));
+        let mut found = false;
+        nir::visit::expressions(&specialized, &mut 1000, |expr, _| {
+            if matches!(expr.kind, nir::program::ExprKind::Closure { .. }) {
+                assert_eq!(expr.ty, expected);
+                found = true;
+            }
+            Ok::<_, String>(())
+        })
+        .unwrap();
+        assert!(found);
+        assert!(!specialized.to_string().contains("list-concat"));
+    }
+}
+
+#[test]
 fn symbolic_type_list_spreads_in_annotations_specialize_without_unfolding() {
     let source = "typealias Type=.Type'builtin;typealias Byte=.u8'builtin;
         pure comptime fn List<T>->Type {T}
@@ -35422,7 +35504,7 @@ fn symbolic_type_list_spreads_in_annotations_specialize_without_unfolding() {
         },
     )
     .unwrap();
-    assert!(package.to_string().contains("type-list-concat"));
+    assert!(package.to_string().contains("list-concat"));
     let tuple = id(&package, "Tuple");
     let template = package
         .functions
@@ -35469,7 +35551,7 @@ fn symbolic_type_list_spreads_in_annotations_specialize_without_unfolding() {
         })
         .unwrap();
         assert!(found);
-        assert!(!specialized.to_string().contains("type-list-concat"));
+        assert!(!specialized.to_string().contains("list-concat"));
     }
 }
 

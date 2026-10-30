@@ -236,8 +236,12 @@ pub enum Term {
     /// Immutable `meta.List<Type>` input, including symbolic Type elements.
     /// A value supplied to a normal-form head, never a tuple Type or tuple value.
     TypeListValue(Vec<Term>),
-    /// Ordered concatenation of Type-list values, retained across substitution.
-    TypeListConcat(Vec<Term>),
+    /// Ordered concatenation of list values in one declared domain.
+    /// This residual must complete before immutable value admission.
+    ListConcat {
+        ty: Box<Term>,
+        parts: Vec<Term>,
+    },
     /// Completed structural value; field labels and order are part of identity.
     RecordValue(Vec<(String, Term)>),
     /// Closed value of an identity-bearing aggregate. Nominal fields follow
@@ -522,8 +526,7 @@ impl Term {
                 | Self::Tuple(arguments)
                 | Self::TupleValue(arguments)
                 | Self::ClosureContextValue(arguments)
-                | Self::TypeListValue(arguments)
-                | Self::TypeListConcat(arguments) => pending.extend(arguments),
+                | Self::TypeListValue(arguments) => pending.extend(arguments),
                 Self::Record(fields) | Self::RecordValue(fields) => {
                     pending.extend(fields.into_iter().map(|(_, field)| field))
                 }
@@ -536,7 +539,7 @@ impl Term {
                     pending.extend(label.map(|label| *label));
                     pending.push(*value);
                 }
-                Self::NominalValue { ty, fields, .. } => {
+                Self::ListConcat { ty, parts: fields } | Self::NominalValue { ty, fields, .. } => {
                     pending.push(*ty);
                     pending.extend(fields);
                 }
@@ -583,51 +586,108 @@ impl Term {
         }
     }
 
-    pub fn type_list_concat(parts: Vec<Term>) -> Self {
+    /// Normalize an admitted collection operation without unfolding its head.
+    /// Domain admission belongs to the producer; this checks representation and
+    /// preserves order while substitution supplies previously unknown pieces.
+    /// Like structural rewriting, callers precharge retained input structure.
+    pub fn list_concat(ty: Term, parts: Vec<Term>) -> Result<Self, TypeError> {
+        ty.list_element_domain()
+            .ok_or(TypeError::InvalidListComponent)?;
         let mut pending = parts.into_iter().rev().collect::<Vec<_>>();
         let mut result = Vec::new();
+        let mut fields = Vec::new();
+        let flush = |fields: &mut Vec<Term>, result: &mut Vec<Term>| -> Result<(), TypeError> {
+            if !fields.is_empty() {
+                result.push(
+                    crate::comptime_values::encode_admitted_list(
+                        ty.clone(),
+                        std::mem::take(fields),
+                    )
+                    .map_err(|_| TypeError::InvalidListComponent)?,
+                );
+            }
+            Ok(())
+        };
         while let Some(part) = pending.pop() {
+            if !part.is_list_component(&ty) {
+                return Err(TypeError::InvalidListComponent);
+            }
             match part {
-                Self::TypeListConcat(parts) => pending.extend(parts.into_iter().rev()),
-                Self::TypeListValue(mut elements) => {
-                    if elements.is_empty() {
-                        continue;
-                    }
-                    if let Some(Self::TypeListValue(previous)) = result.last_mut() {
-                        previous.append(&mut elements);
-                    } else {
-                        result.push(Self::TypeListValue(elements));
-                    }
+                Self::ListConcat { parts, .. } => pending.extend(parts.into_iter().rev()),
+                Self::TypeListValue(elements)
+                | Self::NominalValue {
+                    fields: elements, ..
+                } => {
+                    fields.extend(elements);
                 }
-                other => result.push(other),
+                other => {
+                    flush(&mut fields, &mut result)?;
+                    result.push(other);
+                }
             }
         }
-        if result.is_empty() {
-            Self::TypeListValue(vec![])
-        } else if result.len() == 1 && result[0].is_type_list_component() {
+        flush(&mut fields, &mut result)?;
+        Ok(if result.is_empty() {
+            crate::comptime_values::encode_admitted_list(ty, vec![])
+                .map_err(|_| TypeError::InvalidListComponent)?
+        } else if result.len() == 1 {
             result.pop().unwrap()
         } else {
-            Self::TypeListConcat(result)
+            Self::ListConcat {
+                ty: Box::new(ty),
+                parts: result,
+            }
+        })
+    }
+    fn list_element_domain(&self) -> Option<&Term> {
+        match self {
+            Self::NormalForm {
+                sort: Sort::Type,
+                arguments,
+                ..
+            } => match arguments.as_slice() {
+                [element] if element.sort() == Sort::Type => Some(element),
+                _ => None,
+            },
+            _ => None,
         }
     }
-    fn is_type_list_component(&self) -> bool {
-        matches!(self, Self::TypeListValue(_) | Self::TypeListConcat(_))
-            || matches!(
-                self,
-                Self::Rigid {
-                    sort: Sort::ComptimeValue,
-                    ..
-                } | Self::Bound {
-                    sort: Sort::ComptimeValue,
-                    ..
-                } | Self::Hole {
-                    sort: Sort::ComptimeValue,
-                    ..
-                } | Self::NormalForm {
-                    sort: Sort::ComptimeValue,
-                    ..
-                }
-            )
+    fn is_list_component(&self, domain: &Term) -> bool {
+        let Some(element) = domain.list_element_domain() else {
+            return false;
+        };
+        let types = *element == Self::Primitive(Primitive::Type);
+        let sort = if types {
+            Sort::Type
+        } else {
+            Sort::ComptimeValue
+        };
+        match self {
+            Self::TypeListValue(fields) => types && fields.iter().all(|field| field.sort() == sort),
+            Self::NominalValue {
+                ty,
+                variant: None,
+                fields,
+            } => ty.as_ref() == domain && fields.iter().all(|field| field.sort() == sort),
+            Self::ListConcat { ty, .. } => ty.as_ref() == domain,
+            Self::Rigid {
+                sort: Sort::ComptimeValue,
+                ..
+            }
+            | Self::Bound {
+                sort: Sort::ComptimeValue,
+                ..
+            }
+            | Self::Hole {
+                sort: Sort::ComptimeValue,
+                ..
+            }
+            | Self::NormalForm {
+                sort: Sort::ComptimeValue,
+                ..
+            } => true,
+            _ => false,
+        }
     }
     /// Empty qualification disappears; adjacent effect prefixes concatenate.
     /// Do not deduplicate occurrences or reorder labels without evidence.
@@ -831,7 +891,7 @@ impl Term {
             | Self::TupleValue(_)
             | Self::ClosureContextValue(_)
             | Self::TypeListValue(_)
-            | Self::TypeListConcat(_)
+            | Self::ListConcat { .. }
             | Self::RecordValue(_)
             | Self::Unit
             | Self::Bool(_)
@@ -1358,12 +1418,8 @@ impl Term {
             ),
             Self::TupleValue(items) => Self::TupleValue(many(items, leaf)?),
             Self::TypeListValue(items) => Self::TypeListValue(many(items, leaf)?),
-            Self::TypeListConcat(items) => {
-                let parts = many(items, leaf)?;
-                if parts.iter().any(|part| !part.is_type_list_component()) {
-                    return Err(TypeError::InvalidTypeListComponent);
-                }
-                Self::type_list_concat(parts)
+            Self::ListConcat { ty, parts } => {
+                Self::list_concat(ty.rewrite(nesting, leaf)?, many(parts, leaf)?)?
             }
             Self::ComptimeFunction(inner) => {
                 Self::ComptimeFunction(Box::new(inner.rewrite(nesting, leaf)?))
@@ -1448,7 +1504,7 @@ pub enum TypeError {
     InvalidNormalFormFunctionSignature,
     InvalidUnsafeFunctionSignature,
     InvalidFunctionSignature,
-    InvalidTypeListComponent,
+    InvalidListComponent,
 }
 
 impl fmt::Display for TypeError {
@@ -1456,8 +1512,8 @@ impl fmt::Display for TypeError {
         match self {
             Self::ContextualCodeNotCallable => f.write_str("contextual code signature requires code-method elaboration, not ordinary callable erasure"),
             Self::InvalidClosureContext => f.write_str("closure qualification requires a closure context"),
-            Self::InvalidTypeListComponent => {
-                f.write_str("type-list concatenation requires list operands")
+            Self::InvalidListComponent => {
+                f.write_str("list concatenation requires list operands")
             }
             Self::WrongSort { expected, actual } => write!(f, "expected {expected}, got {actual}"),
             Self::MissingArgument(i) => write!(f, "missing substitution argument {i}"),
@@ -1752,7 +1808,6 @@ fn collect_runtime_dependencies(term: &Term, result: &mut BTreeSet<RuntimeId>) {
         | Term::Tuple(arguments)
         | Term::ClosureContextValue(arguments)
         | Term::TypeListValue(arguments)
-        | Term::TypeListConcat(arguments)
         | Term::TupleValue(arguments) => {
             for argument in arguments {
                 collect_runtime_dependencies(argument, result);
@@ -1771,7 +1826,7 @@ fn collect_runtime_dependencies(term: &Term, result: &mut BTreeSet<RuntimeId>) {
             }
             collect_runtime_dependencies(value, result);
         }
-        Term::NominalValue { ty, fields, .. } => {
+        Term::ListConcat { ty, parts: fields } | Term::NominalValue { ty, fields, .. } => {
             collect_runtime_dependencies(ty, result);
             for field in fields {
                 collect_runtime_dependencies(field, result);
@@ -2022,12 +2077,15 @@ fn validate(
                 validate(item, holes, frames, allow_free, core)?;
             }
         }
-        Term::TypeListConcat(items) => {
-            for item in items {
-                if !item.is_type_list_component() {
-                    return Err(TypeError::InvalidTypeListComponent);
+        Term::ListConcat { ty, parts } => {
+            ty.list_element_domain()
+                .ok_or(TypeError::InvalidListComponent)?;
+            validate(ty, holes, frames, allow_free, core)?;
+            for part in parts {
+                if !part.is_list_component(ty) {
+                    return Err(TypeError::InvalidListComponent);
                 }
-                validate(item, holes, frames, allow_free, core)?;
+                validate(part, holes, frames, allow_free, core)?;
             }
         }
         Term::Optional(inner) | Term::Pointer(inner) => {
@@ -2374,10 +2432,10 @@ impl fmt::Display for Term {
                 list(f, items)?;
                 f.write_str(")")
             }
-            Self::TypeListConcat(items) => {
-                f.write_str("(type-list-concat ")?;
-                list(f, items)?;
-                f.write_str(")")
+            Self::ListConcat { ty, parts } => {
+                write!(f, "(list-concat (type {ty}) (parts ")?;
+                list(f, parts)?;
+                f.write_str("))")
             }
             Self::TupleValue(items) => {
                 f.write_str("(tuple-value ")?;

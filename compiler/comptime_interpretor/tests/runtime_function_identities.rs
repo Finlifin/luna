@@ -111,7 +111,17 @@ fn runtime_identity_snapshots_validate_scope_and_recover_after_budget_failure() 
             declaration: id(3),
             sort: Sort::ComptimeValue,
         },
-        Term::TypeListConcat(vec![Term::TypeListValue(vec![])]),
+        Term::ListConcat {
+            ty: Box::new(Term::NormalForm {
+                head: nir::DeclarationId {
+                    package: 91,
+                    local: 9,
+                },
+                sort: nir::Sort::Type,
+                arguments: vec![Term::Primitive(nir::Primitive::Type)],
+            }),
+            parts: vec![Term::TypeListValue(vec![])],
+        },
     ] {
         let unresolved = Value::FunctionInstance {
             declaration: id(2),

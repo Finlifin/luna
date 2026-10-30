@@ -14,6 +14,45 @@ fn packet(fields: Vec<(String, Entry)>) -> Vec<Input> {
 }
 
 #[test]
+fn wire_preserves_typed_list_residuals_and_rejects_untyped_legacy_tag() {
+    let ty = T::NormalForm {
+        head: DeclarationId {
+            package: 91,
+            local: 1,
+        },
+        sort: Sort::Type,
+        arguments: vec![T::Primitive(P::Bool)],
+    };
+    let value = T::ListConcat {
+        ty: Box::new(ty.clone()),
+        parts: vec![T::NominalValue {
+            ty: Box::new(ty.clone()),
+            variant: None,
+            fields: vec![T::Bool(true)],
+        }],
+    };
+    let inputs = packet(vec![("x".into(), entry(ty, value))]);
+    let encoded = encode_hex(&inputs).unwrap();
+    assert_eq!(decode_hex(&encoded).unwrap(), inputs);
+    assert_eq!(encode_hex(&decode_hex(&encoded).unwrap()).unwrap(), encoded);
+
+    // A one-field bool packet gives a stable value-tag offset, independent of
+    // the payload following it. Never reinterpret v1's old untyped tag as 36.
+    let mut legacy = encode_hex(&packet(vec![(
+        "x".into(),
+        entry(T::Primitive(P::Bool), T::Bool(true)),
+    )]))
+    .unwrap();
+    legacy.replace_range(78..80, "20");
+    assert!(
+        decode_hex(&legacy)
+            .unwrap_err()
+            .contains("lacks its declared domain")
+    );
+    assert_eq!(decode_hex(&encoded).unwrap(), inputs);
+}
+
+#[test]
 fn wire_preserves_normal_form_callable_type_and_collector() {
     for collector in [None, Some(0)] {
         let signature = T::NormalFormFunction(

@@ -191,7 +191,10 @@ fn normalize(
             normalize(signature, values, fuel, depth + 1)?,
         )
         .map_err(|_| ErrorKind::Type)?,
-        Term::TypeListConcat(items) => Term::type_list_concat(many(items, fuel)?),
+        Term::ListConcat { ty, parts } => {
+            Term::list_concat(normalize(ty, values, fuel, depth + 1)?, many(parts, fuel)?)
+                .map_err(|_| ErrorKind::Type)?
+        }
         Term::Record(fields) => {
             if fields.len() > *fuel {
                 return Err(ErrorKind::StepsExhausted);

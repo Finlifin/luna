@@ -361,7 +361,6 @@ impl Interpreter<'_> {
             Term::Tuple(types)
             | Term::ClosureContextValue(types)
             | Term::TypeListValue(types)
-            | Term::TypeListConcat(types)
             | Term::TupleValue(types) => {
                 for ty in types {
                     self.admit_type(ty, depth + 1)?;
@@ -380,7 +379,7 @@ impl Interpreter<'_> {
                 }
                 self.admit_type(value, depth + 1)?;
             }
-            Term::NominalValue { ty, fields, .. } => {
+            Term::ListConcat { ty, parts: fields } | Term::NominalValue { ty, fields, .. } => {
                 self.admit_type(ty, depth + 1)?;
                 for field in fields {
                     self.admit_type(field, depth + 1)?;

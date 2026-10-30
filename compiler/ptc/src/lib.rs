@@ -705,7 +705,7 @@ fn within_input_limits(input: Input<'_>, limit: usize, fuel: &mut usize) -> bool
                     }
                     pending.push((Input::Term(value), depth + 1));
                 }
-                Term::NominalValue { ty, fields, .. } => {
+                Term::ListConcat { ty, parts: fields } | Term::NominalValue { ty, fields, .. } => {
                     if fields.len().saturating_add(1) > room {
                         return false;
                     }
@@ -727,7 +727,6 @@ fn within_input_limits(input: Input<'_>, limit: usize, fuel: &mut usize) -> bool
                 Term::Tuple(items)
                 | Term::ClosureContextValue(items)
                 | Term::TypeListValue(items)
-                | Term::TypeListConcat(items)
                 | Term::TupleValue(items)
                 | Term::Nominal {
                     arguments: items, ..
@@ -824,7 +823,7 @@ fn subterms(term: &Term) -> Vec<&Term> {
             .chain(label.as_deref())
             .chain(std::iter::once(value.as_ref()))
             .collect(),
-        Term::NominalValue { ty, fields, .. } => {
+        Term::ListConcat { ty, parts: fields } | Term::NominalValue { ty, fields, .. } => {
             std::iter::once(ty.as_ref()).chain(fields.iter()).collect()
         }
         Term::Record(fields) | Term::RecordValue(fields) => {
@@ -833,7 +832,6 @@ fn subterms(term: &Term) -> Vec<&Term> {
         Term::Tuple(items)
         | Term::ClosureContextValue(items)
         | Term::TypeListValue(items)
-        | Term::TypeListConcat(items)
         | Term::TupleValue(items)
         | Term::Nominal {
             arguments: items, ..
@@ -886,7 +884,9 @@ fn has_bound(term: &Term) -> bool {
                 || label.as_ref().is_some_and(|label| has_bound(label))
                 || has_bound(value)
         }
-        Term::NominalValue { ty, fields, .. } => has_bound(ty) || fields.iter().any(has_bound),
+        Term::ListConcat { ty, parts: fields } | Term::NominalValue { ty, fields, .. } => {
+            has_bound(ty) || fields.iter().any(has_bound)
+        }
         Term::Record(fields) | Term::RecordValue(fields) => {
             fields.iter().any(|(_, ty)| has_bound(ty))
         }
@@ -904,7 +904,6 @@ fn has_bound(term: &Term) -> bool {
         Term::Tuple(items)
         | Term::ClosureContextValue(items)
         | Term::TypeListValue(items)
-        | Term::TypeListConcat(items)
         | Term::TupleValue(items)
         | Term::Nominal {
             arguments: items, ..
@@ -1240,7 +1239,7 @@ fn same_congruent_head(a: &Term, b: &Term, context: &Context) -> bool {
         return a.len() == b.len() && a.iter().zip(b).all(|((a, _), (b, _))| a == b);
     }
     if let (Term::TypeListValue(a), Term::TypeListValue(b))
-    | (Term::TypeListConcat(a), Term::TypeListConcat(b))
+    | (Term::ListConcat { parts: a, .. }, Term::ListConcat { parts: b, .. })
     | (Term::TupleValue(a), Term::TupleValue(b)) = (a, b)
     {
         return a.len() == b.len();
@@ -2466,9 +2465,10 @@ mod tuple_classification_tests {
         let pending = Term::NormalForm {
             head: id(2),
             sort: Sort::Type,
-            arguments: vec![Term::TypeListConcat(vec![Term::TypeListValue(vec![
-                boolean.clone(),
-            ])])],
+            arguments: vec![Term::ListConcat {
+                ty: Box::new(list.clone()),
+                parts: vec![Term::TypeListValue(vec![boolean.clone()])],
+            }],
         };
         assert!(matches!(
             context.prove(Formula::kind(pending, TypeKind::Boolean), Budget::default()),

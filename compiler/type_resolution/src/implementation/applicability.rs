@@ -348,7 +348,9 @@ pub(super) fn validate(
                 }
                 pending.push((Work::Term(value), depth + 1));
             }
-            Work::Term(Term::NominalValue { ty, fields, .. }) => {
+            Work::Term(
+                Term::ListConcat { ty, parts: fields } | Term::NominalValue { ty, fields, .. },
+            ) => {
                 if fields.len().saturating_add(1) > fuel {
                     return Err("input budget exhausted".into());
                 }
@@ -370,7 +372,6 @@ pub(super) fn validate(
                 Term::Tuple(items)
                 | Term::ClosureContextValue(items)
                 | Term::TypeListValue(items)
-                | Term::TypeListConcat(items)
                 | Term::TupleValue(items)
                 | Term::Nominal {
                     arguments: items, ..

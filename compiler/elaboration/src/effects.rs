@@ -226,7 +226,6 @@ fn charge(term: &Term, fuel: &mut usize, depth: usize) -> Result<(), Error> {
         | Term::Tuple(arguments)
         | Term::ClosureContextValue(arguments)
         | Term::TypeListValue(arguments)
-        | Term::TypeListConcat(arguments)
         | Term::TupleValue(arguments) => terms(arguments, fuel, depth - 1),
         Term::AssociatedType {
             subject, arguments, ..
@@ -273,7 +272,7 @@ fn charge(term: &Term, fuel: &mut usize, depth: usize) -> Result<(), Error> {
             }
             charge(value, fuel, depth - 1)
         }
-        Term::NominalValue { ty, fields, .. } => {
+        Term::ListConcat { ty, parts: fields } | Term::NominalValue { ty, fields, .. } => {
             if fields.len().saturating_add(1) > *fuel {
                 return Err(Error::BudgetExhausted);
             }

@@ -6692,3 +6692,66 @@ No full workspace test suite was run.
 Public-library validation:
 `python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
 exit 0, three native tests passed; `/tmp/luna-tools-n7bgurd6/result.json`.
+
+
+## Domain-carrying deferred list concatenation (2026-10-31)
+
+`Term::TypeListConcat` and its Type-only constructor have been removed.
+`Term::ListConcat { ty, parts }` retains the exact collection domain while
+ordered pieces await substitution. Its structural normalizer handles ordinary,
+nested and compact legacy list payloads, rejects foreign domains, variants,
+wrong sorts and scalar operands, merges adjacent completed pieces and preserves
+unknown pieces. It never unfolds an opaque head or grants list layout authority.
+The existing frozen-value encoding decision is shared with VM/IIR exporters.
+
+Elaboration no longer has a separate collected-Type-list observer. Every
+registered list collector follows the declared element domain, accumulates
+adjacent scalar entries together and retains symbolic spreads through the same
+operation. This avoids constructing a separate one-element list for every
+adjacent input. The owning phases still validate domains and precharge retained
+structure; substitution is structural normalization, not program verification.
+
+All former concatenation walkers now include the domain child: scope and binder
+rewriting, runtime and declaration dependencies, disposal, resource budgets,
+associated normalization, implementation matching, materialization and PTC
+structural traversal. PTC does not gain value propositions or evaluation of
+normal-form heads. Pending concatenation remains inadmissible as completed IIR
+or a completed immutable value. Dumps use `(list-concat (type ...) (parts ...))`.
+
+Metadata wire v1 uses new descriptor tag 36. Tag 35 continues to identify
+normal-form callable signatures; legacy tag 32 is rejected because it lacks a
+collection domain. Existing unrelated descriptor encodings remain unchanged.
+The new round-trip regression initially exposed a tag collision, which was
+corrected before the final successful run; no test expectation was weakened.
+
+New tests cover bool/nested-list substitution, empty pieces, source order,
+foreign domains, invalid operands, domain-only dependencies, scope and budget
+boundaries. Source tests inspect both Type-list and ordinary bool-list residuals
+in unspecialized function annotations, then substitute empty/nonempty inputs and
+check exact opaque identities. The real-sysroot native example also checks
+`Surround<T, values: meta.List<T>, prefix: T, suffix: T>` for bool and Type inputs.
+
+Canonical `TypeListValue` storage and remaining contextual-call reconstruction
+still need migration. This stage removes the special deferred operation; it does
+not assert that all frozen list representations are unified yet.
+
+Validation from /home/fin/luna:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test normal_form_inference --test type_spreads --test comptime_clause_inputs --test cmtt --test builder_invocations --test metadata_wire --test build_metadata --no-fail-fast`:
+  exit 0, 824 passed; `/tmp/luna-tools-_nx85p72/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test execution spreads_in_annotations_specialize_without_unfolding`:
+  exit 0, two passed; `/tmp/luna-tools-42n3cd5o/result.json`.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
+  exit 0, four native tests passed; `/tmp/luna-tools-bngpmdhe/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-f45x68qm/result.json`; `git diff --check` passed.
+
+No full workspace suite was run.
+
+Final underlying-crate validation:
+`python3 -B development/check.py --timeout 900 -- test -p nir -p iir -p comptime_interpretor -p ptc -p type_resolution --no-fail-fast`:
+exit 0, 1481 passed; `/tmp/luna-tools-0ybj0y3p/result.json`.
+
+After batching adjacent collector inputs and sharing the owned list encoder,
+the public-library command above was repeated on the final implementation:
+exit 0, four native tests passed; `/tmp/luna-tools-x1rmnvif/result.json`.

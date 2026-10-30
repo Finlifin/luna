@@ -35,14 +35,15 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), &'static str> {
             | Term::Tuple(arguments)
             | Term::ClosureContextValue(arguments)
             | Term::TypeListValue(arguments)
-            | Term::TypeListConcat(arguments)
             | Term::TupleValue(arguments) => arguments.len(),
             Term::ContextualClosure { .. } => 2,
             Term::Closure { environment, .. } => environment.len().saturating_add(1),
             Term::Function { parameters, .. } => parameters.len().saturating_add(1),
             Term::OptionalValue { value, .. } => 1 + usize::from(value.is_some()),
             Term::ErrorValue { .. } => 3,
-            Term::NominalValue { fields, .. } => fields.len().saturating_add(1),
+            Term::ListConcat { parts: fields, .. } | Term::NominalValue { fields, .. } => {
+                fields.len().saturating_add(1)
+            }
             Term::Record(fields) | Term::RecordValue(fields) => fields.len(),
             Term::Optional(_)
             | Term::Pointer(_)
@@ -77,7 +78,6 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), &'static str> {
             | Term::Tuple(arguments)
             | Term::ClosureContextValue(arguments)
             | Term::TypeListValue(arguments)
-            | Term::TypeListConcat(arguments)
             | Term::TupleValue(arguments) => children.extend(arguments),
             Term::ContextualClosure { context, signature } => {
                 children.push(context);
@@ -113,7 +113,7 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), &'static str> {
                 }
                 children.push(value);
             }
-            Term::NominalValue { ty, fields, .. } => {
+            Term::ListConcat { ty, parts: fields } | Term::NominalValue { ty, fields, .. } => {
                 children.push(ty);
                 children.extend(fields);
             }

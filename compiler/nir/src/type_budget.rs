@@ -57,7 +57,7 @@ pub fn charge_structure(ty: &Term, fuel: &mut usize) -> Result<(), &'static str>
                 }
                 pending.push((value, depth + 1));
             }
-            Term::NominalValue { ty, fields, .. } => {
+            Term::ListConcat { ty, parts: fields } | Term::NominalValue { ty, fields, .. } => {
                 pending.push((ty, depth + 1));
                 pending.extend(fields.iter().map(|field| (field, depth + 1)));
             }
@@ -66,7 +66,6 @@ pub fn charge_structure(ty: &Term, fuel: &mut usize) -> Result<(), &'static str>
             }
             Term::Tuple(fields)
             | Term::TypeListValue(fields)
-            | Term::TypeListConcat(fields)
             | Term::TupleValue(fields)
             | Term::Nominal {
                 arguments: fields, ..

@@ -110,7 +110,6 @@ fn local_identity(
             Term::Nominal { arguments, .. }
             | Term::Tuple(arguments)
             | Term::TypeListValue(arguments)
-            | Term::TypeListConcat(arguments)
             | Term::TupleValue(arguments) => arguments,
             Term::OptionalValue { ty, value } => {
                 work.push((ty, depth + 1));
@@ -127,7 +126,7 @@ fn local_identity(
                 work.push((value, depth + 1));
                 continue;
             }
-            Term::NominalValue { ty, fields, .. } => {
+            Term::ListConcat { ty, parts: fields } | Term::NominalValue { ty, fields, .. } => {
                 if fields.len().saturating_add(1) > *fuel {
                     return Err(Error::BudgetExhausted);
                 }

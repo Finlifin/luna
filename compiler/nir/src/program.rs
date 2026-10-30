@@ -4598,7 +4598,6 @@ impl Term {
                 | Term::Tuple(arguments)
                 | Term::ClosureContextValue(arguments)
                 | Term::TypeListValue(arguments)
-                | Term::TypeListConcat(arguments)
                 | Term::TupleValue(arguments) => terms.extend(arguments),
                 Term::OptionalValue { ty, value } => {
                     terms.push(ty);
@@ -4614,7 +4613,7 @@ impl Term {
                     }
                     terms.push(value);
                 }
-                Term::NominalValue { ty, fields, .. } => {
+                Term::ListConcat { ty, parts: fields } | Term::NominalValue { ty, fields, .. } => {
                     terms.push(ty);
                     terms.extend(fields);
                 }

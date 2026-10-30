@@ -452,7 +452,10 @@ fn registered_list_heads_admit_reduced_inputs_and_reject_pending_concatenation()
     let pending = Term::NormalForm {
         head: id(2),
         sort: Sort::Type,
-        arguments: vec![Term::TypeListConcat(parts.clone())],
+        arguments: vec![Term::ListConcat {
+            ty: Box::new(list_type()),
+            parts: parts.clone(),
+        }],
     };
     assert!(
         vm.validate_immutable_input(&Value::Type(pending), &ty(P::Type))
@@ -461,7 +464,7 @@ fn registered_list_heads_admit_reduced_inputs_and_reject_pending_concatenation()
     let completed = Term::NormalForm {
         head: id(2),
         sort: Sort::Type,
-        arguments: vec![Term::type_list_concat(parts)],
+        arguments: vec![Term::list_concat(list_type(), parts).unwrap()],
     };
     assert!(
         vm.validate_immutable_input(&Value::Type(completed.clone()), &ty(P::Type))

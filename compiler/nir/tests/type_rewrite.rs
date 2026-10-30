@@ -94,16 +94,27 @@ fn symbolic_type_lists_concatenate_after_substitution_without_changing_heads() {
     };
     let boolean = Term::Primitive(Primitive::Bool);
     let byte = Term::Primitive(Primitive::U8);
-    let list = Term::type_list_concat(vec![
-        Term::TypeListValue(vec![boolean.clone()]),
-        Term::Rigid {
-            declaration: input,
-            sort: Sort::ComptimeValue,
+    let list = Term::list_concat(
+        Term::NormalForm {
+            head: nir::DeclarationId {
+                package: 91,
+                local: 9,
+            },
+            sort: nir::Sort::Type,
+            arguments: vec![Term::Primitive(nir::Primitive::Type)],
         },
-        Term::TypeListValue(vec![byte.clone()]),
-    ]);
+        vec![
+            Term::TypeListValue(vec![boolean.clone()]),
+            Term::Rigid {
+                declaration: input,
+                sort: Sort::ComptimeValue,
+            },
+            Term::TypeListValue(vec![byte.clone()]),
+        ],
+    )
+    .unwrap();
     list.check_scope(&[]).unwrap();
-    assert!(list.to_string().contains("type-list-concat"));
+    assert!(list.to_string().contains("list-concat"));
     let template = Term::NormalForm {
         head,
         sort: Sort::Type,
@@ -142,7 +153,21 @@ fn symbolic_type_lists_concatenate_after_substitution_without_changing_heads() {
             )
             .is_err()
     );
-    assert_eq!(Term::type_list_concat(vec![]), Term::TypeListValue(vec![]));
+    assert_eq!(
+        Term::list_concat(
+            Term::NormalForm {
+                head: nir::DeclarationId {
+                    package: 91,
+                    local: 9
+                },
+                sort: nir::Sort::Type,
+                arguments: vec![Term::Primitive(nir::Primitive::Type)]
+            },
+            vec![]
+        )
+        .unwrap(),
+        Term::TypeListValue(vec![])
+    );
 }
 
 #[test]

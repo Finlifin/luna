@@ -36,11 +36,17 @@ pub fn freeze_admitted_list(
 ) -> Result<Term, Error> {
     crate::type_computations::charge_term(domain, fuel).map_err(|_| Error::Budget)?;
     *fuel = fuel.checked_sub(fields.len()).ok_or(Error::Budget)?;
+    encode_admitted_list(domain.clone(), fields)
+}
+
+// Structural rewriting already owns and charges its retained terms. Share the
+// representation decision without resetting an invocation's resource budget.
+pub(crate) fn encode_admitted_list(domain: Term, fields: Vec<Term>) -> Result<Term, Error> {
     let Term::NormalForm {
         sort: Sort::Type,
         arguments,
         ..
-    } = domain
+    } = &domain
     else {
         return Err(Error::Invalid("admitted list has an invalid domain"));
     };
@@ -63,7 +69,7 @@ pub fn freeze_admitted_list(
         Term::TypeListValue(fields)
     } else {
         Term::NominalValue {
-            ty: Box::new(domain.clone()),
+            ty: Box::new(domain),
             variant: None,
             fields,
         }

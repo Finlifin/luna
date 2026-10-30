@@ -2682,10 +2682,9 @@ impl Builder<'_> {
                 }
                 children.push((**result).clone());
             }
-            Term::Tuple(items)
-            | Term::TypeListValue(items)
-            | Term::TypeListConcat(items)
-            | Term::TupleValue(items) => children.extend(items.iter().cloned()),
+            Term::Tuple(items) | Term::TypeListValue(items) | Term::TupleValue(items) => {
+                children.extend(items.iter().cloned())
+            }
             Term::OptionalValue { ty, value } => {
                 children.push((**ty).clone());
                 if let Some(value) = value {
@@ -2699,7 +2698,7 @@ impl Builder<'_> {
                 }
                 children.push((**value).clone());
             }
-            Term::NominalValue { ty, fields, .. } => {
+            Term::ListConcat { ty, parts: fields } | Term::NominalValue { ty, fields, .. } => {
                 children.push((**ty).clone());
                 children.extend(fields.iter().cloned());
             }

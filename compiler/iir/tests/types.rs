@@ -571,17 +571,28 @@ fn incomplete_type_list_concatenation_cannot_enter_iir() {
         package: 91,
         local: 1,
     };
-    let term = Term::type_list_concat(vec![
-        Term::TypeListValue(vec![Term::Primitive(Primitive::Bool)]),
-        Term::Rigid {
-            declaration: input,
-            sort: Sort::ComptimeValue,
+    let term = Term::list_concat(
+        Term::NormalForm {
+            head: nir::DeclarationId {
+                package: 91,
+                local: 9,
+            },
+            sort: nir::Sort::Type,
+            arguments: vec![Term::Primitive(nir::Primitive::Type)],
         },
-    ]);
+        vec![
+            Term::TypeListValue(vec![Term::Primitive(Primitive::Bool)]),
+            Term::Rigid {
+                declaration: input,
+                sort: Sort::ComptimeValue,
+            },
+        ],
+    )
+    .unwrap();
     assert!(
         completed_type(&term, &BTreeSet::new(), &mut 100)
             .unwrap_err()
-            .contains("type-list concatenation")
+            .contains("list concatenation")
     );
     let completed = term
         .instantiate_parameters(

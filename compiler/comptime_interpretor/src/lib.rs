@@ -6954,10 +6954,10 @@ fn scoped_term_value_work_with_callables_in(
         if depth > 128 || work > 100_000 {
             return None;
         }
-        // A concatenation is a pending type-list operation, not a completed
+        // A concatenation is a pending list operation, not a completed
         // value identity. Even literal-only parts must first pass through the
-        // canonical constructor/substitution that produces TypeListValue.
-        if matches!(ty, Term::TypeListConcat(_)) {
+        // canonical constructor/substitution that produces an immutable list value.
+        if matches!(ty, Term::ListConcat { .. }) {
             return None;
         }
         let scalar_work = match ty {
@@ -6980,12 +6980,13 @@ fn scoped_term_value_work_with_callables_in(
         let children = match ty {
             Term::OptionalValue { value, .. } => 1 + usize::from(value.is_some()),
             Term::ErrorValue { .. } => 3,
-            Term::NominalValue { fields, .. } => fields.len().saturating_add(1),
+            Term::ListConcat { parts: fields, .. } | Term::NominalValue { fields, .. } => {
+                fields.len().saturating_add(1)
+            }
             Term::Record(fields) | Term::RecordValue(fields) => fields.len(),
             Term::Tuple(items)
             | Term::ClosureContextValue(items)
             | Term::TypeListValue(items)
-            | Term::TypeListConcat(items)
             | Term::TupleValue(items)
             | Term::ClosureSnapshot {
                 arguments: items, ..
@@ -7097,7 +7098,7 @@ fn scoped_term_value_work_with_callables_in(
                 }
                 pending.push((value, depth + 1, frames.clone()));
             }
-            Term::NominalValue { ty, fields, .. } => {
+            Term::ListConcat { ty, parts: fields } | Term::NominalValue { ty, fields, .. } => {
                 pending.push((ty, depth + 1, frames.clone()));
                 pending.extend(
                     fields
@@ -7126,7 +7127,6 @@ fn scoped_term_value_work_with_callables_in(
             Term::Tuple(items)
             | Term::ClosureContextValue(items)
             | Term::TypeListValue(items)
-            | Term::TypeListConcat(items)
             | Term::TupleValue(items)
             | Term::ClosureSnapshot {
                 arguments: items, ..
@@ -7531,7 +7531,17 @@ mod computation_type_tests {
                 declaration: id,
                 sort: nir::Sort::ComptimeValue,
             },
-            Term::TypeListConcat(vec![Term::TypeListValue(vec![rigid.clone()])]),
+            Term::ListConcat {
+                ty: Box::new(Term::NormalForm {
+                    head: nir::DeclarationId {
+                        package: 91,
+                        local: 9,
+                    },
+                    sort: nir::Sort::Type,
+                    arguments: vec![Term::Primitive(nir::Primitive::Type)],
+                }),
+                parts: vec![Term::TypeListValue(vec![rigid.clone()])],
+            },
         ] {
             let nested = Term::NormalForm {
                 head: id,
@@ -7764,7 +7774,17 @@ mod normal_input_data_tests {
                 declaration,
                 sort: nir::Sort::ComptimeValue,
             }]),
-            Term::TypeListConcat(vec![Term::TypeListValue(vec![])]),
+            Term::ListConcat {
+                ty: Box::new(Term::NormalForm {
+                    head: nir::DeclarationId {
+                        package: 91,
+                        local: 9,
+                    },
+                    sort: nir::Sort::Type,
+                    arguments: vec![Term::Primitive(nir::Primitive::Type)],
+                }),
+                parts: vec![Term::TypeListValue(vec![])],
+            },
         ] {
             let mut instance = closure.clone();
             instance.instance_arguments = Some(vec![argument]);

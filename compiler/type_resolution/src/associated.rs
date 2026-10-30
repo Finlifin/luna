@@ -717,7 +717,10 @@ impl Normalizer<'_, '_, '_> {
             Term::Tuple(items) => Term::Tuple(self.many(items, depth + 1)?),
             Term::TupleValue(items) => Term::TupleValue(self.many(items, depth + 1)?),
             Term::TypeListValue(items) => Term::TypeListValue(self.many(items, depth + 1)?),
-            Term::TypeListConcat(items) => Term::type_list_concat(self.many(items, depth + 1)?),
+            Term::ListConcat { ty, parts } => {
+                Term::list_concat(self.normalize(ty, depth + 1)?, self.many(parts, depth + 1)?)
+                    .map_err(|error| error.to_string())?
+            }
             Term::OptionalValue { ty, value } => Term::OptionalValue {
                 ty: Box::new(self.normalize(ty, depth + 1)?),
                 value: value
@@ -893,7 +896,6 @@ pub fn charge_projection_copy(term: &Term, fuel: &mut usize) -> Result<(), Strin
             }
             Term::Tuple(items)
             | Term::TypeListValue(items)
-            | Term::TypeListConcat(items)
             | Term::TupleValue(items)
             | Term::Nominal {
                 arguments: items, ..
@@ -919,7 +921,7 @@ pub fn charge_projection_copy(term: &Term, fuel: &mut usize) -> Result<(), Strin
                 pending.push(value);
                 0
             }
-            Term::NominalValue { ty, fields, .. } => {
+            Term::ListConcat { ty, parts: fields } | Term::NominalValue { ty, fields, .. } => {
                 pending.push(ty);
                 pending.extend(fields);
                 0

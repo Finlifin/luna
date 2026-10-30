@@ -588,8 +588,7 @@ pub(crate) fn visit_expanded_term(
             | Term::Tuple(arguments)
             | Term::TupleValue(arguments)
             | Term::ClosureContextValue(arguments)
-            | Term::TypeListValue(arguments)
-            | Term::TypeListConcat(arguments) => {
+            | Term::TypeListValue(arguments) => {
                 for argument in arguments {
                     push(argument)?;
                 }
@@ -620,7 +619,7 @@ pub(crate) fn visit_expanded_term(
                 }
                 push(value)?;
             }
-            Term::NominalValue { ty, fields, .. } => {
+            Term::ListConcat { ty, parts: fields } | Term::NominalValue { ty, fields, .. } => {
                 push(ty)?;
                 for field in fields {
                     push(field)?;

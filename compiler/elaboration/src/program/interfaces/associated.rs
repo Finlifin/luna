@@ -980,7 +980,6 @@ impl Checker<'_, '_> {
                 | Term::NormalForm { arguments, .. }
                 | Term::Tuple(arguments)
                 | Term::TypeListValue(arguments)
-                | Term::TypeListConcat(arguments)
                 | Term::TupleValue(arguments) => {
                     pending.extend(arguments.into_iter().map(|t| Work::Visit(t, depth + 1)))
                 }
@@ -997,7 +996,7 @@ impl Checker<'_, '_> {
                     }
                     pending.push(Work::Visit(*value, depth + 1));
                 }
-                Term::NominalValue { ty, fields, .. } => {
+                Term::ListConcat { ty, parts: fields } | Term::NominalValue { ty, fields, .. } => {
                     pending.push(Work::Visit(*ty, depth + 1));
                     pending.extend(
                         fields

@@ -133,7 +133,7 @@ impl Key {
                 | Term::NormalForm { .. }
                 | Term::ClosureContextValue(_)
                 | Term::TypeListValue(_)
-                | Term::TypeListConcat(_)
+                | Term::ListConcat { .. }
                 | Term::TupleValue(_)
                 | Term::RecordValue(_) => {
                     // Validate and bound the complete opaque value before cloning.
@@ -165,7 +165,6 @@ impl Key {
                             | Term::Tuple(arguments)
                             | Term::ClosureContextValue(arguments)
                             | Term::TypeListValue(arguments)
-                            | Term::TypeListConcat(arguments)
                             | Term::TupleValue(arguments) => {
                                 if arguments.len() > *fuel {
                                     return Err(Error::BudgetExhausted);
@@ -185,7 +184,8 @@ impl Key {
                                 }
                                 work.push((value, d + 1));
                             }
-                            Term::NominalValue { ty, fields, .. } => {
+                            Term::ListConcat { ty, parts: fields }
+                            | Term::NominalValue { ty, fields, .. } => {
                                 if fields.len().saturating_add(1) > *fuel {
                                     return Err(Error::BudgetExhausted);
                                 }
@@ -292,7 +292,7 @@ impl Key {
                     Self::Leaf(
                         Term::NormalForm { .. }
                         | Term::TypeListValue(_)
-                        | Term::TypeListConcat(_)
+                        | Term::ListConcat { .. }
                         | Term::TupleValue(_)
                         | Term::Value { .. },
                     ),
@@ -303,7 +303,7 @@ impl Key {
                     Self::Leaf(
                         Term::NormalForm { .. }
                         | Term::TypeListValue(_)
-                        | Term::TypeListConcat(_)
+                        | Term::ListConcat { .. }
                         | Term::TupleValue(_)
                         | Term::Value { .. },
                     ),

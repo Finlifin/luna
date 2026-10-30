@@ -104,86 +104,51 @@ impl Checker<'_, '_> {
         })
     }
 
-    fn known_collected_type_list_in(
-        &mut self,
-        items: &[n::NormalFormArgument],
-        domain: &Term,
-        bindings: &BTreeMap<n::LocalId, std::sync::Arc<Term>>,
-    ) -> Option<Term> {
-        let mut budget = comptime_runtime::Budget {
-            steps: self.required_steps as usize,
-            max_limbs: 4096,
-        };
-        let before = budget.steps;
-        let mut parts = Vec::new();
-        let mut known = true;
-        for item in items {
-            match item {
-                n::NormalFormArgument::Value(value) => {
-                    match self.known_normal_input_in(value, 0, &mut budget, bindings) {
-                        Some(ty) if ty.sort() == Sort::Type => {
-                            parts.push(Term::TypeListValue(vec![ty]))
-                        }
-                        _ => known = false,
-                    }
-                }
-                n::NormalFormArgument::ListSpread(value) => {
-                    match self.known_normal_input_in(value, 0, &mut budget, bindings) {
-                        Some(value @ (Term::NominalValue { .. } | Term::TypeListValue(_))) => {
-                            match take_known_list_elements(value, domain, &p(P::Type), &mut budget)
-                            {
-                                Some(fields) => parts.push(Term::TypeListValue(fields)),
-                                None => known = false,
-                            }
-                        }
-                        Some(value) => parts.push(value),
-                        _ => known = false,
-                    }
-                }
-                _ => known = false,
-            }
-        }
-        self.required_steps -= (before - budget.steps) as u64;
-        known.then(|| Term::type_list_concat(parts))
-    }
-
     pub(super) fn known_collected_list_in(
         &mut self,
         items: &[n::NormalFormArgument],
         ty: &Term,
         bindings: &BTreeMap<n::LocalId, std::sync::Arc<Term>>,
     ) -> Option<Term> {
-        if self.is_type_list_type(ty) {
-            return self.known_collected_type_list_in(items, ty, bindings);
-        }
         let element = self.list_element_type(ty)?;
         let mut budget = comptime_runtime::Budget {
-            steps: self.required_steps as usize,
+            steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
             max_limbs: 4096,
         };
         let before = budget.steps;
-        let mut fields = Vec::new();
         let result = (|| {
             budget.consume(items.len()).ok()?;
-            let ty = clone_known_term(ty, &mut budget)?;
+            let domain = clone_known_term(ty, &mut budget)?;
+            let mut parts = Vec::new();
+            let mut fields = Vec::new();
             for item in items {
                 match item {
-                    n::NormalFormArgument::Value(value) => {
-                        fields.push(self.known_normal_input_in(value, 0, &mut budget, bindings)?);
-                    }
-                    n::NormalFormArgument::ListSpread(value) => {
+                    n::NormalFormArgument::Value(value) if value.ty == *element => {
                         let value = self.known_normal_input_in(value, 0, &mut budget, bindings)?;
-                        let elements = take_known_list_elements(value, &ty, element, &mut budget)?;
-                        fields.extend(elements);
+                        fields.push(value);
+                    }
+                    n::NormalFormArgument::ListSpread(value) if value.ty == *ty => {
+                        if !fields.is_empty() {
+                            parts.push(freeze_known_list(
+                                ty,
+                                element,
+                                std::mem::take(&mut fields),
+                                &mut budget,
+                            )?);
+                        }
+                        parts.push(self.known_normal_input_in(value, 0, &mut budget, bindings)?);
                     }
                     _ => return None,
                 }
             }
-            Some(Term::NominalValue {
-                ty: Box::new(ty),
-                variant: None,
-                fields,
-            })
+            if !fields.is_empty() {
+                parts.push(freeze_known_list(ty, element, fields, &mut budget)?);
+            }
+            // Pay for inspecting/merging retained operands before normalization.
+            for part in &parts {
+                nir::type_computations::charge_term(part, &mut budget.steps).ok()?;
+            }
+            Term::list_concat(domain, parts).ok()
         })();
         self.required_steps -= (before - budget.steps) as u64;
         result
@@ -2486,7 +2451,7 @@ pub(super) fn clone_known_term(term: &Term, budget: &mut comptime_runtime::Budge
                 }
                 pending.push((value, depth + 1));
             }
-            Term::NominalValue { ty, fields, .. } => {
+            Term::ListConcat { ty, parts: fields } | Term::NominalValue { ty, fields, .. } => {
                 if fields.len().saturating_add(1) > budget.steps {
                     return None;
                 }
@@ -2504,7 +2469,6 @@ pub(super) fn clone_known_term(term: &Term, budget: &mut comptime_runtime::Budge
             }
             Term::Tuple(items)
             | Term::TypeListValue(items)
-            | Term::TypeListConcat(items)
             | Term::TupleValue(items)
             | Term::Nominal {
                 arguments: items, ..

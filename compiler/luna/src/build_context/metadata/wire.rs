@@ -366,9 +366,10 @@ impl Writer {
                 self.term(context, d)?;
                 self.term(signature, d)?;
             }
-            T::TypeListConcat(values) => {
-                self.byte(32)?;
-                self.terms(values, d)?;
+            T::ListConcat { ty, parts } => {
+                self.byte(36)?;
+                self.term(ty, d)?;
+                self.terms(parts, d)?;
             }
             T::Computation { effects, result } => {
                 self.byte(33)?;
@@ -633,7 +634,15 @@ impl<'a> Reader<'a> {
                 context: Box::new(self.term(d)?),
                 signature: Box::new(self.term(d)?),
             },
-            32 => T::TypeListConcat(self.terms(d)?),
+            32 => {
+                return Err(failure(
+                    "legacy list concatenation lacks its declared domain",
+                ));
+            }
+            36 => T::ListConcat {
+                ty: Box::new(self.term(d)?),
+                parts: self.terms(d)?,
+            },
             33 => {
                 let count = self.count()?;
                 let mut effects = Vec::new();

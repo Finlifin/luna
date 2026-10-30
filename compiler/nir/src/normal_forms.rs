@@ -1407,8 +1407,7 @@ fn nominal_domain_scope(
             | Term::Tuple(arguments)
             | Term::TupleValue(arguments)
             | Term::ClosureContextValue(arguments)
-            | Term::TypeListValue(arguments)
-            | Term::TypeListConcat(arguments) => pending.extend(arguments),
+            | Term::TypeListValue(arguments) => pending.extend(arguments),
             Term::Record(fields) | Term::RecordValue(fields) => {
                 pending.extend(fields.iter().map(|(_, ty)| ty))
             }
@@ -1426,7 +1425,7 @@ fn nominal_domain_scope(
                 }
                 pending.push(value);
             }
-            Term::NominalValue { ty, fields, .. } => {
+            Term::ListConcat { ty, parts: fields } | Term::NominalValue { ty, fields, .. } => {
                 pending.push(ty);
                 pending.extend(fields);
             }

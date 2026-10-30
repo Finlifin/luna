@@ -389,9 +389,32 @@ fn unreduced_type_list_concatenations_do_not_cross_completed_value_boundaries() 
     };
     // Public IR constructors can bypass the canonical constructor. Scope-valid
     // does not imply reduced: this must not create a second completed identity.
-    let unfinished = applied(Term::TypeListConcat(parts.clone()));
+    let unfinished = applied(Term::ListConcat {
+        ty: Box::new(Term::NormalForm {
+            head: nir::DeclarationId {
+                package: 91,
+                local: 9,
+            },
+            sort: nir::Sort::Type,
+            arguments: vec![Term::Primitive(nir::Primitive::Type)],
+        }),
+        parts: parts.clone(),
+    });
     unfinished.check_scope(&[]).unwrap();
-    let completed = applied(Term::type_list_concat(parts));
+    let completed = applied(
+        Term::list_concat(
+            Term::NormalForm {
+                head: nir::DeclarationId {
+                    package: 91,
+                    local: 9,
+                },
+                sort: nir::Sort::Type,
+                arguments: vec![Term::Primitive(nir::Primitive::Type)],
+            },
+            parts,
+        )
+        .unwrap(),
+    );
     let package = nir::program::Package::default();
     let mut interpreter =
         comptime_interpretor::Interpreter::new(&package, comptime_interpretor::Budget::default())

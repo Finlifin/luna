@@ -722,10 +722,9 @@ impl Package {
                     }
                     pending.extend(arguments);
                 }
-                Term::Tuple(fields)
-                | Term::TypeListValue(fields)
-                | Term::TypeListConcat(fields)
-                | Term::TupleValue(fields) => pending.extend(fields),
+                Term::Tuple(fields) | Term::TypeListValue(fields) | Term::TupleValue(fields) => {
+                    pending.extend(fields)
+                }
                 Term::OptionalValue { ty, value } => {
                     pending.push(ty);
                     if let Some(value) = value {
@@ -739,7 +738,7 @@ impl Package {
                     }
                     pending.push(value);
                 }
-                Term::NominalValue { ty, fields, .. } => {
+                Term::ListConcat { ty, parts: fields } | Term::NominalValue { ty, fields, .. } => {
                     pending.push(ty);
                     pending.extend(fields);
                 }
@@ -873,8 +872,8 @@ pub fn completed_dependencies(
             Term::Value { .. } => {
                 return Err("IIR value identity lacks retained value-store evidence".into());
             }
-            Term::TypeListConcat(_) => {
-                return Err("IIR type retains an unresolved type-list concatenation".into());
+            Term::ListConcat { .. } => {
+                return Err("IIR type retains an unresolved list concatenation".into());
             }
             Term::Rigid { .. } | Term::Hole { .. } => {
                 return Err(

@@ -90,3 +90,28 @@ test {
     let empty_ok = empty_collection().flag;
     assumes empty_ok;
 }
+
+{- Generic collection assembly retains its domain while its pieces are still
+   clause parameters. Substitution completes the same operation for ordinary
+   values and Type values; neither Indexed body is invoked for identity.
+-}
+typealias Surround<T, values: meta.List<T>, prefix: T, suffix: T> =
+    Indexed<T, prefix, ...values, suffix>;
+
+fn keep_surrounded(value: Holder<Surround<bool, [false], true, true>>)
+    -> Holder<Indexed<bool, .items = [true, false, true]>>
+{
+    value
+}
+
+fn keep_type_list(value: Holder<Surround<Type, [u8], bool, bool>>)
+    -> Holder<Indexed<Type, .items = [bool, u8, bool]>>
+{
+    value
+}
+
+test {
+    let flags = keep_surrounded(Holder<Surround<bool, [false], true, true>> {flag: true});
+    let types = keep_type_list(Holder<Surround<Type, [u8], bool, bool>> {flag: true});
+    assumes flags.flag and types.flag;
+}
