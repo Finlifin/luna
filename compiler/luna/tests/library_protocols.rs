@@ -802,13 +802,14 @@ fn tuple_implementation_infers_one_complete_type_list_input() {
 #[test]
 fn repository_conversion_protocols_select_full_interfaces_and_transfer_ownership() {
     let source = format!(
-        "mod conversion {{ {} }}\nmod resources {{ {} }}\n{}",
+        "mod builtin {{ {} }}\nmod conversion {{ {} }}\nmod resources {{ {} }}\n{}",
+        include_str!("../../../library/builtin/primitives.fl"),
         include_str!("../../../library/builtin/protocols/conversion.fl"),
         include!("support/resources_source.rs"),
         include_str!("../../../development/examples/host-library-conversion.fl"),
     );
     let compile = |source: &str| {
-        compile_with_source_bindings(
+        support::compile_explicit_source_with_bindings(
             source,
             &Default::default(),
             luna::protocols::type_constructors::Selectors {
@@ -816,6 +817,7 @@ fn repository_conversion_protocols_select_full_interfaces_and_transfer_ownership
                 drop: Some("input.resources.Drop"),
                 ..Default::default()
             },
+            None,
         )
     };
     let package = compile(&source).unwrap();
@@ -826,14 +828,22 @@ fn repository_conversion_protocols_select_full_interfaces_and_transfer_ownership
     );
     // Sharing the same subject and trait head does not grant another interface.
     let wrong_target = source.replace(
-        "convert<Flag, .u8'builtin>(Flag {value: false})",
-        "convert<Flag, .u16'builtin>(Flag {value: false})",
+        "convert<Flag, u8>(Flag {value: false})",
+        "convert<Flag, builtin.u16>(Flag {value: false})",
+    );
+    assert_ne!(
+        wrong_target, source,
+        "rejection fixture must change the target"
     );
     assert!(compile(&wrong_target).is_err());
     // The protocol consumes its receiver; conversion cannot clone an affine field.
     let reused = source.replace(
         "    assumes not retired;",
         "    let second = convert<Packet, Token>(packet); retire(second);\n    assumes not retired;",
+    );
+    assert_ne!(
+        reused, source,
+        "reuse fixture must consume the packet twice"
     );
     let package = compile(&reused).unwrap();
     let error = luna::execution::interpret_with_protocols(&package, "run", "Copy", "Drop", 100_000)

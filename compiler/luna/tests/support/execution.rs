@@ -56,12 +56,27 @@ pub(crate) fn compile_with_source_bindings_for_target(
     selectors: luna::protocols::type_constructors::Selectors<'_>,
     target: Option<nir::target::TargetData>,
 ) -> Result<Package, String> {
+    compile_explicit_source_with_bindings(
+        &primitive_bindings::with_bool_binding(source),
+        protocols,
+        selectors,
+        target,
+    )
+}
+
+/// Compile a self-contained fixture exactly as written, including its imports.
+pub(crate) fn compile_explicit_source_with_bindings(
+    source: &str,
+    protocols: &elaboration::program::Protocols,
+    selectors: luna::protocols::type_constructors::Selectors<'_>,
+    target: Option<nir::target::TargetData>,
+) -> Result<Package, String> {
     let path = std::env::temp_dir().join(format!(
         "luna-execution-{}-{}.fl",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::write(&path, primitive_bindings::with_bool_binding(source)).unwrap();
+    std::fs::write(&path, source).unwrap();
     let result = frontend::compile_bound_for_target(
         &Options {
             dispatch_fuel: None,

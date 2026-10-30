@@ -131,3 +131,29 @@ primitive 绑定，不再直接访问编译器符号；Tuple 使用具名 `Es` �
 应用到 builtin 的依赖显式建立，已有 primitive 包复用且不重复添加依赖边。
 `test_host_examples.py` 的 12 项及 `test_library_check.py` 的 13 项
 Python 单元测试均通过；`git diff --check` 通过，未运行全量语言测试。
+
+## Conversion fixture import recovery
+
+The library protocol fixture now supplies the shipped builtin primitive module
+required by host-library-conversion.fl and compiles this self-contained input
+without the standalone fixture helper's automatic bool binding. Other legacy
+fixtures keep their existing explicit bootstrap helper behavior. Production
+name resolution and implicit imports are unchanged.
+
+Its negative conversion case now replaces the example's current `u8` spelling
+with `builtin.u16`. Both generated negative inputs assert that replacement
+actually changed the source, avoiding a stale mutation silently testing the
+original program. Coverage includes distinct trait target arguments,
+single evaluation and affine receiver transfer/reuse.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test library_protocols`:
+  27 passed, exit 0; `/tmp/luna-tools-oujz5_0o/result.json`. This resolves the
+  pre-existing missing-builtin fixture failure recorded in comptime-vm.md.
+- `python3 -B development/library_check.py --stage native-conversion --timeout 300`:
+  three native tests passed, exit 0; `/tmp/luna-library-l64ih72y/summary.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-zzveju75/result.json`; `git diff --check` passed.
+
+No full language suite was run for this test-fixture-only change.
