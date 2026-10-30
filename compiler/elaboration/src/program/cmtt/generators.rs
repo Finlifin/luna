@@ -18,13 +18,13 @@ use statements::Control;
 use nir::code_interfaces::{CodeFunctionSignature, CodeInput as Input};
 #[derive(Clone)]
 pub(in crate::program) struct Generator<O = Interface> {
-    captures: Vec<(DeclarationId, Term)>,
-    types: Vec<(DeclarationId, Term)>,
-    signature: CodeFunctionSignature<O>,
-    defaults: Vec<(usize, hir::HirId)>,
-    variadics: Vec<usize>,
-    body: Option<hir::BodyId>,
-    checked: bool,
+    pub(super) captures: Vec<(DeclarationId, Term)>,
+    pub(super) types: Vec<(DeclarationId, Term)>,
+    pub(super) signature: CodeFunctionSignature<O>,
+    pub(super) defaults: Vec<(usize, hir::HirId)>,
+    pub(super) variadics: Vec<usize>,
+    pub(super) body: Option<hir::BodyId>,
+    pub(super) checked: bool,
 }
 impl<O> std::ops::Deref for Generator<O> {
     type Target = CodeFunctionSignature<O>;

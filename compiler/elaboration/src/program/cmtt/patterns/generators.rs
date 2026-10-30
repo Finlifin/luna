@@ -43,6 +43,121 @@ impl std::ops::Deref for PatternGenerator {
     }
 }
 
+impl PatternGenerator {
+    fn charge(&self, fuel: &mut usize) -> Result<(), nir::type_computations::Error> {
+        for ty in std::iter::once(&self.subject)
+            .chain(self.outputs.values())
+            .chain(self.types.iter().map(|(_, ty)| ty))
+            .chain(self.clause_domains.iter())
+            .chain(self.captures.iter().map(|(_, value)| value))
+        {
+            nir::type_computations::charge_term(ty, fuel)?;
+        }
+        for (_, input) in &self.inputs {
+            match input {
+                PatternInput::Data(ty) => nir::type_computations::charge_term(ty, fuel)?,
+                PatternInput::Expression(code) => code.charge(fuel)?,
+                PatternInput::Code(code) => {
+                    nir::type_computations::charge_term(&code.subject, fuel)?;
+                    for (name, (_, ty)) in &code.outputs {
+                        *fuel = fuel
+                            .checked_sub(name.len().saturating_add(1))
+                            .ok_or(nir::type_computations::Error::Budget)?;
+                        nir::type_computations::charge_term(ty, fuel)?;
+                    }
+                }
+            }
+        }
+        for name in self.outputs.keys() {
+            *fuel = fuel
+                .checked_sub(name.len().saturating_add(1))
+                .ok_or(nir::type_computations::Error::Budget)?;
+        }
+        Ok(())
+    }
+
+    // Preserve named interface types separately from the pattern-local output
+    // identities used by definition checking and body elaboration.
+    fn contextual_signature(
+        &self,
+        steps: &mut u64,
+        span: Span,
+    ) -> Result<nir::code_interfaces::PatternFunctionSignature, Error> {
+        let mut fuel = usize::try_from(*steps).unwrap_or(usize::MAX);
+        let result = self.charge(&mut fuel);
+        *steps = fuel as u64;
+        result.map_err(|failure| error(span, failure.to_string()))?;
+        let definition = self;
+        Ok(nir::code_interfaces::PatternFunctionSignature {
+            input_binders: Default::default(),
+            clause_domains: definition.clause_domains.clone(),
+            inputs: definition
+                .inputs
+                .iter()
+                .map(|(binding, input)| {
+                    (
+                        *binding,
+                        match input {
+                            PatternInput::Data(ty) => {
+                                nir::code_interfaces::CodeInput::Data(ty.clone())
+                            }
+                            PatternInput::Expression(code) => {
+                                nir::code_interfaces::CodeInput::Code(code.clone())
+                            }
+                            PatternInput::Code(code) => {
+                                nir::code_interfaces::CodeInput::Pattern(PatternInterface {
+                                    subject: code.subject.clone(),
+                                    outputs: code
+                                        .outputs
+                                        .iter()
+                                        .map(|(name, (_, ty))| (name.clone(), ty.clone()))
+                                        .collect(),
+                                })
+                            }
+                        },
+                    )
+                })
+                .collect(),
+            output: definition.interface.clone(),
+        })
+    }
+
+    fn apply_contextual_signature(
+        &mut self,
+        signature: nir::code_interfaces::PatternFunctionSignature,
+    ) {
+        use nir::code_interfaces::CodeInput;
+        self.clause_domains = signature.clause_domains;
+        self.interface = signature.output;
+        for ((binding, input), (new_binding, completed)) in
+            self.inputs.iter_mut().zip(signature.inputs)
+        {
+            debug_assert_eq!(*binding, new_binding);
+            *input = match (completed, &*input) {
+                (CodeInput::Data(ty), PatternInput::Data(_)) => PatternInput::Data(ty),
+                (CodeInput::Code(code), PatternInput::Expression(_)) => {
+                    PatternInput::Expression(code)
+                }
+                (CodeInput::Pattern(code), PatternInput::Code(original)) => {
+                    PatternInput::Code(Arc::new(PatternCode {
+                        subject: code.subject,
+                        outputs: code
+                            .outputs
+                            .into_iter()
+                            .map(|(name, ty)| {
+                                let binding = original.outputs[&name].0;
+                                (name, (binding, ty))
+                            })
+                            .collect(),
+                        body: None,
+                    }))
+                }
+                _ => unreachable!("contextual input preparation preserves categories"),
+            };
+        }
+    }
+}
+
 impl fmt::Display for PatternGenerator {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(pattern-generator (captures")?;
@@ -102,37 +217,7 @@ impl Checker<'_, '_> {
         let definition = &self.pattern_generators[&owner];
         let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
         let before = fuel;
-        let result = (|| {
-            for ty in std::iter::once(&definition.subject)
-                .chain(definition.outputs.values())
-                .chain(definition.types.iter().map(|(_, ty)| ty))
-                .chain(definition.clause_domains.iter())
-                .chain(definition.captures.iter().map(|(_, value)| value))
-            {
-                nir::type_computations::charge_term(ty, &mut fuel)?;
-            }
-            for (_, input) in &definition.inputs {
-                match input {
-                    PatternInput::Data(ty) => nir::type_computations::charge_term(ty, &mut fuel)?,
-                    PatternInput::Expression(code) => code.charge(&mut fuel)?,
-                    PatternInput::Code(code) => {
-                        nir::type_computations::charge_term(&code.subject, &mut fuel)?;
-                        for (name, (_, ty)) in &code.outputs {
-                            fuel = fuel
-                                .checked_sub(name.len().saturating_add(1))
-                                .ok_or(nir::type_computations::Error::Budget)?;
-                            nir::type_computations::charge_term(ty, &mut fuel)?;
-                        }
-                    }
-                }
-            }
-            for name in definition.outputs.keys() {
-                fuel = fuel
-                    .checked_sub(name.len().saturating_add(1))
-                    .ok_or(nir::type_computations::Error::Budget)?;
-            }
-            Ok::<_, nir::type_computations::Error>(())
-        })();
+        let result = definition.charge(&mut fuel);
         self.required_steps -= (before - fuel) as u64;
         result.map_err(|failure| error(span, failure.to_string()))?;
         let mut definition = definition.clone();
@@ -507,38 +592,7 @@ impl Checker<'_, '_> {
         Error,
     > {
         let definition = self.copy_pattern_generator(owner, span)?;
-        let signature = nir::code_interfaces::PatternFunctionSignature {
-            input_binders: Default::default(),
-            clause_domains: definition.clause_domains.clone(),
-            inputs: definition
-                .inputs
-                .iter()
-                .map(|(binding, input)| {
-                    (
-                        *binding,
-                        match input {
-                            PatternInput::Data(ty) => {
-                                nir::code_interfaces::CodeInput::Data(ty.clone())
-                            }
-                            PatternInput::Expression(code) => {
-                                nir::code_interfaces::CodeInput::Code(code.clone())
-                            }
-                            PatternInput::Code(code) => {
-                                nir::code_interfaces::CodeInput::Pattern(PatternInterface {
-                                    subject: code.subject.clone(),
-                                    outputs: code
-                                        .outputs
-                                        .iter()
-                                        .map(|(name, (_, ty))| (name.clone(), ty.clone()))
-                                        .collect(),
-                                })
-                            }
-                        },
-                    )
-                })
-                .collect(),
-            output: definition.interface.clone(),
-        };
+        let signature = definition.contextual_signature(&mut self.required_steps, span)?;
         let context = self.context.clone();
         let checking = std::mem::replace(&mut self.checking_code_generator, true);
         let result = self.generator_frame(owner, |this| {
@@ -830,9 +884,9 @@ impl Checker<'_, '_> {
         packets: &mut super::super::generators::spreads::SpreadPlan<'_>,
         prepared_types: Option<PatternTypePlan>,
     ) -> Result<Arc<PatternCode>, Error> {
-        let (head, explicit) = match callee.kind {
-            H::NFApplication(head, args) => (head, Some(args)),
-            _ => (callee, None),
+        let head = match callee.kind {
+            H::NFApplication(head, _) => head,
+            _ => callee,
         };
         let H::ResolvedDef { def_id, .. } = head.kind else {
             return Err(error(
@@ -855,28 +909,19 @@ impl Checker<'_, '_> {
         let result = (|| {
             self.ensure_pattern_generator(owner, span)?;
             let template = self.copy_pattern_generator(owner, span)?;
-            let (parameters, mut plan, pending_defaults, deferred_clauses) =
-                if let Some(plan) = prepared_types {
-                    plan
-                } else if let Some(args) = explicit {
-                    (
-                        Vec::new(),
-                        self.type_clause_arguments(owner, args, None, span)?,
-                        Vec::new(),
-                        Vec::new(),
-                    )
-                } else {
-                    self.generator_clause_plan(owner, span)?
-                };
-            let definition = self.instantiate_pattern_generator(template.clone(), &plan, span)?;
-            // The inference result includes the success interface, not only
-            // the scrutinee. These tuples are solver shapes, never runtime data.
+            let (ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)) =
+                &self.package.item(owner).unwrap().kind
+            else {
+                unreachable!()
+            };
+            // The inference result includes both the subject and every named
+            // success output. Solver tuples are never materialized runtime data.
             let expected_result = expected_interface_context.cloned().or_else(|| {
                 expected_subject.map(|subject| {
                     crate::calls::InputContext::Tuple(
                         std::iter::once(crate::calls::InputContext::Known(subject.clone()))
                             .chain(
-                                definition
+                                template
                                     .outputs
                                     .values()
                                     .map(|_| crate::calls::InputContext::Unknown),
@@ -885,687 +930,59 @@ impl Checker<'_, '_> {
                     )
                 })
             });
-            let (ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)) =
-                &self.package.item(owner).unwrap().kind
-            else {
-                unreachable!()
-            };
-            let (routes, _) = route_arguments(
-                arguments,
-                Some(signature.params),
-                definition.inputs.len(),
-                span,
-            )?;
-            let mut completed_defaults =
-                super::super::generators::clauses::CompletedDefaults::default();
-            let mut input_contexts =
-                vec![crate::calls::InputContext::Unknown; definition.inputs.len()];
-            let mut partial_contexts =
-                vec![crate::calls::InputContext::Unknown; definition.inputs.len()];
-            let hinted = if !parameters.is_empty() {
-                use crate::calls::InputContext as C;
-                let scheme = self.pattern_call_scheme(&definition, &parameters, span)?;
-                let mut contexts = vec![C::Unknown; definition.inputs.len()];
-                for route in &routes {
-                    let context =
-                        if matches!(definition.inputs[route.parameter].1, PatternInput::Code(_)) {
-                            let mut inputs = route.source_inputs();
-                            match inputs.next().map(|(_, value)| &value.kind) {
-                                Some(H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id)) => self
-                                    .pattern_codes
-                                    .get(&local(*id))
-                                    .map_or(C::Unknown, |code| {
-                                        C::Known(Term::Tuple(
-                                            std::iter::once(code.subject.clone())
-                                                .chain(
-                                                    code.outputs.values().map(|(_, ty)| ty.clone()),
-                                                )
-                                                .collect(),
-                                        ))
-                                    }),
-                                _ => C::Unknown,
-                            }
-                        } else if matches!(
-                            definition.inputs[route.parameter].1,
-                            PatternInput::Expression(_)
-                        ) {
-                            match route.source_inputs().next().map(|(_, value)| &value.kind) {
-                                Some(H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id)) => self
-                                    .code_values
-                                    .get(&local(*id))
-                                    .map_or(C::Unknown, |code| {
-                                        C::Known(Term::Tuple(
-                                            std::iter::once(code.result.clone())
-                                                .chain(code.context.values().cloned())
-                                                .collect(),
-                                        ))
-                                    }),
-                                _ => C::Unknown,
-                            }
-                        } else if let Some(fields) = route.property_fields() {
-                            let mut contexts = Vec::new();
-                            for field in fields {
-                                contexts.push((
-                                    field.ident.name.to_string(),
-                                    self.pattern_data_input_hint(field.expr, packets)?,
-                                ));
-                            }
-                            C::Record(contexts)
-                        } else if route.is_collected() {
-                            let mut fields = Vec::new();
-                            for (_, value) in route.source_inputs() {
-                                fields.push(self.pattern_data_input_hint(value, packets)?);
-                            }
-                            match self.protocols.tuple {
-                                Some(head) => C::NormalTuple { head, fields },
-                                None => C::Tuple(fields),
-                            }
-                        } else {
-                            let adapted = signature.params[route.parameter]
-                                .ty
-                                .is_lambda()
-                                .then(|| route.expression(callee));
-                            self.pattern_data_input_hint(
-                                adapted
-                                    .as_ref()
-                                    .unwrap_or(route.source_inputs().next().unwrap().1),
-                                packets,
-                            )?
-                        };
-                    contexts[route.parameter] = context.clone();
-                }
-                partial_contexts = contexts.clone();
-                let candidate = self.generator_call_candidate_with_result_context(
-                    owner,
-                    &parameters,
-                    &mut plan,
-                    &pending_defaults,
-                    &deferred_clauses,
-                    &mut completed_defaults,
-                    &scheme,
-                    &vec![None; definition.inputs.len()],
-                    &contexts,
-                    None,
-                    expected_result.as_ref(),
-                    span,
-                )?;
-                input_contexts = (0..definition.inputs.len())
-                    .map(|index| {
-                        candidate
-                            .parameter_input_context(index)
-                            .map_err(|e| call_inference_error(span, e))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                let hints = parameters
+            let contextual = super::super::generators::Generator {
+                signature: template.contextual_signature(&mut self.required_steps, span)?,
+                captures: template.captures.clone(),
+                types: template.types.clone(),
+                defaults: signature
+                    .params
                     .iter()
                     .enumerate()
-                    .map(|(index, id)| {
-                        candidate
-                            .type_argument(index)
-                            .map(|ty| {
-                                ty.unwrap_or(Term::Rigid {
-                                    declaration: *id,
-                                    sort: self.input_binders(&[*id])[0].sort,
-                                })
-                            })
-                            .map_err(|e| call_inference_error(span, e))
+                    .filter_map(|(slot, parameter)| match parameter.ty.kind {
+                        TyParamKind::Optional(_, _, value) => Some((slot, value.hir_id)),
+                        _ => None,
                     })
-                    .collect::<Result<Vec<_>, _>>()?;
-                let types = plan
+                    .collect(),
+                variadics: signature
+                    .params
                     .iter()
-                    .map(|ty| self.instantiate_input_types(ty, &parameters, &hints, span))
-                    .collect::<Result<Vec<_>, _>>()?;
-                Some(self.instantiate_pattern_generator(template.clone(), &types, span)?)
-            } else {
-                None
+                    .enumerate()
+                    .filter_map(|(slot, parameter)| {
+                        matches!(parameter.ty.kind, TyParamKind::Varadic(..)).then_some(slot)
+                    })
+                    .collect(),
+                body: template.body,
+                checked: template.checked,
             };
-            let mut input_definition = hinted.unwrap_or_else(|| definition.clone());
-            let mut collection_types = BTreeMap::new();
-            let mut collected: BTreeMap<usize, Vec<(PatternArgument, Term)>> = BTreeMap::new();
-            let mut properties = BTreeMap::new();
-            for route in &routes {
-                if let Some(fields) = route.property_fields() {
-                    properties.insert(route.parameter, fields);
-                    collected.insert(route.parameter, Vec::new());
-                    let PatternInput::Data(ty) = &input_definition.inputs[route.parameter].1 else {
-                        return Err(error(span, "property collection requires data"));
-                    };
-                    match self.structural_type(ty, span)? {
-                        Term::Record(types) => {
-                            if types.len() != fields.len() {
-                                return Err(error(span, "pattern property field count mismatch"));
-                            }
-                            let expected = fields
-                                .iter()
-                                .map(|field| {
-                                    types
-                                        .iter()
-                                        .find(|(name, _)| name == field.ident.name.as_str())
-                                        .map(|(_, ty)| ty.clone())
-                                        .ok_or_else(|| {
-                                            error(field.span, "unknown pattern property field")
-                                        })
-                                })
-                                .collect::<Result<Vec<_>, _>>()?;
-                            collection_types.insert(route.parameter, expected);
-                        }
-                        _ if parameters.iter().any(|id| ty.mentions_rigid(*id)) => {}
-                        _ => {
-                            return Err(error(
-                                span,
-                                "pattern property collection requires a record type",
-                            ));
-                        }
-                    }
-                } else if route.is_collected() {
-                    collected.insert(route.parameter, Vec::new());
-                    let PatternInput::Data(ty) = &input_definition.inputs[route.parameter].1 else {
-                        return Err(error(
-                            span,
-                            "variadic pattern code collections are not yet implemented",
-                        ));
-                    };
-                    match self.structural_type(ty, span)? {
-                        Term::Tuple(fields) => {
-                            if fields.len() != route.source_inputs().count() {
-                                return Err(error(
-                                    span,
-                                    "pattern generator variadic tuple arity mismatch",
-                                ));
-                            }
-                            collection_types.insert(route.parameter, fields);
-                        }
-                        _ if parameters.iter().any(|id| ty.mentions_rigid(*id)) => {}
-                        _ => {
-                            return Err(error(
-                                span,
-                                "pattern generator variadic input requires a tuple type",
-                            ));
-                        }
-                    }
-                }
-            }
-            let mut supplied: Vec<Option<PatternArgument>> =
-                input_definition.inputs.iter().map(|_| None).collect();
-            let mut events = Vec::new();
-            for route in &routes {
-                if let Some(fields) = route.property_fields() {
-                    for (position, field) in fields.iter().enumerate() {
-                        events.push((
-                            field.expr.span.lo().0,
-                            position,
-                            route.parameter,
-                            field.expr,
-                        ));
-                    }
-                    continue;
-                }
-                for (position, value) in route.source_inputs() {
-                    events.push((value.span.lo().0, position, route.parameter, value));
-                }
-            }
-            for (_, packet) in &packets.empty {
-                events.push((packets.source_start(*packet), *packet, usize::MAX, callee));
-            }
-            events.sort_by_key(|(source, position, _, _)| (*source, *position));
-            let mut actual = vec![None; input_definition.inputs.len()];
-            for (_, position, index, value) in events {
-                if index == usize::MAX {
-                    self.prepare_generator_packet(packets, position, None)?;
-                    continue;
-                }
-                let adapted = if signature.params[index].ty.is_lambda() {
-                    routes
-                        .iter()
-                        .find(|route| route.parameter == index)
-                        .map(|route| route.expression(callee))
-                } else {
-                    None
-                };
-                let value = adapted.as_ref().unwrap_or(value);
-                let (argument, shape) = match &input_definition.inputs[index].1 {
-                    PatternInput::Expression(interface) => {
-                        if packets.fields.contains_key(&local(value.hir_id)) {
-                            return Err(error(
-                                value.span,
-                                "data packet cannot supply code evidence",
-                            ));
-                        }
-                        let known = !parameters
-                            .iter()
-                            .any(|id| interface.result.mentions_rigid(*id));
-                        let mut expected = interface.clone();
-                        expected.infer_context = true;
-                        let partial_result = match &input_contexts[index] {
-                            crate::calls::InputContext::Tuple(fields) => fields.first(),
-                            _ => None,
-                        };
-                        let code = self.code_value_in_context(
-                            value,
-                            known.then_some(&expected),
-                            partial_result,
-                            0,
-                        )?;
-                        let shape = Term::Tuple(
-                            std::iter::once(code.result.clone())
-                                .chain(code.context.values().cloned())
-                                .collect(),
-                        );
-                        (PatternArgument::Code(CodeValue::Expression(code)), shape)
-                    }
-                    PatternInput::Code(interface) => {
-                        if packets.fields.contains_key(&local(value.hir_id)) {
-                            return Err(error(
-                                value.span,
-                                "data packet cannot supply pattern code evidence",
-                            ));
-                        }
-                        let expected = PatternInterface {
-                            subject: interface.subject.clone(),
-                            outputs: interface
-                                .outputs
-                                .iter()
-                                .map(|(name, (_, ty))| (name.clone(), ty.clone()))
-                                .collect(),
-                        };
-                        let subject = (!parameters
-                            .iter()
-                            .any(|id| expected.subject.mentions_rigid(*id)))
-                        .then_some(&expected.subject);
-                        let partial = match &input_contexts[index] {
-                            context @ (crate::calls::InputContext::Tuple(_)
-                            | crate::calls::InputContext::Known(_)) => Some(context),
-                            _ => None,
-                        };
-                        let code = self.pattern_input_value(value, &expected, subject, partial)?;
-                        let shape = Term::Tuple(
-                            std::iter::once(code.subject.clone())
-                                .chain(code.outputs.values().map(|(_, ty)| ty.clone()))
-                                .collect(),
-                        );
-                        (PatternArgument::Code(CodeValue::Pattern(code)), shape)
-                    }
-                    PatternInput::Data(ty) => {
-                        if collected.contains_key(&index)
-                            && !parameters.iter().any(|id| ty.mentions_rigid(*id))
-                        {
-                            if let Some(route) =
-                                routes.iter().find(|route| route.parameter == index)
-                            {
-                                route.require_collection_type(self, ty, span)?;
-                            }
-                            match self.structural_type(ty, span)? {
-                                Term::Tuple(fields) => {
-                                    collection_types.insert(index, fields);
-                                }
-                                Term::Record(fields) => {
-                                    if let Some(properties) = properties.get(&index) {
-                                        let types = properties
-                                            .iter()
-                                            .map(|field| {
-                                                fields
-                                                    .iter()
-                                                    .find(|(name, _)| {
-                                                        name == field.ident.name.as_str()
-                                                    })
-                                                    .map(|(_, ty)| ty.clone())
-                                                    .ok_or_else(|| {
-                                                        error(
-                                                            field.span,
-                                                            "unknown pattern property field",
-                                                        )
-                                                    })
-                                            })
-                                            .collect::<Result<Vec<_>, _>>()?;
-                                        collection_types.insert(index, types);
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                        let expected = if let Some(elements) = collected.get(&index) {
-                            collection_types
-                                .get(&index)
-                                .and_then(|types| types.get(elements.len()))
-                                .filter(|ty| !parameters.iter().any(|id| ty.mentions_rigid(*id)))
-                        } else {
-                            (!parameters.iter().any(|id| ty.mentions_rigid(*id))).then_some(ty)
-                        };
-                        let context = if expected.is_some() {
-                            None
-                        } else {
-                            use crate::calls::InputContext as C;
-                            match (&input_contexts[index], collected.get(&index)) {
-                                (
-                                    C::Tuple(fields) | C::NormalTuple { fields, .. },
-                                    Some(elements),
-                                ) => fields.get(elements.len()),
-                                (C::Record(fields), Some(elements)) => {
-                                    fields.get(elements.len()).map(|(_, context)| context)
-                                }
-                                (context, None) => Some(context),
-                                _ => None,
-                            }
-                        };
-                        if let Some((packet, element)) =
-                            packets.fields.get(&local(value.hir_id)).copied()
-                        {
-                            let mut fields = vec![None; packets.width(packet)];
-                            for route in &routes {
-                                let PatternInput::Data(ty) =
-                                    &input_definition.inputs[route.parameter].1
-                                else {
-                                    continue;
-                                };
-                                if parameters.iter().any(|id| ty.mentions_rigid(*id)) {
-                                    continue;
-                                }
-                                for (element, (_, input)) in route.source_inputs().enumerate() {
-                                    if let Some((owner, field)) =
-                                        packets.fields.get(&local(input.hir_id))
-                                    {
-                                        if *owner == packet {
-                                            fields[*field] = if route.is_collected() {
-                                                collection_types
-                                                    .get(&route.parameter)
-                                                    .and_then(|types| types.get(element))
-                                                    .cloned()
-                                            } else {
-                                                Some(ty.clone())
-                                            };
-                                        }
-                                    }
-                                }
-                            }
-                            let context = fields
-                                .into_iter()
-                                .collect::<Option<Vec<_>>>()
-                                .map(|fields| self.tuple_value_type(fields, span))
-                                .transpose()?;
-                            self.prepare_generator_packet(packets, packet, context.as_ref())?;
-                            let (argument, ty) = self.generator_packet_field(
-                                packets, packet, element, expected, value.span,
-                            )?;
-                            let argument = match argument {
-                                super::super::generators::Argument::Data(value) => {
-                                    PatternArgument::Data(value)
-                                }
-                                super::super::generators::Argument::LiveData(value) => {
-                                    PatternArgument::LiveData(value)
-                                }
-                                _ => unreachable!("data packet produced code evidence"),
-                            };
-                            (argument, ty)
-                        } else if self.checking_code_generator {
-                            let checked =
-                                self.check_generator_data_input(value, expected, context)?;
-                            (PatternArgument::Data(None), checked.ty)
-                        } else {
-                            let (data, ty) = self
-                                .generator_data_expression_in_context(value, expected, context)?;
-                            (
-                                self.complete_pattern_data_argument(data, &ty, value.span)?,
-                                ty,
-                            )
-                        }
-                    }
-                };
-                if let Some(elements) = collected.get_mut(&index) {
-                    elements.push((argument, shape));
-                } else {
-                    actual[index] = Some(shape);
-                    supplied[index] = Some(argument);
-                }
-                if !parameters.is_empty() {
-                    use crate::calls::InputContext as C;
-                    if let Some(elements) = collected.get(&index) {
-                        let count = properties
-                            .get(&index)
-                            .map(|fields| fields.len())
-                            .unwrap_or_else(|| {
-                                routes
-                                    .iter()
-                                    .find(|route| route.parameter == index)
-                                    .map(|route| route.source_inputs().count())
-                                    .unwrap_or(elements.len())
-                            });
-                        let fields = (0..count)
-                            .map(|slot| {
-                                if let Some((_, ty)) = elements.get(slot) {
-                                    C::Known(ty.clone())
-                                } else {
-                                    // Unvisited fields retain statically established evidence.
-                                    // Completing an earlier field does not invalidate their types.
-                                    match &partial_contexts[index] {
-                                        C::Tuple(fields) | C::NormalTuple { fields, .. } => {
-                                            fields.get(slot).cloned().unwrap_or(C::Unknown)
-                                        }
-                                        C::Record(fields) => fields
-                                            .get(slot)
-                                            .map(|(_, context)| context.clone())
-                                            .unwrap_or(C::Unknown),
-                                        _ => C::Unknown,
-                                    }
-                                }
-                            })
-                            .collect::<Vec<_>>();
-                        partial_contexts[index] = if let Some(properties) = properties.get(&index) {
-                            C::Record(
-                                properties
-                                    .iter()
-                                    .map(|field| field.ident.name.to_string())
-                                    .zip(fields)
-                                    .collect(),
-                            )
-                        } else if let Some(head) = self.protocols.tuple {
-                            C::NormalTuple { head, fields }
-                        } else {
-                            C::Tuple(fields)
-                        };
-                    }
-                    let scheme = self.pattern_call_scheme(&definition, &parameters, span)?;
-                    let candidate = self.generator_call_candidate_with_result_context(
-                        owner,
-                        &parameters,
-                        &mut plan,
-                        &pending_defaults,
-                        &deferred_clauses,
-                        &mut completed_defaults,
-                        &scheme,
-                        &actual,
-                        &partial_contexts,
-                        None,
-                        expected_result.as_ref(),
-                        span,
-                    )?;
-                    input_contexts = (0..definition.inputs.len())
-                        .map(|index| {
-                            candidate
-                                .parameter_input_context(index)
-                                .map_err(|e| call_inference_error(span, e))
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    let hints = parameters
-                        .iter()
-                        .enumerate()
-                        .map(|(index, id)| {
-                            candidate
-                                .type_argument(index)
-                                .map(|ty| {
-                                    ty.unwrap_or(Term::Rigid {
-                                        declaration: *id,
-                                        sort: self.input_binders(&[*id])[0].sort,
-                                    })
-                                })
-                                .map_err(|e| call_inference_error(span, e))
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    let types = plan
-                        .iter()
-                        .map(|ty| self.instantiate_input_types(ty, &parameters, &hints, span))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    input_definition =
-                        self.instantiate_pattern_generator(template.clone(), &types, span)?;
-                }
-            }
-            for (index, elements) in collected {
-                let ty = if let Some(fields) = properties.get(&index) {
-                    Term::Record(
-                        fields
-                            .iter()
-                            .zip(&elements)
-                            .map(|(field, (_, ty))| (field.ident.name.to_string(), ty.clone()))
+            let site = Expr {
+                hir_id: callee.hir_id,
+                span,
+                kind: H::Unit,
+            };
+            let (prepared, supplied) = self.prepare_contextual_inputs(
+                owner,
+                contextual,
+                &site,
+                callee,
+                arguments,
+                None,
+                |output| {
+                    Term::Tuple(
+                        std::iter::once(output.subject.clone())
+                            .chain(output.outputs.values().cloned())
                             .collect(),
                     )
-                } else {
-                    self.tuple_value_type(
-                        elements.iter().map(|(_, ty)| ty.clone()).collect(),
-                        span,
-                    )?
-                };
-                let argument = if self.checking_code_generator {
-                    PatternArgument::Data(None)
-                } else if elements
-                    .iter()
-                    .any(|(value, _)| matches!(value, PatternArgument::LiveData(_)))
-                {
-                    let mut values = Vec::new();
-                    for (value, _) in elements {
-                        values.push(match value {
-                            PatternArgument::LiveData(value) => value,
-                            PatternArgument::Data(Some(value)) => {
-                                self.required_normal_input(callee, value, vec![])?.0
-                            }
-                            _ => {
-                                return Err(error(
-                                    span,
-                                    "pattern collection requires completed data",
-                                ));
-                            }
-                        });
-                    }
-                    self.complete_pattern_data_argument(
-                        if let Some(fields) = properties.get(&index) {
-                            comptime_interpretor::Value::AnonymousRecord(
-                                fields
-                                    .iter()
-                                    .zip(values)
-                                    .map(|(field, value)| (field.ident.name.to_string(), value))
-                                    .collect(),
-                            )
-                        } else {
-                            comptime_interpretor::Value::Tuple(values)
-                        },
-                        &ty,
-                        span,
-                    )?
-                } else {
-                    let values = elements
-                        .into_iter()
-                        .map(|(value, _)| match value {
-                            PatternArgument::Data(Some(value)) => Ok(value),
-                            _ => Err(error(span, "pattern collection requires completed data")),
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    PatternArgument::Data(Some(n::Expr {
-                        source: source(span),
-                        ty: ty.clone(),
-                        kind: if properties.contains_key(&index) {
-                            K::AnonymousRecord { fields: values }
-                        } else {
-                            K::Tuple(values)
-                        },
-                    }))
-                };
-                actual[index] = Some(ty);
-                supplied[index] = Some(argument);
-            }
-            let types = {
-                let scheme = self.pattern_call_scheme(&definition, &parameters, span)?;
-                let candidate = self.generator_call_candidate_with_result_context(
-                    owner,
-                    &parameters,
-                    &mut plan,
-                    &pending_defaults,
-                    &deferred_clauses,
-                    &mut completed_defaults,
-                    &scheme,
-                    &actual,
-                    &[],
-                    None,
-                    expected_result.as_ref(),
-                    span,
-                )?;
-                let inferred = candidate
-                    .finish()
-                    .map_err(|e| call_inference_error(span, e))?
-                    .type_arguments;
-                let mut types = plan
-                    .iter()
-                    .map(|ty| self.instantiate_input_types(ty, &parameters, &inferred, span))
-                    .collect::<Result<Vec<_>, _>>()?;
-                for (slot, value) in completed_defaults.clauses {
-                    types[slot] = value;
-                }
-                types
-            };
-            let saved_captures = template
-                .captures
-                .iter()
-                .map(|(id, value)| {
-                    (
-                        *id,
-                        self.alias_substitution.insert(*id, Arc::new(value.clone())),
-                    )
-                })
-                .collect::<Vec<_>>();
-            let formation = self.check_type_application(owner, &types, span);
-            for (id, saved) in saved_captures {
-                match saved {
-                    Some(value) => {
-                        self.alias_substitution.insert(id, value);
-                    }
-                    None => {
-                        self.alias_substitution.remove(&id);
-                    }
-                }
-            }
-            formation?;
-            let definition = self.instantiate_pattern_generator(template, &types, span)?;
+                },
+                expected_result.as_ref(),
+                packets,
+                prepared_types,
+            )?;
+            let mut definition = template;
+            definition.types = prepared.types;
+            definition.captures = prepared.captures;
+            definition.apply_contextual_signature(prepared.signature);
             if let Some(expected) = expected_subject {
                 self.require(&definition.subject, expected, span)?;
-            }
-            for (index, (_, input)) in definition.inputs.iter().enumerate() {
-                match (&mut supplied[index], input) {
-                    (
-                        Some(PatternArgument::Code(CodeValue::Expression(code))),
-                        PatternInput::Expression(expected),
-                    ) => {
-                        *code = self.ascribe_code(code.clone(), Some(expected), span)?;
-                    }
-                    (
-                        Some(PatternArgument::Code(CodeValue::Pattern(code))),
-                        PatternInput::Code(expected),
-                    ) => {
-                        self.ascribe_pattern_input(
-                            code,
-                            &PatternInterface {
-                                subject: expected.subject.clone(),
-                                outputs: expected
-                                    .outputs
-                                    .iter()
-                                    .map(|(name, (_, ty))| (name.clone(), ty.clone()))
-                                    .collect(),
-                            },
-                            span,
-                        )?;
-                    }
-                    (
-                        Some(PatternArgument::Data(_) | PatternArgument::LiveData(_)),
-                        PatternInput::Data(ty),
-                    ) => self.require(actual[index].as_ref().unwrap(), ty, span)?,
-                    _ => {}
-                }
             }
             self.generator_frame(owner, |this| {
                 this.alias_substitution.extend(
@@ -1621,61 +1038,6 @@ impl Checker<'_, '_> {
         })();
         self.code_construction_depth -= 1;
         result
-    }
-
-    fn pattern_data_input_hint(
-        &mut self,
-        value: &Expr<'_>,
-        packets: &super::super::generators::spreads::SpreadPlan<'_>,
-    ) -> Result<crate::calls::InputContext, Error> {
-        self.generator_partial_input_hint(value, None, &[], packets, 0)
-    }
-
-    fn pattern_call_scheme(
-        &self,
-        definition: &PatternGenerator,
-        parameters: &[DeclarationId],
-        span: Span,
-    ) -> Result<crate::calls::Scheme, Error> {
-        let shape = Term::Function {
-            parameters: definition
-                .inputs
-                .iter()
-                .map(|(_, input)| Parameter {
-                    sort: Sort::Runtime,
-                    ty: match input {
-                        PatternInput::Data(ty) => ty.clone(),
-                        PatternInput::Expression(code) => Term::Tuple(
-                            std::iter::once(code.result.clone())
-                                .chain(code.context.values().cloned())
-                                .collect(),
-                        ),
-                        PatternInput::Code(code) => Term::Tuple(
-                            std::iter::once(code.subject.clone())
-                                .chain(code.outputs.values().map(|(_, ty)| ty.clone()))
-                                .collect(),
-                        ),
-                    },
-                })
-                .collect(),
-            result: Box::new(Term::Tuple(
-                std::iter::once(definition.subject.clone())
-                    .chain(definition.outputs.values().cloned())
-                    .collect(),
-            )),
-        };
-        let scheme = crate::calls::Scheme {
-            type_parameters: parameters.len(),
-            parameter_sorts: self
-                .input_binders(parameters)
-                .iter()
-                .map(|binder| binder.sort)
-                .collect(),
-            signature: shape
-                .abstract_parameters(&self.input_binders(parameters))
-                .map_err(|e| error(span, e.to_string()))?,
-        };
-        Ok(scheme)
     }
 
     // Both symbolic checking and concrete invocation use the same contract

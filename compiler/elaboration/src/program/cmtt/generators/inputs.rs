@@ -3,7 +3,9 @@ use super::*;
 
 impl Checker<'_, '_> {
     #[inline(never)]
-    pub(super) fn prepare_contextual_inputs<O: nir::code_interfaces::SignatureOutput + Clone>(
+    pub(in crate::program::cmtt) fn prepare_contextual_inputs<
+        O: nir::code_interfaces::SignatureOutput + Clone,
+    >(
         &mut self,
         owner: OwnerId,
         template: Generator<O>,

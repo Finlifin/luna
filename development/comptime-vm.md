@@ -5969,3 +5969,46 @@ Validation from `/home/fin/luna`, exit 0:
   12 tests passed; `/tmp/luna-tools-ytwnhe54/result.json`. A contract regression
   rejects the false equivalence between (B, outer A) and (A, A).
 - Formatting: `/tmp/luna-tools-m5a4g0v4/result.json`; git diff --check passed.
+
+## Shared pattern-generator argument preparation (2026-10-31)
+
+Pattern-producing calls now use the same `prepare_contextual_inputs` entry as
+expression-code generators and contextual data consumers. The former separate
+routing, inference, collection, clause-default completion and argument evaluation
+implementation has been removed. All three result categories now extend one
+source-ordered call-preparation path when ordinary dependent inputs are wired.
+
+The pattern adapter retains the full subject/success-output inference shape.
+Its return conversion preserves the original pattern-local output identities;
+only interface types are replaced. Default evaluation, body execution, contract
+checks and failure recovery remain inside the existing pattern generator frame.
+Constructing an adapter signature is charged before copying the interface,
+captures and clause values. No source syntax or language contract changed.
+
+Ordinary `comptime Type` inputs remain unsupported by source generator signature
+formation. The existing ignored regression is still ignored: this refactor is
+prerequisite integration, not a claim that the dependent-input feature works.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --test cmtt_methods --test cmtt_phase_boundaries --no-fail-fast`:
+  final modified tree `/tmp/luna-tools-53poub33/result.json`, exit 101;
+  579 CMTT tests passed, 3 failed, 1 ignored; all 144 method and 3 phase-boundary
+  tests passed. The same command against HEAD versions of the three changed
+  implementation files reproduced exactly the same three failures and all
+  other counts: `/tmp/luna-tools-8xfa48dm/result.json`, exit 101. Only this
+  task's edits were temporarily saved/restored; unrelated work was untouched.
+- The unchanged baseline failures are
+  `generator_explicit_registered_tuple_results_determine_layout`,
+  `generator_local_type_lists_drive_registered_tuple_instantiation`, and
+  `static_normal_tuple_evidence_uses_completed_type_lists`. They concern
+  completed Type-list values in normal-form input/layout evidence. Their
+  original expected behavior is retained; no assertion or test was weakened.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt pattern`:
+  `/tmp/luna-tools-hjxiutnq/result.json`, exit 0; 136 passed, 1 existing ignored.
+  These cover pattern output hygiene, partial subject/output inference,
+  expression-code inputs, lambdas, properties, variadics, dependent clause
+  defaults, source order, storage aliasing, contracts and failure boundaries.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  `/tmp/luna-tools-2guf6pxj/result.json`, exit 0. Final format and diff checks
+  accompany the commit. No full workspace test run was requested or performed.
