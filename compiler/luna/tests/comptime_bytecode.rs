@@ -190,7 +190,7 @@ fn calls_suspend_frames_and_preserve_argument_order() {
         ErrorKind::DepthExhausted
     );
     assert_eq!(
-        vm.invoke(id, args(100)).unwrap_err().kind,
+        vm.invoke(id, args(200)).unwrap_err().kind,
         ErrorKind::DepthExhausted
     );
     assert_eq!(vm.invoke(id, args(3)).unwrap(), Value::Bool(true));
@@ -331,4 +331,43 @@ fn computed_callees_execute_once_before_arguments_in_bytecode() {
             Value::Bool(true)
         );
     }
+}
+
+#[test]
+fn heap_activations_honor_requested_depth_and_recover_on_small_host_stack() {
+    let package = support::compile(
+        "typealias Integer = .Integer'builtin;
+        comptime fn countdown(n: Integer) -> Integer {
+            if n == 0 { 0 } else { 1 + countdown(n - 1) }
+        }",
+    );
+    std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(move || {
+            let id = support::id(&package, "countdown");
+            let integer = |n| Value::Integer(comptime_runtime::Integer::from_i128(n));
+            let budget = Budget {
+                steps: 10_000_000,
+                depth: 1024,
+            };
+            let mut vm = Interpreter::for_comptime(&package, budget).unwrap();
+            assert_eq!(vm.invoke(id, vec![integer(1000)]).unwrap(), integer(1000));
+            assert_eq!(vm.bytecode_invocations(), 1001);
+            // The root counts too: n + 1 simultaneous activations.
+            assert_eq!(vm.invoke(id, vec![integer(1023)]).unwrap(), integer(1023));
+            assert_eq!(
+                vm.invoke(id, vec![integer(1024)]).unwrap_err().kind,
+                ErrorKind::DepthExhausted
+            );
+            assert_eq!(vm.invoke(id, vec![integer(1000)]).unwrap(), integer(1000));
+            let mut tree = Interpreter::new(&package, budget).unwrap();
+            assert_eq!(
+                tree.invoke(id, vec![integer(1000)]).unwrap_err().kind,
+                ErrorKind::DepthExhausted
+            );
+            assert_eq!(tree.invoke(id, vec![integer(2)]).unwrap(), integer(2));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }

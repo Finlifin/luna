@@ -4917,3 +4917,37 @@ Final sysroot check:
 `python3 -B development/check.py --timeout 900 -- run -p luna -- development/examples/sysroot-meta-object-methods.fl --sysroot library --test-native`:
 exit 0, `/tmp/luna-tools-stqodfdf/result.json`; public Object edits still stage
 into a passing native test. Existing unrelated compiler warnings remain.
+
+
+## Invocation depth independent of native recursion (2026-10-30)
+
+Compiled invocation frames now count against the caller's original `Budget.depth`
+without retaining a native evaluation depth charge while suspended on the heap.
+Entry and preparation still carry the native charge; tree fallback retains it
+until delivery. Both counters unwind on preparation, execution and delivery
+errors. Nested compiled calls no longer look like top-level invocations when
+resetting cleanup failure and pending effect transfer state.
+
+This does not increase the native evaluator or recursive representation limits.
+The migration tree evaluator remains bounded independently of a large requested
+invocation budget. IIR construction initializes the same invocation accounting;
+it retains its existing native depth policy and execution path.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode --test comptime_bytecode_defaults`:
+  passed, `/tmp/luna-tools-k_2530iq/result.json`. Includes a 2 MiB thread running
+  1,001 simultaneous compiled activations, budget exhaustion and reuse of the
+  same VM; tree execution rejects deep recursion and remains reusable.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  308 passed, `/tmp/luna-tools-7hgg145u/result.json`, including caller state
+  restoration and execution failure paths.
+
+Remaining limits include recursive value/type inspection and native execution of
+unsupported bodies and contract boundaries. This change does not make every
+comptime operation iterative or remove invocation and instruction budgets.
+
+The final boundary assertion (1,024 active calls allowed, 1,025 rejected) passed
+with `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode heap_activations_honor_requested_depth_and_recover_on_small_host_stack`:
+`/tmp/luna-tools-14aqcsm5/result.json`, exit 0. Formatting and `git diff --check`
+also passed.

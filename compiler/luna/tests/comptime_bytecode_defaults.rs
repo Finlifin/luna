@@ -65,11 +65,11 @@ fn default_failure_prevents_entry_and_restores_the_caller() {
     let mut tree = Interpreter::new(&package, Budget::default()).unwrap();
     let integer = |value| Value::Integer(comptime_runtime::Integer::from_i128(value));
     assert_eq!(
-        vm.invoke(id, vec![integer(100)]).unwrap_err().kind,
+        vm.invoke(id, vec![integer(200)]).unwrap_err().kind,
         ErrorKind::DepthExhausted
     );
     assert_eq!(
-        tree.invoke(id, vec![integer(100)]).unwrap_err().kind,
+        tree.invoke(id, vec![integer(200)]).unwrap_err().kind,
         ErrorKind::DepthExhausted
     );
     assert!(!vm.events().iter().any(|event| matches!(event,

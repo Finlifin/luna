@@ -181,6 +181,8 @@ impl<'a> Interpreter<'a> {
                 depth: budget.depth.min(256),
             },
             depth: 0,
+            invocation_depth: 0,
+            invocation_depth_limit: budget.depth,
             events: vec![],
         })
     }

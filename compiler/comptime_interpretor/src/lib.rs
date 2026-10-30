@@ -626,6 +626,8 @@ impl Closure {
 #[derive(Clone, Copy, Debug)]
 pub struct Budget {
     pub steps: u64,
+    /// Maximum active invocations. Native evaluation and recursive value
+    /// inspection additionally obey a conservative host-stack depth bound.
     pub depth: usize,
 }
 impl Default for Budget {
@@ -839,6 +841,8 @@ pub struct Interpreter<'a> {
     enums: BTreeMap<DeclarationId, generated_enums::EnumDefinition<'a>>,
     budget: Budget,
     depth: usize,
+    invocation_depth: usize,
+    invocation_depth_limit: usize,
     events: Vec<Event>,
 }
 impl<'a> Interpreter<'a> {
@@ -1710,6 +1714,8 @@ impl<'a> Interpreter<'a> {
                 depth: budget.depth.min(64),
             },
             depth: 0,
+            invocation_depth: 0,
+            invocation_depth_limit: budget.depth,
             events: Vec::new(),
         })
     }

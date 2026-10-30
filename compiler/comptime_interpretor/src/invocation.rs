@@ -28,6 +28,7 @@ struct InvocationFrame<'a> {
 // The monotonic effect identity allocator and pending transfers are intentionally
 // not restored. They belong to the engine, not the suspended caller activation.
 struct SavedInvocation {
+    counts_native_depth: bool,
     effect_invocation: u64,
     effect_resume: Option<u64>,
     effect_environment: Vec<effects::Entry>,
@@ -217,28 +218,39 @@ impl<'a> Interpreter<'a> {
                     | Execution::Contract { expression, .. } => Some(expression.clone()),
                     _ => None,
                 };
-                let (expression, identity, environment) = active.parts();
+                let (expression, identity, _) = active.parts();
                 let code = match owned {
                     Some(body) => self.owned_invocation_code(&body),
                     None => self.invocation_code(expression, identity),
                 };
                 result = match code {
-                    Ok(Some(code)) => match self.start_frame(&code, environment) {
-                        Ok(code_frame) => {
-                            match &active {
-                                Execution::Invocation(_) => self.bytecode_invocations += 1,
-                                Execution::Default { .. } => self.bytecode_default_evaluations += 1,
-                                Execution::Contract { .. } => {}
-                            }
-                            stack.push(StackEntry::Code(
-                                StackContext::Execution(active),
-                                code_frame,
-                            ));
-                            None
+                    Ok(Some(code)) => {
+                        // Suspended bytecode activations live on the explicit stack.
+                        // Keep the native guard for tree evaluation and preparation.
+                        if let Execution::Invocation(activation) = &mut active {
+                            activation.saved.counts_native_depth = false;
+                            self.depth -= 1;
                         }
-                        Err(error) => Some(self.complete_execution(active, Err(error))),
-                    },
+                        match self.start_frame(&code, active.parts().2) {
+                            Ok(code_frame) => {
+                                match &active {
+                                    Execution::Invocation(_) => self.bytecode_invocations += 1,
+                                    Execution::Default { .. } => {
+                                        self.bytecode_default_evaluations += 1
+                                    }
+                                    Execution::Contract { .. } => {}
+                                }
+                                stack.push(StackEntry::Code(
+                                    StackContext::Execution(active),
+                                    code_frame,
+                                ));
+                                None
+                            }
+                            Err(error) => Some(self.complete_execution(active, Err(error))),
+                        }
+                    }
                     Ok(None) => {
+                        let (expression, _, environment) = active.parts();
                         let flow = self.eval(expression, environment);
                         Some(self.complete_execution(active, flow))
                     }
@@ -524,6 +536,9 @@ impl<'a> Interpreter<'a> {
         context: Option<(iir::InstanceKey, Vec<iir::cleanup::ContextKey>)>,
     ) -> Result<SavedInvocation, Error> {
         self.tick(None)?;
+        if self.invocation_depth >= self.invocation_depth_limit {
+            return Err(self.failure(ErrorKind::DepthExhausted, None));
+        }
         self.effect_charge(self.effect_state.environment.len(), None)?;
         let next_effect_identity = self
             .effect_state
@@ -535,11 +550,12 @@ impl<'a> Interpreter<'a> {
         let previous_effect_environment = self.effect_state.environment.clone();
         self.effect_state.next_identity = next_effect_identity;
         self.effect_state.invocation = next_effect_identity;
-        if self.depth == 0 {
+        if self.depth == 0 && self.invocation_depth == 0 {
             self.cleanup_failed = false;
             self.effect_state.transfer = None;
         }
         self.depth += 1;
+        self.invocation_depth += 1;
         let previous_cleanup_context = std::mem::take(&mut self.cleanup_context);
         let previous_residuals = std::mem::take(&mut self.residual_temporaries);
         let previous_pattern_orders = std::mem::take(&mut self.pattern_binding_orders);
@@ -563,6 +579,7 @@ impl<'a> Interpreter<'a> {
             self.cleanup_context = context;
         }
         Ok(SavedInvocation {
+            counts_native_depth: true,
             effect_invocation: previous_effect_invocation,
             effect_resume: previous_effect_resume,
             effect_environment: previous_effect_environment,
@@ -583,7 +600,10 @@ impl<'a> Interpreter<'a> {
         self.residual_temporaries = saved.residuals;
         self.pattern_binding_orders = saved.pattern_orders;
         self.cleanup_context = saved.cleanup_context;
-        self.depth -= 1;
+        self.invocation_depth -= 1;
+        if saved.counts_native_depth {
+            self.depth -= 1;
+        }
     }
 
     fn prepare_invocation(
@@ -917,6 +937,7 @@ mod tests {
             assert_eq!(environment.get(&local(1)), Some(&Value::Bool(true)));
             assert_eq!(environment.len(), 2);
             assert_eq!(vm.depth, 0);
+            assert_eq!(vm.invocation_depth, 0);
             assert_eq!(vm.effect_state.invocation, 71);
             assert_eq!(vm.effect_state.resume, Some(19));
             assert_eq!(
@@ -994,6 +1015,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.kind, ErrorKind::StepsExhausted);
         assert_eq!(vm.depth, 0);
+        assert_eq!(vm.invocation_depth, 0);
         assert_eq!(vm.effect_state.resume, Some(9));
         assert_eq!(vm.effect_state.invocation, 5);
         vm.effect_state.next_identity = 10;
@@ -1004,6 +1026,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.kind, ErrorKind::UnknownFunction);
         assert_eq!(vm.depth, 0);
+        assert_eq!(vm.invocation_depth, 0);
         assert_eq!(vm.effect_state.resume, Some(9));
         assert_eq!(vm.effect_state.invocation, 5);
         assert_eq!(vm.effect_state.next_identity, 11);
@@ -1057,6 +1080,7 @@ mod tests {
             Some(Flow::Value(Value::Bool(true)))
         ));
         assert_eq!(vm.depth, 0);
+        assert_eq!(vm.invocation_depth, 0);
         assert_eq!(vm.effect_state.invocation, 0);
     }
 }
