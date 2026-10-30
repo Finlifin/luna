@@ -434,3 +434,40 @@ fn shipped_type_factories_keep_identity_through_comptime_parameters() {
         .unwrap();
     assert_true(output);
 }
+
+#[test]
+fn shipped_list_fold_retains_comptime_callback_state() {
+    let input = Inputs::new();
+    input.write(
+        "input.fl",
+        "
+        comptime fn folded()->bool {
+            var seen:Integer=0;
+            let values: List<bool> = [true,false,true];
+            let result=values.fold(0,|total:Integer,enabled:bool| {
+                seen = seen + 1;
+                total + if enabled {seen} else {0}
+            });
+            result == 4 and seen == 0
+        }
+    ",
+    );
+    let library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_luna"))
+        .arg(input.0.join("input.fl"))
+        .arg("--sysroot")
+        .arg(library)
+        .args([
+            "--build-target",
+            "x86_64",
+            "linux",
+            "64",
+            "--invoke-comptime",
+            "folded",
+            "--fuel",
+            "4000000",
+        ])
+        .output()
+        .unwrap();
+    assert_true(output);
+}

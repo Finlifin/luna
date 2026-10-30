@@ -1,5 +1,6 @@
 //! Linear invocation code. Unsupported operations are detected before execution.
 //! Constants and default templates own bounded typed NIR copies; opcodes never evaluate trees.
+pub mod closures;
 pub mod leaf_inputs;
 pub mod lists;
 pub mod normal_types;
@@ -35,6 +36,19 @@ impl fmt::Display for ErrorConversion {
 
 #[derive(Debug)]
 pub enum Op {
+    BeginClosure {
+        closure: Register,
+        constructor: Arc<closures::Constructor>,
+    },
+    Capture {
+        closure: Register,
+        index: usize,
+        value: Register,
+    },
+    Closure {
+        closure: Register,
+        destination: Register,
+    },
     TypeInputPlan {
         destination: Register,
         expression: Arc<Expr>,
@@ -381,6 +395,19 @@ impl fmt::Display for Program {
                 instruction.source.start, instruction.source.end
             )?;
             match &instruction.op {
+                Op::BeginClosure {
+                    closure,
+                    constructor,
+                } => write!(f, "(begin-closure %{closure} {constructor})")?,
+                Op::Capture {
+                    closure,
+                    index,
+                    value,
+                } => write!(f, "(capture %{closure} (index {index}) (value %{value}))")?,
+                Op::Closure {
+                    closure,
+                    destination,
+                } => write!(f, "(closure %{destination} (prepared %{closure}))")?,
                 Op::TypeInputPlan {
                     destination,
                     expression,
@@ -1054,6 +1081,61 @@ fn compile_root(
                     continue;
                 }
                 match &expr.kind {
+                    K::Closure {
+                        parameters,
+                        captures,
+                        body,
+                    } => {
+                        nir::copy_budget::charge_substitution(expr, &[], &[], fuel)
+                            .map_err(|error| copy_error(error, source))?;
+                        let closure = fresh();
+                        emit(
+                            &mut work,
+                            Op::Closure {
+                                closure,
+                                destination: dst,
+                            },
+                        );
+                        for (index, capture) in captures.iter().enumerate().rev() {
+                            let value = fresh();
+                            emit(
+                                &mut work,
+                                Op::Capture {
+                                    closure,
+                                    index,
+                                    value,
+                                },
+                            );
+                            if let Some(expression) = &capture.value {
+                                work.push(Work::Expression(expression, value));
+                            } else {
+                                let local =
+                                    *locals.entry(capture.binding).or_insert_with(&mut fresh);
+                                emit(
+                                    &mut work,
+                                    Op::Read {
+                                        destination: value,
+                                        local,
+                                    },
+                                );
+                            }
+                        }
+                        emit(
+                            &mut work,
+                            Op::BeginClosure {
+                                closure,
+                                constructor: Arc::new(closures::Constructor {
+                                    ty: expr.ty.clone(),
+                                    parameters: parameters.clone(),
+                                    captures: captures
+                                        .iter()
+                                        .map(|capture| (capture.binding, capture.ty.clone()))
+                                        .collect(),
+                                    body: body.clone(),
+                                }),
+                            },
+                        );
+                    }
                     K::Call {
                         callee,
                         arguments,

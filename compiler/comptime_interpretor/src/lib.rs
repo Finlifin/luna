@@ -4838,6 +4838,30 @@ impl<'a> Interpreter<'a> {
         Ok(Flow::Value(result))
     }
 
+    fn closure_capture_types<'t>(
+        &self,
+        ty: &'t Term,
+        parameters: usize,
+        captures: usize,
+        source: SourceRange,
+    ) -> Result<&'t [Term], Error> {
+        let capture_types: &[Term] = match ty {
+            Term::Closure { environment, .. } => environment,
+            Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_) => &[],
+            _ => return Err(self.failure(ErrorKind::Type, Some(source))),
+        };
+        let Term::Function {
+            parameters: types, ..
+        } = ty.callable_signature()
+        else {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        };
+        if types.len() != parameters || capture_types.len() != captures {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        }
+        Ok(capture_types)
+    }
+
     #[inline(never)]
     fn eval_closure(&mut self, expr: &Expr, environment: &mut Environment) -> Result<Flow, Error> {
         self.with_prepared_frame(expr.source, |this| {
@@ -4847,22 +4871,12 @@ impl<'a> Interpreter<'a> {
                     captures,
                     body,
                 } => {
-                    let capture_types: &[Term] = match &expr.ty {
-                        Term::Closure { environment, .. } => environment,
-                        Term::Function { .. }
-                        | Term::ComptimeFunction(_)
-                        | Term::UnsafeFunction(_) => &[],
-                        _ => return Err(this.failure(ErrorKind::Type, Some(expr.source))),
-                    };
-                    let Term::Function {
-                        parameters: types, ..
-                    } = expr.ty.callable_signature()
-                    else {
-                        return Err(this.failure(ErrorKind::Type, Some(expr.source)));
-                    };
-                    if types.len() != parameters.len() || captures.len() != capture_types.len() {
-                        return Err(this.failure(ErrorKind::Type, Some(expr.source)));
-                    }
+                    let capture_types = this.closure_capture_types(
+                        &expr.ty,
+                        parameters.len(),
+                        captures.len(),
+                        expr.source,
+                    )?;
                     let mut captured = Environment::new();
                     for (slot, (capture, ty)) in captures.iter().zip(capture_types).enumerate() {
                         this.tick(Some(expr.source))?;

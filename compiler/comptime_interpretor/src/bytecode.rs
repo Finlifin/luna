@@ -10,6 +10,7 @@ pub(super) struct Frame {
     terminal: bool,
     waiting: Option<Waiting>,
     calls: BTreeMap<usize, PendingCall>,
+    closures: BTreeMap<usize, PendingClosure>,
     normal_types: BTreeMap<usize, super::normal_types::Inputs>,
     staged: Option<Box<staged_bytecode::State>>,
     pc: usize,
@@ -41,6 +42,12 @@ struct PendingCall {
 enum PreparedArgument {
     Value(Value),
     Normal(Term),
+}
+
+struct PendingClosure {
+    constructor: Arc<comptime_compiler::closures::Constructor>,
+    environment: Environment,
+    next: usize,
 }
 
 impl std::fmt::Display for PreparedArgument {
@@ -140,6 +147,18 @@ impl fmt::Display for Frame {
             write!(f, ") (last-default")?;
             if let Some(parameter) = call.last_default {
                 write!(f, " {parameter}")?;
+            }
+            write!(f, "))")?;
+        }
+        write!(f, ") (closures")?;
+        for (id, closure) in &self.closures {
+            write!(
+                f,
+                " (%{id} (next {}) {} (environment",
+                closure.next, closure.constructor
+            )?;
+            for (binding, value) in &closure.environment {
+                write!(f, " ({binding} {value})")?;
             }
             write!(f, "))")?;
         }
@@ -653,6 +672,7 @@ impl<'a> Interpreter<'a> {
             waiting: None,
             calls: BTreeMap::new(),
             normal_types: BTreeMap::new(),
+            closures: BTreeMap::new(),
             staged: None,
             pc: 0,
             scopes: Vec::new(),
@@ -704,6 +724,88 @@ impl<'a> Interpreter<'a> {
                 source: Some(source),
             };
             match &instruction.op {
+                Op::BeginClosure {
+                    closure,
+                    constructor,
+                } => {
+                    self.closure_capture_types(
+                        &constructor.ty,
+                        constructor.parameters.len(),
+                        constructor.captures.len(),
+                        source,
+                    )?;
+                    frame.closures.insert(
+                        *closure,
+                        PendingClosure {
+                            constructor: constructor.clone(),
+                            environment: Environment::new(),
+                            next: 0,
+                        },
+                    );
+                }
+                Op::Capture {
+                    closure,
+                    index,
+                    value,
+                } => {
+                    let pending = frame.closures.get_mut(closure).ok_or_else(missing)?;
+                    if *index != pending.next {
+                        return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
+                    }
+                    let constructor = &pending.constructor;
+                    let (binding, ty) = constructor.captures.get(*index).ok_or_else(missing)?;
+                    let capture_types = self.closure_capture_types(
+                        &constructor.ty,
+                        constructor.parameters.len(),
+                        constructor.captures.len(),
+                        source,
+                    )?;
+                    let value = frame.slots[*value].take().ok_or_else(missing)?;
+                    if ty != &capture_types[*index] || !self.has_type(&value, ty) {
+                        return Err(self.failure(ErrorKind::Type, Some(source)));
+                    }
+                    if constructor.parameters.contains(binding)
+                        || pending.environment.contains_key(binding)
+                    {
+                        return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
+                    }
+                    pending
+                        .environment
+                        .insert(*binding, Value::Storage(Storage::new(value)));
+                    pending.next += 1;
+                }
+                Op::Closure {
+                    closure,
+                    destination,
+                } => {
+                    let pending = frame.closures.remove(closure).ok_or_else(missing)?;
+                    let constructor = pending.constructor;
+                    if pending.next != constructor.captures.len() {
+                        return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
+                    }
+                    self.effect_charge(
+                        constructor.parameters.len() + constructor.captures.len(),
+                        Some(source),
+                    )?;
+                    let mut fuel = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+                    let charged = nir::type_computations::charge_term(&constructor.ty, &mut fuel);
+                    self.budget.steps = fuel as u64;
+                    charged.map_err(|_| self.failure(ErrorKind::StepsExhausted, Some(source)))?;
+                    self.events.push(Event::CreateClosure {
+                        source,
+                        captures: constructor.captures.len(),
+                    });
+                    frame.slots[*destination] = Some(Value::Closure(Arc::new(Closure {
+                        definition_source: Some(source),
+                        origin: None,
+                        instance_arguments: None,
+                        parameters: constructor.parameters.clone(),
+                        environment: pending.environment,
+                        capture_order: constructor.captures.iter().map(|(id, _)| *id).collect(),
+                        body: constructor.body.clone(),
+                        ty: constructor.ty.clone(),
+                    })));
+                }
                 Op::TypeInputPlan {
                     destination,
                     expression,
@@ -3084,6 +3186,10 @@ mod type_constructor_tests;
 #[cfg(test)]
 #[path = "bytecode_object_borrows.rs"]
 mod object_borrow_tests;
+
+#[cfg(test)]
+#[path = "bytecode_closures.rs"]
+mod closure_tests;
 
 #[cfg(test)]
 #[path = "bytecode_lists.rs"]

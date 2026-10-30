@@ -4025,3 +4025,48 @@ Validation in /home/fin/luna:
   exit 0, `/tmp/luna-tools-sd3vxpfu/result.json`; `git diff --check`: exit 0.
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_references --test comptime_bytecode_types --test library_meta_objects --test comptime_clause_inputs`:
   exit 0, `/tmp/luna-tools-r8nmy0sx/result.json`.
+
+### Closure construction in invocation bytecode
+
+Closure construction now emits a checked constructor, source-ordered capture
+instructions, and a completion instruction. Explicit capture expressions use the
+ordinary instruction worklist; implicit captures read lexical slots through the
+same snapshot operation as interpretation. The closure body stays an owned Arc
+and enters the existing invocation compiler when called. No instruction evaluates
+its body or a capture expression with the tree evaluator.
+
+The interpreter and bytecode share callable/capture shape validation. Each
+construction allocates fresh capture cells, while repeated calls retain that
+closure's updates. Type failures, duplicate capture bindings, and early exits
+preserve capture order and do not publish a partial closure. Constructor metadata
+and pending capture environments have deterministic S-expression dumps. Runtime
+cleanup and mixed-stage interpretation retain their existing execution paths.
+
+Source regressions require compiled construction and callback invocations for
+returned closures, independent instances, local mutable captures and empty
+captures. Differential tests exercise explicit capture effects, shape failures,
+per-slot rejection, duplicate identities, early return and recovery. A shipped
+sysroot example folds a List with a privately captured counter and verifies both
+callback state retention and isolation from the outer binding.
+
+Remaining performance work: `invocation_code` caches stable declaration bodies,
+but an owned closure body currently compiles on every invocation. Reusing its
+immutable code must remain separate from invocation-result caching and must not
+retain captured environments as cache entries.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-jz5f761j/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_closures --test comptime_list_operations --test sysroot_preludes`:
+  closure and List groups passed (1 and 54 cases); overall exit 101 due to the
+  new sysroot fixture's missing whitespace before assignment,
+  `/tmp/luna-tools-5827anrv/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_closures --test sysroot_preludes --test comptime_bytecode_defaults --test comptime_bytecode_references`:
+  closure, defaults and references groups passed. Overall exit 101 because the
+  new sysroot fixture transported its comptime result into runtime without a
+  bound Splice protocol, `/tmp/luna-tools-eeykqzz_/result.json`. The fixture now
+  invokes its comptime entry directly; it does not change cross-stage semantics.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_list_fold_retains_comptime_callback_state`:
+  exit 0, `/tmp/luna-tools-9ptfjsoz/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-s35snhmc/result.json`; `git diff --check`: exit 0.
