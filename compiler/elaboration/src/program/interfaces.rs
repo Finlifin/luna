@@ -764,12 +764,16 @@ impl Checker<'_, '_> {
                             }))
                             .collect();
                         let actual_signature = &actual.signature;
+                        let parameter_ids = substitution_parameters
+                            .iter()
+                            .map(|parameter| parameter.declaration)
+                            .collect::<Vec<_>>();
+                        let substitution = self
+                            .input_substitution(&parameter_ids, &substitution_arguments, &[])
+                            .map_err(|e| error(item.span, e.to_string()))?;
                         let expected_signature = contract
                             .signature
-                            .instantiate_parameters(
-                                &substitution_parameters,
-                                &substitution_arguments,
-                            )
+                            .try_map_types(|ty: &Term| substitution.instantiate(ty))
                             .map_err(|e| error(item.span, e.to_string()))?;
                         // Compatibility assumes the interface contract, never the
                         // implementation method's own (possibly stronger) premises.
@@ -784,7 +788,14 @@ impl Checker<'_, '_> {
                         for assumption in base.assumptions() {
                             context.assume(assumption.clone());
                         }
-                        let scoped_parameters = substitution_parameters.clone();
+                        let substitution_frames = context.scope().to_vec();
+                        let scoped_substitution = self
+                            .input_substitution(
+                                &parameter_ids,
+                                &substitution_arguments,
+                                &substitution_frames,
+                            )
+                            .map_err(|e| error(item.span, e.to_string()))?;
                         // This tuple only collects type dependencies for associated
                         // equations. Signature category/context checks stay separate.
                         let signature_types = expected_signature
@@ -804,23 +815,15 @@ impl Checker<'_, '_> {
                             context.assume(Formula::equal(projection.clone(), value.clone()));
                         }
                         for requirement in &contract.requirements {
-                            let requirement = requirement
-                                .instantiate_parameters_in_scope(
-                                    &scoped_parameters,
-                                    &substitution_arguments,
-                                    context.scope(),
-                                )
+                            let requirement = scoped_substitution
+                                .instantiate_predicate(requirement)
                                 .map_err(|e| error(item.span, e.to_string()))?;
                             context.assume(Formula::from_predicate(&requirement));
                         }
                         let mut assumptions = self.capabilities[&owner].clone();
                         for capability in &contract.capabilities {
-                            let capability = capability
-                                .instantiate_parameters_in_scope(
-                                    &scoped_parameters,
-                                    &substitution_arguments,
-                                    context.scope(),
-                                )
+                            let capability = scoped_substitution
+                                .instantiate_requirement_bounded(capability, &mut 100_000)
                                 .map_err(|e| error(item.span, e.to_string()))?;
                             context
                                 .assume(Formula::Trait(crate::ptc::TraitQuery::from(&capability)));
@@ -838,12 +841,11 @@ impl Checker<'_, '_> {
                             .iter()
                             .zip(&actual.type_parameters)
                             .map(|(expected, actual)| {
-                                let expected = self
-                                    .trait_input_domain(*expected)
-                                    .unwrap_or_else(|| p(P::Type))
-                                    .instantiate_parameters(
-                                        &substitution_parameters,
-                                        &substitution_arguments,
+                                let expected = substitution
+                                    .instantiate(
+                                        &self
+                                            .trait_input_domain(*expected)
+                                            .unwrap_or_else(|| p(P::Type)),
                                     )
                                     .map_err(|e| error(item.span, e.to_string()))?;
                                 let actual = self

@@ -460,13 +460,22 @@ impl Checker<'_, '_> {
         frames: &[Vec<Sort>],
         span: Span,
     ) -> Result<Term, Error> {
+        self.input_substitution(parameters, arguments, frames)
+            .and_then(|substitution| substitution.instantiate(ty))
+            .map_err(|e| error(span, e.to_string()))
+    }
+
+    pub(super) fn input_substitution<'a>(
+        &self,
+        parameters: &[DeclarationId],
+        arguments: &'a [Term],
+        frames: &'a [Vec<Sort>],
+    ) -> Result<nir::DeclarationSubstitution<'a>, nir::TypeError> {
         let domains = parameters
             .iter()
             .map(|id| self.trait_input_domain(*id).unwrap_or_else(|| p(P::Type)))
             .collect::<Vec<_>>();
         nir::DeclarationSubstitution::new(parameters, &domains, arguments, frames)
-            .and_then(|substitution| substitution.instantiate(ty))
-            .map_err(|e| error(span, e.to_string()))
     }
 
     pub(super) fn instantiate_declaration_type(

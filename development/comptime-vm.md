@@ -3512,3 +3512,44 @@ Validation in `/home/fin/luna`:
 
 Other declaration-substitution consumers still require audit. This stage does
 not claim all associated initializer or dependent specification paths complete.
+
+### Chained associated initializers and explicit method overrides
+
+Checker input-domain substitution is now reusable across type terms and
+interface queries. A selected associated initializer uses that context for Self
+and interface inputs, so a dependent default can read another associated member
+from the same selected implementation, including an explicit override.
+
+Explicit method compatibility now specializes the public signature, clause
+input domains, type requirements and capabilities using completed declaration
+domains. Candidate associated equations use the interface domain context.
+Program-contract inheritance separately specializes predicates in the actual
+method's ordinary input frame; predicates still belong to program verification.
+The source regressions execute chained defaults and overrides, reject a stale
+associated result type, execute an explicit method with an associated signature,
+reject a false inherited precondition, and reject a strengthened precondition.
+
+Initial failures: `/tmp/luna-tools-vid6t9xu/result.json` (chained initializer),
+`/tmp/luna-tools-nhng6axy/result.json` (override signature), and
+`/tmp/luna-tools-lq8myl9g/result.json` (program-contract inheritance).
+
+Validation in `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test trait_phases --test trait_purity --test method_memory_contracts --test staged_aggregate_contracts --test sysroot_preludes`:
+  exit 0, `/tmp/luna-tools-gr6fhg0g/result.json`, no exclusions.
+- `python3 -B development/check.py --timeout 900 -- test -p program_verification`:
+  exit 0, `/tmp/luna-tools-2keg4ll3/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-svz2g8pj/result.json`; `git diff --check`: exit 0.
+- Expanded `python3 -B development/check.py --timeout 900 -- test -p elaboration -p program_verification`:
+  exit 101, `/tmp/luna-tools-9vnhr__t/result.json`. It stops at
+  `failed_effect_inference_does_not_unfold_opaque_inputs_or_mutate_scheme`:
+  inference succeeds where the test expects failure. This test directly uses
+  the Scheme re-export from type_resolution. `git diff --exit-code HEAD --
+  compiler/type_resolution compiler/nir compiler/elaboration/tests/effect_inference.rs
+  compiler/elaboration/src/lib.rs` exits 0 against the pre-stage HEAD ed391bd2.
+  The inference implementation, its dependencies and this test were not changed
+  in this stage; no separate baseline build was run. Its semantic expectation
+  and implementation still need investigation; the expanded suite is not green.
+
+Remaining declaration-only and contextual-code substitution consumers are not
+claimed complete by this stage.

@@ -85,11 +85,14 @@ impl Checker<'_, '_> {
         // While evaluating a selected initializer, queries use its concrete
         // (or implementation-generic) Self and interface arguments.
         if let Some((parameters, arguments)) = self.initializer_substitution() {
-            requested = requested
-                .instantiate_parameters(&self.input_binders(parameters), arguments)
+            let substitution = self
+                .input_substitution(parameters, arguments, &[])
                 .map_err(|e| error(span, e.to_string()))?;
-            subject = subject
-                .instantiate_parameters(&self.input_binders(parameters), arguments)
+            requested = substitution
+                .instantiate_interface_bounded(&requested, &mut 100_000)
+                .map_err(|e| error(span, e.to_string()))?;
+            subject = substitution
+                .instantiate(&subject)
                 .map_err(|e| error(span, e.to_string()))?;
         }
         if self.checked_traits.is_empty() && !self.interfaces_ready {
@@ -934,13 +937,11 @@ impl Checker<'_, '_> {
                         let inputs: Vec<_> = std::iter::once(subject.clone())
                             .chain(arguments.iter().cloned())
                             .collect();
-                        value = value
-                            .instantiate_parameters(
-                                &interface
-                                    .binders_with_self(&mut fuel)
-                                    .map_err(|message| error(span, message))?,
-                                &inputs,
-                            )
+                        value = interface
+                            .input_substitution(&inputs, &[], &mut fuel)
+                            .and_then(|substitution| {
+                                substitution.instantiate_bounded(&value, &mut fuel)
+                            })
                             .map_err(|e| error(span, e.to_string()))?;
                     }
                     crate::associated::charge_projection_copy(&value, &mut fuel)
@@ -1096,11 +1097,10 @@ impl Checker<'_, '_> {
             .checked_implementations
             .iter()
             .find(|i| i.declaration == selected)?;
-        let subject = subject
-            .instantiate_parameters(&self.input_binders(parameters), arguments)
-            .ok()?;
-        let interface = interface
-            .instantiate_parameters(&self.input_binders(parameters), arguments)
+        let substitution = self.input_substitution(parameters, arguments, &[]).ok()?;
+        let subject = substitution.instantiate(subject).ok()?;
+        let interface = substitution
+            .instantiate_interface_bounded(interface, &mut 100_000)
             .ok()?;
         (subject == implementation.subject
             && Some(interface) == implementation.interface_instance())

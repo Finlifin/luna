@@ -156,9 +156,34 @@ pub fn inherit(package: &mut Package, next: &mut u32) -> Result<(), flow::Error>
                         }),
                 )
                 .collect();
+            let parameter_ids = parameters
+                .iter()
+                .map(|parameter| parameter.declaration)
+                .collect::<Vec<_>>();
+            let parameter_domains = parameter_ids
+                .iter()
+                .map(|id| {
+                    domains
+                        .get(id)
+                        .cloned()
+                        .unwrap_or(Term::Primitive(Primitive::Type))
+                })
+                .collect::<Vec<_>>();
+            let frames = match actual.signature.callable_signature() {
+                Term::Function { parameters, .. } if !parameters.is_empty() => {
+                    vec![parameters.iter().map(|parameter| parameter.sort).collect()]
+                }
+                _ => Vec::new(),
+            };
             let mut contract = method
                 .program
-                .instantiate_parameters(&parameters, &method_arguments)
+                .instantiate_declaration_parameters(
+                    &parameter_ids,
+                    &parameter_domains,
+                    &method_arguments,
+                    &frames,
+                    &mut 100_000,
+                )
                 .map_err(|_| failure(source, "trait program contract substitution failed"))?;
             if method.parameter_bindings.len() != actual.parameters.len() {
                 return Err(failure(source, "trait program contract arity mismatch"));

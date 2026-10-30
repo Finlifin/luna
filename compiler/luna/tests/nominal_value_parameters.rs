@@ -6303,3 +6303,71 @@ fn type_valued_indices_preserve_associated_constants() {
         }";
     assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
 }
+
+#[test]
+fn type_valued_indices_preserve_chained_associated_defaults() {
+    let source = "typealias Type=.Type'builtin;
+        struct Tagged where T,index:T {value:bool}
+        trait Shape where T,index:T {
+            assoc Base:Type=Tagged<T,index>;
+            assoc Output:Type=Self.as(Shape<T,index>).Base;
+        }
+        struct Holder {}
+        impl Shape<Type,bool> for Holder {}
+        fn run()->bool {
+            let value:Holder.as(Shape<Type,bool>).Output=Tagged<Type,bool>{value:true};
+            value.value
+        }";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    let overridden = source
+        .replace(
+            "impl Shape<Type,bool> for Holder {}",
+            "impl Shape<Type,bool> for Holder {assoc Base:Type=Tagged<Type,Type>;}",
+        )
+        .replace("Output=Tagged<Type,bool>", "Output=Tagged<Type,Type>");
+    assert_eq!(
+        support::run_iir(&overridden, "run", vec![]),
+        Value::Bool(true)
+    );
+    let wrong = overridden.replace("Output=Tagged<Type,Type>", "Output=Tagged<Type,bool>");
+    assert!(support::compile_with_protocols(&wrong, &Default::default()).is_err());
+}
+
+#[test]
+fn type_valued_indices_preserve_associated_default_method_signatures() {
+    let source = "typealias Type=.Type'builtin;
+        struct Tagged where T,index:T {value:bool}
+        trait Shape where T,index:T {
+            assoc Output:Type=Tagged<T,index>;
+            fn keep(value:Self.as(Shape<T,index>).Output)->Self.as(Shape<T,index>).Output {value}
+        }
+        struct Holder {}
+        impl Shape<Type,bool> for Holder {}
+        fn run()->bool {
+            Holder.as(Shape<Type,bool>).keep(Tagged<Type,bool>{value:true}).value
+        }";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    let overridden = source.replace("impl Shape<Type,bool> for Holder {}", "impl Shape<Type,bool> for Holder {fn keep(value:Tagged<Type,bool>)->Tagged<Type,bool>{value}}");
+    assert_eq!(
+        support::run_iir(&overridden, "run", vec![]),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn type_valued_indices_preserve_overridden_method_preconditions() {
+    let source = "typealias Type=.Type'builtin;
+        trait Read where T,index:T {fn read(allow:bool)->bool where requires allow;}
+        struct Holder {}
+        impl Read<Type,bool> for Holder {fn read(allow:bool)->bool {true}}
+        fn run()->bool {Holder.as(Read<Type,bool>).read(true)}";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    let invalid = source.replace(".read(true)", ".read(false)");
+    let error = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+    assert!(error.contains("precondition"), "{error}");
+    let stronger = source.replace(
+        "fn read(allow:bool)->bool {true}",
+        "fn read(allow:bool)->bool where requires not allow {true}",
+    );
+    assert!(support::compile_with_protocols(&stronger, &Default::default()).is_err());
+}
