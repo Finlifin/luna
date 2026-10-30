@@ -1,5 +1,5 @@
 //! Declaration domains for callable clause inputs, independent of executable
-//! parameters and bodies. Runtime instantiation must retain value input sorts.
+//! parameters and bodies. Runtime instantiation completes dependent input domains.
 use crate::{DeclarationId, DeclarationParameter, Term, TypeError};
 use std::fmt;
 
@@ -25,34 +25,19 @@ pub fn validate_arguments(
     arguments: &[Term],
     fuel: &mut usize,
 ) -> Result<(), String> {
-    let binders =
-        crate::declaration_parameters(parameters, domains).map_err(|error| error.to_string())?;
-    if binders.len() != arguments.len() {
-        return Err("callable argument count mismatch".into());
-    }
-    // Validate the entire input vector before substitution, including captured
-    // inputs whose domains can refer to parameters stored later in the vector.
-    for (binder, argument) in binders.iter().zip(arguments) {
-        crate::type_computations::charge_term(argument, fuel).map_err(|error| error.to_string())?;
-        argument
-            .check_scope(&[])
+    let substitution =
+        crate::DeclarationSubstitution::bounded(parameters, domains, arguments, &[], fuel)
             .map_err(|error| error.to_string())?;
-        if binder.sort != argument.sort() {
-            return Err("callable argument sort mismatch".into());
-        }
-    }
-    for (index, (binder, argument)) in binders.iter().zip(arguments).enumerate() {
-        if binder.sort == crate::Sort::Type {
+    for (index, argument) in arguments.iter().enumerate() {
+        let domain = domains
+            .get(index)
+            .unwrap_or(&Term::Primitive(crate::Primitive::Type));
+        let domain = substitution
+            .instantiate_bounded(domain, fuel)
+            .map_err(|error| error.to_string())?;
+        if domain == Term::Primitive(crate::Primitive::Type) {
             continue;
         }
-        let domain = crate::type_computations::instantiate_parameters_bounded(
-            &domains[index],
-            &binders,
-            arguments,
-            &[],
-            fuel,
-        )
-        .map_err(|error| error.to_string())?;
         if let Term::TypeListValue(elements) = argument {
             let Term::NormalForm {
                 head: declaration, ..

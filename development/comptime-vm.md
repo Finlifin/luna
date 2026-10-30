@@ -3125,3 +3125,57 @@ from `/home/fin/luna` completed with exit 0; all eight cases passed, including
 native host execution and the real meta Object/NF integration. Evidence:
 `/tmp/luna-tools-_1k2pcrb/result.json`. `git diff --check` passed. This corrects
 stale fixtures, not compiler semantics or expected program behavior.
+
+## Completed domains in runtime function materialization
+
+Runtime functions now specialize dependent clause inputs by their completed
+source domains. The new source regression first failed at IIR formation with
+`expected comptime-value, got type`. It now executes ordinary, inline and staged
+runtime calls taking `Key<Type, bool>`, with a retained formation requirement and
+field access. The function template transformation keeps its ordinary input frame
+for body annotations, defaults and contracts, and copies each output field once.
+
+Declaration-world queries expose bounded domain copies. Concrete materialization
+admits value inputs before specializing templates; Type-only declarations reuse
+strict substitution and the already completed instance-key Type checks. This
+avoids redundantly traversing large unused Type arguments. The original phantom
+input/copy-expansion regression still fits its unchanged 3000-step budget while
+the repeated-type body still exhausts it. No special library-name path was added.
+
+Open runtime identities and finite template-storage tables use the same completed
+domain rule. The table regression covers Type-valued dependent indices, malformed
+inputs, budget failure, and successful construction after failure. Trait method
+selection and other independent fixed-sort consumers remain separate migration
+work; this stage does not claim all dependent declarations are implemented.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p iir -p materialization --lib --tests -- --skip nested_scalar_comparisons_and_blocks_reach_logical_depth_limits`:
+  `/tmp/luna-tools-0ivzitms/result.json`, exit 0. One known failing deep-fold test
+  was excluded only for this follow-up run, not deleted or ignored in source.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test instantiation instance_copy_budget_counts_expanded_parameter_occurrences_and_recovers -- --nocapture`:
+  `/tmp/luna-tools-ver86xlu/result.json`, exit 0 with the original budget assertions.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test default_calls --test comptime_clause_inputs --test sysroot_preludes`:
+  `/tmp/luna-tools-r79z0j2q/result.json`, exit 0 before the final Type-only fast-path
+  optimization. Includes the real sysroot and runtime specialization regressions.
+- Managed formatting: `/tmp/luna-tools-hp6l0i7s/result.json`, exit 0.
+
+Expanded checks exposed additional failures, retained for follow-up:
+
+- The unrestricted NIR/IIR/materialization run
+  `/tmp/luna-tools-t2mzoq05/result.json` aborted in
+  `staging::tests::nested_scalar_comparisons_and_blocks_reach_logical_depth_limits`
+  with a host stack overflow. The staging folder was not changed in this stage.
+- The unrestricted instantiation run `/tmp/luna-tools-wb5ht9aw/result.json`
+  aborted in `concrete_graph_executes_without_source_templates` with a host stack
+  overflow. It also exposed the redundant-input budget regression fixed above.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test instantiation --test staged_aggregate_contracts --test test_templates -- --skip concrete_graph_executes_without_source_templates`:
+  `/tmp/luna-tools-2wz2egw5/result.json`, exit 101 overall. The remaining 56
+  instantiation tests and all 31 staged aggregate tests passed; test_templates
+  had 67 failures, with missing ordinary bool bindings in its old fixture path.
+  No template tests were changed to suppress these failures. No clean-baseline
+  run was made to attribute the stack failures to a historical commit.
+
+Final source regression:
+`python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters type_valued_indices_specialize_runtime_function_instances`:
+`/tmp/luna-tools-_tblahne/result.json`, exit 0. `git diff --check` passed.

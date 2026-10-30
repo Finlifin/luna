@@ -93,6 +93,23 @@ impl<'a> DeclarationWorld<'a> {
     pub fn assumptions(&self) -> &[n::TraitRequirement] {
         &self.assumptions
     }
+    pub fn input_domains(&self, parameters: &[Id], fuel: &mut usize) -> Result<Vec<Term>, String> {
+        *fuel = fuel
+            .checked_sub(parameters.len())
+            .ok_or("input domain budget exhausted")?;
+        parameters
+            .iter()
+            .map(|id| {
+                let domain = self
+                    .index
+                    .parameter_domains()
+                    .get(id)
+                    .unwrap_or(&Term::Primitive(nir::Primitive::Type));
+                nir::type_computations::charge_term(domain, fuel).map_err(|e| e.to_string())?;
+                Ok(domain.clone())
+            })
+            .collect()
+    }
     pub fn input_binders(&self, parameters: &[Id]) -> Vec<nir::DeclarationParameter> {
         parameters
             .iter()

@@ -1765,6 +1765,104 @@ impl Function {
         })
     }
 
+    /// Specialize a declaration using completed domains while retaining its
+    /// ordinary input frame in contracts, defaults and body annotations.
+    /// Callers separately admit values and charge the template copy.
+    pub fn instantiate_declaration_parameters(
+        &self,
+        domains: &[Term],
+        arguments: &[Term],
+        fuel: &mut usize,
+    ) -> Result<Self, crate::type_computations::Error> {
+        // Type-only declarations cannot change binder sorts. Reuse their
+        // strict substitution path without rescanning wide, unused Type inputs.
+        if domains
+            .iter()
+            .all(|domain| *domain == Term::Primitive(crate::Primitive::Type))
+        {
+            *fuel = fuel
+                .checked_sub(self.type_parameters.len())
+                .ok_or(crate::type_computations::Error::Budget)?;
+            let binders = crate::declaration_parameters(&self.type_parameters, domains)
+                .map_err(crate::type_computations::Error::Scope)?;
+            return self
+                .instantiate_parameters(&binders, arguments)
+                .map_err(crate::type_computations::Error::Scope);
+        }
+        let closed = crate::DeclarationSubstitution::bounded(
+            &self.type_parameters,
+            domains,
+            arguments,
+            &[],
+            fuel,
+        )?;
+        let frames = match self.signature.callable_signature() {
+            Term::Function { parameters, .. } => vec![parameters.iter().map(|p| p.sort).collect()],
+            _ => vec![],
+        };
+        let scoped = crate::DeclarationSubstitution::bounded(
+            &self.type_parameters,
+            domains,
+            arguments,
+            &frames,
+            fuel,
+        )?;
+        let specialized = (|| -> Result<Self, crate::TypeError> {
+            let expression = |value: &Expr| {
+                let mut value = value.clone();
+                value.rewrite_types(&mut |ty| scoped.instantiate(ty))?;
+                Ok::<_, crate::TypeError>(value)
+            };
+            Ok(Self {
+                phase: self.phase,
+                inline: self.inline,
+                pure: self.pure,
+                is_unsafe: self.is_unsafe,
+                result_binding: self.result_binding,
+                entry_snapshots: self.entry_snapshots.clone(),
+                type_parameters: self.type_parameters.clone(),
+                declaration: self.declaration,
+                name: self.name.clone(),
+                parameters: self.parameters.clone(),
+                signature: closed.instantiate(&self.signature)?,
+                requirements: self
+                    .requirements
+                    .iter()
+                    .map(|p| scoped.instantiate_predicate(p))
+                    .collect::<Result<_, _>>()?,
+                capabilities: self
+                    .capabilities
+                    .iter()
+                    .map(|capability| {
+                        let TypePredicate::Trait(value) = scoped
+                            .instantiate_predicate(&TypePredicate::Trait(capability.clone()))?
+                        else {
+                            unreachable!()
+                        };
+                        Ok(value)
+                    })
+                    .collect::<Result<_, crate::TypeError>>()?,
+                body: expression(&self.body)?,
+                preconditions: self
+                    .preconditions
+                    .iter()
+                    .map(expression)
+                    .collect::<Result<_, _>>()?,
+                postconditions: self
+                    .postconditions
+                    .iter()
+                    .map(expression)
+                    .collect::<Result<_, _>>()?,
+                defaults: self
+                    .defaults
+                    .iter()
+                    .map(|(index, value)| expression(value).map(|value| (*index, value)))
+                    .collect::<Result<_, _>>()?,
+            })
+        })();
+        specialized.map_err(crate::type_computations::Error::Scope)
+    }
+
     pub fn instantiate_types(
         &self,
         parameters: &[DeclarationId],

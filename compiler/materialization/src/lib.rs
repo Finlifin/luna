@@ -644,9 +644,19 @@ impl Builder<'_> {
                     "runtime function identity has no executable definition for IIR".into(),
                 );
             }
-            let signature = identity
-                .signature
-                .instantiate_parameters(&self.input_binders(&identity.type_parameters), &arguments)
+            let domains = self
+                .world
+                .input_domains(&identity.type_parameters, &mut self.fuel)?;
+            let substitution = nir::DeclarationSubstitution::bounded(
+                &identity.type_parameters,
+                &domains,
+                &arguments,
+                &[],
+                &mut self.fuel,
+            )
+            .map_err(|e| e.to_string())?;
+            let signature = substitution
+                .instantiate_bounded(&identity.signature, &mut self.fuel)
                 .map_err(|e| e.to_string())?;
             self.queue.push_back(Task::Type(signature));
             return Ok(());
@@ -700,8 +710,30 @@ impl Builder<'_> {
             {
                 return Err("staged runtime function requires a specialized direct call".into());
             }
-            f.instantiate_parameters(&parameters, &arguments)
-                .map_err(|e| e.to_string())?
+            if parameters
+                .iter()
+                .all(|parameter| parameter.sort == nir::Sort::Type)
+            {
+                // The key's Type inputs were already checked above; preserve
+                // the strict path and avoid copying their known Type domains.
+                f.instantiate_parameters(&parameters, &arguments)
+                    .map_err(|e| e.to_string())?
+            } else {
+                let domains = self
+                    .world
+                    .input_domains(&f.type_parameters, &mut self.fuel)?;
+                if self.instances.is_some() {
+                    nir::function_parameters::validate_arguments(
+                        self.package,
+                        &f.type_parameters,
+                        &domains,
+                        &arguments,
+                        &mut self.fuel,
+                    )?;
+                }
+                f.instantiate_declaration_parameters(&domains, &arguments, &mut self.fuel)
+                    .map_err(|e| e.to_string())?
+            }
         };
         if self.instances.is_some() {
             function.signature = self.normalized_type(&function.signature)?;
@@ -1811,7 +1843,13 @@ impl Builder<'_> {
                 return Ok(true);
             }
             let mut bound = template
-                .instantiate_parameters(&self.input_binders(&template.type_parameters), &arguments)
+                .instantiate_declaration_parameters(
+                    &self
+                        .world
+                        .input_domains(&template.type_parameters, &mut self.fuel)?,
+                    &arguments,
+                    &mut self.fuel,
+                )
                 .map_err(|e| e.to_string())?;
             bound.type_parameters.clear();
             if let Some((requirements, capabilities, program)) = entry_contract {
@@ -1830,7 +1868,13 @@ impl Builder<'_> {
         }
         // Declaration substitution closes the type inputs before staged evaluation.
         let mut template = template
-            .instantiate_parameters(&self.input_binders(&template.type_parameters), &arguments)
+            .instantiate_declaration_parameters(
+                &self
+                    .world
+                    .input_domains(&template.type_parameters, &mut self.fuel)?,
+                &arguments,
+                &mut self.fuel,
+            )
             .map_err(|e| e.to_string())?;
         template.type_parameters.clear();
         if let Some((requirements, capabilities, program)) = entry_contract {

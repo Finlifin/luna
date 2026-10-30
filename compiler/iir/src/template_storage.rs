@@ -73,20 +73,16 @@ impl TemplateStorage {
                 &key.arguments,
                 fuel,
             )?;
-            let binders = nir::declaration_parameters(type_parameters, &input_domains)
-                .map_err(|e| e.to_string())?;
-            let before = *fuel;
-            nir::type_computations::charge_term(declared_signature, fuel)
-                .map_err(|e| e.to_string())?;
-            let signature_work = before - *fuel;
-            let before = *fuel;
-            charge_key(&key, fuel)?;
-            let input_work = before - *fuel;
-            *fuel = fuel
-                .checked_sub(signature_work.saturating_mul(input_work))
-                .ok_or("template signature substitution budget exhausted")?;
-            let signature = declared_signature
-                .instantiate_parameters(&binders, &key.arguments)
+            let substitution = nir::DeclarationSubstitution::bounded(
+                type_parameters,
+                &input_domains,
+                &key.arguments,
+                &[],
+                fuel,
+            )
+            .map_err(|e| e.to_string())?;
+            let signature = substitution
+                .instantiate_bounded(declared_signature, fuel)
                 .map_err(|e| e.to_string())?;
             selected.push((key, signature));
         }
@@ -271,6 +267,70 @@ mod tests {
             dump.bytes().filter(|b| *b == b')').count()
         );
     }
+    #[test]
+    fn package_targets_admit_type_valued_dependent_indices() {
+        let target = key(10).declaration;
+        let first = key(11).declaration;
+        let second = key(12).declaration;
+        let package = nir::program::Package {
+            function_parameters: vec![nir::function_parameters::Declaration {
+                declaration: target,
+                parameters: vec![first, second],
+                domains: vec![
+                    Term::Primitive(Primitive::Type),
+                    Term::Rigid {
+                        declaration: first,
+                        sort: Sort::Type,
+                    },
+                ],
+            }],
+            runtime_function_identities: vec![nir::program::RuntimeFunctionIdentity {
+                declaration: target,
+                type_parameters: vec![first, second],
+                signature: signature(),
+            }],
+            ..Default::default()
+        };
+        let selected = InstanceKey {
+            declaration: target,
+            arguments: vec![
+                Term::Primitive(Primitive::Type),
+                Term::Primitive(Primitive::Bool),
+            ],
+        };
+        assert!(
+            TemplateStorage::from_package(signature(), vec![selected.clone()], &package, &mut 0)
+                .is_err()
+        );
+        let table = TemplateStorage::from_package(
+            signature(),
+            vec![selected.clone()],
+            &package,
+            &mut 10000,
+        )
+        .unwrap();
+        assert_eq!(table.decode(0).unwrap(), &selected);
+        let invalid = InstanceKey {
+            declaration: target,
+            arguments: vec![
+                Term::Primitive(Primitive::Bool),
+                Term::Primitive(Primitive::Bool),
+            ],
+        };
+        assert!(
+            TemplateStorage::from_package(signature(), vec![invalid], &package, &mut 10000)
+                .is_err()
+        );
+        let table = TemplateStorage::from_package(
+            signature(),
+            vec![selected.clone()],
+            &package,
+            &mut 10000,
+        )
+        .unwrap();
+        assert_eq!(table.decode(0).unwrap(), &selected);
+    }
+
     #[test]
     fn malformed_domains_and_exhausted_budgets_do_not_publish_tables() {
         let ty = signature();

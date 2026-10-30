@@ -6128,3 +6128,21 @@ fn type_valued_dependent_indices_support_named_enum_defaults() {
         fn run()->bool {let packet:Packet<Type,bool> = .data {}; let .data {flag}=packet; flag}";
     assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
 }
+
+#[test]
+fn type_valued_indices_specialize_runtime_function_instances() {
+    for (prefix, parameter, input) in [
+        ("", "", ""),
+        ("inline ", "", ""),
+        ("", "comptime enabled:bool,", "true,"),
+    ] {
+        let source = format!(
+            "typealias Type=.Type'builtin;
+            struct Key where T,value:T {{payload:bool}}
+            {prefix}fn inspect({parameter}key:Key<T,value>)->bool
+                where T,value:T, requires Key<T,value> == Key<T,value> {{key.payload}}
+            fn run()->bool {{inspect<Type,bool>({input}Key<Type,bool>{{payload:true}})}}"
+        );
+        assert_eq!(support::run_iir(&source, "run", vec![]), Value::Bool(true));
+    }
+}
