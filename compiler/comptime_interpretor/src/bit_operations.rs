@@ -34,6 +34,7 @@ impl Interpreter<'_> {
             K::BitConcat(left, right) => (B::Concat, vec![left, right]),
             K::BitEqual(left, right) => (B::Equal, vec![left, right]),
             K::BitConvert(value) => (B::Convert, vec![value]),
+            K::TakeBits(value) => (B::Take, vec![value]),
             _ => unreachable!("bit operation dispatcher"),
         };
         let mut values = Vec::new();
@@ -65,7 +66,7 @@ impl Interpreter<'_> {
         source: SourceRange,
     ) -> Result<Value, Error> {
         let count = match operation {
-            B::Slice { .. } | B::Convert => 1,
+            B::Slice { .. } | B::Convert | B::Take => 1,
             B::Index | B::Concat | B::Equal => 2,
             B::Window => 3,
         };
@@ -73,6 +74,9 @@ impl Interpreter<'_> {
             return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
         }
         let mut values = values.into_iter();
+        if matches!(operation, B::Take) {
+            return self.take_bits_value(values.next().unwrap(), types[0], output, source);
+        }
         let Some(Value::BitVec(bits)) = values.next() else {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         };
@@ -86,6 +90,7 @@ impl Interpreter<'_> {
             .and_then(|n| usize::try_from(n).ok())
         };
         let result = match operation {
+            B::Take => unreachable!("representation input handled before requiring bits"),
             B::Equal => {
                 let Some(Value::BitVec(right)) = values.next() else {
                     return Err(self.failure(ErrorKind::Type, Some(source)));

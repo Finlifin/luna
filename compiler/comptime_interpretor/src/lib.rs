@@ -14,6 +14,7 @@ mod cleanup;
 mod code_values;
 pub use code_values::CodeValue;
 mod bit_operations;
+mod bit_representation;
 mod dynamic_instances;
 mod environment;
 mod field_access;
@@ -3346,7 +3347,7 @@ impl<'a> Interpreter<'a> {
             K::Snapshot(_) => self.eval_snapshot(expr, environment),
             K::ComptimeIntegerConvert(_) => self.eval_comptime_integer_convert(expr, environment),
             K::IntegerRepresentation(_) => self.eval_integer_representation(expr, environment),
-            K::TakeBits(..) => self.eval_take_bits(expr, environment),
+            K::TakeBits(..) => self.eval_bit_values(expr, environment),
             K::Not(..) => self.eval_not(expr, environment),
             K::And(..) | K::Or(..) => self.eval_and(expr, environment),
             K::Call { .. } => self.eval_call(expr, environment),
@@ -5688,140 +5689,6 @@ impl<'a> Interpreter<'a> {
                         return Err(
                             self.failure(ErrorKind::AbstractValueUnresolved, Some(expr.source))
                         );
-                    }
-                    _ => return Err(self.failure(ErrorKind::Type, Some(expr.source))),
-                }
-            }
-            _ => unreachable!("expression dispatcher selected an incompatible evaluator"),
-        };
-        Ok(Flow::Value(result))
-    }
-
-    #[inline(never)]
-    fn eval_take_bits(
-        &mut self,
-        expr: &Expr,
-        environment: &mut Environment,
-    ) -> Result<Flow, Error> {
-        let result = match &expr.kind {
-            K::TakeBits(operand) => {
-                let value =
-                    Self::concrete_value(value!(self.eval(operand, environment)), expr.source)?;
-                let Term::Primitive(Primitive::BitVec(width)) = expr.ty else {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                };
-                match value {
-                    Value::BitVec(bits) if bits.width() == width => Value::BitVec(bits),
-                    value @ Value::Variant { .. } => {
-                        if !self.has_type(&value, &operand.ty) {
-                            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                        }
-                        let Value::Variant {
-                            declaration,
-                            index,
-                            fields,
-                            arguments,
-                        } = value
-                        else {
-                            unreachable!()
-                        };
-                        let definition = if let Some(graph) = self.graph {
-                            graph
-                                .nominals
-                                .iter()
-                                .find(|nominal| {
-                                    matches!(&nominal.ty,
-                                Term::Nominal {declaration:actual,arguments:actual_args}
-                                    if *actual == declaration && *actual_args == arguments)
-                                })
-                                .and_then(|nominal| match &nominal.definition {
-                                    iir::NominalDefinition::Enum(definition) => {
-                                        Some(generated_enums::EnumDefinition::Borrowed(definition))
-                                    }
-                                    _ => None,
-                                })
-                        } else {
-                            self.enums.get(&declaration).cloned()
-                        };
-                        let layout = definition
-                            .as_ref()
-                            .and_then(|definition| definition.encoding.as_ref())
-                            .filter(|layout| layout.width() == width)
-                            .ok_or_else(|| self.failure(ErrorKind::Type, Some(expr.source)))?;
-                        let variant = layout
-                            .variants()
-                            .get(index)
-                            .ok_or_else(|| self.failure(ErrorKind::Type, Some(expr.source)))?;
-                        Value::BitVec(self.bit_operation(expr.source, |budget| {
-                            use comptime_runtime::bitvec::{BitVec, Error as BitError};
-                            let mut payloads = Vec::new();
-                            for (field, value) in variant.fields().iter().zip(&fields) {
-                                let bits = if let Value::BitVec(bits) = value {
-                                    BitVec::from_words(bits.width(), bits.words(), budget)?
-                                } else {
-                                    let raw = match value {
-                                        Value::UnsignedInteger(value) => *value,
-                                        Value::SignedInteger(value) => *value as u128,
-                                        Value::Float32(value) => u128::from(*value),
-                                        Value::Float64(value) => u128::from(*value),
-                                        _ => return Err(BitError::InvalidRepresentation),
-                                    };
-                                    if field.width > 128 {
-                                        return Err(BitError::InvalidRepresentation);
-                                    }
-                                    let raw = if field.width == 128 {
-                                        raw
-                                    } else {
-                                        raw & ((1u128 << field.width) - 1)
-                                    };
-                                    comptime_runtime::Integer::from_u128(raw)
-                                        .to_bitvec(field.width, budget)?
-                                };
-                                payloads.push(bits);
-                            }
-                            variant
-                                .construct(&payloads, budget)
-                                .map_err(|error| match error {
-                                    nir::enum_encoding::Error::Bits(error) => error,
-                                    _ => BitError::InvalidRepresentation,
-                                })
-                        })?)
-                    }
-                    Value::SignedInteger(_)
-                    | Value::UnsignedInteger(_)
-                    | Value::Float16(_)
-                    | Value::BFloat16(_)
-                    | Value::Float32(_)
-                    | Value::Float64(_)
-                    | Value::Char(_) => {
-                        let Term::Primitive(primitive) = operand.ty else {
-                            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                        };
-                        if primitive
-                            .readable_scalar_width_in(self.target)
-                            .map(|w| w as usize)
-                            != Some(width)
-                            || !self.has_type(&value, &operand.ty)
-                        {
-                            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                        }
-                        let raw = match value {
-                            Value::SignedInteger(v) => v as u128,
-                            Value::UnsignedInteger(v) => v,
-                            Value::Float16(bits) | Value::BFloat16(bits) => u128::from(bits),
-                            Value::Float32(bits) => u128::from(bits),
-                            Value::Float64(bits) => u128::from(bits),
-                            Value::Char(value) => u128::from(u32::from(value)),
-                            _ => unreachable!(),
-                        };
-                        let raw = if width == 128 {
-                            raw
-                        } else {
-                            raw & ((1u128 << width) - 1)
-                        };
-                        Value::BitVec(self.bit_operation(expr.source, |budget| {
-                            comptime_runtime::Integer::from_u128(raw).to_bitvec(width, budget)
-                        })?)
                     }
                     _ => return Err(self.failure(ErrorKind::Type, Some(expr.source))),
                 }

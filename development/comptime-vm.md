@@ -4182,3 +4182,26 @@ Validation in /home/fin/luna:
   exit 0, two selected tests, `/tmp/luna-tools-rj534srk/result.json`.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
   exit 0, `/tmp/luna-tools-7pl4s5up/result.json`; `git diff --check`: exit 0.
+
+### Compile defined representation reads
+
+TakeBits now lowers its operand to a register and invokes the shared value-level
+representation reader. Scalar reads retain target-specific width and domain
+checks; encoded enums retain nominal identity, declared layout and payload
+construction checks. Reading a representation produces a value, not a retained
+place. The helper is separated from the tree dispatcher and consumes no Expr.
+
+Source tests require compiled entry for encoded signed payloads, f16/bf16 raw
+encodings and BitVec identity. NIR tests reject output-width mismatches, an
+out-of-domain scalar, unsupported bool reading and a non-BitVec output, then
+accept a valid read on the same interpreter. Existing encoded-enum tests cover
+NIR/IIR metadata checks and generic wide payloads. Bit-place writeback remains
+uncompiled; this step does not add general object representation reading.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_bits --test encoded_enums`:
+  exit 0, `/tmp/luna-tools-2m81o7ix/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-lmxr6jea/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-8g8ykqfs/result.json`; `git diff --check`: exit 0.

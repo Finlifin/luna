@@ -131,3 +131,49 @@ fn bit_conversions_preserve_encodings_and_equality_uses_bytecode() {
         assert_eq!(tree.invoke(id, arguments).unwrap(), expected, "{name}");
     }
 }
+
+#[test]
+fn taking_bits_compiles_scalar_and_encoded_enum_representations() {
+    let package = support::compile(
+        "typealias Byte=.i8'builtin;
+        typealias Word=.u16'builtin;
+        typealias Half=.f16'builtin;
+        typealias Brain=.bf16'builtin;
+        typealias Bits=.BitVec'builtin<16>;
+        enum Signed {.base_type Word,.discrete_tag true,number:0xA (value:Byte) F,}
+        comptime fn signed(value:Byte)->Word {
+            let code=Signed.number {value:value};code'bitvec.as(Word)
+        }
+        comptime fn half(value:Half)->Bits {value'bitvec}
+        comptime fn brain(value:Brain)->Bits {value'bitvec}
+        comptime fn identity(value:Bits)->Bits {value'bitvec}",
+    );
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let mut tree = Interpreter::new(&package, Budget::default()).unwrap();
+    for (name, argument, expected) in [
+        (
+            "signed",
+            Value::SignedInteger(-1),
+            Value::UnsignedInteger(0xAFFF),
+        ),
+        (
+            "signed",
+            Value::SignedInteger(0),
+            Value::UnsignedInteger(0xA00F),
+        ),
+        ("half", Value::Float16(0x8000), bits(16, 0x8000)),
+        ("half", Value::Float16(0x7e42), bits(16, 0x7e42)),
+        ("brain", Value::BFloat16(0x7fc1), bits(16, 0x7fc1)),
+        ("identity", bits(16, 0x1234), bits(16, 0x1234)),
+    ] {
+        let before = vm.bytecode_invocations();
+        let id = support::id(&package, name);
+        assert_eq!(
+            vm.invoke(id, vec![argument.clone()]).unwrap(),
+            expected,
+            "{name}"
+        );
+        assert_eq!(vm.bytecode_invocations() - before, 1, "{name}");
+        assert_eq!(tree.invoke(id, vec![argument]).unwrap(), expected, "{name}");
+    }
+}

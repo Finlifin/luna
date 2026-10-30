@@ -143,3 +143,70 @@ fn bit_conversion_rejects_narrowing_and_restricted_representations() {
         }
     }
 }
+
+#[test]
+fn taking_bits_checks_source_domain_and_output_width_before_delivery() {
+    let package = Package::default();
+    let source = SourceRange { start: 30, end: 35 };
+    for compiled in [false, true] {
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        for (input, output, literal, valid) in [
+            (
+                Primitive::U8,
+                Primitive::BitVec(16),
+                Literal::UnsignedInteger(1),
+                false,
+            ),
+            (
+                Primitive::U8,
+                Primitive::BitVec(8),
+                Literal::UnsignedInteger(256),
+                false,
+            ),
+            (
+                Primitive::Bool,
+                Primitive::BitVec(1),
+                Literal::Bool(true),
+                false,
+            ),
+            (
+                Primitive::U8,
+                Primitive::U8,
+                Literal::UnsignedInteger(1),
+                false,
+            ),
+            (
+                Primitive::U8,
+                Primitive::BitVec(8),
+                Literal::UnsignedInteger(255),
+                true,
+            ),
+        ] {
+            let body = Expr {
+                source,
+                ty: Term::Primitive(output),
+                kind: K::TakeBits(Box::new(Expr {
+                    source,
+                    ty: Term::Primitive(input),
+                    kind: K::Literal(literal),
+                })),
+            };
+            let mut environment = Environment::default();
+            let result = if compiled {
+                let code = Arc::new(comptime_compiler::compile(&body, &mut 10000).unwrap());
+                vm.execute_code(&code, &mut environment)
+            } else {
+                vm.eval(&body, &mut environment)
+            };
+            if valid {
+                let Flow::Value(Value::BitVec(bits)) = result.unwrap() else {
+                    panic!("expected bits")
+                };
+                assert_eq!(bits.width(), 8);
+                assert_eq!(bits.words(), &[255]);
+            } else {
+                assert!(result.is_err(), "{input:?} -> {output:?}");
+            }
+        }
+    }
+}
