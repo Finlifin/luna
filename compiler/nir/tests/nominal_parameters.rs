@@ -16,10 +16,13 @@ fn completed_value_domains_can_use_captured_type_suffixes() {
     let domains = [rigid(2, Sort::Type), Term::Primitive(P::Type)];
     let valid = [Term::Bool(true), Term::Primitive(P::Bool)];
     nir::validate_declaration_arguments(&parameters, &domains, &valid, &mut 1000).unwrap();
+    // A completed Type domain admits a Type value, even when the source
+    // declaration had to retain a dependent value binder before completion.
+    let type_value = [Term::Primitive(P::Bool), Term::Primitive(P::Type)];
+    nir::validate_declaration_arguments(&parameters, &domains, &type_value, &mut 1000).unwrap();
     for arguments in [
         [Term::Bool(true), Term::Primitive(P::U8)],
         [Term::Bool(true), Term::Bool(false)],
-        [Term::Primitive(P::Bool), Term::Primitive(P::Type)],
     ] {
         assert!(
             nir::validate_declaration_arguments(&parameters, &domains, &arguments, &mut 1000)

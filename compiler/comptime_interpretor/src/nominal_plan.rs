@@ -261,7 +261,10 @@ impl Contract<'_> {
                 },
                 |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if vm.abstract_value_parameters.get(declaration)==Some(domain)), vm.target)
         } else {
-            nir::validate_declaration_arguments_with_evidence_in(
+            Ok(())
+        };
+        let valid = valid.and_then(|_| {
+            nir::admit_declaration_arguments_with_evidence_in(
                 &ids,
                 domains,
                 &types,
@@ -280,9 +283,9 @@ impl Contract<'_> {
                 |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if vm.abstract_value_parameters.get(declaration)==Some(domain)),
                 vm.target,
             )
-        };
+        });
         vm.budget.steps -= (before - remaining) as u64;
-        valid.map_err(|error| {
+        let admitted = valid.map_err(|error| {
             vm.failure(
                 match error {
                     nir::NominalAdmissionError::Budget => ErrorKind::StepsExhausted,
@@ -293,12 +296,20 @@ impl Contract<'_> {
         })?;
         for requirement in requirements {
             vm.tick(Some(expr.source))?;
-            let predicate = requirement
-                .instantiate_parameters(&parameters, &types)
-                .map_err(|_| vm.failure(ErrorKind::Type, Some(expr.source)))?;
+            let predicate = admitted_work(vm, expr.source, |fuel| {
+                admitted.instantiate_predicate(requirement, fuel)
+            })?;
             vm.check_type_contract(&predicate, expr.source)?;
         }
-        if !vm.capabilities_hold_parameters(capabilities, &parameters, &types) {
+        let capabilities = capabilities
+            .iter()
+            .map(|requirement| {
+                admitted_work(vm, expr.source, |fuel| {
+                    admitted.instantiate_requirement(requirement, fuel)
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if !vm.capabilities_hold_parameters(&capabilities, &[], &[]) {
             return Err(vm.failure(ErrorKind::TypeContractUnresolved, Some(expr.source)));
         }
         if let K::CheckTypeAlias { body, .. } = &expr.kind {
@@ -320,7 +331,7 @@ impl Contract<'_> {
                 )?;
                 let mut specialized = (**body).clone();
                 specialized.rewrite_types(&mut |ty| {
-                    vm.instantiate_contextual_domain(ty, &parameters, &types, body.source)
+                    admitted_work(vm, body.source, |fuel| admitted.instantiate(ty, fuel))
                 })?;
                 Ok(Admitted::Body(Arc::new(specialized)))
             } else {
@@ -413,4 +424,25 @@ impl InputPlan for Frame<'_, '_> {
             environment.remove(&binding);
         }
     }
+}
+
+fn admitted_work<T>(
+    vm: &mut Interpreter<'_>,
+    source: SourceRange,
+    work: impl FnOnce(&mut usize) -> Result<T, nir::type_computations::Error>,
+) -> Result<T, Error> {
+    let before = usize::try_from(vm.budget.steps).unwrap_or(usize::MAX);
+    let mut remaining = before;
+    let result = work(&mut remaining);
+    vm.budget.steps -= (before - remaining) as u64;
+    result.map_err(|error| {
+        vm.failure(
+            if matches!(error, nir::type_computations::Error::Budget) {
+                ErrorKind::StepsExhausted
+            } else {
+                ErrorKind::Type
+            },
+            Some(source),
+        )
+    })
 }

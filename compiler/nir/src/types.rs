@@ -1083,6 +1083,40 @@ impl Term {
         })
     }
 
+    /// Internal substitution for a domain-admitted declaration instance. The
+    /// caller must establish each replacement's domain before using this path.
+    /// Occurrences still have to match the declaration's original sort.
+    pub(crate) fn instantiate_admitted_parameters(
+        &self,
+        parameters: &[DeclarationParameter],
+        arguments: &[Term],
+    ) -> Result<Term, TypeError> {
+        if parameters.len() != arguments.len() {
+            return Err(TypeError::ArgumentCount {
+                expected: parameters.len(),
+                actual: arguments.len(),
+            });
+        }
+        let indices = declaration_parameter_indices(parameters)?;
+        let result = self.rewrite(0, &mut |term, depth| match term {
+            Self::Rigid { declaration, sort } => match indices.get(declaration) {
+                Some(&(index, expected)) => {
+                    if *sort != expected {
+                        return Err(TypeError::WrongSort {
+                            expected,
+                            actual: *sort,
+                        });
+                    }
+                    arguments[index].shift(depth, 0)
+                }
+                None => Ok(term.clone()),
+            },
+            _ => Ok(term.clone()),
+        })?;
+        result.check_scope(&[])?;
+        Ok(result)
+    }
+
     /// Bind selected definition-side Type parameters without unfolding heads.
     pub fn abstract_types(&self, parameters: &[DeclarationId]) -> Result<Term, TypeError> {
         let parameters: Vec<_> = parameters

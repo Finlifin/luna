@@ -125,37 +125,104 @@ impl<'e> Frame<'e> {
             .as_ref()
             .map_or(&self.arguments()[slot], |inputs| &inputs[slot])
     }
-    fn specialize(&mut self, vm: &mut Interpreter<'_>, slot: usize) -> Result<(), Error> {
-        if let Some(inputs) = &mut self.specialized {
-            vm.specialize_contextual_input(&mut inputs[slot], &self.parameters, &self.types)?;
+    fn instantiate(
+        &self,
+        vm: &mut Interpreter<'_>,
+        term: &Term,
+        source: SourceRange,
+    ) -> Result<Term, Error> {
+        vm.integer_operation(Some(source), |budget| budget.consume(self.ready.len()))?;
+        if self
+            .ready
+            .iter()
+            .all(|&slot| self.parameters[slot].sort == self.types[slot].sort())
+        {
+            return vm.instantiate_contextual_domain(term, &self.parameters, &self.types, source);
         }
-        Ok(())
+        let before = usize::try_from(vm.budget.steps).unwrap_or(usize::MAX);
+        let mut remaining = before;
+        let result = (|| -> Result<Term, nir::NominalAdmissionError> {
+            remaining = remaining
+                .checked_sub(self.ready.len())
+                .ok_or(nir::NominalAdmissionError::Budget)?;
+            let mut ids = Vec::new();
+            let mut domains = Vec::new();
+            let mut arguments = Vec::new();
+            for &slot in &self.ready {
+                let domain = self
+                    .domains
+                    .get(slot)
+                    .unwrap_or(&Term::Primitive(Primitive::Type));
+                nir::type_computations::charge_term(domain, &mut remaining)?;
+                nir::type_computations::charge_term(&self.types[slot], &mut remaining)?;
+                ids.push(self.parameters[slot].declaration);
+                domains.push(domain.clone());
+                arguments.push(self.types[slot].clone());
+            }
+            let admitted = nir::admit_declaration_arguments_with_evidence_in(
+                &ids,
+                &domains,
+                &arguments,
+                &mut remaining,
+                |ty, variant, fuel| {
+                    vm.normal_value_fields(ty, variant, fuel).ok_or_else(|| {
+                        if *fuel == 0 {
+                            nir::NominalAdmissionError::Budget
+                        } else {
+                            nir::NominalAdmissionError::Invalid(
+                                "nominal value layout unavailable".into(),
+                            )
+                        }
+                    })
+                },
+                |value, domain, _| {
+                    matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue}
+                    if vm.abstract_value_parameters.get(declaration) == Some(domain))
+                },
+                vm.target,
+            )?;
+            admitted
+                .instantiate(term, &mut remaining)
+                .map_err(Into::into)
+        })();
+        vm.budget.steps -= (before - remaining) as u64;
+        result.map_err(|error| {
+            vm.failure(
+                if matches!(error, nir::NominalAdmissionError::Budget) {
+                    ErrorKind::StepsExhausted
+                } else {
+                    ErrorKind::Type
+                },
+                Some(source),
+            )
+        })
+    }
+    fn specialize(&mut self, vm: &mut Interpreter<'_>, slot: usize) -> Result<(), Error> {
+        let Some(mut inputs) = self.specialized.take() else {
+            return Ok(());
+        };
+        // Moving the vector does not move its heap storage: pending staged keys
+        // continue to refer to the same argument nodes during specialization.
+        let source = inputs[slot].source();
+        let result = (|| {
+            let mut rewrite = |ty: &Term| self.instantiate(vm, ty, source);
+            for pattern in inputs[slot].patterns_mut() {
+                pattern.rewrite_types(&mut rewrite)?;
+            }
+            for expression in inputs[slot].expressions_mut() {
+                expression.rewrite_types(&mut rewrite)?;
+            }
+            Ok(())
+        })();
+        self.specialized = Some(inputs);
+        result
     }
     fn domain(&self, vm: &mut Interpreter<'_>, slot: usize) -> Result<(Term, bool), Error> {
         let domain = self
             .domains
             .get(slot)
             .unwrap_or(&Term::Primitive(Primitive::Type));
-        let before = usize::try_from(vm.budget.steps).unwrap_or(usize::MAX);
-        let mut remaining = before;
-        let expected = nir::type_computations::instantiate_parameters_bounded(
-            domain,
-            &self.parameters,
-            &self.types,
-            &[],
-            &mut remaining,
-        );
-        vm.budget.steps -= (before - remaining) as u64;
-        let expected = expected.map_err(|error| {
-            vm.failure(
-                if matches!(error, nir::type_computations::Error::Budget) {
-                    ErrorKind::StepsExhausted
-                } else {
-                    ErrorKind::Type
-                },
-                Some(self.arguments()[slot].source()),
-            )
-        })?;
+        let expected = self.instantiate(vm, domain, self.arguments()[slot].source())?;
         let unresolved = self.parameters.iter().enumerate().any(|(index, p)| {
             !self.ready.contains(&index) && expected.mentions_rigid(p.declaration)
         });

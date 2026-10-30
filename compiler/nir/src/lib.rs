@@ -54,8 +54,9 @@ pub mod code_interfaces;
 pub mod code_values;
 
 pub use nominal_parameters::{
-    AdmissionError as NominalAdmissionError, binders as declaration_parameters,
-    validate_completed as validate_declaration_arguments,
+    AdmissionError as NominalAdmissionError, AdmittedArguments,
+    admit_with_evidence_in as admit_declaration_arguments_with_evidence_in,
+    binders as declaration_parameters, validate_completed as validate_declaration_arguments,
     validate_completed_in as validate_declaration_arguments_in,
     validate_completed_with_layouts as validate_declaration_arguments_with_layouts,
     validate_completed_with_layouts_in as validate_declaration_arguments_with_layouts_in,

@@ -164,43 +164,192 @@ pub fn validate_with_evidence_in(
     mut declared: impl FnMut(&Term, &Term, &mut usize) -> bool,
     target: Option<crate::target::TargetData>,
 ) -> Result<(), AdmissionError> {
+    admit_with_evidence_in(
+        parameters,
+        domains,
+        arguments,
+        fuel,
+        &mut layout,
+        &mut declared,
+        target,
+    )
+    .map(|_| ())
+}
+
+/// Completed declaration inputs with checked domains. Only this evidence permits
+/// a definition-side value binder to become Type when its actual domain is Type.
+/// Strict mixed-sort substitution remains available for fixed-sort frames.
+pub struct AdmittedArguments<'a> {
+    parameters: Vec<DeclarationParameter>,
+    arguments: &'a [Term],
+}
+impl std::fmt::Display for AdmittedArguments<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("(admitted-arguments")?;
+        for (parameter, argument) in self.parameters.iter().zip(self.arguments) {
+            write!(f, " (input {parameter} {argument})")?;
+        }
+        f.write_str(")")
+    }
+}
+impl AdmittedArguments<'_> {
+    pub fn instantiate(
+        &self,
+        term: &Term,
+        fuel: &mut usize,
+    ) -> Result<Term, crate::type_computations::Error> {
+        crate::type_computations::charge_parameter_substitution(
+            term,
+            &self.parameters,
+            self.arguments,
+            fuel,
+        )?;
+        term.instantiate_admitted_parameters(&self.parameters, self.arguments)
+            .map_err(crate::type_computations::Error::Scope)
+    }
+    pub fn instantiate_requirement(
+        &self,
+        requirement: &crate::program::TraitRequirement,
+        fuel: &mut usize,
+    ) -> Result<crate::program::TraitRequirement, crate::type_computations::Error> {
+        Ok(crate::program::TraitRequirement {
+            interface: requirement.interface,
+            subject: self.instantiate(&requirement.subject, fuel)?,
+            interface_arguments: requirement
+                .interface_arguments
+                .iter()
+                .map(|term| self.instantiate(term, fuel))
+                .collect::<Result<_, _>>()?,
+        })
+    }
+    pub fn instantiate_predicate(
+        &self,
+        predicate: &crate::program::TypePredicate,
+        fuel: &mut usize,
+    ) -> Result<crate::program::TypePredicate, crate::type_computations::Error> {
+        self.predicate(predicate, fuel, 0)
+    }
+    fn predicate(
+        &self,
+        predicate: &crate::program::TypePredicate,
+        fuel: &mut usize,
+        depth: usize,
+    ) -> Result<crate::program::TypePredicate, crate::type_computations::Error> {
+        use crate::program::TypePredicate as P;
+        use crate::type_computations::Error;
+        if depth >= 128 {
+            return Err(Error::Budget);
+        }
+        *fuel = fuel.checked_sub(1).ok_or(Error::Budget)?;
+        Ok(match predicate {
+            P::Bool(value) => P::Bool(*value),
+            P::Trait(requirement) => P::Trait(self.instantiate_requirement(requirement, fuel)?),
+            P::Equal(a, b) => P::Equal(self.instantiate(a, fuel)?, self.instantiate(b, fuel)?),
+            P::Not(inner) => P::Not(Box::new(self.predicate(inner, fuel, depth + 1)?)),
+            P::And(parts) | P::Or(parts) => {
+                let parts = parts
+                    .iter()
+                    .map(|part| self.predicate(part, fuel, depth + 1))
+                    .collect::<Result<_, _>>()?;
+                if matches!(predicate, P::And(_)) {
+                    P::And(parts)
+                } else {
+                    P::Or(parts)
+                }
+            }
+        })
+    }
+}
+
+pub fn admit_with_evidence_in<'a>(
+    parameters: &[DeclarationId],
+    domains: &[Term],
+    arguments: &'a [Term],
+    fuel: &mut usize,
+    mut layout: impl FnMut(&Term, Option<u32>, &mut usize) -> Result<Vec<Term>, AdmissionError>,
+    mut declared: impl FnMut(&Term, &Term, &mut usize) -> bool,
+    target: Option<crate::target::TargetData>,
+) -> Result<AdmittedArguments<'a>, AdmissionError> {
+    *fuel = fuel
+        .checked_sub(parameters.len())
+        .ok_or(AdmissionError::Budget)?;
+    for domain in domains {
+        crate::type_computations::charge_term(domain, fuel)?;
+    }
     let parameters = binders(parameters, domains).map_err(|e| e.to_string())?;
     if parameters.len() != arguments.len() {
         return Err("nominal argument count mismatch".into());
     }
-    // This boundary validates already supplied values, not source evaluation
-    // order. Captured parent inputs may occupy a suffix after own inputs whose
-    // domains use them. Check the whole input vector before substituting it.
-    for (parameter, argument) in parameters.iter().zip(arguments) {
-        crate::type_computations::charge_term(argument, fuel).map_err(AdmissionError::from)?;
+    for argument in arguments {
+        crate::type_computations::charge_term(argument, fuel)?;
         argument.check_scope(&[]).map_err(|e| e.to_string())?;
-        if parameter.sort != argument.sort() {
-            return Err("nominal argument sort mismatch".into());
+    }
+    let mut ready = BTreeSet::new();
+    let mut admitted_parameters = Vec::new();
+    let mut admitted_arguments = Vec::new();
+    while ready.len() != parameters.len() {
+        let before = ready.len();
+        for (index, parameter) in parameters.iter().enumerate() {
+            *fuel = fuel.checked_sub(1).ok_or(AdmissionError::Budget)?;
+            if ready.contains(&parameter.declaration) {
+                continue;
+            }
+            let domain = domains
+                .get(index)
+                .unwrap_or(&Term::Primitive(Primitive::Type));
+            crate::type_computations::charge_term(domain, fuel)?;
+            let references = domain.rigid_parameters().map_err(|e| e.to_string())?;
+            *fuel = fuel
+                .checked_sub(parameters.len())
+                .ok_or(AdmissionError::Budget)?;
+            if parameters
+                .iter()
+                .any(|p| references.contains_key(&p.declaration) && !ready.contains(&p.declaration))
+            {
+                continue;
+            }
+            crate::type_computations::charge_parameter_substitution(
+                domain,
+                &admitted_parameters,
+                &admitted_arguments,
+                fuel,
+            )?;
+            let domain = domain
+                .instantiate_admitted_parameters(&admitted_parameters, &admitted_arguments)
+                .map_err(|e| e.to_string())?;
+            let argument = &arguments[index];
+            let expected = if domain == Term::Primitive(Primitive::Type) {
+                Sort::Type
+            } else {
+                Sort::ComptimeValue
+            };
+            if argument.sort() != expected {
+                return Err("nominal argument sort mismatch".into());
+            }
+            if expected != Sort::Type {
+                validate_value(
+                    argument,
+                    &domain,
+                    fuel,
+                    &mut layout,
+                    &mut declared,
+                    0,
+                    target,
+                )?;
+            }
+            crate::type_computations::charge_term(argument, fuel)?;
+            admitted_parameters.push(*parameter);
+            admitted_arguments.push(argument.clone());
+            ready.insert(parameter.declaration);
+        }
+        if ready.len() == before {
+            return Err("nominal input domains have a cyclic dependency".into());
         }
     }
-    for (index, (parameter, argument)) in parameters.iter().zip(arguments).enumerate() {
-        if parameter.sort == Sort::Type {
-            continue;
-        }
-        let domain = crate::type_computations::instantiate_parameters_bounded(
-            &domains[index],
-            &parameters,
-            arguments,
-            &[],
-            fuel,
-        )
-        .map_err(AdmissionError::from)?;
-        validate_value(
-            argument,
-            &domain,
-            fuel,
-            &mut layout,
-            &mut declared,
-            0,
-            target,
-        )?;
-    }
-    Ok(())
+    Ok(AdmittedArguments {
+        parameters,
+        arguments,
+    })
 }
 
 /// The caller has already checked scope and charged the input tree. Symbolic

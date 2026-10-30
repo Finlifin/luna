@@ -704,3 +704,82 @@ fn nominal_alias_and_normal_plans_share_the_compiled_activation_stack() {
         }
     }
 }
+
+#[test]
+fn dependent_nominal_inputs_accept_type_values_after_domain_completion() {
+    let mut package = support::compile(
+        "typealias Type = .Type'builtin;
+        struct Key where T, value:T, flag:bool {}
+        typealias Alias<T,value:T> = Key<T,value,true>;
+        comptime fn Build() -> Type { Alias<Type,bool> }
+        comptime fn Rejected() -> Type { Alias<bool,true> }",
+    );
+    // Exercise runtime contract instantiation independently of elaboration's
+    // static discharge. The completed Type input must not erase these checks.
+    let contract = package
+        .alias_contracts
+        .iter_mut()
+        .find(|contract| contract.parameters.len() == 2)
+        .unwrap();
+    contract
+        .requirements
+        .push(nir::program::TypePredicate::Equal(
+            Term::Rigid {
+                declaration: contract.parameters[0],
+                sort: nir::Sort::Type,
+            },
+            Term::Primitive(Primitive::Type),
+        ));
+    let expected = Value::Type(Term::Nominal {
+        declaration: package
+            .structs
+            .iter()
+            .find(|s| s.name == "Key")
+            .unwrap()
+            .declaration,
+        arguments: vec![
+            Term::Primitive(Primitive::Type),
+            Term::Primitive(Primitive::Bool),
+            Term::Bool(true),
+        ],
+    });
+    let context = elaboration::ptc::Context::from_package(&package).unwrap();
+    let solver = |predicate: &nir::program::TypePredicate| {
+        use elaboration::ptc::{Budget, Formula, Outcome};
+        match context.prove(Formula::from_predicate(predicate), Budget::default()) {
+            Outcome::Entailed(_) => ContractOutcome::Satisfied,
+            Outcome::NotEntailed(_) => ContractOutcome::Rejected,
+            _ => ContractOutcome::Unknown,
+        }
+    };
+    let mut vm = Interpreter::for_comptime(&package, Budget::default())
+        .unwrap()
+        .with_type_solver(&solver);
+    let mut tree = Interpreter::new(&package, Budget::default())
+        .unwrap()
+        .with_type_solver(&solver);
+    for _ in 0..2 {
+        assert_eq!(
+            vm.invoke(support::id(&package, "Rejected"), vec![])
+                .unwrap_err()
+                .kind,
+            ErrorKind::TypeContractRejected
+        );
+        assert_eq!(
+            tree.invoke(support::id(&package, "Rejected"), vec![])
+                .unwrap_err()
+                .kind,
+            ErrorKind::TypeContractRejected
+        );
+        let before = vm.bytecode_invocations();
+        assert_eq!(
+            vm.invoke(support::id(&package, "Build"), vec![]).unwrap(),
+            expected
+        );
+        assert_eq!(
+            tree.invoke(support::id(&package, "Build"), vec![]).unwrap(),
+            expected
+        );
+        assert_eq!(vm.bytecode_invocations() - before, 1);
+    }
+}

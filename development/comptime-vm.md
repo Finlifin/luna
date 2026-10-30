@@ -2968,3 +2968,49 @@ Validation from `/home/fin/luna`:
   and early-return source regression.
 - Managed `cargo fmt --all`: `/tmp/luna-tools-uh_pai9b/result.json`, exit 0;
   `git diff --check` passed.
+
+## Domain-admitted Type-valued nominal inputs
+
+Nominal declaration admission now resolves parameter domains using completed
+inputs before choosing their instance sorts. This implements the rule documented
+in `docs/type/comptime-gradual-dependent-type.md`: a completed Type domain takes a
+Type input, even when the definition could only represent it as a dependent value
+binder. Captured suffixes are resolved by dependency rather than source position;
+cycles, mismatched domains and budget exhaustion remain distinct failures.
+
+`AdmittedArguments` retains checked inputs and provides bounded substitution for
+terms, type predicates and trait requirements. Definition occurrences must still
+match their declared sorts. Ordinary fixed-sort substitution remains strict; no
+blanket permission to replace a value binder by a Type was added. Opaque heads
+remain opaque. This evidence now guards nominal/alias VM contract substitution,
+alias-body specialization and later inputs whose domains use already completed
+Type-valued inputs. Unchanged sorts retain the existing substitution path.
+
+The saved Type-valued nominal repro now succeeds. Source coverage checks both VM
+paths, a trailing bool input, rejection/recovery through an injected NIR alias
+contract with the real PTC solver, repeated invocation and actual bytecode entry.
+The injected contract isolates VM admission from elaboration's static discharge;
+it is not evidence for all source constraint elaboration paths.
+
+A prior NIR test incorrectly rejected `[bool, Type]` for a value followed by its
+captured Type domain. It is now an explicit positive case based on the documented
+completed-domain rule. Wrong-domain, unauthorized symbolic-value, malformed-sort
+and budget cases remain negative. New NIR coverage also verifies opaque identity,
+checked predicate substitution and the unchanged strict substitution API.
+
+This stage covers type formation and VM contracts. General layout substitution,
+function/NF dependent binder completion and open caller scopes have other consumers
+of the fixed-sort APIs and are not claimed migrated here. The sort-changing input
+path currently reconstructs admission evidence while specializing later inputs;
+its performance still needs measurement and incremental evidence reuse.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-49o94x_c/result.json`, exit 0, including completed/captured
+  domains, alias budget ordering, nested aggregate admission and failure recovery.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_types --test nominal_value_parameters --test type_spreads --test newtypes --test comptime_clause_inputs`:
+  `/tmp/luna-tools-9q0k68s1/result.json`, exit 0, including the Type-valued
+  nominal/alias regression with a subsequent bool parameter.
+- Managed formatting: `/tmp/luna-tools-91ubdqpg/result.json`, exit 0;
+  `git diff --check` passed.

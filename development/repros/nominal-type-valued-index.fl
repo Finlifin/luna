@@ -1,6 +1,6 @@
-{- A dependent value domain can become Type. Both VM paths currently reject
-   this at nominal admission with "nominal argument sort mismatch".
-   Expected: Key with Type and bool as its two ordinary clause inputs.
+{- Regression: a dependent value domain can become Type. Both VM paths
+   must form Key with Type and bool as its two ordinary clause inputs.
+   Admission must use the completed domain rather than the original sort.
 -}
 struct Key where T, value: T {}
 typealias Alias<T, value: T> = Key<T, value>;
