@@ -1,0 +1,63 @@
+{- Heterogeneous descriptions use ordinary Object traversal before publication. -}
+pure comptime fn Identity<T> -> Type { T }
+
+comptime fn Schema() -> Type {
+    let description: Object = {ready: bool, note: "metadata", bool, count: u32};
+    let fields = description.filter(|entry| {
+        (entry.key(0) matches _?) and entry.EntryType(0) == Type
+    });
+    let expanded = fields.flat_map(|entry| {
+        if entry.key(0) matches .ready? {
+            entry.concat({backup: bool})
+        } else { entry }
+    });
+    let draft = meta.StructBuilder.from_object(expanded, .name = .Packet) match {
+        value? => value,
+        null => return bool,
+    };
+    draft.Build()
+}
+
+typealias Packet = Schema();
+
+comptime fn observations() -> bool {
+    let absent: ?bool = null;
+    var input: Object = {flag: true, 'x', flag: false, absent: absent, kind: Identity<bool>};
+    let saved = input;
+    let selected = input.filter(|entry| {
+        entry.EntryType(0) == bool
+    });
+    let doubled = selected.flat_map(|entry| entry.concat(entry));
+    var serial: Integer = 0;
+    let numbered = selected.flat_map(|entry| {
+        serial += 1;
+        ({position: serial}).concat(entry)
+    });
+    let rebuilt = saved.fold({}, |output, entry| output.concat(entry));
+    let order = doubled.fold(0, |order, entry| {
+        let bit = entry.value<bool>(0) match {value? => value, null => false};
+        order * 10 + if bit {1} else {2}
+    });
+    doubled.foreach(|entry| { entry.value<bool>(0); });
+    let empty: Object = {};
+    empty.foreach(|entry| { entry.value<bool>(0); });
+    let empty_filter = empty.filter(|entry| entry.value<bool>(0) matches true?);
+    let empty_map = empty.flat_map(|entry| entry.slice(0, 1));
+    let seed = empty.fold(absent, |value, entry| { entry.value<bool>(0); value });
+    serial == 0 and (numbered.value<Integer>(0) matches 1?)
+        and (numbered.value<Integer>(2) matches 2?) and input.length() == 5 and saved.length() == 5
+        and selected.length() == 2 and doubled.length() == 4 and order == 1122
+        and rebuilt.length() == 5 and (rebuilt.key(1) matches null)
+        and (rebuilt.get<bool>(.flag) matches false?)
+        and (rebuilt.get<?bool>(.absent) match {v? => v matches null, null => false})
+        and (rebuilt.get<Type>(.kind) match {T? => T == Identity<bool>, null => false})
+        and empty_filter.length() == 0 and empty_map.length() == 0 and (seed matches null)
+}
+
+test {
+    inline if observations() { assumes true; } else { assumes false; };
+    let packet = Packet {ready: true, backup: false, count: 23};
+    assumes packet.ready;
+    assumes not packet.backup;
+    assumes packet.count == 23;
+}

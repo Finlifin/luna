@@ -31,6 +31,12 @@ typealias RecordType = Record();
 `Build()` 的受检发布拒绝；from_object 成功只说明字段描述形状有效，不代表已
 发布合法定义。底层错误和预算耗尽继续传播，不转换成 false 或 null。
 
+描述预处理可以复用 Object 的 `filter`、`flat_map` 和 `fold`：例如先保留具名
+Type 条目，再按策略展开字段，最后交给 from_object 和 Build。回调接收单条目
+Object，保留其值域与重复键；筛选成功不会绕过发布时的重名和存储合法性检查。
+见 [Object 遍历接口](../data/README.md#object-逐条遍历与变换)及
+`development/examples/sysroot-object-traversal.fl`。
+
 这是已有具体 struct 发布路径的普通库组合，不支持字段默认表达式、泛型子句、
 函数体或 trait／impl 的生成。贯通示例在
 `development/examples/sysroot-object-struct-builder.fl`：从 Object 生成 Type，

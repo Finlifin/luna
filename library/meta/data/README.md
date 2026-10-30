@@ -118,3 +118,47 @@ pure comptime fn common_period(a: Integer, b: Integer) -> Integer {
 隐式降为固定宽度值。gcd 使用普通 comptime 循环，lcm 先除后乘；它们与其它
 库函数一样受工作预算约束。完整 sysroot 示例见
 `development/examples/sysroot-meta-integers.fl`。
+
+
+## Object 逐条遍历与变换
+
+Object 是有序的异构条目集合。`foreach`、`fold`、`filter` 和 `flat_map`
+的回调每次接收一个长度为 1 的 Object，保留该条目的可选名字、完整值域和值。
+可以继续使用 `entry.key(0)`、`entry.EntryType(0)`、`entry.value<T>(0)`
+观察它；不会把所有值抹成 Any，也不会按键合并重复条目。
+
+- `object.foreach(visit)` 按顺序访问每个条目，丢弃回调的 void 结果。
+- `object.fold(initial, combine)` 将上次累积值和当前条目交给 combine，返回最终累积值。
+- `object.filter(pred)` 保留 pred 返回 true 的完整条目，保持顺序。
+- `object.flat_map(transform)` 按顺序拼接每次返回的 Object，允许删除、替换或展开条目。
+
+```flurry
+comptime fn fields_only(description: Object) -> Object {
+    description.filter(|entry| {
+        (entry.key(0) matches _?) and entry.EntryType(0) == Type
+    })
+}
+
+comptime fn Schema() -> Type {
+    let fields = fields_only({ready: bool, note: "metadata", count: u32});
+    let draft = meta.StructBuilder.from_object(fields, .name = .Packet) match {
+        value? => value,
+        null => return bool,
+    };
+    draft.Build()
+}
+```
+
+每个条目调用回调一次；空输入不调用回调，fold 原样返回初始累积值。
+遍历开始时固定输入快照，因此回调重新赋值调用者的 Object 不改变本轮范围。
+回调环境在各次调用间保留，副作用按条目顺序发生；异常、预算耗尽和非法查询
+直接传播，不转成 false 或空 Object，也不回滚已发生的回调副作用。
+
+filter 保留的是原条目，不是回调对参数局部副本的修改。flat_map 拼接的是返回值，
+不会去重键、重排字段或隐式拆开可选值。需要进一步筛选的重复键仍逐条可见；
+生成定义是否具有合法字段名和表示由 Build 检查。
+
+这些方法以 slice、concat 和普通 comptime 控制流实现，仍进行完整的表示检查，
+不承诺线性构造成本。真实 sysroot 示例为
+`development/examples/sysroot-object-traversal.fl`，包含异构数据、回调状态、
+空输入、normal-form Type 身份，以及从筛选后的描述生成并使用 runtime struct。

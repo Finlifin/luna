@@ -5379,3 +5379,29 @@ Validation from `/home/fin/luna`:
   exit 0, one native test passed; `/tmp/luna-tools-ran7lmro/result.json`.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
   exit 0; `/tmp/luna-tools-1z1492ps/result.json`.
+
+
+### Ordered Object traversal in meta (2026-10-30)
+
+Object now provides inherent comptime foreach, fold, filter and flat_map methods.
+Each callback receives one complete entry as an Object, preserving its optional
+name, domain and value. Ordinary snapshot and closure-capture rules apply;
+callbacks do not receive a writable view into the original Object. Traversal is
+ordered and bounded by the initial snapshot, empty inputs skip callbacks, and
+errors propagate without becoming empty results. Construction composes existing
+checked slice/concat operations; no new intrinsic or linear-time claim is made.
+The sysroot example filters heterogeneous schema data, expands fields, publishes
+a struct with StructBuilder and constructs it in a native test.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test library_meta_objects`:
+  exit 0, 33 tests passed; `/tmp/luna-tools-i7xlilq3/result.json`.
+  Covers duplicate keys, optional layers, opaque Type identity, private persistent
+  callback state, input snapshots, callback counts, empty inputs, runtime rejection
+  and VM recovery after callback failure. Type inequalities use the invocation
+  driver's solver; a bare VM's Unknown is never treated as false.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- development/examples/sysroot-object-traversal.fl --sysroot library --test-native`:
+  exit 0, one native test passed; `/tmp/luna-tools-k5gbrjvz/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-jjqtels8/result.json`.

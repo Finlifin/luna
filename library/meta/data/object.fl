@@ -5,6 +5,76 @@ pub use bindings.Object;
 
 impl Object {
     {-
+        Visit a fixed snapshot in declaration order. Each callback receives a
+        one-entry Object, retaining its optional key, exact domain and value.
+        This does not erase heterogeneous entries to Any or merge duplicate keys.
+        Empty input never invokes the callback; errors propagate normally.
+    -}
+    pub comptime fn foreach(self, visit: %c comptime fn(Object))
+    where c: Type.vars.Closure
+    {
+        let input = self;
+        let count = input.length();
+        var index: Integer = 0;
+        while index < count {
+            visit(input.slice(index, index + 1));
+            index += 1;
+        };
+    }
+
+    pub comptime fn fold(self, initial: A,
+        combine: %c comptime fn(A, Object) -> A) -> A
+    where A, c: Type.vars.Closure
+    {
+        let input = self;
+        let count = input.length();
+        var accumulator = initial;
+        var index: Integer = 0;
+        while index < count {
+            accumulator = combine(accumulator, input.slice(index, index + 1));
+            index += 1;
+        };
+        accumulator
+    }
+
+    {- Retain complete entries, in order, without reinterpreting their values. -}
+    pub comptime fn filter(self, pred: %c comptime fn(Object) -> bool) -> Object
+    where c: Type.vars.Closure
+    {
+        let input = self;
+        let count = input.length();
+        var output: Object = {};
+        var index: Integer = 0;
+        while index < count {
+            let entry = input.slice(index, index + 1);
+            if pred(entry) { output = output.concat(entry); };
+            index += 1;
+        };
+        output
+    }
+
+    {-
+        Replace each entry with zero or more complete entries. Concatenate each
+        callback result in order; an empty result removes only that input entry.
+        Input and returned snapshots remain ordinary Object values. Construction
+        uses checked concat and does not promise linear-time accumulation.
+    -}
+    pub comptime fn flat_map(self, transform: %c comptime fn(Object) -> Object) -> Object
+    where c: Type.vars.Closure
+    {
+        let input = self;
+        let count = input.length();
+        var output: Object = {};
+        var index: Integer = 0;
+        while index < count {
+            let entries = transform(input.slice(index, index + 1));
+            output = output.concat(entries);
+            index += 1;
+        };
+        output
+    }
+
+    {-
         Observe ordered entries without merging duplicate keys. Indices are
         checked; an out-of-range index fails the invocation. A positional entry
         has no key. Typed reads return null only for a domain mismatch.

@@ -838,3 +838,149 @@ fn object_range_arguments_run_once_in_order_and_return_skips_edit() {
                 and (changed.value<char>(1) matches 'y'?) and early()
         }").unwrap(),Value::Bool(true));
 }
+
+fn invoke_entries(source: &str) -> Result<Value, String> {
+    let meta = include!("support/meta_source.rs");
+    let package = compile(&format!("mod meta {{ {meta} }} {source}"))?;
+    luna::invocation::invoke(&package, "run", 1_000_000)
+}
+
+#[test]
+fn entry_combinators_preserve_domains_order_and_duplicate_keys() {
+    let result = invoke_entries(
+        "typealias Integer=.Integer'builtin;typealias Type=.Type'builtin;
+        typealias char=.char'builtin;
+        pure comptime fn Identity<T>->Type {T}
+        comptime fn run()->bool {
+            let absent:?bool=null;
+            let input:meta.Object={key:true,'x',key:false,empty:absent,kind:Identity<bool>};
+            input.foreach(|entry| {entry.value<bool>(0);});
+            let seen=input.fold(0,|sum,entry|sum * 10 + entry.length());
+            let filtered=input.filter(|entry| entry.EntryType(0)==bool);
+            let flattened=input.flat_map(|entry| {
+                if entry.EntryType(0)==char { ({}) } else { entry.concat(entry) }
+            });
+            let joined=input.fold({},|acc,entry|acc.concat(entry));
+            seen==11111 and filtered.length()==2
+                and (filtered.value<bool>(0) matches true?)
+                and (filtered.get<bool>(.key) matches false?)
+                and flattened.length()==8
+                and (flattened.value<?bool>(4) match {v?=>v matches null,null=>false})
+                and (flattened.get<Type>(.kind) match {T?=>T==Identity<bool>,null=>false})
+                and joined.length()==5 and (joined.key(1) matches null)
+                and (joined.value<char>(1) matches 'x'?)
+                and input.length()==5
+        }",
+    )
+    .unwrap();
+    assert_eq!(result, Value::Bool(true));
+}
+
+#[test]
+fn entry_combinators_keep_snapshot_and_private_callback_state() {
+    let result = invoke(
+        "typealias Integer=.Integer'builtin;
+        comptime fn run()->bool {
+            var input:meta.Object={first:true,second:false,third:true};
+            var visits:Integer=0;
+            let filtered=input.filter(|entry| {
+                visits = visits + 1;
+                entry.set(0,false);
+                visits != 2
+            });
+            let expanded=filtered.flat_map(|entry| {
+                visits = visits + 1;
+                ({before:visits}).concat(entry)
+            });
+            let total=expanded.fold(0,|sum,entry|sum + entry.length());
+            visits==0 and total==4 and input.length()==3
+                and filtered.length()==2 and expanded.length()==4
+                and (filtered.value<bool>(0) matches true?)
+                and (filtered.value<bool>(1) matches true?)
+                and (expanded.value<Integer>(0) matches 1?)
+                and (expanded.value<Integer>(2) matches 2?)
+                and (expanded.key(1) matches .first?)
+                and (expanded.key(3) matches .third?)
+        }",
+    )
+    .unwrap();
+    assert_eq!(result, Value::Bool(true));
+}
+
+#[test]
+fn empty_entry_combinators_skip_callbacks_and_preserve_fold_seed() {
+    assert_eq!(
+        invoke(
+            "typealias Integer=.Integer'builtin;
+        comptime fn run()->bool {
+            let empty:meta.Object={};
+            var count:Integer=0;
+            empty.foreach(|entry| {entry.value<bool>(0);});
+            let filtered=empty.filter(|entry| entry.value<bool>(0) matches true?);
+            let mapped=empty.flat_map(|entry| entry.slice(0,1));
+            let seed:?bool=null;
+            let result=empty.fold(seed,|acc,entry| {entry.value<bool>(0);acc});
+            count==0 and filtered.length()==0 and mapped.length()==0
+                and (result matches null)
+        }"
+        )
+        .unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn entry_combinators_propagate_callback_failure_and_reject_runtime_use() {
+    for expression in [
+        "entries.foreach(|entry| {entry.value<bool>(1);})",
+        "entries.filter(|entry| entry.value<bool>(1) matches true?)",
+        "entries.flat_map(|entry| entry.slice(0,2))",
+        "entries.fold(true,|acc,entry| entry.value<bool>(1) matches true?)",
+    ] {
+        let result = invoke(&format!(
+            "comptime fn run()->bool {{let entries:meta.Object={{flag:true}};{expression};true}}"
+        ));
+        let error = result.unwrap_err();
+        assert!(error.contains("IndexOutOfBounds"), "{expression}: {error}");
+    }
+    let meta = include!("support/meta_source.rs");
+    assert!(compile(&format!("mod meta {{{meta}}} fn bad()->meta.Object {{let data:meta.Object={{}};data.filter(|entry|true)}}")).is_err());
+}
+
+#[test]
+fn foreach_calls_once_per_entry_and_vm_recovers_after_callback_failure() {
+    let meta = include!("support/meta_source.rs");
+    let package = compile(&format!(
+        "mod meta {{{meta}}}
+        comptime fn visit(entry:meta.Object) {{entry.value<bool>(0);}}
+        comptime fn fail()->bool {{
+            let data:meta.Object={{a:true,b:false}};
+            data.foreach(|entry| {{entry.value<bool>(1);}});
+            true
+        }}
+        comptime fn run()->bool {{
+            let data:meta.Object={{a:true,false,a:false}};
+            data.foreach(visit);
+            true
+        }}"
+    ))
+    .unwrap();
+    let mut vm = Interpreter::for_comptime(&package, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke(support::id(&package, "fail"), vec![])
+            .unwrap_err()
+            .kind,
+        comptime_interpretor::ErrorKind::IndexOutOfBounds
+    );
+    assert_eq!(
+        vm.invoke(support::id(&package, "run"), vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        support::calls(&package, &vm)
+            .iter()
+            .filter(|name| **name == "visit")
+            .count(),
+        3
+    );
+}
