@@ -1058,13 +1058,7 @@ fn compile_root(
                         callee,
                         arguments,
                         parameter_bindings,
-                    } if (callee.ty.is_normal_form_callable() && parameter_bindings.is_empty())
-                        || (!callee.ty.is_normal_form_callable()
-                            && matches!(
-                                callee.kind,
-                                K::Function(_) | K::FunctionInstance { .. } | K::Local(_)
-                            )) =>
-                    {
+                    } if !callee.ty.is_normal_form_callable() || parameter_bindings.is_empty() => {
                         *fuel = fuel
                             .checked_sub(arguments.len() + parameter_bindings.len())
                             .ok_or(Error::Budget(source))?;
@@ -1105,7 +1099,12 @@ fn compile_root(
                                         call,
                                         destination: value,
                                         value: Arc::new(argument.value.clone()),
-                                        dynamic: matches!(callee.kind, K::Local(_)),
+                                        dynamic: !matches!(
+                                            callee.kind,
+                                            K::Function(_)
+                                                | K::FunctionInstance { .. }
+                                                | K::TraitMethod { .. }
+                                        ),
                                     },
                                 );
                             } else if argument.passing != ArgumentPassing::Value {

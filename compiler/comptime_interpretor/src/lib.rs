@@ -6260,9 +6260,9 @@ impl<'a> Interpreter<'a> {
         } else {
             None
         };
-        let dynamic_defaults = matches!(
+        let dynamic_defaults = !matches!(
             callee.kind,
-            K::ComptimeFunctionInstance { .. } | K::Local(_)
+            K::Function(_) | K::FunctionInstance { .. } | K::TraitMethod { .. }
         );
         let callee_source = callee.source;
         // Static function identities carry no owned callee environment. A

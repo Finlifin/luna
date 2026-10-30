@@ -3994,3 +3994,34 @@ Validation in /home/fin/luna:
   exit 0, `/tmp/luna-tools-w8olpj3k/result.json`.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
   exit 0, `/tmp/luna-tools-rtllj14d/result.json`; `git diff --check`: exit 0.
+
+### Computed ordinary callees in invocation bytecode
+
+Ordinary Call lowering no longer restricts the callee to a function declaration,
+static instance, or local binding. The expression worklist compiles the callee
+first, followed by source-ordered arguments and the existing call suspension.
+Unsupported callee expressions still reject the whole compiled carrier before
+execution, so this does not silently omit unsupported operations.
+
+A callee obtained through a block, branch, field, or another call can retain a
+selected declaration instance. When an existing prepared call carries declaration
+default templates, both tree interpretation and bytecode now substitute those
+templates from the selected instance for all computed callee forms. Direct static
+instances and trait methods keep their existing preparation. This does not grant
+parameter names or default protocols to ordinary function values; source routing
+still follows docs/functions/calls-and-returns.md.
+
+Source tests require compiled invocation counts for blocks, nested selector
+calls, callable struct fields, conditional selection, and early return that skips
+argument evaluation. The existing selected-instance default regression exercises
+both local and computed carriers, comparing bytecode with interpretation.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode --test comptime_bytecode_defaults`:
+  exit 0, `/tmp/luna-tools-qjgppebl/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-129w2a34/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-sd3vxpfu/result.json`; `git diff --check`: exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_references --test comptime_bytecode_types --test library_meta_objects --test comptime_clause_inputs`:
+  exit 0, `/tmp/luna-tools-r8nmy0sx/result.json`.

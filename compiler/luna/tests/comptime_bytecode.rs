@@ -261,3 +261,74 @@ fn nested_calls_check_contracts_and_recover_after_failure() {
         );
     }
 }
+
+#[test]
+fn computed_callees_execute_once_before_arguments_in_bytecode() {
+    let package = support::compile(
+        "typealias u8=.u8'builtin;
+        struct Table {apply:comptime fn(bool)->bool}
+        comptime fn keep(value:bool)->bool {value}
+        comptime fn invert(value:bool)->bool {not value}
+        comptime fn select(flag:bool)->comptime fn(bool)->bool {
+            if flag {keep} else {invert}
+        }
+        comptime fn ordered()->bool {
+            var trace:u8=0;
+            let result=(do {trace = trace + 1;keep})(do {trace = trace * 2;true});
+            result and trace == 2
+        }
+        comptime fn nested()->bool {select(false)(false)}
+        comptime fn branch(flag:bool)->bool {(if flag {keep} else {invert})(flag)}
+        comptime fn field()->bool {
+            let table=Table{apply:keep};
+            table.apply(true)
+        }
+        comptime fn early(flag:bool)->bool {
+            (if flag {do {return true;keep}} else {keep})(do {while true {} false})
+        }",
+    );
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let mut tree = Interpreter::new(&package, Budget::default()).unwrap();
+    for (name, count) in [("ordered", 2), ("nested", 3), ("field", 2), ("early", 1)] {
+        let before = vm.bytecode_invocations();
+        assert_eq!(
+            vm.invoke(
+                support::id(&package, name),
+                if name == "early" {
+                    vec![Value::Bool(true)]
+                } else {
+                    vec![]
+                }
+            )
+            .unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(vm.bytecode_invocations() - before, count, "{name}");
+        assert_eq!(
+            tree.invoke(
+                support::id(&package, name),
+                if name == "early" {
+                    vec![Value::Bool(true)]
+                } else {
+                    vec![]
+                }
+            )
+            .unwrap(),
+            Value::Bool(true)
+        );
+    }
+    for flag in [true, false] {
+        let before = vm.bytecode_invocations();
+        assert_eq!(
+            vm.invoke(support::id(&package, "branch"), vec![Value::Bool(flag)])
+                .unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(vm.bytecode_invocations() - before, 2);
+        assert_eq!(
+            tree.invoke(support::id(&package, "branch"), vec![Value::Bool(flag)])
+                .unwrap(),
+            Value::Bool(true)
+        );
+    }
+}

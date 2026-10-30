@@ -179,13 +179,32 @@ fn local_instance_defaults_substitute_the_selected_type_inputs() {
         }],
         result: Some(Box::new(call)),
     };
-    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
-    let mut tree = Interpreter::new(&package, Budget::default()).unwrap();
-    let expected = Value::Type(Term::Primitive(Primitive::Bool));
-    assert_eq!(vm.invoke(root, vec![]).unwrap(), expected);
-    assert_eq!(tree.invoke(root, vec![]).unwrap(), expected);
-    assert_eq!(vm.bytecode_invocations(), 2);
-    assert_eq!(vm.bytecode_default_evaluations(), 1);
+    for computed in [false, true] {
+        let mut package = package.clone();
+        if computed {
+            let root_body = &mut package
+                .functions
+                .iter_mut()
+                .find(|function| function.declaration == root)
+                .unwrap()
+                .body;
+            let K::Call { callee, .. } = &mut tail_expression(root_body).kind else {
+                panic!("expected call")
+            };
+            let selected = callee.clone();
+            callee.kind = K::Block {
+                statements: vec![],
+                result: Some(selected),
+            };
+        }
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let mut tree = Interpreter::new(&package, Budget::default()).unwrap();
+        let expected = Value::Type(Term::Primitive(Primitive::Bool));
+        assert_eq!(vm.invoke(root, vec![]).unwrap(), expected);
+        assert_eq!(tree.invoke(root, vec![]).unwrap(), expected);
+        assert_eq!(vm.bytecode_invocations(), 2);
+        assert_eq!(vm.bytecode_default_evaluations(), 1);
+    }
 }
 
 fn tail_expression(mut expression: &mut nir::program::Expr) -> &mut nir::program::Expr {
