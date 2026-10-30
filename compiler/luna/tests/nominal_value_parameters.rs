@@ -6467,3 +6467,36 @@ fn dependent_type_indices_forward_ordinary_constraints_without_capture() {
         assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
     }
 }
+
+#[test]
+fn type_valued_indices_preserve_enum_constructor_contexts() {
+    let source = "typealias Type=.Type'builtin;
+        enum Choice where T,index:T {none,some(bool)}
+        fn make()->Choice<Type,bool> {.some(true)}
+        fn run()->bool {make() match {.some(value)=>value,.none=>false}}";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn type_valued_indices_infer_enum_payloads_from_partial_contexts() {
+    let source = "typealias Type=.Type'builtin;
+        enum Choice where T,index:T,U {none,some(U)}
+        fn keep(value:Choice<Type,bool,U>)->Choice<Type,bool,U> where U {value}
+        fn run()->bool {let result=keep(.some(true));result match {.some(value)=>value,.none=>false}}";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    let spread = source.replace(".some(true)", ".some(...(true,))");
+    assert_eq!(
+        support::run_iir_with_tuple(&spread, "run", vec![]),
+        Value::Bool(true)
+    );
+    let record = source
+        .replace("some(U)", "some {value:U,flag:bool=true}")
+        .replace(".some(true)", ".some {value:true}")
+        .replace(".some(value)=>value", ".some {value,flag}=>value and flag");
+    assert_eq!(support::run_iir(&record, "run", vec![]), Value::Bool(true));
+    let wrong_index = source.replace(
+        "keep(.some(true))",
+        "keep(Choice<Type,Type,bool>.some(true))",
+    );
+    assert!(support::compile_with_protocols(&wrong_index, &Default::default()).is_err());
+}

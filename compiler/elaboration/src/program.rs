@@ -2516,37 +2516,48 @@ impl Checker<'_, '_> {
         let mut open_binders = Vec::new();
         let mut supplied = Vec::new();
         for (slot, binder) in binders.iter().enumerate() {
-            if binder.sort == Sort::Type {
-                open_binders.push(*binder);
+            let domain = definition
+                .parameter_types
+                .get(slot)
+                .cloned()
+                .unwrap_or(p(P::Type));
+            let domain = self.instantiate_input_types(
+                &domain,
+                &definition.type_parameters[..slot],
+                &supplied,
+                expr.span,
+            )?;
+            let sort = if domain == p(P::Type) {
+                Sort::Type
+            } else {
+                Sort::ComptimeValue
+            };
+            let value = match context {
+                crate::calls::InputContext::Nominal {
+                    declaration,
+                    arguments,
+                } if *declaration == id => match arguments.get(slot) {
+                    Some(crate::calls::InputContext::Known(value)) => Some(value),
+                    _ => None,
+                },
+                crate::calls::InputContext::Known(Term::Nominal {
+                    declaration,
+                    arguments,
+                }) if *declaration == id => arguments.get(slot),
+                _ => None,
+            }
+            .filter(|value| value.sort() == sort);
+            if let Some(value) = value {
+                supplied.push(self.copy_alias_type(value, expr.span)?);
+            } else {
+                open_binders.push(nir::DeclarationParameter {
+                    declaration: binder.declaration,
+                    sort,
+                });
                 supplied.push(Term::Rigid {
                     declaration: binder.declaration,
-                    sort: binder.sort,
+                    sort,
                 });
-            } else {
-                let value = match context {
-                    crate::calls::InputContext::Nominal {
-                        declaration,
-                        arguments,
-                    } if *declaration == id => match arguments.get(slot) {
-                        Some(crate::calls::InputContext::Known(value)) => Some(value),
-                        _ => None,
-                    },
-                    crate::calls::InputContext::Known(Term::Nominal {
-                        declaration,
-                        arguments,
-                    }) if *declaration == id => arguments.get(slot),
-                    _ => None,
-                }
-                .filter(|value| value.sort() == binder.sort);
-                if let Some(value) = value {
-                    supplied.push(self.copy_alias_type(value, expr.span)?);
-                } else {
-                    open_binders.push(*binder);
-                    supplied.push(Term::Rigid {
-                        declaration: binder.declaration,
-                        sort: binder.sort,
-                    });
-                }
             }
         }
         let result = Term::Nominal {
@@ -2560,9 +2571,12 @@ impl Checker<'_, '_> {
                 .map(|ty| {
                     Ok(Parameter {
                         sort: Sort::Runtime,
-                        ty: ty
-                            .instantiate_parameters(&binders, &supplied)
-                            .map_err(|e| error(expr.span, e.to_string()))?,
+                        ty: self.instantiate_input_types(
+                            ty,
+                            &definition.type_parameters,
+                            &supplied,
+                            expr.span,
+                        )?,
                     })
                 })
                 .collect::<Result<Vec<_>, Error>>()?,

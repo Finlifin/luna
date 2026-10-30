@@ -3717,3 +3717,26 @@ Validation in /home/fin/luna:
 
 This closes the exercised quote expansion paths, not all remaining declaration
 substitution consumers or the full CMTT implementation.
+
+### Partial enum contexts complete dependent index domains
+
+Enum payload inference now consumes known contextual arguments in declaration
+order, completing each later domain before assigning its inference sort. Only
+unknown inputs become open inference slots. Payload field types use declaration
+domains when specialized; final constructor admission and field compatibility
+checks remain unchanged. The shared trait-domain prefix substitution also uses
+bounded domain evidence, so a later Type parameter can follow an index whose
+completed domain is Type.
+
+The source regression first exposed the prefix error in
+`/tmp/luna-tools-o6v2ezz_/result.json`; fixing that revealed the unresolved partial
+constructor context in `/tmp/luna-tools-dgcimokp/result.json`. Final cases execute
+complete and partial enum contexts, tuple payload spreads and record defaults,
+and reject a distinct nominal index. No concrete enum name is recognized by the
+implementation, and normal-form heads remain opaque.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test cmtt_methods --test quote_functions --test sysroot_preludes`:
+  exit 0, `/tmp/luna-tools-we46dsbe/result.json`, no exclusions.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-xyn5t139/result.json`; `git diff --check`: exit 0.

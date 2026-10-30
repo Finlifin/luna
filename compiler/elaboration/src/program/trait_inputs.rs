@@ -143,13 +143,18 @@ impl Checker<'_, '_> {
     ) -> Result<Term, Error> {
         let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
         let before = fuel;
-        let result = nir::type_computations::instantiate_parameters_bounded(
-            domain,
-            binders,
-            values,
-            &self.call_input_frames(),
-            &mut fuel,
-        );
+        let ids = binders
+            .iter()
+            .map(|binder| binder.declaration)
+            .collect::<Vec<_>>();
+        let domains = ids
+            .iter()
+            .map(|id| self.trait_input_domain(*id).unwrap_or_else(|| p(P::Type)))
+            .collect::<Vec<_>>();
+        let frames = self.call_input_frames();
+        let result =
+            nir::DeclarationSubstitution::bounded(&ids, &domains, values, &frames, &mut fuel)
+                .and_then(|substitution| substitution.instantiate_bounded(domain, &mut fuel));
         self.required_steps -= (before - fuel) as u64;
         let domain = result
             .map_err(|e| error(span, format!("trait input domain substitution failed: {e}")))?;
