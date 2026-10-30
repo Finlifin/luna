@@ -720,7 +720,7 @@ struct Analysis<'a> {
     method_callees: crate::memory::MethodCallees,
     protocols: Protocols,
     functions: HashMap<DeclarationId, &'a n::Function>,
-    tuple_heads: HashSet<DeclarationId>,
+    tuple_heads: HashMap<DeclarationId, &'a nir::normal_forms::Head>,
     parameter_sorts: Option<BTreeMap<DeclarationId, Sort>>,
     staged_parameters: BTreeSet<n::LocalId>,
     finite: bool,
@@ -775,7 +775,7 @@ impl<'a> Analysis<'a> {
                 .normal_forms
                 .iter()
                 .filter(|head| head.role == nir::normal_forms::Role::Tuple)
-                .map(|head| head.declaration)
+                .map(|head| (head.declaration, head))
                 .collect(),
             finite,
             resource_scope: false,
@@ -998,19 +998,21 @@ impl<'a> Analysis<'a> {
         if !self.finite && matches!(ty, Term::Primitive(P::Type | P::Integer | P::Float)) {
             return true;
         }
-        fn inspect(ty: &Term, heads: &HashSet<DeclarationId>, depth: usize) -> bool {
+        fn inspect(
+            ty: &Term,
+            heads: &HashMap<DeclarationId, &nir::normal_forms::Head>,
+            depth: usize,
+        ) -> bool {
             if depth >= 128 {
                 return false;
             }
             match ty {
                 Term::Tuple(fields) => fields.iter().all(|ty| inspect(ty, heads, depth + 1)),
                 Term::Record(fields) => fields.iter().all(|(_, ty)| inspect(ty, heads, depth + 1)),
-                Term::NormalForm {
-                    head, arguments, ..
-                } if heads.contains(head) => {
-                    matches!(arguments.as_slice(), [Term::TypeListValue(fields)]
-                        if fields.iter().all(|ty| inspect(ty, heads, depth + 1)))
-                }
+                Term::NormalForm { head, .. } => heads
+                    .get(head)
+                    .and_then(|metadata| metadata.tuple_elements(ty))
+                    .is_some_and(|fields| fields.iter().all(|ty| inspect(ty, heads, depth + 1))),
                 _ => copy_scalar(ty),
             }
         }

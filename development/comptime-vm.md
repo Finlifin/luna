@@ -6895,3 +6895,38 @@ Validation from /home/fin/luna:
   No test expectations or implicit primitive resolution rules were changed.
 
 No full workspace test suite was run.
+
+
+## Purity uses declared Tuple collector layouts (2026-10-31)
+
+The purity analysis now retains borrowed Tuple head metadata in its existing
+identity index. Its structural Copy shortcut reads fields through the shared
+`Head::tuple_elements` view instead of destructuring the legacy Type-list
+payload. Ordinary immutable collector values therefore receive the same
+recursive scalar/aggregate check as compact payloads. The declared collector
+domain must match; arbitrary normal-form heads do not acquire a Tuple layout.
+
+This changes the representation reader, not the resource protocol. An affine
+nominal field still prevents the structural shortcut. Existing Copy/Drop
+acquisition and resource-aware paths retain their responsibility for explicit
+protocol evidence. P3 finite-default and P4 runtime-purity distinctions remain
+unchanged, and opaque heads are not evaluated.
+
+A public `validate_defaults` regression discards constructed empty, scalar and
+nested tuples in a block before returning a boolean, covering both payload
+encodings. It rejects a foreign collector domain, a tuple containing an affine
+nominal value and an unregistered head. Re-registering the head allows the
+valid input again. These are typed-IR tests; canonical source storage still
+uses the legacy Type-list encoder.
+
+Validation from /home/fin/luna:
+
+- `python3 -B development/check.py --timeout 900 -- test -p program_verification --test purity`:
+  exit 0, 2 passed; `/tmp/luna-tools-t09bt0t2/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0; `/tmp/luna-tools-zgz_m7k6/result.json`; `git diff --check` passed.
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test runtime_purity --test default_calls --test optional_purity --test associated_purity --test trait_purity --no-fail-fast`:
+  exit 0, 133 source tests passed; `/tmp/luna-tools-5yvgw75w/result.json`.
+
+No full workspace test suite was run.
