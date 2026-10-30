@@ -6612,3 +6612,42 @@ variants remain to migrate. No full workspace suite was run.
 Final public-library validation:
 `python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
 exit 0, three native tests passed; `/tmp/luna-tools-91od9u7m/result.json`.
+
+
+## Ordinary payloads in elaboration's known-list observer (2026-10-31)
+
+Known-list indexing and normal-form spread collection now share a reader for
+ordinary nominal payloads and legacy compact Type-list values. Callers first
+establish the registered collection domain; the reader requires its exact
+identity, no variant, the expected element sort and a bounded payload traversal.
+Symbolic collection assembly also converts completed ordinary Type-list pieces
+through this reader before joining its still-legacy deferred representation.
+
+The ordinary list expression observer now follows the declared element domain
+for every list, checking child expression types and preserving observation
+order. A shared canonical writer retains the existing frozen encoding for Type
+elements; it is not a second identity scheme. Ordinary non-Type collection
+identity remains domain-qualified, including empty inputs.
+
+Regression coverage mixes nominal and compact Type-list spreads, retains their
+source order and checks domain mismatches, malformed fields/variants, budget
+failure and subsequent recovery. Existing unknown-input and no-body-unfolding
+checks remain unchanged.
+
+Validation from /home/fin/luna:
+
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib known_`:
+  exit 0, 14 passed; `/tmp/luna-tools-nogexebz/result.json`.
+- Source integration command:
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test normal_form_inference --test type_spreads --test comptime_clause_inputs --test cmtt --test builder_invocations --no-fail-fast`;
+  exit 0, 804 passed; `/tmp/luna-tools-tv3ouij6/result.json`.
+- Formatting: `python3 -B development/command.py --timeout 120 -- cargo fmt --all`,
+  exit 0, `/tmp/luna-tools-hhk06yy0/result.json`; `git diff --check` passed.
+
+Deferred TypeListConcat and canonical Type-list producers remain to migrate.
+This is observer compatibility with ordinary values, not complete storage
+migration. No full workspace suite was run.
+
+Final public-library validation:
+`python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
+exit 0, three native tests passed; `/tmp/luna-tools-z3vjzfdr/result.json`.

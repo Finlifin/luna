@@ -107,6 +107,7 @@ impl Checker<'_, '_> {
     fn known_collected_type_list_in(
         &mut self,
         items: &[n::NormalFormArgument],
+        domain: &Term,
         bindings: &BTreeMap<n::LocalId, std::sync::Arc<Term>>,
     ) -> Option<Term> {
         let mut budget = comptime_runtime::Budget {
@@ -128,6 +129,13 @@ impl Checker<'_, '_> {
                 }
                 n::NormalFormArgument::ListSpread(value) => {
                     match self.known_normal_input_in(value, 0, &mut budget, bindings) {
+                        Some(value @ (Term::NominalValue { .. } | Term::TypeListValue(_))) => {
+                            match take_known_list_elements(value, domain, &p(P::Type), &mut budget)
+                            {
+                                Some(fields) => parts.push(Term::TypeListValue(fields)),
+                                None => known = false,
+                            }
+                        }
                         Some(value) => parts.push(value),
                         _ => known = false,
                     }
@@ -146,9 +154,9 @@ impl Checker<'_, '_> {
         bindings: &BTreeMap<n::LocalId, std::sync::Arc<Term>>,
     ) -> Option<Term> {
         if self.is_type_list_type(ty) {
-            return self.known_collected_type_list_in(items, bindings);
+            return self.known_collected_type_list_in(items, ty, bindings);
         }
-        self.list_element_type(ty)?;
+        let element = self.list_element_type(ty)?;
         let mut budget = comptime_runtime::Budget {
             steps: self.required_steps as usize,
             max_limbs: 4096,
@@ -164,18 +172,8 @@ impl Checker<'_, '_> {
                         fields.push(self.known_normal_input_in(value, 0, &mut budget, bindings)?);
                     }
                     n::NormalFormArgument::ListSpread(value) => {
-                        let Term::NominalValue {
-                            ty: actual,
-                            variant: None,
-                            fields: elements,
-                        } = self.known_normal_input_in(value, 0, &mut budget, bindings)?
-                        else {
-                            return None;
-                        };
-                        if actual.as_ref() != &ty {
-                            return None;
-                        }
-                        budget.consume(elements.len()).ok()?;
+                        let value = self.known_normal_input_in(value, 0, &mut budget, bindings)?;
+                        let elements = take_known_list_elements(value, &ty, element, &mut budget)?;
                         fields.extend(elements);
                     }
                     _ => return None,
@@ -1473,21 +1471,12 @@ impl Checker<'_, '_> {
                 Some(Term::TypeListValue(values))
             }
             K::TypeListIndex(values, index) => {
-                let is_types = self.is_type_list_type(&values.ty);
                 let element = self.list_element_type(&values.ty)?;
                 if *element != expr.ty {
                     return None;
                 }
                 let frozen = self.known_normal_input_in(values, depth + 1, budget, bindings)?;
-                let mut values = match frozen {
-                    Term::TypeListValue(fields) if is_types => fields,
-                    Term::NominalValue {
-                        ty,
-                        variant: None,
-                        fields,
-                    } if !is_types && *ty == values.ty => fields,
-                    _ => return None,
-                };
+                let mut values = take_known_list_elements(frozen, &values.ty, element, budget)?;
                 let Term::Integer(index) =
                     self.known_normal_input_in(index, depth + 1, budget, bindings)?
                 else {
@@ -1497,7 +1486,7 @@ impl Checker<'_, '_> {
                     .consume(index.bit_len().div_ceil(32).saturating_add(1))
                     .ok()?;
                 let index = usize::try_from(index.to_u128().ok()?).ok()?;
-                if index >= values.len() || (is_types && values[index].sort() != Sort::Type) {
+                if index >= values.len() {
                     return None;
                 }
                 Some(values.swap_remove(index))
@@ -1622,27 +1611,17 @@ impl Checker<'_, '_> {
                     })
                 }
             }
-            K::TypeList(values) if self.is_type_list_type(&expr.ty) => {
-                let values = values
-                    .iter()
-                    .map(|value| self.known_normal_input_in(value, depth + 1, budget, bindings))
-                    .collect::<Option<Vec<_>>>()?;
-                values
-                    .iter()
-                    .all(|value| value.sort() == Sort::Type)
-                    .then_some(Term::TypeListValue(values))
-            }
-            K::TypeList(values) if self.list_element_type(&expr.ty).is_some() => {
+            K::TypeList(values) => {
+                let element = self.list_element_type(&expr.ty)?;
                 budget.consume(values.len()).ok()?;
-                let fields = values
-                    .iter()
-                    .map(|value| self.known_normal_input_in(value, depth + 1, budget, bindings))
-                    .collect::<Option<Vec<_>>>()?;
-                Some(Term::NominalValue {
-                    ty: Box::new(clone_known_term(&expr.ty, budget)?),
-                    variant: None,
-                    fields,
-                })
+                let mut fields = Vec::with_capacity(values.len());
+                for value in values {
+                    if value.ty != *element {
+                        return None;
+                    }
+                    fields.push(self.known_normal_input_in(value, depth + 1, budget, bindings)?);
+                }
+                freeze_known_list(&expr.ty, element, fields, budget)
             }
             K::TupleType(values) => Some(Term::Tuple(
                 values
@@ -2368,33 +2347,68 @@ fn collect_known_normal_argument(
                 collected.push(value);
             }
             n::NormalFormArgument::ListSpread(expr) => {
-                let fields = match known(expr, budget)? {
-                    Term::TypeListValue(fields) if types => {
-                        if fields.iter().any(|ty| ty.sort() != Sort::Type) {
-                            return None;
-                        }
-                        fields
-                    }
-                    Term::NominalValue {
-                        ty,
-                        variant: None,
-                        fields,
-                    } if !types && ty.as_ref() == domain => fields,
-                    _ => return None,
-                };
-                budget.consume(fields.len()).ok()?;
+                let fields =
+                    take_known_list_elements(known(expr, budget)?, domain, element, budget)?;
                 collected.extend(fields);
             }
             _ => return None,
         }
     }
-    Some(if types {
-        Term::TypeListValue(collected)
+    freeze_known_list(domain, element, collected, budget)
+}
+
+// Callers establish the registered list domain before using this representation
+// reader. Payload encoding does not grant collection authority.
+fn take_known_list_elements(
+    value: Term,
+    domain: &Term,
+    element: &Term,
+    budget: &mut comptime_runtime::Budget,
+) -> Option<Vec<Term>> {
+    let fields = match value {
+        Term::TypeListValue(fields) if *element == p(P::Type) => fields,
+        Term::NominalValue {
+            ty,
+            variant: None,
+            fields,
+        } if ty.as_ref() == domain => fields,
+        _ => return None,
+    };
+    budget.consume(fields.len()).ok()?;
+    let sort = if *element == p(P::Type) {
+        Sort::Type
+    } else {
+        Sort::ComptimeValue
+    };
+    fields
+        .iter()
+        .all(|field| field.sort() == sort)
+        .then_some(fields)
+}
+
+// Keep one canonical writer until all frozen-list consumers migrate together.
+fn freeze_known_list(
+    domain: &Term,
+    element: &Term,
+    fields: Vec<Term>,
+    budget: &mut comptime_runtime::Budget,
+) -> Option<Term> {
+    budget.consume(fields.len()).ok()?;
+    let sort = if *element == p(P::Type) {
+        Sort::Type
+    } else {
+        Sort::ComptimeValue
+    };
+    if fields.iter().any(|field| field.sort() != sort) {
+        return None;
+    }
+    Some(if *element == p(P::Type) {
+        Term::TypeListValue(fields)
     } else {
         Term::NominalValue {
             ty: Box::new(clone_known_term(domain, budget)?),
             variant: None,
-            fields: collected,
+            fields,
         }
     })
 }
@@ -2602,6 +2616,11 @@ mod tests {
             A::Value(expr(K::TypeValue(flag.clone()))),
             A::ListSpread(expr(K::TypeListValue(vec![byte.clone(), flag.clone()]))),
             A::ListSpread(expr(K::TypeListValue(vec![]))),
+            A::ListSpread(expr(K::ComptimeValue(Term::NominalValue {
+                ty: Box::new(list.clone()),
+                variant: None,
+                fields: vec![byte.clone()],
+            }))),
         ]);
         assert_eq!(
             collect_known_normal_argument(
@@ -2611,7 +2630,12 @@ mod tests {
                 &mut Budget::default(),
                 resolve
             ),
-            Some(Term::TypeListValue(vec![flag.clone(), byte, flag.clone()]))
+            Some(Term::TypeListValue(vec![
+                flag.clone(),
+                byte.clone(),
+                flag.clone(),
+                byte
+            ]))
         );
         assert!(
             collect_known_normal_argument(
@@ -2787,6 +2811,94 @@ mod tests {
                     max_limbs: 4096
                 },
                 resolve
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn known_list_payloads_require_exact_domains_and_valid_element_sorts() {
+        use super::{freeze_known_list, take_known_list_elements};
+        let domain = |element| Term::NormalForm {
+            head: nir::DeclarationId {
+                package: 3,
+                local: 1,
+            },
+            sort: Sort::Type,
+            arguments: vec![element],
+        };
+        let type_domain = domain(Term::Primitive(Primitive::Type));
+        let bool_domain = domain(Term::Primitive(Primitive::Bool));
+        let nominal = |ty: &Term, fields| Term::NominalValue {
+            ty: Box::new(ty.clone()),
+            variant: None,
+            fields,
+        };
+        for (ty, element, fields) in [
+            (
+                type_domain.clone(),
+                Term::Primitive(Primitive::Type),
+                vec![Term::Primitive(Primitive::Bool)],
+            ),
+            (
+                bool_domain.clone(),
+                Term::Primitive(Primitive::Bool),
+                vec![Term::Bool(true)],
+            ),
+        ] {
+            let input = nominal(&ty, fields.clone());
+            assert_eq!(
+                take_known_list_elements(input.clone(), &ty, &element, &mut Budget::default()),
+                Some(fields.clone())
+            );
+            assert!(
+                take_known_list_elements(
+                    input.clone(),
+                    &ty,
+                    &element,
+                    &mut Budget {
+                        steps: 0,
+                        max_limbs: 4096
+                    }
+                )
+                .is_none()
+            );
+            assert_eq!(
+                take_known_list_elements(input, &ty, &element, &mut Budget::default()),
+                Some(fields.clone())
+            );
+            let frozen =
+                freeze_known_list(&ty, &element, fields.clone(), &mut Budget::default()).unwrap();
+            assert_eq!(
+                take_known_list_elements(frozen, &ty, &element, &mut Budget::default()),
+                Some(fields)
+            );
+        }
+        for bad in [
+            nominal(&bool_domain, vec![Term::Primitive(Primitive::Bool)]),
+            nominal(&type_domain, vec![Term::Bool(true)]),
+            Term::NominalValue {
+                ty: Box::new(type_domain.clone()),
+                variant: Some(0),
+                fields: vec![],
+            },
+        ] {
+            assert!(
+                take_known_list_elements(
+                    bad,
+                    &type_domain,
+                    &Term::Primitive(Primitive::Type),
+                    &mut Budget::default()
+                )
+                .is_none()
+            );
+        }
+        assert!(
+            take_known_list_elements(
+                Term::TypeListValue(vec![]),
+                &bool_domain,
+                &Term::Primitive(Primitive::Bool),
+                &mut Budget::default()
             )
             .is_none()
         );
