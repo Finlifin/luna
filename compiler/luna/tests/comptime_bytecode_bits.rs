@@ -277,3 +277,50 @@ fn dynamic_bit_writeback_freezes_ranges_before_rhs_and_recovers() {
         );
     }
 }
+
+#[test]
+fn bitwise_and_or_are_eager_while_boolean_operations_short_circuit() {
+    let package=support::compile("typealias Bits=.BitVec'builtin<8>;
+        comptime fn eager_and()->bool {var seen=false;let a:Bits=0;let b=a and do {seen=true;0xff};seen and b == 0}
+        comptime fn eager_or()->bool {var seen=false;let a:Bits=0xff;let b=a or do {seen=true;0};seen and b == 0xff}
+        comptime fn short_and()->bool {var seen=false;let b=false and do {seen=true;true};not seen and not b}
+        comptime fn short_or()->bool {var seen=false;let b=true or do {seen=true;false};not seen and b}");
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let mut tree = Interpreter::new(&package, Budget::default()).unwrap();
+    for name in ["eager_and", "eager_or", "short_and", "short_or"] {
+        let before = vm.bytecode_invocations();
+        let id = support::id(&package, name);
+        assert_eq!(vm.invoke(id, vec![]).unwrap(), Value::Bool(true), "{name}");
+        assert_eq!(vm.bytecode_invocations() - before, 1, "{name}");
+        assert_eq!(
+            tree.invoke(id, vec![]).unwrap(),
+            Value::Bool(true),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn compiled_program_predicates_reject_and_recover() {
+    use comptime_interpretor::ErrorKind;
+    let package = support::compile("comptime fn checked(value:bool)->bool {assumes value;true}");
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let mut tree = Interpreter::new(&package, Budget::default()).unwrap();
+    let id = support::id(&package, "checked");
+    for value in [true, false, true] {
+        let before = vm.bytecode_invocations();
+        let actual = vm.invoke(id, vec![Value::Bool(value)]);
+        let expected = tree.invoke(id, vec![Value::Bool(value)]);
+        assert_eq!(vm.bytecode_invocations() - before, 1);
+        if value {
+            assert_eq!(actual.unwrap(), Value::Bool(true));
+            assert_eq!(expected.unwrap(), Value::Bool(true));
+        } else {
+            assert_eq!(actual.unwrap_err().kind, ErrorKind::ProgramContractRejected);
+            assert_eq!(
+                expected.unwrap_err().kind,
+                ErrorKind::ProgramContractRejected
+            );
+        }
+    }
+}

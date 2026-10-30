@@ -481,7 +481,7 @@ fn root_dispatch_preserves_generic_parents_of_concrete_implementations() {
 }
 
 #[test]
-#[ignore = "requires trait-method callable and eager BitVec and/or bytecode"]
+#[ignore = "requires trait-method callable bytecode with interface contracts"]
 fn shipped_text_hash_runs_its_loop_in_bytecode() {
     use comptime_interpretor::{Budget, Interpreter};
     let package = support::compile(&source(
@@ -495,4 +495,30 @@ fn shipped_text_hash_runs_its_loop_in_bytecode() {
         2,
         "wrapper and shipped hash body must both compile"
     );
+}
+
+#[test]
+fn shipped_text_hash_body_uses_bytecode_for_all_bytes() {
+    use comptime_interpretor::{Budget, Interpreter};
+    use nir::{Primitive, Term};
+    let package = support::compile(&source(""));
+    let method=package.functions.iter().find(|function| {
+        function.phase==nir::program::FunctionPhase::Comptime
+        && matches!(function.signature.callable_signature(), Term::Function {parameters,result}
+            if parameters.len()==1 && parameters[0].ty==Term::Primitive(Primitive::Str)
+            && **result==Term::Primitive(Primitive::U64))
+    }).expect("shipped comptime string hash").declaration;
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    for (text, expected) in [
+        ("", 0xcbf29ce484222325u128),
+        ("é", 0x0ac21707b7181e01),
+        ("a\0b", 0xe5d29919042666b2),
+    ] {
+        let before = vm.bytecode_invocations();
+        assert_eq!(
+            vm.invoke(method, vec![Value::String(text.into())]).unwrap(),
+            Value::UnsignedInteger(expected)
+        );
+        assert_eq!(vm.bytecode_invocations() - before, 1);
+    }
 }

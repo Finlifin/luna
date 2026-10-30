@@ -10,11 +10,14 @@ pub enum Operation {
     Equal,
     Convert,
     Take,
+    And,
+    Or,
 }
 
 impl Operation {
     pub fn requires_bits(self, index: usize) -> bool {
-        !matches!(self, Self::Take) && (index == 0 || matches!(self, Self::Concat | Self::Equal))
+        !matches!(self, Self::Take)
+            && (index == 0 || matches!(self, Self::Concat | Self::Equal | Self::And | Self::Or))
     }
 }
 
@@ -28,6 +31,8 @@ impl fmt::Display for Operation {
             Self::Equal => write!(f, "(equal)"),
             Self::Convert => write!(f, "(convert)"),
             Self::Take => write!(f, "(take)"),
+            Self::And => write!(f, "(and)"),
+            Self::Or => write!(f, "(or)"),
         }
     }
 }

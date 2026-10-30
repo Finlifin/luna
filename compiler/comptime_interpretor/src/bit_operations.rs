@@ -67,7 +67,7 @@ impl Interpreter<'_> {
     ) -> Result<Value, Error> {
         let count = match operation {
             B::Slice { .. } | B::Convert | B::Take => 1,
-            B::Index | B::Concat | B::Equal => 2,
+            B::Index | B::Concat | B::Equal | B::And | B::Or => 2,
             B::Window => 3,
         };
         if values.len() != count || types.len() != count {
@@ -91,6 +91,19 @@ impl Interpreter<'_> {
         };
         let result = match operation {
             B::Take => unreachable!("representation input handled before requiring bits"),
+            B::And | B::Or => {
+                let Some(Value::BitVec(right)) = values.next() else {
+                    return Err(self.failure(ErrorKind::Type, Some(source)));
+                };
+                if *output != Term::Primitive(Primitive::BitVec(bits.width())) {
+                    return Err(self.failure(ErrorKind::Type, Some(source)));
+                }
+                self.bit_operation(source, |budget| match operation {
+                    B::And => bits.and(&right, budget),
+                    B::Or => bits.or(&right, budget),
+                    _ => unreachable!(),
+                })?
+            }
             B::Equal => {
                 let Some(Value::BitVec(right)) = values.next() else {
                     return Err(self.failure(ErrorKind::Type, Some(source)));

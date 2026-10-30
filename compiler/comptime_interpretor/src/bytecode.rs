@@ -794,6 +794,24 @@ impl<'a> Interpreter<'a> {
                 source: Some(source),
             };
             match &instruction.op {
+                Op::PreparePredicate { valid } => {
+                    if !valid {
+                        return Err(self.failure(ErrorKind::Type, Some(source)));
+                    }
+                }
+                Op::CheckPredicate {
+                    value,
+                    condition_source,
+                } => {
+                    let value = frame.slots[*value].take().ok_or_else(missing)?;
+                    self.finish_predicate(
+                        value,
+                        source,
+                        *condition_source,
+                        &mut frame.environment,
+                    )?;
+                }
+
                 Op::CheckObservation(observation) => self.check_observation(observation, source)?,
                 Op::Observe {
                     destination,

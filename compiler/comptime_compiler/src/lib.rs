@@ -39,6 +39,13 @@ impl fmt::Display for ErrorConversion {
 
 #[derive(Debug)]
 pub enum Op {
+    PreparePredicate {
+        valid: bool,
+    },
+    CheckPredicate {
+        value: Register,
+        condition_source: SourceRange,
+    },
     CheckObservation(Arc<observations::Observation>),
     Observe {
         destination: Register,
@@ -435,6 +442,15 @@ impl fmt::Display for Program {
                 instruction.source.start, instruction.source.end
             )?;
             match &instruction.op {
+                Op::PreparePredicate { valid } => write!(f, "(prepare-predicate {valid})")?,
+                Op::CheckPredicate {
+                    value,
+                    condition_source,
+                } => write!(
+                    f,
+                    "(check-predicate %{value} (condition-source {} {}))",
+                    condition_source.start, condition_source.end
+                )?,
                 Op::CheckObservation(observation) => {
                     write!(f, "(check-observation {observation})")?
                 }
@@ -2397,6 +2413,28 @@ fn compile_root<'a>(
                             work.push(Work::Expression(statement, scratch));
                         }
                     }
+                    K::CheckPredicate(condition)
+                    | K::RequirePredicate(condition)
+                    | K::EnsurePredicate(condition) => {
+                        let mut allowance = *fuel as u64;
+                        let charged =
+                            nir::copy_budget::charge_expression(condition, &mut allowance);
+                        *fuel = allowance as usize;
+                        charged.map_err(|error| copy_error(error, source))?;
+                        let valid = expr.ty == Term::Primitive(Primitive::Void)
+                            && nir::program::checkable_predicate(condition);
+                        let value = fresh();
+                        emit(&mut work, Op::Unit(dst));
+                        emit(
+                            &mut work,
+                            Op::CheckPredicate {
+                                value,
+                                condition_source: condition.source,
+                            },
+                        );
+                        work.push(Work::Expression(condition, value));
+                        emit(&mut work, Op::PreparePredicate { valid });
+                    }
                     K::Discard(value) => {
                         let scratch = fresh();
                         emit(&mut work, Op::Unit(dst));
@@ -2442,6 +2480,45 @@ fn compile_root<'a>(
                             },
                         );
                         work.push(Work::Expression(condition, src));
+                    }
+                    K::And(left, right) | K::Or(left, right)
+                        if matches!(left.ty, Term::Primitive(Primitive::BitVec(_))) =>
+                    {
+                        let operation = if matches!(expr.kind, K::And(..)) {
+                            bits::Operation::And
+                        } else {
+                            bits::Operation::Or
+                        };
+                        let lhs = fresh();
+                        let rhs = fresh();
+                        emit(
+                            &mut work,
+                            Op::Bits {
+                                destination: dst,
+                                operation,
+                                inputs: vec![
+                                    (lhs, copy_term(&left.ty, fuel, source)?),
+                                    (rhs, copy_term(&right.ty, fuel, source)?),
+                                ],
+                                output: copy_term(&expr.ty, fuel, source)?,
+                            },
+                        );
+                        emit(
+                            &mut work,
+                            Op::BitOperand {
+                                value: rhs,
+                                requires_bits: true,
+                            },
+                        );
+                        work.push(Work::Expression(right, rhs));
+                        emit(
+                            &mut work,
+                            Op::BitOperand {
+                                value: lhs,
+                                requires_bits: true,
+                            },
+                        );
+                        work.push(Work::Expression(left, lhs));
                     }
                     K::And(left, right) | K::Or(left, right)
                         if left.ty == Term::Primitive(Primitive::Bool) =>

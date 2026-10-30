@@ -4299,3 +4299,39 @@ Validation in /home/fin/luna:
   tests passed, one known incomplete compilation regression ignored as above.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
   exit 0, `/tmp/luna-tools-_i_ldog3/result.json`; `git diff --check`: exit 0.
+
+### Compile eager bitwise operations and checked program predicates
+
+BitVec And/Or now evaluate both operands in source order and share bounded
+value operations with tree execution. Boolean And/Or retain their existing
+short-circuit branches. Program Check/Require/EnsurePredicate nodes compile
+shape admission, condition evaluation and checked delivery separately. Shape
+inspection is charged during compilation; failed conditions record their check
+and reject through the shared predicate completion helper. Runtime cleanup
+continues through the original scheduled interpreter path.
+
+The shipped string-hash body now compiles as a whole and produces the documented
+FNV-1a values for empty, UTF-8 and embedded-NUL strings. A direct invocation of
+that actual library declaration asserts one compiled frame per call. Source
+regressions distinguish eager zero/all-ones bit operations from Boolean short
+circuiting and exercise predicate rejection followed by successful reuse.
+
+The outer trait-call regression remains ignored. Investigation confirmed that
+simply treating TraitMethod as a function constant is insufficient: interface
+program conditions, declaration-side argument bindings and default environments
+must survive dispatch. Next work must integrate that public contract into call
+preparation and continuation delivery, not bypass it for the hash example.
+Initial hash-body testing exposed the additional unsupported CheckPredicate;
+it was implemented rather than deleting the library's assumes. Temporary
+lowering diagnostics were removed.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test library_hash shipped_text_hash_body_uses_bytecode_for_all_bytes`:
+  exit 0 after bitwise/predicate support, `/tmp/luna-tools-qpsw9z5v/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-l6d_zuak/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_bits --test library_hash`:
+  exit 0, `/tmp/luna-tools-py_lpzx5/result.json`; one known outer trait-call
+  compilation regression remains ignored, not reported as completed.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-lw4oari8/result.json`; `git diff --check`: exit 0.

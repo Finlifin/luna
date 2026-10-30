@@ -5573,24 +5573,31 @@ impl<'a> Interpreter<'a> {
         {
             return Err(self.failure(ErrorKind::Type, Some(expr.source)));
         }
-        let Value::Bool(passed) =
-            Self::concrete_value(value!(self.eval(condition, environment)), expr.source)?
-        else {
-            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+        let value = value!(self.eval(condition, environment));
+        self.finish_predicate(value, expr.source, condition.source, environment)?;
+        Ok(Flow::Value(Value::Unit))
+    }
+
+    fn finish_predicate(
+        &mut self,
+        value: Value,
+        source: SourceRange,
+        condition_source: SourceRange,
+        environment: &mut Environment,
+    ) -> Result<(), Error> {
+        let Value::Bool(passed) = Self::concrete_value(value, source)? else {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
         };
-        self.events.push(Event::CheckPredicate {
-            source: expr.source,
-            passed,
-        });
+        self.events.push(Event::CheckPredicate { source, passed });
         if !passed {
             self.cleanup_site(
-                condition.source,
+                condition_source,
                 iir::cleanup::Boundary::PredicateFailure,
                 environment,
             )?;
-            return Err(self.failure(ErrorKind::ProgramContractRejected, Some(expr.source)));
+            return Err(self.failure(ErrorKind::ProgramContractRejected, Some(source)));
         }
-        Ok(Flow::Value(Value::Unit))
+        Ok(())
     }
 
     #[inline(never)]
@@ -5717,16 +5724,17 @@ impl<'a> Interpreter<'a> {
                         else {
                             return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                         };
-                        if expr.ty != Term::Primitive(Primitive::BitVec(left.width())) {
-                            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                        }
-                        Value::BitVec(self.bit_operation(expr.source, |budget| {
+                        self.bit_values(
                             if matches!(expr.kind, K::And(..)) {
-                                left.and(&right, budget)
+                                comptime_compiler::bits::Operation::And
                             } else {
-                                left.or(&right, budget)
-                            }
-                        })?)
+                                comptime_compiler::bits::Operation::Or
+                            },
+                            &[&a.ty, &b.ty],
+                            &expr.ty,
+                            vec![Value::BitVec(left), Value::BitVec(right)],
+                            expr.source,
+                        )?
                     }
                     Value::Bool(left) => {
                         if (matches!(expr.kind, K::And(..)) && !left)
