@@ -37330,6 +37330,86 @@ fn residual_type_invocations_recreate_isolated_waiters_without_runtime_dependenc
 }
 
 #[test]
+fn residual_list_calls_capture_source_construction_and_resume_after_inputs_arrive() {
+    use elaboration::type_computations::{Session, State};
+    use elaboration::{InferenceContext, InferenceTerm as I};
+    use nir::type_computations::Invocation;
+    let source = "typealias Type=.Type'builtin; typealias Byte=.u8'builtin;
+        pure comptime fn List<T>->Type {T}
+        comptime fn Select(values:List<bool>)->Type {if values[0] {bool} else {Byte}}
+        comptime fn SelectNested(values:List<List<bool>>)->Type {Select(values[0])}
+        comptime fn First(values:List<Type>)->Type {values[0]}
+        comptime fn Flags(comptime flag:bool)->Type {Select([flag,false])}
+        comptime fn NestedFlags(comptime flag:bool)->Type {SelectNested([[flag],[false]])}
+        comptime fn Types(comptime T:Type)->Type {First([T,bool])}
+        comptime fn Body(comptime flag:bool)->Type {Select([do {flag},false])}";
+    let package = compile_with_source_bindings(
+        source,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            meta_list: Some("input.List"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for (name, input, expected) in [
+        ("Flags", nir::Term::Bool(true), nir::Primitive::Bool),
+        ("Flags", nir::Term::Bool(false), nir::Primitive::U8),
+        ("NestedFlags", nir::Term::Bool(false), nir::Primitive::U8),
+        (
+            "Types",
+            nir::Term::Primitive(nir::Primitive::Char),
+            nir::Primitive::Char,
+        ),
+    ] {
+        let template = package.functions.iter().find(|f| f.name == name).unwrap();
+        let nir::Term::Function { parameters, .. } = template.signature.callable_signature() else {
+            panic!("signature")
+        };
+        let captures = template
+            .parameters
+            .iter()
+            .copied()
+            .zip(parameters.iter().cloned())
+            .collect::<Vec<_>>();
+        let residual = Invocation::from_call(&template.body, &captures, &mut 10000).unwrap();
+        let saved = residual.clone();
+        assert_eq!(
+            residual.dependencies().iter().copied().collect::<Vec<_>>(),
+            vec![0]
+        );
+        let mut context = InferenceContext::default();
+        let argument = context.fresh(input.sort());
+        let mut session = Session::new(&package, &context, Budget::default()).unwrap();
+        let output = session
+            .enqueue_residual(&mut context, &residual, &[I::Meta(argument)])
+            .unwrap();
+        assert!(matches!(
+            session.resume(&mut context, output).unwrap(),
+            State::Waiting(_)
+        ));
+        context.assign(argument, I::Stable(input)).unwrap();
+        assert!(
+            matches!(session.resume(&mut context, output).unwrap(), State::Complete(ty)
+            if *ty == nir::Term::Primitive(expected)),
+            "{name}"
+        );
+        assert_eq!(residual, saved);
+    }
+    let template = package.functions.iter().find(|f| f.name == "Body").unwrap();
+    let nir::Term::Function { parameters, .. } = template.signature.callable_signature() else {
+        panic!("signature")
+    };
+    let captures = template
+        .parameters
+        .iter()
+        .copied()
+        .zip(parameters.iter().cloned())
+        .collect::<Vec<_>>();
+    assert!(Invocation::from_call(&template.body, &captures, &mut 10000).is_err());
+}
+
+#[test]
 fn checked_type_calls_capture_residuals_from_source_and_preserve_argument_routing() {
     use elaboration::type_computations::{Session, State};
     use elaboration::{InferenceContext, InferenceTerm as I};

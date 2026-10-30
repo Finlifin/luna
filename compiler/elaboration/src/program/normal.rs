@@ -95,13 +95,27 @@ impl Checker<'_, '_> {
                     .then_some(owner)
             })
             .unwrap();
-        let arguments = vec![Term::TypeListValue(elements)];
+        let domain = self.normal_parameters[&owner][0].2.clone();
+        let arguments = vec![self.freeze_normal_list(&domain, elements, span)?];
         self.check_type_application(owner, &arguments, span)?;
         Ok(Term::NormalForm {
             head,
             sort: Sort::Type,
             arguments,
         })
+    }
+
+    pub(super) fn freeze_normal_list(
+        &mut self,
+        domain: &Term,
+        fields: Vec<Term>,
+        span: Span,
+    ) -> Result<Term, Error> {
+        let available = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let mut remaining = available;
+        let value = nir::comptime_values::freeze_admitted_list(domain, fields, &mut remaining);
+        self.required_steps -= (available - remaining) as u64;
+        value.map_err(|failure| error(span, failure.to_string()))
     }
 
     pub(super) fn known_collected_list_in(
@@ -609,15 +623,7 @@ impl Checker<'_, '_> {
                 for value in values {
                     fields.push(self.normal_value_argument_at(value, &element, depth + 1)?);
                 }
-                return Ok(if self.is_type_list_type(ty) {
-                    Term::TypeListValue(fields)
-                } else {
-                    Term::NominalValue {
-                        ty: Box::new(self.copy_alias_type(ty, value.span)?),
-                        variant: None,
-                        fields,
-                    }
-                });
+                return self.freeze_normal_list(ty, fields, value.span);
             }
         }
         let result = self.required_expression(value, Some(ty))?;
@@ -1433,7 +1439,7 @@ impl Checker<'_, '_> {
                     }
                     values.push(clone_known_term(ty, budget)?);
                 }
-                Some(Term::TypeListValue(values))
+                freeze_known_list(&expr.ty, &p(P::Type), values, budget)
             }
             K::TypeListIndex(values, index) => {
                 let element = self.list_element_type(&values.ty)?;

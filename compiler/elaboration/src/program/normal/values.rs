@@ -189,12 +189,7 @@ impl Checker<'_, '_> {
                     };
                     fields.push(field);
                 }
-                let available = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-                let mut remaining = available;
-                let frozen =
-                    nir::comptime_values::freeze_admitted_list(&ty, fields, &mut remaining);
-                self.required_steps -= (available - remaining) as u64;
-                frozen.map_err(|failure| error(span, failure.to_string()))?
+                self.freeze_normal_list(&ty, fields, span)?
             }
             value => {
                 let parameters = self.visible_comptime_parameters(span)?;

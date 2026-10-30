@@ -6807,3 +6807,45 @@ Validation from /home/fin/luna:
   exit 0, `/tmp/luna-tools-ho4rbpwh/result.json`; `git diff --check` passed.
 
 No full workspace test suite was run.
+
+
+## Immutable list construction in residual calls (2026-10-31)
+
+`Invocation::from_call` can capture elaborated immutable list construction,
+including nested lists and references to unresolved comptime inputs. The
+captured payload retains its declared domain, uses the shared admitted-list
+freezer, and preserves input dependencies. Type-valued inputs use the same
+capture path. Element domains, type-value sorts, traversal depth and allocation
+fuel are checked before exporting the residual.
+
+This is extraction from already elaborated list nodes, not a rule granting
+list formation authority to an arbitrary opaque head. Source tests explicitly
+exercise extraction and the existing invocation session: wait on an inference
+input, supply its value, resume to the expected result, and leave the saved
+residual unchanged. Calls, effects and control flow inside elements are not
+folded into immutable payloads; these still require the complete saved-body
+path. This stage does not add automatic selection of the extraction fast path.
+
+Elaboration now shares one budget adapter for scoped VM list results, literal
+normal-form arguments and tuple collector construction. Tuple construction gets
+the collector domain from its validated declaration signature. The known-value
+observer also uses the shared freezer for legacy typed-list nodes. Canonical
+Type-list storage still uses `TypeListValue`; producer/consumer migration is
+not complete, and raw ordinary and legacy encodings are not equated.
+
+Validation from /home/fin/luna:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir --no-fail-fast`:
+  exit 0, 474 passed; `/tmp/luna-tools-fzpkb4_b/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test normal_form_inference --test type_spreads --test comptime_clause_inputs --test cmtt --test builder_invocations --no-fail-fast`:
+  exit 0, 805 passed; `/tmp/luna-tools-d4gddxb9/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test execution residual`:
+  exit 0, 10 passed; `/tmp/luna-tools-rykvq84v/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0; `/tmp/luna-tools-8x9ndbwb/result.json`; `git diff --check` passed.
+
+No full workspace test suite was run.
+
+Public-library validation on the final implementation:
+`python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
+exit 0, five native tests passed; `/tmp/luna-tools-64i4x8sm/result.json`.

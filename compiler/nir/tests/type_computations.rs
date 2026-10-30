@@ -21,6 +21,158 @@ fn input(value: Term) -> Input {
 }
 
 #[test]
+fn residual_list_capture_retains_nested_domains_bindings_and_effect_boundaries() {
+    use nir::program::{CallArgument, Expr, ExprKind as K, Literal, LocalId, SourceRange};
+    let source = SourceRange { start: 1, end: 2 };
+    let domain = |element| Term::NormalForm {
+        head: target(),
+        sort: Sort::Type,
+        arguments: vec![element],
+    };
+    let bools = domain(Term::Primitive(Primitive::Bool));
+    let types = domain(Term::Primitive(Primitive::Type));
+    let local = LocalId { owner: 7, index: 0 };
+    let call = |value: Expr| Expr {
+        source,
+        ty: Term::Primitive(Primitive::Type),
+        kind: K::Call {
+            callee: Box::new(Expr {
+                source,
+                kind: K::Function(target()),
+                ty: Term::Function {
+                    parameters: vec![nir::Parameter {
+                        sort: Sort::Runtime,
+                        ty: value.ty.clone(),
+                    }],
+                    result: Box::new(Term::Primitive(Primitive::Type)),
+                }
+                .with_comptime_phase(true),
+            }),
+            arguments: vec![CallArgument {
+                passing: Default::default(),
+                parameter: 0,
+                is_default: false,
+                value,
+            }],
+            parameter_bindings: vec![local],
+        },
+    };
+    for (ty, element, sort) in [
+        (
+            bools.clone(),
+            Term::Primitive(Primitive::Bool),
+            Sort::ComptimeValue,
+        ),
+        (types, Term::Primitive(Primitive::Type), Sort::Type),
+    ] {
+        let captures = [(
+            local,
+            nir::Parameter {
+                sort,
+                ty: element.clone(),
+            },
+        )];
+        let value = Expr {
+            source,
+            ty: ty.clone(),
+            kind: K::TypeList(vec![Expr {
+                source,
+                ty: element.clone(),
+                kind: K::Local(local),
+            }]),
+        };
+        let expected =
+            nir::comptime_values::freeze_admitted_list(&ty, vec![slot(0, sort)], &mut 1000)
+                .unwrap();
+        let root = call(value.clone());
+        let saved = root.clone();
+        let plan = Invocation::from_call(&root, &captures, &mut 10000).unwrap();
+        assert_eq!(
+            plan.inputs()[0],
+            Input {
+                ty: ty.clone(),
+                value: expected.clone()
+            }
+        );
+        assert_eq!(
+            plan.dependencies().iter().copied().collect::<Vec<_>>(),
+            vec![0]
+        );
+        let nested = call(Expr {
+            source,
+            ty: domain(ty.clone()),
+            kind: K::TypeList(vec![value]),
+        });
+        let plan = Invocation::from_call(&nested, &captures, &mut 10000).unwrap();
+        assert_eq!(
+            plan.inputs()[0].value,
+            Term::NominalValue {
+                ty: Box::new(domain(ty)),
+                variant: None,
+                fields: vec![expected],
+            }
+        );
+        assert!(matches!(
+            Invocation::from_call(&root, &captures, &mut 0),
+            Err(Error::Budget)
+        ));
+        assert!(Invocation::from_call(&root, &captures, &mut 10000).is_ok());
+        assert_eq!(root, saved);
+        let runtime = [(
+            local,
+            nir::Parameter {
+                sort: Sort::Runtime,
+                ty: element,
+            },
+        )];
+        assert!(Invocation::from_call(&root, &runtime, &mut 10000).is_err());
+    }
+    let literal = Expr {
+        source,
+        ty: Term::Primitive(Primitive::Bool),
+        kind: K::Literal(Literal::Bool(true)),
+    };
+    for element in [
+        Expr {
+            ty: Term::Primitive(Primitive::Char),
+            ..literal.clone()
+        },
+        Expr {
+            kind: K::Block {
+                statements: vec![],
+                result: Some(Box::new(literal.clone())),
+            },
+            ..literal.clone()
+        },
+    ] {
+        assert!(
+            Invocation::from_call(
+                &call(Expr {
+                    source,
+                    ty: bools.clone(),
+                    kind: K::TypeList(vec![element]),
+                }),
+                &[],
+                &mut 10000
+            )
+            .is_err()
+        );
+    }
+    let mut deep = literal;
+    for _ in 0..130 {
+        deep = Expr {
+            source,
+            ty: domain(deep.ty.clone()),
+            kind: K::TypeList(vec![deep]),
+        };
+    }
+    assert!(matches!(
+        Invocation::from_call(&call(deep), &[], &mut 1_000_000),
+        Err(Error::Budget)
+    ));
+}
+
+#[test]
 fn nominal_dependency_walk_is_bounded_and_keeps_opaque_heads_separate() {
     use nir::type_computations::nominal_declarations_bounded;
     use std::collections::BTreeSet;

@@ -253,7 +253,7 @@ impl Invocation {
         *fuel = fuel.checked_sub(arguments.len()).ok_or(Error::Budget)?;
         let mut inputs = vec![None; parameters.len()];
         for argument in arguments {
-            let input = capture_value(&argument.value, &bindings, fuel)?;
+            let input = capture_value(&argument.value, &bindings, fuel, 0)?;
             let slot = inputs
                 .get_mut(argument.parameter)
                 .ok_or(Error::InvalidCall(call.source))?;
@@ -318,7 +318,11 @@ fn capture_value(
     expr: &Expr,
     bindings: &BTreeMap<LocalId, Input>,
     fuel: &mut usize,
+    depth: usize,
 ) -> Result<Input, Error> {
+    if depth >= 128 {
+        return Err(Error::Budget);
+    }
     *fuel = fuel.checked_sub(1).ok_or(Error::Budget)?;
     bounded(&expr.ty, fuel)?;
     let value = match &expr.kind {
@@ -342,14 +346,42 @@ fn capture_value(
             value.clone()
         }
         K::TypeValue(ty) => {
+            if expr.ty != Term::Primitive(crate::Primitive::Type) || ty.sort() != Sort::Type {
+                return Err(Error::InvalidCall(expr.source));
+            }
             bounded(ty, fuel)?;
             ty.clone()
+        }
+        K::TypeList(elements) => {
+            let Term::NormalForm {
+                sort: Sort::Type,
+                arguments,
+                ..
+            } = &expr.ty
+            else {
+                return Err(Error::InvalidCall(expr.source));
+            };
+            let [element] = arguments.as_slice() else {
+                return Err(Error::InvalidCall(expr.source));
+            };
+            *fuel = fuel.checked_sub(elements.len()).ok_or(Error::Budget)?;
+            let mut fields = Vec::with_capacity(elements.len());
+            for value in elements {
+                if value.ty != *element {
+                    return Err(Error::InvalidCall(value.source));
+                }
+                fields.push(capture_value(value, bindings, fuel, depth + 1)?.value);
+            }
+            freeze_list(&expr.ty, fields, expr.source, fuel)?
         }
         K::TypeListValue(types) => {
             for ty in types {
                 bounded(ty, fuel)?;
             }
-            Term::TypeListValue(types.clone())
+            if !crate::normal_forms::type_list_input_type(&expr.ty) {
+                return Err(Error::InvalidCall(expr.source));
+            }
+            freeze_list(&expr.ty, types.clone(), expr.source, fuel)?
         }
         K::Unit => Term::Unit,
         K::Literal(Literal::Bool(value)) => Term::Bool(*value),
@@ -409,6 +441,22 @@ fn capture_value(
         ty: expr.ty.clone(),
         value,
     })
+}
+
+// Typed list nodes already carry their elaborated layout authority. Capturing
+// their immutable payload does not infer that authority from an opaque head.
+fn freeze_list(
+    domain: &Term,
+    fields: Vec<Term>,
+    source: SourceRange,
+    fuel: &mut usize,
+) -> Result<Term, Error> {
+    crate::comptime_values::freeze_admitted_list(domain, fields, fuel).map_err(
+        |error| match error {
+            crate::comptime_values::Error::Budget => Error::Budget,
+            crate::comptime_values::Error::Invalid(_) => Error::InvalidCall(source),
+        },
+    )
 }
 pub(crate) use charge_term as bounded;
 
