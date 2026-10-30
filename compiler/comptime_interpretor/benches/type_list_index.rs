@@ -159,7 +159,14 @@ fn main() {
                 )
                 .unwrap();
                 let arguments = || {
-                    let mut args = vec![Value::TypeList(vec![primitive(Primitive::Bool); length])];
+                    let mut args = vec![Value::List {
+                        ty: Term::NormalForm {
+                            head: id(2),
+                            sort: Sort::Type,
+                            arguments: vec![primitive(Primitive::Type)],
+                        },
+                        values: vec![Value::Type(primitive(Primitive::Bool)); length],
+                    }];
                     if mode == "local" {
                         args.push(Value::Integer(comptime_runtime::Integer::from_u128(
                             (length - 1) as u128,

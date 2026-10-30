@@ -143,13 +143,16 @@ fn main() {
                         arguments: vec![primitive(element)],
                     };
                     let arguments = || {
-                        vec![if element == Primitive::Type {
-                            Value::TypeList(vec![primitive(Primitive::Bool); length])
-                        } else {
-                            Value::List {
-                                ty: list.clone(),
-                                values: vec![Value::Bool(true); length],
-                            }
+                        vec![Value::List {
+                            ty: list.clone(),
+                            values: vec![
+                                if element == Primitive::Type {
+                                    Value::Type(primitive(Primitive::Bool))
+                                } else {
+                                    Value::Bool(true)
+                                };
+                                length
+                            ],
                         }]
                     };
                     let expected =

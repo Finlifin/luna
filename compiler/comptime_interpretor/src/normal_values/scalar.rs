@@ -16,7 +16,10 @@ impl Interpreter<'_> {
                         .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
                     self.integer_operation(None, |budget| budget.consume(work))?;
                 }
-                Value::TypeList(elements.clone())
+                Value::List {
+                    ty: ty.clone(),
+                    values: elements.iter().cloned().map(Value::Type).collect(),
+                }
             }
             (Term::Bool(value), _) => Value::Bool(*value),
             (Term::Char(value), _) => Value::Char(*value),

@@ -251,19 +251,14 @@ fn main() {
                         )
                         .unwrap();
                         let invoke = |vm: &mut Interpreter<'_>| {
-                            let original = if element == Primitive::Type {
-                                Value::TypeList(vec![])
-                            } else {
-                                Value::List {
-                                    ty: list.clone(),
-                                    values: vec![],
-                                }
+                            let original = Value::List {
+                                ty: list.clone(),
+                                values: vec![],
                             };
                             let result = vm
                                 .invoke_with_typed_values(id(1), vec![(list.clone(), original)])
                                 .unwrap();
                             match result {
-                                Value::TypeList(values) => assert_eq!(values.len(), count),
                                 Value::List { values, .. } => assert_eq!(values.len(), count),
                                 other => panic!("invalid result {other:?}"),
                             }

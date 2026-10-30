@@ -894,7 +894,7 @@ fn repository_tuple_and_meta_definitions_preserve_identity_and_execute() {
     ];
     assert_eq!(
         luna::invocation::invoke(&package, "Elements", 100_000).unwrap(),
-        Value::TypeList(fields.clone())
+        support::type_list_value(&package, fields.clone())
     );
     for (entry, fields) in [("PacketType", fields), ("EmptyType", vec![])] {
         let Value::Type(Term::NormalForm {

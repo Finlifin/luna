@@ -260,7 +260,10 @@ impl Interpreter<'_> {
             }
             Q::FieldTypes => {
                 for variant in reflected.variants {
-                    values.push(Value::TypeList(variant.fields));
+                    values.push(Value::List {
+                        ty: inner.clone(),
+                        values: variant.fields.into_iter().map(Value::Type).collect(),
+                    });
                 }
             }
         }

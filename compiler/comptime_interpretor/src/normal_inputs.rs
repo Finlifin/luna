@@ -211,7 +211,6 @@ impl Interpreter<'_> {
             List {
                 ty: Term,
                 items: std::vec::IntoIter<(bool, StagedNormalInput)>,
-                types: Vec<Term>,
                 values: Vec<Value>,
                 depth: usize,
                 pending: Option<bool>,
@@ -247,7 +246,6 @@ impl Interpreter<'_> {
                             work.push(Work::List {
                                 ty,
                                 items: items.into_iter(),
-                                types: vec![],
                                 values: vec![],
                                 depth,
                                 pending: None,
@@ -265,7 +263,6 @@ impl Interpreter<'_> {
                 Work::List {
                     ty,
                     mut items,
-                    mut types,
                     mut values,
                     depth,
                     pending,
@@ -273,7 +270,6 @@ impl Interpreter<'_> {
                     if let Some(spread) = pending {
                         self.append_normal_list_item(
                             &ty,
-                            &mut types,
                             &mut values,
                             spread,
                             completed.take().unwrap(),
@@ -284,14 +280,13 @@ impl Interpreter<'_> {
                         work.push(Work::List {
                             ty,
                             items,
-                            types,
                             values,
                             depth,
                             pending: Some(spread),
                         });
                         work.push(Work::Enter(item, depth + 1));
                     } else {
-                        completed = Some(self.finish_normal_list(ty, types, values)?);
+                        completed = Some(self.finish_normal_list(ty, values)?);
                     }
                 }
                 Work::Tuple {

@@ -305,7 +305,6 @@ impl Interpreter<'_> {
                     }
                     Prepared::List {
                         ty: expected.clone(),
-                        types: vec![],
                         values: vec![],
                     }
                 }
@@ -350,8 +349,8 @@ impl Interpreter<'_> {
         source: SourceRange,
     ) -> Result<(), Error> {
         match container {
-            Prepared::List { ty, types, values } => {
-                self.append_normal_list_item(ty, types, values, spread, value, source)
+            Prepared::List { ty, values } => {
+                self.append_normal_list_item(ty, values, spread, value, source)
             }
             Prepared::Tuple { values, .. } => {
                 values.push(value);
@@ -366,7 +365,7 @@ impl Interpreter<'_> {
         source: SourceRange,
     ) -> Result<Value, Error> {
         match container {
-            Prepared::List { ty, types, values } => self.finish_normal_list(ty, types, values),
+            Prepared::List { ty, values } => self.finish_normal_list(ty, values),
             Prepared::Tuple { head, values } => self.finish_contextual_tuple(head, values, source),
             _ => Err(self.failure(ErrorKind::Type, Some(source))),
         }
@@ -519,7 +518,6 @@ pub(super) enum Prepared {
     Literal(Value),
     List {
         ty: Term,
-        types: Vec<Term>,
         values: Vec<Value>,
     },
     Tuple {
@@ -531,12 +529,8 @@ impl fmt::Display for Prepared {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let (kind, values) = match self {
             Self::Literal(value) => return write!(f, "(literal {value})"),
-            Self::List { ty, types, values } => {
-                write!(f, "(list (type {ty}) (types")?;
-                for ty in types {
-                    write!(f, " {ty}")?;
-                }
-                write!(f, ")")?;
+            Self::List { ty, values } => {
+                write!(f, "(list (type {ty})")?;
                 ("values", values)
             }
             Self::Tuple { head, values } => {

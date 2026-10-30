@@ -18,6 +18,12 @@ fn list_type() -> Term {
         arguments: vec![ty(P::Type)],
     }
 }
+fn ordinary_type_list(types: Vec<Term>) -> Value {
+    Value::List {
+        ty: list_type(),
+        values: types.into_iter().map(Value::Type).collect(),
+    }
+}
 fn tuple_type(elements: Vec<Term>) -> Term {
     Term::NormalForm {
         head: id(2),
@@ -220,7 +226,7 @@ fn homogeneous_value_lists_require_the_bound_head_and_validate_every_element() {
 #[test]
 fn collected_type_list_crosses_invocation_and_preserves_tuple_head() {
     let package = package();
-    let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     for elements in [
         vec![],
         vec![ty(P::U8)],
@@ -256,8 +262,8 @@ fn type_list_constant_nodes_validate_elements_domain_and_substitution() {
             ty: list_type(),
             kind: K::TypeListValue(types.clone()),
         };
-        let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
-        assert_eq!(vm.invoke(id(3), vec![]).unwrap(), Value::TypeList(types));
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        assert_eq!(vm.invoke(id(3), vec![]).unwrap(), ordinary_type_list(types));
     }
     for invalid in [
         Term::Bool(true),
@@ -267,7 +273,7 @@ fn type_list_constant_nodes_validate_elements_domain_and_substitution() {
         },
     ] {
         package.functions[0].body.kind = K::TypeListValue(vec![invalid]);
-        let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         assert!(vm.invoke(id(3), vec![]).is_err());
     }
     let mut constant = Expr {
@@ -284,14 +290,14 @@ fn type_list_constant_nodes_validate_elements_domain_and_substitution() {
     assert_eq!(constant.kind, K::TypeListValue(vec![ty(P::Bool)]));
     assert!(constant.to_string().contains("(type-list-value"));
     package.functions[0].body = constant;
-    let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     assert_eq!(
         vm.invoke(id(3), vec![]).unwrap(),
-        Value::TypeList(vec![ty(P::Bool)])
+        ordinary_type_list(vec![ty(P::Bool)])
     );
     package.functions[0].body.ty = ty(P::Type);
     assert!(
-        Interpreter::new(&package, Budget::default())
+        Interpreter::for_comptime(&package, Budget::default())
             .unwrap()
             .invoke(id(3), vec![])
             .is_err()
@@ -299,7 +305,7 @@ fn type_list_constant_nodes_validate_elements_domain_and_substitution() {
     package.functions[0].body.ty = list_type();
     package.normal_forms.clear();
     assert!(
-        Interpreter::new(&package, Budget::default())
+        Interpreter::for_comptime(&package, Budget::default())
             .unwrap()
             .invoke(id(3), vec![])
             .is_err()
@@ -1412,7 +1418,7 @@ fn list_append_failure_rolls_back_and_success_preserves_snapshots() {
         for general in [false, true] {
             let (package, list, pointer_ty) = list_append_package(element, general);
             let original = if element == P::Type {
-                Value::TypeList(vec![ty(P::Bool); 4])
+                ordinary_type_list(vec![ty(P::Bool); 4])
             } else {
                 Value::List {
                     ty: list.clone(),
@@ -1425,7 +1431,7 @@ fn list_append_failure_rolls_back_and_success_preserves_snapshots() {
                 Value::Bool(false)
             };
             let expected = if element == P::Type {
-                Value::TypeList(vec![
+                ordinary_type_list(vec![
                     ty(P::Bool),
                     ty(P::Bool),
                     ty(P::Bool),

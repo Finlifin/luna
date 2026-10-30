@@ -142,8 +142,9 @@ pub enum Value {
         declaration: DeclarationId,
         ty: Term,
     },
-    /// Immutable meta.List<Type>; distinct from a tuple of Type values.
-    /// Abstract elements require the same scope as individual Type descriptions.
+    /// Legacy compact input carrier retained during representation migration.
+    /// Evaluation and reflection produce ordinary List values, including Type
+    /// elements. Abstract inputs still require the Type description scope.
     TypeList(Vec<Term>),
     /// Immutable homogeneous comptime data with its original list type identity.
     List {
@@ -3641,74 +3642,49 @@ impl<'a> Interpreter<'a> {
     fn append_normal_list_item(
         &mut self,
         ty: &Term,
-        types: &mut Vec<Term>,
         values: &mut Vec<Value>,
         spread: bool,
         value: Value,
         source: SourceRange,
     ) -> Result<(), Error> {
-        let type_elements = self.is_type_list_input(ty);
         if spread {
             self.validate_immutable_input(&value, ty)?;
-            match value {
-                Value::TypeList(elements) if type_elements => {
+            let elements = match value {
+                Value::TypeList(elements) if self.is_type_list_input(ty) => {
                     self.integer_operation(Some(source), |budget| budget.consume(elements.len()))?;
-                    if types.len().saturating_add(elements.len()) > 100_000 {
-                        return Err(self.failure(ErrorKind::RepresentationSizeLimit, Some(source)));
-                    }
-                    types.extend(elements);
-                }
-                Value::List {
-                    ty,
-                    values: elements,
-                } if type_elements => {
-                    let elements = self.definition_type_elements(
-                        Value::List {
-                            ty,
-                            values: elements,
-                        },
-                        source,
-                    )?;
-                    if types.len().saturating_add(elements.len()) > 100_000 {
-                        return Err(self.failure(ErrorKind::RepresentationSizeLimit, Some(source)));
-                    }
-                    types.extend(elements);
+                    elements.into_iter().map(Value::Type).collect()
                 }
                 Value::List {
                     values: elements, ..
-                } if !type_elements => {
+                } => {
                     self.integer_operation(Some(source), |budget| budget.consume(elements.len()))?;
-                    if values.len().saturating_add(elements.len()) > 100_000 {
-                        return Err(self.failure(ErrorKind::RepresentationSizeLimit, Some(source)));
-                    }
-                    values.extend(elements);
+                    elements
                 }
                 _ => return Err(self.failure(ErrorKind::Type, Some(source))),
+            };
+            if values.len().saturating_add(elements.len()) > 100_000 {
+                return Err(self.failure(ErrorKind::RepresentationSizeLimit, Some(source)));
             }
-        } else if type_elements {
-            types.push(self.type_description_term(value, source)?);
+            values.extend(elements);
         } else {
+            // Normalize authorized opaque Type inputs before later operands run.
+            let value = if self.is_type_list_input(ty) {
+                Value::Type(self.type_description_term(value, source)?)
+            } else {
+                value
+            };
             values.push(value);
         }
-        if values.len().max(types.len()) > 100_000 {
+        if values.len() > 100_000 {
             return Err(self.failure(ErrorKind::RepresentationSizeLimit, Some(source)));
         }
         Ok(())
     }
 
-    fn finish_normal_list(
-        &mut self,
-        ty: Term,
-        types: Vec<Term>,
-        values: Vec<Value>,
-    ) -> Result<Value, Error> {
-        let value = if self.is_type_list_input(&ty) {
-            Value::TypeList(types)
-        } else {
-            Value::List {
-                ty: ty.clone(),
-                values,
-            }
+    fn finish_normal_list(&mut self, ty: Term, values: Vec<Value>) -> Result<Value, Error> {
+        let value = Value::List {
+            ty: ty.clone(),
+            values,
         };
         self.validate_immutable_input(&value, &ty)?;
         Ok(value)
@@ -3889,19 +3865,17 @@ impl<'a> Interpreter<'a> {
                     return Err(self.failure(ErrorKind::Type, Some(input.source())));
                 };
                 let mut values = Vec::new();
-                let mut types = Vec::new();
                 for item in items {
                     let value = value!(self.eval_normal_argument(item, literals, environment));
                     self.append_normal_list_item(
                         &ty,
-                        &mut types,
                         &mut values,
                         matches!(item, A::TypeListSpread(_)),
                         value,
                         item.source(),
                     )?;
                 }
-                self.finish_normal_list(ty, types, values).map(Flow::Value)
+                self.finish_normal_list(ty, values).map(Flow::Value)
             }
             A::Tuple { items, .. } => {
                 let mut values = Vec::new();
@@ -4042,7 +4016,10 @@ impl<'a> Interpreter<'a> {
                         .ok_or_else(|| self.failure(ErrorKind::Type, Some(expr.source)))?;
                     self.integer_operation(Some(expr.source), |budget| budget.consume(work))?;
                 }
-                let value = Value::TypeList(types.clone());
+                let value = Value::List {
+                    ty: expr.ty.clone(),
+                    values: types.iter().cloned().map(Value::Type).collect(),
+                };
                 self.validate_immutable_input(&value, &expr.ty)?;
                 value
             }

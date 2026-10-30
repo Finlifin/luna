@@ -406,10 +406,13 @@ fn source_struct_field_nodes_validate_domains_meter_work_and_recover() {
         } else {
             assert_eq!(
                 value,
-                Value::TypeList(vec![
-                    p(Primitive::Bool),
-                    Term::Pointer(Box::new(nominal(vec![p(Primitive::Bool)])))
-                ])
+                Value::List {
+                    ty,
+                    values: vec![
+                        Value::Type(p(Primitive::Bool)),
+                        Value::Type(Term::Pointer(Box::new(nominal(vec![p(Primitive::Bool)]))))
+                    ]
+                }
             );
         }
         let mut malformed = query.clone();

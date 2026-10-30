@@ -526,11 +526,24 @@ impl Checker<'_, '_> {
                             "type-list spread requires the bound meta.List<Type>",
                         ));
                     }
-                    let Value::TypeList(items) = value else {
-                        return Err(error(
-                            input.span,
-                            "type-list spread did not produce Type list data",
-                        ));
+                    let items = match value {
+                        Value::TypeList(items) => items,
+                        Value::List { ty, values } if ty == *domain => values
+                            .into_iter()
+                            .map(|value| match value {
+                                Value::Type(ty) => Ok(ty),
+                                _ => Err(error(
+                                    input.span,
+                                    "type-list collection requires Type values",
+                                )),
+                            })
+                            .collect::<Result<Vec<_>, _>>()?,
+                        _ => {
+                            return Err(error(
+                                input.span,
+                                "type-list spread did not produce Type list data",
+                            ));
+                        }
                     };
                     self.required_steps = self
                         .required_steps
@@ -553,7 +566,13 @@ impl Checker<'_, '_> {
                     elements.push(ty);
                 }
             }
-            return Ok((Value::TypeList(elements), domain.clone()));
+            return Ok((
+                Value::List {
+                    ty: domain.clone(),
+                    values: elements.into_iter().map(Value::Type).collect(),
+                },
+                domain.clone(),
+            ));
         }
         let Term::Tuple(expected) = self.structural_type(domain, span)? else {
             return Err(error(

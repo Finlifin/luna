@@ -39,26 +39,12 @@ impl Interpreter<'_> {
         values: Vec<Value>,
         source: SourceRange,
     ) -> Result<Value, Error> {
-        let element = self
-            .list_element(ty)
-            .cloned()
-            .or_else(|| {
-                self.is_type_list_input(ty)
-                    .then_some(Term::Primitive(Primitive::Type))
-            })
-            .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
-        let value = if element == Term::Primitive(Primitive::Type) {
-            Value::TypeList(
-                values
-                    .into_iter()
-                    .map(|value| self.type_description_term(value, source))
-                    .collect::<Result<_, _>>()?,
-            )
-        } else {
-            Value::List {
-                ty: ty.clone(),
-                values,
-            }
+        if self.list_element(ty).is_none() {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        }
+        let value = Value::List {
+            ty: ty.clone(),
+            values,
         };
         self.validate_immutable_input(&value, ty)?;
         Ok(value)

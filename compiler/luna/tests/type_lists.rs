@@ -367,7 +367,7 @@ fn type_list_literals_construct_empty_and_ordered_values() {
         assert!(package.to_string().contains("(type-list (elements"));
         assert_eq!(
             luna::invocation::invoke(&package, "make", 100_000).unwrap(),
-            Value::TypeList(types.into_iter().map(Term::Primitive).collect())
+            support::type_list_value(&package, types.into_iter().map(Term::Primitive).collect())
         );
     }
 }
@@ -392,7 +392,10 @@ fn type_list_elements_execute_once_and_stop_at_return() {
         let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         assert_eq!(
             vm.invoke(support::id(&package, entry), vec![]).unwrap(),
-            Value::TypeList(expected.into_iter().map(Term::Primitive).collect())
+            support::type_list_value(
+                &package,
+                expected.into_iter().map(Term::Primitive).collect()
+            )
         );
         assert_eq!(support::calls(&package, &vm), calls);
     }
@@ -477,6 +480,10 @@ fn type_lists_and_tuple_packets_keep_distinct_domains() {
         ("Tuple<>", "()", Value::Tuple(vec![])),
     ] {
         let package = compile_packet(&format!("comptime fn make()->{domain} {{{value}}}")).unwrap();
+        let expected = match expected {
+            Value::TypeList(types) => support::type_list_value(&package, types),
+            value => value,
+        };
         assert_eq!(
             luna::invocation::invoke(&package, "make", 100_000).unwrap(),
             expected
@@ -520,7 +527,10 @@ fn type_list_literals_keep_generic_elements_constants_and_indexing() {
             vec![Value::Type(Term::Primitive(P::U8))]
         )
         .unwrap(),
-        Value::TypeList(vec![Term::Primitive(P::U8), Term::Primitive(P::Bool)])
+        support::type_list_value(
+            &package,
+            vec![Term::Primitive(P::U8), Term::Primitive(P::Bool)]
+        )
     );
 }
 

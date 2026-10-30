@@ -43,11 +43,11 @@ fn list_construction_concat_and_length_execute_without_losing_snapshots() {
                 values,
                 vec![Value::Bool(true), Value::Bool(false), Value::Bool(true)]
             ),
-            ("types", Value::TypeList(types)) => assert_eq!(
+            ("types", Value::List { values: types, .. }) => assert_eq!(
                 types,
                 vec![
-                    Term::Primitive(Primitive::Bool),
-                    Term::Primitive(Primitive::Integer)
+                    Value::Type(Term::Primitive(Primitive::Bool)),
+                    Value::Type(Term::Primitive(Primitive::Integer))
                 ]
             ),
             ("snapshots", Value::List { values, .. }) => assert_eq!(
@@ -182,12 +182,22 @@ fn repeated_append_keeps_copies_and_callback_snapshots() {
         );
         assert_eq!(vm.bytecode_invocations() - before, 1);
     }
+    let Value::List { ty, values } = vm.invoke(support::id(&package, "types"), vec![]).unwrap()
+    else {
+        panic!("ordinary list")
+    };
     assert_eq!(
-        vm.invoke(support::id(&package, "types"), vec![]).unwrap(),
-        Value::TypeList(vec![
-            Term::Primitive(Primitive::Bool),
-            Term::Primitive(Primitive::Integer)
-        ])
+        values,
+        vec![
+            Value::Type(Term::Primitive(Primitive::Bool)),
+            Value::Type(Term::Primitive(Primitive::Integer))
+        ]
+    );
+    assert!(
+        package
+            .normal_forms
+            .iter()
+            .any(|head| head.list_element(&ty) == Some(&Term::Primitive(Primitive::Type)))
     );
 }
 

@@ -4987,3 +4987,49 @@ Checks from `/home/fin/luna`:
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_list_type_evidence --test comptime_list_operations --test comptime_bytecode_lists`:
   all three groups passed, `/tmp/luna-tools-l4icv3f8/result.json`, exit 0.
 - Formatting check and `git diff --check` passed.
+
+## Type-element list producers use ordinary values (2026-10-30)
+
+List literals, constant list nodes, normal-input collection, frozen list decoding,
+struct/enum field reflection and test-template collection now produce
+`Value::List { ty, values }` with ordinary Type elements. This preserves the
+registered List identity in every produced value. Normal-input collectors use
+one value buffer for all element domains, with the same Type authority checks
+and operand ordering; the prepared-container S-expression no longer has a
+separate Type-elements buffer.
+
+The three list benchmarks now feed ordinary lists, so future measurements follow
+the source execution representation. Their benchmark targets were checked; this
+change does not assert a measured speedup.
+
+Compatibility input handling for `Value::TypeList` remains, as does canonical
+`Term::TypeListValue` freezing. Removing that NIR encoding still requires migrating
+identity, substitution and tuple-layout consumers together. The VM's external
+compact-input compatibility is not used by the migrated source producers.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_lists --test comptime_bytecode_lists --test comptime_list_type_evidence --test library_protocols`:
+  all groups passed, `/tmp/luna-tools-og6xaejw/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --test type_list_inputs --test normal_values --test abstract_values --test type_list_index`:
+  all groups passed, `/tmp/luna-tools-80z06b7h/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test test_templates --test builder_invocations`:
+  81 template and 76 builder cases passed, `/tmp/luna-tools-46jh3kug/result.json`.
+- `python3 -B development/check.py --timeout 900 -- check -p comptime_interpretor --benches`:
+  passed, `/tmp/luna-tools-mnt2jxwl/result.json`.
+- After unifying collector buffers, `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --test type_list_inputs`:
+  passed, `/tmp/luna-tools-5egnxf9c/result.json`.
+
+The two historical comptime constant/decode tests now use `for_comptime` rather
+than the runtime migration entrypoint. Their complete-domain, wrong-element,
+substitution and tuple-identity assertions are retained. Output assertions check
+ordinary lists including their registered type; they do not equate list and
+tuple carriers or hide the representation change through Value equality.
+- Final collector integration also passes
+  `python3 -B development/check.py --timeout 900 -- run -p luna -- development/examples/sysroot-object-struct-builder.fl --sysroot library --test-native`:
+  one native test passed, `/tmp/luna-tools-qume3n8_/result.json`. This checks
+  reflection and generated runtime construction through the actual sysroot.
+- After the final collector change,
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test type_lists --test comptime_list_type_evidence --test test_templates`:
+  all groups passed, `/tmp/luna-tools-f9meyot6/result.json`.
+- Final formatting check and `git diff --check` passed.

@@ -1,7 +1,7 @@
 //! Shared source compilation and interpreter assertions for execution suites.
 #[path = "primitive_bindings.rs"]
 mod primitive_bindings;
-use comptime_interpretor::{Event, Interpreter};
+use comptime_interpretor::{Event, Interpreter, Value};
 use luna::cli::{Emit, Options};
 use luna::frontend::{self, Artifact};
 use nir::program::Package;
@@ -197,5 +197,22 @@ pub(crate) fn meta_fixture_protocols() -> elaboration::program::Protocols {
     elaboration::program::Protocols {
         builtin_implementation_packages: [0].into(),
         ..Default::default()
+    }
+}
+
+/// Build an expected ordinary list with the fixture's registered list identity.
+pub(crate) fn type_list_value(package: &Package, types: Vec<nir::Term>) -> Value {
+    let head = package
+        .normal_forms
+        .iter()
+        .find(|head| head.role == nir::normal_forms::Role::TypeList)
+        .expect("registered list head");
+    Value::List {
+        ty: nir::Term::NormalForm {
+            head: head.declaration,
+            sort: nir::Sort::Type,
+            arguments: vec![nir::Term::Primitive(nir::Primitive::Type)],
+        },
+        values: types.into_iter().map(Value::Type).collect(),
     }
 }

@@ -66,7 +66,14 @@ impl Interpreter<'_> {
                     .collect(),
             }
         } else {
-            Value::TypeList(reflected.fields.into_iter().map(|field| field.ty).collect())
+            Value::List {
+                ty: output.clone(),
+                values: reflected
+                    .fields
+                    .into_iter()
+                    .map(|field| Value::Type(field.ty))
+                    .collect(),
+            }
         };
         self.validate_immutable_input(&value, output)?;
         Ok(value)
