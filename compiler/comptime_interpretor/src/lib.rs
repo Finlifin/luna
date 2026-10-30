@@ -3291,9 +3291,7 @@ impl<'a> Interpreter<'a> {
             K::Unit | K::Local(_) | K::Function(_) | K::Break(_) | K::Continue(_) => {
                 self.eval_leaf(expr, environment)
             }
-            K::ComptimeValue(..) | K::TypeValue(..) | K::TypeListValue(..) => {
-                self.eval_type_value(expr, environment)
-            }
+            K::ComptimeValue(..) | K::TypeValue(..) => self.eval_type_value(expr, environment),
             K::NormalFormType { .. } => self.eval_normal_form_type(expr, environment),
             K::FunctionType { .. } | K::FunctionResultType { .. } => {
                 self.eval_type_constructor(expr, environment)
@@ -4053,23 +4051,6 @@ impl<'a> Interpreter<'a> {
                     )
                 })?;
                 self.normal_pattern_value(value, &expr.ty)?
-            }
-            K::TypeListValue(types) => {
-                if !self.is_type_list_input(&expr.ty) || types.len() > 100_000 {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                }
-                for ty in types {
-                    let work = self
-                        .type_description_work(ty)
-                        .ok_or_else(|| self.failure(ErrorKind::Type, Some(expr.source)))?;
-                    self.integer_operation(Some(expr.source), |budget| budget.consume(work))?;
-                }
-                let value = Value::List {
-                    ty: expr.ty.clone(),
-                    values: types.iter().cloned().map(Value::Type).collect(),
-                };
-                self.validate_immutable_input(&value, &expr.ty)?;
-                value
             }
             K::TypeValue(ty) => {
                 if expr.ty != Term::Primitive(Primitive::Type) {

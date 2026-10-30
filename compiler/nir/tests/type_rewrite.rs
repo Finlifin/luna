@@ -213,7 +213,11 @@ fn type_list_index_rewriting_reaches_both_operands_and_keeps_head_identity() {
             Box::new(Expr {
                 ty: list_type.clone(),
                 source: SourceRange { start: 11, end: 12 },
-                kind: K::TypeListValue(vec![nested]),
+                kind: K::ComptimeValue(Term::NominalValue {
+                    ty: Box::new(list_type.clone()),
+                    variant: None,
+                    fields: vec![nested],
+                }),
             }),
             Box::new(Expr {
                 ty: Term::Primitive(Primitive::Integer),
@@ -246,11 +250,15 @@ fn type_list_index_rewriting_reaches_both_operands_and_keeps_head_identity() {
     assert_eq!(list.ty, list_type);
     assert_eq!(
         list.kind,
-        K::TypeListValue(vec![Term::NormalForm {
-            head: tuple_head,
-            sort: Sort::Type,
-            arguments: vec![Term::TypeListValue(vec![Term::Primitive(Primitive::U8)])]
-        }])
+        K::ComptimeValue(Term::NominalValue {
+            ty: Box::new(list_type.clone()),
+            variant: None,
+            fields: vec![Term::NormalForm {
+                head: tuple_head,
+                sort: Sort::Type,
+                arguments: vec![Term::TypeListValue(vec![Term::Primitive(Primitive::U8)])]
+            }]
+        })
     );
     assert!(matches!(position.kind, K::Literal(_)));
     assert!(index.to_string().contains("(type-list-index (values"));

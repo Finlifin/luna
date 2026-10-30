@@ -41,7 +41,7 @@ impl Interpreter<'_> {
                     K::Local(_) | K::TypeValue(_) | K::ComptimeValue(_) | K::Literal(_)
                 )
             }),
-            K::TypeListValue(_) | K::ComptimeValue(_) => true,
+            K::ComptimeValue(_) => true,
             _ => false,
         };
         if !simple {
@@ -118,7 +118,7 @@ impl Interpreter<'_> {
                     K::Local(_) | K::TypeValue(_) | K::ComptimeValue(_) | K::Literal(_)
                 )
             }),
-            K::TypeListValue(_) | K::ComptimeValue(_) | K::Local(_) => true,
+            K::ComptimeValue(_) | K::Local(_) => true,
             _ => false,
         };
         if !simple {
@@ -202,7 +202,7 @@ impl Interpreter<'_> {
                     K::Local(_) | K::TypeValue(_) | K::ComptimeValue(_) | K::Literal(_)
                 )
             }),
-            K::TypeListValue(_) | K::ComptimeValue(_) | K::Local(_) => true,
+            K::ComptimeValue(_) | K::Local(_) => true,
             _ => false,
         };
         if !simple || !matches!(environment.get(&place.root)?, Value::List { .. }) {

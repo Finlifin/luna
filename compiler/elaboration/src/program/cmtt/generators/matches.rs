@@ -30,9 +30,9 @@ impl Checker<'_, '_> {
         let mut saved = BTreeMap::new();
         for (id, data) in &mut self.generator_data {
             if self.immutable.contains(id)
-                && data.as_ref().is_some_and(|value| {
-                    matches!(value.kind, K::TypeValue(_) | K::TypeListValue(_))
-                })
+                && data
+                    .as_ref()
+                    .is_some_and(|value| matches!(value.kind, K::TypeValue(_)))
             {
                 continue;
             }

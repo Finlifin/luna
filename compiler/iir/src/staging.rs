@@ -563,7 +563,6 @@ pub fn structural_boolean_dependencies_in(
             _ if total_float_operation(expr) => {}
             K::Literal(_)
             | K::TypeValue(_)
-            | K::TypeListValue(_)
             | K::Unit
             | K::Tuple(_)
             | K::AnonymousRecord { .. }
@@ -2953,24 +2952,6 @@ fn constant<'layout>(
                 fields: vec![constant(heads, value, fuel, depth + 1)?],
             }
         }
-        (K::TypeListValue(types), ty) => {
-            let mut admitted = false;
-            for head in heads {
-                charge(fuel, 1)?;
-                admitted |= head.is_type_list_instance(ty);
-            }
-            if !admitted || !nir::normal_forms::type_list_input_type(ty) {
-                return Err("staged type list requires trusted meta.List<Type> metadata".into());
-            }
-            for element in types {
-                crate::completed_type(element, &BTreeSet::new(), fuel)?;
-                if element.sort() != Sort::Type {
-                    return Err("staged type-list element is not Type".into());
-                }
-            }
-            nir::comptime_values::freeze_admitted_list(ty, types.clone(), fuel)
-                .map_err(|error| error.to_string())?
-        }
         (K::TypeValue(ty), Term::Primitive(Primitive::Type)) => {
             crate::completed_type(ty, &BTreeSet::new(), fuel)?;
             if ty.sort() != Sort::Type {
@@ -3389,7 +3370,11 @@ mod tests {
         let list = Expr {
             source: value.source,
             ty: heads[0].parameters[0].ty.clone(),
-            kind: K::TypeListValue(vec![Term::Primitive(Primitive::Bool)]),
+            kind: K::ComptimeValue(Term::NominalValue {
+                ty: Box::new(heads[0].parameters[0].ty.clone()),
+                variant: None,
+                fields: vec![Term::Primitive(Primitive::Bool)],
+            }),
         };
         assert_eq!(
             constant(&heads, &list, &mut 100, 0).unwrap(),
@@ -3414,20 +3399,24 @@ mod tests {
         assert!(constant(&heads, &ordinary, &mut 1, 0).is_err());
         let wrong_element = Expr {
             kind: K::TypeList(vec![expr(K::Literal(Literal::Bool(true)), Primitive::Bool)]),
-            ..ordinary
+            ..ordinary.clone()
         };
         assert!(constant(&heads, &wrong_element, &mut 100, 0).is_err());
         assert!(constant(&[], &list, &mut 100, 0).is_err());
         assert!(constant(&heads, &list, &mut 1, 0).is_err());
         let mut wrong = list.clone();
-        wrong.kind = K::TypeListValue(vec![Term::Bool(true)]);
+        wrong.kind = K::ComptimeValue(Term::NominalValue {
+            ty: Box::new(heads[0].parameters[0].ty.clone()),
+            variant: None,
+            fields: vec![Term::Bool(true)],
+        });
         assert!(constant(&heads, &wrong, &mut 100, 0).is_err());
         wrong = list.clone();
         wrong.ty = Term::Primitive(Primitive::Type);
         assert!(constant(&heads, &wrong, &mut 100, 0).is_err());
         assert_eq!(
             fold_value_with_layouts(&heads, &list, &mut 100).unwrap(),
-            list
+            ordinary
         );
     }
 

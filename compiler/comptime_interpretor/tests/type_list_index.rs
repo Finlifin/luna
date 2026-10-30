@@ -263,7 +263,11 @@ fn effectful_index_keeps_the_list_snapshot_from_before_index_evaluation() {
                 value: Box::new(Expr {
                     source,
                     ty: list_type(),
-                    kind: K::TypeListValue(vec![ty(P::U8)]),
+                    kind: K::ComptimeValue(Term::NominalValue {
+                        ty: Box::new(list_type()),
+                        variant: None,
+                        fields: vec![ty(P::U8)],
+                    }),
                 }),
             },
         }],

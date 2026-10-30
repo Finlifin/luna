@@ -609,8 +609,8 @@ impl Package {
                     return Err("IIR newtype conversion has no direct representation edge".into());
                 }
             }
-            K::TypeListValue(_) | K::TypeList(_) => {
-                let diverging = if let K::TypeList(fields) = &expr.kind {
+            K::TypeList(fields) => {
+                let diverging = {
                     for field in fields {
                         *fuel = fuel
                             .checked_sub(1)
@@ -625,8 +625,6 @@ impl Package {
                     fields
                         .iter()
                         .any(|field| field.ty == Term::Primitive(nir::Primitive::Never))
-                } else {
-                    false
                 };
                 if diverging {
                     if expr.ty != Term::Primitive(nir::Primitive::Never) {
@@ -646,17 +644,15 @@ impl Package {
                         "IIR type-list constant requires trusted meta.List<Type> metadata".into(),
                     );
                 }
-                if let K::TypeListValue(types) = &expr.kind {
-                    for ty in types {
-                        self.validate_type(ty, fuel)?;
-                        if ty.sort() != nir::Sort::Type {
-                            return Err("IIR type-list element is not Type".into());
-                        }
-                    }
-                }
             }
-            K::TypeValue(ty)
-            | K::BitAssign {
+            K::TypeValue(ty) => {
+                if expr.ty != Term::Primitive(nir::Primitive::Type) || ty.sort() != nir::Sort::Type
+                {
+                    return Err("IIR Type value requires a Type domain and type identity".into());
+                }
+                self.validate_type(ty, fuel)?;
+            }
+            K::BitAssign {
                 storage_type: ty, ..
             }
             | K::BitUpdate {

@@ -374,15 +374,6 @@ fn capture_value(
             }
             freeze_list(&expr.ty, fields, expr.source, fuel)?
         }
-        K::TypeListValue(types) => {
-            for ty in types {
-                bounded(ty, fuel)?;
-            }
-            if !crate::normal_forms::type_list_input_type(&expr.ty) {
-                return Err(Error::InvalidCall(expr.source));
-            }
-            freeze_list(&expr.ty, types.clone(), expr.source, fuel)?
-        }
         K::Unit => Term::Unit,
         K::Literal(Literal::Bool(value)) => Term::Bool(*value),
         K::Literal(Literal::Char(value)) => Term::Char(*value),

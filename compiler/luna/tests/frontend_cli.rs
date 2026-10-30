@@ -4445,7 +4445,8 @@ fn sysroot_language_items_bind_real_list_and_tuple_definitions_by_default() {
     let output = sandbox.run_with_sysroot(&["input.fl", "--emit", "nir"]);
     let dump = success(&output);
     assert!(dump.contains("normal-form"), "{dump}");
-    assert!(dump.contains("type-list-value"), "{dump}");
+    assert!(dump.contains("nominal-value"), "{dump}");
+    assert!(!dump.contains("type-list-value"), "{dump}");
     let original = fs::read_to_string(sandbox.path("input.fl")).unwrap();
     sandbox.write_exact("input.fl","use builtin.Add;
         struct Flag {value:bool}

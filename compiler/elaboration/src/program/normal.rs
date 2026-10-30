@@ -1446,16 +1446,6 @@ impl Checker<'_, '_> {
                     )?)),
                 })
             }
-            K::TypeListValue(types) if self.is_type_list_type(&expr.ty) => {
-                let mut values = Vec::new();
-                for ty in types {
-                    if ty.sort() != Sort::Type {
-                        return None;
-                    }
-                    values.push(clone_known_term(ty, budget)?);
-                }
-                freeze_known_list(&expr.ty, &p(P::Type), values, budget)
-            }
             K::TypeListIndex(values, index) => {
                 let element = self.list_element_type(&values.ty)?;
                 if *element != expr.ty {
@@ -2574,7 +2564,10 @@ mod tests {
         let source = SourceRange { start: 0, end: 0 };
         let expr = |kind| Expr {
             source,
-            ty: Term::Primitive(Primitive::Type),
+            ty: match &kind {
+                K::ComptimeValue(Term::NominalValue { ty, .. }) => ty.as_ref().clone(),
+                _ => Term::Primitive(Primitive::Type),
+            },
             kind,
         };
         let input = |items| A::List { source, items };
@@ -2582,13 +2575,20 @@ mod tests {
         let byte = Term::Primitive(Primitive::U8);
         let resolve = |e: &Expr, budget: &mut Budget| match &e.kind {
             K::TypeValue(ty) | K::ComptimeValue(ty) => super::clone_known_term(ty, budget),
-            K::TypeListValue(types) => Some(Term::TypeListValue(types.clone())),
             _ => None,
         };
         let valid = input(vec![
             A::Value(expr(K::TypeValue(flag.clone()))),
-            A::ListSpread(expr(K::TypeListValue(vec![byte.clone(), flag.clone()]))),
-            A::ListSpread(expr(K::TypeListValue(vec![]))),
+            A::ListSpread(expr(K::ComptimeValue(Term::NominalValue {
+                ty: Box::new(list.clone()),
+                variant: None,
+                fields: vec![byte.clone(), flag.clone()],
+            }))),
+            A::ListSpread(expr(K::ComptimeValue(Term::NominalValue {
+                ty: Box::new(list.clone()),
+                variant: None,
+                fields: vec![],
+            }))),
             A::ListSpread(expr(K::ComptimeValue(Term::NominalValue {
                 ty: Box::new(list.clone()),
                 variant: None,
@@ -2633,9 +2633,17 @@ mod tests {
             .is_some()
         );
         for invalid in [
-            A::Value(expr(K::TypeListValue(vec![]))),
+            A::Value(expr(K::ComptimeValue(Term::NominalValue {
+                ty: Box::new(list.clone()),
+                variant: None,
+                fields: vec![],
+            }))),
             A::ListSpread(expr(K::TypeValue(flag))),
-            A::ListSpread(expr(K::TypeListValue(vec![Term::Bool(true)]))),
+            A::ListSpread(expr(K::ComptimeValue(Term::NominalValue {
+                ty: Box::new(list.clone()),
+                variant: None,
+                fields: vec![Term::Bool(true)],
+            }))),
             A::ListSpread(expr(K::TypeValue(Term::Rigid {
                 declaration: nir::DeclarationId {
                     package: 1,

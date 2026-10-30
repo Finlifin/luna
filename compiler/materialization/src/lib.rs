@@ -3453,15 +3453,6 @@ impl Builder<'_> {
                 }
                 self.queue.push_back(Task::Type(ty.clone()));
             }
-            K::TypeListValue(types) => {
-                for ty in types {
-                    self.tick(depth + 1)?;
-                    if self.instances.is_some() {
-                        iir::completed_type(ty, &self.runtime_bindings, &mut self.fuel)?;
-                    }
-                    self.queue.push_back(Task::Type(ty.clone()));
-                }
-            }
             K::Literal(_)
             | K::Local(_)
             | K::OptionalAbsent

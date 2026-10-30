@@ -264,7 +264,11 @@ fn type_list_constant_nodes_validate_elements_domain_and_substitution() {
         package.functions[0].body = Expr {
             source,
             ty: list_type(),
-            kind: K::TypeListValue(types.clone()),
+            kind: K::ComptimeValue(Term::NominalValue {
+                ty: Box::new(list_type()),
+                variant: None,
+                fields: types.clone(),
+            }),
         };
         let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         assert_eq!(vm.invoke(id(3), vec![]).unwrap(), ordinary_type_list(types));
@@ -276,23 +280,42 @@ fn type_list_constant_nodes_validate_elements_domain_and_substitution() {
             sort: Sort::Type,
         },
     ] {
-        package.functions[0].body.kind = K::TypeListValue(vec![invalid]);
+        package.functions[0].body.kind = K::ComptimeValue(Term::NominalValue {
+            ty: Box::new(list_type()),
+            variant: None,
+            fields: vec![invalid],
+        });
         let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         assert!(vm.invoke(id(3), vec![]).is_err());
     }
     let mut constant = Expr {
         source,
         ty: list_type(),
-        kind: K::TypeListValue(vec![Term::Rigid {
-            declaration: id(99),
-            sort: Sort::Type,
-        }]),
+        kind: K::ComptimeValue(Term::NominalValue {
+            ty: Box::new(list_type()),
+            variant: None,
+            fields: vec![Term::Rigid {
+                declaration: id(99),
+                sort: Sort::Type,
+            }],
+        }),
     };
     constant
         .rewrite_types(&mut |t| t.instantiate_types(&[id(99)], &[ty(P::Bool)]))
         .unwrap();
-    assert_eq!(constant.kind, K::TypeListValue(vec![ty(P::Bool)]));
-    assert!(constant.to_string().contains("(type-list-value"));
+    assert_eq!(
+        constant.kind,
+        K::ComptimeValue(Term::NominalValue {
+            ty: Box::new(list_type()),
+            variant: None,
+            fields: vec![ty(P::Bool)]
+        })
+    );
+    assert!(
+        constant
+            .to_string()
+            .contains("(comptime-value (nominal-value")
+    );
     package.functions[0].body = constant;
     let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     assert_eq!(
@@ -300,12 +323,12 @@ fn type_list_constant_nodes_validate_elements_domain_and_substitution() {
         ordinary_type_list(vec![ty(P::Bool)])
     );
     package.functions[0].body.ty = ty(P::Type);
-    assert!(
-        Interpreter::for_comptime(&package, Budget::default())
-            .unwrap()
-            .invoke(id(3), vec![])
-            .is_err()
-    );
+    // A frozen data value mislabelled as Type fails phase admission before
+    // execution; the retired compact node delayed this check until invocation.
+    assert!(matches!(
+        Interpreter::for_comptime(&package, Budget::default()),
+        Err(failure) if failure.kind == comptime_interpretor::ErrorKind::PhaseMismatch
+    ));
     package.functions[0].body.ty = list_type();
     package.normal_forms.clear();
     assert!(
@@ -582,7 +605,11 @@ fn planned_input_type_rewrite_charges_unused_closure_body() {
             result: Some(Box::new(NormalFormArgument::Value(Expr {
                 source,
                 ty: list_type(),
-                kind: K::TypeListValue(vec![]),
+                kind: K::ComptimeValue(Term::NominalValue {
+                    ty: Box::new(list_type()),
+                    variant: None,
+                    fields: vec![],
+                }),
             }))),
         }],
     };
@@ -1054,7 +1081,11 @@ fn list_length_observes_replacement_and_runs_general_operand_effects() {
                     source,
                     ty: list.clone(),
                     kind: if element == P::Type {
-                        K::TypeListValue(vec![ty(P::Bool), ty(P::Char)])
+                        K::ComptimeValue(Term::NominalValue {
+                            ty: Box::new(list.clone()),
+                            variant: None,
+                            fields: vec![ty(P::Bool), ty(P::Char)],
+                        })
                     } else {
                         K::TypeList(vec![
                             Expr {

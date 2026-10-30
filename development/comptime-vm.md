@@ -7583,3 +7583,63 @@ The earlier frozen-aggregate frame attempt caused 17 CMTT regressions; the final
 901-test run includes those cases and resolves them. No full language suite or
 performance benchmark was run. General dynamic Type computations in symbolic
 nested frames remain subject to the existing completed-input requirement.
+
+### Retire the specialized completed Type-list expression
+
+`nir::program::ExprKind::TypeListValue` has been removed. Production elaboration
+already emits ordinary lists; frozen list data now has only the general
+`ComptimeValue(NominalValue { ty, variant: None, fields })` carrier, with the
+exact declared list domain retained. The reference interpreter, bytecode
+compiler, staging, substitution, copy budgeting, materialization and resource
+analysis no longer maintain a second leaf-node path for Type elements.
+
+IIR still rejects unmaterialized ComptimeValue nodes. Its tests use the ordinary
+post-materialization list constructor, whose children are TypeValue expressions.
+Every IIR TypeValue now checks both its Type domain and the Type sort of its
+payload, preserving rejection of data masquerading as a type without relying
+on the removed container-specific validation. Frozen-list staging tests compare
+against reconstructed ordinary expressions and keep metadata, bounds, budget,
+substitution and invalid-element coverage. Dump tests use the ordinary frozen
+carrier's existing S-expression Display.
+
+This removes an expression representation, not all legacy normal-form terms:
+`Term::TypeListValue` and its metadata/read compatibility paths remain for a
+separate migration. Normal-form heads are still opaque. No source language
+syntax or public library API changed.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p iir -p materialization -p comptime_compiler -p comptime_interpretor -p elaboration -p program_verification --no-fail-fast`:
+  1,581 passed, exit 0; `/tmp/luna-tools-v00k2ahr/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --test cmtt_type_inputs --test inline_control --test type_lists --test comptime_bytecode_lists --test builder_invocations --test reflected_definitions --test generated_definitions --test library_protocols --no-fail-fast`:
+  996 passed and two generated-definition fixture failures, exit 101;
+  `/tmp/luna-tools-lb_bp_zd/result.json`. Those fixtures omitted bool bindings
+  before invoking their definition callbacks; the independent fixture repair
+  is commit 0613d31a. Its rerun passed both tests, including native O0/O3
+  execution, at `/tmp/luna-tools-9626bpym/result.json`.
+
+Initial migration checks exposed stale dump expectations, an IIR fixture using
+unmaterialized frozen data, and an invalid-domain case now rejected during VM
+preparation instead of invocation. The final checks preserve the rejection
+requirements and exercise the correct stage; no admission checks were relaxed.
+
+The CLI sysroot integration test was attempted with
+`python3 -B development/check.py --timeout 900 -- test -p luna --test frontend_cli sysroot_language_items_bind_real_list_and_tuple_definitions_by_default`.
+It hit the harness's fixed 15-second child-process deadline before its dump
+assertions (exit 101; `/tmp/luna-tools-gzzbq7b4/result.json`). This is not counted
+as a pass; the deadline was not relaxed. Real sysroot native library acceptance
+uses the existing longer-deadline runner instead.
+
+Final targeted evidence:
+
+- `python3 -B development/library_check.py --stage sysroot-meta --stage sysroot-builders --stage sysroot-enum-builder --timeout 300`:
+  exit 0; all three stages matched expected output (10 native tests total),
+  `/tmp/luna-library-997kk07q/summary.json`.
+- After correcting the known-input fixture's expression domain,
+  `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib known_type_list_collection_preserves_order_and_stops_at_unknowns`:
+  one passed, exit 0; `/tmp/luna-tools-ogs89daf/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-8a7sz8_3/result.json`. `git diff --check` passed.
+
+No full workspace/source-language suite was run. Unrelated working changes,
+including the existing resource-effects implementation, were not staged.

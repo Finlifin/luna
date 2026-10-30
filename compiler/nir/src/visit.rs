@@ -550,7 +550,6 @@ fn walk_roots<'a>(
                     K::AssociatedValue { .. }
                     | K::ComptimeValue(_)
                     | K::TypeValue(_)
-                    | K::TypeListValue(_)
                     | K::Literal(_)
                     | K::Local(_)
                     | K::OptionalAbsent
@@ -960,7 +959,6 @@ fn walk_mut(
                     K::AssociatedValue { .. }
                     | K::ComptimeValue(_)
                     | K::TypeValue(_)
-                    | K::TypeListValue(_)
                     | K::Literal(_)
                     | K::Local(_)
                     | K::OptionalAbsent

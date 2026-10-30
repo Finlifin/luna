@@ -366,15 +366,6 @@ fn value_in<'a, 'd>(
         // Specialization supplies its domain-checked concrete representation.
         K::ComptimeValue(t) => crate::comptime_values::validate_in(t, &value.ty, target, fuel)
             .map_err(|error| error.message()),
-        K::TypeListValue(types) => {
-            for element in types {
-                ty(element, fuel)?;
-                if element.sort() != crate::Sort::Type {
-                    return Err("completed type-list element is not Type");
-                }
-            }
-            Ok(())
-        }
         K::FunctionInstance { arguments, .. } => {
             for t in arguments {
                 ty(t, fuel)?;

@@ -3155,15 +3155,6 @@ impl Checker<'_, '_> {
                         .map_err(|e| error(span, e.to_string()))?
                         .is_empty();
                 }
-                K::TypeListValue(types) => {
-                    for ty in types {
-                        deferred |= type_bindings.iter().any(|id| ty.mentions_rigid(*id));
-                        deferred |= !ty
-                            .substitution_parameters()
-                            .map_err(|e| error(span, e.to_string()))?
-                            .is_empty();
-                    }
-                }
                 K::NormalFormType {
                     arguments, plan, ..
                 } => {

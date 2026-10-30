@@ -282,7 +282,7 @@ impl Checker<'_, '_> {
             // substituted into the selected body. Emitting an additional let
             // would incorrectly require runtime storage for these domains.
             // Keep aggregate/pointer reconstruction and resource storage intact.
-            if matches!(value.kind, K::TypeValue(_) | K::TypeListValue(_))
+            if matches!(value.kind, K::TypeValue(_))
                 || (matches!(value.kind, K::Literal(_))
                     && matches!(value.ty, Term::Primitive(P::Integer | P::Float)))
             {

@@ -2496,7 +2496,6 @@ fn compile_root<'a>(
                     K::Literal(_)
                     | K::TypeValue(_)
                     | K::ComptimeValue(_)
-                    | K::TypeListValue(_)
                     | K::Function(_)
                     | K::FunctionInstance { .. }
                     | K::TraitMethod { .. } => {

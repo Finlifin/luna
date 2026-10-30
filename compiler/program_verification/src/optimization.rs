@@ -422,7 +422,6 @@ fn visit(
         K::AssociatedValue { .. }
         | K::ComptimeValue(_)
         | K::TypeValue(_)
-        | K::TypeListValue(_)
         | K::TraitMethod { .. }
         | K::FunctionInstance { .. }
         | K::Literal(_)

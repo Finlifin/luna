@@ -1684,7 +1684,6 @@ pub fn machine_arithmetic_functions(
                             .map_err(|error| fail(expr.source, error.message()))?;
                         }
                         K::TypeValue(_)
-                        | K::TypeListValue(_)
                         | K::Literal(_)
                         | K::Local(_)
                         | K::OptionalAbsent

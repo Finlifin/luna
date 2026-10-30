@@ -3256,7 +3256,6 @@ impl Walker<'_> {
             | K::Unit
             | K::ComptimeValue(_)
             | K::TypeValue(_)
-            | K::TypeListValue(_)
             | K::Function(_)
             | K::FunctionInstance { .. }
             | K::TraitMethod { .. } => self.binding_expression(expr, state, depth)?,
@@ -4848,8 +4847,7 @@ impl Walker<'_> {
             | K::FunctionInstance { .. }
             | K::TraitMethod { .. }
             | K::ComptimeValue(_)
-            | K::TypeValue(_)
-            | K::TypeListValue(_) => {}
+            | K::TypeValue(_) => {}
             _ => unreachable!(),
         }
         Ok(result)
@@ -5500,7 +5498,6 @@ impl Walker<'_> {
             | K::Unit
             | K::ComptimeValue(_)
             | K::TypeValue(_)
-            | K::TypeListValue(_)
             | K::Function(_)
             | K::FunctionInstance { .. }
             | K::TraitMethod { .. }

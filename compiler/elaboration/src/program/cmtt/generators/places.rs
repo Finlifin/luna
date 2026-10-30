@@ -469,7 +469,7 @@ impl Checker<'_, '_> {
             for (id, stored) in &previous {
                 if self.immutable.contains(id)
                     && let Some(stored) = stored
-                    && matches!(stored.kind, K::TypeValue(_) | K::TypeListValue(_))
+                    && matches!(stored.kind, K::TypeValue(_))
                 {
                     constants::charge_copy(stored, &mut self.required_steps, value.span)?;
                     self.generator_data.insert(*id, Some(stored.clone()));

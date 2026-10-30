@@ -53,8 +53,8 @@ pub(super) fn fold(
     }
 }
 
-// Read completed data through its declared domain. Legacy compact Type syntax
-// is decoded once at this boundary; all operations use ordinary expressions.
+// Read completed data through its declared domain. Frozen values are decoded
+// by the caller; all operations use ordinary expressions.
 pub(super) fn elements(
     heads: Layouts<'_>,
     value: Expr,
@@ -64,17 +64,6 @@ pub(super) fn elements(
     constant(heads, &value, fuel, depth)?;
     match value.kind {
         K::TypeList(fields) => Ok(fields),
-        K::TypeListValue(types) => {
-            charge(fuel, types.len())?;
-            Ok(types
-                .into_iter()
-                .map(|ty| Expr {
-                    source: value.source,
-                    ty: Term::Primitive(Primitive::Type),
-                    kind: K::TypeValue(ty),
-                })
-                .collect())
-        }
         _ => Err("staged list operation requires completed list data".into()),
     }
 }

@@ -1087,8 +1087,6 @@ pub enum ExprKind {
         selector: Box<Expr>,
         entries: Vec<(String, u64, Option<Term>)>,
     },
-    /// Completed immutable meta.List<Type> data, distinct from Type and tuple data.
-    TypeListValue(Vec<Term>),
     /// Ordered comptime construction of immutable meta.List<T> data.
     /// The expression type carries the trusted head and homogeneous element domain.
     TypeList(Vec<Expr>),
@@ -3380,13 +3378,6 @@ impl fmt::Display for ExprKind {
                 }
                 f.write_str("))")
             }
-            Self::TypeListValue(types) => {
-                f.write_str("(type-list-value")?;
-                for ty in types {
-                    write!(f, " {ty}")?;
-                }
-                f.write_str(")")
-            }
             Self::TypeList(elements) => {
                 f.write_str("(type-list (elements")?;
                 for element in elements {
@@ -4230,11 +4221,6 @@ impl Expr {
                     && value.sort() == crate::Sort::Type
                 {
                     self.kind = ExprKind::TypeValue(value.clone());
-                }
-            }
-            ExprKind::TypeListValue(types) => {
-                for ty in types {
-                    *ty = rewriter.ty(ty)?;
                 }
             }
 

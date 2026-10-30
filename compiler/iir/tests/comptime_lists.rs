@@ -168,13 +168,17 @@ fn mixed_completed_list_encodings_share_nested_operations_and_domain_checks() {
         type_domain.clone(),
         vec![expr(type_domain.clone(), K::TypeValue(bool_type.clone()))],
     );
-    let legacy = Expr {
-        kind: K::TypeListValue(vec![char_type.clone()]),
+    let frozen = Expr {
+        kind: K::ComptimeValue(Term::NominalValue {
+            ty: Box::new(ordinary.ty.clone()),
+            variant: None,
+            fields: vec![char_type.clone()],
+        }),
         ..ordinary.clone()
     };
     for (left, right, expected) in [
-        (ordinary.clone(), legacy.clone(), char_type.clone()),
-        (legacy.clone(), ordinary.clone(), bool_type.clone()),
+        (ordinary.clone(), frozen.clone(), char_type.clone()),
+        (frozen.clone(), ordinary.clone(), bool_type.clone()),
     ] {
         let joined = expr(
             ordinary.ty.clone(),
@@ -203,7 +207,7 @@ fn mixed_completed_list_encodings_share_nested_operations_and_domain_checks() {
     let empty = list(type_domain.clone(), vec![]);
     let joined = expr(
         ordinary.ty.clone(),
-        K::ListConcat(Box::new(empty), Box::new(legacy.clone())),
+        K::ListConcat(Box::new(empty), Box::new(frozen.clone())),
     );
     let selected = index(joined, type_domain.clone(), "0");
     assert_eq!(
@@ -213,8 +217,8 @@ fn mixed_completed_list_encodings_share_nested_operations_and_domain_checks() {
         K::TypeValue(char_type)
     );
     for bad in [
-        index(legacy.clone(), bool_type.clone(), "0"),
-        index(legacy.clone(), type_domain.clone(), "1"),
+        index(frozen.clone(), bool_type.clone(), "0"),
+        index(frozen.clone(), type_domain.clone(), "1"),
         expr(
             ordinary.ty.clone(),
             K::ListConcat(
@@ -224,8 +228,12 @@ fn mixed_completed_list_encodings_share_nested_operations_and_domain_checks() {
         ),
         index(
             Expr {
-                kind: K::TypeListValue(vec![Term::Bool(true)]),
-                ..legacy
+                kind: K::ComptimeValue(Term::NominalValue {
+                    ty: Box::new(ordinary.ty.clone()),
+                    variant: None,
+                    fields: vec![Term::Bool(true)],
+                }),
+                ..frozen
             },
             type_domain.clone(),
             "0",

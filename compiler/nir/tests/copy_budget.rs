@@ -527,14 +527,25 @@ fn input_dependency_scan_covers_hidden_types_and_shared_bodies() {
             plan: None,
             arguments: vec![nir::program::NormalFormArgument::Value(hidden)],
         }),
-        expr(K::TypeListValue(vec![Term::NormalForm {
-            head: DeclarationId {
-                package: 1,
-                local: 9,
-            },
-            sort: nir::Sort::Type,
-            arguments: vec![bound],
-        }])),
+        expr(K::ComptimeValue(Term::NominalValue {
+            ty: Box::new(Term::NormalForm {
+                head: DeclarationId {
+                    package: 1,
+                    local: 88,
+                },
+                sort: nir::Sort::Type,
+                arguments: vec![Term::Primitive(nir::Primitive::Type)],
+            }),
+            variant: None,
+            fields: vec![Term::NormalForm {
+                head: DeclarationId {
+                    package: 1,
+                    local: 9,
+                },
+                sort: nir::Sort::Type,
+                arguments: vec![bound],
+            }],
+        })),
     ];
     for case in cases {
         let before = case.to_string();

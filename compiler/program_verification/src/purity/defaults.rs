@@ -260,7 +260,6 @@ pub fn stable_default(expr: &n::Expr) -> bool {
         | K::Call { .. }
         | K::Field { .. }
         | K::TypeValue(_)
-        | K::TypeListValue(_)
         | K::NormalFormType { .. }
         | K::BitVecType(_)
         | K::TypeEqual(..)

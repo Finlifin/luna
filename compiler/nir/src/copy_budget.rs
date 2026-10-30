@@ -419,11 +419,6 @@ fn charge_node_observed(
                         work.extend(fields.iter().map(|field| (Node::Expr(field), depth + 1)));
                         0
                     }
-                    K::TypeListValue(types) => {
-                        charge_width(steps, types.len())?;
-                        work.extend(types.iter().map(|ty| (Node::Type(ty), depth + 1)));
-                        0
-                    }
                     K::CheckTypeAlias {
                         arguments,
                         body,

@@ -64,7 +64,7 @@ pub(crate) fn inert_suffix(expr: &Expr, fuel: &mut usize) -> Result<bool, Error>
                 )
             })
         }
-        K::TypeListValue(_) | K::ComptimeValue(_) | K::Local(_) => true,
+        K::ComptimeValue(_) | K::Local(_) => true,
         _ => false,
     })
 }

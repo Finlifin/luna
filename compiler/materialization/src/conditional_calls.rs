@@ -10,7 +10,6 @@ fn inert_input(expression: &n::Expr, fuel: &mut usize) -> Result<bool, String> {
         inert &= matches!(
             node.kind,
             K::TypeValue(_)
-                | K::TypeListValue(_)
                 | K::Literal(_)
                 | K::Unit
                 | K::Tuple(_)
@@ -18,7 +17,6 @@ fn inert_input(expression: &n::Expr, fuel: &mut usize) -> Result<bool, String> {
                 | K::Record { .. }
                 | K::Variant { .. }
                 | K::NewtypeConvert(_)
-                | K::TypeListValue(_)
                 | K::Function(_)
                 | K::FunctionInstance { .. }
         );

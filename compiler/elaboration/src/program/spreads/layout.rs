@@ -898,15 +898,6 @@ fn completed_list_constructor_width(
                 .all(|field| field.ty == *element)
                 .then_some(fields.len()))
         }
-        K::TypeListValue(fields) if *element == p(P::Type) => {
-            *fuel = fuel
-                .checked_sub(fields.len())
-                .ok_or("spread list width budget exhausted")?;
-            Ok(fields
-                .iter()
-                .all(|field| field.sort() == Sort::Type)
-                .then_some(fields.len()))
-        }
         K::ComptimeValue(Term::NominalValue {
             ty,
             variant: None,
@@ -968,8 +959,7 @@ mod list_width_tests {
                 fields: vec![p(P::Bool)],
             }),
         );
-        let compact = expr(domain.clone(), K::TypeListValue(vec![p(P::Bool)]));
-        for value in [&ordinary, &frozen, &compact] {
+        for value in [&ordinary, &frozen] {
             assert_eq!(
                 completed_list_constructor_width(value, &p(P::Type), &mut 100),
                 Ok(Some(1))

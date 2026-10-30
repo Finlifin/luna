@@ -343,7 +343,6 @@ fn scan<'a>(
                 | K::TraitMethod { .. }
                 | K::ComptimeValue(_)
                 | K::TypeValue(_)
-                | K::TypeListValue(_)
                 | K::Break(_)
                 | K::Continue(_) => (),
                 K::RequirePredicate(condition)

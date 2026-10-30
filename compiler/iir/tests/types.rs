@@ -259,6 +259,18 @@ fn type_list_constants_validate_embedded_types_and_domain_authority() {
     use nir::program::{Expr, ExprKind as K, Function, FunctionPhase, LocalId, SourceRange};
     let id = |local| DeclarationId { package: 51, local };
     let primitive = |p| Term::Primitive(p);
+    let completed_list = |fields: Vec<Term>| {
+        K::TypeList(
+            fields
+                .into_iter()
+                .map(|ty| Expr {
+                    source: SourceRange { start: 0, end: 1 },
+                    ty: Term::Primitive(Primitive::Type),
+                    kind: K::TypeValue(ty),
+                })
+                .collect(),
+        )
+    };
     let list = Term::NormalForm {
         head: id(1),
         sort: Sort::Type,
@@ -312,7 +324,7 @@ fn type_list_constants_validate_embedded_types_and_domain_authority() {
                 body: Expr {
                     source: SourceRange { start: 0, end: 1 },
                     ty: list.clone(),
-                    kind: K::TypeListValue(vec![]),
+                    kind: completed_list(vec![]),
                 },
                 parameters: vec![],
                 defaults: vec![],
@@ -337,7 +349,7 @@ fn type_list_constants_validate_embedded_types_and_domain_authority() {
             arguments: vec![Term::TypeListValue(vec![primitive(Primitive::U8)])],
         },
     ] {
-        package.functions[0].function.body.kind = K::TypeListValue(vec![element]);
+        package.functions[0].function.body.kind = completed_list(vec![element]);
         package.validate(&mut 10_000).unwrap();
     }
     for element in [
@@ -352,10 +364,10 @@ fn type_list_constants_validate_embedded_types_and_domain_authority() {
             arguments: vec![],
         },
     ] {
-        package.functions[0].function.body.kind = K::TypeListValue(vec![element]);
+        package.functions[0].function.body.kind = completed_list(vec![element]);
         assert!(package.validate(&mut 10_000).is_err());
     }
-    package.functions[0].function.body.kind = K::TypeListValue(vec![primitive(Primitive::Bool)]);
+    package.functions[0].function.body.kind = completed_list(vec![primitive(Primitive::Bool)]);
     assert!(package.validate(&mut 0).is_err());
     package.validate(&mut 10_000).unwrap();
     package.functions[0].function.body.ty = primitive(Primitive::Type);
@@ -553,7 +565,7 @@ fn type_list_constants_validate_embedded_types_and_domain_authority() {
     let K::Block { statements, .. } = &mut predicate.kind else {
         unreachable!()
     };
-    statements[0].kind = K::TypeListValue(vec![Term::Rigid {
+    statements[0].kind = completed_list(vec![Term::Rigid {
         declaration: id(99),
         sort: Sort::Type,
     }]);

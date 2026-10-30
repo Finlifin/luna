@@ -2811,7 +2811,6 @@ pub(super) fn references(
                 }
                 K::ComptimeValue(_)
                 | K::TypeValue(_)
-                | K::TypeListValue(_)
                 | K::Literal(_)
                 | K::Local(_)
                 | K::OptionalAbsent
