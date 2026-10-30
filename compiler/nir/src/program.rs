@@ -2655,8 +2655,12 @@ impl Enum {
         arguments: &[Term],
         frames: &[Vec<crate::Sort>],
     ) -> Result<Vec<Variant>, crate::TypeError> {
-        let parameters = self.parameter_binders()?;
-        Term::Tuple(Vec::new()).instantiate_parameters_in_scope(&parameters, arguments, frames)?;
+        let substitution = crate::DeclarationSubstitution::new(
+            &self.type_parameters,
+            &self.parameter_types,
+            arguments,
+            frames,
+        )?;
         self.variants
             .iter()
             .map(|variant| {
@@ -2666,9 +2670,7 @@ impl Enum {
                     fields: variant
                         .fields
                         .iter()
-                        .map(|ty| {
-                            ty.instantiate_parameters_in_scope(&parameters, arguments, frames)
-                        })
+                        .map(|ty| substitution.instantiate(ty))
                         .collect::<Result<_, _>>()?,
                 })
             })
@@ -2775,16 +2777,15 @@ impl Struct {
         arguments: &[Term],
         frames: &[Vec<crate::Sort>],
     ) -> Result<Vec<(String, Term)>, crate::TypeError> {
-        let parameters = self.parameter_binders()?;
-        Term::Tuple(Vec::new()).instantiate_parameters_in_scope(&parameters, arguments, frames)?;
+        let substitution = crate::DeclarationSubstitution::new(
+            &self.type_parameters,
+            &self.parameter_types,
+            arguments,
+            frames,
+        )?;
         self.fields
             .iter()
-            .map(|(name, ty)| {
-                Ok((
-                    name.clone(),
-                    ty.instantiate_parameters_in_scope(&parameters, arguments, frames)?,
-                ))
-            })
+            .map(|(name, ty)| Ok((name.clone(), substitution.instantiate(ty)?)))
             .collect()
     }
 }
@@ -3645,6 +3646,22 @@ impl Expr {
         value.rewrite_types(&mut |ty| {
             ty.instantiate_parameters_in_scope(parameters, arguments, frames)
         })?;
+        Ok(value)
+    }
+
+    /// Specialize a declaration-owned template using completed parameter
+    /// domains. Full value/formation admission belongs to the caller.
+    pub fn instantiate_declaration_parameters_in_scope(
+        &self,
+        parameters: &[DeclarationId],
+        domains: &[Term],
+        arguments: &[Term],
+        frames: &[Vec<crate::Sort>],
+    ) -> Result<Self, crate::TypeError> {
+        let substitution =
+            crate::DeclarationSubstitution::new(parameters, domains, arguments, frames)?;
+        let mut value = self.clone();
+        value.rewrite_types(&mut |ty| substitution.instantiate(ty))?;
         Ok(value)
     }
 

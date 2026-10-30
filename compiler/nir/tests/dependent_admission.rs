@@ -136,3 +136,79 @@ fn actual_domains_reject_mismatches_and_exhaustion_is_not_rejection() {
         .is_err()
     );
 }
+
+#[test]
+fn structural_substitution_checks_completed_sorts_and_preserves_caller_scope() {
+    let ids = [id(1), id(2)];
+    let domains = [p(Primitive::Type), rigid(1, Sort::Type)];
+    let frames = [vec![Sort::Type]];
+    let arguments = [
+        p(Primitive::Type),
+        Term::Bound {
+            depth: 0,
+            index: 0,
+            sort: Sort::Type,
+        },
+    ];
+    let substitution =
+        nir::DeclarationSubstitution::bounded(&ids, &domains, &arguments, &frames, &mut 10000)
+            .unwrap();
+    let body = Term::NormalForm {
+        head: id(3),
+        sort: Sort::Type,
+        arguments: vec![rigid(2, Sort::ComptimeValue)],
+    };
+    assert_eq!(
+        substitution.instantiate_bounded(&body, &mut 10000).unwrap(),
+        Term::NormalForm {
+            head: id(3),
+            sort: Sort::Type,
+            arguments: vec![arguments[1].clone()]
+        }
+    );
+    let nested = Term::Function {
+        parameters: vec![nir::Parameter {
+            sort: Sort::Type,
+            ty: p(Primitive::Type),
+        }],
+        result: Box::new(body.clone()),
+    };
+    let expected_nested = Term::Function {
+        parameters: vec![nir::Parameter {
+            sort: Sort::Type,
+            ty: p(Primitive::Type),
+        }],
+        result: Box::new(Term::NormalForm {
+            head: id(3),
+            sort: Sort::Type,
+            arguments: vec![Term::Bound {
+                depth: 1,
+                index: 0,
+                sort: Sort::Type,
+            }],
+        }),
+    };
+    assert_eq!(substitution.instantiate(&nested).unwrap(), expected_nested);
+    assert!(substitution.to_string().contains("(frames (frame type))"));
+    assert!(nir::DeclarationSubstitution::new(&ids, &domains, &arguments, &[]).is_err());
+    assert!(
+        nir::DeclarationSubstitution::bounded(&ids, &domains, &arguments, &frames, &mut 0).is_err()
+    );
+    for arguments in [
+        [p(Primitive::Type), Term::Bool(true)],
+        [p(Primitive::Bool), p(Primitive::Bool)],
+    ] {
+        assert!(nir::DeclarationSubstitution::new(&ids, &domains, &arguments, &[]).is_err());
+    }
+    // An opaque domain does not become Type by looking at the supplied value.
+    let opaque = [p(Primitive::Type), body];
+    assert!(
+        nir::DeclarationSubstitution::new(
+            &ids,
+            &opaque,
+            &[p(Primitive::Type), p(Primitive::Bool)],
+            &[]
+        )
+        .is_err()
+    );
+}

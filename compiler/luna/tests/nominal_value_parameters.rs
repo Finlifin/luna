@@ -6069,3 +6069,62 @@ fn checked_execution_runs_drop_for_nominal_value_indices() {
         }
     }
 }
+
+#[test]
+fn type_valued_dependent_indices_support_construction_and_field_access() {
+    for body in [
+        "let key=Key<Type,bool>{payload:true}; key.payload",
+        "let key=Key<Type,bool>{}; key.payload",
+        "let outer=Outer<Type,bool>{inner:Key<Type,bool>{}}; outer.inner.payload",
+        "var key=Key<Type,bool>{payload:false}; key.payload=true; key.payload",
+        "var key=Key<Type,bool>{payload:false}; let pointer=key.ref; pointer.*.payload=true; pointer.*.payload",
+    ] {
+        let source = format!(
+            "typealias Type=.Type'builtin;
+            struct Key where T,value:T {{ payload:bool=true }}
+            struct Outer where T,value:T {{ inner:Key<T,value> }}
+            fn run()->bool {{ {body} }}"
+        );
+        assert_eq!(
+            support::run_iir(&source, "run", vec![]),
+            Value::Bool(true),
+            "{body}"
+        );
+    }
+}
+
+#[test]
+fn dependent_layouts_do_not_admit_type_values_in_non_type_domains() {
+    for inputs in ["bool,bool", "Type,true"] {
+        let source = format!(
+            "typealias Type=.Type'builtin;
+            struct Key where T,value:T {{ payload:bool }}
+            fn run()->bool {{ let key=Key<{inputs}>{{payload:true}}; key.payload }}"
+        );
+        assert!(
+            support::compile_with_protocols(&source, &Default::default()).is_err(),
+            "{inputs}"
+        );
+    }
+}
+
+#[test]
+fn type_valued_dependent_indices_support_enum_payloads_and_newtype_conversion() {
+    let source = "typealias Type=.Type'builtin;
+        enum Choice where T,value:T {none,some(bool)}
+        newtype Wrapped<T,value:T> = bool;
+        fn run()->bool {
+            let item:Choice<Type,bool> = .some(true);
+            let result = item match {.none=>false,.some(value)=>value};
+            result.as(Wrapped<Type,bool>).as(bool)
+        }";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn type_valued_dependent_indices_support_named_enum_defaults() {
+    let source = "typealias Type=.Type'builtin;
+        enum Packet where T,value:T {data {flag:bool=true}}
+        fn run()->bool {let packet:Packet<Type,bool> = .data {}; let .data {flag}=packet; flag}";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+}

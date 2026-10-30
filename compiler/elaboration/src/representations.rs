@@ -152,42 +152,67 @@ impl<'a> Checker<'a> {
                     ));
                 }
                 if let Some(def) = self.structs.get(declaration) {
-                    let parameters = def.parameter_binders().map_err(|_| {
-                        Failure::invalid("invalid struct representation parameters")
+                    let substitution = nir::DeclarationSubstitution::bounded(
+                        &def.type_parameters,
+                        &def.parameter_types,
+                        arguments,
+                        &[],
+                        fuel,
+                    )
+                    .map_err(|failure| match failure {
+                        nir::type_computations::Error::Scope(_) => {
+                            Failure::invalid("invalid struct type arguments in representation")
+                        }
+                        _ => BUDGET,
                     })?;
-                    for (_, field) in &def.fields {
-                        nir::copy_budget::charge_type_substitution(
-                            field,
-                            &parameters,
-                            arguments,
-                            fuel,
-                        )
-                        .map_err(|_| BUDGET)?;
-                    }
-                    let fields = def.instantiate_fields(arguments).map_err(|_| {
-                        Failure::invalid("invalid struct type arguments in representation")
-                    })?;
-                    for (_, field) in fields {
+                    let fields = def
+                        .fields
+                        .iter()
+                        .map(|(_, field)| {
+                            substitution
+                                .instantiate_bounded(field, fuel)
+                                .map_err(|failure| match failure {
+                                    nir::type_computations::Error::Scope(_) => {
+                                        Failure::invalid("invalid struct field in representation")
+                                    }
+                                    _ => BUDGET,
+                                })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    for field in fields {
                         self.visit(&field, active, fuel, depth + 1)?;
                     }
                 } else if let Some(def) = self.enums.get(declaration) {
-                    let parameters = def
-                        .parameter_binders()
-                        .map_err(|_| Failure::invalid("invalid enum representation parameters"))?;
-                    for field in def.variants.iter().flat_map(|v| &v.fields) {
-                        nir::copy_budget::charge_type_substitution(
-                            field,
-                            &parameters,
-                            arguments,
-                            fuel,
-                        )
-                        .map_err(|_| BUDGET)?;
-                    }
-                    let variants = def.instantiate_variants(arguments).map_err(|_| {
-                        Failure::invalid("invalid enum type arguments in representation")
+                    let substitution = nir::DeclarationSubstitution::bounded(
+                        &def.type_parameters,
+                        &def.parameter_types,
+                        arguments,
+                        &[],
+                        fuel,
+                    )
+                    .map_err(|failure| match failure {
+                        nir::type_computations::Error::Scope(_) => {
+                            Failure::invalid("invalid enum type arguments in representation")
+                        }
+                        _ => BUDGET,
                     })?;
-                    for field in variants.iter().flat_map(|v| &v.fields) {
-                        self.visit(field, active, fuel, depth + 1)?;
+                    let fields = def
+                        .variants
+                        .iter()
+                        .flat_map(|v| &v.fields)
+                        .map(|field| {
+                            substitution
+                                .instantiate_bounded(field, fuel)
+                                .map_err(|failure| match failure {
+                                    nir::type_computations::Error::Scope(_) => {
+                                        Failure::invalid("invalid enum payload in representation")
+                                    }
+                                    _ => BUDGET,
+                                })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    for field in fields {
+                        self.visit(&field, active, fuel, depth + 1)?;
                     }
                 } else if let Some(def) = self.newtypes.get(declaration) {
                     let representation = def

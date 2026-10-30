@@ -1091,6 +1091,17 @@ impl Term {
         parameters: &[DeclarationParameter],
         arguments: &[Term],
     ) -> Result<Term, TypeError> {
+        self.instantiate_domain_checked_parameters_in_scope(parameters, arguments, &[])
+    }
+
+    /// Structural callers establish the replacement sorts from parameter domains;
+    /// completed-value callers additionally carry full domain-admission evidence.
+    pub(crate) fn instantiate_domain_checked_parameters_in_scope(
+        &self,
+        parameters: &[DeclarationParameter],
+        arguments: &[Term],
+        frames: &[Vec<Sort>],
+    ) -> Result<Term, TypeError> {
         if parameters.len() != arguments.len() {
             return Err(TypeError::ArgumentCount {
                 expected: parameters.len(),
@@ -1113,7 +1124,7 @@ impl Term {
             },
             _ => Ok(term.clone()),
         })?;
-        result.check_scope(&[])?;
+        result.check_scope(frames)?;
         Ok(result)
     }
 

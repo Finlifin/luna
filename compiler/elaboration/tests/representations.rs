@@ -654,3 +654,51 @@ fn newtype_expansion_preserves_budget_and_type_failure_categories() {
         FailureKind::Invalid
     );
 }
+
+#[test]
+fn dependent_type_valued_layouts_keep_budget_failures_retryable() {
+    use elaboration::representations::FailureKind;
+    let domains = vec![
+        Term::Primitive(Primitive::Type),
+        Term::Rigid {
+            declaration: id(10),
+            sort: Sort::Type,
+        },
+    ];
+    let field = Term::Tuple(vec![Term::Primitive(Primitive::Bool); 128]);
+    let mut record = definition(1, field.clone());
+    record.type_parameters = vec![id(10), id(11)];
+    record.parameter_types = domains.clone();
+    let mut enumeration = enumeration(2, field);
+    enumeration.type_parameters = vec![id(10), id(11)];
+    enumeration.parameter_types = domains;
+    let structs = BTreeMap::from([(id(1), record)]);
+    let enums = BTreeMap::from([(id(2), enumeration)]);
+    let newtypes = BTreeMap::new();
+    let mut checker = Checker::new(None, &structs, &enums, &newtypes);
+    for declaration in [id(1), id(2)] {
+        let ty = Term::Nominal {
+            declaration,
+            arguments: vec![
+                Term::Primitive(Primitive::Type),
+                Term::Primitive(Primitive::Bool),
+            ],
+        };
+        assert_eq!(
+            checker.check(&ty, &mut 50).unwrap_err().kind,
+            FailureKind::Budget
+        );
+        checker.check(&ty, &mut 10000).unwrap();
+        let wrong = Term::Nominal {
+            declaration,
+            arguments: vec![
+                Term::Primitive(Primitive::Bool),
+                Term::Primitive(Primitive::Bool),
+            ],
+        };
+        assert_eq!(
+            checker.check(&wrong, &mut 10000).unwrap_err().kind,
+            FailureKind::Invalid
+        );
+    }
+}

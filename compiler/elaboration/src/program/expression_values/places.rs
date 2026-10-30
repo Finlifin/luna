@@ -221,9 +221,10 @@ impl Checker<'_, '_> {
                             error(field.span, format!("unknown struct field {}", field.name))
                         })?;
                     path.push((n::FieldOwner::Nominal(*declaration), index));
-                    ty = self.instantiate_input_types(
+                    ty = self.instantiate_declaration_type(
                         &def.fields[index].1,
                         &def.type_parameters,
+                        &def.parameter_types,
                         arguments,
                         field.span,
                     )?;

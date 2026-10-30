@@ -2455,10 +2455,9 @@ impl Checker<'_, '_> {
                     )
                 })?;
                 self.field_default(owner, Some(index), slot)?
-                    .instantiate_parameters_in_scope(
-                        &self.enums[&id]
-                            .parameter_binders()
-                            .map_err(|e| error(expr.span, e.to_string()))?,
+                    .instantiate_declaration_parameters_in_scope(
+                        &self.enums[&id].type_parameters,
+                        &self.enums[&id].parameter_types,
                         arguments,
                         &self.call_input_frames(),
                     )
@@ -2769,8 +2768,9 @@ impl Checker<'_, '_> {
                 Some(value) => value,
                 None => default
                     .expect("omitted payload has a checked default")
-                    .instantiate_parameters_in_scope(
-                        &binders,
+                    .instantiate_declaration_parameters_in_scope(
+                        &definition.type_parameters,
+                        &definition.parameter_types,
                         &complete_arguments,
                         &self.call_input_frames(),
                     )
@@ -3247,9 +3247,9 @@ impl Checker<'_, '_> {
                     None,
                     index,
                 )?
-                .instantiate_parameters_in_scope(
-                    &def.parameter_binders()
-                        .map_err(|e| error(expr.span, e.to_string()))?,
+                .instantiate_declaration_parameters_in_scope(
+                    &def.type_parameters,
+                    &def.parameter_types,
                     arguments,
                     &self.call_input_frames(),
                 )

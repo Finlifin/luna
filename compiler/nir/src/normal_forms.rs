@@ -1215,22 +1215,21 @@ pub fn instantiate_value_fields<'a>(
     for domain in domains {
         charge_layout_term(domain, fuel)?;
     }
-    let parameters = crate::declaration_parameters(parameters, domains).ok()?;
-    let before = *fuel;
-    for argument in arguments {
-        charge_layout_term(argument, fuel)?;
-    }
-    let input_work = before - *fuel;
-    Term::Tuple(vec![])
-        .instantiate_parameters(&parameters, arguments)
-        .ok()?;
-    let mut output = Vec::with_capacity(fields.len());
-    for field in fields {
-        let before = *fuel;
-        charge_layout_term(field, fuel)?;
-        spend_layout(fuel, (before - *fuel).saturating_mul(input_work))?;
-        output.push(field.instantiate_parameters(&parameters, arguments).ok()?);
-    }
+    let result = (|| {
+        let substitution =
+            crate::DeclarationSubstitution::bounded(parameters, domains, arguments, &[], fuel)?;
+        fields
+            .map(|field| substitution.instantiate_bounded(field, fuel))
+            .collect::<Result<Vec<_>, crate::type_computations::Error>>()
+    })();
+    let output = match result {
+        Ok(output) => output,
+        Err(crate::type_computations::Error::Budget) => {
+            *fuel = 0;
+            return None;
+        }
+        Err(_) => return None,
+    };
     Some(output)
 }
 

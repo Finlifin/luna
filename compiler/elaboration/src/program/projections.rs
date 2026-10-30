@@ -162,9 +162,10 @@ impl Checker<'_, '_> {
                     else {
                         return Ok(None);
                     };
-                    self.instantiate_input_types(
+                    self.instantiate_declaration_type(
                         field,
                         &definition.type_parameters,
+                        &definition.parameter_types,
                         arguments,
                         expr.span,
                     )?
@@ -1451,9 +1452,10 @@ impl Checker<'_, '_> {
                 .iter()
                 .position(|(name, _)| name == field.name.as_str())
                 .ok_or_else(|| error(field.span, format!("unknown struct field {}", field.name)))?;
-            let ty = self.instantiate_input_types(
+            let ty = self.instantiate_declaration_type(
                 &def.fields[index].1,
                 &def.type_parameters,
+                &def.parameter_types,
                 arguments,
                 expr.span,
             )?;

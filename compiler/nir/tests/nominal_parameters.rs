@@ -763,3 +763,86 @@ fn object_indices_validate_nested_domains_without_nominal_layout_guessing() {
     );
     assert!(nir::validate_declaration_arguments(&[id(1)], &[domain], &[good], &mut 1).is_err());
 }
+
+#[test]
+fn type_valued_dependent_indices_substitute_all_nominal_layouts() {
+    let record = record(vec![Term::Primitive(P::Type), rigid(1, Sort::Type)]);
+    let arguments = [Term::Primitive(P::Type), Term::Primitive(P::Bool)];
+    let fields = record.instantiate_fields(&arguments).unwrap();
+    assert_eq!(
+        fields[1].1,
+        Term::NormalForm {
+            head: id(3),
+            sort: Sort::Type,
+            arguments: vec![Term::Primitive(P::Bool)],
+        }
+    );
+    let enumeration = Enum {
+        declaration: id(4),
+        name: "IndexedChoice".into(),
+        type_parameters: record.type_parameters.clone(),
+        parameter_types: record.parameter_types.clone(),
+        requirements: vec![],
+        capabilities: vec![],
+        variants: vec![Variant {
+            name: "some".into(),
+            shape: VariantShape::Tuple,
+            fields: record.fields.iter().map(|(_, ty)| ty.clone()).collect(),
+        }],
+        groups: vec![],
+        encoding: None,
+        is_intrinsic: false,
+        symbol_encoding: None,
+    };
+    assert_eq!(
+        enumeration.instantiate_variants(&arguments).unwrap()[0].fields[1],
+        fields[1].1
+    );
+    let wrapper = nir::newtypes::Newtype {
+        declaration: id(5),
+        name: "IndexedWrapper".into(),
+        type_parameters: record.type_parameters.clone(),
+        parameter_types: record.parameter_types.clone(),
+        capture_count: 0,
+        requirements: vec![],
+        capabilities: vec![],
+        representation: record.fields[1].1.clone(),
+    };
+    assert_eq!(
+        wrapper
+            .representation_budgeted(&arguments, &[], &mut 10000)
+            .unwrap(),
+        fields[1].1
+    );
+    assert!(
+        wrapper
+            .representation_budgeted(&arguments, &[], &mut 0)
+            .is_err()
+    );
+    let layout = nir::normal_forms::nominal_value_fields_with_lookup(
+        &Term::Nominal {
+            declaration: record.declaration,
+            arguments: arguments.to_vec(),
+        },
+        None,
+        &mut 10000,
+        &|_, _| Some(nir::normal_forms::NominalValueDeclaration::Struct(&record)),
+    )
+    .unwrap();
+    assert_eq!(
+        layout,
+        fields.into_iter().map(|(_, ty)| ty).collect::<Vec<_>>()
+    );
+    for wrong in [
+        [Term::Primitive(P::Type), Term::Bool(true)],
+        [Term::Primitive(P::Bool), Term::Primitive(P::Bool)],
+    ] {
+        assert!(record.instantiate_fields(&wrong).is_err());
+        assert!(enumeration.instantiate_variants(&wrong).is_err());
+        assert!(
+            wrapper
+                .representation_budgeted(&wrong, &[], &mut 10000)
+                .is_err()
+        );
+    }
+}

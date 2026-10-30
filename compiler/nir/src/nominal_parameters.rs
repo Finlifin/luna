@@ -176,6 +176,137 @@ pub fn validate_with_evidence_in(
     .map(|_| ())
 }
 
+/// Structural declaration substitution in an explicit caller scope. This checks
+/// scopes and sorts, including a dependent domain becoming Type. It does not
+/// validate scalar ranges, aggregate payloads, requirements or capabilities;
+/// those remain formation/admission obligations at the owning boundary.
+pub struct DeclarationSubstitution<'a> {
+    parameters: Vec<DeclarationParameter>,
+    arguments: &'a [Term],
+    frames: &'a [Vec<Sort>],
+}
+impl std::fmt::Display for DeclarationSubstitution<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("(declaration-substitution (inputs")?;
+        for (parameter, argument) in self.parameters.iter().zip(self.arguments) {
+            write!(f, " (input {parameter} {argument})")?;
+        }
+        f.write_str(") (frames")?;
+        for frame in self.frames {
+            f.write_str(" (frame")?;
+            for sort in frame {
+                write!(f, " {sort}")?;
+            }
+            f.write_str(")")?;
+        }
+        f.write_str("))")
+    }
+}
+impl<'a> DeclarationSubstitution<'a> {
+    pub fn new(
+        ids: &[DeclarationId],
+        domains: &[Term],
+        arguments: &'a [Term],
+        frames: &'a [Vec<Sort>],
+    ) -> Result<Self, TypeError> {
+        Self::from_parameters(binders(ids, domains)?, domains, arguments, frames)
+    }
+    fn from_parameters(
+        parameters: Vec<DeclarationParameter>,
+        domains: &[Term],
+        arguments: &'a [Term],
+        frames: &'a [Vec<Sort>],
+    ) -> Result<Self, TypeError> {
+        if parameters.len() != arguments.len() {
+            return Err(TypeError::ArgumentCount {
+                expected: parameters.len(),
+                actual: arguments.len(),
+            });
+        }
+        for argument in arguments {
+            argument.check_scope(frames)?;
+        }
+        for (index, (parameter, argument)) in parameters.iter().zip(arguments).enumerate() {
+            let expected = if parameter.sort == Sort::Type {
+                Sort::Type
+            } else {
+                let domain = domains[index].instantiate_domain_checked_parameters_in_scope(
+                    &parameters,
+                    arguments,
+                    frames,
+                )?;
+                if domain == Term::Primitive(Primitive::Type) {
+                    Sort::Type
+                } else {
+                    Sort::ComptimeValue
+                }
+            };
+            if expected != argument.sort() {
+                return Err(TypeError::WrongSort {
+                    expected,
+                    actual: argument.sort(),
+                });
+            }
+        }
+        Ok(Self {
+            parameters,
+            arguments,
+            frames,
+        })
+    }
+    pub fn bounded(
+        ids: &[DeclarationId],
+        domains: &[Term],
+        arguments: &'a [Term],
+        frames: &'a [Vec<Sort>],
+        fuel: &mut usize,
+    ) -> Result<Self, crate::type_computations::Error> {
+        use crate::type_computations::{Error, charge_parameter_substitution, charge_term};
+        *fuel = fuel
+            .checked_sub(ids.len().saturating_add(frames.len()))
+            .ok_or(Error::Budget)?;
+        for frame in frames {
+            *fuel = fuel.checked_sub(frame.len()).ok_or(Error::Budget)?;
+        }
+        for domain in domains {
+            charge_term(domain, fuel)?;
+        }
+        for argument in arguments {
+            charge_term(argument, fuel)?;
+        }
+        let parameters = binders(ids, domains).map_err(Error::Scope)?;
+        for (index, parameter) in parameters.iter().enumerate() {
+            if parameter.sort == Sort::ComptimeValue {
+                if let Some(domain) = domains.get(index) {
+                    charge_parameter_substitution(domain, &parameters, arguments, fuel)?;
+                }
+            }
+        }
+        Self::from_parameters(parameters, domains, arguments, frames).map_err(Error::Scope)
+    }
+    pub fn instantiate(&self, term: &Term) -> Result<Term, TypeError> {
+        term.instantiate_domain_checked_parameters_in_scope(
+            &self.parameters,
+            self.arguments,
+            self.frames,
+        )
+    }
+    pub fn instantiate_bounded(
+        &self,
+        term: &Term,
+        fuel: &mut usize,
+    ) -> Result<Term, crate::type_computations::Error> {
+        crate::type_computations::charge_parameter_substitution(
+            term,
+            &self.parameters,
+            self.arguments,
+            fuel,
+        )?;
+        self.instantiate(term)
+            .map_err(crate::type_computations::Error::Scope)
+    }
+}
+
 /// Completed declaration inputs with checked domains. Only this evidence permits
 /// a definition-side value binder to become Type when its actual domain is Type.
 /// Strict mixed-sort substitution remains available for fixed-sort frames.

@@ -448,6 +448,20 @@ impl Checker<'_, '_> {
             .map_err(|e| error(span, e.to_string()))
     }
 
+    pub(super) fn instantiate_declaration_type(
+        &self,
+        ty: &Term,
+        parameters: &[DeclarationId],
+        domains: &[Term],
+        arguments: &[Term],
+        span: Span,
+    ) -> Result<Term, Error> {
+        let frames = self.call_input_frames();
+        nir::DeclarationSubstitution::new(parameters, domains, arguments, &frames)
+            .and_then(|substitution| substitution.instantiate(ty))
+            .map_err(|e| error(span, e.to_string()))
+    }
+
     pub(super) fn prepare_call_types(
         &mut self,
         parameters: &[Parameter],

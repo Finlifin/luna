@@ -176,11 +176,14 @@ impl Newtype {
                 actual,
             });
         }
-        self.representation.instantiate_parameters_in_scope(
-            &self.parameter_binders()?,
+        self.parameter_binders()?;
+        crate::DeclarationSubstitution::new(
+            &self.type_parameters,
+            &self.parameter_types,
             arguments,
             frames,
-        )
+        )?
+        .instantiate(&self.representation)
     }
 }
 impl fmt::Display for Newtype {
@@ -410,33 +413,40 @@ impl Newtype {
         frames: &[Vec<Sort>],
         fuel: &mut usize,
     ) -> Result<Term, ConversionError> {
-        spend(
-            fuel,
-            self.type_parameters.len().saturating_add(arguments.len()),
-        )?;
-        spend(fuel, frames.len())?;
-        for frame in frames {
-            spend(fuel, frame.len())?;
-        }
-        for domain in &self.parameter_types {
-            charge(domain, fuel)?;
-        }
-        let before = *fuel;
-        charge(&self.representation, fuel)?;
-        let representation_work = before - *fuel;
-        let before = *fuel;
-        for argument in arguments {
-            charge(argument, fuel)?;
-        }
-        let argument_work = before - *fuel;
-        // Each occurrence of a parameter can copy its argument. Count that
-        // expansion before invoking the general structural substitution engine.
-        spend(
-            fuel,
-            representation_work.saturating_mul(argument_work.saturating_add(1)),
-        )?;
-        self.instantiate_representation_in_scope(arguments, frames)
-            .map_err(ConversionError::Type)
+        let result = (|| {
+            if self.capture_count > self.type_parameters.len() {
+                return Err(crate::type_computations::Error::Scope(
+                    TypeError::ArgumentCount {
+                        expected: self.type_parameters.len(),
+                        actual: self.capture_count,
+                    },
+                ));
+            }
+            let actual = self.representation.sort();
+            if actual != Sort::Type {
+                return Err(crate::type_computations::Error::Scope(
+                    TypeError::WrongSort {
+                        expected: Sort::Type,
+                        actual,
+                    },
+                ));
+            }
+            let substitution = crate::DeclarationSubstitution::bounded(
+                &self.type_parameters,
+                &self.parameter_types,
+                arguments,
+                frames,
+                fuel,
+            )?;
+            substitution.instantiate_bounded(&self.representation, fuel)
+        })();
+        result.map_err(|error| match error {
+            crate::type_computations::Error::Scope(error) => ConversionError::Type(error),
+            _ => {
+                *fuel = 0;
+                ConversionError::Budget
+            }
+        })
     }
 }
 

@@ -3014,3 +3014,47 @@ Validation from `/home/fin/luna`:
   nominal/alias regression with a subsequent bool parameter.
 - Managed formatting: `/tmp/luna-tools-91ubdqpg/result.json`, exit 0;
   `git diff --check` passed.
+
+## Domain-aware nominal layout substitution
+
+`DeclarationSubstitution` checks the argument scope and completed parameter sorts
+for structural queries. A dependent domain equal to Type requires a Type input;
+a domain that stays an opaque head is not unfolded to justify a sort change.
+Its caller frames are explicit, and substitution shifts references beneath nested
+function binders. The checked context has an S-expression dump. This is structural
+substitution, not full value admission: scalar ranges, aggregate payload evidence,
+formation requirements and capabilities retain their own owning boundaries.
+
+Struct fields, enum payloads, newtype representations and nominal frozen-value
+layout queries now use this context. Budgeted queries charge domain completion and
+replacement payloads before copying; representation checks preserve budget failure
+and retry behavior. Elaborated field reads, multi-level type observation, direct
+writes, pointer projections/writes and declaration-owned field defaults use the
+same domain-aware substitution. Ordinary fixed-sort substitution remains strict.
+
+The initial source regression formed `Key<Type, bool>` successfully but failed
+on construction with `expected comptime-value, got type`. After layout migration,
+a nested `Outer<Type, bool>.inner.payload` case exposed the remaining fixed-sort
+field-observation path; that path was corrected without removing the regression.
+The final source cases instantiate and execute IIR for nested struct construction,
+field reads/writes, pointer writes, defaults, enum payload matching and newtype
+conversion. Wrong-domain Type/value exchanges remain rejected. These are compiler
+and IIR execution checks, not LLVM host execution benchmarks.
+
+General function/NF binder completion and declaration contract consumers beyond
+the previously migrated nominal/alias VM path are still separate migration work.
+This stage does not claim every fixed-sort consumer or all dependent language
+features have been migrated.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-soq1v6nd/result.json`, exit 0. Includes new concrete/open-scope
+  layout cases, nested binder capture avoidance and preserved budget errors.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test newtypes --test comptime_bytecode_types --test type_spreads --test comptime_clause_inputs`:
+  `/tmp/luna-tools-qc98up3k/result.json`, exit 0 on the final implementation.
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --test representations --test checked_definition_publisher --test checked_struct_publisher`:
+  `/tmp/luna-tools-ho77fa12/result.json`, exit 0, including the added Type-valued
+  struct/enum budget-failure recovery test and existing publication atomicity tests.
+- Managed formatting: `/tmp/luna-tools-a76zxsuk/result.json`, exit 0;
+  `git diff --check` passed.
