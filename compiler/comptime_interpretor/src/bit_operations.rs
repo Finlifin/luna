@@ -1,4 +1,4 @@
-//! Shared value semantics for interpreted and compiled bit selections/concats.
+//! Shared BitVec value semantics for tree interpretation and bytecode.
 use super::*;
 use comptime_compiler::bits::Operation as B;
 
@@ -32,6 +32,8 @@ impl Interpreter<'_> {
             K::BitIndex(value, index) => (B::Index, vec![value, index]),
             K::BitWindow { value, start, end } => (B::Window, vec![value, start, end]),
             K::BitConcat(left, right) => (B::Concat, vec![left, right]),
+            K::BitEqual(left, right) => (B::Equal, vec![left, right]),
+            K::BitConvert(value) => (B::Convert, vec![value]),
             _ => unreachable!("bit operation dispatcher"),
         };
         let mut values = Vec::new();
@@ -63,8 +65,8 @@ impl Interpreter<'_> {
         source: SourceRange,
     ) -> Result<Value, Error> {
         let count = match operation {
-            B::Slice { .. } => 1,
-            B::Index | B::Concat => 2,
+            B::Slice { .. } | B::Convert => 1,
+            B::Index | B::Concat | B::Equal => 2,
             B::Window => 3,
         };
         if values.len() != count || types.len() != count {
@@ -84,6 +86,62 @@ impl Interpreter<'_> {
             .and_then(|n| usize::try_from(n).ok())
         };
         let result = match operation {
+            B::Equal => {
+                let Some(Value::BitVec(right)) = values.next() else {
+                    return Err(self.failure(ErrorKind::Type, Some(source)));
+                };
+                if bits.width() != right.width() || *output != Term::Primitive(Primitive::Bool) {
+                    return Err(self.failure(ErrorKind::Type, Some(source)));
+                }
+                return self.bit_operation(source, |budget| {
+                    budget.consume(bits.words().len().saturating_add(1))?;
+                    Ok(Value::Bool(bits == right))
+                });
+            }
+            B::Convert => {
+                return Ok(match *output {
+                    Term::Primitive(Primitive::BitVec(width)) => Value::BitVec(
+                        self.bit_operation(source, |budget| bits.widen(width, budget))?,
+                    ),
+                    Term::Primitive(primitive) => {
+                        let Some(width) = primitive.unrestricted_scalar_width_in(self.target)
+                        else {
+                            return Err(self.failure(ErrorKind::Type, Some(source)));
+                        };
+                        let widening = self
+                            .integer_layout(primitive)
+                            .is_some_and(|(signed, _)| !signed);
+                        if (width as usize) < bits.width()
+                            || (!widening && width as usize != bits.width())
+                        {
+                            return Err(self.failure(ErrorKind::Type, Some(source)));
+                        }
+                        let value = self.bit_operation(source, |budget| {
+                            budget.consume(bits.words().len().saturating_add(1))?;
+                            Ok(bits
+                                .words()
+                                .iter()
+                                .rev()
+                                .fold(0u128, |acc, word| (acc << 32) | u128::from(*word)))
+                        })?;
+                        match primitive {
+                            Primitive::F16 => Value::Float16(value as u16),
+                            Primitive::Bf16 => Value::BFloat16(value as u16),
+                            Primitive::F32 => Value::Float32(value as u32),
+                            Primitive::F64 => Value::Float64(value as u64),
+                            _ if self
+                                .integer_layout(primitive)
+                                .is_some_and(|(signed, _)| signed) =>
+                            {
+                                let shift = 128 - width;
+                                Value::SignedInteger(((value << shift) as i128) >> shift)
+                            }
+                            _ => Value::UnsignedInteger(value),
+                        }
+                    }
+                    _ => return Err(self.failure(ErrorKind::Type, Some(source))),
+                });
+            }
             B::Slice { start, end } => {
                 self.bit_operation(source, |budget| bits.slice(start, end, budget))?
             }

@@ -79,3 +79,55 @@ fn bit_selections_and_concatenation_use_bytecode_with_checked_boundaries() {
         }
     }
 }
+
+#[test]
+fn bit_conversions_preserve_encodings_and_equality_uses_bytecode() {
+    let package = support::compile(
+        "typealias Bits=.BitVec'builtin<8>;
+        typealias Wide=.BitVec'builtin<32>;
+        typealias Signed=.i8'builtin;
+        typealias Unsigned=.u32'builtin;
+        typealias Float=.f32'builtin;
+        comptime fn widen(value:Bits)->Wide {value.as(Wide)}
+        comptime fn unsigned(value:Bits)->Unsigned {value.as(Unsigned)}
+        comptime fn signed(value:Bits)->Signed {value.as(Signed)}
+        comptime fn float(value:Wide)->Float {value.as(Float)}
+        comptime fn equal(left:Bits,right:Bits)->bool {left == right}",
+    );
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let mut tree = Interpreter::new(&package, Budget::default()).unwrap();
+    let mut cases = Vec::new();
+    for value in [0, 127, 128, 255] {
+        cases.push(("widen", vec![bits(8, value)], bits(32, value)));
+        cases.push((
+            "unsigned",
+            vec![bits(8, value)],
+            Value::UnsignedInteger(value as u128),
+        ));
+        cases.push((
+            "signed",
+            vec![bits(8, value)],
+            Value::SignedInteger(value as u8 as i8 as i128),
+        ));
+    }
+    for raw in [0, 0x80000000, 1, 0x7f800000, 0x7fc00042, 0x7f800001] {
+        cases.push(("float", vec![bits(32, raw)], Value::Float32(raw)));
+    }
+    cases.push(("equal", vec![bits(8, 255), bits(8, 255)], Value::Bool(true)));
+    cases.push((
+        "equal",
+        vec![bits(8, 255), bits(8, 127)],
+        Value::Bool(false),
+    ));
+    for (name, arguments, expected) in cases {
+        let before = vm.bytecode_invocations();
+        let id = support::id(&package, name);
+        assert_eq!(
+            vm.invoke(id, arguments.clone()).unwrap(),
+            expected,
+            "{name}"
+        );
+        assert_eq!(vm.bytecode_invocations() - before, 1, "{name}");
+        assert_eq!(tree.invoke(id, arguments).unwrap(), expected, "{name}");
+    }
+}

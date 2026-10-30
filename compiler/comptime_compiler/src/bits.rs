@@ -7,11 +7,13 @@ pub enum Operation {
     Index,
     Window,
     Concat,
+    Equal,
+    Convert,
 }
 
 impl Operation {
     pub fn requires_bits(self, index: usize) -> bool {
-        index == 0 || matches!(self, Self::Concat)
+        index == 0 || matches!(self, Self::Concat | Self::Equal)
     }
 }
 
@@ -22,6 +24,8 @@ impl fmt::Display for Operation {
             Self::Index => write!(f, "(index)"),
             Self::Window => write!(f, "(window)"),
             Self::Concat => write!(f, "(concat)"),
+            Self::Equal => write!(f, "(equal)"),
+            Self::Convert => write!(f, "(convert)"),
         }
     }
 }

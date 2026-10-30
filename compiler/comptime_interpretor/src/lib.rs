@@ -3330,13 +3330,13 @@ impl<'a> Interpreter<'a> {
             K::BitSlice { .. } | K::BitIndex(..) | K::BitWindow { .. } => {
                 self.eval_bit_values(expr, environment)
             }
-            K::BitEqual(..) => self.eval_bit_equal(expr, environment),
+            K::BitEqual(..) => self.eval_bit_values(expr, environment),
             K::FloatNegate(..) | K::FloatBinary { .. } => {
                 self.eval_scalar_operation(expr, environment)
             }
             K::IntegerNegate(..) => self.eval_scalar_operation(expr, environment),
             K::IntegerBinary { .. } => self.eval_scalar_operation(expr, environment),
-            K::BitConvert(..) => self.eval_bit_convert(expr, environment),
+            K::BitConvert(..) => self.eval_bit_values(expr, environment),
             K::ErrorConvert { .. } => self.eval_error_convert(expr, environment),
             K::NewtypeConvert(..) => self.eval_newtype_convert(expr, environment),
             K::BitConcat(..) => self.eval_bit_values(expr, environment),
@@ -5688,98 +5688,6 @@ impl<'a> Interpreter<'a> {
                         return Err(
                             self.failure(ErrorKind::AbstractValueUnresolved, Some(expr.source))
                         );
-                    }
-                    _ => return Err(self.failure(ErrorKind::Type, Some(expr.source))),
-                }
-            }
-            _ => unreachable!("expression dispatcher selected an incompatible evaluator"),
-        };
-        Ok(Flow::Value(result))
-    }
-
-    #[inline(never)]
-    fn eval_bit_equal(
-        &mut self,
-        expr: &Expr,
-        environment: &mut Environment,
-    ) -> Result<Flow, Error> {
-        let result = match &expr.kind {
-            K::BitEqual(a, b) => {
-                let Value::BitVec(a) =
-                    Self::concrete_value(value!(self.eval(a, environment)), expr.source)?
-                else {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                };
-                let Value::BitVec(b) =
-                    Self::concrete_value(value!(self.eval(b, environment)), expr.source)?
-                else {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                };
-                if a.width() != b.width() || expr.ty != Term::Primitive(Primitive::Bool) {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                }
-                Value::Bool(self.bit_operation(expr.source, |budget| {
-                    budget.consume(a.words().len().saturating_add(1))?;
-                    Ok(a == b)
-                })?)
-            }
-            _ => unreachable!("expression dispatcher selected an incompatible evaluator"),
-        };
-        Ok(Flow::Value(result))
-    }
-
-    #[inline(never)]
-    fn eval_bit_convert(
-        &mut self,
-        expr: &Expr,
-        environment: &mut Environment,
-    ) -> Result<Flow, Error> {
-        let result = match &expr.kind {
-            K::BitConvert(value) => {
-                let Value::BitVec(bits) =
-                    Self::concrete_value(value!(self.eval(value, environment)), expr.source)?
-                else {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                };
-                match expr.ty {
-                    Term::Primitive(Primitive::BitVec(width)) => Value::BitVec(
-                        self.bit_operation(expr.source, |budget| bits.widen(width, budget))?,
-                    ),
-                    Term::Primitive(primitive) => {
-                        let Some(width) = primitive.unrestricted_scalar_width_in(self.target)
-                        else {
-                            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                        };
-                        let widening = self
-                            .integer_layout(primitive)
-                            .is_some_and(|(signed, _)| !signed);
-                        if (width as usize) < bits.width()
-                            || (!widening && width as usize != bits.width())
-                        {
-                            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                        }
-                        let value = self.bit_operation(expr.source, |budget| {
-                            budget.consume(bits.words().len().saturating_add(1))?;
-                            Ok(bits
-                                .words()
-                                .iter()
-                                .rev()
-                                .fold(0u128, |acc, word| (acc << 32) | u128::from(*word)))
-                        })?;
-                        match primitive {
-                            Primitive::F16 => Value::Float16(value as u16),
-                            Primitive::Bf16 => Value::BFloat16(value as u16),
-                            Primitive::F32 => Value::Float32(value as u32),
-                            Primitive::F64 => Value::Float64(value as u64),
-                            _ if self
-                                .integer_layout(primitive)
-                                .is_some_and(|(signed, _)| signed) =>
-                            {
-                                let shift = 128 - width;
-                                Value::SignedInteger(((value << shift) as i128) >> shift)
-                            }
-                            _ => Value::UnsignedInteger(value),
-                        }
                     }
                     _ => return Err(self.failure(ErrorKind::Type, Some(expr.source))),
                 }

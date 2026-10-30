@@ -4156,3 +4156,29 @@ Validation in /home/fin/luna:
   exit 0, 10 selected tests, `/tmp/luna-tools-8sg3q8fd/result.json`.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
   exit 0, `/tmp/luna-tools-es20h1kg/result.json`; `git diff --check`: exit 0.
+
+### Compile BitVec equality and representation conversion
+
+BitEqual and BitConvert now use the typed-register bit-operation instructions.
+Tree interpretation shares the same value implementation. Equality checks both
+widths and charges comparison work; conversion preserves the existing target
+layout checks, zero extension and exact signed/IEEE representations. Neither
+path evaluates an expression tree from an opcode. Operand preparation preserves
+early type failure before subsequent effects.
+
+Source coverage checks actual compiled entry for widening, unsigned delivery,
+signed reinterpretation, signed zero, infinity, NaN payloads and equality.
+Direct NIR coverage rejects narrowing even for a small stored value, mismatched
+float width and restricted bool representations, then successfully converts on
+the same interpreter. TakeBits and bit-place writeback remain separate work;
+this does not expand which resource-bearing representations may be constructed.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_bits`:
+  exit 0, `/tmp/luna-tools-i22jidgh/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-gzvd1zsx/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test execution reinterpretation`:
+  exit 0, two selected tests, `/tmp/luna-tools-rj534srk/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-7pl4s5up/result.json`; `git diff --check`: exit 0.

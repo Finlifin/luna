@@ -1111,7 +1111,9 @@ fn compile_root(
                     K::BitSlice { .. }
                     | K::BitIndex(..)
                     | K::BitWindow { .. }
-                    | K::BitConcat(..) => {
+                    | K::BitConcat(..)
+                    | K::BitEqual(..)
+                    | K::BitConvert(..) => {
                         use bits::Operation as B;
                         let (operation, values): (_, Vec<&Expr>) = match &expr.kind {
                             K::BitSlice { value, start, end } => (
@@ -1126,6 +1128,8 @@ fn compile_root(
                                 (B::Window, vec![value, start, end])
                             }
                             K::BitConcat(left, right) => (B::Concat, vec![left, right]),
+                            K::BitEqual(left, right) => (B::Equal, vec![left, right]),
+                            K::BitConvert(value) => (B::Convert, vec![value]),
                             _ => unreachable!(),
                         };
                         for ty in values
