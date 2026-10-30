@@ -5556,3 +5556,34 @@ Validation from `/home/fin/luna`, exit 0:
   and recovery, independent interface identities and malformed output scope.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
   `/tmp/luna-tools-u07rmf71/result.json`; `git diff --check` passed.
+
+### Lexical trait source plans (2026-10-31)
+
+Resolver now collects potential trait-name resolution plans at a lexical position.
+A per-resolver index covers only immutable module-tree trait spellings; decisions
+involving local ribs are always recomputed. The collection considers enclosing
+scopes and active ribs, not all public traits in the package. Normal deferred
+name resolution retains import origin, entry permission, shadowing, glob ambiguity
+and errors. Alias spellings retain the same declaration identity; their plans stay
+separate because a generated scope may shadow only one spelling.
+
+TraitSourcePlan also records pending generated export sites even when no known
+trait name is currently present. Such a snapshot cannot authorize fallback or be
+considered complete. The caller must wait and recollect after generated bindings
+are available. Names are sorted by spelling and the plan has a deterministic
+S-expression Display. This is name-source discovery, not implementation evidence.
+
+The API is not yet attached to HIR member sites. Next, lowering must preserve these
+source plans with their unresolved state, then concrete lookup must combine them
+with receiver inference and full implementation checks. Do not replace the plan
+with a package-global list or discard ambiguity before the relevant member query.
+
+Validation from `/home/fin/luna`, exit 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p resolve`:
+  all 39 tests passed; `/tmp/luna-tools-b63oatys/result.json`.
+  Eight new cases cover lexical visibility, alias identity, transitive and
+  duplicate globs, ambiguous imports, ordinary/local/clause shadowing, pending
+  generated exports, dynamic aliases and original declaration privacy.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  `/tmp/luna-tools-m6852vqn/result.json`; `git diff --check` passed.

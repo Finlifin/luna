@@ -1,3 +1,7 @@
+mod trait_sources;
+use trait_sources::TraitSourceIndex;
+pub use trait_sources::TraitSourcePlan;
+
 use std::{collections::HashMap, sync::Arc};
 use symbol::{DefId, Symbol};
 
@@ -22,6 +26,7 @@ use crate::scope::ScopeTree;
 pub struct Resolver<'a> {
     /// The pre-built module tree (scope tree + def names).
     tree: &'a ModuleTree,
+    trait_sources: TraitSourceIndex,
     /// Rib stack for ordered (lexical) scopes.
     ribs: RibStack,
     /// Scope-sensitive results over the immutable module tree. Shared with HIR
@@ -39,6 +44,7 @@ impl<'a> Resolver<'a> {
     pub fn new(tree: &'a ModuleTree) -> Self {
         Self {
             tree,
+            trait_sources: TraitSourceIndex::new(tree),
             ribs: RibStack::new(),
             type_members: HashMap::new(),
         }
