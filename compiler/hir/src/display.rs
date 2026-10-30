@@ -214,6 +214,12 @@ impl Display for Package<'_> {
                 f.write_str("))")?;
             }
         }
+        f.write_str(") (trait-sources")?;
+        let mut plans: Vec<_> = self.trait_sources.iter().collect();
+        plans.sort_unstable_by_key(|(id, _)| (id.owner.def_id.raw(), id.local_id.raw()));
+        for (id, plan) in plans {
+            write!(f, " (projection (expression {}) {})", Id(*id), plan)?;
+        }
         f.write_str(") (source-origins")?;
         let mut origins: Vec<_> = self.source_origins.iter().collect();
         origins.sort_unstable_by_key(|(id, _)| (id.owner.def_id.raw(), id.local_id.raw()));

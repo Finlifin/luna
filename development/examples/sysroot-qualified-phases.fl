@@ -36,14 +36,14 @@ comptime fn inspect() -> bool {
     let absent: ?bool = null;
     let success: !u8 bool = true;
     let failure: !u8 bool = error 7;
-    let mapped = present.as(ComptimeOptionalOps<bool>).map(invert);
-    let flipped = success.as(ComptimeErrorResultOps<bool, u8>).map(invert);
+    let mapped = present.map(invert);
+    let flipped = success.map(invert);
     staged_presence(present) and staged_success(success)
-        and present.as(ComptimeOptionalOps<bool>).unwrap_or_else(forbidden)
-        and absent.as(ComptimeOptionalOps<bool>).is_none()
-        and not mapped.as(ComptimeOptionalOps<bool>).unwrap_or(true)
-        and not flipped.as(ComptimeErrorResultOps<bool, u8>).unwrap_or_else(recover)
-        and failure.as(ComptimeErrorResultOps<bool, u8>).unwrap_or_else(recover)
+        and present.unwrap_or_else(forbidden)
+        and absent.is_none()
+        and not mapped.unwrap_or(true)
+        and not flipped.unwrap_or_else(recover)
+        and failure.unwrap_or_else(recover)
 }
 
 fn run() -> bool {

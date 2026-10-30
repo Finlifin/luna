@@ -9,6 +9,7 @@ use std::sync::Arc;
 pub struct ResolutionEvidence {
     /// Original definition, intentionally not remapped to a generated owner.
     pub source_origin: Option<DefId>,
+    pub trait_sources: Option<Arc<crate::trait_sources::TraitSourcePlan>>,
     pub projection: Option<DefId>,
     pub deferred: Option<Arc<[(DefId, DefId)]>>,
     pub access: Option<Arc<[(DefId, DefId)]>>,
@@ -42,8 +43,18 @@ impl DefinitionBatch<'_, '_> {
                 || self.package.deferred_member_projections.contains_key(id)
                 || self.package.member_access.contains_key(id)
                 || self.package.source_origins.contains_key(id)
+                || self.package.trait_sources.contains_key(id)
             {
                 return Err(error("resolution target already published", id.owner));
+            }
+            if let Some(plan) = &evidence.trait_sources {
+                plan.charge(fuel)
+                    .map_err(|message| error(message, id.owner))?;
+                for name in &plan.names {
+                    if matches!(name.fallback, Ok(Some(definition)) if !definition.is_valid()) {
+                        return Err(error("invalid trait source definition", id.owner));
+                    }
+                }
             }
             if evidence.source_origin.is_some_and(|id| !id.is_valid()) {
                 return Err(error("invalid source origin", id.owner));
@@ -65,6 +76,9 @@ impl DefinitionBatch<'_, '_> {
 
     pub(super) fn publish_resolution(&mut self) {
         for (id, evidence) in self.resolution.drain(..) {
+            if let Some(plan) = evidence.trait_sources {
+                self.package.trait_sources.insert(id, plan);
+            }
             if let Some(origin) = evidence.source_origin {
                 self.package.source_origins.insert(id, origin);
             }
@@ -111,6 +125,9 @@ impl fmt::Display for ResolutionEvidence {
                 }
             }
             f.write_str(")")?;
+        }
+        if let Some(plan) = &self.trait_sources {
+            write!(f, " (trait-sources {plan})")?;
         }
         f.write_str(")")
     }

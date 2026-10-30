@@ -318,7 +318,7 @@ impl Checker<'_, '_> {
                 .is_some()
         }
     }
-    fn comptime_member_context(&self) -> bool {
+    pub(super) fn comptime_member_context(&self) -> bool {
         self.in_required_comptime
             || self.in_staged_input
             || (!self.in_code_body

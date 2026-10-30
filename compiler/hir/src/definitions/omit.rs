@@ -85,6 +85,9 @@ pub fn omit_generation_sources<'h>(
         .deferred_member_projections
         .retain(|id, _| !omitted.contains(&id.owner));
     package
+        .trait_sources
+        .retain(|id, _| !omitted.contains(&id.owner));
+    package
         .member_access
         .retain(|id, _| !omitted.contains(&id.owner));
     package

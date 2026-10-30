@@ -5587,3 +5587,41 @@ Validation from `/home/fin/luna`, exit 0:
   generated exports, dynamic aliases and original declaration privacy.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
   `/tmp/luna-tools-m6852vqn/result.json`; `git diff --check` passed.
+
+## Concrete receiver trait sources (2026-10-31)
+
+Member projection lowering now carries the resolver's lexical trait-source plan
+into HIR. Equal adjacent plans share storage. Generated definition publication
+keeps this evidence transactional; function-template rebinding remaps local
+trait identities, while original pending-export sites retain their provenance.
+The new metadata has deterministic S-expression Display and bounded validation.
+
+Concrete method discovery uses visible declaration identities, receiver-derived
+interface arguments, and the full capability world. Inherent/context sources
+retain their preceding lookup position. Comptime-only sources form the first
+comptime tier; runtime lookup excludes them. Duplicate aliases do not create
+competing interfaces, explicit views bypass discovery, and uncertain applicable
+sources reject fallback. No protocol name or optional/error type is special-cased.
+The shipped qualified-phase example now calls its comptime optional/error methods
+directly, including map and lazy recovery callbacks.
+
+Remaining work: discovery currently considers directly declared methods, not
+inherited-only or associated callable sources. Pending generated exports retain
+an explicit diagnostic rather than a resumable recollection. Visibility errors
+are conservatively propagated before member filtering. Inference and capability
+queries reserve bounded sub-budgets rather than returning unused fuel; large
+candidate sets can therefore exhaust the current allowance conservatively. These
+are implementation gaps, not language restrictions or permission to fall back.
+
+Validation from `/home/fin/luna`, exit 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p hir -p luna --test trait_phases --test definitions --test display`:
+  23 definition publication, 19 Display, and 51 trait-phase tests passed;
+  `/tmp/luna-tools-s7f0tsot/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes complete_shipped_sysroot_invokes_comptime_qualified_type_traits`:
+  actual sysroot direct-method invocation passed;
+  `/tmp/luna-tools-ovtrlt25/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  `/tmp/luna-tools-w1k6y6t0/result.json`.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- development/examples/sysroot-qualified-phases.fl --sysroot library --test-native`:
+  one native test passed; `/tmp/luna-tools-ergrhy7l/result.json`.

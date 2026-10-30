@@ -56,16 +56,41 @@ impl Rebind<'_, '_> {
                 .map(|id| self.definitions.get(id).copied().unwrap_or(*id));
             let deferred = self.candidates(self.source.deferred_member_projections.get(&old))?;
             let access = self.candidates(self.source.member_access.get(&old))?;
+            let trait_sources = self
+                .source
+                .trait_sources
+                .get(&old)
+                .map(|source| {
+                    source
+                        .charge(&mut self.budget)
+                        .map_err(|message| error(rustc_span::DUMMY_SP, message))?;
+                    if !source.names.iter().any(|name| {
+                        matches!(name.fallback,
+                    Ok(Some(id)) if self.definitions.contains_key(&id))
+                    }) {
+                        return Ok(source.clone());
+                    }
+                    let mut plan = (**source).clone();
+                    for name in &mut plan.names {
+                        if let Ok(Some(id)) = &mut name.fallback {
+                            *id = self.definitions.get(id).copied().unwrap_or(*id);
+                        }
+                    }
+                    Ok::<_, Error>(Arc::new(plan))
+                })
+                .transpose()?;
             let source_origin = self.source.source_origin(old);
             if source_origin.is_some()
                 || projection.is_some()
                 || deferred.is_some()
                 || access.is_some()
+                || trait_sources.is_some()
             {
                 evidence.push((
                     new,
                     ResolutionEvidence {
                         source_origin,
+                        trait_sources,
                         projection,
                         deferred,
                         access,

@@ -534,6 +534,37 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 let base_ref = self.arena.alloc_expr(base_expr);
                 let field_ident = self.node_to_ident(children[1]);
                 let hir_id = self.next_hir_id();
+                let source_plan = self.resolver.visible_trait_sources(self.file_scope, span);
+                let sites = |values: Vec<resolve::ids::AstNodeRef>| {
+                    values
+                        .into_iter()
+                        .map(|site| (site.file.raw(), site.node))
+                        .collect()
+                };
+                let plan = hir::trait_sources::TraitSourcePlan {
+                    pending_exports: sites(source_plan.pending_exports),
+                    names: source_plan
+                        .names
+                        .into_iter()
+                        .map(|name| hir::trait_sources::TraitSourceName {
+                            name: name.name,
+                            pending_exports: sites(name.pending_outputs),
+                            fallback: name
+                                .fallback
+                                .map(|resolution| match resolution.kind {
+                                    BindingKind::Definition(id, _) => Some(id),
+                                    _ => None,
+                                })
+                                .map_err(|error| error.message()),
+                        })
+                        .collect(),
+                };
+                let shared = match &self.last_trait_sources {
+                    Some(previous) if **previous == plan => previous.clone(),
+                    _ => std::sync::Arc::new(plan),
+                };
+                self.last_trait_sources = Some(shared.clone());
+                self.package.trait_sources.insert(hir_id, shared);
                 let candidates = self
                     .resolver
                     .accessible_type_members(field_ident.name, self.file_scope);

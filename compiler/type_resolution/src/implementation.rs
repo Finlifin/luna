@@ -580,6 +580,12 @@ impl Index {
         f.write_str(")")
     }
 
+    /// Borrow a registered head from this immutable query snapshot. Reading it
+    /// is not evidence of applicability or permission to dispatch.
+    pub fn head(&self, declaration: DeclarationId) -> Option<&ImplementationHead> {
+        self.entries.get(&declaration).map(|entry| &entry.head)
+    }
+
     pub fn revision(&self) -> u64 {
         self.revision
     }

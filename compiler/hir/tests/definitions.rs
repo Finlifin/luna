@@ -847,6 +847,14 @@ fn resolution_evidence_is_checked_before_atomic_publication() {
     let member = DefId::new(2, 9);
     let container = DefId::new(2, 8);
     let evidence = ResolutionEvidence {
+        trait_sources: Some(std::sync::Arc::new(hir::trait_sources::TraitSourcePlan {
+            names: vec![hir::trait_sources::TraitSourceName {
+                name: symbol::Symbol::intern("Protocol"),
+                fallback: Ok(Some(container)),
+                pending_exports: vec![],
+            }],
+            pending_exports: vec![(3, 7)],
+        })),
         source_origin: Some(container),
         projection: Some(member),
         deferred: Some(vec![(container, member)].into()),
@@ -859,6 +867,11 @@ fn resolution_evidence_is_checked_before_atomic_publication() {
     assert!(batch.published().member_projections.is_empty());
     let result = batch.publish_checked(&mut 1000, |candidate| {
         assert_eq!(candidate.source_origin(site), Some(container));
+        assert_eq!(
+            candidate.trait_sources[&site].names[0].fallback,
+            Ok(Some(container))
+        );
+        assert_eq!(candidate.trait_sources[&site].pending_exports, [(3, 7)]);
         assert_eq!(candidate.member_projections[&site], member);
         assert_eq!(
             &*candidate.deferred_member_projections[&site],
@@ -871,6 +884,7 @@ fn resolution_evidence_is_checked_before_atomic_publication() {
     assert_eq!(batch.published().num_defs(), 0);
     assert!(batch.published().member_access.is_empty());
     assert!(batch.published().source_origins.is_empty());
+    assert!(batch.published().trait_sources.is_empty());
     let prepared = batch
         .prepare_checked(&mut 1000, |_| Ok::<_, ()>(()))
         .unwrap();

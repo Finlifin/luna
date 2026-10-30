@@ -4,6 +4,7 @@ use super::*;
 use crate::ptc::{Budget, Formula, Outcome};
 mod associated;
 mod declarations;
+mod discovery;
 mod early_inherent;
 mod parents;
 mod phase_associated;
@@ -1556,7 +1557,15 @@ impl Checker<'_, '_> {
         } else {
             self.method_subject_view(&subject, span)?
         };
-        let selected = self.selected_method(subject, interface, name, span)?;
+        let implicit = interface.is_none();
+        let mut selected = self.selected_method(subject.clone(), interface, name, span)?;
+        if selected.is_none() && implicit {
+            if let Some(interface) =
+                self.discovered_member_interface(&subject, name, projection, span)?
+            {
+                selected = self.selected_method(subject, Some(interface), name, span)?;
+            }
+        }
         self.check_selected_method_access(selected.as_ref(), projection, span)?;
         Ok(selected)
     }
@@ -2323,7 +2332,12 @@ impl Checker<'_, '_> {
             H::Cast(base, interface) if !self.is_static_method_subject(base) => {
                 (base, Some(interface))
             }
-            _ if self.default_interface().is_some()
+            _ if self
+                .package
+                .trait_sources
+                .get(&callee.hir_id)
+                .is_some_and(|plan| !plan.names.is_empty() || !plan.pending_exports.is_empty())
+                || self.default_interface().is_some()
                 || (self.in_required_comptime
                     && !self.interfaces_ready
                     && self.early_inherent_name_available(name.name.as_str()))
@@ -2403,6 +2417,7 @@ impl Checker<'_, '_> {
             } else {
                 false
             };
+            let discover = candidate_interface.is_none();
             if !absent_at_pointer {
                 if let Some(method) = self.selected_method(
                     subject.clone(),
@@ -2411,6 +2426,23 @@ impl Checker<'_, '_> {
                     expr.span,
                 )? {
                     break method;
+                }
+            }
+            if discover {
+                if let Some(interface) = self.discovered_member_interface(
+                    &subject,
+                    name.name.as_str(),
+                    callee.hir_id,
+                    expr.span,
+                )? {
+                    if let Some(method) = self.selected_method(
+                        subject.clone(),
+                        Some(interface),
+                        name.name.as_str(),
+                        expr.span,
+                    )? {
+                        break method;
+                    }
                 }
             }
             let Term::Pointer(inner) = subject else {

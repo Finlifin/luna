@@ -973,3 +973,134 @@ fn quoted_runtime_member_lookup_does_not_inherit_its_generator_stage() {
     ";
     compile(source, Emit::Nir).unwrap();
 }
+
+#[test]
+fn concrete_receiver_selects_visible_comptime_interface() {
+    let package = support::compile(
+        "
+        struct Subject {}
+        trait Ordinary {fn read(self)->bool;}
+        pure comptime trait Staged {comptime fn read(self)->bool;}
+        impl Ordinary for Subject {fn read(self)->bool {false}}
+        comptime impl Staged for Subject {comptime fn read(self)->bool {true}}
+        fn runtime_read(value:Subject)->bool {value.read()}
+        comptime fn run()->bool {Subject{}.read()}
+    ",
+    );
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+    let ordinary = package
+        .traits
+        .iter()
+        .find(|t| t.name == "Ordinary")
+        .unwrap();
+    let runtime = package
+        .functions
+        .iter()
+        .find(|f| f.name == "runtime_read")
+        .unwrap();
+    assert!(
+        runtime.body.to_string().contains(&format!(
+            "(interface (interface-instance {}",
+            ordinary.declaration
+        )),
+        "{}",
+        runtime.body
+    );
+}
+
+#[test]
+fn concrete_receiver_rejects_same_tier_sources() {
+    let failure = compile(
+        "
+        struct Subject {}
+        pure comptime trait First {comptime fn read(self)->bool;}
+        pure comptime trait Second {comptime fn read(self)->bool;}
+        comptime impl First for Subject {comptime fn read(self)->bool {true}}
+        comptime impl Second for Subject {comptime fn read(self)->bool {false}}
+        comptime fn run()->bool {Subject{}.read()}
+    ",
+        Emit::Nir,
+    )
+    .err()
+    .expect("ambiguous source");
+    assert!(
+        failure.contains("ambiguous visible trait member"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn concrete_receiver_explicit_view_bypasses_source_competition() {
+    let package = support::compile(
+        "
+        struct Subject {}
+        pure comptime trait First {comptime fn read(self)->bool;}
+        pure comptime trait Second {comptime fn read(self)->bool;}
+        comptime impl First for Subject {comptime fn read(self)->bool {true}}
+        comptime impl Second for Subject {comptime fn read(self)->bool {false}}
+        comptime fn run()->bool {Subject{}.as(First).read()}
+    ",
+    );
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn concrete_receiver_infers_interface_arguments_from_optional_subject() {
+    let package = support::compile(
+        "
+        pure comptime trait Presence where T {comptime fn present(self)->bool;}
+        comptime impl Presence<T> for ?T where T {
+            comptime fn present(self)->bool = self match {_? => true, null => false,};
+        }
+        comptime fn run()->bool {let value:?bool = true; value.present()}
+    ",
+    );
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn concrete_receiver_does_not_discover_unimported_trait() {
+    let failure = compile(
+        "
+        struct Subject {}
+        mod hidden {
+            pub pure comptime trait Protocol {comptime fn read(self)->bool;}
+            comptime impl Protocol for Subject {comptime fn read(self)->bool {true}}
+        }
+        comptime fn run()->bool {Subject{}.read()}
+    ",
+        Emit::Nir,
+    )
+    .err()
+    .expect("hidden source");
+    assert!(failure.contains("unknown struct field read"), "{failure}");
+}
+
+#[test]
+fn concrete_receiver_import_aliases_keep_one_interface_identity() {
+    let package = support::compile(
+        "
+        struct Subject {}
+        mod provider {
+            pub pure comptime trait Protocol {comptime fn read(self)->bool;}
+            comptime impl Protocol for Subject {comptime fn read(self)->bool {true}}
+        }
+        use provider.Protocol as First;
+        use provider.Protocol as Second;
+        comptime fn run()->bool {Subject{}.read()}
+    ",
+    );
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}

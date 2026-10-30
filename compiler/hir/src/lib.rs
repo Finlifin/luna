@@ -30,6 +30,7 @@ pub mod item;
 pub mod node;
 pub mod owner;
 pub mod pattern;
+pub mod trait_sources;
 
 pub use arena::HirArena;
 pub use body::{Body, BodyParam};
@@ -93,6 +94,8 @@ pub struct Package<'hir> {
     /// elaboration. Each pair is (container, member), resolved at the use site.
     pub deferred_member_projections:
         FxHashMap<HirId, std::sync::Arc<[(symbol::DefId, symbol::DefId)]>>,
+    /// Lexical trait sources and unresolved exports at each member use site.
+    pub trait_sources: FxHashMap<HirId, std::sync::Arc<trait_sources::TraitSourcePlan>>,
     /// Use-site permissions for methods selected from a receiver's inferred type.
     pub member_access: FxHashMap<HirId, std::sync::Arc<[(symbol::DefId, symbol::DefId)]>>,
     definitions: FxHashMap<symbol::DefId, OwnerId>,
@@ -117,6 +120,7 @@ impl<'hir> Package<'hir> {
             source_origins: FxHashMap::default(),
             deferred_member_projections: FxHashMap::default(),
             member_access: FxHashMap::default(),
+            trait_sources: FxHashMap::default(),
             definitions: FxHashMap::default(),
             owner_definitions: FxHashMap::default(),
             clause_definitions: FxHashMap::default(),

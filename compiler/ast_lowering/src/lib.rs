@@ -108,6 +108,7 @@ pub struct LoweringContext<'hir, 'ast, 'resolver> {
     pub(crate) current_owner: OwnerId,
     /// Each owner keeps its allocation sequence across nested definitions.
     next_local_ids: HashMap<OwnerId, u32>,
+    last_trait_sources: Option<std::sync::Arc<hir::trait_sources::TraitSourcePlan>>,
 
     /// Early name resolver – performs module-level name lookup.
     pub(crate) resolver: &'resolver mut Resolver<'resolver>,
@@ -144,6 +145,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             package,
             current_owner: OwnerId::INVALID,
             next_local_ids: HashMap::new(),
+            last_trait_sources: None,
             resolver,
             file_scope,
             ast_ref_to_hir_id: HashMap::default(),

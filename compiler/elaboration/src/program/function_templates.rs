@@ -129,6 +129,9 @@ pub(super) fn expand<'h>(source: &Package<'h>, arena: &'h HirArena) -> Result<Pa
             package.insert_body(id, body);
         }
         for (id, evidence) in rebind.resolution()? {
+            if let Some(plan) = evidence.trait_sources {
+                package.trait_sources.insert(id, plan);
+            }
             if let Some(origin) = evidence.source_origin {
                 package.source_origins.insert(id, origin);
             }

@@ -10,7 +10,8 @@ list.fl 将列表操作 impl 到 meta.List；object.fl 提供有序 Object 查�
 
 泛型约束同时提供两份接口时，comptime 正文优先选择仅限 comptime 的接口，
 runtime 正文采用普通接口；显式 `.as(Trait)` 保留指定来源。具体接收者的自动
-可见接口搜索尚未接通，目前仍用显式接口视角，或通过声明完整约束的泛型函数调用。
+可见接口搜索已接通，可以直接调用这里的可选值与错误限定值方法；泛型 impl 的
+接口实参从接收者推导，并继续检查完整实现契约。
 真实 sysroot 用例见 `development/examples/sysroot-qualified-phases.fl`。
 
 ## 前缀累积
