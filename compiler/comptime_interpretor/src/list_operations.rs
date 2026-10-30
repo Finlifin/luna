@@ -379,10 +379,7 @@ impl Interpreter<'_> {
         let length = match value {
             Value::TypeList(values) if self.is_type_list_input(ty) => values.len(),
             Value::List { ty: stored, values }
-                if stored == ty
-                    && self
-                        .list_element(stored)
-                        .is_some_and(|element| *element != Term::Primitive(Primitive::Type)) =>
+                if stored == ty && self.list_element(stored).is_some() =>
             {
                 values.len()
             }
@@ -415,7 +412,7 @@ impl Interpreter<'_> {
 
     pub(super) fn complete_list_concat(
         &mut self,
-        mut value: Value,
+        value: Value,
         other: Value,
         length: usize,
         other_length: usize,
@@ -428,13 +425,26 @@ impl Interpreter<'_> {
         self.integer_operation(Some(source), |budget| {
             budget.consume(count.saturating_add(1))
         })?;
-        match (&mut value, other) {
-            (Value::TypeList(left), Value::TypeList(right)) => left.extend(right),
-            (Value::List { values: left, .. }, Value::List { values: right, .. }) => {
-                left.extend(right)
+        let value = match (value, other) {
+            (Value::TypeList(mut left), Value::TypeList(right)) => {
+                left.extend(right);
+                Value::TypeList(left)
+            }
+            (Value::List { ty, mut values }, Value::List { values: right, .. }) => {
+                values.extend(right);
+                Value::List { ty, values }
+            }
+            (Value::List { ty, mut values }, Value::TypeList(right)) => {
+                values.extend(right.into_iter().map(Value::Type));
+                Value::List { ty, values }
+            }
+            (Value::TypeList(left), Value::List { ty, values: right }) => {
+                let mut values: Vec<_> = left.into_iter().map(Value::Type).collect();
+                values.extend(right);
+                Value::List { ty, values }
             }
             _ => return Err(self.failure(ErrorKind::Type, Some(source))),
-        }
+        };
         // Both inputs were admitted. A combined immutable description can
         // still exceed the shared structural work limit even below the element
         // limit; report that as a resource limit rather than a malformed type.

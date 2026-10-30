@@ -516,7 +516,14 @@ fn ordinary_struct_builder_rejects_host_added_metadata_before_commit() {
             let input = Value::Tuple(vec![
                 Value::Symbol("Generated".into()),
                 symbols(&["flag"]),
-                Value::TypeList(vec![p(Primitive::Bool)]),
+                if case % 2 == 0 {
+                    Value::List {
+                        ty: list(p(Primitive::Type)),
+                        values: vec![Value::Type(p(Primitive::Bool))],
+                    }
+                } else {
+                    Value::TypeList(vec![p(Primitive::Bool)])
+                },
             ]);
             let mut vm = Interpreter::for_comptime(&world, Budget::default())
                 .unwrap()
@@ -802,5 +809,55 @@ fn execute(
         vm.execute_code(&code, env)
     } else {
         vm.eval(expr, env)
+    }
+}
+
+#[test]
+fn enum_builder_accepts_ordinary_type_lists_without_erasing_element_checks() {
+    for compiled in [false, true] {
+        let world = world();
+        let commits = Cell::new(0);
+        let builder = |request: &EnumBuildRequest, _: &mut u64| {
+            assert_eq!(request.variants[0].fields, vec![p(Primitive::Bool)]);
+            Ok(prepared(
+                request,
+                Box::new(|| {
+                    commits.set(commits.get() + 1);
+                    Ok(())
+                }),
+            ))
+        };
+        let mut vm = Interpreter::for_comptime(&world, Budget::default())
+            .unwrap()
+            .with_enum_builder(&builder);
+        for bad in [true, false] {
+            let Value::Tuple(mut packet) = input("named") else {
+                panic!()
+            };
+            packet[5] = Value::List {
+                ty: list(list(p(Primitive::Type))),
+                values: vec![Value::List {
+                    ty: list(p(Primitive::Type)),
+                    values: vec![if bad {
+                        Value::Bool(true)
+                    } else {
+                        Value::Type(p(Primitive::Bool))
+                    }],
+                }],
+            };
+            let result = execute(
+                &mut vm,
+                compiled,
+                &expression(),
+                &mut env(Value::Tuple(packet)),
+            );
+            if bad {
+                assert_eq!(result.unwrap_err().kind, ErrorKind::Type);
+                assert_eq!(commits.get(), 0);
+            } else {
+                assert!(matches!(result.unwrap(), Flow::Value(Value::Type(_))));
+                assert_eq!(commits.get(), 1);
+            }
+        }
     }
 }

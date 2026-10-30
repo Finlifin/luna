@@ -45,10 +45,7 @@ impl Interpreter<'_> {
         match value {
             Value::TypeList(values) if self.is_type_list_input(ty) => Ok(values.len()),
             Value::List { ty: stored, values }
-                if stored == ty
-                    && self
-                        .list_element(ty)
-                        .is_some_and(|element| *element != Term::Primitive(Primitive::Type)) =>
+                if stored == ty && self.list_element(ty).is_some() =>
             {
                 Ok(values.len())
             }

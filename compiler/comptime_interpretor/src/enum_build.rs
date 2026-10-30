@@ -237,9 +237,7 @@ impl<'a> Interpreter<'a> {
                 ));
             }
             let names = self.enum_symbols(field_names, source)?;
-            let Value::TypeList(fields) = field_types else {
-                return Err(fail());
-            };
+            let fields = self.definition_type_elements(field_types, source)?;
             let shape = match shape.as_str() {
                 "unit" if names.is_empty() && fields.is_empty() => nir::program::VariantShape::Unit,
                 "tuple" if names.is_empty() => nir::program::VariantShape::Tuple,

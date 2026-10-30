@@ -381,3 +381,107 @@ fn nested_concat_type_observation_is_sound_for_all_branch_choices() {
         "invalid or unknown positions must not all be accepted"
     );
 }
+
+#[test]
+fn ordinary_type_lists_support_methods_spreads_and_canonical_normal_inputs() {
+    let package = compile(
+        "pure comptime fn Pack<...Ts: meta.List<Type>> -> Type { bool }
+        comptime fn inspect_type_list_carrier(types: meta.List<Type>) -> bool {
+            var copy = types;
+            copy.append(bool);
+            let prefix: meta.List<Type> = [Byte];
+            let left = prefix.concat(types);
+            let right = types.concat(prefix);
+            types.length() == 2 and types[0] == bool and types[1] == Byte
+                and copy.length() == 3 and copy[2] == bool
+                and left[0] == Byte and left[1] == bool
+                and right[0] == bool and right[2] == Byte
+        }
+        comptime fn Form(types: meta.List<Type>) -> Type { Pack<.Ts = types> }
+        comptime fn Spread(types: meta.List<Type>) -> Type { Pack<...types> }
+        comptime fn identity(types: meta.List<Type>) -> meta.List<Type> { types }",
+    )
+    .unwrap();
+    let function = package
+        .functions
+        .iter()
+        .find(|f| f.declaration == support::id(&package, "inspect_type_list_carrier"))
+        .unwrap();
+    let nir::Term::Function { parameters, .. } = function.signature.callable_signature() else {
+        panic!()
+    };
+    let ty = parameters[0].ty.clone();
+    let elements = vec![
+        nir::Term::Primitive(nir::Primitive::Bool),
+        nir::Term::Primitive(nir::Primitive::U8),
+    ];
+    let ordinary = Value::List {
+        ty: ty.clone(),
+        values: elements.iter().cloned().map(Value::Type).collect(),
+    };
+    let compact = Value::TypeList(elements);
+    let mut vm = Interpreter::for_comptime(
+        &package,
+        comptime_interpretor::Budget {
+            steps: 1_000_000,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    vm.validate_immutable_input(&ordinary, &ty)
+        .unwrap_or_else(|error| {
+            panic!(
+                "ordinary admission {error:?}: {ordinary:?}, work {:?}",
+                ordinary.immutable_copy_work()
+            )
+        });
+    for input in [ordinary.clone(), compact.clone()] {
+        assert_eq!(
+            vm.invoke(
+                support::id(&package, "inspect_type_list_carrier"),
+                vec![input]
+            )
+            .unwrap_or_else(|error| panic!("{error:?}: {:?}", vm.events())),
+            Value::Bool(true)
+        );
+    }
+    assert_eq!(
+        vm.invoke(support::id(&package, "identity"), vec![ordinary.clone()])
+            .unwrap(),
+        ordinary
+    );
+    let mut expected = None;
+    for entry in ["Form", "Spread"] {
+        for input in [ordinary.clone(), compact.clone()] {
+            let value = vm
+                .invoke(support::id(&package, entry), vec![input])
+                .unwrap();
+            if let Some(expected) = &expected {
+                assert_eq!(&value, expected);
+            } else {
+                expected = Some(value);
+            }
+        }
+    }
+    // Wrong element domains and forged Type descriptions remain rejected.
+    for bad in [Value::Bool(true), Value::Type(nir::Term::Bool(true))] {
+        let error = vm
+            .invoke(
+                support::id(&package, "identity"),
+                vec![Value::List {
+                    ty: ty.clone(),
+                    values: vec![bad],
+                }],
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, comptime_interpretor::ErrorKind::Type);
+        assert_eq!(
+            vm.invoke(
+                support::id(&package, "inspect_type_list_carrier"),
+                vec![ordinary.clone()]
+            )
+            .unwrap(),
+            Value::Bool(true)
+        );
+    }
+}

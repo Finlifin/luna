@@ -82,7 +82,7 @@ impl<'a> Interpreter<'a> {
                 ty: names_ty,
                 values: names,
             }),
-            Some(Value::TypeList(types)),
+            Some(types),
             None,
         ) = (values.next(), values.next(), values.next(), values.next())
         else {
@@ -91,6 +91,7 @@ impl<'a> Interpreter<'a> {
         if self.list_element(&names_ty) != Some(&Term::Primitive(Primitive::Symbol)) {
             return Err(fail());
         }
+        let types = self.definition_type_elements(types, source)?;
         if names.len() != types.len() {
             return Err(self.failure(
                 ErrorKind::InvalidDefinition(DefinitionBuildError::FieldCount {

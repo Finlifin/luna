@@ -2630,8 +2630,7 @@ impl<'a> Interpreter<'a> {
             (Value::List { ty: actual, values }, ty) => {
                 self.comptime_only && actual == ty && values.len() <= 100_000
                     && self.list_element(ty).is_some_and(|element|
-                        element != &Term::Primitive(Primitive::Type)
-                        && values.iter().all(|value| self.has_type_at(value, element, depth + 1)))
+                        values.iter().all(|value| self.has_type_at(value, element, depth + 1)))
             }
             (Value::TypeList(elements), ty) => {
                 self.is_type_list_input(ty)
@@ -3654,6 +3653,22 @@ impl<'a> Interpreter<'a> {
             match value {
                 Value::TypeList(elements) if type_elements => {
                     self.integer_operation(Some(source), |budget| budget.consume(elements.len()))?;
+                    if types.len().saturating_add(elements.len()) > 100_000 {
+                        return Err(self.failure(ErrorKind::RepresentationSizeLimit, Some(source)));
+                    }
+                    types.extend(elements);
+                }
+                Value::List {
+                    ty,
+                    values: elements,
+                } if type_elements => {
+                    let elements = self.definition_type_elements(
+                        Value::List {
+                            ty,
+                            values: elements,
+                        },
+                        source,
+                    )?;
                     if types.len().saturating_add(elements.len()) > 100_000 {
                         return Err(self.failure(ErrorKind::RepresentationSizeLimit, Some(source)));
                     }

@@ -4951,3 +4951,39 @@ The final boundary assertion (1,024 active calls allowed, 1,025 rejected) passed
 with `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode heap_activations_honor_requested_depth_and_recover_on_small_host_stack`:
 `/tmp/luna-tools-14aqcsm5/result.json`, exit 0. Formatting and `git diff --check`
 also passed.
+
+## Ordinary List carriers for Type elements (2026-10-30)
+
+The VM now admits `Value::List { ty, values: Vec<Value::Type> }` against the
+ordinary bound List<Type> domain. The declared list identity and each Type value
+are checked using the same List admission and element traversal as other domains.
+Length/index observations, concatenation, receiver append and normal-input
+spreads accept this carrier. Mixed compact/ordinary append preserves the target
+carrier and restores its original contents if the final check fails.
+
+Struct and enum construction decode either carrier at the checked host boundary;
+malformed element domains still fail before commit. This is preparatory consumer
+migration: source Type-list literals and reflection still commonly produce
+`Value::TypeList`, and the legacy enum variant has not been removed.
+
+Freezing an ordinary Type-element list deliberately uses the existing canonical
+`Term::TypeListValue` encoding. It must not introduce a second identity for the
+same normal-form argument. The generic frozen NominalValue decoder continues to
+reject a second Type-list encoding. Moving all producers and subsequently the
+frozen representation requires a coordinated change to the remaining NIR
+consumers, equality and tuple layout views; this stage does not claim that work
+is complete.
+
+Checks from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  310 passed, `/tmp/luna-tools-l153uznw/result.json`. Includes both builder
+  execution paths, host-metadata rejection before commit, malformed element
+  recovery and mixed-carrier append rollback.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_list_type_evidence ordinary_type_lists`:
+  passed, `/tmp/luna-tools-frkdrj2c/result.json`. Exercises actual ordinary-list
+  inputs through public List methods and equal NF identities for named/spread
+  inputs in both representations, followed by malformed-input recovery.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_list_type_evidence --test comptime_list_operations --test comptime_bytecode_lists`:
+  all three groups passed, `/tmp/luna-tools-l4icv3f8/result.json`, exit 0.
+- Formatting check and `git diff --check` passed.

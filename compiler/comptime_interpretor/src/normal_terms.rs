@@ -261,7 +261,7 @@ impl Value {
                         return Err(ErrorKind::Type);
                     };
                     if !matches!(arguments.as_slice(), [element]
-                        if element.sort() == nir::Sort::Type && *element != Term::Primitive(Primitive::Type))
+                        if element.sort() == nir::Sort::Type)
                     {
                         return Err(ErrorKind::Type);
                     }
@@ -280,6 +280,26 @@ impl Value {
                     charge(budget, work)?;
                     charge(budget, values.len())?;
                     ty.check_scope(&[]).map_err(|_| ErrorKind::Type)?;
+                    // The existing frozen Type-list encoding is still canonical.
+                    // VM carriers may be ordinary Lists without creating a second
+                    // normal-form identity for the same input value.
+                    if arguments.as_slice() == [Term::Primitive(Primitive::Type)] {
+                        let elements = values
+                            .iter()
+                            .map(|value| match value {
+                                Value::Type(_) | Value::TypeParameter(_) => visit(
+                                    value,
+                                    depth + 1,
+                                    budget,
+                                    parameters,
+                                    value_parameters,
+                                    invocation,
+                                ),
+                                _ => Err(ErrorKind::Type),
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        return Ok(Term::TypeListValue(elements));
+                    }
                     Term::NominalValue {
                         ty: Box::new(ty.clone()),
                         variant: None,
