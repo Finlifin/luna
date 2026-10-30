@@ -3294,8 +3294,15 @@ impl Checker<'_, '_> {
         })
     }
     fn check_struct_cycles(&self) -> Result<(), Error> {
+        let tuple = self.protocols.tuple.and_then(|identity| {
+            self.normal_parameters.keys().find_map(|owner| {
+                matches_declaration(self.package, &self.package_identities, *owner, identity)
+                    .then(|| self.normal_form_head_metadata(*owner))
+                    .flatten()
+            })
+        });
         let mut representations = crate::representations::Checker::new(
-            self.protocols.tuple,
+            tuple.as_ref(),
             &self.structs,
             &self.enums,
             &self.newtypes,

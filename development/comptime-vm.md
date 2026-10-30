@@ -6849,3 +6849,49 @@ No full workspace test suite was run.
 Public-library validation on the final implementation:
 `python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
 exit 0, five native tests passed; `/tmp/luna-tools-64i4x8sm/result.json`.
+
+
+## Tuple representation traversal through declaration layouts (2026-10-31)
+
+Finite-storage checking now borrows the configured Tuple head metadata rather
+than retaining only its identity and decoding `TypeListValue` itself. The
+shared `Head::tuple_elements` view accepts ordinary frozen collector payloads
+under their exact declared domain, as well as the legacy compact encoding.
+Source declaration checking supplies that metadata from its existing normal
+parameters; incremental builder worlds borrow it from the immutable package.
+Tentative worlds retain the same layout evidence without copying field trees.
+
+Previously a nominal declaration embedding itself in an ordinary Tuple payload
+could skip the recursive field walk. It now fails the same by-value cycle
+check as the legacy form. Pointer indirection still permits finite storage,
+unregistered heads remain opaque, and budget failures remain retryable.
+A regression exercises both baseline and tentative builder worlds, optional
+nesting, a rejected candidate followed by a successful candidate at the same
+identity, and subsequent reuse of the published finite declaration.
+
+This is representation checking over admitted descriptions. Formation, input
+domain admission and symbolic specialization retain their existing owners; no
+opaque head is unfolded or granted a layout by its input shape. Canonical list
+storage migration and other remaining direct consumers are separate work.
+
+Validation from /home/fin/luna:
+
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --test representations`:
+  exit 0, 20 passed; `/tmp/luna-tools-0hxitioz/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0; `/tmp/luna-tools-ik5rb20e/result.json`; `git diff --check` passed.
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test builder_invocations --test tuple_examples --test tuple_type_syntax --test newtypes --no-fail-fast`:
+  builder_invocations 79, newtypes 212 and tuple_type_syntax 8 passed.
+  tuple_examples failed on the existing anonymous-record-patterns.fl example:
+  unresolved `bool` during name resolution. Combined exit 101;
+  `/tmp/luna-tools-3enoswnd/result.json`.
+- Baseline isolation: temporarily restored only the two owned elaboration
+  implementation files from HEAD `fe324028`, ran
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test tuple_examples`,
+  and restored both files byte-for-byte in a finally block. The same unresolved
+  `bool` diagnostics occurred, exit 101; `/tmp/luna-tools-hgeh8ofo/result.json`.
+  This is an existing example binding failure, not a representation regression.
+  No test expectations or implicit primitive resolution rules were changed.
+
+No full workspace test suite was run.

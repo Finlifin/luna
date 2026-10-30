@@ -218,8 +218,15 @@ fn check(
     field: Term,
     tuple: Option<DeclarationId>,
 ) -> Result<(), elaboration::representations::Failure> {
+    let tuple = tuple.map(|declaration| nir::normal_forms::Head {
+        declaration,
+        role: nir::normal_forms::Role::Tuple,
+        collector: Some(0),
+        parameters: vec![],
+        requirements: vec![],
+    });
     Checker::new(
-        tuple,
+        tuple.as_ref(),
         &BTreeMap::from([(id(0), definition(0, field))]),
         &BTreeMap::new(),
         &BTreeMap::new(),
@@ -701,4 +708,88 @@ fn dependent_type_valued_layouts_keep_budget_failures_retryable() {
             FailureKind::Invalid
         );
     }
+}
+
+#[test]
+fn ordinary_tuple_payloads_use_declared_layout_in_baseline_and_candidate_worlds() {
+    use elaboration::representations::{FailureKind, IncrementalChecker};
+    use nir::normal_forms::{Head, Kind, Parameter, Role};
+    let domain = Term::NormalForm {
+        head: id(6),
+        sort: Sort::Type,
+        arguments: vec![Term::Primitive(Primitive::Type)],
+    };
+    let head = Head {
+        declaration: id(5),
+        role: Role::Tuple,
+        collector: Some(0),
+        parameters: vec![Parameter {
+            declaration: id(7),
+            binding: nir::program::LocalId { owner: 5, index: 0 },
+            kind: Kind::Value,
+            ty: domain.clone(),
+        }],
+        requirements: vec![],
+    };
+    let tuple = |field| Term::NormalForm {
+        head: id(5),
+        sort: Sort::Type,
+        arguments: vec![Term::NominalValue {
+            ty: Box::new(domain.clone()),
+            variant: None,
+            fields: vec![field],
+        }],
+    };
+    let structs = BTreeMap::from([(id(0), definition(0, tuple(nominal(0))))]);
+    let enums = BTreeMap::new();
+    let newtypes = BTreeMap::new();
+    let mut checker = Checker::new(Some(&head), &structs, &enums, &newtypes);
+    assert_eq!(
+        checker.check(&nominal(0), &mut 100_000).unwrap_err().kind,
+        FailureKind::Invalid
+    );
+    assert_eq!(
+        checker
+            .check(&tuple(Term::Primitive(Primitive::Bool)), &mut 0)
+            .unwrap_err()
+            .kind,
+        FailureKind::Budget
+    );
+    checker
+        .check(&tuple(Term::Primitive(Primitive::Bool)), &mut 100_000)
+        .unwrap();
+    // An unregistered opaque head does not expose storage through its inputs.
+    Checker::new(None, &structs, &enums, &newtypes)
+        .check(&nominal(0), &mut 100_000)
+        .unwrap();
+    let package = nir::program::Package {
+        normal_forms: vec![head],
+        ..Default::default()
+    };
+    let mut incremental = IncrementalChecker::new(&package, &mut 100_000).unwrap();
+    for field in [
+        tuple(nominal(0)),
+        tuple(Term::Optional(Box::new(nominal(0)))),
+    ] {
+        assert_eq!(
+            incremental
+                .prepare(Arc::from([definition(0, field)]), &mut 100_000)
+                .err()
+                .unwrap()
+                .kind,
+            FailureKind::Invalid
+        );
+    }
+    let receipt = incremental
+        .prepare(
+            Arc::from([definition(0, tuple(Term::Pointer(Box::new(nominal(0)))))]),
+            &mut 100_000,
+        )
+        .unwrap();
+    incremental.commit(receipt).unwrap();
+    // Published finite roots are reusable through a new ordinary tuple payload.
+    let receipt = incremental
+        .prepare(Arc::from([definition(1, tuple(nominal(0)))]), &mut 100_000)
+        .unwrap();
+    incremental.commit(receipt).unwrap();
 }

@@ -1,6 +1,6 @@
 //! Finite storage checks over completed declaration descriptions. Normal-form
 //! heads stay opaque except for the configured language Tuple constructor.
-use nir::{DeclarationId, Sort, Term, program as n};
+use nir::{DeclarationId, Term, program as n};
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
@@ -77,7 +77,7 @@ impl<T> Descriptions<'_, T> {
 /// The borrowed world cannot change while successful roots are memoized.
 /// Failed roots leave no active traversal behind and can be checked again.
 pub struct Checker<'a> {
-    tuple: Option<DeclarationId>,
+    tuple: Option<&'a nir::normal_forms::Head>,
     structs: Descriptions<'a, n::Struct>,
     enums: Descriptions<'a, n::Enum>,
     newtypes: Descriptions<'a, nir::newtypes::Newtype>,
@@ -86,7 +86,7 @@ pub struct Checker<'a> {
 }
 impl<'a> Checker<'a> {
     pub fn new(
-        tuple: Option<DeclarationId>,
+        tuple: Option<&'a nir::normal_forms::Head>,
         structs: &'a BTreeMap<DeclarationId, n::Struct>,
         enums: &'a BTreeMap<DeclarationId, n::Enum>,
         newtypes: &'a BTreeMap<DeclarationId, nir::newtypes::Newtype>,
@@ -105,7 +105,7 @@ impl<'a> Checker<'a> {
     /// their field trees. The caller precharges construction of these indices
     /// and admits declaration identities before entering this representation check.
     pub fn from_references(
-        tuple: Option<DeclarationId>,
+        tuple: Option<&'a nir::normal_forms::Head>,
         structs: BTreeMap<DeclarationId, &'a n::Struct>,
         enums: BTreeMap<DeclarationId, &'a n::Enum>,
         newtypes: BTreeMap<DeclarationId, &'a nir::newtypes::Newtype>,
@@ -234,12 +234,8 @@ impl<'a> Checker<'a> {
                 self.done.insert(ty.clone());
                 Ok(())
             }
-            Term::NormalForm {
-                head,
-                sort: Sort::Type,
-                arguments,
-            } if Some(*head) == self.tuple => {
-                if let [Term::TypeListValue(items)] = arguments.as_slice() {
+            Term::NormalForm { .. } => {
+                if let Some(items) = self.tuple.and_then(|head| head.tuple_elements(ty)) {
                     for item in items {
                         self.visit(item, active, fuel, depth + 1)?;
                     }
@@ -314,8 +310,7 @@ impl<'a> IncrementalChecker<'a> {
                 tuple: package
                     .normal_forms
                     .iter()
-                    .find(|head| head.role == nir::normal_forms::Role::Tuple)
-                    .map(|head| head.declaration),
+                    .find(|head| head.role == nir::normal_forms::Role::Tuple),
                 structs: Descriptions::Shared(
                     package
                         .structs
