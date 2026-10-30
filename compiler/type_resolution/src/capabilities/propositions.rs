@@ -284,7 +284,12 @@ impl<'w> World<'w> {
                 },
                 Some(&self.index.nominal_layouts),
             )?;
-            let parameter_binders = contract.parameter_binders(&mut fuel)?;
+            let inputs: Vec<_> = std::iter::once(query.subject.clone())
+                .chain(query.arguments.iter().cloned())
+                .collect();
+            let substitution = contract
+                .input_substitution(&inputs, self.context.scope(), &mut fuel)
+                .map_err(|error| error.to_string())?;
             // Bound formation checks separately; selection below reuses their
             // unused work through the shared meter.
             let count = contract
@@ -304,12 +309,8 @@ impl<'w> World<'w> {
                 if requirement.mentions_rigid(contract.self_parameter) {
                     continue;
                 }
-                let requirement = requirement
-                    .instantiate_parameters_in_scope(
-                        &parameter_binders,
-                        &query.arguments,
-                        self.context.scope(),
-                    )
+                let requirement = substitution
+                    .instantiate_predicate_bounded(requirement, &mut fuel)
                     .map_err(|e| e.to_string())?;
                 if !matches!(
                     metered(&mut fuel, allowance, |budget| self
@@ -324,12 +325,8 @@ impl<'w> World<'w> {
                 if requirement.mentions_rigid(contract.self_parameter) {
                     continue;
                 }
-                let requirement = requirement
-                    .instantiate_parameters_in_scope(
-                        &parameter_binders,
-                        &query.arguments,
-                        self.context.scope(),
-                    )
+                let requirement = substitution
+                    .instantiate_requirement_bounded(requirement, &mut fuel)
                     .map_err(|e| e.to_string())?;
                 if metered(&mut fuel, allowance, |budget| {
                     self.given_in_context_metered(&requirement, budget)

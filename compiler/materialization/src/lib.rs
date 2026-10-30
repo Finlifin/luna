@@ -889,14 +889,17 @@ impl Builder<'_> {
             .iter()
             .find(|i| i.declaration == id)
             .ok_or("missing selected implementation")?;
+        let implementation_substitution = nir::DeclarationSubstitution::bounded(
+            &implementation.type_parameters,
+            &implementation.parameter_types,
+            &implementation_arguments,
+            &[],
+            &mut self.fuel,
+        )
+        .map_err(|e| e.to_string())?;
         for capability in &implementation.capabilities {
-            let capability = capability
-                .instantiate_parameters(
-                    &implementation
-                        .parameter_binders()
-                        .map_err(|e| e.to_string())?,
-                    &implementation_arguments,
-                )
+            let capability = implementation_substitution
+                .instantiate_requirement_bounded(capability, &mut self.fuel)
                 .map_err(|e| e.to_string())?;
             self.queue.push_back(Task::Interface(
                 capability.interface_instance(),

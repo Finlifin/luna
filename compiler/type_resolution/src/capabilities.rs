@@ -151,20 +151,22 @@ pub fn capability_sources_with_layouts(
             |_, _, _| false,
             layouts,
         )?;
-        let parameters = contract.binders_with_self(&mut remaining)?;
         let arguments: Vec<_> = std::iter::once(current.subject.clone())
             .chain(current.interface_arguments.iter().cloned())
             .collect();
+        let substitution = contract
+            .input_substitution(&arguments, frames, &mut remaining)
+            .map_err(|error| error.to_string())?;
         for capability in &contract.capabilities {
-            let capability = capability
-                .instantiate_parameters_in_scope(&parameters, &arguments, frames)
+            let capability = substitution
+                .instantiate_requirement_bounded(capability, &mut remaining)
                 .map_err(|error| format!("invalid capability member edge: {error}"))?;
             output.push(capability.clone());
             pending.push((capability, depth + 1));
         }
         for parent in &contract.parents {
-            let parent = parent
-                .instantiate_parameters_in_scope(&parameters, &arguments, frames)
+            let parent = substitution
+                .instantiate_interface_bounded(parent, &mut remaining)
                 .map_err(|error| format!("invalid parent member edge: {error}"))?;
             pending.push((
                 TraitRequirement {
@@ -250,22 +252,23 @@ pub fn subject_requirements_with_layouts(
         {
             continue;
         }
-        let Ok(parameters) = contract.binders_with_self(&mut remaining) else {
-            continue;
-        };
         let arguments: Vec<_> = std::iter::once(assumption.subject.clone())
             .chain(assumption.interface_arguments.iter().cloned())
             .collect();
+        let Ok(substitution) = contract.input_substitution(&arguments, &[], &mut remaining) else {
+            continue;
+        };
         for requirement in &contract.requirements {
             if requirement.mentions_rigid(contract.self_parameter) {
-                if let Ok(requirement) = requirement.instantiate_parameters(&parameters, &arguments)
+                if let Ok(requirement) =
+                    substitution.instantiate_predicate_bounded(requirement, &mut remaining)
                 {
                     output.push(requirement);
                 }
             }
         }
         for parent in &contract.parents {
-            if let Ok(parent) = parent.instantiate_parameters(&parameters, &arguments) {
+            if let Ok(parent) = substitution.instantiate_interface_bounded(parent, &mut remaining) {
                 pending.push((
                     TraitRequirement {
                         subject: assumption.subject.clone(),
@@ -277,7 +280,9 @@ pub fn subject_requirements_with_layouts(
             }
         }
         for capability in &contract.capabilities {
-            if let Ok(capability) = capability.instantiate_parameters(&parameters, &arguments) {
+            if let Ok(capability) =
+                substitution.instantiate_requirement_bounded(capability, &mut remaining)
+            {
                 pending.push((capability, depth + 1));
             }
         }
@@ -767,22 +772,22 @@ impl Solver<'_, '_> {
                     .iter()
                     .find(|t| t.declaration == interface.declaration)
                 {
-                    let parameters = t.binders_with_self(&mut self.remaining).ok()?;
                     let arguments: Vec<_> = std::iter::once(current.subject.clone())
                         .chain(interface.arguments.iter().cloned())
                         .collect();
+                    let substitution = t
+                        .input_substitution(&arguments, &frames, &mut self.remaining)
+                        .ok()?;
                     for capability in &t.capabilities {
-                        if let Ok(capability) = capability.instantiate_parameters_in_scope(
-                            &parameters,
-                            &arguments,
-                            &frames,
-                        ) {
+                        if let Ok(capability) = substitution
+                            .instantiate_requirement_bounded(capability, &mut self.remaining)
+                        {
                             pending.push(capability);
                         }
                     }
                     for parent in &t.parents {
                         if let Ok(parent) =
-                            parent.instantiate_parameters_in_scope(&parameters, &arguments, &frames)
+                            substitution.instantiate_interface_bounded(parent, &mut self.remaining)
                         {
                             pending.push(TraitRequirement {
                                 subject: current.subject.clone(),
@@ -874,8 +879,14 @@ impl Solver<'_, '_> {
         };
         let mut witnesses = Vec::new();
         let mut pending = None;
-        let parameters = match implementation.parameter_binders() {
-            Ok(parameters) => parameters,
+        let substitution = match nir::DeclarationSubstitution::bounded(
+            &implementation.type_parameters,
+            &implementation.parameter_types,
+            &evidence.type_arguments,
+            &[],
+            &mut self.remaining,
+        ) {
+            Ok(substitution) => substitution,
             Err(error) => return Qualification::Pending(error.to_string()),
         };
         for capability in &implementation.capabilities {
@@ -883,11 +894,12 @@ impl Solver<'_, '_> {
                 return Qualification::Pending("capability resolution budget exhausted".into());
             }
             self.remaining -= 1;
-            let requirement =
-                match capability.instantiate_parameters(&parameters, &evidence.type_arguments) {
-                    Ok(requirement) => requirement,
-                    Err(e) => return Qualification::Pending(e.to_string()),
-                };
+            let requirement = match substitution
+                .instantiate_requirement_bounded(capability, &mut self.remaining)
+            {
+                Ok(requirement) => requirement,
+                Err(e) => return Qualification::Pending(e.to_string()),
+            };
             if let Some(given) = self.given(&requirement, budget) {
                 witnesses.push(Witness {
                     requirement,

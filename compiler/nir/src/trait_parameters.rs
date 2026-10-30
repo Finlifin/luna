@@ -364,6 +364,39 @@ impl Trait {
         .collect())
     }
 
+    /// Structural substitution for Self followed by interface inputs. The
+    /// caller separately admits values and establishes trait obligations.
+    pub fn input_substitution<'a>(
+        &self,
+        arguments: &'a [Term],
+        frames: &'a [Vec<Sort>],
+        fuel: &mut usize,
+    ) -> Result<crate::DeclarationSubstitution<'a>, crate::type_computations::Error> {
+        use crate::type_computations::{Error, charge_term};
+        *fuel = fuel
+            .checked_sub(self.type_parameters.len().saturating_add(1))
+            .ok_or(Error::Budget)?;
+        let parameters = self.parameters_with_self();
+        let mut domains = vec![Term::Primitive(Primitive::Type)];
+        for index in 0..self.type_parameters.len() {
+            let domain = self
+                .parameter_types
+                .get(index)
+                .unwrap_or(&Term::Primitive(Primitive::Type));
+            charge_term(domain, fuel)?;
+            domains.push(domain.clone());
+        }
+        if !self.parameter_types.is_empty()
+            && self.parameter_types.len() != self.type_parameters.len()
+        {
+            return Err(Error::Scope(crate::TypeError::ArgumentCount {
+                expected: self.type_parameters.len(),
+                actual: self.parameter_types.len(),
+            }));
+        }
+        crate::DeclarationSubstitution::bounded(&parameters, &domains, arguments, frames, fuel)
+    }
+
     /// Validate completed input domains in order. An untyped store handle or
     /// symbolic value is not guessed to inhabit the requested source type.
     pub fn validate_arguments(

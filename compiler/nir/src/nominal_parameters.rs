@@ -337,6 +337,35 @@ impl<'a> DeclarationSubstitution<'a> {
         self.instantiate_predicate(predicate)
             .map_err(crate::type_computations::Error::Scope)
     }
+    pub fn instantiate_interface_bounded(
+        &self,
+        interface: &crate::program::InterfaceInstance,
+        fuel: &mut usize,
+    ) -> Result<crate::program::InterfaceInstance, crate::type_computations::Error> {
+        Ok(crate::program::InterfaceInstance {
+            declaration: interface.declaration,
+            arguments: interface
+                .arguments
+                .iter()
+                .map(|ty| self.instantiate_bounded(ty, fuel))
+                .collect::<Result<_, _>>()?,
+        })
+    }
+    pub fn instantiate_requirement_bounded(
+        &self,
+        requirement: &crate::program::TraitRequirement,
+        fuel: &mut usize,
+    ) -> Result<crate::program::TraitRequirement, crate::type_computations::Error> {
+        Ok(crate::program::TraitRequirement {
+            interface: requirement.interface,
+            subject: self.instantiate_bounded(&requirement.subject, fuel)?,
+            interface_arguments: requirement
+                .interface_arguments
+                .iter()
+                .map(|ty| self.instantiate_bounded(ty, fuel))
+                .collect::<Result<_, _>>()?,
+        })
+    }
     pub fn instantiate_bounded(
         &self,
         term: &Term,

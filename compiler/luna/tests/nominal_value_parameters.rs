@@ -6183,3 +6183,21 @@ fn type_valued_indices_select_parameterized_trait_implementations() {
     let invalid = source.replace("as(Read<Type,bool>)", "as(Read<Type,char>)");
     assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
 }
+
+#[test]
+fn type_valued_indices_preserve_parent_trait_method_sources() {
+    let source = "typealias Type=.Type'builtin;
+        struct Key where T,value:T {payload:bool}
+        trait Read where T,value:T {fn read(self)->bool;}
+        trait Child :- Read<T,value> where T,value:T {}
+        impl Read<T,value> for Key<T,value> where T,value:T {
+            fn read(self)->bool {self.payload}
+        }
+        impl Child<T,value> for Key<T,value> where T,value:T {}
+        fn through_bound(key:K)->bool where K:-Child<Type,bool> {key.read()}
+        fn run()->bool {
+            Key<Type,bool>{payload:true}.as(Child<Type,bool>).read()
+                and through_bound(Key<Type,bool>{payload:true})
+        }";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+}

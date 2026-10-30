@@ -2805,3 +2805,135 @@ fn trait_proposition_reuses_budget_after_formation_and_given_checks() {
         proposition.verify(&world, Budget::default()).unwrap();
     }
 }
+
+#[test]
+fn type_valued_indices_cross_parent_and_capability_edges_without_losing_identity() {
+    use nir::program::{InterfaceInstance, TypePredicate};
+    use type_resolution::capabilities::{capability_sources, subject_requirements};
+    let rigid = |local, sort| Term::Rigid {
+        declaration: id(local),
+        sort,
+    };
+    let type_domain = Term::Primitive(Primitive::Type);
+    let boolean = Term::Primitive(Primitive::Bool);
+    let mut child = marker(100);
+    child.type_parameters = vec![id(101), id(102)];
+    child.parameter_types = vec![type_domain.clone(), rigid(101, Sort::Type)];
+    child.parents.push(InterfaceInstance {
+        declaration: id(110),
+        arguments: vec![rigid(101, Sort::Type), rigid(102, Sort::ComptimeValue)],
+    });
+    let mut parent = marker(110);
+    parent.type_parameters = vec![id(111), id(112)];
+    parent.parameter_types = vec![type_domain.clone(), rigid(111, Sort::Type)];
+    parent
+        .capabilities
+        .push(requirement(120, boxed(rigid(112, Sort::ComptimeValue))));
+    parent.requirements.push(TypePredicate::Equal(
+        rigid(110, Sort::Type),
+        boxed(rigid(112, Sort::ComptimeValue)),
+    ));
+    let traits = vec![child, parent, marker(120)];
+    let assumption = TraitRequirement {
+        interface: id(100),
+        subject: boxed(boolean.clone()),
+        interface_arguments: vec![type_domain, boolean.clone()],
+    };
+    let assumptions = vec![assumption.clone()];
+    let mut context = Context::default();
+    context.admit_nominal_constructor(id(10));
+    let index = Index::default();
+    let world = World {
+        index: &index,
+        implementations: &[],
+        traits: &traits,
+        assumptions: &assumptions,
+        context: &context,
+    };
+    let requested = requirement(120, boxed(boolean.clone()));
+    assert_eq!(
+        world.given_in_scope(&requested, Budget::default(), &[]),
+        Some(assumption.clone())
+    );
+    assert!(
+        world
+            .given_in_scope(
+                &requirement(120, boxed(Term::Primitive(Primitive::Char))),
+                Budget::default(),
+                &[]
+            )
+            .is_none()
+    );
+    let sources = capability_sources(&traits, &assumptions, Budget::default()).unwrap();
+    assert!(sources.contains(&requested));
+    assert!(!sources.iter().any(|source| source.interface == id(110)));
+    let facts = subject_requirements(&traits, &assumptions, Budget::default());
+    assert!(facts.contains(&TypePredicate::Equal(
+        boxed(boolean.clone()),
+        boxed(boolean)
+    )));
+    let tiny = Budget {
+        steps: 1,
+        ..Budget::default()
+    };
+    assert!(capability_sources(&traits, &assumptions, tiny).is_err());
+    assert!(world.given_in_scope(&requested, tiny, &[]).is_none());
+    assert_eq!(
+        world.given_in_scope(&requested, Budget::default(), &[]),
+        Some(assumption)
+    );
+}
+
+#[test]
+fn type_valued_impl_inputs_specialize_capability_qualification() {
+    let value = Term::Rigid {
+        declaration: id(2),
+        sort: Sort::ComptimeValue,
+    };
+    let family = |a, b| Term::Nominal {
+        declaration: id(10),
+        arguments: vec![a, b],
+    };
+    let boolean = Term::Primitive(Primitive::Bool);
+    let subject = family(Term::Primitive(Primitive::Type), boolean.clone());
+    let mut candidate = implementation(
+        20,
+        100,
+        family(var(), value.clone()),
+        vec![id(1), id(2)],
+        vec![requirement(101, boxed(value))],
+    );
+    candidate.parameter_types = vec![Term::Primitive(Primitive::Type), var()];
+    let context = context();
+    for available in [false, true] {
+        let mut implementations = vec![candidate.clone()];
+        if available {
+            implementations.push(implementation(
+                21,
+                101,
+                boxed(boolean.clone()),
+                vec![],
+                vec![],
+            ));
+        }
+        let index = index(&implementations);
+        let world = World {
+            index: &index,
+            implementations: &implementations,
+            traits: &[],
+            assumptions: &[],
+            context: &context,
+        };
+        let result = world.resolve(id(100), &subject, Budget::default()).unwrap();
+        assert_eq!(
+            matches!(result.types.selection, Selection::Selected(selected) if selected == id(20)),
+            available
+        );
+        if available {
+            assert!(matches!(
+                result.qualifications[&id(20)],
+                Qualification::Proved(_)
+            ));
+        }
+    }
+}

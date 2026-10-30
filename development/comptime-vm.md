@@ -3374,3 +3374,33 @@ Final source recheck after adding the mismatched interface rejection and reusing
 the elaboration substitution inputs:
 `python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test sysroot_preludes --test trait_phases --test trait_purity`: exit 0,
 `/tmp/luna-tools-o6is6dk4/result.json` (273 + 9 + 30 + 21 cases).
+
+### Parent interfaces and capability propagation preserve dependent domains
+
+Added a structural trait-input substitution entrypoint for `Self` followed by the
+interface inputs, plus bounded interface/requirement mapping. Inherited member
+lookup, capability lookup roots, subject-guarantee propagation, given-evidence
+traversal, trait formation, impl qualification and materialized impl capabilities
+now use completed declaration domains. Value admission and formation obligations
+remain independent; parent traversal does not promote a parent to a lookup root.
+
+A source regression executes both explicit `Child<Type,bool>` parent-method
+lookup and a generic `K :- Child<Type,bool>` call through IIR. Solver regressions
+cover parent-to-capability propagation, exact type identity, subject guarantees,
+low-budget rejection/recovery, and impl qualification with/without its required
+capability. The original source failure was fixed-sort member lookup
+(`/tmp/luna-tools-qaaz6kop/result.json`).
+
+Validation in `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution -p nir -p materialization`:
+  exit 0, `/tmp/luna-tools-pz9e6rja/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: exit 0,
+  `/tmp/luna-tools-7wlfb4ys/result.json`; `git diff --check`: exit 0.
+
+Remaining: staged method/program-summary consumers and other fixed-sort contract
+paths require separate audits. This change establishes these traversal paths,
+not arbitrary runtime/comptime dispatch completion.
+
+Final source verification:
+`python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test trait_phases --test trait_purity --test sysroot_preludes`:
+exit 0, `/tmp/luna-tools-_jqbk15q/result.json`.

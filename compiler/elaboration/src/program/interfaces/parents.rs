@@ -198,11 +198,13 @@ impl Checker<'_, '_> {
                 }
             } else {
                 let (_, arguments) = self.interface_substitution(&instance, subject);
-                let parameters = self.interface_parameter_binders(&instance, span)?;
+                let substitution = interface
+                    .input_substitution(&arguments, &frames, &mut fuel)
+                    .map_err(|e| error(span, e.to_string()))?;
                 for parent in &interface.parents {
                     pending.push(
-                        parent
-                            .instantiate_parameters_in_scope(&parameters, &arguments, &frames)
+                        substitution
+                            .instantiate_interface_bounded(parent, &mut fuel)
                             .map_err(|e| error(span, e.to_string()))?,
                     );
                 }

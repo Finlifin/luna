@@ -207,13 +207,18 @@ impl Solver<'_, '_> {
             },
             Some(&self.world.index.nominal_layouts),
         )?;
-        let parameter_binders = contract.parameter_binders(&mut self.remaining)?;
+        let inputs: Vec<_> = std::iter::once(query.subject.clone())
+            .chain(query.arguments.iter().cloned())
+            .collect();
+        let substitution = contract
+            .input_substitution(&inputs, &[], &mut self.remaining)
+            .map_err(|error| error.to_string())?;
         for requirement in &contract.requirements {
             if requirement.mentions_rigid(contract.self_parameter) {
                 continue;
             }
-            let requirement = requirement
-                .instantiate_parameters(&parameter_binders, &query.arguments)
+            let requirement = substitution
+                .instantiate_predicate_bounded(requirement, &mut self.remaining)
                 .map_err(|error| error.to_string())?;
             if !matches!(
                 self.world
@@ -229,8 +234,8 @@ impl Solver<'_, '_> {
             if capability.mentions_rigid(contract.self_parameter) {
                 continue;
             }
-            let capability = capability
-                .instantiate_parameters(&parameter_binders, &query.arguments)
+            let capability = substitution
+                .instantiate_requirement_bounded(capability, &mut self.remaining)
                 .map_err(|error| error.to_string())?;
             if self.given(&capability, budget).is_none() {
                 let Ok(resolution) = self.resolve(
