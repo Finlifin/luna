@@ -37,12 +37,27 @@ impl Interpreter<'_> {
                         .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
                     self.integer_operation(None, |budget| budget.consume(work))?;
                 }
-                let signature = function
-                    .signature
-                    .instantiate_parameters(
-                        &self.input_binders(&function.type_parameters),
+                self.admit_function_inputs(
+                    &function.type_parameters,
+                    arguments,
+                    function.body.source,
+                )?;
+                let binders = self.input_binders(&function.type_parameters);
+                self.charge_copy_work(Some(function.body.source), |fuel| {
+                    nir::copy_budget::charge_type_substitution(
+                        &function.signature,
+                        &binders,
                         arguments,
+                        fuel,
                     )
+                })?;
+                let substitution = self.function_substitution(
+                    &function.type_parameters,
+                    arguments,
+                    function.body.source,
+                )?;
+                let signature = substitution
+                    .instantiate(&function.signature)
                     .map_err(|_| self.failure(ErrorKind::Type, None))?;
                 if !matches!(signature.callable_signature(), Term::Function { parameters, result }
                         if parameters.is_empty() && result.as_ref() == ty)

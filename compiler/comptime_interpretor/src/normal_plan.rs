@@ -323,12 +323,9 @@ impl<'a> Frame<'a> {
 
     fn domain(&self, vm: &mut Interpreter<'_>, slot: usize) -> Result<(Term, bool), Error> {
         let metadata = vm.normal_forms[&self.head];
-        let expected = vm.instantiate_contextual_domain(
-            &metadata.parameters[slot].ty,
-            &self.bindings.parameters,
-            &self.bindings.arguments,
-            self.source,
-        )?;
+        let expected = self
+            .bindings
+            .instantiate(vm, &metadata.parameters[slot].ty, self.source)?;
         let unresolved = metadata
             .parameters
             .iter()
@@ -372,11 +369,7 @@ impl<'a> Frame<'a> {
                     mut argument,
                     staged,
                 } = self.pending.remove(&slot).unwrap();
-                vm.specialize_contextual_input(
-                    &mut argument,
-                    &self.bindings.parameters,
-                    &self.bindings.arguments,
-                )?;
+                self.bindings.specialize(vm, &mut argument)?;
                 let mut literals = BTreeMap::new();
                 vm.prepare_normal_argument(&argument, &expected, &mut literals, 0)?;
                 let value =
@@ -390,11 +383,7 @@ impl<'a> Frame<'a> {
             self.waiting = Some(Waiting::Preparation(self.preparation));
         } else if let Some(&slot) = self.inputs.parts().1.order.get(self.position) {
             let mut argument = Box::new(self.inputs.parts().0[slot].clone());
-            vm.specialize_contextual_input(
-                &mut argument,
-                &self.bindings.parameters,
-                &self.bindings.arguments,
-            )?;
+            self.bindings.specialize(vm, &mut argument)?;
             let (expected, unresolved) = self.domain(vm, slot)?;
             self.waiting = Some(if unresolved {
                 Waiting::Stage { slot, argument }

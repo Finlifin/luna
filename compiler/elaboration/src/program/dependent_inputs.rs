@@ -443,8 +443,29 @@ impl Checker<'_, '_> {
         arguments: &[Term],
         span: Span,
     ) -> Result<Term, Error> {
-        let frames = self.call_input_frames();
-        ty.instantiate_parameters_in_scope(&self.input_binders(parameters), arguments, &frames)
+        self.instantiate_input_types_in_scope(
+            ty,
+            parameters,
+            arguments,
+            &self.call_input_frames(),
+            span,
+        )
+    }
+
+    pub(super) fn instantiate_input_types_in_scope(
+        &self,
+        ty: &Term,
+        parameters: &[DeclarationId],
+        arguments: &[Term],
+        frames: &[Vec<Sort>],
+        span: Span,
+    ) -> Result<Term, Error> {
+        let domains = parameters
+            .iter()
+            .map(|id| self.trait_input_domain(*id).unwrap_or_else(|| p(P::Type)))
+            .collect::<Vec<_>>();
+        nir::DeclarationSubstitution::new(parameters, &domains, arguments, frames)
+            .and_then(|substitution| substitution.instantiate(ty))
             .map_err(|e| error(span, e.to_string()))
     }
 
@@ -612,15 +633,6 @@ impl Checker<'_, '_> {
             }
             _ => return Ok(value),
         };
-        let parameters = self.input_binders(&parameters);
-        if arguments
-            .iter()
-            .all(|argument| argument.check_scope(&[]).is_ok())
-        {
-            return value
-                .instantiate_parameters(&parameters, &arguments)
-                .map_err(|e| error(span, e.to_string()));
-        }
         // Default annotations live under the callee's ordinary parameter frame.
         // Generic arguments arrive in the caller frame and must cross that
         // boundary before replacing declaration rigids. Later input preparation
@@ -647,11 +659,16 @@ impl Checker<'_, '_> {
             .map(|argument| argument.abstract_parameters(&[]))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| error(span, e.to_string()))?;
+        let domains = parameters
+            .iter()
+            .map(|id| self.trait_input_domain(*id).unwrap_or_else(|| p(P::Type)))
+            .collect::<Vec<_>>();
+        let substitution =
+            nir::DeclarationSubstitution::new(&parameters, &domains, &arguments, &frames)
+                .map_err(|e| error(span, e.to_string()))?;
         let mut value = value;
         value
-            .rewrite_types(&mut |ty| {
-                ty.instantiate_parameters_in_scope(&parameters, &arguments, &frames)
-            })
+            .rewrite_types(&mut |ty| substitution.instantiate(ty))
             .map_err(|e| error(span, e.to_string()))?;
         Ok(value)
     }

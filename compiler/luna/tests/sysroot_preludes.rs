@@ -305,3 +305,47 @@ fn complete_shipped_sysroot_invokes_comptime_qualified_type_traits() {
         "(bool true)"
     );
 }
+
+#[test]
+fn shipped_meta_object_preserves_type_valued_indices_in_normal_inputs() {
+    let input = Inputs::new();
+    input.write(
+        "input.fl",
+        "
+        struct Key where T,value:T {payload:bool}
+        pure comptime fn Tag<T,value:T,key:Key<T,value>> -> Type
+        where requires Key<T,value> == Key<T,value> {T}
+        comptime fn Build()->Type {
+            let object=Object.append({},Key<Type,bool>{payload:true});
+            let key=Object.value<Key<Type,bool>>(object,0) match {
+                value?=>value,
+                null=>Key<Type,bool>{payload:false},
+            };
+            Tag<Type,bool,key>
+        }
+        const STAGED=Build();
+        fn run()->bool {
+            const equal=STAGED == Tag<Type,bool,Key<Type,bool>{payload:true}>;
+            equal
+        }
+    ",
+    );
+    let library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_luna"))
+        .arg(input.0.join("input.fl"))
+        .arg("--sysroot")
+        .arg(library)
+        .args([
+            "--build-target",
+            "x86_64",
+            "linux",
+            "64",
+            "--interpret",
+            "run",
+            "--fuel",
+            "4000000",
+        ])
+        .output()
+        .unwrap();
+    assert_true(output);
+}

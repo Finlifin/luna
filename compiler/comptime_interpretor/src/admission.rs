@@ -351,15 +351,7 @@ impl Interpreter<'_> {
                         None,
                     )
                 })?;
-                let parameters: Vec<_> =
-                    metadata.parameters.iter().map(|p| p.declaration).collect();
-                for p in &metadata.requirements {
-                    self.tick(None)?;
-                    let predicate = p
-                        .instantiate_rigids(&parameters, arguments)
-                        .map_err(|_| self.failure(ErrorKind::Type, None))?;
-                    self.check_type_contract(&predicate, source)?;
-                }
+                self.check_normal_requirements(metadata, arguments, source)?;
                 for ty in arguments {
                     self.admit_type(ty, depth + 1)?;
                 }

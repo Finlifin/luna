@@ -8,6 +8,86 @@ pub(super) enum PreparedTraitInstance {
 }
 
 impl Interpreter<'_> {
+    pub(super) fn function_substitution_bounded<'inputs>(
+        &self,
+        parameters: &[DeclarationId],
+        arguments: &'inputs [Term],
+        frames: &'inputs [Vec<nir::Sort>],
+        fuel: &mut usize,
+    ) -> Result<nir::DeclarationSubstitution<'inputs>, nir::type_computations::Error> {
+        *fuel = fuel
+            .checked_sub(parameters.len())
+            .ok_or(nir::type_computations::Error::Budget)?;
+        let mut domains = Vec::with_capacity(parameters.len());
+        for parameter in parameters {
+            let domain = self
+                .declaration_parameter_domains
+                .get(parameter)
+                .unwrap_or(&Term::Primitive(Primitive::Type));
+            nir::type_computations::charge_term(domain, fuel)?;
+            domains.push(domain.clone());
+        }
+        nir::DeclarationSubstitution::bounded(parameters, &domains, arguments, frames, fuel)
+    }
+
+    pub(super) fn function_substitution<'inputs>(
+        &mut self,
+        parameters: &[DeclarationId],
+        arguments: &'inputs [Term],
+        source: SourceRange,
+    ) -> Result<nir::DeclarationSubstitution<'inputs>, Error> {
+        let mut fuel = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+        let before = fuel;
+        let result = self.function_substitution_bounded(parameters, arguments, &[], &mut fuel);
+        self.budget.steps -= (before - fuel) as u64;
+        result.map_err(|failure| {
+            self.failure(
+                if matches!(failure, nir::type_computations::Error::Budget) {
+                    ErrorKind::StepsExhausted
+                } else {
+                    ErrorKind::Type
+                },
+                Some(source),
+            )
+        })
+    }
+
+    pub(super) fn specialize_function_predicate(
+        &mut self,
+        definition: &nir::program::Function,
+        arguments: &[Term],
+        predicate: &nir::program::TypePredicate,
+        source: SourceRange,
+    ) -> Result<nir::program::TypePredicate, Error> {
+        let Term::Function { parameters, .. } = definition.signature.callable_signature() else {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        };
+        let frames = vec![parameters.iter().map(|p| p.sort).collect()];
+        let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+        let mut fuel = before;
+        let result = self
+            .function_substitution_bounded(
+                &definition.type_parameters,
+                arguments,
+                &frames,
+                &mut fuel,
+            )
+            .and_then(|substitution| {
+                substitution.instantiate_predicate_bounded(predicate, &mut fuel)
+            });
+        self.budget.steps -= (before - fuel) as u64;
+        result.map_err(|error| {
+            self.failure(
+                if matches!(error, nir::type_computations::Error::Budget) {
+                    ErrorKind::StepsExhausted
+                } else {
+                    ErrorKind::Type
+                },
+                Some(source),
+            )
+        })
+    }
+
     pub(super) fn evaluate_instance_default(
         &mut self,
         construction: SourceRange,
@@ -44,7 +124,16 @@ impl Interpreter<'_> {
             .copied()
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(construction)))?;
         let binders = self.input_binders(&definition.type_parameters);
-        self.bound_default_expression(expression, &binders, arguments)
+        self.charge_copy_work(Some(expression.source), |fuel| {
+            nir::copy_budget::charge_substitution(expression, &binders, arguments, fuel)
+        })?;
+        let substitution =
+            self.function_substitution(&definition.type_parameters, arguments, expression.source)?;
+        let mut value = expression.clone();
+        value
+            .rewrite_types(&mut |ty| substitution.instantiate(ty))
+            .map_err(|_| self.failure(ErrorKind::Type, Some(expression.source)))?;
+        Ok(value)
     }
 
     fn bound_default_expression(

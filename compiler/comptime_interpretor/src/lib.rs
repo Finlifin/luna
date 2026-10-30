@@ -2057,9 +2057,18 @@ impl<'a> Interpreter<'a> {
             )
         })?;
         match arguments {
-            Some(arguments) => condition
-                .instantiate_parameters(&binders, arguments)
-                .map_err(|_| self.failure(ErrorKind::Type, Some(condition.source))),
+            Some(arguments) => {
+                let substitution = self.function_substitution(
+                    &definition.type_parameters,
+                    arguments,
+                    condition.source,
+                )?;
+                let mut value = condition.clone();
+                value
+                    .rewrite_types(&mut |ty| substitution.instantiate(ty))
+                    .map_err(|_| self.failure(ErrorKind::Type, Some(condition.source)))?;
+                Ok(value)
+            }
             None => Ok(condition.clone()),
         }
     }
@@ -2131,9 +2140,14 @@ impl<'a> Interpreter<'a> {
                 fuel,
             )
         })?;
-        let signature = definition
-            .signature
-            .instantiate_parameters(&self.input_binders(&definition.type_parameters), &types)
+        self.admit_function_inputs(&definition.type_parameters, &types, definition.body.source)?;
+        let substitution = self.function_substitution(
+            &definition.type_parameters,
+            &types,
+            definition.body.source,
+        )?;
+        let signature = substitution
+            .instantiate(&definition.signature)
             .map_err(|_| self.failure(ErrorKind::Type, None))?
             .with_comptime_phase(definition.phase == nir::program::FunctionPhase::Comptime)
             .with_unsafe_call_requirement(definition.is_unsafe);
@@ -3643,12 +3657,8 @@ impl<'a> Interpreter<'a> {
         }
         let mut bindings = normal_types::Bindings::new(arguments.len());
         for (slot, argument) in arguments.iter().enumerate() {
-            let expected = self.instantiate_contextual_domain(
-                &metadata.parameters[slot].ty,
-                &bindings.parameters,
-                &bindings.arguments,
-                expr.source,
-            )?;
+            let expected =
+                bindings.instantiate(self, &metadata.parameters[slot].ty, expr.source)?;
             let value = value!(self.evaluate_contextual_argument(argument, &expected, environment));
             self.bind_normal_input(*head, &mut bindings, slot, value, argument.source())?;
         }
@@ -3701,15 +3711,46 @@ impl<'a> Interpreter<'a> {
         else {
             unreachable!()
         };
-        let parameters: Vec<_> = metadata.parameters.iter().map(|p| p.declaration).collect();
-        for requirement in &metadata.requirements {
-            self.tick(Some(source))?;
-            let predicate = requirement
-                .instantiate_rigids(&parameters, values)
-                .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
+        self.check_normal_requirements(metadata, values, source)?;
+        Ok(Value::Type(ty))
+    }
+
+    fn check_normal_requirements(
+        &mut self,
+        metadata: &nir::normal_forms::Head,
+        values: &[Term],
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        if metadata.requirements.is_empty() {
+            return Ok(());
+        }
+        let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+        let mut remaining = before;
+        let prepared = (|| {
+            let substitution = metadata.input_substitution(values, &[], &mut remaining)?;
+            metadata
+                .requirements
+                .iter()
+                .map(|predicate| {
+                    substitution.instantiate_predicate_bounded(predicate, &mut remaining)
+                })
+                .collect::<Result<Vec<_>, nir::type_computations::Error>>()
+        })();
+        self.budget.steps -= (before - remaining) as u64;
+        let predicates = prepared.map_err(|error| {
+            self.failure(
+                if matches!(error, nir::type_computations::Error::Budget) {
+                    ErrorKind::StepsExhausted
+                } else {
+                    ErrorKind::Type
+                },
+                Some(source),
+            )
+        })?;
+        for predicate in predicates {
             self.check_type_contract(&predicate, source)?;
         }
-        Ok(Value::Type(ty))
+        Ok(())
     }
 
     /// Only data with a structural normal-input representation is frozen here.
@@ -4305,24 +4346,6 @@ impl<'a> Interpreter<'a> {
         })
     }
 
-    fn specialize_contextual_input(
-        &mut self,
-        input: &mut nir::program::NormalFormArgument,
-        parameters: &[nir::DeclarationParameter],
-        types: &[Term],
-    ) -> Result<(), Error> {
-        let source = input.source();
-        let mut rewrite =
-            |ty: &Term| self.instantiate_contextual_domain(ty, parameters, types, source);
-        for pattern in input.patterns_mut() {
-            pattern.rewrite_types(&mut rewrite)?;
-        }
-        for expression in input.expressions_mut() {
-            expression.rewrite_types(&mut rewrite)?;
-        }
-        Ok(())
-    }
-
     #[inline(never)]
     fn eval_tuple_type(
         &mut self,
@@ -4770,32 +4793,33 @@ impl<'a> Interpreter<'a> {
         if parameters.len() != arguments.len() {
             return Err(ErrorKind::Type);
         }
-        let binders = self.input_binders(parameters);
-        for (binder, argument) in binders.iter().zip(arguments) {
-            if argument.sort() != binder.sort {
-                return Err(ErrorKind::Type);
-            }
-            if binder.sort == nir::Sort::Type {
-                continue;
-            }
-            let raw = self
-                .declaration_parameter_domains
-                .get(&binder.declaration)
-                .ok_or(ErrorKind::Type)?;
-            let domain = nir::type_computations::instantiate_parameters_bounded(
-                raw,
-                &binders,
-                arguments,
-                &[],
-                fuel,
-            )
-            .map_err(|failure| {
-                if matches!(failure, nir::type_computations::Error::Budget) {
+        let substitution = self
+            .function_substitution_bounded(parameters, arguments, &[], fuel)
+            .map_err(|error| {
+                if matches!(error, nir::type_computations::Error::Budget) {
                     ErrorKind::StepsExhausted
                 } else {
                     ErrorKind::Type
                 }
             })?;
+        let binders = self.input_binders(parameters);
+        for (binder, argument) in binders.iter().zip(arguments) {
+            let raw = self
+                .declaration_parameter_domains
+                .get(&binder.declaration)
+                .unwrap_or(&Term::Primitive(Primitive::Type));
+            let domain = substitution
+                .instantiate_bounded(raw, fuel)
+                .map_err(|error| {
+                    if matches!(error, nir::type_computations::Error::Budget) {
+                        ErrorKind::StepsExhausted
+                    } else {
+                        ErrorKind::Type
+                    }
+                })?;
+            if domain == Term::Primitive(Primitive::Type) {
+                continue;
+            }
             if let Term::TypeListValue(elements) = argument {
                 nir::type_computations::charge_term(argument, fuel).map_err(|failure| {
                     if matches!(failure, nir::type_computations::Error::Budget) {
@@ -4908,12 +4932,10 @@ impl<'a> Interpreter<'a> {
                         fuel,
                     )
                 })?;
-                let signature = identity
-                    .signature
-                    .instantiate_parameters(
-                        &self.input_binders(&identity.type_parameters),
-                        arguments,
-                    )
+                let substitution =
+                    self.function_substitution(&identity.type_parameters, arguments, expr.source)?;
+                let signature = substitution
+                    .instantiate(&identity.signature)
                     .map_err(|_| self.failure(ErrorKind::Type, Some(expr.source)))?;
                 if !selected_types::same(&signature, &expr.ty, &self.associated_values) {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
@@ -4934,6 +4956,11 @@ impl<'a> Interpreter<'a> {
                     .get(declaration)
                     .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(expr.source)))?;
                 self.admit_function_inputs(&definition.type_parameters, arguments, expr.source)?;
+                let substitution = self.function_substitution(
+                    &definition.type_parameters,
+                    arguments,
+                    expr.source,
+                )?;
                 let key = (*declaration, arguments.clone());
                 let binders = self.input_binders(&definition.type_parameters);
                 if !self.instances.contains_key(&key) {
@@ -4948,22 +4975,13 @@ impl<'a> Interpreter<'a> {
                         self.failure(ErrorKind::UnknownFunction, Some(expr.source))
                     })?;
                     for requirement in &definition.requirements {
-                        // Cache hits reuse the body, but invocation contracts
-                        // are substituted again in the current input scope.
-                        self.charge_copy_work(Some(expr.source), |fuel| {
-                            nir::copy_budget::charge_predicate_substitution(
-                                requirement,
-                                &binders,
-                                arguments,
-                                fuel,
-                            )
-                        })?;
-                        let requirement = requirement
-                            .instantiate_parameters(
-                                &self.input_binders(&definition.type_parameters),
-                                arguments,
-                            )
-                            .map_err(|_| self.failure(ErrorKind::Type, Some(expr.source)))?;
+                        // Cached bodies do not suppress current invocation obligations.
+                        let requirement = self.specialize_function_predicate(
+                            definition,
+                            arguments,
+                            requirement,
+                            expr.source,
+                        )?;
                         if let Some(requirement) =
                             self.bind_invocation_contract(&requirement, None, expr.source, 0)?
                         {
@@ -4974,15 +4992,19 @@ impl<'a> Interpreter<'a> {
                 let instance = if let Some(instance) = self.instances.get(&key) {
                     instance.clone()
                 } else {
-                    let definition = self.functions.get(declaration).ok_or_else(|| {
+                    let definition = *self.functions.get(declaration).ok_or_else(|| {
                         self.failure(ErrorKind::UnknownFunction, Some(expr.source))
                     })?;
-                    if !definition.capabilities.iter().all(|capability| {
-                        let Ok(bound) = capability.instantiate_parameters(
-                            &self.input_binders(&definition.type_parameters),
-                            arguments,
-                        ) else {
-                            return false;
+                    for capability in &definition.capabilities {
+                        let nir::program::TypePredicate::Trait(bound) = self
+                            .specialize_function_predicate(
+                                definition,
+                                arguments,
+                                &nir::program::TypePredicate::Trait(capability.clone()),
+                                expr.source,
+                            )?
+                        else {
+                            unreachable!("trait substitution preserves predicate kind");
                         };
                         let open = bound.subject.check_scope(&[]).is_err()
                             || bound
@@ -4990,29 +5012,21 @@ impl<'a> Interpreter<'a> {
                                 .iter()
                                 .any(|ty| ty.check_scope(&[]).is_err());
                         if self.comptime_only && open {
-                            return true;
+                            continue;
                         }
-                        self.capabilities_hold_parameters(
-                            std::slice::from_ref(capability),
-                            &self.input_binders(&definition.type_parameters),
-                            arguments,
-                        )
-                    }) {
-                        return Err(self.failure(ErrorKind::InvalidCallPlan, Some(expr.source)));
+                        if !self.capabilities_hold_parameters(
+                            std::slice::from_ref(&bound),
+                            &[],
+                            &[],
+                        ) {
+                            return Err(self.failure(ErrorKind::InvalidCallPlan, Some(expr.source)));
+                        }
                     }
-                    let signature = definition
-                        .signature
-                        .instantiate_parameters(
-                            &self.input_binders(&definition.type_parameters),
-                            arguments,
-                        )
+                    let signature = substitution
+                        .instantiate(&definition.signature)
                         .map_err(|_| self.failure(ErrorKind::Type, Some(expr.source)))?;
-                    let body = definition
-                        .body
-                        .instantiate_parameters(
-                            &self.input_binders(&definition.type_parameters),
-                            arguments,
-                        )
+                    let mut body = definition.body.clone();
+                    body.rewrite_types(&mut |ty| substitution.instantiate(ty))
                         .map_err(|_| self.failure(ErrorKind::Type, Some(expr.source)))?;
                     let instance = Arc::new(Closure {
                         definition_source: None,

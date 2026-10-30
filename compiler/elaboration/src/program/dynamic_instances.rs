@@ -237,22 +237,11 @@ impl Checker<'_, '_> {
         // completes, validate every retained value against the completed domain
         // even if this function is never invoked.
         for (operand, domain) in operands.iter().zip(&domains) {
-            let domain = domain
-                .instantiate_parameters_in_scope(
-                    &self.input_binders(&parameters),
-                    &symbols,
-                    &self.call_input_frames(),
-                )
-                .map_err(|failure| error(expr.span, failure.to_string()))?;
+            let domain = self.instantiate_input_types(domain, &parameters, &symbols, expr.span)?;
             self.require(&operand.ty, &domain, expr.span)?;
         }
-        let signature = signature
-            .instantiate_parameters_in_scope(
-                &self.input_binders(&parameters),
-                &symbols,
-                &self.call_input_frames(),
-            )
-            .map_err(|failure| error(expr.span, failure.to_string()))?;
+        let signature =
+            self.instantiate_input_types(&signature, &parameters, &symbols, expr.span)?;
         let ty = self.callable_type(owner, signature);
         if let Some(expected) = expected {
             self.require(&ty, expected, expr.span)?;

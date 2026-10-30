@@ -4873,18 +4873,29 @@ impl Checker<'_, '_> {
             }
             let requirement =
                 self.instantiate_formation_environment(requirement, &inputs.environment, span)?;
-            let instantiated = if let Some(parameters) = self.normal_parameters.get(&owner) {
-                let declarations: Vec<_> = parameters.iter().map(|(id, _, _)| *id).collect();
-                requirement.instantiate_rigids(&declarations, arguments)
+            let declarations: Vec<_> = if let Some(parameters) = self.normal_parameters.get(&owner)
+            {
+                parameters.iter().map(|(id, _, _)| *id).collect()
             } else {
-                let parameters = self.declaration_binders(owner);
-                requirement.instantiate_parameters_in_scope(
-                    &parameters,
-                    arguments,
-                    self.context.scope(),
-                )
-            }
+                self.declaration_binders(owner)
+                    .iter()
+                    .map(|p| p.declaration)
+                    .collect()
+            };
+            let domains: Vec<_> = declarations
+                .iter()
+                .map(|id| self.trait_input_domain(*id).unwrap_or_else(|| p(P::Type)))
+                .collect();
+            let substitution = nir::DeclarationSubstitution::new(
+                &declarations,
+                &domains,
+                arguments,
+                self.context.scope(),
+            )
             .map_err(|e| error(span, e.to_string()))?;
+            let instantiated = substitution
+                .instantiate_predicate(&requirement)
+                .map_err(|e| error(span, e.to_string()))?;
             self.establish_type_requirement(&instantiated, span)?;
         }
         if let Some(parameters) = self.normal_parameters.get(&owner) {
@@ -5299,12 +5310,22 @@ impl Checker<'_, '_> {
         } else {
             vec![scope.iter().map(|p| p.0).collect()]
         };
-        let ty = self
+        let template = self
             .known_callable_signature(owner)
             .or_else(|| self.interface_signatures.get(&owner).cloned())
-            .ok_or_else(|| error(expr.span, "declaration is not a supported callable"))?
-            .instantiate_parameters_in_scope(&self.declaration_binders(owner), &arguments, &frames)
-            .map_err(|e| error(expr.span, format!("invalid function type arguments: {e}")))?;
+            .ok_or_else(|| error(expr.span, "declaration is not a supported callable"))?;
+        let parameters = self
+            .declaration_binders(owner)
+            .iter()
+            .map(|p| p.declaration)
+            .collect::<Vec<_>>();
+        let ty = self.instantiate_input_types_in_scope(
+            &template,
+            &parameters,
+            &arguments,
+            &frames,
+            expr.span,
+        )?;
         let ty = self.callable_type(owner, ty);
         self.check_type_application(owner, &arguments, expr.span)?;
         if let Some(expected) = expected {
@@ -6096,24 +6117,25 @@ impl Checker<'_, '_> {
         } else {
             vec![caller_scope.iter().map(|p| p.0).collect()]
         };
-        let prepared_signature = signature
-            .instantiate_parameters_in_scope(
-                &self.input_binders(&known_inputs),
-                &known_values,
-                &caller_frames,
-            )
-            .map_err(|e| error(expr.span, e.to_string()))?;
+        let prepared_signature = self.instantiate_input_types_in_scope(
+            &signature,
+            &known_inputs,
+            &known_values,
+            &caller_frames,
+            expr.span,
+        )?;
         let preview_arguments = template
             .iter()
             .map(|ty| {
-                ty.instantiate_parameters_in_scope(
-                    &self.input_binders(&known_inputs),
+                self.instantiate_input_types_in_scope(
+                    ty,
+                    &known_inputs,
                     &known_values,
                     &caller_frames,
+                    expr.span,
                 )
             })
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| error(expr.span, e.to_string()))?;
+            .collect::<Result<Vec<_>, _>>()?;
         let preview = n::Expr {
             source: source(expr.span),
             ty: self.callable_type(owner, prepared_signature.clone()),
@@ -6508,12 +6530,13 @@ impl Checker<'_, '_> {
         let full_arguments = template
             .iter()
             .map(|ty| {
-                ty.instantiate_parameters_in_scope(
-                    &self.input_binders(&parameters),
+                self.instantiate_input_types_in_scope(
+                    ty,
+                    &parameters,
                     &instance.type_arguments,
                     &caller_frames,
+                    expr.span,
                 )
-                .map_err(|e| error(expr.span, e.to_string()))
             })
             .collect::<Result<Vec<_>, _>>()?;
         self.check_type_application(owner, &full_arguments, expr.span)?;
@@ -6592,13 +6615,13 @@ impl Checker<'_, '_> {
                 callee: Box::new(n::Expr {
                     ty: self.callable_type(
                         owner,
-                        signature
-                            .instantiate_parameters_in_scope(
-                                &self.input_binders(&parameters),
-                                &instance.type_arguments,
-                                &caller_frames,
-                            )
-                            .map_err(|e| error(expr.span, e.to_string()))?,
+                        self.instantiate_input_types_in_scope(
+                            &signature,
+                            &parameters,
+                            &instance.type_arguments,
+                            &caller_frames,
+                            expr.span,
+                        )?,
                     ),
                     source: source(expr.span),
                     kind: K::FunctionInstance {

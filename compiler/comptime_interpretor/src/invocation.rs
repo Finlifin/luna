@@ -608,21 +608,12 @@ impl<'a> Interpreter<'a> {
                     _ => &[],
                 };
                 for requirement in &definition.requirements {
-                    let binders = self.input_binders(&definition.type_parameters);
-                    self.charge_copy_work(Some(body.source), |fuel| {
-                        nir::copy_budget::charge_predicate_substitution(
-                            requirement,
-                            &binders,
-                            generic_arguments,
-                            fuel,
-                        )
-                    })?;
-                    let requirement = requirement
-                        .instantiate_parameters(
-                            &self.input_binders(&definition.type_parameters),
-                            generic_arguments,
-                        )
-                        .map_err(|_| self.failure(ErrorKind::Type, Some(body.source)))?;
+                    let requirement = self.specialize_function_predicate(
+                        definition,
+                        generic_arguments,
+                        requirement,
+                        body.source,
+                    )?;
                     let requirement = self
                         .bind_invocation_contract(
                             &requirement,

@@ -783,3 +783,50 @@ fn dependent_nominal_inputs_accept_type_values_after_domain_completion() {
         assert_eq!(vm.bytecode_invocations() - before, 1);
     }
 }
+
+#[test]
+fn normal_input_domains_use_type_valued_prior_value_parameters() {
+    let package = support::compile(
+        "typealias Type=.Type'builtin;
+        struct Key where T,value:T {payload:bool}
+        pure comptime fn Tag<T,value:T,key:Key<T,value>> -> Type where requires Key<T,value> == Key<T,value> {T}
+        comptime fn Build()->Type {Tag<Type,bool,Key<Type,bool>{payload:true}>}",
+    );
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let mut tree = Interpreter::new(&package, Budget::default()).unwrap();
+    let key = Term::Nominal {
+        declaration: package
+            .structs
+            .iter()
+            .find(|s| s.name == "Key")
+            .unwrap()
+            .declaration,
+        arguments: vec![
+            Term::Primitive(Primitive::Type),
+            Term::Primitive(Primitive::Bool),
+        ],
+    };
+    let expected = Value::Type(Term::NormalForm {
+        head: support::id(&package, "Tag"),
+        sort: nir::Sort::Type,
+        arguments: vec![
+            Term::Primitive(Primitive::Type),
+            Term::Primitive(Primitive::Bool),
+            Term::NominalValue {
+                ty: Box::new(key),
+                variant: None,
+                fields: vec![Term::Bool(true)],
+            },
+        ],
+    });
+    for _ in 0..2 {
+        assert_eq!(
+            vm.invoke(support::id(&package, "Build"), vec![]).unwrap(),
+            expected
+        );
+        assert_eq!(
+            tree.invoke(support::id(&package, "Build"), vec![]).unwrap(),
+            expected
+        );
+    }
+}

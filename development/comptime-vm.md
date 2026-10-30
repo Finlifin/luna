@@ -3058,3 +3058,55 @@ Validation from `/home/fin/luna`:
   struct/enum budget-failure recovery test and existing publication atomicity tests.
 - Managed formatting: `/tmp/luna-tools-a76zxsuk/result.json`, exit 0;
   `git diff --check` passed.
+
+## Completed domains in NF and ordinary callable instances
+
+NF input preparation, stored-type admission and formation requirements now use
+source domains when substituting completed arguments. An input declared as
+`value: T` can receive a Type when T completes to Type, including when subsequent
+inputs contain a nominal type indexed by that value. Opaque NF heads remain
+opaque. This uses the same structural substitution evidence as nominal layouts;
+it does not authorize arbitrary Type/value sort exchanges.
+
+NF domain checks collect the transitive dependency closure of the current input,
+not the entire earlier telescope. The first implementation revisited every prefix
+and failed the existing 100-independent-bool-input budget test. That test remains
+unchanged and now passes. Substitution, domain copying and predicate expansion
+consume the shared invocation budget.
+
+Ordinary callable admission, signature/body specialization, default arguments,
+formation predicates, deferred capabilities and invocation conditions use declared
+domains as well. Predicate substitution retains the ordinary input frame from the
+function signature, so a requirement on an ordinary Type argument still waits for
+that argument. Cached callable bodies do not suppress current contract checks;
+rejected formation does not populate the instance cache. Frozen callable recovery
+and explicit host invocation use the same domain-aware specialization.
+
+Source regressions cover VM/tree results, repeated calls, a nominal default and
+field read, wrong-domain rejection, and dynamic formation rejection with the PTC
+solver installed. The real sysroot regression stores `Key<Type, bool>` through
+`Object.append`, recovers it with `Object.value`, then constructs and compares an
+opaque normal form. It specifies an explicit build target because the shipped
+sysroot also contains target-dependent runtime definitions.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-h85qvoh8/result.json`, exit 0 on the final implementation.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_clause_inputs --test comptime_bytecode_types --test default_calls --test nominal_value_parameters --test type_spreads --test newtypes`:
+  `/tmp/luna-tools-e6nh4qy7/result.json`, exit 0, including formation rejection
+  with an installed PTC solver and repeated failed formation without caching.
+- Managed formatting: `/tmp/luna-tools-8559v_cw/result.json`, exit 0.
+
+The broader sysroot run `/tmp/luna-tools-d9mzuda0/result.json` failed. Three old
+fixture tests omit the ordinary bool binding; the tuple/optional/math/iteration
+integration fails with `field projection requires a supported struct`. The new
+Object test initially lacked target pointer-width information; its invocation
+now supplies `--build-target x86_64 linux 64`. The other four failures remain
+separate unresolved work; no clean-baseline run was made to attribute them to a
+particular historical commit. This stage does not claim the full sysroot suite
+passes, nor that all trait/IIR substitution consumers have been migrated.
+
+- Final sysroot check:
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_meta_object_preserves_type_valued_indices_in_normal_inputs`:
+  `/tmp/luna-tools-r76hdp6c/result.json`, exit 0. `git diff --check` passed.

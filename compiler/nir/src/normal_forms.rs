@@ -488,6 +488,26 @@ impl fmt::Display for ApplicationError {
     }
 }
 impl Head {
+    /// Prepare structural substitution from the declared input domains. Values
+    /// must still pass this head's collection/layout and formation checks.
+    pub fn input_substitution<'a>(
+        &self,
+        arguments: &'a [Term],
+        frames: &'a [Vec<Sort>],
+        fuel: &mut usize,
+    ) -> Result<crate::DeclarationSubstitution<'a>, crate::type_computations::Error> {
+        *fuel = fuel
+            .checked_sub(self.parameters.len())
+            .ok_or(crate::type_computations::Error::Budget)?;
+        let mut ids = Vec::new();
+        let mut domains = Vec::new();
+        for parameter in &self.parameters {
+            crate::type_computations::charge_term(&parameter.ty, fuel)?;
+            ids.push(parameter.declaration);
+            domains.push(parameter.ty.clone());
+        }
+        crate::DeclarationSubstitution::bounded(&ids, &domains, arguments, frames, fuel)
+    }
     /// Reconstruct the callable's dependent input frame without unfolding the head.
     pub fn callable_type(&self) -> Result<Term, crate::TypeError> {
         let mut binders = Vec::new();
@@ -727,53 +747,59 @@ impl Head {
                     actual: arguments.len(),
                 });
             }
-            let mut types: BTreeMap<DeclarationId, (Sort, &Term)> = BTreeMap::new();
+            let mut prior: BTreeMap<DeclarationId, usize> = BTreeMap::new();
             for (index, (parameter, argument)) in self.parameters.iter().zip(arguments).enumerate()
             {
                 crate::type_computations::charge_term(argument, &mut remaining)
                     .map_err(|_| ApplicationError::InputType { index })?;
-                let before_template = remaining;
-                crate::type_computations::charge_term(&parameter.ty, &mut remaining)
-                    .map_err(|_| ApplicationError::InputType { index })?;
-                let template_work = before_template - remaining;
-                let dependencies = parameter
-                    .ty
-                    .rigid_parameters()
-                    .map_err(|_| ApplicationError::InputDependency { index })?;
-                let prior = dependencies
-                    .keys()
-                    .filter_map(|id| {
-                        types.get(id).map(|(sort, value)| {
-                            (
-                                crate::DeclarationParameter {
-                                    declaration: *id,
-                                    sort: *sort,
-                                },
-                                *value,
-                            )
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                let before_inputs = remaining;
-                for (_, ty) in &prior {
-                    crate::type_computations::charge_term(ty, &mut remaining)
-                        .map_err(|_| ApplicationError::InputType { index })?;
-                }
-                // Bound substitution expansion before cloning prior inputs at
-                // each occurrence in the parameter's domain.
-                let input_work = before_inputs - remaining;
-                remaining = remaining
-                    .checked_sub(template_work.saturating_mul(input_work))
-                    .ok_or(ApplicationError::InputType { index })?;
-                let parameters: Vec<_> = prior
-                    .iter()
-                    .map(|(parameter, _)| parameter.clone())
-                    .collect();
-                let inputs: Vec<_> = prior.iter().map(|(_, value)| (*value).clone()).collect();
-                let expected = parameter
-                    .ty
-                    .instantiate_parameters_in_scope(&parameters, &inputs, frames)
-                    .map_err(|_| ApplicationError::InputDependency { index })?;
+                let expected = (|| {
+                    use crate::type_computations::{Error, charge_term};
+                    charge_term(&parameter.ty, &mut remaining)?;
+                    let mut pending = parameter
+                        .ty
+                        .rigid_parameters()
+                        .map_err(Error::Scope)?
+                        .into_keys()
+                        .collect::<Vec<_>>();
+                    let mut needed = BTreeSet::new();
+                    while let Some(id) = pending.pop() {
+                        remaining = remaining.checked_sub(1).ok_or(Error::Budget)?;
+                        let Some(&slot) = prior.get(&id) else {
+                            continue;
+                        };
+                        if !needed.insert(slot) {
+                            continue;
+                        }
+                        let domain: &Term = &self.parameters[slot].ty;
+                        charge_term(domain, &mut remaining)?;
+                        pending
+                            .extend(domain.rigid_parameters().map_err(Error::Scope)?.into_keys());
+                    }
+                    let mut ids = Vec::new();
+                    let mut domains = Vec::new();
+                    let mut inputs = Vec::new();
+                    for slot in needed {
+                        charge_term(&self.parameters[slot].ty, &mut remaining)?;
+                        charge_term(&arguments[slot], &mut remaining)?;
+                        ids.push(self.parameters[slot].declaration);
+                        domains.push(self.parameters[slot].ty.clone());
+                        inputs.push(arguments[slot].clone());
+                    }
+                    let substitution = crate::DeclarationSubstitution::bounded(
+                        &ids,
+                        &domains,
+                        &inputs,
+                        frames,
+                        &mut remaining,
+                    )?;
+                    substitution.instantiate_bounded(&parameter.ty, &mut remaining)
+                })()
+                .map_err(|error| {
+                    if matches!(error, crate::type_computations::Error::Budget) {
+                        remaining = 0;
+                    }
+                    ApplicationError::InputDependency { index }
+                })?;
                 let mut work = vec![(expected, argument, 0usize)];
                 while let Some((expected, argument, depth)) = work.pop() {
                     if depth > 128 || remaining == 0 {
@@ -983,17 +1009,7 @@ impl Head {
                         return Err(ApplicationError::InputType { index });
                     }
                 }
-                types.insert(
-                    parameter.declaration,
-                    (
-                        if parameter.kind == Kind::Type {
-                            Sort::Type
-                        } else {
-                            Sort::ComptimeValue
-                        },
-                        argument,
-                    ),
-                );
+                prior.insert(parameter.declaration, index);
             }
             Ok(())
         })();

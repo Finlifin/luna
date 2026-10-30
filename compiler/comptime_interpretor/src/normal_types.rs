@@ -7,6 +7,7 @@ pub(super) struct Bindings {
     slots: Vec<Option<usize>>,
     pub parameters: Vec<nir::DeclarationParameter>,
     pub arguments: Vec<Term>,
+    domains: Vec<Term>,
 }
 impl Bindings {
     pub fn new(count: usize) -> Self {
@@ -14,7 +15,65 @@ impl Bindings {
             slots: vec![None; count],
             parameters: vec![],
             arguments: vec![],
+            domains: vec![],
         }
+    }
+    pub fn instantiate(
+        &self,
+        vm: &mut Interpreter<'_>,
+        ty: &Term,
+        source: SourceRange,
+    ) -> Result<Term, Error> {
+        vm.integer_operation(Some(source), |budget| budget.consume(self.parameters.len()))?;
+        if self
+            .parameters
+            .iter()
+            .zip(&self.arguments)
+            .all(|(p, a)| p.sort == a.sort())
+        {
+            return vm.instantiate_contextual_domain(ty, &self.parameters, &self.arguments, source);
+        }
+        let before = usize::try_from(vm.budget.steps).unwrap_or(usize::MAX);
+        let mut remaining = before;
+        let ids = self
+            .parameters
+            .iter()
+            .map(|p| p.declaration)
+            .collect::<Vec<_>>();
+        let result = nir::DeclarationSubstitution::bounded(
+            &ids,
+            &self.domains,
+            &self.arguments,
+            &[],
+            &mut remaining,
+        )
+        .and_then(|substitution| substitution.instantiate_bounded(ty, &mut remaining));
+        vm.budget.steps -= (before - remaining) as u64;
+        result.map_err(|error| {
+            vm.failure(
+                if matches!(error, nir::type_computations::Error::Budget) {
+                    ErrorKind::StepsExhausted
+                } else {
+                    ErrorKind::Type
+                },
+                Some(source),
+            )
+        })
+    }
+    pub fn specialize(
+        &self,
+        vm: &mut Interpreter<'_>,
+        input: &mut nir::program::NormalFormArgument,
+    ) -> Result<(), Error> {
+        let source = input.source();
+        let mut rewrite = |ty: &Term| self.instantiate(vm, ty, source);
+        for pattern in input.patterns_mut() {
+            pattern.rewrite_types(&mut rewrite)?;
+        }
+        for expression in input.expressions_mut() {
+            expression.rewrite_types(&mut rewrite)?;
+        }
+        Ok(())
     }
     pub fn contains(&self, slot: usize) -> bool {
         self.slots.get(slot).is_some_and(Option::is_some)
@@ -134,12 +193,9 @@ impl Interpreter<'_> {
         if index != normal.bindings.arguments.len() || index >= metadata.parameters.len() {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         }
-        let expected = self.instantiate_contextual_domain(
-            &metadata.parameters[index].ty,
-            &normal.bindings.parameters,
-            &normal.bindings.arguments,
-            source,
-        )?;
+        let expected = normal
+            .bindings
+            .instantiate(self, &metadata.parameters[index].ty, source)?;
         inputs.prepared.clear();
         self.prepare_normal_shape(input, &expected, &mut inputs.prepared, 0)
     }
@@ -435,6 +491,12 @@ impl Interpreter<'_> {
             .get(&head)
             .and_then(|head| head.parameters.get(slot))
             .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
+        let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+        let mut remaining = before;
+        let charged = nir::type_computations::charge_term(&parameter.ty, &mut remaining);
+        self.budget.steps -= (before - remaining) as u64;
+        charged.map_err(|_| self.failure(ErrorKind::StepsExhausted, Some(source)))?;
+        let domain = parameter.ty.clone();
         let parameter = nir::DeclarationParameter {
             declaration: parameter.declaration,
             sort: if parameter.kind == nir::normal_forms::Kind::Type {
@@ -446,6 +508,7 @@ impl Interpreter<'_> {
         let term = self.residual_input_term(value, source)?;
         bindings.slots[slot] = Some(bindings.arguments.len());
         bindings.parameters.push(parameter);
+        bindings.domains.push(domain);
         bindings.arguments.push(term);
         Ok(())
     }

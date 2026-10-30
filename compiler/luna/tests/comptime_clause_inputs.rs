@@ -668,3 +668,81 @@ fn ordinary_comptime_inline_controls_keep_definition_checks() {
     }
     assert!(compile("fn choose(flag:bool)->bool {inline if flag {true} else {false}}").is_err());
 }
+
+#[test]
+fn type_valued_dependent_clause_inputs_form_callable_instances() {
+    let package = support::compile(
+        "typealias Type=.Type'builtin;
+        struct Key where T,value:T {payload:bool}
+        comptime fn inspect(.key:Key<T,value> = Key<T,value>{payload:true})->bool
+        where T,value:T, requires Key<T,value> == Key<T,value> {key.payload}
+        comptime fn run()->bool {
+            inspect<Type,bool>() and
+            not inspect<Type,bool>(.key=Key<Type,bool>{payload:false})
+        }",
+    );
+    for tree in [false, true] {
+        let mut vm = if tree {
+            Interpreter::new(&package, Default::default()).unwrap()
+        } else {
+            Interpreter::for_comptime(&package, Default::default()).unwrap()
+        };
+        for _ in 0..2 {
+            assert_eq!(
+                vm.invoke(support::id(&package, "run"), vec![]).unwrap(),
+                Value::Bool(true)
+            );
+        }
+    }
+}
+
+#[test]
+fn completed_clause_domains_reject_type_value_mismatches() {
+    for arguments in ["Type,true", "bool,bool"] {
+        let source = format!(
+            "typealias Type=.Type'builtin;
+            struct Key where T,value:T {{payload:bool}}
+            comptime fn inspect()->bool where T,value:T,
+                requires Key<T,value> == Key<T,value> {{true}}
+            comptime fn run()->bool {{inspect<{arguments}>()}}"
+        );
+        assert!(
+            support::compile_with_protocols(&source, &Default::default()).is_err(),
+            "accepted incompatible input: {arguments}"
+        );
+    }
+}
+
+#[test]
+fn type_valued_clause_contracts_reject_at_dynamic_instance_formation() {
+    let package = support::compile(
+        "typealias Type=.Type'builtin;
+        struct Key where T,value:T {payload:bool}
+        comptime fn inspect()->bool where T,value:T,
+            requires Key<T,value> == Key<Type,.char'builtin> {true}
+        comptime fn run()->bool {inspect<Type,bool>()}",
+    );
+    let context = elaboration::ptc::Context::from_package(&package).unwrap();
+    let solver = |predicate: &nir::program::TypePredicate| {
+        use comptime_interpretor::ContractOutcome;
+        use elaboration::ptc::{Budget, Formula, Outcome};
+        match context.prove(Formula::from_predicate(predicate), Budget::default()) {
+            Outcome::Entailed(_) => ContractOutcome::Satisfied,
+            Outcome::NotEntailed(_) => ContractOutcome::Rejected,
+            _ => ContractOutcome::Unknown,
+        }
+    };
+    let mut vm = Interpreter::for_comptime(&package, Default::default())
+        .unwrap()
+        .with_type_solver(&solver);
+    for _ in 0..2 {
+        assert_eq!(
+            vm.invoke(support::id(&package, "run"), vec![])
+                .unwrap_err()
+                .kind,
+            comptime_interpretor::ErrorKind::TypeContractRejected
+        );
+    }
+    assert!(!vm.events().iter().any(|event| matches!(event,
+        Event::InstantiateFunction { declaration, .. } if *declaration == support::id(&package, "inspect"))));
+}

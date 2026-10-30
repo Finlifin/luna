@@ -12,12 +12,12 @@ impl Interpreter<'_> {
         source: SourceRange,
     ) -> Result<(), Error> {
         for capability in &definition.capabilities {
-            // Enclosing nominal parameters can be values as well as Types.
-            // Keep their declared sorts when closing invocation obligations.
-            let capability = capability
-                .instantiate_parameters(&self.input_binders(&definition.type_parameters), arguments)
-                .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
-            let predicate = P::Trait(capability);
+            let predicate = self.specialize_function_predicate(
+                definition,
+                arguments,
+                &P::Trait(capability.clone()),
+                source,
+            )?;
             // Closed capabilities already use the executable/assumed dispatch
             // world. Only obligations deferred at formation need input binding.
             if self

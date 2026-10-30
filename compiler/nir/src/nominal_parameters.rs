@@ -291,6 +291,52 @@ impl<'a> DeclarationSubstitution<'a> {
             self.frames,
         )
     }
+    pub fn instantiate_predicate(
+        &self,
+        predicate: &crate::program::TypePredicate,
+    ) -> Result<crate::program::TypePredicate, TypeError> {
+        use crate::program::{TraitRequirement, TypePredicate as P};
+        Ok(match predicate {
+            P::Bool(value) => P::Bool(*value),
+            P::Trait(requirement) => P::Trait(TraitRequirement {
+                interface: requirement.interface,
+                subject: self.instantiate(&requirement.subject)?,
+                interface_arguments: requirement
+                    .interface_arguments
+                    .iter()
+                    .map(|ty| self.instantiate(ty))
+                    .collect::<Result<_, _>>()?,
+            }),
+            P::Equal(a, b) => P::Equal(self.instantiate(a)?, self.instantiate(b)?),
+            P::Not(inner) => P::Not(Box::new(self.instantiate_predicate(inner)?)),
+            P::And(parts) | P::Or(parts) => {
+                let parts = parts
+                    .iter()
+                    .map(|p| self.instantiate_predicate(p))
+                    .collect::<Result<_, _>>()?;
+                if matches!(predicate, P::And(_)) {
+                    P::And(parts)
+                } else {
+                    P::Or(parts)
+                }
+            }
+        })
+    }
+    pub fn instantiate_predicate_bounded(
+        &self,
+        predicate: &crate::program::TypePredicate,
+        fuel: &mut usize,
+    ) -> Result<crate::program::TypePredicate, crate::type_computations::Error> {
+        crate::copy_budget::charge_predicate_substitution(
+            predicate,
+            &self.parameters,
+            self.arguments,
+            fuel,
+        )
+        .map_err(|_| crate::type_computations::Error::Budget)?;
+        self.instantiate_predicate(predicate)
+            .map_err(crate::type_computations::Error::Scope)
+    }
     pub fn instantiate_bounded(
         &self,
         term: &Term,
