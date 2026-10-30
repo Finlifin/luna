@@ -132,7 +132,10 @@ impl Checker<'_, '_> {
         if template.types.len() != types.len() || template.inputs.len() != public.inputs.len() {
             return Err(error(span, "selected code method signature arity mismatch"));
         }
-        let definition = self.instantiate_code_generator(template, &types, span)?;
+        let mut definition = self.instantiate_code_generator(template, &types, span)?;
+        for (&slot, value) in &public.input_values {
+            self.specialize_generator_input(&mut definition, slot, value, span)?;
+        }
         let saved = definition
             .captures
             .iter()

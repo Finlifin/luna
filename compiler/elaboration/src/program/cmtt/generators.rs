@@ -21,11 +21,23 @@ pub(in crate::program) struct Generator<O = Interface> {
     pub(super) captures: Vec<(DeclarationId, Term)>,
     pub(super) types: Vec<(DeclarationId, Term)>,
     pub(super) signature: CodeFunctionSignature<O>,
+    pub(super) input_values: BTreeMap<usize, Term>,
     pub(super) defaults: Vec<(usize, hir::HirId)>,
     pub(super) variadics: Vec<usize>,
     pub(super) body: Option<hir::BodyId>,
     pub(super) checked: bool,
 }
+impl<O> Generator<O> {
+    pub(super) fn input_value(&self, slot: usize) -> Option<Term> {
+        self.input_values.get(&slot).cloned().or_else(|| {
+            self.input_binders.get(&slot).map(|binder| Term::Rigid {
+                declaration: binder.declaration,
+                sort: binder.sort,
+            })
+        })
+    }
+}
+
 impl<O> std::ops::Deref for Generator<O> {
     type Target = CodeFunctionSignature<O>;
     fn deref(&self) -> &Self::Target {
@@ -61,6 +73,18 @@ impl<O: fmt::Display> fmt::Display for Generator<O> {
         f.write_str(") (clauses")?;
         for ((id, ty), domain) in self.types.iter().zip(&self.clause_domains) {
             write!(f, " (input {id} (domain {domain}) (value {ty}))")?;
+        }
+        f.write_str(") (input-binders")?;
+        for (slot, binder) in &self.input_binders {
+            write!(
+                f,
+                " (binder (parameter {slot}) (declaration {}) (sort {:?}))",
+                binder.declaration, binder.sort
+            )?;
+        }
+        f.write_str(") (input-values")?;
+        for (slot, value) in &self.input_values {
+            write!(f, " (input {slot} {value})")?;
         }
         f.write_str(") (inputs")?;
         for (binding, input) in &self.inputs {
@@ -127,6 +151,7 @@ impl Checker<'_, '_> {
             return Err(error(span, "cyclic code generator signature"));
         }
         let saved = std::mem::take(&mut self.locals);
+        let saved_type_inputs = std::mem::take(&mut self.type_input_bindings);
         let saved_owner = self.signature_owner.replace(owner);
         let saved_context = self.context.clone();
         self.context = self.nominal_context();
@@ -227,7 +252,8 @@ impl Checker<'_, '_> {
             // including enclosing value binders, as part of definition checking.
             self.context = self.definition_context(owner);
             let mut inputs = Vec::new();
-            for parameter in sig.params {
+            let mut input_binders = BTreeMap::new();
+            for (slot, parameter) in sig.params.iter().enumerate() {
                 let annotation = match parameter.ty.kind {
                     TyParamKind::Positional(annotation)
                     | TyParamKind::Optional(_, annotation, _)
@@ -302,6 +328,20 @@ impl Checker<'_, '_> {
                         "generator lambda parameter requires a comptime callable type",
                     ));
                 }
+                if parameter.ty.is_comptime()
+                    && matches!(&input, Input::Data(ty) if *ty == p(P::Type))
+                {
+                    let binder = self.fresh_generator_type_binder(owner, parameter.span)?;
+                    self.type_input_bindings.insert(
+                        local(parameter.hir_id),
+                        Term::Rigid {
+                            declaration: binder.declaration,
+                            sort: binder.sort,
+                        },
+                    );
+                    visible_parameters.push(binder.declaration);
+                    input_binders.insert(slot, binder);
+                }
                 inputs.push((local(parameter.hir_id), input));
             }
             let output = form_output(self, sig.return_ty)?;
@@ -310,7 +350,12 @@ impl Checker<'_, '_> {
                     .input_binders(
                         &visible_parameters
                             .into_iter()
-                            .filter(|id| !self.type_parameters[&owner].contains(id))
+                            .filter(|id| {
+                                !self.type_parameters[&owner].contains(id)
+                                    && !input_binders
+                                        .values()
+                                        .any(|binder| binder.declaration == *id)
+                            })
                             .collect::<BTreeSet<_>>()
                             .into_iter()
                             .collect::<Vec<_>>(),
@@ -344,11 +389,12 @@ impl Checker<'_, '_> {
                     })
                     .collect(),
                 signature: CodeFunctionSignature {
-                    input_binders: Default::default(),
+                    input_binders,
                     clause_domains: domains,
                     inputs,
                     output,
                 },
+                input_values: BTreeMap::new(),
                 variadics: sig
                     .params
                     .iter()
@@ -371,6 +417,7 @@ impl Checker<'_, '_> {
             })
         })();
         self.locals = saved;
+        self.type_input_bindings = saved_type_inputs;
         self.signature_owner = saved_owner;
         self.context = saved_context;
         self.active_signatures.remove(&owner);
@@ -389,6 +436,10 @@ impl Checker<'_, '_> {
             .map(|(_, cell)| comptime_interpretor::Value::Storage(cell.clone()))
             .collect::<Vec<_>>();
         let checkpoint = self.checkpoint_generator_cells(&roots, span)?;
+        // Generator inputs use declaration identities, not a new de Bruijn
+        // telescope. Retain the caller's type scope for quoted interfaces that
+        // mention its already staged Type slots, without importing its locals.
+        let caller_scope = self.call_inference_domains();
         let outer = (
             self.context.clone(),
             std::mem::take(&mut self.type_input_bindings),
@@ -403,6 +454,7 @@ impl Checker<'_, '_> {
         );
         let aliases = std::mem::take(&mut self.alias_substitution);
         let clause_bindings = std::mem::take(&mut self.normal_default_bindings);
+        self.default_input_scope = (!caller_scope.is_empty()).then_some(caller_scope);
         self.context = self.definition_context(owner);
         let saved_cells = std::mem::take(&mut self.generator_cells);
         let saved_patterns = std::mem::take(&mut self.pattern_codes);
@@ -586,7 +638,8 @@ impl Checker<'_, '_> {
                     this.normal_default_bindings.insert(*id, (binding, domain.clone()));
                 }
             }
-            for (binding, input) in &definition.inputs {
+            for (slot, (binding, input)) in definition.inputs.iter().enumerate() {
+                this.install_generator_type_input(*binding, definition.input_value(slot));
                 match input {
                     Input::Data(ty) => {
                         this.locals.insert(*binding, ty.clone());
@@ -643,6 +696,9 @@ impl Checker<'_, '_> {
         let mut remaining = usize::try_from(*fuel).unwrap_or(usize::MAX);
         let result = (|| {
             for (_, ty) in &definition.captures {
+                nir::type_computations::charge_term(ty, &mut remaining)?;
+            }
+            for ty in definition.input_values.values() {
                 nir::type_computations::charge_term(ty, &mut remaining)?;
             }
             for (_, ty) in &definition.types {
@@ -724,6 +780,7 @@ impl Checker<'_, '_> {
                 |ty: &Term| self.instantiate_generator_type(ty, &parameters, &values, span);
             definition.signature = definition.signature.try_map_types(&mut substitute)?;
         }
+        self.freshen_generator_signature(owner, &mut definition.signature, span)?;
         Ok(definition)
     }
 
@@ -808,7 +865,19 @@ impl Checker<'_, '_> {
                 self.instantiate_generator_type(ty, &binders, &hints, span)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        self.instantiate_code_generator(template, &types, span)
+        let mut definition = self.instantiate_code_generator(template, &types, span)?;
+        for (&slot, binder) in &template.input_binders {
+            let Some(index) = parameters.iter().position(|id| *id == binder.declaration) else {
+                continue;
+            };
+            if let Some(value) = candidate
+                .type_argument(index)
+                .map_err(|e| call_inference_error(span, e))?
+            {
+                self.specialize_generator_input(&mut definition, slot, &value, span)?;
+            }
+        }
+        Ok(definition)
     }
 
     pub(super) fn invoke_property_generator(
@@ -1153,6 +1222,7 @@ impl Checker<'_, '_> {
                 )
             })?;
             self.immutable.insert(*id);
+            self.install_generator_type_input(*id, definition.input_value(index));
             match (input, argument) {
                 (Input::Pattern(interface), Argument::Code(CodeValue::Pattern(code))) => {
                     self.ascribe_pattern_input(&code, interface, signature.span)?;

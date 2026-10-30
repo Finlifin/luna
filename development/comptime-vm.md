@@ -6012,3 +6012,71 @@ Validation from `/home/fin/luna`:
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
   `/tmp/luna-tools-2guf6pxj/result.json`, exit 0. Final format and diff checks
   accompany the commit. No full workspace test run was requested or performed.
+
+## Ordinary Type inputs in contextual generators (2026-10-31)
+
+Expression-code generators, pattern generators and contextual data consumers
+now bind ordinary `comptime T: Type` parameters during signature formation.
+Later data domains, quoted runtime contexts, results and pattern success outputs
+can depend on these inputs. They are ordinary supplied values, not additional
+clause arguments. The original `generic_code_defaults_preserve_expression_context_and_pattern_outputs`
+regression is enabled and passes.
+
+Each cached source signature owns declaration binders from the shared identity
+allocator. Copies freshen those binders before nested calls or recursive
+invocation can transport caller identities into them. The caller's type scope
+is retained through generator frames without importing caller runtime locals.
+Completed Type inputs also enter the callee's staged-value environment, so
+annotations and forwarded Type expressions refer to the same identity.
+
+The common argument pipeline uses provisional inference slots for contextual
+checking, then constrains them to the Type values actually obtained at each
+source position. Inferred interface evidence never fabricates a supplied Type
+value. The existing NIR specialization boundary rewrites all signature types
+while retaining runtime binding identities. Named argument order, single
+evaluation, ordinary function calls producing Type, literal spreads, code
+parameter defaults and trait implementation dispatch are covered by source
+regressions. Runtime data still cannot enter a required Type computation.
+
+Open definitions now route local code constants through their contextual
+binding checker and publish pattern-splice success bindings into subsequent
+expression descriptions. Code witnesses are restored across open-definition
+frames. Fragment phase-check snapshots retain callable clause domains and
+newtype representations: omitting them made a full-sysroot check reject the
+Iterator callback context even though the contextual example did not call it.
+A focused declaration-domain regression reproduces that boundary.
+
+Remaining work: omission/evaluation of defaults for the ordinary Type parameter
+itself is not yet wired into shared prefix completion. Code-valued parameter
+defaults depending on an explicitly supplied Type are supported. Type evidence
+from nonliteral data packets also needs the same source-ordered transport;
+current rejection must not be replaced by inferring a value from its domain.
+General suspended Type computations remain subject to the existing definition
+checking limits. This stage does not claim complete CMTT or language support.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt_type_inputs --test cmtt --test cmtt_methods --test cmtt_phase_boundaries --test open_functions --test function_type_dependencies --test scoped_comptime_callables --no-fail-fast`:
+  `/tmp/luna-tools-z4s8x8xd/result.json`, exit 101. CMTT: 580 passed and the same
+  three previously established Type-list baseline failures; no ignored tests.
+  Methods: 144 passed; phase boundaries: 3; open functions: 389; function type
+  dependencies: 37; scoped callables: 10. One newly written test had used the
+  reserved name `lift`; its declaration and calls were corrected to
+  `select_value`, without changing expected behavior.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt_type_inputs`:
+  `/tmp/luna-tools-f4djwtrs/result.json`, exit 0; all nine new tests passed.
+- After the full-sysroot snapshot fix,
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt_type_inputs --test open_functions --no-fail-fast`:
+  `/tmp/luna-tools-yz3gr89q/result.json`, exit 0; ten contextual Type-input tests
+  and all 389 open-function tests passed.
+- The existing real-sysroot callable example was also checked during diagnosis:
+  `python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-callable-type-inputs.fl --sysroot library`:
+  `/tmp/luna-tools-4px66_66/result.json`, exit 0. No library reduction or phase
+  validation bypass was used to resolve the new example's snapshot failure.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-type-inputs.fl --sysroot library`:
+  `/tmp/luna-tools-h_othkcn/result.json`, exit 0; the native test passed for
+  bool and char instances, including both code-parameter defaults, local code
+  constants and pattern output use. This is the complete real sysroot and the
+  LLVM host pipeline, not an inline imitation of its primitive bindings.
+- Formatting: `/tmp/luna-tools-jywad5mo/result.json`, exit 0; final format and
+  diff checks accompany the commit. No full workspace test run was performed.

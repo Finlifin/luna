@@ -951,6 +951,20 @@ impl Checker<'_, '_> {
         expected: Option<&D>,
         depth: usize,
     ) -> Result<D, Error> {
+        // Contextual values have dedicated interfaces, not ordinary callable
+        // results or Any descriptions. Keep their witnesses in the same code
+        // binding path used by a direct splice in this definition.
+        if binding.comptime
+            && binding.init.is_some_and(|init| {
+                self.code_producer(init)
+                    || self.pattern_code_producer(init, binding.ty)
+                    || binding
+                        .ty
+                        .is_some_and(|ty| matches!(ty.kind, H::ContextualExprType(..)))
+            })
+        {
+            return self.describe_known_region(expr, expected);
+        }
         let pending_annotation = std::cell::Cell::new(false);
         let annotation = binding
             .ty
@@ -1016,6 +1030,7 @@ impl Checker<'_, '_> {
             let D::Known(ty) = &actual else {
                 unreachable!()
             };
+            let previous_bindings = self.locals.keys().copied().collect::<BTreeSet<_>>();
             let result = if *ty == p(P::Type) || !self.contains_inline_control(init)? {
                 // Preserve concrete pattern evidence when there is no
                 // inline selector requiring compositional checking.
@@ -1041,8 +1056,11 @@ impl Checker<'_, '_> {
                     this.describe_known_region(&probe, expected)
                 })?
             };
-            for id in pattern_binding_ids(&binding.pattern) {
-                if let Some(ty) = self.locals.get(&id) {
+            // Pattern splices can introduce outputs absent from the source
+            // pattern's syntactic binding list. Publish the bindings actually
+            // established by the checked pattern, including these outputs.
+            for (&id, ty) in &self.locals {
+                if !previous_bindings.contains(&id) {
                     locals.insert(id, D::Known(ty.clone()));
                     if self.in_staged_input {
                         self.open_staged_locals.insert(id);
@@ -1992,6 +2010,8 @@ impl Checker<'_, '_> {
         let saved_match_input = self.inline_match_input.take();
         let saved_unselected = std::mem::replace(&mut self.in_unselected_inline, false);
         let saved_locals = std::mem::take(&mut self.locals);
+        let saved_code = self.code_values.clone();
+        let saved_patterns = self.pattern_codes.clone();
         let saved_staged_locals = std::mem::take(&mut self.open_staged_locals);
         let saved_staged_locals_members = std::mem::take(&mut self.open_member_locals);
         let saved_captures = std::mem::take(&mut self.captures);
@@ -2026,6 +2046,8 @@ impl Checker<'_, '_> {
         self.inline_match_input = saved_match_input;
         self.in_unselected_inline = saved_unselected;
         self.locals = saved_locals;
+        self.code_values = saved_code;
+        self.pattern_codes = saved_patterns;
         self.open_staged_locals = saved_staged_locals;
         self.open_member_locals = saved_staged_locals_members;
         self.captures = saved_captures;
@@ -2645,7 +2667,9 @@ impl Checker<'_, '_> {
             functions,
             runtime_function_identities,
             normal_forms: self.normal_form_metadata(),
+            function_parameters: self.function_parameter_metadata(),
             structs: self.structs.values().cloned().collect(),
+            newtypes: self.newtypes.values().cloned().collect(),
             alias_contracts: self.alias_contracts.values().cloned().collect(),
             enums: self.enums.values().cloned().collect(),
             traits: self.checked_traits.clone(),

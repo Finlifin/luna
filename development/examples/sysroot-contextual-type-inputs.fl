@@ -1,0 +1,36 @@
+{- Type inputs retain their caller identity through code generation. Expression
+   contexts and pattern success bindings remain separate runtime interfaces.
+-}
+comptime fn identity_code(comptime T: Type) -> <value: T |- T> {
+    '(value)
+}
+
+comptime fn expression(comptime T: Type,
+    .code: <value: T |- T> = identity_code(T)) -> <value: T |- T> {
+    code
+}
+
+comptime fn binding_code(comptime T: Type) -> <T -| result: T> {
+    '<result>
+}
+
+comptime fn pattern(comptime T: Type,
+    .code: <T -| result: T> = binding_code(T)) -> <T -| result: T> {
+    code
+}
+
+fn select(comptime T: Type, input: T) -> T {
+    const code = expression(T);
+    let value = ~[value=input]<code>;
+    let ~<pattern(T)> = value;
+    result
+}
+
+test {
+    let yes = select(bool, true);
+    let no = select(bool, false);
+    let letter = select(char, 'a');
+    assumes yes;
+    assumes not no;
+    assumes letter == 'a';
+}

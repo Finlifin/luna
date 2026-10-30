@@ -77,7 +77,11 @@ impl Checker<'_, '_> {
                 .is_some_and(|owner| self.is_pattern_generator(owner))
     }
 
-    fn pattern_code_producer(&mut self, value: &Expr<'_>, annotation: Option<&Expr<'_>>) -> bool {
+    pub(super) fn pattern_code_producer(
+        &mut self,
+        value: &Expr<'_>,
+        annotation: Option<&Expr<'_>>,
+    ) -> bool {
         annotation.is_some_and(|ty| matches!(ty.kind, H::ContextualPatternType(..)))
             || self.pattern_producer_in(value, &mut BTreeSet::new(), 0)
     }

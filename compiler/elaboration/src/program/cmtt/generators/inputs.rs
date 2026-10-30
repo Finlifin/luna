@@ -41,7 +41,7 @@ impl Checker<'_, '_> {
                 route.expand_literal_packet(&mut self.required_steps)?;
             }
         }
-        let (parameters, mut type_plan, pending, deferred_clauses) =
+        let (mut parameters, mut type_plan, pending, deferred_clauses) =
             if let Some(plan) = prepared_types {
                 plan
             } else if let Some(explicit) = explicit {
@@ -54,6 +54,15 @@ impl Checker<'_, '_> {
             } else {
                 self.generator_clause_plan(owner, site.span)?
             };
+        // Ordinary Type values have their own inference slots, but are never
+        // inferred as supplied values. Their evaluated identities constrain
+        // these slots later, at their original source positions.
+        parameters.extend(
+            template
+                .input_binders
+                .values()
+                .map(|binder| binder.declaration),
+        );
         let planned = self.instantiate_code_generator(&template, &type_plan, site.span)?;
         // Previously completed argument interfaces are safe inference evidence:
         // reading their types neither runs a generator nor reads runtime storage.
@@ -487,6 +496,16 @@ impl Checker<'_, '_> {
                             expected,
                             argument.span,
                         )?
+                    } else if template.input_binders.contains_key(&route.parameter) {
+                        let value = self.generator_required_type(argument)?;
+                        (
+                            Argument::Data(Some(n::Expr {
+                                source: source(argument.span),
+                                ty: p(P::Type),
+                                kind: K::TypeValue(value),
+                            })),
+                            p(P::Type),
+                        )
                     } else if self.checking_code_generator {
                         let value = self.check_generator_data_input(argument, expected, context)?;
                         (Argument::Data(None), value.ty)
@@ -541,6 +560,22 @@ impl Checker<'_, '_> {
                 }
                 collected[route_index].push((value, ty));
             } else {
+                if let Some(binder) = template.input_binders.get(&route.parameter) {
+                    let Argument::Data(Some(n::Expr {
+                        kind: K::TypeValue(value),
+                        ..
+                    })) = &value
+                    else {
+                        return Err(error(
+                            argument.span,
+                            "dependent contextual input requires a completed Type value",
+                        ));
+                    };
+                    completed.inputs.insert(
+                        binder.declaration,
+                        self.copy_alias_type(value, argument.span)?,
+                    );
+                }
                 values[route.parameter] = Some(value);
                 actual[route.parameter] = Some(ty.clone());
                 evidence[route.parameter] = Some(ty);
@@ -765,7 +800,16 @@ impl Checker<'_, '_> {
             }
         }
         formation?;
-        let definition = self.instantiate_code_generator(&template, &types, site.span)?;
+        let mut definition = self.instantiate_code_generator(&template, &types, site.span)?;
+        for (&slot, binder) in &template.input_binders {
+            let value = completed.inputs.get(&binder.declaration).ok_or_else(|| {
+                error(
+                    site.span,
+                    "contextual Type parameter default completion is not yet implemented",
+                )
+            })?;
+            self.specialize_generator_input(&mut definition, slot, value, site.span)?;
+        }
         for ((value, actual), (_, input)) in values.iter_mut().zip(&actual).zip(&definition.inputs)
         {
             match (value, input) {

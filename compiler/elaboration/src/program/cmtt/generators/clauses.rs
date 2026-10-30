@@ -5,6 +5,7 @@ use super::*;
 pub(in crate::program::cmtt) struct CompletedDefaults {
     pub(in crate::program::cmtt) types: BTreeMap<usize, Term>,
     pub(in crate::program::cmtt) clauses: BTreeMap<usize, Term>,
+    pub(in crate::program::cmtt) inputs: BTreeMap<DeclarationId, Term>,
 }
 
 impl fmt::Display for CompletedDefaults {
@@ -16,6 +17,10 @@ impl fmt::Display for CompletedDefaults {
         f.write_str(") (clauses")?;
         for (slot, value) in &self.clauses {
             write!(f, " (slot {slot} {value})")?;
+        }
+        f.write_str(") (inputs")?;
+        for (id, value) in &self.inputs {
+            write!(f, " (input {id} {value})")?;
         }
         f.write_str("))")
     }
@@ -114,6 +119,7 @@ impl Checker<'_, '_> {
                 .iter()
                 .map(|id| self.trait_input_domain(*id).unwrap_or_else(|| p(P::Type)))
                 .collect::<Vec<_>>();
+            let scope = self.call_inference_domains();
             let mut candidate = scheme
                 .infer_declared_sparse_types_mode(
                     parameters,
@@ -124,9 +130,18 @@ impl Checker<'_, '_> {
                     &self.context,
                     crate::ptc::Budget::default(),
                     false,
-                    &[],
+                    &scope,
                 )
                 .map_err(|e| call_inference_error(span, e))?;
+            for (id, value) in &completed.inputs {
+                let index = parameters
+                    .iter()
+                    .position(|parameter| parameter == id)
+                    .ok_or_else(|| error(span, "missing contextual input inference binder"))?;
+                candidate
+                    .constrain_type_argument(index, value, crate::ptc::Budget::default())
+                    .map_err(|e| call_inference_error(span, e))?;
+            }
             let Term::Function {
                 parameters: inputs,
                 result,

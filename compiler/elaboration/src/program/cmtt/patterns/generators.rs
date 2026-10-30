@@ -29,6 +29,8 @@ pub(in crate::program) struct PatternGenerator {
     captures: Vec<(DeclarationId, Term)>,
     types: Vec<(DeclarationId, Term)>,
     clause_domains: Vec<Term>,
+    input_binders: BTreeMap<usize, nir::DeclarationParameter>,
+    input_values: BTreeMap<usize, Term>,
     interface: PatternInterface,
     body: Option<hir::BodyId>,
     checked: bool,
@@ -44,12 +46,22 @@ impl std::ops::Deref for PatternGenerator {
 }
 
 impl PatternGenerator {
+    fn input_value(&self, slot: usize) -> Option<Term> {
+        self.input_values.get(&slot).cloned().or_else(|| {
+            self.input_binders.get(&slot).map(|binder| Term::Rigid {
+                declaration: binder.declaration,
+                sort: binder.sort,
+            })
+        })
+    }
+
     fn charge(&self, fuel: &mut usize) -> Result<(), nir::type_computations::Error> {
         for ty in std::iter::once(&self.subject)
             .chain(self.outputs.values())
             .chain(self.types.iter().map(|(_, ty)| ty))
             .chain(self.clause_domains.iter())
             .chain(self.captures.iter().map(|(_, value)| value))
+            .chain(self.input_values.values())
         {
             nir::type_computations::charge_term(ty, fuel)?;
         }
@@ -89,7 +101,7 @@ impl PatternGenerator {
         result.map_err(|failure| error(span, failure.to_string()))?;
         let definition = self;
         Ok(nir::code_interfaces::PatternFunctionSignature {
-            input_binders: Default::default(),
+            input_binders: self.input_binders.clone(),
             clause_domains: definition.clause_domains.clone(),
             inputs: definition
                 .inputs
@@ -127,6 +139,7 @@ impl PatternGenerator {
         signature: nir::code_interfaces::PatternFunctionSignature,
     ) {
         use nir::code_interfaces::CodeInput;
+        self.input_binders = signature.input_binders;
         self.clause_domains = signature.clause_domains;
         self.interface = signature.output;
         for ((binding, input), (new_binding, completed)) in
@@ -167,6 +180,18 @@ impl fmt::Display for PatternGenerator {
         f.write_str(") (types")?;
         for ((id, ty), domain) in self.types.iter().zip(&self.clause_domains) {
             write!(f, " (input {id} (domain {domain}) (value {ty}))")?;
+        }
+        f.write_str(") (input-binders")?;
+        for (slot, binder) in &self.input_binders {
+            write!(
+                f,
+                " (binder (parameter {slot}) (declaration {}) (sort {:?}))",
+                binder.declaration, binder.sort
+            )?;
+        }
+        f.write_str(") (input-values")?;
+        for (slot, value) in &self.input_values {
+            write!(f, " (input {slot} {value})")?;
         }
         f.write_str(") (inputs")?;
         for (id, ty) in &self.inputs {
@@ -237,6 +262,11 @@ impl Checker<'_, '_> {
                 .collect::<Vec<_>>();
             self.rewrite_pattern_generator(&mut definition, &binders, &values, span)?;
             definition.captures = captures;
+        }
+        if !definition.input_binders.is_empty() {
+            let mut signature = definition.contextual_signature(&mut self.required_steps, span)?;
+            self.freshen_generator_signature(owner, &mut signature, span)?;
+            definition.apply_contextual_signature(signature);
         }
         Ok(definition)
     }
@@ -370,7 +400,8 @@ impl Checker<'_, '_> {
                 })
                 .collect();
             let mut inputs = Vec::new();
-            for parameter in sig.params {
+            let mut input_binders = BTreeMap::new();
+            for (slot, parameter) in sig.params.iter().enumerate() {
                 if let TyParamKind::Itself { is_ref } = parameter.ty.kind {
                     let subject = this.self_type(owner, parameter.span)?;
                     let ty = if is_ref {
@@ -468,6 +499,18 @@ impl Checker<'_, '_> {
                         "pattern generator data domain is not supported",
                     ));
                 }
+                if parameter.ty.is_comptime() && ty == p(P::Type) {
+                    let binder = this.fresh_generator_type_binder(owner, parameter.span)?;
+                    this.type_input_bindings.insert(
+                        local(parameter.hir_id),
+                        Term::Rigid {
+                            declaration: binder.declaration,
+                            sort: binder.sort,
+                        },
+                    );
+                    visible_parameters.push(binder.declaration);
+                    input_binders.insert(slot, binder);
+                }
                 inputs.push((local(parameter.hir_id), PatternInput::Data(ty.clone())));
                 this.locals.insert(local(parameter.hir_id), ty);
             }
@@ -486,7 +529,12 @@ impl Checker<'_, '_> {
                 .input_binders(
                     &visible_parameters
                         .into_iter()
-                        .filter(|id| !parameters.contains(id))
+                        .filter(|id| {
+                            !parameters.contains(id)
+                                && !input_binders
+                                    .values()
+                                    .any(|binder| binder.declaration == *id)
+                        })
                         .collect::<Vec<_>>(),
                 )
                 .into_iter()
@@ -505,6 +553,8 @@ impl Checker<'_, '_> {
                 captures,
                 types,
                 clause_domains: domains,
+                input_binders,
+                input_values: BTreeMap::new(),
                 interface: PatternInterface { subject, outputs },
                 body,
                 checked: false,
@@ -545,11 +595,14 @@ impl Checker<'_, '_> {
             else {
                 unreachable!()
             };
-            for ((id, input), parameter) in definition.inputs.iter().zip(signature.params) {
+            for (slot, ((id, input), parameter)) in
+                definition.inputs.iter().zip(signature.params).enumerate()
+            {
                 if let TyParamKind::Optional(_, _, value) = parameter.ty.kind {
                     this.evaluate_pattern_argument(value, input)?;
                 }
                 this.immutable.insert(*id);
+                this.install_generator_type_input(*id, definition.input_value(slot));
                 match input {
                     PatternInput::Data(ty) => {
                         this.locals.insert(*id, ty.clone());
@@ -609,7 +662,8 @@ impl Checker<'_, '_> {
                 &definition.types,
                 &definition.clause_domains,
             )?;
-            for (binding, input) in &definition.inputs {
+            for (slot, (binding, input)) in definition.inputs.iter().enumerate() {
+                this.install_generator_type_input(*binding, definition.input_value(slot));
                 match input {
                     PatternInput::Data(ty) => {
                         this.locals.insert(*binding, ty.clone());
@@ -932,6 +986,7 @@ impl Checker<'_, '_> {
             });
             let contextual = super::super::generators::Generator {
                 signature: template.contextual_signature(&mut self.required_steps, span)?,
+                input_values: template.input_values.clone(),
                 captures: template.captures.clone(),
                 types: template.types.clone(),
                 defaults: signature
@@ -978,6 +1033,7 @@ impl Checker<'_, '_> {
                 prepared_types,
             )?;
             let mut definition = template;
+            definition.input_values = prepared.input_values;
             definition.types = prepared.types;
             definition.captures = prepared.captures;
             definition.apply_contextual_signature(prepared.signature);
@@ -997,8 +1053,12 @@ impl Checker<'_, '_> {
                     &definition.types,
                     &definition.clause_domains,
                 )?;
-                for (((id, input), parameter), provided) in
-                    definition.inputs.iter().zip(signature.params).zip(supplied)
+                for (slot, (((id, input), parameter), provided)) in definition
+                    .inputs
+                    .iter()
+                    .zip(signature.params)
+                    .zip(supplied)
+                    .enumerate()
                 {
                     let value = match provided {
                         Some(value) => value,
@@ -1010,6 +1070,7 @@ impl Checker<'_, '_> {
                         },
                     };
                     this.immutable.insert(*id);
+                    this.install_generator_type_input(*id, definition.input_value(slot));
                     match (input, value) {
                         (PatternInput::Data(ty), PatternArgument::Data(value)) => {
                             this.locals.insert(*id, ty.clone());
@@ -1115,7 +1176,21 @@ impl Checker<'_, '_> {
         if template.types.len() != types.len() || template.inputs.len() != public.inputs.len() {
             return Err(error(span, "selected code method signature arity mismatch"));
         }
-        let definition = self.instantiate_pattern_generator(template, &types, span)?;
+        let mut definition = self.instantiate_pattern_generator(template, &types, span)?;
+        if !public.input_values.is_empty() {
+            let mut signature = definition.contextual_signature(&mut self.required_steps, span)?;
+            let frames = self.call_input_frames();
+            for (&slot, value) in &public.input_values {
+                let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                let completed = signature.specialize_input(slot, value, &frames, &mut fuel);
+                self.required_steps = fuel as u64;
+                signature = completed.map_err(|failure| error(span, failure.to_string()))?;
+                definition
+                    .input_values
+                    .insert(slot, self.copy_alias_type(value, span)?);
+            }
+            definition.apply_contextual_signature(signature);
+        }
         let saved = definition
             .captures
             .iter()
@@ -1213,7 +1288,10 @@ impl Checker<'_, '_> {
                 &definition.types,
                 &definition.clause_domains,
             )?;
-            for ((binding, input), argument) in definition.inputs.iter().zip(arguments) {
+            for (slot, ((binding, input), argument)) in
+                definition.inputs.iter().zip(arguments).enumerate()
+            {
+                this.install_generator_type_input(*binding, definition.input_value(slot));
                 this.immutable.insert(*binding);
                 match (input, argument) {
                     (PatternInput::Data(ty), PatternArgument::Data(value)) => {

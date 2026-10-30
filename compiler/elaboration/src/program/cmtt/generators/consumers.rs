@@ -382,6 +382,7 @@ impl Checker<'_, '_> {
                 .or(supplied)
                 .ok_or_else(|| error(sig.params[slot].span, "missing contextual data argument"))?;
             self.immutable.insert(*id);
+            self.install_generator_type_input(*id, definition.input_value(slot));
             match (input, value) {
                 (Input::Data(ty), Argument::Data(value)) => {
                     self.locals.insert(*id, ty.clone());

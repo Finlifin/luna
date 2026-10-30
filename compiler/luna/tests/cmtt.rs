@@ -10918,7 +10918,6 @@ fn contextual_data_trait_calls_execute_default_bodies_and_public_preconditions()
 }
 
 #[test]
-#[ignore = "code generator signatures do not yet bind ordinary comptime Type inputs"]
 fn generic_code_defaults_preserve_expression_context_and_pattern_outputs() {
     let source = "typealias Type = .Type'builtin;
         comptime fn identity_code(comptime T:Type)-><x:T|-T> {'(x)}
