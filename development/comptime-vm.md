@@ -2924,3 +2924,47 @@ Validation from `/home/fin/luna`:
   expectations were retained. No production primitive lookup was changed.
 - Managed formatting check: `/tmp/luna-tools-13jk9h2s/result.json`, exit 0;
   `git diff --check` passed.
+
+## Nominal and alias plans on the activation stack
+
+`TypeInputPlan` now suspends compiled callers for NF, nominal/newtype and alias
+plans. Nominal input collection, declaration admission and alias-body execution
+have explicit boundaries on the shared driver. Admission retains capture-first
+newtype validation, type requirements and capabilities; alias specialization and
+body execution start only after admission succeeds. A compiled alias body can
+suspend for nested plans and calls without recursively starting another VM driver.
+Plan completion restores caller bindings and removes plan-local bindings on both
+success and failure. Tree entrypoints borrow their original expressions; compiled
+plans retain immutable templates. Frame dumps use S-expressions.
+
+Template copying now charges the work performed by `Expr::clone`, which shares
+closure bodies. Alias specialization separately charges type rewriting, including
+those shared bodies, after admission. The existing low-budget rejection test
+caught premature charging of specialization work; its expectations were retained.
+Unsupported bodies and contract evaluation still have migration paths. Input
+fragments and specialized alias bodies are still compiled per use; this change
+makes execution resumable, but does not establish an end-to-end speedup.
+
+A new source case combines an opaque NF head, transparent alias expansion,
+value-indexed nominal construction, reordered inputs, one caller mutation and
+an early return before a divergent later input. It compares tree/bytecode results,
+repeats invocation and requires the enclosing function to execute as bytecode.
+
+An independent unresolved issue was found while constructing that case:
+`value: T` remains a `ComptimeValue` binder when T becomes Type, while its supplied
+Type value has Type sort. Nominal admission rejects it before alias expansion.
+Both tree and bytecode paths exhibit this mismatch. The retained reproducer is
+`development/repros/nominal-type-valued-index.fl`; it requires a general dependent
+binder/residual-value solution, not an exception for any particular library type.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-9xzd83ly/result.json`, exit 0. Includes alias admission before
+  body specialization under a tight budget, rejection recovery, input cleanup,
+  dependent nominal captures and malformed input order.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test type_spreads --test comptime_clause_inputs --test newtypes --test comptime_bytecode_types`:
+  `/tmp/luna-tools-jvzn6q3i/result.json`, exit 0, including the new nested-plan
+  and early-return source regression.
+- Managed `cargo fmt --all`: `/tmp/luna-tools-uh_pai9b/result.json`, exit 0;
+  `git diff --check` passed.

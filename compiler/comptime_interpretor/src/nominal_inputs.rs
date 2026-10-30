@@ -3,14 +3,11 @@
 use super::*;
 use nir::program::{NormalFormArgument as A, NormalFormPreparation};
 
-pub(super) struct Frame<'a> {
-    arguments: &'a [A],
+pub(super) struct Frame<'e> {
+    expression: nominal_plan::Expression<'e>,
     specialized: Option<Vec<A>>,
-    parameters: &'a [nir::DeclarationParameter],
-    domains: &'a [Term],
-    bindings: Option<&'a [LocalId]>,
-    order: Option<&'a [usize]>,
-    preparations: &'a [NormalFormPreparation],
+    parameters: Vec<nir::DeclarationParameter>,
+    domains: Vec<Term>,
     alias: bool,
     source: SourceRange,
     types: Vec<Term>,
@@ -54,40 +51,18 @@ impl fmt::Display for Frame<'_> {
     }
 }
 
-impl<'a> Frame<'a> {
+impl<'e> Frame<'e> {
     pub fn new(
-        expr: &'a Expr,
-        parameters: &'a [nir::DeclarationParameter],
-        domains: &'a [Term],
+        expression: nominal_plan::Expression<'e>,
+        parameters: Vec<nir::DeclarationParameter>,
+        domains: Vec<Term>,
         specialize: bool,
     ) -> Self {
-        let (K::NominalType {
-            arguments,
-            bindings,
-            order,
-            preparations,
-            ..
-        }
-        | K::CheckTypeAlias {
-            arguments,
-            bindings,
-            order,
-            preparations,
-            ..
-        }) = &expr.kind
-        else {
-            unreachable!()
-        };
+        let arguments = Self::arguments_of(&expression);
         Self {
-            arguments,
-            specialized: specialize.then(|| arguments.clone()),
-            parameters,
-            domains,
-            bindings: bindings.as_deref(),
-            order: order.as_deref(),
-            preparations,
-            alias: matches!(expr.kind, K::CheckTypeAlias { .. }),
-            source: expr.source,
+            specialized: specialize.then(|| arguments.to_vec()),
+            alias: matches!(expression.kind, K::CheckTypeAlias { .. }),
+            source: expression.source,
             types: parameters
                 .iter()
                 .map(|parameter| Term::Rigid {
@@ -95,6 +70,9 @@ impl<'a> Frame<'a> {
                     sort: parameter.sort,
                 })
                 .collect(),
+            expression,
+            parameters,
+            domains,
             ready: BTreeSet::new(),
             pending: BTreeMap::new(),
             position: 0,
@@ -104,17 +82,52 @@ impl<'a> Frame<'a> {
             terminal: false,
         }
     }
+    fn arguments_of(expression: &Expr) -> &[A] {
+        match &expression.kind {
+            K::NominalType { arguments, .. } | K::CheckTypeAlias { arguments, .. } => arguments,
+            _ => unreachable!(),
+        }
+    }
+    fn arguments(&self) -> &[A] {
+        Self::arguments_of(&self.expression)
+    }
+    fn bindings(&self) -> Option<&[LocalId]> {
+        match &self.expression.kind {
+            K::NominalType { bindings, .. } | K::CheckTypeAlias { bindings, .. } => {
+                bindings.as_deref()
+            }
+            _ => unreachable!(),
+        }
+    }
+    fn order(&self) -> Option<&[usize]> {
+        match &self.expression.kind {
+            K::NominalType { order, .. } | K::CheckTypeAlias { order, .. } => order.as_deref(),
+            _ => unreachable!(),
+        }
+    }
+    fn preparations(&self) -> &[NormalFormPreparation] {
+        match &self.expression.kind {
+            K::NominalType { preparations, .. } | K::CheckTypeAlias { preparations, .. } => {
+                preparations
+            }
+            _ => unreachable!(),
+        }
+    }
+    pub fn finish_parts(self) -> (Vec<nir::DeclarationParameter>, Vec<Term>) {
+        (self.parameters, self.types)
+    }
+    #[cfg(test)]
     pub fn finish(self) -> Vec<Term> {
         self.types
     }
     fn input(&self, slot: usize) -> &A {
         self.specialized
             .as_ref()
-            .map_or(&self.arguments[slot], |inputs| &inputs[slot])
+            .map_or(&self.arguments()[slot], |inputs| &inputs[slot])
     }
     fn specialize(&mut self, vm: &mut Interpreter<'_>, slot: usize) -> Result<(), Error> {
         if let Some(inputs) = &mut self.specialized {
-            vm.specialize_contextual_input(&mut inputs[slot], self.parameters, &self.types)?;
+            vm.specialize_contextual_input(&mut inputs[slot], &self.parameters, &self.types)?;
         }
         Ok(())
     }
@@ -127,7 +140,7 @@ impl<'a> Frame<'a> {
         let mut remaining = before;
         let expected = nir::type_computations::instantiate_parameters_bounded(
             domain,
-            self.parameters,
+            &self.parameters,
             &self.types,
             &[],
             &mut remaining,
@@ -140,7 +153,7 @@ impl<'a> Frame<'a> {
                 } else {
                     ErrorKind::Type
                 },
-                Some(self.arguments[slot].source()),
+                Some(self.arguments()[slot].source()),
             )
         })?;
         let unresolved = self.parameters.iter().enumerate().any(|(index, p)| {
@@ -170,14 +183,14 @@ impl<'a> Frame<'a> {
         slot: usize,
         value: Value,
     ) -> Result<(), Error> {
-        let source = self.arguments[slot].source();
+        let source = self.arguments()[slot].source();
         let copy = self
-            .bindings
+            .bindings()
             .map(|_| vm.checkpoint_representation(&value, source))
             .transpose()?;
         self.types[slot] = vm.residual_input_term(value, source)?;
         if let Some(copy) = copy {
-            environment.insert(self.bindings.unwrap()[slot], copy);
+            environment.insert(self.bindings().unwrap()[slot], copy);
         }
         self.ready.insert(slot);
         Ok(())
@@ -205,7 +218,7 @@ impl<'a> Frame<'a> {
                 let value = vm.finish_staged_normal_argument(
                     staged,
                     &mut literals,
-                    self.arguments[slot].source(),
+                    self.arguments()[slot].source(),
                     0,
                 )?;
                 self.bind(vm, environment, slot, value)?;
@@ -229,11 +242,11 @@ impl<'a> Frame<'a> {
                 self.drain = false;
                 self.drain(vm, environment)?;
             }
-            if let Some(preparation) = self.preparations.get(self.preparation)
+            if let Some(preparation) = self.preparations().get(self.preparation)
                 && preparation.before == self.position
             {
-                self.waiting = Some(Waiting::Preparation);
                 if let Some(frame) = vm.start_input_preparation(preparation, environment)? {
+                    self.waiting = Some(Waiting::Preparation);
                     return Ok(normal_plan::Progress::Input(frame));
                 }
                 match vm.eval(&preparation.expression, environment)? {
@@ -245,14 +258,14 @@ impl<'a> Frame<'a> {
                     flow => return Ok(normal_plan::Progress::Complete(flow)),
                 }
             }
-            if self.position == self.arguments.len() {
-                if self.ready.len() != self.arguments.len() {
+            if self.position == self.arguments().len() {
+                if self.ready.len() != self.arguments().len() {
                     return Err(vm.failure(ErrorKind::Type, Some(self.source)));
                 }
                 return Ok(normal_plan::Progress::InputsComplete);
             }
             let slot = self
-                .order
+                .order()
                 .map_or(self.position, |order| order[self.position]);
             self.specialize(vm, slot)?;
             if self.parameters[slot].sort == nir::Sort::Type
@@ -298,6 +311,16 @@ impl<'a> Frame<'a> {
     }
 }
 impl normal_plan::InputPlan for Frame<'_> {
+    fn cleanup(&self, environment: &mut Environment) {
+        for binding in self
+            .expression
+            .kind
+            .nominal_local_bindings()
+            .expect("validated input plan")
+        {
+            environment.remove(&binding);
+        }
+    }
     fn next_input(
         &mut self,
         vm: &mut Interpreter<'_>,
@@ -397,7 +420,12 @@ mod tests {
         };
         let package = Package::default();
         let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
-        let mut frame = Frame::new(&expression, &parameters, &domains, true);
+        let mut frame = Frame::new(
+            nominal_plan::Expression::Owned(Arc::new(expression)),
+            parameters,
+            domains,
+            true,
+        );
         let mut environment = Environment::new();
         let normal_plan::Progress::Input(bytecode::InputFrame { mut code, finish }) =
             frame.next_input(&mut vm, &mut environment).unwrap()

@@ -39,7 +39,7 @@ struct PendingCall {
 
 #[derive(Debug)]
 pub(super) enum Progress {
-    NormalPlan {
+    TypeInputPlan {
         expression: Arc<Expr>,
         environment: Environment,
     },
@@ -487,6 +487,21 @@ impl<'a> Interpreter<'a> {
         }))
     }
 
+    pub(super) fn start_expression_input(
+        &mut self,
+        expression: &Expr,
+        environment: &mut Environment,
+    ) -> Result<Option<InputFrame>, Error> {
+        let Some(code) = self.invocation_code(expression, None)? else {
+            return Ok(None);
+        };
+        let code = self.start_frame(&code, environment)?;
+        Ok(Some(InputFrame {
+            code,
+            finish: InputFinish::Ready,
+        }))
+    }
+
     pub(super) fn start_contextual_input(
         &mut self,
         input: &nir::program::NormalFormArgument,
@@ -667,7 +682,7 @@ impl<'a> Interpreter<'a> {
                 source: Some(source),
             };
             match &instruction.op {
-                Op::NormalPlan {
+                Op::TypeInputPlan {
                     destination,
                     expression,
                 } => {
@@ -684,7 +699,7 @@ impl<'a> Interpreter<'a> {
                         destination: *destination,
                         borrowed,
                     });
-                    return Ok(Progress::NormalPlan {
+                    return Ok(Progress::TypeInputPlan {
                         expression: expression.clone(),
                         environment,
                     });
@@ -2957,7 +2972,7 @@ mod tests {
                     Progress::Complete(_)
                     | Progress::Call { .. }
                     | Progress::Default { .. }
-                    | Progress::NormalPlan { .. },
+                    | Progress::TypeInputPlan { .. },
                 ) => {
                     panic!("malformed operation completed")
                 }

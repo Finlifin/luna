@@ -256,7 +256,7 @@ fn normal_plan_cleans_exported_bindings_and_executes_trailing_empty_packets() {
         env.insert(local(0), Value::Bool(false));
         let result = if compiled {
             let code = Arc::new(comptime_compiler::compile(&body, &mut 10000).unwrap());
-            assert!(code.to_string().contains("(normal-plan %"));
+            assert!(code.to_string().contains("(type-input-plan %"));
             vm.execute_code(&code, &mut env)
         } else {
             vm.eval(&body, &mut env)

@@ -83,11 +83,11 @@ enum StackContext<'a> {
     Input(bytecode::InputFinish),
 }
 
-struct PlanActivation {
-    frame: normal_plan::Frame<'static>,
+struct PlanActivation<'a> {
+    frame: Box<dyn normal_plan::InputPlan + 'a>,
     environment: Environment,
 }
-impl PlanActivation {
+impl PlanActivation<'_> {
     fn complete(mut self, flow: Result<Flow, Error>) -> Completion {
         self.frame.cleanup(&mut self.environment);
         Completion::Ordinary {
@@ -98,7 +98,7 @@ impl PlanActivation {
 }
 enum StackEntry<'a> {
     Code(StackContext<'a>, bytecode::Frame),
-    Plan(Box<PlanActivation>),
+    Plan(Box<PlanActivation<'a>>),
 }
 impl StackEntry<'_> {
     fn code(&mut self) -> Option<&mut bytecode::Frame> {
@@ -137,8 +137,39 @@ impl<'a> Interpreter<'a> {
             .ok_or_else(|| self.failure(ErrorKind::InvalidControlFlow, None))
     }
 
+    pub(super) fn run_type_plan(
+        &mut self,
+        frame: &mut dyn normal_plan::InputPlan,
+        environment: &mut Environment,
+    ) -> Result<Flow, Error> {
+        self.run_executions(None, None, Some((frame, environment)))?
+            .ok_or_else(|| self.failure(ErrorKind::InvalidControlFlow, None))
+    }
+    fn start_type_plan(
+        &mut self,
+        expression: Arc<Expr>,
+        environment: &Environment,
+    ) -> Result<Box<dyn normal_plan::InputPlan + 'a>, Error> {
+        match &expression.kind {
+            K::NormalFormType { .. } => Ok(Box::new(normal_plan::Frame::owned(
+                self,
+                expression,
+                environment,
+            )?)),
+            K::NominalType { .. } | K::CheckTypeAlias { .. } => {
+                Ok(Box::new(nominal_plan::Frame::new(
+                    self,
+                    nominal_plan::Expression::Owned(expression),
+                    environment,
+                )?))
+            }
+            _ => Err(self.failure(ErrorKind::Type, Some(expression.source))),
+        }
+    }
+
     /// None means all inputs are ready for declaration admission. A flow is an
     /// early transfer, never a fabricated value standing in for the input list.
+    #[cfg(test)]
     pub(super) fn run_nominal_inputs(
         &mut self,
         frame: &mut nominal_inputs::Frame<'_>,
@@ -264,10 +295,10 @@ impl<'a> Interpreter<'a> {
                 .or_else(|| root.as_deref_mut())
                 .expect("active execution");
             match self.resume_frame(code, 1024) {
-                Ok(bytecode::Progress::NormalPlan {
+                Ok(bytecode::Progress::TypeInputPlan {
                     expression,
                     environment,
-                }) => match normal_plan::Frame::owned(self, expression, &environment) {
+                }) => match self.start_type_plan(expression, &environment) {
                     Ok(frame) => stack.push(StackEntry::Plan(Box::new(PlanActivation {
                         frame,
                         environment,

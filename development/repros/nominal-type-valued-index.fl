@@ -1,0 +1,7 @@
+{- A dependent value domain can become Type. Both VM paths currently reject
+   this at nominal admission with "nominal argument sort mismatch".
+   Expected: Key with Type and bool as its two ordinary clause inputs.
+-}
+struct Key where T, value: T {}
+typealias Alias<T, value: T> = Key<T, value>;
+comptime fn Build() -> Type { Alias<Type, bool> }

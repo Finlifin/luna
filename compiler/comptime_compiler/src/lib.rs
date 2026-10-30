@@ -35,7 +35,7 @@ impl fmt::Display for ErrorConversion {
 
 #[derive(Debug)]
 pub enum Op {
-    NormalPlan {
+    TypeInputPlan {
         destination: Register,
         expression: Arc<Expr>,
     },
@@ -379,10 +379,10 @@ impl fmt::Display for Program {
                 instruction.source.start, instruction.source.end
             )?;
             match &instruction.op {
-                Op::NormalPlan {
+                Op::TypeInputPlan {
                     destination,
                     expression,
-                } => write!(f, "(normal-plan %{destination} {expression})")?,
+                } => write!(f, "(type-input-plan %{destination} {expression})")?,
                 Op::CheckListAppend { local, ty } => {
                     write!(f, "(check-list-append %{local} {ty})")?
                 }
@@ -1259,9 +1259,15 @@ fn compile_root(
                             work.push(Work::Expression(field, slot));
                         }
                     }
-                    K::NormalFormType { plan: Some(_), .. } => {
-                        nir::copy_budget::charge_substitution(expr, &[], &[], fuel)
-                            .map_err(|error| copy_error(error, source))?;
+                    K::NormalFormType { plan: Some(_), .. }
+                    | K::NominalType { .. }
+                    | K::CheckTypeAlias { .. } => {
+                        // The template shares closure bodies. Type rewriting is
+                        // charged only when the admitted plan specializes them.
+                        let mut copy_steps = *fuel as u64;
+                        let copied = nir::copy_budget::charge_expression(expr, &mut copy_steps);
+                        *fuel = copy_steps as usize;
+                        copied.map_err(|error| copy_error(error, source))?;
                         for binding in
                             nir::free_bindings::collect(expr, fuel).map_err(|message| {
                                 if message.contains("budget") {
@@ -1275,7 +1281,7 @@ fn compile_root(
                         }
                         emit(
                             &mut work,
-                            Op::NormalPlan {
+                            Op::TypeInputPlan {
                                 destination: dst,
                                 expression: Arc::new(expr.clone()),
                             },

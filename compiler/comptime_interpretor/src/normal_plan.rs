@@ -100,6 +100,7 @@ pub(super) enum Progress {
 }
 
 pub(super) trait InputPlan {
+    fn cleanup(&self, environment: &mut Environment);
     fn next_input(
         &mut self,
         vm: &mut Interpreter<'_>,
@@ -113,6 +114,9 @@ pub(super) trait InputPlan {
     ) -> Result<Option<Flow>, Error>;
 }
 impl InputPlan for Frame<'_> {
+    fn cleanup(&self, environment: &mut Environment) {
+        Frame::cleanup(self, environment);
+    }
     fn next_input(
         &mut self,
         vm: &mut Interpreter<'_>,

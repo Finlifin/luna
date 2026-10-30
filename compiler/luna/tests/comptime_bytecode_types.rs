@@ -646,3 +646,61 @@ fn nested_reordered_normal_plans_suspend_compiled_callers() {
         assert_eq!(vm.bytecode_staged_inputs() - staged, 2);
     }
 }
+
+#[test]
+fn nominal_alias_and_normal_plans_share_the_compiled_activation_stack() {
+    let package = support::compile(
+        "typealias Type = .Type'builtin;
+        typealias u8 = .u8'builtin;
+        struct Key where .T:Type=u8, value:T {}
+        typealias Alias<.T:Type=u8,value:T> = Key<value,.T=T>;
+        pure comptime fn Tag<.T:Type=Type,value:T> -> Type { T }
+        comptime fn Build() -> Type {
+            var touched = false;
+            let result = Tag<Alias<do { touched = not touched; 7 },.T=u8>,.T=Type>;
+            if touched { result } else { bool }
+        }
+        comptime fn Early() -> Type {
+            Alias<do { return bool; 7 },.T=do { while true {} u8 }>
+        }",
+    );
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let mut tree = Interpreter::new(&package, Budget::default()).unwrap();
+    let key = package
+        .structs
+        .iter()
+        .find(|def| def.name == "Key")
+        .unwrap()
+        .declaration;
+    let expected = Value::Type(Term::NormalForm {
+        head: support::id(&package, "Tag"),
+        sort: nir::Sort::Type,
+        arguments: vec![
+            Term::Primitive(Primitive::Type),
+            Term::Nominal {
+                declaration: key,
+                arguments: vec![
+                    Term::Primitive(Primitive::U8),
+                    Term::Integer(comptime_runtime::Integer::from_u128(7)),
+                ],
+            },
+        ],
+    });
+    for _ in 0..3 {
+        for (name, expected) in [
+            ("Build", expected.clone()),
+            ("Early", Value::Type(Term::Primitive(Primitive::Bool))),
+        ] {
+            let before = vm.bytecode_invocations();
+            assert_eq!(
+                vm.invoke(support::id(&package, name), vec![]).unwrap(),
+                expected
+            );
+            assert_eq!(
+                tree.invoke(support::id(&package, name), vec![]).unwrap(),
+                expected
+            );
+            assert_eq!(vm.bytecode_invocations() - before, 1, "{name}");
+        }
+    }
+}

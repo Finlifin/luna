@@ -723,7 +723,7 @@ fn normal_plan_templates_own_inputs_and_capture_only_free_bindings() {
         code
     };
     let dump = code.to_string();
-    assert!(dump.contains("(normal-plan %"));
+    assert!(dump.contains("(type-input-plan %"));
     assert!(dump.contains("(order 0 1)"));
     assert_eq!(dump, code.to_string());
 }
