@@ -58,7 +58,7 @@ comptime fn run() -> bool {
         and unused.length() == 0 and unused_filter.length() == 0
         and reducers_and_searches() and named_metadata() and stable_sorting()
         and exact_integer_division() and value_receivers() and indexed_pairing() and bulk_extension()
-        and prefix_layout()
+        and prefix_layout() and adjacent_groups()
 }
 
 comptime fn prefix_layout() -> bool {
@@ -216,4 +216,31 @@ comptime fn bulk_extension() -> bool {
     values.length() == 4 and values[0] == 1 and values[2] == 1
         and values[3] == 2 and saved.length() == 2
         and holder.items.length() == 3 and not holder.items[1] and holder.items[2]
+}
+
+
+comptime fn adjacent_groups() -> bool {
+    var original: meta.List<Integer> = [1, 1, 2, 2, 1];
+    var trace: Integer = 0;
+    let equivalent = |left: Integer, right: Integer| -> bool {
+        if left == 0 { trace == 1221 } else {
+            trace = trace * 10 + right;
+            original = [];
+            left == right
+        }
+    };
+    let groups = original.dedup_by(equivalent);
+    let observed = equivalent(0, 0);
+    let sorted = groups.sort_by(|a, b| a < b);
+    let empty: meta.List<Integer> = [];
+    let single: meta.List<Integer> = [1];
+    observed and groups.length() == 3
+        and groups[0] == 1 and groups[1] == 2 and groups[2] == 1
+        and original.length() == 5 and trace == 0
+        and not groups.is_sorted_by(|a, b| a < b)
+        and sorted.is_sorted_by(|a, b| a < b)
+        and empty.dedup_by(|a, b| invalid_callback()).length() == 0
+        and single.dedup_by(|a, b| invalid_callback()).length() == 1
+        and empty.is_sorted_by(|a, b| invalid_callback())
+        and single.is_sorted_by(|a, b| invalid_callback())
 }

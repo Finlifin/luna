@@ -1760,3 +1760,110 @@ fn list_scans_evaluate_receiver_seed_and_callback_producer_once_in_order() {
         );
     }
 }
+
+#[test]
+fn adjacent_list_operations_preserve_representatives_and_strict_ordering() {
+    let source = "typealias Integer=.Integer'builtin;typealias Type=.Type'builtin;
+        pure comptime fn Identity<T>->Type {T}
+        comptime fn run()->bool {
+            let input:meta.List<Integer> = [1,2,3,8,9,1];
+            let groups=input.dedup_by(|left,right|right - left < 2);
+            let empty:meta.List<Integer> = [];
+            let single:meta.List<Integer> = [7];
+            let ordered:meta.List<Integer> = [1,1,2,3];
+            let reverse:meta.List<Integer> = [3,2,2,1];
+            let types:meta.List<Type> = [Identity<bool>,Identity<bool>,Identity<bool>];
+            let distinct=types.dedup_by(|a,b|a==b);
+            groups.length()==3 and groups[0]==1 and groups[1]==3 and groups[2]==8
+                and input.length()==6
+                and empty.dedup_by(|a,b|{let bad:meta.List<bool> = [];bad[0]}).length()==0
+                and single.dedup_by(|a,b|{let bad:meta.List<bool> = [];bad[0]}).length()==1
+                and empty.is_sorted_by(|a,b|{let bad:meta.List<bool> = [];bad[0]})
+                and single.is_sorted_by(|a,b|{let bad:meta.List<bool> = [];bad[0]})
+                and ordered.is_sorted_by(|a,b|a < b)
+                and reverse.is_sorted_by(|a,b|a > b)
+                and not input.is_sorted_by(|a,b|a < b)
+                and distinct.length()==1 and distinct[0]==Identity<bool>
+        }";
+    let package = compile(source).unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 2_000_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn adjacent_list_operations_short_circuit_and_recover_after_callback_failure() {
+    let package=compile(
+        "typealias Integer=.Integer'builtin;
+        comptime fn less(a:Integer,b:Integer)->bool {
+            if a==9 {let bad:meta.List<bool> = [];bad[0]} else {a < b}
+        }
+        comptime fn equivalent(a:Integer,b:Integer)->bool {
+            if b==9 {let bad:meta.List<bool> = [];bad[0]} else {a==b}
+        }
+        comptime fn short()->bool {let xs:meta.List<Integer> = [2,1,9];not xs.is_sorted_by(less)}
+        comptime fn bad_order()->bool {let xs:meta.List<Integer> = [1,2,9];xs.is_sorted_by(less)}
+        comptime fn bad_group()->meta.List<Integer> {let xs:meta.List<Integer> = [1,1,9];xs.dedup_by(equivalent)}
+        comptime fn recover()->bool {let xs:meta.List<Integer> = [1,1,2];xs.dedup_by(equivalent).length()==2 and xs.is_sorted_by(less)}"
+    ).unwrap();
+    let mut vm = comptime_interpretor::Interpreter::for_comptime(
+        &package,
+        comptime_interpretor::Budget {
+            steps: 2_000_000,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        vm.invoke(support::id(&package, "short"), vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        support::calls(&package, &vm)
+            .iter()
+            .filter(|name| **name == "less")
+            .count(),
+        1
+    );
+    for entry in ["bad_order", "bad_group"] {
+        assert_eq!(
+            vm.invoke(support::id(&package, entry), vec![])
+                .unwrap_err()
+                .kind,
+            comptime_interpretor::ErrorKind::IndexOutOfBounds
+        );
+        assert_eq!(
+            vm.invoke(support::id(&package, "recover"), vec![]).unwrap(),
+            Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn adjacent_list_operations_reject_runtime_and_wrong_domain_callbacks() {
+    for method in ["dedup_by", "is_sorted_by"] {
+        for declaration in [
+            "fn compare(a:bool,b:bool)->bool {a}",
+            "comptime fn compare(a:bool,b:bool)->.Integer'builtin {0}",
+            "typealias char=.char'builtin;comptime fn compare(a:char,b:char)->bool {true}",
+        ] {
+            assert!(compile(&format!("{declaration} comptime fn bad() {{let xs:meta.List<bool> = [];xs.{method}(compare);}}" )).is_err());
+        }
+    }
+}
+
+#[test]
+fn adjacent_list_dedup_propagates_unknown_type_equality() {
+    let package = compile(
+        "typealias Type=.Type'builtin;
+        pure comptime fn Identity<T>->Type {T}
+        comptime fn run()->bool {
+            let types:meta.List<Type> = [bool,Identity<bool>];
+            types.dedup_by(|a,b|a==b).length()==1
+        }",
+    )
+    .unwrap();
+    let error = luna::invocation::invoke(&package, "run", 1_000_000).unwrap_err();
+    assert!(error.contains("TypeContractUnresolved"), "{error}");
+}

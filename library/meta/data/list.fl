@@ -317,6 +317,47 @@ impl List<T> where T {
     }
 
     {-
+        Keep the first element of each adjacent group. equivalent receives the
+        last retained element, then the next candidate, exactly once per candidate.
+        It need not be a global equality relation; separated groups stay separate.
+        Both traversal and retained representatives use fixed value snapshots.
+    -}
+    pub comptime fn dedup_by(self, equivalent: %c comptime fn(T, T) -> bool) -> List<T>
+    where c: Type.vars.Closure
+    {
+        let input = self;
+        let count = input.length();
+        if count == 0 { return input; }
+        var previous = input[0];
+        var output: List<T> = [previous];
+        inline for index in 1..count {
+            let candidate = input[index];
+            if not equivalent(previous, candidate) {
+                output.append(candidate);
+                previous = candidate;
+            }
+        }
+        output
+    }
+
+    {-
+        Check adjacent pairs using the same strict ordering as sort_by.
+        A right-before-left pair rejects immediately; equivalent items are valid.
+        Empty and singleton lists are sorted without invoking less.
+    -}
+    pub comptime fn is_sorted_by(self, less: %c comptime fn(T, T) -> bool) -> bool
+    where c: Type.vars.Closure
+    {
+        let input = self;
+        let count = input.length();
+        if count < 2 { return true; }
+        inline for index in 1..count {
+            if less(input[index], input[index - 1]) { return false; }
+        }
+        true
+    }
+
+    {-
         Stable ascending merge sort. less(a, b) describes a strict ordering; equal
         items retain input order. Each comparison receives the right candidate
         first: only a strict right-before-left result displaces the left item.
