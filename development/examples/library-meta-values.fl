@@ -1,8 +1,8 @@
 {-
     Compiled with the real meta package and builtin primitive declarations.
-    Lists retain their type identity and remain in comptime execution.
+    Lists retain their type identity and remain in comptime invocation.
 -}
-use builtin.Integer;
+use builtin.{Integer, bool};
 
 comptime fn flags() -> meta.List<bool> { [true, false] }
 

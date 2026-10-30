@@ -115,3 +115,10 @@ luna serve packages-v1 --cache-entries 8
   `/tmp/luna-tools-0ouaw8is/result.json`；`git diff --check` 通过。
 
 没有运行全量语言测试；本次未改变语言语义与后端实现。
+
+实际内置包多包验收（2026-10-31）：
+`python3 -B development/library_check.py --stage attributes --stage merged-attributes --stage meta-values --timeout 300`
+退出 0，三个阶段的 `value_matches` 均为 true；证据为
+`/tmp/luna-library-f01o3ubh/summary.json`。这次运行也纠正了两个旧示例遗漏
+普通 `bool` 导入的问题，并给属性检查的包图补齐 builtin primitive 依赖。
+未向 resolver 恢复隐式 primitive 名称。对应 runner 的 13 项单元测试通过。
