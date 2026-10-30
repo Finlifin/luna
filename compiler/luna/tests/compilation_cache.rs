@@ -1,3 +1,5 @@
+#[path = "support/primitive_bindings.rs"]
+mod primitive_bindings;
 use luna::{
     compilation_cache::CompilationCache,
     frontend::Artifact,
@@ -23,7 +25,7 @@ impl Files {
         Self(root)
     }
     fn write(&self, name: &str, text: &str) {
-        std::fs::write(self.0.join(name), text).unwrap();
+        primitive_bindings::write_fixture(self.0.join(name), text).unwrap();
     }
     fn request(&self, file: &str) -> Request {
         package_cli::parse([
@@ -44,6 +46,17 @@ impl Drop for Files {
     fn drop(&mut self) {
         std::fs::remove_dir_all(&self.0).unwrap();
     }
+}
+
+fn bind_build_primitives(request: &mut Request, build: u32) {
+    request.packages.push(luna::packages::SourcePackage {
+        resolution_id: 99,
+        identity: 9900,
+        name: "builtin".into(),
+        entry: std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../library/builtin/primitives.fl"),
+    });
+    request.dependencies.push((build, "builtin".into(), 99));
 }
 fn result(value: &luna::compilation_cache::CompilationOutcome) -> comptime_interpretor::Value {
     let Artifact::Nir(package) = &value.compilation.artifact else {
@@ -156,7 +169,7 @@ fn cache_hits_recheck_output_alias_protection() {
     assert!(cache.is_empty());
     assert_eq!(
         std::fs::read_to_string(files.0.join("entry.fl")).unwrap(),
-        "fn run()->bool {true}"
+        primitive_bindings::with_bool_binding("fn run()->bool {true}")
     );
     std::fs::remove_file(output).unwrap();
     assert!(!cache.compile(&request).unwrap().reused);
@@ -364,6 +377,7 @@ fn explicit_build_modes_invalidate_cached_source_results_without_fallback() {
         entry: std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/build/lib.fl"),
     });
     request.dependencies.push((1, "build".into(), 2));
+    bind_build_primitives(&mut request, 2);
     request.options.build_modes.primary = Some("debug".into());
     let mut cache = CompilationCache::new(4);
     let first = cache.compile(&request).unwrap();
@@ -419,6 +433,7 @@ fn target_snapshots_and_optional_features_participate_in_cache_identity() {
         entry: std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/build/lib.fl"),
     });
     request.dependencies.push((1, "build".into(), 2));
+    bind_build_primitives(&mut request, 2);
     let options = |arch: &str, os: &str, bits: &str, feature: Option<bool>| {
         let mut selected = luna::build_context::TargetOptions::default();
         selected
@@ -496,6 +511,7 @@ fn typed_metadata_requests_invalidate_values_presence_and_provider_identity() {
         });
     }
     request.dependencies = vec![(1, "provider".into(), 2), (1, "build".into(), 4)];
+    bind_build_primitives(&mut request, 4);
     let input = |identity, enabled| Input {
         identity,
         fields: vec![(
