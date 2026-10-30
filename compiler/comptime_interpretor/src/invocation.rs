@@ -83,6 +83,32 @@ enum StackContext<'a> {
     Input(bytecode::InputFinish),
 }
 
+struct PlanActivation {
+    frame: normal_plan::Frame<'static>,
+    environment: Environment,
+}
+impl PlanActivation {
+    fn complete(mut self, flow: Result<Flow, Error>) -> Completion {
+        self.frame.cleanup(&mut self.environment);
+        Completion::Ordinary {
+            flow,
+            defaults: Some(self.environment),
+        }
+    }
+}
+enum StackEntry<'a> {
+    Code(StackContext<'a>, bytecode::Frame),
+    Plan(Box<PlanActivation>),
+}
+impl StackEntry<'_> {
+    fn code(&mut self) -> Option<&mut bytecode::Frame> {
+        match self {
+            Self::Code(_, code) => Some(code),
+            Self::Plan(_) => None,
+        }
+    }
+}
+
 impl<'a> Interpreter<'a> {
     pub(super) fn invoke_value_scoped(
         &mut self,
@@ -117,7 +143,7 @@ impl<'a> Interpreter<'a> {
         mut root: Option<&mut bytecode::Frame>,
         mut plan: Option<(&mut normal_plan::Frame<'_>, &mut Environment)>,
     ) -> Result<Flow, Error> {
-        let mut stack: Vec<(StackContext<'a>, bytecode::Frame)> = Vec::new();
+        let mut stack: Vec<StackEntry<'a>> = Vec::new();
         let mut result = None;
         loop {
             if let Some(mut active) = execution.take() {
@@ -129,7 +155,10 @@ impl<'a> Interpreter<'a> {
                                 Execution::Invocation(_) => self.bytecode_invocations += 1,
                                 Execution::Default { .. } => self.bytecode_default_evaluations += 1,
                             }
-                            stack.push((StackContext::Execution(active), code_frame));
+                            stack.push(StackEntry::Code(
+                                StackContext::Execution(active),
+                                code_frame,
+                            ));
                             None
                         }
                         Err(error) => Some(self.complete_execution(active, Err(error))),
@@ -144,9 +173,22 @@ impl<'a> Interpreter<'a> {
             if let Some(delivered) = result.take() {
                 let (flow, defaults) = match delivered {
                     Completion::Input(input) => {
-                        let (frame, environment) = plan.as_mut().expect("input plan root");
-                        if let Some(flow) = frame.accept_input(self, environment, input)? {
-                            return Ok(flow);
+                        if let Some(StackEntry::Plan(active)) = stack.last_mut() {
+                            let outcome =
+                                active
+                                    .frame
+                                    .accept_input(self, &mut active.environment, input);
+                            if !matches!(&outcome, Ok(None)) {
+                                let Some(StackEntry::Plan(active)) = stack.pop() else {
+                                    unreachable!()
+                                };
+                                result = Some(active.complete(outcome.map(|flow| flow.unwrap())));
+                            }
+                        } else {
+                            let (frame, environment) = plan.as_mut().expect("input plan root");
+                            if let Some(flow) = frame.accept_input(self, environment, input)? {
+                                return Ok(flow);
+                            }
                         }
                         continue;
                     }
@@ -154,7 +196,7 @@ impl<'a> Interpreter<'a> {
                 };
                 let Some(parent) = stack
                     .last_mut()
-                    .map(|(_, code)| code)
+                    .and_then(StackEntry::code)
                     .or_else(|| root.as_deref_mut())
                 else {
                     return flow;
@@ -167,18 +209,36 @@ impl<'a> Interpreter<'a> {
                 if let Some(flow) = propagation {
                     // Defaults may return from their enclosing invocation.
                     // Restore each activation before propagating a transfer/error.
-                    if let Some((parent, code)) = stack.pop() {
+                    if let Some(StackEntry::Code(parent, code)) = stack.pop() {
                         result = Some(self.complete_stack(parent, code, flow));
                         continue;
                     }
                     return flow;
                 }
             }
+            if let Some(StackEntry::Plan(active)) = stack.last_mut() {
+                match active.frame.next_input(self, &mut active.environment) {
+                    Ok(normal_plan::Progress::Input(bytecode::InputFrame { code, finish })) => {
+                        stack.push(StackEntry::Code(StackContext::Input(finish), code));
+                    }
+                    outcome => {
+                        let Some(StackEntry::Plan(active)) = stack.pop() else {
+                            unreachable!()
+                        };
+                        let flow = outcome.map(|progress| match progress {
+                            normal_plan::Progress::Complete(flow) => flow,
+                            _ => unreachable!(),
+                        });
+                        result = Some(active.complete(flow));
+                    }
+                }
+                continue;
+            }
             if stack.is_empty() {
                 if let Some((frame, environment)) = plan.as_mut() {
                     match frame.next_input(self, environment)? {
                         normal_plan::Progress::Input(bytecode::InputFrame { code, finish }) => {
-                            stack.push((StackContext::Input(finish), code));
+                            stack.push(StackEntry::Code(StackContext::Input(finish), code));
                         }
                         normal_plan::Progress::Complete(flow) => return Ok(flow),
                     }
@@ -187,10 +247,25 @@ impl<'a> Interpreter<'a> {
             }
             let code = stack
                 .last_mut()
-                .map(|(_, code)| code)
+                .and_then(StackEntry::code)
                 .or_else(|| root.as_deref_mut())
                 .expect("active execution");
             match self.resume_frame(code, 1024) {
+                Ok(bytecode::Progress::NormalPlan {
+                    expression,
+                    environment,
+                }) => match normal_plan::Frame::owned(self, expression, &environment) {
+                    Ok(frame) => stack.push(StackEntry::Plan(Box::new(PlanActivation {
+                        frame,
+                        environment,
+                    }))),
+                    Err(error) => {
+                        result = Some(Completion::Ordinary {
+                            flow: Err(error),
+                            defaults: Some(environment),
+                        })
+                    }
+                },
                 Ok(bytecode::Progress::Suspended) => {}
                 Ok(bytecode::Progress::Default {
                     expression,
@@ -218,7 +293,7 @@ impl<'a> Interpreter<'a> {
                         Err(error) => Err(error),
                         _ => unreachable!("handled suspension"),
                     };
-                    if let Some((completed, code)) = stack.pop() {
+                    if let Some(StackEntry::Code(completed, code)) = stack.pop() {
                         result = Some(self.complete_stack(completed, code, flow));
                     } else {
                         return flow;

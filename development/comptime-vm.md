@@ -2855,3 +2855,38 @@ Validation from `/home/fin/luna`:
   restores caller state and leaves the suspended plan terminal.
 - Managed `cargo fmt --all`: `/tmp/luna-tools-t0y2a4yc/result.json`, exit 0;
   `git diff --check` passed.
+
+## Bytecode suspension for nested normal-form plans
+
+Compiled bodies now emit a `NormalPlan` suspension instruction for planned NF
+construction. It owns an immutable, bounded-copy template and registers the
+plan's free value bindings. Execution moves live caller locals into the plan
+activation, preserving other registers and lexical scopes in the suspended caller.
+The unified stack interleaves owned plan activations, input fragments, defaults
+and function calls. Completion removes only plan-local bindings and restores the
+borrowed caller locals before returning a value, transfer or error. An opcode never
+recursively evaluates its plan.
+
+This removes the body-wide migration fallback solely caused by a normal-form input
+plan. The existing migration entry remains available for mixed/tree interpretation.
+Nominal/alias outer plans, unsupported operand bodies and contract evaluation still
+retain migration paths. Per-input specialization and fragment compilation remain;
+no end-to-end speedup is claimed.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-5z1shhpv/result.json`, exit 0. New compiler coverage checks
+  owned templates, free-versus-plan-local bindings, deterministic dumps, copy
+  budget exhaustion and malformed-plan fallback. Packet tests compare tree and
+  bytecode execution for ready/deferred order, failure cleanup and empty tails.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode --test comptime_bytecode_defaults --test comptime_bytecode_types --test type_spreads --test comptime_clause_inputs --test nominal_value_parameters`:
+  `/tmp/luna-tools-z1xt515e/result.json`, exit 0 for the implementation before the
+  final malformed-plan diagnostic mapping and additional regression assertions.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_types`:
+  `/tmp/luna-tools-taa7m0hv/result.json`, exit 0 on the final implementation.
+  A nested reordered-plan example checks opaque identity, caller mutation,
+  repeated invocation and actual compiled-root/staged-fragment counters. Existing
+  early-return cases now also require the enclosing function to execute bytecode.
+- Managed `cargo fmt --all`: `/tmp/luna-tools-w4s66g1v/result.json`, exit 0;
+  `git diff --check` passed.

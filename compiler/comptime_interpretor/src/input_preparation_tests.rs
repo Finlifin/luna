@@ -210,7 +210,16 @@ fn normal_plan_cleans_exported_bindings_and_executes_trailing_empty_packets() {
         }],
         ..Default::default()
     };
-    for (invalid, reversed) in [(true, false), (false, false), (true, true), (false, true)] {
+    for (invalid, reversed, compiled) in [
+        (true, false, false),
+        (false, false, false),
+        (true, true, false),
+        (false, true, false),
+        (true, false, true),
+        (false, false, true),
+        (true, true, true),
+        (false, true, true),
+    ] {
         let first = preparation(tuple(vec![
             expr(
                 Primitive::Type,
@@ -245,7 +254,13 @@ fn normal_plan_cleans_exported_bindings_and_executes_trailing_empty_packets() {
         let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         let mut env = Environment::new();
         env.insert(local(0), Value::Bool(false));
-        let result = vm.eval(&body, &mut env);
+        let result = if compiled {
+            let code = Arc::new(comptime_compiler::compile(&body, &mut 10000).unwrap());
+            assert!(code.to_string().contains("(normal-plan %"));
+            vm.execute_code(&code, &mut env)
+        } else {
+            vm.eval(&body, &mut env)
+        };
         assert_eq!(env.len(), 1);
         assert_eq!(vm.bytecode_staged_inputs(), usize::from(reversed));
         if invalid {

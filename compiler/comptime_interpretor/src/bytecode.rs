@@ -19,7 +19,14 @@ pub(super) struct Frame {
 
 enum Waiting {
     Call(usize),
-    Default { call: usize, destination: usize },
+    Default {
+        call: usize,
+        destination: usize,
+    },
+    Plan {
+        destination: usize,
+        borrowed: Vec<(LocalId, usize)>,
+    },
 }
 
 struct PendingCall {
@@ -32,6 +39,10 @@ struct PendingCall {
 
 #[derive(Debug)]
 pub(super) enum Progress {
+    NormalPlan {
+        expression: Arc<Expr>,
+        environment: Environment,
+    },
     Default {
         expression: Arc<Expr>,
         environment: Environment,
@@ -70,6 +81,16 @@ impl fmt::Display for Frame {
         }
         write!(f, ") (waiting")?;
         match &self.waiting {
+            Some(Waiting::Plan {
+                destination,
+                borrowed,
+            }) => {
+                write!(f, " (plan %{destination} (borrowed")?;
+                for (binding, slot) in borrowed {
+                    write!(f, " ({binding} %{slot})")?;
+                }
+                write!(f, "))")?;
+            }
             Some(Waiting::Call(destination)) => write!(f, " (call {destination})")?,
             Some(Waiting::Default { call, destination }) => {
                 write!(f, " (default {call} {destination})")?
@@ -233,18 +254,41 @@ impl Frame {
         defaults: Option<Environment>,
     ) -> Result<Option<Flow>, Error> {
         if let Some(environment) = defaults {
-            let Some(Waiting::Default { call, destination }) = self.waiting else {
-                return Err(Error {
+            if let Some(Waiting::Plan { .. }) = &self.waiting {
+                let Some(Waiting::Plan {
+                    destination,
+                    borrowed,
+                }) = self.waiting.take()
+                else {
+                    unreachable!()
+                };
+                self.environment = environment;
+                let mut missing = false;
+                for (binding, slot) in borrowed {
+                    self.slots[slot] = self.environment.remove(&binding);
+                    missing |= self.slots[slot].is_none();
+                }
+                self.waiting = Some(Waiting::Call(destination));
+                if missing {
+                    return Err(Error {
+                        kind: ErrorKind::MissingBinding,
+                        source: None,
+                    });
+                }
+            } else {
+                let Some(Waiting::Default { call, destination }) = self.waiting else {
+                    return Err(Error {
+                        kind: ErrorKind::InvalidControlFlow,
+                        source: None,
+                    });
+                };
+                let pending = self.calls.get_mut(&call).ok_or(Error {
                     kind: ErrorKind::InvalidControlFlow,
                     source: None,
-                });
-            };
-            let pending = self.calls.get_mut(&call).ok_or(Error {
-                kind: ErrorKind::InvalidControlFlow,
-                source: None,
-            })?;
-            pending.defaults = environment;
-            self.waiting = Some(Waiting::Call(destination));
+                })?;
+                pending.defaults = environment;
+                self.waiting = Some(Waiting::Call(destination));
+            }
         }
         match result? {
             Flow::Value(value) => {
@@ -623,6 +667,28 @@ impl<'a> Interpreter<'a> {
                 source: Some(source),
             };
             match &instruction.op {
+                Op::NormalPlan {
+                    destination,
+                    expression,
+                } => {
+                    self.effect_charge(frame.code.locals().len(), Some(source))?;
+                    let mut environment = std::mem::take(&mut frame.environment);
+                    let mut borrowed = Vec::new();
+                    for &(binding, slot) in frame.code.locals() {
+                        if let Some(value) = frame.slots[slot].take() {
+                            environment.insert(binding, value);
+                            borrowed.push((binding, slot));
+                        }
+                    }
+                    frame.waiting = Some(Waiting::Plan {
+                        destination: *destination,
+                        borrowed,
+                    });
+                    return Ok(Progress::NormalPlan {
+                        expression: expression.clone(),
+                        environment,
+                    });
+                }
                 Op::Stage(operation) => {
                     if let Some(flow) = frame
                         .staged
@@ -2887,7 +2953,12 @@ mod tests {
         let failure = loop {
             match vm.resume_frame(&mut frame, 1) {
                 Ok(Progress::Suspended) => continue,
-                Ok(Progress::Complete(_) | Progress::Call { .. } | Progress::Default { .. }) => {
+                Ok(
+                    Progress::Complete(_)
+                    | Progress::Call { .. }
+                    | Progress::Default { .. }
+                    | Progress::NormalPlan { .. },
+                ) => {
                     panic!("malformed operation completed")
                 }
                 Err(error) => break error,

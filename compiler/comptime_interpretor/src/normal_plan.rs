@@ -35,11 +35,30 @@ enum Completion {
     Staged(StagedNormalInput),
 }
 
+enum Inputs<'a> {
+    Borrowed(&'a [Argument], &'a NormalFormInputPlan),
+    Owned(Arc<Expr>),
+}
+impl Inputs<'_> {
+    fn parts(&self) -> (&[Argument], &NormalFormInputPlan) {
+        match self {
+            Self::Borrowed(arguments, plan) => (arguments, plan),
+            Self::Owned(expression) => match &expression.kind {
+                K::NormalFormType {
+                    arguments,
+                    plan: Some(plan),
+                    ..
+                } => (arguments, plan),
+                _ => unreachable!("validated normal plan"),
+            },
+        }
+    }
+}
+
 pub(super) struct Frame<'a> {
     head: DeclarationId,
     source: SourceRange,
-    arguments: &'a [Argument],
-    plan: &'a NormalFormInputPlan,
+    inputs: Inputs<'a>,
     position: usize,
     preparation: usize,
     waiting: Option<Waiting>,
@@ -89,8 +108,7 @@ impl<'a> Frame<'a> {
         Self {
             head,
             source,
-            arguments,
-            plan,
+            inputs: Inputs::Borrowed(arguments, plan),
             position: 0,
             preparation: 0,
             waiting: None,
@@ -98,6 +116,77 @@ impl<'a> Frame<'a> {
             bindings: normal_types::Bindings::new(arguments.len()),
             drain: false,
             terminal: false,
+        }
+    }
+
+    pub(super) fn owned(
+        vm: &mut Interpreter<'_>,
+        expression: Arc<Expr>,
+        environment: &Environment,
+    ) -> Result<Frame<'static>, Error> {
+        let K::NormalFormType {
+            head,
+            arguments,
+            plan: Some(plan),
+        } = &expression.kind
+        else {
+            return Err(vm.failure(ErrorKind::Type, Some(expression.source)));
+        };
+        if !plan.valid(arguments.len())
+            || plan
+                .local_bindings()
+                .unwrap()
+                .iter()
+                .any(|id| environment.contains_key(id))
+        {
+            return Err(vm.failure(ErrorKind::Type, Some(expression.source)));
+        }
+        let diverges = arguments.iter().any(Argument::is_diverging)
+            || plan
+                .preparations
+                .iter()
+                .any(|p| p.expression.ty == Term::Primitive(Primitive::Never));
+        vm.prepare_normal_type(
+            *head,
+            &expression.ty,
+            arguments.len(),
+            diverges,
+            expression.source,
+        )?;
+        nir::copy_budget::charge_type_rewrite(&expression, &mut vm.budget.steps).map_err(
+            |error| {
+                vm.failure(
+                    match error {
+                        nir::copy_budget::CopyBudgetExhausted::Steps => ErrorKind::StepsExhausted,
+                        nir::copy_budget::CopyBudgetExhausted::Depth => ErrorKind::DepthExhausted,
+                    },
+                    Some(expression.source),
+                )
+            },
+        )?;
+        Ok(Frame {
+            head: *head,
+            source: expression.source,
+            bindings: normal_types::Bindings::new(arguments.len()),
+            inputs: Inputs::Owned(expression),
+            position: 0,
+            preparation: 0,
+            waiting: None,
+            pending: BTreeMap::new(),
+            drain: false,
+            terminal: false,
+        })
+    }
+
+    pub(super) fn cleanup(&self, environment: &mut Environment) {
+        for binding in self
+            .inputs
+            .parts()
+            .1
+            .local_bindings()
+            .expect("validated plan")
+        {
+            environment.remove(&binding);
         }
     }
 
@@ -221,7 +310,7 @@ impl<'a> Frame<'a> {
     ) -> Result<(), Error> {
         let copy = vm.checkpoint_representation(&value, source)?;
         vm.bind_normal_input(self.head, &mut self.bindings, slot, value, source)?;
-        env.insert(self.plan.bindings[slot], copy);
+        env.insert(self.inputs.parts().1.bindings[slot], copy);
         Ok(())
     }
 
@@ -259,12 +348,12 @@ impl<'a> Frame<'a> {
                 self.bind(vm, env, slot, value, argument.source())?;
             }
         }
-        if let Some(preparation) = self.plan.preparations.get(self.preparation)
+        if let Some(preparation) = self.inputs.parts().1.preparations.get(self.preparation)
             && preparation.before == self.position
         {
             self.waiting = Some(Waiting::Preparation(self.preparation));
-        } else if let Some(&slot) = self.plan.order.get(self.position) {
-            let mut argument = Box::new(self.arguments[slot].clone());
+        } else if let Some(&slot) = self.inputs.parts().1.order.get(self.position) {
+            let mut argument = Box::new(self.inputs.parts().0[slot].clone());
             vm.specialize_contextual_input(
                 &mut argument,
                 &self.bindings.parameters,
@@ -286,7 +375,9 @@ impl<'a> Frame<'a> {
         }
         self.terminal = false;
         Ok(match self.waiting.as_ref().unwrap() {
-            Waiting::Preparation(index) => Request::Preparation(&self.plan.preparations[*index]),
+            Waiting::Preparation(index) => {
+                Request::Preparation(&self.inputs.parts().1.preparations[*index])
+            }
             Waiting::Ready {
                 argument, expected, ..
             } => Request::Ready(argument, expected),

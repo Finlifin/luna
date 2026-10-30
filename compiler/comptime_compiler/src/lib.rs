@@ -35,6 +35,10 @@ impl fmt::Display for ErrorConversion {
 
 #[derive(Debug)]
 pub enum Op {
+    NormalPlan {
+        destination: Register,
+        expression: Arc<Expr>,
+    },
     Stage(staged_inputs::Instruction),
     BeginContextualInput {
         destination: Register,
@@ -375,6 +379,10 @@ impl fmt::Display for Program {
                 instruction.source.start, instruction.source.end
             )?;
             match &instruction.op {
+                Op::NormalPlan {
+                    destination,
+                    expression,
+                } => write!(f, "(normal-plan %{destination} {expression})")?,
                 Op::CheckListAppend { local, ty } => {
                     write!(f, "(check-list-append %{local} {ty})")?
                 }
@@ -1250,6 +1258,28 @@ fn compile_root(
                         for (field, slot) in fields.iter().zip(slots).rev() {
                             work.push(Work::Expression(field, slot));
                         }
+                    }
+                    K::NormalFormType { plan: Some(_), .. } => {
+                        nir::copy_budget::charge_substitution(expr, &[], &[], fuel)
+                            .map_err(|error| copy_error(error, source))?;
+                        for binding in
+                            nir::free_bindings::collect(expr, fuel).map_err(|message| {
+                                if message.contains("budget") {
+                                    Error::Budget(source)
+                                } else {
+                                    Error::Unsupported(source)
+                                }
+                            })?
+                        {
+                            locals.entry(binding).or_insert_with(&mut fresh);
+                        }
+                        emit(
+                            &mut work,
+                            Op::NormalPlan {
+                                destination: dst,
+                                expression: Arc::new(expr.clone()),
+                            },
+                        );
                     }
                     K::NormalFormType {
                         head,

@@ -658,3 +658,72 @@ fn append_fusion_requires_an_inert_suffix_and_matching_local() {
         assert!(matches!(compile(&body, &mut 1), Err(Error::Budget(_))));
     }
 }
+
+#[test]
+fn normal_plan_templates_own_inputs_and_capture_only_free_bindings() {
+    use nir::program::{NormalFormArgument as A, NormalFormInputPlan};
+    let external = LocalId {
+        owner: 90,
+        index: 0,
+    };
+    let first = LocalId {
+        owner: 90,
+        index: 1,
+    };
+    let second = LocalId {
+        owner: 90,
+        index: 2,
+    };
+    let code = {
+        let mut body = Expr {
+            source: SourceRange { start: 3, end: 8 },
+            ty: Term::Primitive(Primitive::Type),
+            kind: K::NormalFormType {
+                head: nir::DeclarationId {
+                    package: 90,
+                    local: 0,
+                },
+                arguments: [external, first]
+                    .into_iter()
+                    .map(|binding| {
+                        A::Value(Expr {
+                            source: SourceRange { start: 4, end: 7 },
+                            ty: Term::Primitive(Primitive::Type),
+                            kind: K::Local(binding),
+                        })
+                    })
+                    .collect(),
+                plan: Some(NormalFormInputPlan {
+                    order: vec![0, 1],
+                    bindings: vec![first, second],
+                    preparations: vec![],
+                }),
+            },
+        };
+        let code = compile(&body, &mut 10000).unwrap();
+        assert_eq!(
+            code.locals().iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![external]
+        );
+        assert!(matches!(
+            compile(&body, &mut (code.storage_work() - 1)),
+            Err(Error::Budget(_))
+        ));
+        let K::NormalFormType {
+            plan: Some(plan), ..
+        } = &mut body.kind
+        else {
+            unreachable!()
+        };
+        plan.order = vec![0, 0];
+        assert!(matches!(
+            compile(&body, &mut 10000),
+            Err(Error::Unsupported(_))
+        ));
+        code
+    };
+    let dump = code.to_string();
+    assert!(dump.contains("(normal-plan %"));
+    assert!(dump.contains("(order 0 1)"));
+    assert_eq!(dump, code.to_string());
+}

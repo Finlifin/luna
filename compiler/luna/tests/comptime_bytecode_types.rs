@@ -575,6 +575,7 @@ fn deferred_normal_inputs_run_bytecode_before_their_domains_arrive() {
         assert_eq!(vm.bytecode_staged_inputs() - before, 1);
         assert_eq!(vm.bytecode_default_evaluations() - defaults, 1);
         let before = vm.bytecode_staged_inputs();
+        let invocations = vm.bytecode_invocations();
         assert_eq!(
             vm.invoke(
                 support::id(&package, "Early"),
@@ -584,6 +585,8 @@ fn deferred_normal_inputs_run_bytecode_before_their_domains_arrive() {
             Value::Type(Term::Primitive(Primitive::Bool))
         );
         assert_eq!(vm.bytecode_staged_inputs() - before, 1);
+        assert_eq!(vm.bytecode_invocations() - invocations, 1);
+        let invocations = vm.bytecode_invocations();
         let contextual = vm.bytecode_contextual_inputs();
         assert_eq!(
             vm.invoke(
@@ -594,5 +597,52 @@ fn deferred_normal_inputs_run_bytecode_before_their_domains_arrive() {
             Value::Type(Term::Primitive(Primitive::Bool))
         );
         assert_eq!(vm.bytecode_contextual_inputs() - contextual, 2);
+        assert_eq!(vm.bytecode_invocations() - invocations, 1);
+    }
+}
+
+#[test]
+fn nested_reordered_normal_plans_suspend_compiled_callers() {
+    let package = support::compile(
+        "typealias Type = .Type'builtin;
+        typealias u8 = .u8'builtin;
+        pure comptime fn Tag<.T: Type = Type, value: T> -> Type { T }
+        comptime fn Build() -> Type {
+            var touched = false;
+            let result = Tag<Tag<do { touched = not touched; 7 }, .T=u8>, .T=Type>;
+            if touched { result } else { bool }
+        }",
+    );
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let mut tree = Interpreter::new(&package, Budget::default()).unwrap();
+    let head = support::id(&package, "Tag");
+    let expected = Value::Type(Term::NormalForm {
+        head,
+        sort: nir::Sort::Type,
+        arguments: vec![
+            Term::Primitive(Primitive::Type),
+            Term::NormalForm {
+                head,
+                sort: nir::Sort::Type,
+                arguments: vec![
+                    Term::Primitive(Primitive::U8),
+                    Term::Integer(comptime_runtime::Integer::from_u128(7)),
+                ],
+            },
+        ],
+    });
+    for _ in 0..3 {
+        let invocations = vm.bytecode_invocations();
+        let staged = vm.bytecode_staged_inputs();
+        assert_eq!(
+            vm.invoke(support::id(&package, "Build"), vec![]).unwrap(),
+            expected
+        );
+        assert_eq!(
+            tree.invoke(support::id(&package, "Build"), vec![]).unwrap(),
+            expected
+        );
+        assert_eq!(vm.bytecode_invocations() - invocations, 1);
+        assert_eq!(vm.bytecode_staged_inputs() - staged, 2);
     }
 }
