@@ -6699,3 +6699,115 @@ fn dependent_generator_defaults_preserve_generated_type_identity() {
     let scalar = source.replace("Tagged<Type,bool>", "Tagged<bool,true>");
     assert_eq!(support::run_iir(&scalar, "run", vec![]), Value::Bool(true));
 }
+
+#[test]
+fn dependent_packet_inputs_supply_context_for_later_callbacks() {
+    let source = "typealias Type=.Type'builtin;
+        struct Tagged where T,index:T {value:bool}
+        fn packet()->Tuple<Tagged<Type,bool>> {(Tagged<Type,bool>{value:true},)}
+        fn apply(value:Tagged<T,index>,action:fn(Tagged<T,index>)->bool)->bool
+            where T,index:T {action(value)}
+        fn run()->bool {apply(...packet(),|value| value.value)}";
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
+    let method = source
+        .replace(
+            "fn apply(value",
+            "struct Receiver {} impl Receiver {fn apply(self,value",
+        )
+        .replace("{action(value)}", "{action(value)}}")
+        .replace("{apply(...", "{Receiver{}.apply(...");
+    assert_eq!(
+        support::run_iir_with_tuple(&method, "run", vec![]),
+        Value::Bool(true)
+    );
+    let deferred = source.replace(
+        "->bool\n            where",
+        "->defer bool\n            where",
+    );
+    assert_eq!(
+        support::run_iir_with_tuple(&deferred, "run", vec![]),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn dependent_packet_inference_preserves_producer_order_and_once_evaluation() {
+    let source = "typealias Type=.Type'builtin;
+        struct Tagged where T,index:T {value:bool}
+        fn before()->bool {true}
+        fn after()->bool {true}
+        fn packet()->Tuple<Tagged<Type,bool>> {(Tagged<Type,bool>{value:true},)}
+        fn apply(first:bool,value:Tagged<T,index>,action:fn(Tagged<T,index>)->bool,last:bool)->bool
+            where T,index:T {first and action(value) and last}
+        fn run()->bool {apply(before(),...packet(),|value| value.value,after())}";
+    let package = support::compile_with_tuple(source);
+    let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
+    let mut vm = comptime_interpretor::Interpreter::from_iir(&graph, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    let calls = vm
+        .events()
+        .iter()
+        .filter_map(|event| {
+            let comptime_interpretor::Event::EnterFunction(id) = event else {
+                return None;
+            };
+            package
+                .functions
+                .iter()
+                .find(|function| function.declaration == *id)
+                .map(|function| function.name.as_str())
+                .filter(|name| ["before", "packet", "after"].contains(name))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(calls, ["before", "packet", "after"]);
+}
+
+#[test]
+fn dependent_effect_packets_preserve_exact_operation_identity() {
+    let source = "typealias Type=.Type'builtin;
+        struct Tagged where T,index:T {value:bool}
+        fn packet()->Tuple<Tagged<Type,bool>> {(Tagged<Type,bool>{value:true},)}
+        effect read(value:Tagged<T,index>)->bool where T,index:T;
+        fn run()->bool {read(...packet())# {read<Type,bool>(value)=>value.value,}}";
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
+    let wrong = source.replace("read<Type,bool>(value)", "read<Type,Type>(value)");
+    assert!(support::compile_with_tuple_protocols(&wrong, &Default::default()).is_err());
+}
+
+#[test]
+fn dependent_cmtt_data_hints_reach_enclosing_generators() {
+    let source = "typealias Type=.Type'builtin;
+        struct Tagged where T,index:T {value:bool}
+        comptime fn inspect(value:Tagged<T,index>)->Tagged<T,index> where T,index:T {value}
+        comptime fn build(value:Tagged<T,index>)-><|-Tagged<T,index>> where T,index:T {
+            '(Tagged<T,index>{value:true})
+        }
+        fn run()->bool {
+            let value:Tagged<Type,bool> = ~<build(inspect(Tagged<Type,bool>{value:false}))>;
+            value.value
+        }";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn contextual_data_consumers_register_dependent_value_clauses() {
+    let source = "typealias Type=.Type'builtin;
+        struct Tagged where T,index:T {value:bool}
+        comptime fn inspect(code:<|-Tagged<T,index>>)->Tagged<T,index> where T,index:T {
+            Tagged<T,index>{value:true}
+        }
+        fn run()->bool {
+            const value=inspect('(Tagged<Type,bool>{value:false}));
+            value.value
+        }";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+}

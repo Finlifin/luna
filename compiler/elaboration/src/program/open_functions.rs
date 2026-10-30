@@ -5437,8 +5437,14 @@ impl Checker<'_, '_> {
         };
         let actual = vec![None; definition.parameters.len()];
         let scope = self.call_inference_domains();
+        let input_domains = generic
+            .iter()
+            .map(|id| self.trait_input_domain(*id).unwrap_or_else(|| p(P::Type)))
+            .collect::<Vec<_>>();
         let infer = |target| {
-            scheme.infer_sparse_scoped_types_mode(
+            scheme.infer_declared_sparse_types_mode(
+                &generic,
+                &input_domains,
                 &actual,
                 target,
                 None,
@@ -5467,6 +5473,7 @@ impl Checker<'_, '_> {
         };
         self.infer_routed_packet_inputs(
             &scheme,
+            &generic,
             actual,
             args,
             Some(sig.params),
@@ -7302,8 +7309,14 @@ impl Checker<'_, '_> {
         let mut defaults = BTreeMap::new();
         let mut allow_numeric_defaults = false;
         loop {
+            let input_domains = generic
+                .iter()
+                .map(|id| self.trait_input_domain(*id).unwrap_or_else(|| p(P::Type)))
+                .collect::<Vec<_>>();
             let mut candidate = scheme
-                .infer_sparse_scoped_types_mode(
+                .infer_declared_sparse_types_mode(
+                    &generic,
+                    &input_domains,
                     &actual,
                     target,
                     None,

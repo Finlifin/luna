@@ -81,6 +81,7 @@ impl Checker<'_, '_> {
         let mut prepared_packets = BTreeMap::new();
         let candidate = self.infer_packet_inputs(
             &scheme,
+            &binders,
             width,
             arguments,
             expected,

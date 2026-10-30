@@ -9,14 +9,21 @@ impl Checker<'_, '_> {
     fn spread_candidate(
         &self,
         scheme: &crate::calls::Scheme,
+        declaration_inputs: &[DeclarationId],
         actual: &[Option<Term>],
         expected: Option<&Term>,
         partial: Option<&crate::calls::CallableContext>,
         structural: Option<&crate::calls::InputContext>,
         span: Span,
     ) -> Result<crate::calls::CallCandidate, Error> {
+        let domains = declaration_inputs
+            .iter()
+            .map(|id| self.trait_input_domain(*id).unwrap_or_else(|| p(P::Type)))
+            .collect::<Vec<_>>();
         let mut candidate = scheme
-            .infer_sparse_scoped_types_mode(
+            .infer_declared_sparse_types_mode(
+                declaration_inputs,
+                &domains,
                 actual,
                 expected,
                 partial,
@@ -57,6 +64,7 @@ impl Checker<'_, '_> {
     ) -> Result<crate::calls::CallCandidate, Error> {
         self.infer_packet_inputs(
             scheme,
+            &[],
             width,
             args,
             None,
@@ -73,6 +81,7 @@ impl Checker<'_, '_> {
     pub(in crate::program) fn infer_packet_inputs(
         &mut self,
         scheme: &crate::calls::Scheme,
+        declaration_inputs: &[DeclarationId],
         width: usize,
         args: &[Arg<'_>],
         expected: Option<&Term>,
@@ -83,6 +92,7 @@ impl Checker<'_, '_> {
     ) -> Result<crate::calls::CallCandidate, Error> {
         self.infer_routed_packet_inputs(
             scheme,
+            declaration_inputs,
             vec![None; width],
             args,
             None,
@@ -104,6 +114,7 @@ impl Checker<'_, '_> {
     pub(in crate::program) fn infer_routed_packet_inputs(
         &mut self,
         scheme: &crate::calls::Scheme,
+        declaration_inputs: &[DeclarationId],
         actual: Vec<Option<Term>>,
         args: &[Arg<'_>],
         declarations: Option<&[hir::common::FnParam<'_>]>,
@@ -123,6 +134,7 @@ impl Checker<'_, '_> {
         loop {
             let candidate = self.infer_spread_evidence(
                 scheme,
+                declaration_inputs,
                 actual.clone(),
                 args,
                 declarations,
@@ -245,6 +257,7 @@ impl Checker<'_, '_> {
     ) -> Result<crate::calls::CallCandidate, Error> {
         self.infer_spread_evidence(
             scheme,
+            &[],
             actual,
             args,
             declarations,
@@ -263,6 +276,7 @@ impl Checker<'_, '_> {
     fn infer_spread_evidence(
         &mut self,
         scheme: &crate::calls::Scheme,
+        declaration_inputs: &[DeclarationId],
         mut actual: Vec<Option<Term>>,
         args: &[Arg<'_>],
         declarations: Option<&[hir::common::FnParam<'_>]>,
@@ -330,7 +344,13 @@ impl Checker<'_, '_> {
                             // Keep the established result-context path when a
                             // partition is not yet known; never invent a width.
                             return self.spread_candidate(
-                                scheme, &actual, expected, partial, structural, span,
+                                scheme,
+                                declaration_inputs,
+                                &actual,
+                                expected,
+                                partial,
+                                structural,
+                                span,
                             );
                         };
                         fuel = fuel
@@ -383,8 +403,15 @@ impl Checker<'_, '_> {
             }
         }
         loop {
-            let mut candidate =
-                self.spread_candidate(scheme, &actual, expected, partial, structural, span)?;
+            let mut candidate = self.spread_candidate(
+                scheme,
+                declaration_inputs,
+                &actual,
+                expected,
+                partial,
+                structural,
+                span,
+            )?;
             // Retained collection elements provide partial tuple evidence.
             // Unknown packet fields stay candidate-local inference variables.
             for route in routes.iter().filter(|route| route.is_collected()) {

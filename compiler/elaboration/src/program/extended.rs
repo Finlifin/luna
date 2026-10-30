@@ -500,14 +500,22 @@ impl Checker<'_, '_> {
                     .abstract_parameters(&self.input_binders(remaining))
                     .map_err(|cause| error(span, cause.to_string()))?,
             };
+            let input_domains = remaining
+                .iter()
+                .map(|id| self.trait_input_domain(*id).unwrap_or_else(|| p(P::Type)))
+                .collect::<Vec<_>>();
             Some(
                 scheme
-                    .infer_contextual_types(
+                    .infer_declared_sparse_types_mode(
+                        remaining,
+                        &input_domains,
                         &vec![None; parameters.len()],
                         expected,
                         partial,
                         &self.context,
                         crate::ptc::Budget::default(),
+                        false,
+                        &[],
                     )
                     .map_err(|cause| call_inference_error(span, cause))?,
             )

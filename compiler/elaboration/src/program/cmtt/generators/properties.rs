@@ -39,12 +39,22 @@ impl Checker<'_, '_> {
                 .abstract_parameters(&self.input_binders(&type_plan.0))
                 .map_err(|e| error(site.span, e.to_string()))?,
             };
+            let input_domains = type_plan
+                .0
+                .iter()
+                .map(|id| self.trait_input_domain(*id).unwrap_or_else(|| p(P::Type)))
+                .collect::<Vec<_>>();
             let candidate = scheme
-                .infer_partial_types_in_context(
+                .infer_declared_sparse_types_mode(
+                    &type_plan.0,
+                    &input_domains,
                     &[],
                     Some(expected),
+                    None,
                     &self.context,
                     crate::ptc::Budget::default(),
+                    false,
+                    &[],
                 )
                 .map_err(|e| call_inference_error(site.span, e))?;
             definition = self.generator_inference_view(

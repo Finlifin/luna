@@ -641,7 +641,7 @@ fn elaborate_candidate<'a, 'h>(
                         &info.node.expect_item().kind,
                         ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)
                             if sig.return_ty.is_some_and(|ty| matches!(ty.kind, H::ContextualExprType(..) | H::ContextualPatternType(..)))
-                    ) =>
+                    ) || checker.is_data_consumer(owner) =>
                 {
                     p.definition.map(|id| DeclarationId {
                         package: semantic_package(package_identities, id.pkg),

@@ -976,6 +976,7 @@ impl Checker<'_, '_> {
                     }
                     let candidate = self.infer_routed_packet_inputs(
                         &scheme,
+                        &generics,
                         actual,
                         args,
                         declarations,
@@ -1146,6 +1147,7 @@ impl Checker<'_, '_> {
             };
             let candidate = self.infer_routed_packet_inputs(
                 &scheme,
+                &type_parameters,
                 vec![None; declarations.len()],
                 args,
                 Some(declarations),

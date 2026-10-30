@@ -3875,3 +3875,45 @@ Validation in /home/fin/luna:
 Remaining consumers include spread-specific inference and the speculative
 CMTT data-result hint path. This does not claim all inference entrypoints are
 integrated with domain staging.
+
+### Packet and speculative inference use completed declaration domains
+
+Ordinary functions, methods, deferred signatures and effect requests now pass
+input declaration identities through packet evidence collection. Packet and
+property collector candidates use the shared domain-staging entrypoint, including
+open-call input preparation. Enum packet contexts retain their already prepared
+fixed-sort frame. The original simple callback/packet case already passed via
+final ordinary-call checking (`/tmp/luna-tools-_yl2cx1h/result.json`); this change
+makes the intermediate contexts use the same domain evidence instead of relying
+on that later recovery.
+
+CMTT generic data-result hints and contextual property selection also use domain
+staging. Static value hints whose completed domain is Type now delegate to static
+Type evidence with the same depth limit. The nested ordinary comptime producer
+case failed with NeedsContext in `/tmp/luna-tools-jpawr6g7/result.json`; this
+fix supplies its completed nominal result without executing the producer.
+
+Initial parameter registration now includes positional value clauses for
+contextual data consumers (quoted input, ordinary data output). Previously their
+signature domain table contained the value domain but their parameter identity
+list omitted that input, causing `normal-form value argument is not an available
+declaration input` (`/tmp/luna-tools-kajwitn5/result.json`). The source regression
+uses a direct comptime binding and then consumes its data value.
+
+Source cases cover callback contexts from computed packets, ordinary and method
+calls, deferred result annotations, exact effect identities and nested ordinary
+comptime producers. An IIR event assertion verifies before/packet/after execute
+once each in source order. Temporary diagnostic instrumentation was removed.
+
+Remaining separate limitation: a contextual data consumer called directly inside
+another generator's ordinary argument, for example
+`~<build(inspect('(Tagged<Type,bool>{value:false})))>`, still reports that nested
+ordinary-expression scheduling is unsupported. This is recorded by
+`/tmp/luna-tools-fx9paypv/result.json`; accepting its declaration and direct
+binding does not close that scheduling gap.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test extended_calls --test effect_spreads --test open_functions --test cmtt --test cmtt_methods --test sysroot_preludes`:
+  exit 0, `/tmp/luna-tools-1u27a69a/result.json`, no exclusions.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-0b3og_ud/result.json`; `git diff --check`: exit 0.

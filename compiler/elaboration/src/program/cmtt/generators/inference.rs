@@ -776,7 +776,7 @@ impl Checker<'_, '_> {
                             &assigned,
                             default.span,
                         )?;
-                        self.generator_static_value_hint(default, &domain, bindings)?
+                        self.generator_static_value_hint(default, &domain, depth + 1, bindings)?
                     };
                     let Some(ty) = hint else { return Ok(None) };
                     ty
@@ -856,11 +856,20 @@ impl Checker<'_, '_> {
         };
         // Incomplete or conflicting provisional evidence must not replace the
         // actual call's contextual checking and diagnostics.
-        let Ok(candidate) = scheme.infer_partial_types_in_context(
+        let input_domains = parameters
+            .iter()
+            .map(|id| self.trait_input_domain(*id).unwrap_or_else(|| p(P::Type)))
+            .collect::<Vec<_>>();
+        let Ok(candidate) = scheme.infer_declared_sparse_types_mode(
+            &parameters,
+            &input_domains,
             &evidence,
+            None,
             None,
             &self.context,
             crate::ptc::Budget::default(),
+            false,
+            &[],
         ) else {
             return Ok(None);
         };
@@ -1012,7 +1021,7 @@ impl Checker<'_, '_> {
                     &completed,
                     value.span,
                 )?;
-                self.generator_static_value_hint(value, &domain, bindings)?
+                self.generator_static_value_hint(value, &domain, depth + 1, bindings)?
             };
             let Some(hint) = hint else { return Ok(None) };
             completed.push(hint);
@@ -1032,8 +1041,15 @@ impl Checker<'_, '_> {
         &mut self,
         argument: &Expr<'_>,
         domain: &Term,
+        depth: usize,
         bindings: Option<(&[DeclarationId], &[Term])>,
     ) -> Result<Option<Term>, Error> {
+        if depth >= 64 {
+            return Ok(None);
+        }
+        if *domain == p(P::Type) {
+            return self.generator_static_type_hint(argument, depth + 1, bindings);
+        }
         if let H::ResolvedClauseParam(_, id) = argument.kind {
             let id = DeclarationId {
                 package: semantic_package(&self.package_identities, id.pkg),
@@ -1131,7 +1147,12 @@ impl Checker<'_, '_> {
                                 &types,
                                 argument.span,
                             )?;
-                            self.generator_static_value_hint(argument, &domain, bindings)?
+                            self.generator_static_value_hint(
+                                argument,
+                                &domain,
+                                depth + 1,
+                                bindings,
+                            )?
                         };
                         let Some(value) = value else { return Ok(None) };
                         types.push(value);
@@ -1426,7 +1447,7 @@ impl Checker<'_, '_> {
             let hint = if domain == p(P::Type) {
                 self.generator_static_type_hint(value, depth + 1, bindings)?
             } else {
-                self.generator_static_value_hint(value, &domain, bindings)?
+                self.generator_static_value_hint(value, &domain, depth + 1, bindings)?
             };
             let Some(hint) = hint else { return Ok(None) };
             completed.push(hint);
