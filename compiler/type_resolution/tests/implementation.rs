@@ -3424,3 +3424,73 @@ fn disjunctive_subject_eligibility_keeps_symbolic_identity_and_replays() {
         .verify_type_evidence(&evidence, &subject, &[], &context, Budget::default())
         .unwrap();
 }
+
+#[test]
+fn replay_type_valued_dependent_inputs_checks_completed_domains() {
+    use nir::program::TypePredicate;
+    use type_resolution::implementation::TypeEvidence;
+    use type_resolution::ptc::{Formula, Outcome};
+    let value = Term::Rigid {
+        declaration: id(2),
+        sort: Sort::ComptimeValue,
+    };
+    let subject = node(10, vec![ty(P::Type), ty(P::Bool)]);
+    let mut h = generic(
+        200,
+        node(10, vec![var(1), value.clone()]),
+        vec![id(1), id(2)],
+    );
+    h.parameter_types = vec![ty(P::Type), var(1)];
+    h.interface_arguments = vec![node(11, vec![value.clone()])];
+    h.requirements = vec![TypePredicate::Equal(
+        node(12, vec![value]),
+        node(12, vec![ty(P::Bool)]),
+    )];
+    let interface_arguments = vec![node(11, vec![ty(P::Bool)])];
+    let context = context();
+    let prove = |term: Term| {
+        let Outcome::Entailed(proof) =
+            context.prove(Formula::equal(term.clone(), term), Budget::default())
+        else {
+            panic!("reflexive type identity must be provable");
+        };
+        proof
+    };
+    let evidence = TypeEvidence {
+        implementation: h.declaration,
+        type_arguments: vec![ty(P::Type), ty(P::Bool)],
+        head_proofs: vec![
+            prove(subject.clone()),
+            prove(interface_arguments[0].clone()),
+        ],
+        requirement_proofs: vec![prove(node(12, vec![ty(P::Bool)]))],
+        eligibility_proof: None,
+    };
+    let verify = |evidence: &TypeEvidence, budget| {
+        h.verify_type_evidence(evidence, &subject, &interface_arguments, &context, budget)
+    };
+    verify(&evidence, Budget::default()).unwrap();
+    for arguments in [
+        vec![ty(P::Type), Term::Bool(true)],
+        vec![ty(P::Bool), ty(P::Bool)],
+        vec![ty(P::Type), ty(P::Char)],
+    ] {
+        let mut forged = evidence.clone();
+        forged.type_arguments = arguments;
+        assert!(verify(&forged, Budget::default()).is_err());
+    }
+    let mut forged = evidence.clone();
+    forged.requirement_proofs.clear();
+    assert!(verify(&forged, Budget::default()).is_err());
+    assert!(
+        verify(
+            &evidence,
+            Budget {
+                steps: 0,
+                ..Budget::default()
+            }
+        )
+        .is_err()
+    );
+    verify(&evidence, Budget::default()).unwrap();
+}

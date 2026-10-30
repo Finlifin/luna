@@ -210,17 +210,23 @@ impl ImplementationHead {
         if self.interface.is_none() || !matched.evidence.requirement_proofs.is_empty() {
             return Err(ProofError::Invalid);
         }
+        let mut remaining = remaining;
+        let substitution = nir::DeclarationSubstitution::bounded(
+            &self.type_parameters,
+            &self.parameter_types,
+            &matched.evidence.type_arguments,
+            &[],
+            &mut remaining,
+        )
+        .map_err(substitution_proof_error)?;
         let expected = self
             .requirements
             .iter()
             .map(|requirement| {
-                requirement.instantiate_parameters(
-                    &self.parameter_binders()?,
-                    &matched.evidence.type_arguments,
-                )
+                substitution.instantiate_predicate_bounded(requirement, &mut remaining)
             })
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| ProofError::Invalid)?;
+            .map_err(substitution_proof_error)?;
         if matched.requirements != expected {
             return Err(ProofError::Invalid);
         }
@@ -1087,13 +1093,31 @@ impl ImplementationHead {
             nir::NominalAdmissionError::Budget => TypeAssessment::Pending(error.to_string()),
             nir::NominalAdmissionError::Invalid(message) => TypeAssessment::Invalid(message),
         })?;
+        let substitution = nir::DeclarationSubstitution::bounded(
+            &self.type_parameters,
+            &self.parameter_types,
+            &arguments,
+            &[],
+            &mut domain_fuel,
+        )
+        .map_err(|error| match error {
+            nir::type_computations::Error::Budget => TypeAssessment::Pending(error.to_string()),
+            error => TypeAssessment::Invalid(error.to_string()),
+        })?;
         let requirements = match self
             .requirements
             .iter()
-            .map(|requirement| requirement.instantiate_parameters(&parameters, &arguments))
+            .map(|requirement| {
+                substitution.instantiate_predicate_bounded(requirement, &mut domain_fuel)
+            })
             .collect::<Result<Vec<_>, _>>()
         {
             Ok(requirements) => requirements,
+            Err(nir::type_computations::Error::Budget) => {
+                return Err(TypeAssessment::Pending(
+                    "requirement substitution budget exhausted".into(),
+                ));
+            }
             Err(error) => return Err(TypeAssessment::Invalid(error.to_string())),
         };
         // Head inference has its own metered partition. Return its unused work
@@ -1525,13 +1549,16 @@ impl ImplementationHead {
             &mut domain_fuel,
         )
         .map_err(|_| ProofError::Invalid)?;
-        for (parameter, arg) in parameters.iter().zip(&evidence.type_arguments) {
-            if arg.sort() != parameter.sort || arg.check_scope(&[]).is_err() {
-                return Err(ProofError::Invalid);
-            }
-        }
+        let substitution = nir::DeclarationSubstitution::bounded(
+            &self.type_parameters,
+            &self.parameter_types,
+            &evidence.type_arguments,
+            &[],
+            &mut domain_fuel,
+        )
+        .map_err(substitution_proof_error)?;
         let allowance =
-            remaining / (4 + evidence.head_proofs.len() + evidence.requirement_proofs.len());
+            domain_fuel / (4 + evidence.head_proofs.len() + evidence.requirement_proofs.len());
         if allowance == 0 {
             return Err(ProofError::BudgetExhausted);
         }
@@ -1557,9 +1584,10 @@ impl ImplementationHead {
         {
             return Err(ProofError::Invalid);
         }
-        let instantiate = |ty: &Term| {
-            ty.instantiate_parameters(&parameters, &evidence.type_arguments)
-                .map_err(|_| ProofError::Invalid)
+        let mut instantiate = |ty: &Term| {
+            substitution
+                .instantiate_bounded(ty, &mut domain_fuel)
+                .map_err(substitution_proof_error)
         };
         let instantiated = instantiate(&self.subject)?;
         let mut expected = vec![Formula::equal(instantiated.clone(), subject.clone())];
@@ -1599,15 +1627,22 @@ impl ImplementationHead {
             context.verify_proof(proof, budget)?;
         }
         for (requirement, proof) in self.requirements.iter().zip(&evidence.requirement_proofs) {
-            let instantiated = requirement
-                .instantiate_parameters(&parameters, &evidence.type_arguments)
-                .map_err(|_| ProofError::Invalid)?;
+            let instantiated = substitution
+                .instantiate_predicate_bounded(requirement, &mut domain_fuel)
+                .map_err(substitution_proof_error)?;
             if Formula::from_predicate(&instantiated) != proof.goal {
                 return Err(ProofError::Invalid);
             }
             verify_requirement(proof, budget)?;
         }
         Ok(())
+    }
+}
+
+fn substitution_proof_error(error: nir::type_computations::Error) -> crate::ptc::ProofError {
+    match error {
+        nir::type_computations::Error::Budget => crate::ptc::ProofError::BudgetExhausted,
+        _ => crate::ptc::ProofError::Invalid,
     }
 }
 

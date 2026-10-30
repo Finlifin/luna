@@ -3283,3 +3283,27 @@ fail before admission: head inference creates fixed-sort metavariables and leave
 head obligations unsettled (`/tmp/luna-tools-54lpr6cz/result.json`). These pending
 source tests remain outside this admission commit. Head inference and proof replay
 still need completed-domain integration; this stage does not claim source support.
+
+### Domain-aware implementation evidence replay
+
+Implementation requirement specialization, head-match replay, and final type
+evidence replay now use bounded declaration-domain substitution. Replay checks
+completed domains rather than comparing actual arguments to source binder sorts.
+The regression builds independent reflexive proofs for a nominal subject, trait
+argument, and requirement containing a Type-valued dependent input; it also rejects
+forged argument sorts, changed type identity, missing requirements, and exhausted
+budgets, then verifies recovery. No value equations are introduced into PTC.
+
+Validation in `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution`: exit 0,
+  `/tmp/luna-tools-dmjwa9ec/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test trait_phases --test trait_purity`:
+  exit 0, `/tmp/luna-tools-n7rbjoj5/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: exit 0,
+  `/tmp/luna-tools-6i4u3jgv/result.json`; `git diff --check`: exit 0.
+
+Remaining: implementation head inference still allocates source-sort metavariables.
+The fixed-sort `InferenceTerm::Instantiate` and matching decomposition cannot yet
+represent a dependent input whose completed domain changes its sort to Type. The
+two pending source regressions remain uncommitted; replay support alone does not
+establish end-to-end implementation selection.
