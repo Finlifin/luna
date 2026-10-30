@@ -294,7 +294,7 @@ pub fn supported_input_type_with_collections_in(
                 sort: Sort::Type,
                 arguments,
             } if is_tuple(*head) => {
-                let [Term::TypeListValue(fields)] = arguments.as_slice() else {
+                let Some(fields) = type_list_fields_with_layouts(arguments, &is_list) else {
                     return false;
                 };
                 if fields.len() > remaining {
@@ -327,6 +327,45 @@ pub fn type_list_input_type(ty: &Term) -> bool {
         _ => return false,
     };
     arguments.as_slice() == [Term::Primitive(Primitive::Type)]
+}
+
+// Shape-only callers do not own the Tuple signature. Ordinary list payloads
+// therefore require separate registered list-layout evidence. Formation still
+// checks the tuple's exact parameter domain at its owning declaration.
+fn type_list_fields_with_layouts<'a>(
+    arguments: &'a [Term],
+    is_list: &impl Fn(DeclarationId) -> bool,
+) -> Option<&'a [Term]> {
+    let [value] = arguments else { return None };
+    match value {
+        Term::TypeListValue(fields) => Some(fields),
+        Term::NominalValue {
+            ty,
+            variant: None,
+            fields,
+        } if type_list_input_type(ty) => {
+            let Term::NormalForm { head, .. } = ty.as_ref() else {
+                return None;
+            };
+            is_list(*head).then_some(fields)
+        }
+        _ => None,
+    }
+}
+
+// This is a representation view, not list-layout authority. Metadata owners
+// establish the role and supply the exact domain before borrowing the payload.
+fn list_value_payload<'a>(ty: &Term, value: &'a Term) -> Option<&'a [Term]> {
+    match value {
+        Term::NominalValue {
+            ty: actual,
+            variant: None,
+            fields,
+        } if actual.as_ref() == ty => Some(fields),
+        // Read the old encoding until all producers are migrated together.
+        Term::TypeListValue(fields) if type_list_input_type(ty) => Some(fields),
+        _ => None,
+    }
 }
 
 /// Validate the currently supported telescope and its executable-body metadata.
@@ -569,6 +608,14 @@ impl Head {
         }
     }
 
+    /// Borrow a frozen list's payload under this registered layout and its
+    /// exact declared domain. Element admission and scope checks remain with
+    /// the caller; a similarly shaped opaque head grants no list authority.
+    pub fn list_value_elements<'a>(&self, ty: &Term, value: &'a Term) -> Option<&'a [Term]> {
+        self.list_element(ty)?;
+        list_value_payload(ty, value)
+    }
+
     pub fn is_type_list_instance(&self, ty: &Term) -> bool {
         self.role == Role::TypeList
             && matches!(self.parameters.as_slice(), [parameter]
@@ -589,10 +636,27 @@ impl Head {
         if self.role != Role::Tuple || *head != self.declaration {
             return None;
         }
-        let [Term::TypeListValue(elements)] = arguments.as_slice() else {
+        let [value] = arguments.as_slice() else {
             return None;
         };
-        Some(elements)
+        let elements = if let Term::TypeListValue(elements) = value {
+            // Legacy layout metadata can omit a collector domain because the
+            // old payload already fixes its element sort. Typed payloads need
+            // the actual declaration domain; never guess their list identity.
+            elements.as_slice()
+        } else {
+            let [parameter] = self.parameters.as_slice() else {
+                return None;
+            };
+            if parameter.kind != Kind::Value || !type_list_input_type(&parameter.ty) {
+                return None;
+            }
+            list_value_payload(&parameter.ty, value)?
+        };
+        elements
+            .iter()
+            .all(|element| element.sort() == Sort::Type)
+            .then_some(elements)
     }
     /// Check concrete inputs without reducing a head. The caller separately
     /// validates term shape, scope and formation contracts.
@@ -940,10 +1004,7 @@ impl Head {
                             let [element] = arguments.as_slice() else {
                                 return Err(ApplicationError::InputType { index });
                             };
-                            if element.sort() != Sort::Type
-                                || *element == Term::Primitive(Primitive::Type)
-                                || fields.len() > remaining
-                            {
+                            if element.sort() != Sort::Type || fields.len() > remaining {
                                 return Err(ApplicationError::InputType { index });
                             }
                             for value in fields {
@@ -1017,7 +1078,8 @@ impl Head {
                             },
                             Term::TupleValue(values),
                         ) if is_tuple(*head) => {
-                            let [Term::TypeListValue(fields)] = arguments.as_slice() else {
+                            let Some(fields) = type_list_fields_with_layouts(arguments, &is_list)
+                            else {
                                 return Err(ApplicationError::InputType { index });
                             };
                             if fields.len() != values.len() || fields.len() > remaining {

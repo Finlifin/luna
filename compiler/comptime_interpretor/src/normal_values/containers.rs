@@ -140,43 +140,32 @@ impl Interpreter<'_> {
         depth: usize,
         reconstruct_callables: bool,
     ) -> Result<Value, Error> {
-        let value = match (term, ty) {
-            (
-                Term::NominalValue {
-                    ty: actual,
-                    variant: None,
-                    fields,
-                },
-                Term::NormalForm { .. },
-            ) if actual.as_ref() == ty => {
-                let element = self
-                    .list_element(ty)
-                    .cloned()
-                    .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-                if element == Term::Primitive(Primitive::Type) {
-                    return Err(self.failure(ErrorKind::Type, None));
-                }
-                self.integer_operation(None, |budget| budget.consume(fields.len()))?;
-                let values = fields
-                    .iter()
-                    .map(|value| {
-                        self.normal_pattern_value_at(
-                            value,
-                            &element,
-                            depth + 1,
-                            reconstruct_callables,
-                        )
-                    })
-                    .collect::<Result<_, _>>()?;
-                let value = Value::List {
-                    ty: ty.clone(),
-                    values,
-                };
-                self.validate_immutable_input(&value, ty)?;
-                value
-            }
-            _ => return Err(self.failure(ErrorKind::Type, None)),
+        let Term::NormalForm { head, .. } = ty else {
+            return Err(self.failure(ErrorKind::Type, None));
         };
+        let metadata = self
+            .normal_forms
+            .get(head)
+            .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
+        let element = metadata
+            .list_element(ty)
+            .cloned()
+            .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
+        let fields = metadata
+            .list_value_elements(ty, term)
+            .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
+        self.integer_operation(None, |budget| budget.consume(fields.len()))?;
+        let values = fields
+            .iter()
+            .map(|value| {
+                self.normal_pattern_value_at(value, &element, depth + 1, reconstruct_callables)
+            })
+            .collect::<Result<_, _>>()?;
+        let value = Value::List {
+            ty: ty.clone(),
+            values,
+        };
+        self.validate_immutable_input(&value, ty)?;
         Ok(value)
     }
     #[inline(never)]

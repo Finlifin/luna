@@ -1539,3 +1539,179 @@ fn list_append_representation_limit_preserves_old_storage_and_recovers() {
         original
     );
 }
+
+#[test]
+fn typed_list_normal_inputs_share_generic_domain_validation_and_recovery() {
+    let package = package();
+    let frozen = |domain: Term, fields| Term::NominalValue {
+        ty: Box::new(domain),
+        variant: None,
+        fields,
+    };
+    let fields = vec![ty(P::Bool), ty(P::Char)];
+    let good = frozen(list_type(), fields.clone());
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    for bad in [
+        frozen(list_type(), vec![Term::Bool(true)]),
+        frozen(
+            Term::NormalForm {
+                head: id(99),
+                sort: Sort::Type,
+                arguments: vec![ty(P::Type)],
+            },
+            fields.clone(),
+        ),
+        frozen(
+            Term::NormalForm {
+                head: id(1),
+                sort: Sort::Type,
+                arguments: vec![ty(P::Bool)],
+            },
+            vec![Term::Bool(true)],
+        ),
+        Term::NominalValue {
+            ty: Box::new(list_type()),
+            variant: Some(0),
+            fields: fields.clone(),
+        },
+        frozen(
+            list_type(),
+            vec![Term::Rigid {
+                declaration: id(900),
+                sort: Sort::Type,
+            }],
+        ),
+    ] {
+        assert!(
+            vm.invoke_with_normal_arguments(id(3), vec![(list_type(), bad)])
+                .is_err()
+        );
+        assert_eq!(
+            vm.invoke_with_normal_arguments(id(3), vec![(list_type(), good.clone())])
+                .unwrap(),
+            Value::Type(tuple_type(fields.clone()))
+        );
+    }
+    assert_eq!(
+        vm.invoke_with_normal_arguments(id(3), vec![(list_type(), frozen(list_type(), vec![]))])
+            .unwrap(),
+        Value::Type(tuple_type(vec![]))
+    );
+    let scoped = Term::Rigid {
+        declaration: id(900),
+        sort: Sort::Type,
+    };
+    let mut vm = Interpreter::for_comptime(&package, Budget::default())
+        .unwrap()
+        .with_abstract_type_parameters(&[id(900)])
+        .unwrap();
+    assert_eq!(
+        vm.invoke_with_normal_arguments(
+            id(3),
+            vec![(list_type(), frozen(list_type(), vec![scoped.clone()]))]
+        )
+        .unwrap(),
+        Value::Type(tuple_type(vec![scoped]))
+    );
+    let mut unbound = package.clone();
+    unbound.normal_forms.truncate(1);
+    unbound.normal_forms[0].role = nir::normal_forms::Role::Opaque;
+    let function = &mut unbound.functions[0];
+    function.signature = Term::Function {
+        parameters: vec![Parameter {
+            sort: Sort::ComptimeValue,
+            ty: list_type(),
+        }],
+        result: Box::new(list_type()),
+    };
+    function.body.ty = list_type();
+    function.body.kind = K::Local(function.parameters[0]);
+    let mut vm = Interpreter::for_comptime(&unbound, Budget::default()).unwrap();
+    assert!(
+        vm.invoke_with_normal_arguments(id(3), vec![(list_type(), good)])
+            .is_err()
+    );
+}
+
+#[test]
+fn nested_typed_type_lists_reconstruct_as_ordinary_list_values() {
+    let mut package = package();
+    let domain = Term::NormalForm {
+        head: id(1),
+        sort: Sort::Type,
+        arguments: vec![list_type()],
+    };
+    let function = &mut package.functions[0];
+    function.signature = Term::Function {
+        parameters: vec![Parameter {
+            sort: Sort::ComptimeValue,
+            ty: domain.clone(),
+        }],
+        result: Box::new(domain.clone()),
+    };
+    function.body.ty = domain.clone();
+    function.body.kind = K::Local(function.parameters[0]);
+    let child = |fields| Term::NominalValue {
+        ty: Box::new(list_type()),
+        variant: None,
+        fields,
+    };
+    let input = Term::NominalValue {
+        ty: Box::new(domain.clone()),
+        variant: None,
+        fields: vec![child(vec![ty(P::Bool)]), child(vec![])],
+    };
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke_with_normal_arguments(id(3), vec![(domain.clone(), input)])
+            .unwrap(),
+        Value::List {
+            ty: domain,
+            values: vec![
+                ordinary_type_list(vec![ty(P::Bool)]),
+                ordinary_type_list(vec![])
+            ]
+        }
+    );
+}
+
+#[test]
+fn typed_list_arguments_supply_registered_tuple_layout_without_body_reduction() {
+    let mut package = package();
+    package.normal_forms[1].role = nir::normal_forms::Role::Tuple;
+    let tuple = Term::NormalForm {
+        head: id(2),
+        sort: Sort::Type,
+        arguments: vec![Term::NominalValue {
+            ty: Box::new(list_type()),
+            variant: None,
+            fields: vec![ty(P::Bool), ty(P::Char)],
+        }],
+    };
+    let function = &mut package.functions[0];
+    function.signature = Term::Function {
+        parameters: vec![Parameter {
+            sort: Sort::Runtime,
+            ty: tuple.clone(),
+        }],
+        result: Box::new(tuple.clone()),
+    };
+    function.body.ty = tuple.clone();
+    function.body.kind = K::Local(function.parameters[0]);
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let value = Term::TupleValue(vec![Term::Bool(true), Term::Char('x')]);
+    assert_eq!(
+        vm.invoke_with_normal_arguments(id(3), vec![(tuple.clone(), value)])
+            .unwrap(),
+        Value::Tuple(vec![Value::Bool(true), Value::Char('x')])
+    );
+    for wrong in [
+        Term::TupleValue(vec![Term::Bool(true)]),
+        Term::TupleValue(vec![Term::Bool(true), Term::Bool(false)]),
+    ] {
+        assert!(
+            vm.invoke_with_normal_arguments(id(3), vec![(tuple.clone(), wrong)])
+                .is_err()
+        );
+    }
+}

@@ -214,7 +214,7 @@ fn frozen_collection_inputs_require_identity_authority_and_element_domains() {
 }
 
 #[test]
-fn dependent_collection_domains_keep_type_list_encoding_canonical() {
+fn dependent_collection_domains_validate_ordinary_type_list_payloads() {
     let list = |element| Term::NormalForm {
         head: id(90),
         sort: Sort::Type,
@@ -278,7 +278,7 @@ fn dependent_collection_domains_keep_type_list_encoding_canonical() {
                 fields: vec![primitive(P::Bool)],
             }
         )
-        .is_err()
+        .is_ok()
     );
 }
 
@@ -1065,5 +1065,97 @@ fn frozen_objects_check_every_stored_domain_and_preserve_duplicate_keys() {
                 None,
             )
             .is_err()
+    );
+}
+
+#[test]
+fn registered_layout_views_read_typed_list_payloads_without_unfolding_heads() {
+    use nir::normal_forms::Role;
+    let list = Head {
+        declaration: id(90),
+        role: Role::TypeList,
+        collector: None,
+        parameters: vec![parameter(91, Kind::Type, primitive(P::Type))],
+        requirements: vec![],
+    };
+    let domain = Term::NormalForm {
+        head: list.declaration,
+        sort: Sort::Type,
+        arguments: vec![primitive(P::Type)],
+    };
+    let fields = vec![primitive(P::Bool), primitive(P::U8)];
+    let payload = Term::NominalValue {
+        ty: Box::new(domain.clone()),
+        variant: None,
+        fields: fields.clone(),
+    };
+    assert_eq!(
+        list.list_value_elements(&domain, &payload),
+        Some(fields.as_slice())
+    );
+    let mut opaque = list.clone();
+    opaque.role = Role::Opaque;
+    assert!(opaque.list_value_elements(&domain, &payload).is_none());
+    let tuple = Head {
+        declaration: id(80),
+        role: Role::Tuple,
+        collector: Some(0),
+        parameters: vec![parameter(81, Kind::Value, domain.clone())],
+        requirements: vec![],
+    };
+    let application = |payload| Term::NormalForm {
+        head: tuple.declaration,
+        sort: Sort::Type,
+        arguments: vec![payload],
+    };
+    assert_eq!(
+        tuple.tuple_elements(&application(payload.clone())),
+        Some(fields.as_slice())
+    );
+    assert_eq!(
+        tuple.tuple_elements(&application(Term::TypeListValue(fields.clone()))),
+        Some(fields.as_slice())
+    );
+    for wrong in [
+        Term::NominalValue {
+            ty: Box::new(primitive(P::Type)),
+            variant: None,
+            fields: fields.clone(),
+        },
+        Term::NominalValue {
+            ty: Box::new(domain.clone()),
+            variant: Some(0),
+            fields: fields.clone(),
+        },
+        Term::NominalValue {
+            ty: Box::new(Term::NormalForm {
+                head: id(92),
+                sort: Sort::Type,
+                arguments: vec![primitive(P::Type)],
+            }),
+            variant: None,
+            fields: fields.clone(),
+        },
+        Term::NominalValue {
+            ty: Box::new(domain.clone()),
+            variant: None,
+            fields: vec![Term::Bool(true)],
+        },
+    ] {
+        assert!(tuple.tuple_elements(&application(wrong)).is_none());
+    }
+    assert!(
+        tuple
+            .tuple_elements(&application(Term::TypeListValue(vec![Term::Bool(true)])))
+            .is_none()
+    );
+    assert!(
+        tuple
+            .tuple_elements(&Term::NormalForm {
+                head: id(79),
+                sort: Sort::Type,
+                arguments: vec![payload]
+            })
+            .is_none()
     );
 }

@@ -6345,3 +6345,45 @@ Final sysroot validation:
 exit 0, all three LLVM native tests passed;
 `/tmp/luna-tools-pkfzao80/result.json`. This includes the new empty-collection
 identity and source-order checks through the public meta.List binding.
+
+
+## Ordinary frozen list input decoding (2026-10-31)
+
+Frozen List<Type> inputs now use the same domain admission and recursive
+container decoder as other lists. Nominal payloads require the exact declared
+list domain, registered layout authority, no variant, and valid elements in the
+current Type scope. Nested lists reconstruct through this same mechanism.
+The legacy TypeListValue reader also delegates to the container decoder.
+
+Tuple layout inspection can borrow fields from an ordinary typed list argument
+using its declared collector domain, without unfolding a normal-form head.
+Shape-only queries require separate registered list-layout evidence. Opaque or
+wrong-domain heads do not acquire layout authority from their shape.
+
+This is the read-side migration. Canonical producers, including Value freezing,
+still emit the existing TypeListValue representation for Type elements; this
+stage does not equate different raw term encodings. Coordinated producer and
+remaining consumer migration, including TypeListConcat, remains necessary.
+The prior nominal Type-list rejection assertion now checks ordinary domain
+admission; writer identity expectations remain unchanged. Regression coverage
+includes empty/nested inputs, malformed fields, wrong domains/variants, scoped
+Type parameters, invalid inputs followed by recovery, and typed tuple layouts.
+
+Validation from /home/fin/luna:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p comptime_interpretor --no-fail-fast`:
+  exit 0, 996 passed; `/tmp/luna-tools-1fcc0znu/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test builder_invocations --test reflected_definitions --test normal_form_inference --test comptime_clause_inputs --test type_spreads --test cmtt --no-fail-fast`:
+  804 passed, one existing reflected_definitions failure; exit 101,
+  `/tmp/luna-tools-4q5spzu0/result.json`. The failing test is
+  source_comptime_selection_drives_generated_field_layouts_without_reparsing:
+  expected one callback, observed zero. Restoring the four implementation files
+  to ca335a39 and running `test -p luna --test reflected_definitions` through
+  the same check wrapper reproduced that failure (exit 101,
+  `/tmp/luna-tools-mnqujdx5/result.json`). All four files were restored
+  byte-for-byte; the failing test was not modified.
+- `python3 -B development/library_check.py --stage sysroot-builders --stage sysroot-object-enum-builder --timeout 300`:
+  both public sysroot builder stages passed;
+  `/tmp/luna-library-83ylwmm1/summary.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`
+  and `git diff --check` were run before commit. No full workspace suite.

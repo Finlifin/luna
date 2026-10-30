@@ -9,18 +9,6 @@ impl Interpreter<'_> {
         ty: &Term,
     ) -> Result<Value, Error> {
         let value = match (term, ty) {
-            (Term::TypeListValue(elements), ty) if self.is_type_list_input(ty) => {
-                for element in elements {
-                    let work = self
-                        .type_description_work(element)
-                        .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-                    self.integer_operation(None, |budget| budget.consume(work))?;
-                }
-                Value::List {
-                    ty: ty.clone(),
-                    values: elements.iter().cloned().map(Value::Type).collect(),
-                }
-            }
             (Term::Bool(value), _) => Value::Bool(*value),
             (Term::Char(value), _) => Value::Char(*value),
             (Term::String(value), _) => Value::String(value.clone()),

@@ -92,6 +92,9 @@ impl Interpreter<'_> {
                 Term::ErrorValue { .. } => {
                     self.decode_error_normal_value(term, ty, depth, reconstruct_callables)?
                 }
+                Term::TypeListValue(_) => {
+                    self.decode_list_normal_value(term, ty, depth, reconstruct_callables)?
+                }
                 Term::NominalValue { .. } => match ty {
                     Term::Primitive(Primitive::Object) => {
                         self.decode_object_normal_value(term, ty, depth, reconstruct_callables)?
