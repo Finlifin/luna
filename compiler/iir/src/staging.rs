@@ -2829,15 +2829,8 @@ fn constant<'layout>(
                 }
                 values.push(constant(heads, field, fuel, depth + 1)?);
             }
-            if element == Term::Primitive(Primitive::Type) {
-                Term::TypeListValue(values)
-            } else {
-                Term::NominalValue {
-                    ty: Box::new(ty.clone()),
-                    variant: None,
-                    fields: values,
-                }
-            }
+            nir::comptime_values::freeze_admitted_list(ty, values, fuel)
+                .map_err(|error| error.to_string())?
         }
         (K::OptionalAbsent, Term::Optional(_)) => {
             nir::type_computations::charge_term(&expr.ty, fuel).map_err(|e| e.to_string())?;
@@ -2965,7 +2958,8 @@ fn constant<'layout>(
                     return Err("staged type-list element is not Type".into());
                 }
             }
-            Term::TypeListValue(types.clone())
+            nir::comptime_values::freeze_admitted_list(ty, types.clone(), fuel)
+                .map_err(|error| error.to_string())?
         }
         (K::TypeValue(ty), Term::Primitive(Primitive::Type)) => {
             crate::completed_type(ty, &BTreeSet::new(), fuel)?;

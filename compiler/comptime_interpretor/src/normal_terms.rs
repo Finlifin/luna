@@ -279,43 +279,24 @@ impl Value {
                     charge(budget, work)?;
                     charge(budget, values.len())?;
                     ty.check_scope(&[]).map_err(|_| ErrorKind::Type)?;
-                    // The existing frozen Type-list encoding is still canonical.
-                    // VM carriers may be ordinary Lists without creating a second
-                    // normal-form identity for the same input value.
-                    if arguments.as_slice() == [Term::Primitive(Primitive::Type)] {
-                        let elements = values
-                            .iter()
-                            .map(|value| match value {
-                                Value::Type(_) | Value::TypeParameter(_) => visit(
-                                    value,
-                                    depth + 1,
-                                    budget,
-                                    parameters,
-                                    value_parameters,
-                                    invocation,
-                                ),
-                                _ => Err(ErrorKind::Type),
-                            })
-                            .collect::<Result<Vec<_>, _>>()?;
-                        return Ok(Term::TypeListValue(elements));
-                    }
-                    Term::NominalValue {
-                        ty: Box::new(ty.clone()),
-                        variant: None,
-                        fields: values
-                            .iter()
-                            .map(|value| {
-                                visit(
-                                    value,
-                                    depth + 1,
-                                    budget,
-                                    parameters,
-                                    value_parameters,
-                                    invocation,
-                                )
-                            })
-                            .collect::<Result<_, _>>()?,
-                    }
+                    let fields = values
+                        .iter()
+                        .map(|value| {
+                            visit(
+                                value,
+                                depth + 1,
+                                budget,
+                                parameters,
+                                value_parameters,
+                                invocation,
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    nir::comptime_values::freeze_admitted_list(ty, fields, &mut budget.steps)
+                        .map_err(|error| match error {
+                            nir::comptime_values::Error::Budget => ErrorKind::StepsExhausted,
+                            nir::comptime_values::Error::Invalid(_) => ErrorKind::Type,
+                        })?
                 }
                 _ => unreachable!(),
             })

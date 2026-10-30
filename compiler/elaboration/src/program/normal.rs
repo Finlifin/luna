@@ -2393,24 +2393,12 @@ fn freeze_known_list(
     fields: Vec<Term>,
     budget: &mut comptime_runtime::Budget,
 ) -> Option<Term> {
-    budget.consume(fields.len()).ok()?;
-    let sort = if *element == p(P::Type) {
-        Sort::Type
-    } else {
-        Sort::ComptimeValue
-    };
-    if fields.iter().any(|field| field.sort() != sort) {
+    if !matches!(domain, Term::NormalForm { arguments, .. }
+        if matches!(arguments.as_slice(), [actual] if actual == element))
+    {
         return None;
     }
-    Some(if *element == p(P::Type) {
-        Term::TypeListValue(fields)
-    } else {
-        Term::NominalValue {
-            ty: Box::new(clone_known_term(domain, budget)?),
-            variant: None,
-            fields,
-        }
-    })
+    nir::comptime_values::freeze_admitted_list(domain, fields, &mut budget.steps).ok()
 }
 
 /// A type relation needs a proof in either direction. A failed equality query

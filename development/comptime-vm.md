@@ -6651,3 +6651,44 @@ migration. No full workspace suite was run.
 Final public-library validation:
 `python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
 exit 0, three native tests passed; `/tmp/luna-tools-z3vjzfdr/result.json`.
+
+
+## Shared admitted-list freezing boundary (2026-10-31)
+
+VM export, staged IIR constants, known-expression observation and scoped
+invocation-result normalization now use `comptime_values::freeze_admitted_list`.
+The representation decision no longer lives separately in these consumers.
+Element recursion remains producer-owned; list authority, full element-domain
+admission and scope checking remain with the existing owning phase. The shared
+boundary checks the declared domain shape and element sorts and charges domain
+copying and payload inspection before publishing a frozen value.
+
+This is preparation for changing the canonical storage once all symbolic
+producers and readers support it, not completion of that migration. Type inputs
+still use the existing compact encoding; ordinary values preserve the exact
+list domain, including empty and nested lists. The helper does not establish
+layout authority from an opaque head's shape or equate the two raw encodings.
+Deferred TypeListConcat and contextual call reconstruction remain outstanding.
+
+New regression checks cover empty, nested and scoped values, substitution,
+wrong sorts and malformed domains, exhausted budgets and subsequent recovery.
+Existing VM, IIR and source tests exercise the actual connected exporters.
+
+Validation from /home/fin/luna:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p iir -p comptime_interpretor --no-fail-fast`:
+  exit 0, 1094 passed; `/tmp/luna-tools-ehs_nihd/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test normal_form_inference --test type_spreads --test comptime_clause_inputs --test cmtt --test builder_invocations --no-fail-fast`:
+  exit 0, 804 passed; `/tmp/luna-tools-shp7og8m/result.json`.
+  The initial build reported an elaboration u64/usize budget mismatch; it was
+  fixed with the existing bounded budget adapter before this successful run.
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib known_`:
+  exit 0, 14 passed; `/tmp/luna-tools-ioc911sh/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-o_e5h5v1/result.json`; `git diff --check` passed.
+
+No full workspace test suite was run.
+
+Public-library validation:
+`python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
+exit 0, three native tests passed; `/tmp/luna-tools-n7bgurd6/result.json`.
