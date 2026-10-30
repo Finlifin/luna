@@ -124,16 +124,17 @@ impl Emitter<'_> {
             }
             Conversion::Product => {
                 let graph = self.graph;
-                let plan = nir::error_results::transport_plan(
+                let plan = nir::error_results::transport_plan_with_layouts(
                     source,
                     target,
                     true,
                     self.fuel,
                     &mut |a, b| a == b,
-                    &|id| {
-                        graph.normal_forms.iter().any(|head| {
-                            head.declaration == id && head.role == nir::normal_forms::Role::Tuple
-                        })
+                    &|ty| {
+                        graph
+                            .normal_forms
+                            .iter()
+                            .find_map(|head| head.tuple_elements(ty))
                     },
                 )
                 .map_err(|e| format!("host error product transport: {e}"))?;

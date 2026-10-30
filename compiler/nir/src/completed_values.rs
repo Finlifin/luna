@@ -532,25 +532,14 @@ fn value_in<'a, 'd>(
         } => {
             // Completed payloads can undergo checked row and product layout
             // transport. No call or other deferred computation is introduced.
-            if *conversion == crate::error_results::Conversion::Product {
-                crate::error_results::transport_plan_with_layouts(
-                    &payload.ty,
-                    &value.ty,
-                    true,
-                    fuel,
-                    &mut |_, _| false,
-                    tuple_fields,
-                )
-                .map(|_| ())
-            } else {
-                crate::error_results::validate_conversion(
-                    *conversion,
-                    &payload.ty,
-                    &value.ty,
-                    fuel,
-                    &mut |_, _| false,
-                )
-            }
+            crate::error_results::validate_conversion_with_layouts(
+                *conversion,
+                &payload.ty,
+                &value.ty,
+                fuel,
+                &mut |_, _| false,
+                tuple_fields,
+            )
             .map_err(|error| match error {
                 crate::error_results::Error::Budget => "completed value budget exhausted",
                 _ => "completed error payload type mismatch",

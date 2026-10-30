@@ -1715,3 +1715,94 @@ fn typed_list_arguments_supply_registered_tuple_layout_without_body_reduction() 
         );
     }
 }
+
+#[test]
+fn typed_tuple_error_transport_reorders_tags_without_changing_payloads() {
+    use nir::error_results::Conversion as C;
+    use nir::program::Literal;
+    let target = Term::error_result(vec![ty(P::Bool), ty(P::Char)], ty(P::Bool));
+    let Term::ErrorResult { errors, result } = &target else {
+        unreachable!()
+    };
+    let source = Term::ErrorResult {
+        errors: errors.iter().rev().cloned().collect(),
+        result: result.clone(),
+    };
+    let tuple = |element| Term::NormalForm {
+        head: id(2),
+        sort: Sort::Type,
+        arguments: vec![Term::NominalValue {
+            ty: Box::new(list_type()),
+            variant: None,
+            fields: vec![element],
+        }],
+    };
+    for (conversion, payload_ty, literal, value, label) in [
+        (
+            C::Success,
+            ty(P::Bool),
+            Literal::Bool(false),
+            Value::Bool(false),
+            None,
+        ),
+        (
+            C::Failure,
+            ty(P::Bool),
+            Literal::Bool(true),
+            Value::Bool(true),
+            Some(ty(P::Bool)),
+        ),
+        (
+            C::Failure,
+            ty(P::Char),
+            Literal::Char('x'),
+            Value::Char('x'),
+            Some(ty(P::Char)),
+        ),
+    ] {
+        let mut package = package();
+        package.normal_forms[1].role = nir::normal_forms::Role::Tuple;
+        let function = &mut package.functions[0];
+        function.parameters.clear();
+        function.signature = Term::Function {
+            parameters: vec![],
+            result: Box::new(tuple(target.clone())),
+        };
+        let span = function.body.source;
+        function.body.ty = tuple(target.clone());
+        function.body.kind = K::ErrorConvert {
+            conversion: C::Product,
+            value: Box::new(Expr {
+                ty: tuple(source.clone()),
+                source: span,
+                kind: K::Tuple(vec![Expr {
+                    ty: source.clone(),
+                    source: span,
+                    kind: K::ErrorConvert {
+                        conversion,
+                        value: Box::new(Expr {
+                            ty: payload_ty,
+                            source: span,
+                            kind: K::Literal(literal),
+                        }),
+                    },
+                }]),
+            }),
+        };
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let expected = label.as_ref().map(|label| {
+            errors
+                .iter()
+                .position(|candidate| candidate == label)
+                .unwrap()
+        });
+        assert_eq!(
+            vm.invoke(id(3), vec![]).unwrap(),
+            Value::Tuple(vec![Value::ErrorResult {
+                ty: target.clone(),
+                error: expected,
+                value: Box::new(value),
+            }])
+        );
+    }
+}

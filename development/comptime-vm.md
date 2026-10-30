@@ -6488,3 +6488,59 @@ The completed-value production callers now use layout evidence. Other term
 consumers and canonical writers still require coordinated storage migration;
 this is not a complete removal of TypeListValue/TypeListConcat. No full workspace
 suite was run.
+
+
+## Product/error transport with ordinary tuple inputs (2026-10-31)
+
+Production error-conversion callers now supply declaration-owned tuple field
+views: interpreter preparation/execution, IIR validation and constant folding,
+elaboration layout adaptation, LLVM emission, and memory/purity analysis. The
+shared conversion validator uses the same scalar row checks and delegates
+product layout transport to the metadata-aware traversal. Legacy role-only APIs
+remain compatibility entries for existing low-level tests, not production calls.
+
+New tests execute success and both failure labels through a tuple whose single
+collector input is an ordinary typed list. Physical row order changes inside
+the function; the target returned by the function uses the normally formed row.
+An initial test instead returned an explicit noncanonical row in its signature:
+transport completed successfully, but the final result failed signature
+normalization checks. The fixture was corrected to isolate internal layout
+transport; no existing expected result or admission rule was relaxed.
+
+The IIR regression checks frozen values and rebuilt syntax, preserved tuple
+identity, missing/wrong collector evidence, budget exhaustion and recovery.
+No new IR variant was added; existing transport-plan Display remains in use.
+
+Validation from /home/fin/luna:
+
+- Targeted new tests:
+  `python3 -B development/check.py --timeout 900 -- test -p iir -p comptime_interpretor typed_tuple --no-fail-fast`:
+  exit 0, two passed; `/tmp/luna-tools-cxamklm6/result.json`.
+- Low-level integration:
+  `python3 -B development/check.py --timeout 900 -- test -p nir -p iir -p comptime_interpretor -p program_verification --no-fail-fast`;
+  exit 0, 1195 passed; `/tmp/luna-tools-c0y_7skl/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test error_surface --no-fail-fast`:
+  117 passed, one failure in
+  generic_error_labels_do_not_choose_ambiguous_permutations_or_unfold_heads;
+  `/tmp/luna-tools-9n77ph44/result.json`, exit 101. The failure expects rejection
+  of inferring T from Wrap<bool>, unrelated to the tuple transport fixture.
+  Restoring this stage's 11 implementation files to ee7c73ed and running
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test error_surface generic_error_labels_do_not_choose_ambiguous_permutations_or_unfold_heads`
+  reproduced the same failure at line 1166 (exit 101,
+  `/tmp/luna-tools-46z5611k/result.json`). All 11 files were restored
+  byte-for-byte afterward; the test was not changed.
+- Formatting: `python3 -B development/command.py --timeout 120 -- cargo fmt --all`,
+  exit 0, `/tmp/luna-tools-84m6_8kw/result.json`; `git diff --check` passed.
+
+Other term consumers and canonical list writers still need coordinated storage
+migration. This stage does not change Type-list output encoding or make the
+legacy and ordinary raw encodings equal. No full workspace suite was run.
+
+Final native validation:
+`python3 -B development/check.py --timeout 900 -- test -p luna --test host product --no-fail-fast`:
+exit 0, 11 native integration tests passed;
+`/tmp/luna-tools-r409hxhj/result.json`. These cover existing source-level product
+flows through LLVM (including the shipped example at every optimization level);
+the new ordinary typed list payload is directly exercised by the VM/IIR tests.
+Final `cargo fmt --all -- --check` through development/command.py exited 0:
+`/tmp/luna-tools-ns50ekxh/result.json`.

@@ -1679,17 +1679,17 @@ impl<'a> Analysis<'a> {
         else {
             unreachable!()
         };
-        if nir::error_results::validate_conversion_with_tuple(
+        if nir::error_results::validate_conversion_with_layouts(
             *conversion,
             &inner.ty,
             &value.ty,
             &mut self.fuel,
             &mut |a, b| a == b,
-            &|head| {
+            &|ty| {
                 self.package
                     .normal_forms
                     .iter()
-                    .any(|m| m.declaration == head && m.role == nir::normal_forms::Role::Tuple)
+                    .find_map(|m| m.tuple_elements(ty))
             },
         )
         .is_err()

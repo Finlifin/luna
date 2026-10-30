@@ -547,6 +547,24 @@ pub fn validate_conversion(
     validate_conversion_with_tuple(conversion, input, output, fuel, equal, &|_| false)
 }
 
+/// Validate conversions with declaration-owned product fields. Scalar error
+/// constructors retain the same row contract as the compatibility entrypoint.
+pub fn validate_conversion_with_layouts(
+    conversion: Conversion,
+    input: &Term,
+    output: &Term,
+    fuel: &mut usize,
+    equal: &mut impl FnMut(&Term, &Term) -> bool,
+    tuple_fields: &impl for<'t> Fn(&'t Term) -> Option<&'t [Term]>,
+) -> Result<(), Error> {
+    if conversion == Conversion::Product {
+        transport_plan_with_layouts(input, output, true, fuel, equal, tuple_fields)?;
+        Ok(())
+    } else {
+        validate_conversion(conversion, input, output, fuel, equal)
+    }
+}
+
 pub fn validate_conversion_with_tuple(
     conversion: Conversion,
     input: &Term,

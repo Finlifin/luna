@@ -81,13 +81,14 @@ impl Checker<'_, '_> {
             *value = converted;
             return Ok(());
         }
-        nir::error_results::validate_conversion_with_tuple(
+        let layouts = self.normal_form_metadata();
+        nir::error_results::validate_conversion_with_layouts(
             nir::error_results::Conversion::Product,
             &value.ty,
             target,
             &mut 100_000,
             &mut |a, b| self.require(a, b, span).is_ok(),
-            &|head| Some(head) == self.protocols.tuple,
+            &|ty| layouts.iter().find_map(|head| head.tuple_elements(ty)),
         )
         .map_err(|failure| error(span, failure.to_string()))?;
         let original = std::mem::replace(

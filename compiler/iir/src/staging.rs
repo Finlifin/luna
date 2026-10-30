@@ -9,7 +9,7 @@
 //! instance keys as TupleValue, independently of their retained Type identity.
 use nir::program::{Expr, ExprKind as K, Function, Literal, LocalId};
 use nir::{Primitive, Sort, Term};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 mod error_values;
 mod general;
 use general::fold_general_input;
@@ -2933,18 +2933,23 @@ fn constant<'layout>(
         (K::ErrorConvert { conversion, value }, ty) => {
             use nir::error_results::Conversion as C;
             charge(fuel, heads.len())?;
-            let tuple_heads: BTreeSet<_> = heads
+            let tuple_heads: BTreeMap<_, _> = heads
                 .iter()
                 .filter(|head| head.role == nir::normal_forms::Role::Tuple)
-                .map(|head| head.declaration)
+                .map(|head| (head.declaration, head))
                 .collect();
-            nir::error_results::validate_conversion_with_tuple(
+            nir::error_results::validate_conversion_with_layouts(
                 *conversion,
                 &value.ty,
                 ty,
                 fuel,
                 &mut |a, b| a == b,
-                &|head| tuple_heads.contains(&head),
+                &|ty| {
+                    let Term::NormalForm { head, .. } = ty else {
+                        return None;
+                    };
+                    tuple_heads.get(head)?.tuple_elements(ty)
+                },
             )
             .map_err(|error| error.to_string())?;
             let payload = constant(heads, value, fuel, depth + 1)?;
@@ -2955,13 +2960,18 @@ fn constant<'layout>(
                     value: Box::new(payload),
                 },
                 C::Embed | C::Product => {
-                    let plan = nir::error_results::transport_plan(
+                    let plan = nir::error_results::transport_plan_with_layouts(
                         &value.ty,
                         ty,
                         *conversion == C::Product,
                         fuel,
                         &mut |a, b| a == b,
-                        &|head| tuple_heads.contains(&head),
+                        &|ty| {
+                            let Term::NormalForm { head, .. } = ty else {
+                                return None;
+                            };
+                            tuple_heads.get(head)?.tuple_elements(ty)
+                        },
                     )
                     .map_err(|error| error.to_string())?;
                     plan.frozen(&payload, fuel)

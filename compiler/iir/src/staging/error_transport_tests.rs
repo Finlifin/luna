@@ -234,3 +234,72 @@ fn staged_error_nesting_exhausts_logical_depth_without_invocation() {
             .contains("depth")
     );
 }
+
+#[test]
+fn staged_typed_tuple_transport_uses_declared_collector_domain() {
+    use nir::normal_forms::{Head, Kind, Parameter, Role};
+    let id = |local| nir::DeclarationId { package: 4, local };
+    let list = Term::NormalForm {
+        head: id(1),
+        sort: nir::Sort::Type,
+        arguments: vec![Term::Primitive(Primitive::Type)],
+    };
+    let heads = [Head {
+        declaration: id(2),
+        role: Role::Tuple,
+        collector: None,
+        requirements: vec![],
+        parameters: vec![Parameter {
+            declaration: id(3),
+            binding: LocalId { owner: 2, index: 0 },
+            kind: Kind::Value,
+            ty: list.clone(),
+        }],
+    }];
+    let tuple = |fields| Term::NormalForm {
+        head: id(2),
+        sort: nir::Sort::Type,
+        arguments: vec![Term::NominalValue {
+            ty: Box::new(list.clone()),
+            variant: None,
+            fields,
+        }],
+    };
+    let mut source = input();
+    source.ty = tuple(vec![error_type(false), Term::Primitive(Primitive::Bool)]);
+    let converted = expr(
+        tuple(vec![error_type(true), Term::Primitive(Primitive::Bool)]),
+        K::ErrorConvert {
+            conversion: C::Product,
+            value: Box::new(source),
+        },
+    );
+    let layouts = Layouts::new(&heads, &[]);
+    let frozen = constant(layouts, &converted, &mut 10000, 0).unwrap();
+    let expected = Term::TupleValue(vec![
+        Term::ErrorValue {
+            ty: Box::new(error_type(true)),
+            label: Some(Box::new(Term::Primitive(Primitive::Bool))),
+            value: Box::new(Term::Bool(true)),
+        },
+        Term::Bool(true),
+    ]);
+    assert_eq!(frozen, expected);
+    canonical_input_with_layouts(layouts, &converted, &mut 10000).unwrap();
+    let folded = fold_input(layouts, &converted, &mut 10000, 0).unwrap();
+    assert_eq!(folded.ty, converted.ty);
+    assert_eq!(constant(layouts, &folded, &mut 10000, 0).unwrap(), expected);
+    assert!(constant(&[], &converted, &mut 10000, 0).is_err());
+    assert!(constant(layouts, &converted, &mut 0, 0).is_err());
+    let mut invalid = heads.clone();
+    invalid[0].parameters[0].ty = Term::NormalForm {
+        head: id(99),
+        sort: nir::Sort::Type,
+        arguments: vec![Term::Primitive(Primitive::Type)],
+    };
+    assert!(constant(Layouts::new(&invalid, &[]), &converted, &mut 10000, 0).is_err());
+    assert_eq!(
+        constant(layouts, &converted, &mut 10000, 0).unwrap(),
+        expected
+    );
+}

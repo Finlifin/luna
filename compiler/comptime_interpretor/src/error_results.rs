@@ -104,17 +104,13 @@ impl Interpreter<'_> {
     ) -> Result<(), Error> {
         let mut fuel = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
         let before = fuel;
-        let plan = nir::error_results::validate_conversion_with_tuple(
+        let plan = nir::error_results::validate_conversion_with_layouts(
             conversion,
             source_ty,
             target_ty,
             &mut fuel,
             &mut |left, right| left == right,
-            &|head| {
-                self.normal_forms
-                    .get(&head)
-                    .is_some_and(|m| m.role == nir::normal_forms::Role::Tuple)
-            },
+            &|ty| self.tuple_input_elements(ty),
         );
         self.budget.steps -= (before - fuel) as u64;
         plan.map_err(|e| {
@@ -143,17 +139,13 @@ impl Interpreter<'_> {
         if conversion == Conversion::Product {
             let mut fuel = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
             let before = fuel;
-            let plan = nir::error_results::transport_plan(
+            let plan = nir::error_results::transport_plan_with_layouts(
                 source_ty,
                 target_ty,
                 true,
                 &mut fuel,
                 &mut |a, b| a == b,
-                &|head| {
-                    self.normal_forms
-                        .get(&head)
-                        .is_some_and(|m| m.role == nir::normal_forms::Role::Tuple)
-                },
+                &|ty| self.tuple_input_elements(ty),
             );
             self.budget.steps -= (before - fuel) as u64;
             let plan = plan.map_err(|e| {

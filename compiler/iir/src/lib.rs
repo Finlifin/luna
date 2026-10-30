@@ -590,17 +590,13 @@ impl Package {
                 }
             }
             K::ErrorConvert { conversion, value } => {
-                nir::error_results::validate_conversion_with_tuple(
+                nir::error_results::validate_conversion_with_layouts(
                     *conversion,
                     &value.ty,
                     &expr.ty,
                     fuel,
                     &mut |a, b| a == b,
-                    &|head| {
-                        self.normal_forms.iter().any(|m| {
-                            m.declaration == head && m.role == nir::normal_forms::Role::Tuple
-                        })
-                    },
+                    &|ty| self.normal_forms.iter().find_map(|m| m.tuple_elements(ty)),
                 )
                 .map_err(|e| format!("IIR error result conversion: {e}"))?;
             }

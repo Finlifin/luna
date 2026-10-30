@@ -922,18 +922,17 @@ pub fn error_tag_mapping(
     ) {
         return Err("expected error transport".into());
     }
-    nir::error_results::transport_plan(
+    nir::error_results::transport_plan_with_layouts(
         &value.ty,
         &expr.ty,
         *conversion == nir::error_results::Conversion::Product,
         fuel,
         &mut |a, b| a == b,
-        &|head| {
-            package.is_some_and(|p| {
-                p.normal_forms
-                    .iter()
-                    .any(|m| m.declaration == head && m.role == nir::normal_forms::Role::Tuple)
-            })
+        &|ty| {
+            package?
+                .normal_forms
+                .iter()
+                .find_map(|m| m.tuple_elements(ty))
         },
     )
     .map_err(|failure| failure.to_string())

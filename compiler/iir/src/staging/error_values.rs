@@ -35,18 +35,23 @@ pub(super) fn fold(
         unreachable!()
     };
     charge(fuel, heads.len())?;
-    let tuples: BTreeSet<_> = heads
+    let tuples: BTreeMap<_, _> = heads
         .iter()
         .filter(|head| head.role == nir::normal_forms::Role::Tuple)
-        .map(|head| head.declaration)
+        .map(|head| (head.declaration, head))
         .collect();
-    let plan = nir::error_results::transport_plan(
+    let plan = nir::error_results::transport_plan_with_layouts(
         &value.ty,
         &expr.ty,
         *conversion == C::Product,
         fuel,
         &mut |a, b| a == b,
-        &|head| tuples.contains(&head),
+        &|ty| {
+            let Term::NormalForm { head, .. } = ty else {
+                return None;
+            };
+            tuples.get(head)?.tuple_elements(ty)
+        },
     )
     .map_err(|error| error.to_string())?;
     let mut result = transport(heads, &plan, *value, &expr.ty, fuel, depth)?;
