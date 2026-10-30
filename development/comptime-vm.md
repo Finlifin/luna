@@ -4335,3 +4335,49 @@ Validation in /home/fin/luna:
   compilation regression remains ignored, not reported as completed.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
   exit 0, `/tmp/luna-tools-lw4oari8/result.json`; `git diff --check`: exit 0.
+
+### Compile static trait calls with public interface contracts
+
+Direct TraitMethod callees now preserve their immutable identity in call
+preparation. The VM obtains the public interface program and declaration-side
+bindings before resolving the implementation. Defaults therefore observe the
+interface's parameter names, even when the implementation uses different names.
+Standalone method values retain the existing admission/erasure restrictions.
+Interface contract lookup is shared with the tree path.
+
+Nonempty interface programs suspend through a boxed caller-local continuation:
+entry observations and snapshots, entry checks, implementation invocation, exit
+checks, then result delivery. Checks execute as ordinary contract fragments via
+the invocation driver, not recursively from a bytecode instruction. Contract
+fragments are distinct from default evaluations in execution accounting. Live
+argument, snapshot and result environments remain in the frame, never in a code
+cache. Bytecode remains restricted to invocation paths without runtime cleanup
+schedules; scheduled runtime execution retains its existing cleanup behavior.
+
+Source tests cover different interface/body parameter names, dependent defaults,
+explicit overrides, method values, specialized interfaces, precondition failure
+before body entry, postcondition failure after body completion, successful reuse
+and nested independent entry snapshots. To test the retained precondition itself,
+the test elaborates a checked assumes then removes that caller proof from NIR;
+it does not weaken source proof admission. A runtime Interpreter::new comparison
+was inappropriate for a comptime self reference, so the source test checks actual
+compiled entry and explicit expected values in the correct comptime mode.
+
+The complete shipped string-hash regression is enabled and passes: both wrapper
+and library implementation enter bytecode. Dynamic ComptimeFunctionInstance
+callee construction still uses its existing migration path; this stage does not
+claim all staging expressions have linear lowering.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-d_u6f13l/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_traits --test library_hash`:
+  exit 0, `/tmp/luna-tools-59vqbmyp/result.json`; 13 hash tests, none ignored.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_traits --test comptime_bytecode_defaults --test library_comptime_comparison`:
+  exit 0, `/tmp/luna-tools-jgt71us9/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test execution trait_optional_arguments`:
+  exit 0, four selected tests, `/tmp/luna-tools-gfa1_iwd/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test execution staged_trait_calls`:
+  exit 0, five selected tests, `/tmp/luna-tools-_6svghld/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-hipxfp2v/result.json`; `git diff --check`: exit 0.

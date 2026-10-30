@@ -44,6 +44,10 @@ struct Activation<'a> {
 }
 
 enum Execution<'a> {
+    Contract {
+        expression: Arc<Expr>,
+        environment: Environment,
+    },
     Invocation(Box<Activation<'a>>),
     Default {
         expression: Arc<Expr>,
@@ -62,7 +66,11 @@ impl Execution<'_> {
                     &mut frame.environment,
                 )
             }
-            Self::Default {
+            Self::Contract {
+                expression,
+                environment,
+            }
+            | Self::Default {
                 expression,
                 environment,
             } => (expression, None, environment),
@@ -205,7 +213,8 @@ impl<'a> Interpreter<'a> {
                             Body::Package(_) => None,
                         }
                     }
-                    Execution::Default { expression, .. } => Some(expression.clone()),
+                    Execution::Default { expression, .. }
+                    | Execution::Contract { expression, .. } => Some(expression.clone()),
                     _ => None,
                 };
                 let (expression, identity, environment) = active.parts();
@@ -219,6 +228,7 @@ impl<'a> Interpreter<'a> {
                             match &active {
                                 Execution::Invocation(_) => self.bytecode_invocations += 1,
                                 Execution::Default { .. } => self.bytecode_default_evaluations += 1,
+                                Execution::Contract { .. } => {}
                             }
                             stack.push(StackEntry::Code(
                                 StackContext::Execution(active),
@@ -332,6 +342,15 @@ impl<'a> Interpreter<'a> {
                         })
                     }
                 },
+                Ok(bytecode::Progress::Contract {
+                    expression,
+                    environment,
+                }) => {
+                    execution = Some(Execution::Contract {
+                        expression,
+                        environment,
+                    });
+                }
                 Ok(bytecode::Progress::Suspended) => {}
                 Ok(bytecode::Progress::Default {
                     expression,
@@ -394,10 +413,12 @@ impl<'a> Interpreter<'a> {
                 flow: self.complete_invocation(activation, flow).map(Flow::Value),
                 defaults: None,
             },
-            Execution::Default { environment, .. } => Completion::Ordinary {
-                flow,
-                defaults: Some(environment),
-            },
+            Execution::Default { environment, .. } | Execution::Contract { environment, .. } => {
+                Completion::Ordinary {
+                    flow,
+                    defaults: Some(environment),
+                }
+            }
         }
     }
 

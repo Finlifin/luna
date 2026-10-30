@@ -5794,6 +5794,78 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    fn interface_call_contract(
+        &mut self,
+        callee: &Expr,
+        source: SourceRange,
+    ) -> Result<(nir::contracts::ProgramContract, Option<Vec<LocalId>>), Error> {
+        let interface_program = if let K::TraitMethod {
+            method_arguments,
+            interface,
+            member,
+            interface_arguments,
+            subject,
+        } = &callee.kind
+        {
+            if let Some(method) = self.iir_method(
+                *interface,
+                interface_arguments,
+                subject,
+                *member,
+                method_arguments,
+            )? {
+                self.copy_interface_program(&method.program, &[], &[], source)?
+            } else {
+                let (parameters, contract) = self
+                    .method_contracts
+                    .get(&(*interface, *member))
+                    .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(source)))?;
+                self.budget.steps = self
+                    .budget
+                    .steps
+                    .checked_sub(parameters.len() as u64)
+                    .ok_or_else(|| self.failure(ErrorKind::StepsExhausted, Some(source)))?;
+                let contract = *contract;
+                let parameters = parameters.clone();
+                let arguments: Vec<_> = std::iter::once(subject.clone())
+                    .chain(interface_arguments.clone())
+                    .chain(method_arguments.clone())
+                    .collect();
+                self.copy_interface_program(&contract.program, &parameters, &arguments, source)?
+            }
+        } else {
+            Default::default()
+        };
+        let interface_parameters = if let K::TraitMethod {
+            method_arguments,
+            interface,
+            member,
+            interface_arguments,
+            subject,
+        } = &callee.kind
+        {
+            if let Some(method) = self.iir_method(
+                *interface,
+                interface_arguments,
+                subject,
+                *member,
+                method_arguments,
+            )? {
+                Some(method.parameter_bindings.clone())
+            } else {
+                Some(
+                    self.method_parameters
+                        .get(&(*interface, *member))
+                        .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(source)))?
+                        .clone(),
+                )
+            }
+        } else {
+            None
+        };
+        Ok((interface_program, interface_parameters))
+    }
+
     #[inline(never)]
     fn prepare_call(
         &mut self,
@@ -5832,75 +5904,8 @@ impl<'a> Interpreter<'a> {
             dynamic_instances::PreparedTraitInstance::Unrelated => callee.as_ref(),
         };
         let this = self;
-        let interface_program = if let K::TraitMethod {
-            method_arguments,
-            interface,
-            member,
-            interface_arguments,
-            subject,
-        } = &callee.kind
-        {
-            if let Some(method) = this.iir_method(
-                *interface,
-                interface_arguments,
-                subject,
-                *member,
-                method_arguments,
-            )? {
-                this.copy_interface_program(&method.program, &[], &[], expr.source)?
-            } else {
-                let (parameters, contract) = this
-                    .method_contracts
-                    .get(&(*interface, *member))
-                    .ok_or_else(|| this.failure(ErrorKind::InvalidCallPlan, Some(expr.source)))?;
-                this.budget.steps = this
-                    .budget
-                    .steps
-                    .checked_sub(parameters.len() as u64)
-                    .ok_or_else(|| this.failure(ErrorKind::StepsExhausted, Some(expr.source)))?;
-                let contract = *contract;
-                let parameters = parameters.clone();
-                let arguments: Vec<_> = std::iter::once(subject.clone())
-                    .chain(interface_arguments.clone())
-                    .chain(method_arguments.clone())
-                    .collect();
-                this.copy_interface_program(
-                    &contract.program,
-                    &parameters,
-                    &arguments,
-                    expr.source,
-                )?
-            }
-        } else {
-            Default::default()
-        };
-        let interface_parameters = if let K::TraitMethod {
-            method_arguments,
-            interface,
-            member,
-            interface_arguments,
-            subject,
-        } = &callee.kind
-        {
-            if let Some(method) = this.iir_method(
-                *interface,
-                interface_arguments,
-                subject,
-                *member,
-                method_arguments,
-            )? {
-                Some(method.parameter_bindings.clone())
-            } else {
-                Some(
-                    this.method_parameters
-                        .get(&(*interface, *member))
-                        .ok_or_else(|| this.failure(ErrorKind::InvalidCallPlan, Some(expr.source)))?
-                        .clone(),
-                )
-            }
-        } else {
-            None
-        };
+        let (interface_program, interface_parameters) =
+            this.interface_call_contract(callee, expr.source)?;
         let dynamic_defaults = !matches!(
             callee.kind,
             K::Function(_) | K::FunctionInstance { .. } | K::TraitMethod { .. }

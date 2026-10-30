@@ -481,7 +481,6 @@ fn root_dispatch_preserves_generic_parents_of_concrete_implementations() {
 }
 
 #[test]
-#[ignore = "requires trait-method callable bytecode with interface contracts"]
 fn shipped_text_hash_runs_its_loop_in_bytecode() {
     use comptime_interpretor::{Budget, Interpreter};
     let package = support::compile(&source(

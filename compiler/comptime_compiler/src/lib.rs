@@ -308,6 +308,7 @@ pub enum Op {
         normal_form: Option<(Term, usize)>,
         parameter_bindings: Vec<LocalId>,
         prepare_defaults: bool,
+        method: Option<Arc<Expr>>,
     },
     CheckCallArgument {
         call: Register,
@@ -849,6 +850,7 @@ impl fmt::Display for Program {
                     normal_form,
                     parameter_bindings,
                     prepare_defaults,
+                    method,
                 } => {
                     write!(
                         f,
@@ -859,6 +861,9 @@ impl fmt::Display for Program {
                         write!(f, " {binding}")?;
                     }
                     write!(f, ")")?;
+                    if let Some(method) = method {
+                        write!(f, " (interface-method {method})")?;
+                    }
                     if let Some((ty, count)) = normal_form {
                         write!(f, " (normal-form (type {ty}) (inputs {count}))")?;
                     }
@@ -1454,9 +1459,18 @@ fn compile_root<'a>(
                                 },
                                 parameter_bindings: parameter_bindings.clone(),
                                 prepare_defaults: arguments.iter().any(|a| a.is_default),
+                                method: if matches!(callee.kind, K::TraitMethod { .. }) {
+                                    nir::copy_budget::charge_substitution(callee, &[], &[], fuel)
+                                        .map_err(|error| copy_error(error, callee.source))?;
+                                    Some(Arc::new(callee.as_ref().clone()))
+                                } else {
+                                    None
+                                },
                             },
                         );
-                        work.push(Work::Expression(callee, target));
+                        if !matches!(callee.kind, K::TraitMethod { .. }) {
+                            work.push(Work::Expression(callee, target));
+                        }
                     }
                     K::Field { value, .. } | K::AnonymousField { value, .. } => {
                         let (nominal, name, index) = match &expr.kind {
@@ -2156,7 +2170,8 @@ fn compile_root<'a>(
                     | K::ComptimeValue(_)
                     | K::TypeListValue(_)
                     | K::Function(_)
-                    | K::FunctionInstance { .. } => {
+                    | K::FunctionInstance { .. }
+                    | K::TraitMethod { .. } => {
                         nir::copy_budget::charge_substitution(expr, &[], &[], fuel)
                             .map_err(|error| copy_error(error, source))?;
                         emit(

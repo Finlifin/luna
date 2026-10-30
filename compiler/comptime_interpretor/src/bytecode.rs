@@ -2,12 +2,15 @@
 //! interpretation keep their existing paths. No opcode recursively evaluates NIR.
 use super::*;
 use comptime_compiler::{Op, Program};
+#[path = "bytecode_interface.rs"]
+mod interface;
 
 pub(super) struct Frame {
     code: Arc<Program>,
     environment: Environment,
     imported: Vec<(LocalId, usize)>,
     terminal: bool,
+    interface: Option<Box<interface::InterfaceCall>>,
     waiting: Option<Waiting>,
     calls: BTreeMap<usize, PendingCall>,
     closures: BTreeMap<usize, PendingClosure>,
@@ -20,6 +23,7 @@ pub(super) struct Frame {
 }
 
 enum Waiting {
+    Interface,
     Call(usize),
     Default {
         call: usize,
@@ -34,6 +38,7 @@ enum Waiting {
 struct PendingCall {
     callee: Value,
     normal_head: Option<DeclarationId>,
+    interface: Option<(nir::contracts::ProgramContract, Vec<LocalId>)>,
     arguments: Vec<Option<PreparedArgument>>,
     parameter_bindings: Vec<LocalId>,
     defaults: Environment,
@@ -62,6 +67,10 @@ impl std::fmt::Display for PreparedArgument {
 
 #[derive(Debug)]
 pub(super) enum Progress {
+    Contract {
+        expression: Arc<Expr>,
+        environment: Environment,
+    },
     TypeInputPlan {
         expression: Arc<Expr>,
         environment: Environment,
@@ -104,6 +113,7 @@ impl fmt::Display for Frame {
         }
         write!(f, ") (waiting")?;
         match &self.waiting {
+            Some(Waiting::Interface) => write!(f, " (interface)")?,
             Some(Waiting::Plan {
                 destination,
                 borrowed,
@@ -121,6 +131,9 @@ impl fmt::Display for Frame {
             None => {}
         }
         write!(f, ")")?;
+        if let Some(interface) = &self.interface {
+            write!(f, " {interface}")?;
+        }
         if let Some(staged) = &self.staged {
             write!(f, " {staged}")?;
         }
@@ -292,6 +305,15 @@ impl Frame {
         result: Result<Flow, Error>,
         defaults: Option<Environment>,
     ) -> Result<Option<Flow>, Error> {
+        if matches!(self.waiting, Some(Waiting::Interface)) {
+            let interface = self.interface.as_mut().ok_or(Error {
+                kind: ErrorKind::InvalidControlFlow,
+                source: None,
+            })?;
+            interface.receive(result, defaults)?;
+            self.waiting = None;
+            return Ok(None);
+        }
         if let Some(environment) = defaults {
             if let Some(Waiting::Plan { .. }) = &self.waiting {
                 let Some(Waiting::Plan {
@@ -738,6 +760,7 @@ impl<'a> Interpreter<'a> {
             environment: std::mem::take(environment),
             imported: Vec::new(),
             terminal: false,
+            interface: None,
             waiting: None,
             calls: BTreeMap::new(),
             normal_types: BTreeMap::new(),
@@ -775,6 +798,18 @@ impl<'a> Interpreter<'a> {
     }
 
     fn run_frame(&mut self, frame: &mut Frame, quantum: usize) -> Result<Progress, Error> {
+        if let Some(mut interface) = frame.interface.take() {
+            match interface.advance(self)? {
+                interface::Step::Suspend(progress) => {
+                    frame.interface = Some(interface);
+                    frame.waiting = Some(Waiting::Interface);
+                    return Ok(progress);
+                }
+                interface::Step::Complete(value) => {
+                    frame.slots[interface.destination] = Some(value)
+                }
+            }
+        }
         let code = frame.code.clone();
         for _ in 0..quantum {
             let instruction = code
@@ -1707,8 +1742,23 @@ impl<'a> Interpreter<'a> {
                     normal_form,
                     parameter_bindings,
                     prepare_defaults,
+                    method,
                 } => {
-                    let callee = frame.slots[*callee].take().ok_or_else(missing)?;
+                    let (interface_program, interface_parameters) = if let Some(method) = method {
+                        self.interface_call_contract(method, source)?
+                    } else {
+                        (Default::default(), None)
+                    };
+                    let callee = if let Some(method) = method {
+                        let Flow::Value(value) =
+                            self.eval_in_position(method, &mut frame.environment, true)?
+                        else {
+                            return Err(missing());
+                        };
+                        value
+                    } else {
+                        frame.slots[*callee].take().ok_or_else(missing)?
+                    };
                     let (normal_head, parameters, count) = if let Some((ty, count)) = normal_form {
                         if !self.has_type(&callee, ty) {
                             return Err(self.failure(ErrorKind::Type, Some(*callee_source)));
@@ -1726,7 +1776,12 @@ impl<'a> Interpreter<'a> {
                         let count = parameters.len();
                         (None, parameters, count)
                     };
-                    if !parameter_bindings.is_empty() && *parameter_bindings != parameters {
+                    let preparation_parameters =
+                        interface_parameters.as_ref().unwrap_or(&parameters);
+                    if !parameter_bindings.is_empty()
+                        && (*parameter_bindings != *preparation_parameters
+                            || parameter_bindings.len() != count)
+                    {
                         return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
                     }
                     self.effect_charge(count, Some(source))?;
@@ -1735,6 +1790,8 @@ impl<'a> Interpreter<'a> {
                         PendingCall {
                             callee,
                             normal_head,
+                            interface: interface_parameters
+                                .map(|parameters| (interface_program, parameters)),
                             arguments: (0..count).map(|_| None).collect(),
                             parameter_bindings: if *prepare_defaults {
                                 parameter_bindings.clone()
@@ -1885,6 +1942,27 @@ impl<'a> Interpreter<'a> {
                             }
                         })
                         .collect::<Result<Vec<_>, _>>()?;
+                    if let Some((program, parameters)) = pending.interface {
+                        if !program.is_empty() {
+                            let mut interface = Box::new(interface::InterfaceCall::new(
+                                self,
+                                *destination,
+                                source,
+                                program,
+                                &parameters,
+                                pending.defaults,
+                                pending.callee,
+                                arguments,
+                            )?);
+                            let interface::Step::Suspend(progress) = interface.advance(self)?
+                            else {
+                                return Err(missing());
+                            };
+                            frame.interface = Some(interface);
+                            frame.waiting = Some(Waiting::Interface);
+                            return Ok(progress);
+                        }
+                    }
                     frame.waiting = Some(Waiting::Call(*destination));
                     return Ok(Progress::Call {
                         callee: pending.callee,
@@ -1922,6 +2000,9 @@ impl<'a> Interpreter<'a> {
                 }
                 Op::Constant { destination, value } => {
                     let flow = match value.kind {
+                        K::TraitMethod { .. } => {
+                            self.eval_trait_method(value, &mut frame.environment, false)?
+                        }
                         K::Function(_) => self.eval_leaf(value, &mut frame.environment)?,
                         K::FunctionInstance { .. } => {
                             self.eval_function_instance(value, &mut frame.environment)?
@@ -3397,7 +3478,8 @@ mod tests {
                     Progress::Complete(_)
                     | Progress::Call { .. }
                     | Progress::Default { .. }
-                    | Progress::TypeInputPlan { .. },
+                    | Progress::TypeInputPlan { .. }
+                    | Progress::Contract { .. },
                 ) => {
                     panic!("malformed operation completed")
                 }
