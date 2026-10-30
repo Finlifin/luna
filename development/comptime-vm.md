@@ -3680,3 +3680,16 @@ Validation in /home/fin/luna:
 
 Quote-function expansion has separate substitution consumers; this stage does
 not claim that every contextual-code pathway has been migrated.
+
+### Standalone quote fixtures load primitive bindings
+
+The quote_functions entrypoint now uses the shared standalone primitive-binding
+fixture writer, matching other no-sysroot compiler tests. Production primitive
+lookup remains ordinary builtin.prelude lookup; no compiler keyword or fallback
+was restored. Existing quote expectations and compiler implementation are unchanged.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test quote_functions`:
+  exit 0, `/tmp/luna-tools-8p_b8c5z/result.json`, all 104 cases without exclusions.
+- `git diff --check`: exit 0.
+This resolves the fixture failures recorded in the previous stage.

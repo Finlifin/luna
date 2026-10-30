@@ -1,3 +1,5 @@
+#[path = "support/primitive_bindings.rs"]
+mod primitive_bindings;
 use luna::{
     cli::{Emit, Options},
     frontend::{self, Artifact},
@@ -24,7 +26,7 @@ fn compile_with_tuple_option(source: &str, emit: Emit, tuple: bool) -> Result<Ar
     } else {
         source.to_owned()
     };
-    std::fs::write(&path, source).unwrap();
+    primitive_bindings::write_fixture(&path, source).unwrap();
     let result = frontend::compile(&Options {
         dispatch_fuel: None,
         comptime_intrinsics: Vec::new(),
