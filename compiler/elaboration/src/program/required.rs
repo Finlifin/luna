@@ -1392,6 +1392,33 @@ impl Checker<'_, '_> {
                     inputs.push(input.clone());
                 }
             }
+            if !self.checking_code_generator
+                && !self.generator_data.is_empty()
+                && !self.partial_staged_bindings.is_empty()
+            {
+                let mut budget = comptime_runtime::Budget {
+                    steps: self.required_steps as usize,
+                    max_limbs: 4096,
+                };
+                let mut fuel = budget.steps;
+                let free = nir::free_bindings::collect(&root, &mut fuel);
+                budget.steps = fuel;
+                self.required_steps = fuel as u64;
+                let free = free.map_err(|message| error(expr.span, message))?;
+                for binding in free {
+                    if inputs.iter().any(|(id, _, _)| *id == binding)
+                        || live.iter().any(|(id, _, _)| *id == binding)
+                    {
+                        continue;
+                    }
+                    if let Some((domain, value)) =
+                        self.observed_generator_input(binding, &mut budget)
+                    {
+                        inputs.push((binding, domain, value));
+                    }
+                }
+                self.required_steps = budget.steps as u64;
+            }
             let mut scoped_parameters = Vec::new();
             let mut scoped_arguments = Vec::new();
             let input_frames = self.call_input_frames();

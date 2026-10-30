@@ -302,3 +302,17 @@ fn trait_dispatch_uses_completed_ordinary_type_defaults() {
         }";
     assert_eq!(run(source, "run", vec![]), Value::Bool(true));
 }
+
+#[test]
+fn nested_required_calls_receive_ordinary_record_value_inputs() {
+    let source = "typealias Type=.Type'builtin;
+        struct Description {enabled:bool,kind:Type}
+        pure comptime fn Marker<description:Description>->Type {bool}
+        comptime fn inspect()->bool where T {T == Marker<Description {enabled:true,kind:bool}>}
+        comptime fn emit()-><|-bool> {
+            let description=Description {enabled:true,kind:bool};
+            let result=inspect<Marker<description>>();'(result)
+        }
+        fn run()->bool {~<emit()>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}

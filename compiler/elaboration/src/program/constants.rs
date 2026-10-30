@@ -1911,6 +1911,26 @@ impl Checker<'_, '_> {
         result.map_err(|e: String| error(span, e))
     }
 
+    /// Completed construction data may supply a nested required invocation,
+    /// without replacing the enclosing expression's ordinary local reads.
+    pub(super) fn observed_generator_input(
+        &self,
+        binding: n::LocalId,
+        budget: &mut comptime_runtime::Budget,
+    ) -> Option<(Term, Term)> {
+        if !self.generator_data.contains_key(&binding) || !self.immutable.contains(&binding) {
+            return None;
+        }
+        let domain = self.locals.get(&binding)?;
+        let PartialStagedData::Known(value) = &self.partial_staged_bindings.get(&binding)?.data
+        else {
+            return None;
+        };
+        nir::type_computations::charge_term(domain, &mut budget.steps).ok()?;
+        nir::type_computations::charge_term(value, &mut budget.steps).ok()?;
+        Some((domain.clone(), value.clone()))
+    }
+
     pub(super) fn observed_local_type(
         &mut self,
         binding: n::LocalId,
@@ -2709,6 +2729,14 @@ impl Checker<'_, '_> {
                     if let K::Local(binding) = root.kind {
                         invalidated.insert(binding);
                     }
+                }
+                K::Call { .. } if self.in_required_comptime && !self.generator_data.is_empty() => {
+                    // A call can mutate construction storage through aliases.
+                    // Only observation snapshots are invalidated here.
+                    *fuel = fuel
+                        .checked_sub(self.partial_staged_bindings.len())
+                        .ok_or("construction observation invalidation budget exhausted")?;
+                    invalidated.extend(self.partial_staged_bindings.keys().copied());
                 }
                 K::Closure { captures, .. } => {
                     for capture in captures {

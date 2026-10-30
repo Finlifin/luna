@@ -6180,3 +6180,53 @@ Final public-interface/native check:
 `/tmp/luna-tools-f83njyss/result.json`, exit 0. All three LLVM native tests
 passed with the complete sysroot, including bool/char generic default chains
 and pattern Type defaults. No full workspace test run was performed.
+
+## Completed construction values in nested required invocations (2026-10-31)
+
+A generator's data-update frame temporarily removes its stored expressions so
+ordinary reads and updates use owned VM cells. Nested required computations
+inside that expression still need their comptime inputs. The missing path
+rejected a local list value used in an explicit normal-form argument during
+actual invocation, despite definition checking having completed successfully.
+
+Invocation frames now observe complete immutable initialization values before
+checking the expression. Required computations capture only referenced,
+complete observations not already supplied through explicit or live inputs.
+Domains and values are transported through the existing invocation/scoped-Type
+boundary. Ordinary local reads and the executable expression are preserved;
+there is no List/Tuple name test, new normal-form argument kind or head unfolding.
+Writes, address escape and calls invalidate observations; the frame clears
+these temporary observations on exit. Runtime locals and unknown aggregate
+parts are not promoted to comptime inputs. Observation copying is budgeted;
+this stage does not claim constant-cost snapshotting of large construction data.
+
+Validation from `/home/fin/luna`:
+
+- `generator_local_type_lists_drive_registered_tuple_instantiation` reproduced
+  the missing input on the original implementation; the diagnostic run is
+  `/tmp/luna-tools-we0n9nq1/result.json`, exit 101. The same regression passed
+  after the invocation-input fix: `/tmp/luna-tools-30478ply/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --test cmtt_type_inputs --test open_functions --test scoped_comptime_callables --no-fail-fast`:
+  `/tmp/luna-tools-qywfc0ch/result.json`, exit 101. CMTT: 581 passed and two
+  remaining static tuple-evidence/layout failures; open functions: 389 passed;
+  scoped callables: 10 passed. The new record probe initially used the wrong
+  declaration syntax for ordinary function clauses and was corrected to
+  `fn inspect() -> bool where T` without changing expected behavior.
+- After the bounded invalidation and capture guards,
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt_type_inputs`:
+  `/tmp/luna-tools-s5fj20_a/result.json`, exit 0; all 22 passed, including a
+  record-valued ordinary normal-form argument in a nested required call.
+
+The initial full-sysroot probe also asked whether an opaque Marker application
+was unequal to bool. Normal-form opacity supplies no such inequality proof;
+PTC correctly returned Unknown (`/tmp/luna-tools-6lks18t6` and the record-only
+isolation `/tmp/luna-tools-vm4v08eb`, both exit 1). The probe now checks equality
+of the same head and ordinary argument value, following
+`docs/comptime/purity-and-normal-form.md`; no equality rule was changed.
+Formatting: `/tmp/luna-tools-5pauwks7/result.json`, exit 0, for
+`python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`.
+`git diff --check` passed. No full workspace test run was performed.
+Final complete-sysroot verification:
+`python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`,
+`/tmp/luna-tools-_wjizzrk/result.json`, exit 0; LLVM native test passed for both
+named Tuple Es input and ordinary record-valued normal-form arguments.

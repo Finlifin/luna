@@ -1,0 +1,40 @@
+{- Ordinary construction values feed nested required computations without
+   expanding opaque normal-form heads or replacing runtime local reads.
+-}
+comptime fn identity(value: T) -> T where T {
+    value
+}
+
+comptime fn build_tuple() -> <|- bool> {
+    let fields: meta.List<Type> = [bool, u8];
+    let Product = Tuple<.Es = fields>;
+    let pair: Product = (true, 17);
+    let (flag, number) = identity<Tuple<.Es = fields>>(pair);
+    '(flag and number == 17)
+}
+
+struct Description {
+    enabled: bool,
+    kind: Type,
+}
+
+pure comptime fn Marker<description: Description> -> Type {
+    bool
+}
+
+comptime fn inspect() -> bool where T {
+    T == Marker<Description {enabled: true, kind: bool}>
+}
+
+comptime fn build_record() -> <|- bool> {
+    let description = Description {enabled: true, kind: bool};
+    let result = inspect<Marker<description>>();
+    '(result)
+}
+
+test {
+    let tuple_ok = ~<build_tuple()>;
+    let record_ok = ~<build_record()>;
+    assumes tuple_ok;
+    assumes record_ok;
+}

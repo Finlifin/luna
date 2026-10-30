@@ -447,6 +447,22 @@ impl Checker<'_, '_> {
         let mode = std::mem::replace(&mut self.in_required_comptime, true);
         let mut checkpoint = None;
         let result = (|| {
+            if !self.checking_code_generator {
+                for (binding, stored) in &previous {
+                    if self.immutable.contains(binding)
+                        && let Some(stored) = stored
+                    {
+                        self.record_observed_initializer(
+                            &n::Pattern::Binding {
+                                binding: *binding,
+                                inner: Box::new(n::Pattern::Wild),
+                            },
+                            stored,
+                            value.span,
+                        )?;
+                    }
+                }
+            }
             // Immutable Type values are elaboration evidence as well as
             // data. Keep them available for annotations and type arguments.
             // Mutable bindings remain symbolic until this frame executes.
@@ -620,6 +636,9 @@ impl Checker<'_, '_> {
             Ok(Some((completed, output, result_ty, cells)))
         })();
         self.in_required_comptime = mode;
+        if !self.checking_code_generator {
+            self.partial_staged_bindings.clear();
+        }
         self.generator_data = previous;
         if self.checking_code_generator {
             // Restoring a symbolic update frame must not resurrect schema
