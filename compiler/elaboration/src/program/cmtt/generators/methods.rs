@@ -25,7 +25,8 @@ impl Checker<'_, '_> {
         );
         for (id, value) in captures {
             let domain = self.trait_input_domain(*id).unwrap_or_else(|| p(P::Type));
-            let sort = if domain == p(P::Type) {
+            let completed_domain = self.substituted_trait_domain(&domain, span)?;
+            let sort = if completed_domain == p(P::Type) {
                 Sort::Type
             } else {
                 Sort::ComptimeValue
@@ -64,7 +65,7 @@ impl Checker<'_, '_> {
                     })
                 })
                 .ok_or_else(|| error(span, "captured value clause declaration is unavailable"))?;
-            let domain = self.substituted_trait_domain(&domain, span)?;
+            let domain = completed_domain;
             let binding = local(clause.hir_id);
             self.locals.insert(binding, domain.clone());
             self.immutable.insert(binding);

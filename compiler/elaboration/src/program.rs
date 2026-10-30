@@ -4217,14 +4217,14 @@ impl Checker<'_, '_> {
                     package: semantic_package(&self.package_identities, id.pkg),
                     local: id.index,
                 };
-                if self
-                    .trait_input_domain(declaration)
-                    .is_some_and(|ty| ty != p(P::Type))
-                {
-                    return Err(error(
-                        expr.span,
-                        "trait value parameter cannot be used as a Type",
-                    ));
+                if let Some(domain) = self.trait_input_domain(declaration) {
+                    let domain = self.substituted_trait_domain(&domain, expr.span)?;
+                    if domain != p(P::Type) {
+                        return Err(error(
+                            expr.span,
+                            "trait value parameter cannot be used as a Type",
+                        ));
+                    }
                 }
                 if self.forbidden_default_inputs.contains(&declaration) {
                     return Err(error(

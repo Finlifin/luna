@@ -3635,3 +3635,48 @@ Validation in /home/fin/luna:
 
 Contextual-code method contracts and other unreviewed substitution consumers
 remain outside this stage's completion claim.
+
+### Contextual-code contracts and generator captures complete input domains
+
+Contextual-code method program refinement now specializes predicates with
+bounded declaration-domain substitution, charging the required-invocation
+budget before continuing data-only implication checking. Generator signature
+substitution uses the same domain context. Inference schemes explicitly supply
+their external generic frame: validating these open signatures as closed terms
+caused nine regressions, now fixed without weakening scope validation.
+
+Captured value clauses are classified after completing their domains. A clause
+whose domain becomes Type retains its original declaration identity and receives
+the ordinary Type-value representation; it does not gain a fabricated rigid Type
+binder. Source type lookup likewise checks the completed domain before accepting
+a captured clause as a Type. The new cases execute code methods with public
+preconditions, reject strengthening and invalid invocation, generate nominal
+values with both Type and scalar indices, and reject a wrong nominal index.
+Initial failures: `/tmp/luna-tools-5c9a4f5j/result.json`,
+`/tmp/luna-tools-1mpwwuk8/result.json`, `/tmp/luna-tools-9hjbsuf9/result.json`,
+and `/tmp/luna-tools-zqidwfm_/result.json`. The closed-scope regression is recorded
+in `/tmp/luna-tools-3s9v57d1/result.json` and resolved by explicit scheme frames.
+
+The broad CMTT suite also contained an obsolete rejection of inference through
+a retained normal-form pattern subject. As established in the preceding effect
+inference audit, this is a candidate proposal, not head unfolding or an inverse
+equality theorem. That test now accepts matching retained heads while rejecting
+conflicting indices and a bare body-result type.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt_methods`:
+  exit 0, `/tmp/luna-tools-m5zqyswr/result.json`, all 144 cases.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --test cmtt_phase_boundaries --test quote_functions --test nominal_value_parameters --test trait_phases --test trait_purity --test sysroot_preludes`:
+  exit 101, `/tmp/luna-tools-rgt2wl9s/result.json`. CMTT (580), phase boundaries
+  (3), and nominal parameters (288) pass. quote_functions then fails 100 of 104
+  cases during HIR lowering because its standalone fixture omits primitive
+  bindings, notably bool. This happens before the modified elaboration paths;
+  that test entrypoint still needs migration. Do not report this command green.
+- Remaining groups run explicitly:
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test trait_phases --test trait_purity --test sysroot_preludes`:
+  exit 0, `/tmp/luna-tools-ee4d56c9/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-koj69jek/result.json`; `git diff --check`: exit 0.
+
+Quote-function expansion has separate substitution consumers; this stage does
+not claim that every contextual-code pathway has been migrated.

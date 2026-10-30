@@ -14,9 +14,25 @@ impl Checker<'_, '_> {
         if actual.program.preconditions.is_empty() {
             return Ok(());
         }
-        let mut preconditions = public
-            .program
-            .instantiate_parameters(parameters, arguments)
+        let parameter_ids = parameters
+            .iter()
+            .map(|parameter| parameter.declaration)
+            .collect::<Vec<_>>();
+        let domains = parameter_ids
+            .iter()
+            .map(|id| self.trait_input_domain(*id).unwrap_or_else(|| p(P::Type)))
+            .collect::<Vec<_>>();
+        let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let before = fuel;
+        let specialized = public.program.instantiate_declaration_parameters(
+            &parameter_ids,
+            &domains,
+            arguments,
+            &[],
+            &mut fuel,
+        );
+        self.required_steps -= (before - fuel) as u64;
+        let mut preconditions = specialized
             .map_err(|e| error(span, e.to_string()))?
             .preconditions;
         let mut bindings: BTreeMap<_, _> = public

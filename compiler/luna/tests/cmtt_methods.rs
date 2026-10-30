@@ -2284,3 +2284,41 @@ fn generator_irrefutable_tuple_patterns_share_state_and_export_pointers() {
         );
     }
 }
+
+#[test]
+fn dependent_type_indices_preserve_code_method_program_refinement() {
+    let source = "typealias Type=.Type'builtin;
+        trait Build where T,index:T {
+            comptime fn build(flag:bool)-><|-bool> where requires flag;
+        }
+        struct Builder {}
+        impl Build<Type,bool> for Builder {
+            comptime fn build(renamed:bool)-><|-bool> where requires renamed {'(true)}
+        }
+        fn run()->bool {~<Builder.as(Build<Type,bool>).build(true)>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let invalid = source.replace("build(true)", "build(false)");
+    assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+    let stronger = source.replace("requires renamed", "requires not renamed");
+    let failure = support::compile_with_protocols(&stronger, &Default::default()).unwrap_err();
+    assert!(
+        failure.contains("strengthens trait program preconditions"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn dependent_type_indices_survive_generated_nominal_values() {
+    let source = "typealias Type=.Type'builtin;
+        struct Tagged where T,index:T {value:bool}
+        trait Build where T,index:T {
+            comptime fn build()-><|-Tagged<T,index>> {'(Tagged<T,index>{value:true})}
+        }
+        struct Builder {} impl Build<Type,bool> for Builder {}
+        fn run()->bool {let value=~<Builder.as(Build<Type,bool>).build()>;value.value}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let scalar = source.replace("Build<Type,bool>", "Build<bool,true>");
+    assert_eq!(run(&scalar, "run", vec![]), Value::Bool(true));
+    let wrong = source.replace("let value=", "let value:Tagged<Type,Type>=");
+    assert!(support::compile_with_protocols(&wrong, &Default::default()).is_err());
+}

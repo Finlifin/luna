@@ -346,7 +346,7 @@ fn pattern_value_clauses_reconstruct_nominal_data_and_dependent_domains() {
 }
 
 #[test]
-fn pattern_value_clauses_infer_nominal_indices_without_inverting_opaque_heads() {
+fn pattern_value_clauses_infer_retained_indices_without_unfolding_heads() {
     let source = "struct Choice where flag:bool {}
         comptime fn select()-><Choice<flag> -| value:Choice<flag>> where flag:bool {'<value>}
         fn keep(input:Choice<true>)->Choice<true> {let ~<select()> = input;value}";
@@ -357,8 +357,14 @@ fn pattern_value_clauses_infer_nominal_indices_without_inverting_opaque_heads() 
         "struct Choice where flag:bool {}",
         "pure comptime fn Choice<flag:bool>->.Type'builtin {bool}",
     );
-    assert!(support::compile_with_protocols(&opaque, &Default::default()).is_err());
+    support::compile(&opaque);
     support::compile(&opaque.replace("select()>", "select<true>()>"));
+    for invalid in [
+        opaque.replace("select()>", "select<false>()>"),
+        opaque.replace("input:Choice<true>", "input:bool"),
+    ] {
+        assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+    }
 }
 
 #[test]

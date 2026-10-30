@@ -82,8 +82,18 @@ impl Checker<'_, '_> {
                     unavailable.push(all[*slot]);
                 }
             }
-            let signature =
-                self.instantiate_generator_type(&base.signature, &binders, &values, span)?;
+            let frame = if base.parameter_sorts.is_empty() {
+                vec![Sort::Type; base.type_parameters]
+            } else {
+                base.parameter_sorts.clone()
+            };
+            let signature = self.instantiate_generator_type_in_scope(
+                &base.signature,
+                &binders,
+                &values,
+                &[frame],
+                span,
+            )?;
             let Term::Function {
                 parameters: inputs,
                 result,

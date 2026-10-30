@@ -661,15 +661,30 @@ impl Checker<'_, '_> {
         arguments: &[Term],
         span: Span,
     ) -> Result<Term, Error> {
+        self.instantiate_generator_type_in_scope(ty, parameters, arguments, &[], span)
+    }
+
+    fn instantiate_generator_type_in_scope(
+        &mut self,
+        ty: &Term,
+        parameters: &[nir::DeclarationParameter],
+        arguments: &[Term],
+        frames: &[Vec<Sort>],
+        span: Span,
+    ) -> Result<Term, Error> {
         let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
         let before = fuel;
-        let result = nir::type_computations::charge_parameter_substitution(
-            ty, parameters, arguments, &mut fuel,
-        )
-        .and_then(|()| {
-            ty.instantiate_parameters(parameters, arguments)
-                .map_err(nir::type_computations::Error::Scope)
-        });
+        let ids = parameters
+            .iter()
+            .map(|parameter| parameter.declaration)
+            .collect::<Vec<_>>();
+        let domains = ids
+            .iter()
+            .map(|id| self.trait_input_domain(*id).unwrap_or_else(|| p(P::Type)))
+            .collect::<Vec<_>>();
+        let result =
+            nir::DeclarationSubstitution::bounded(&ids, &domains, arguments, frames, &mut fuel)
+                .and_then(|substitution| substitution.instantiate_bounded(ty, &mut fuel));
         self.required_steps -= (before - fuel) as u64;
         result.map_err(|e| {
             error(
