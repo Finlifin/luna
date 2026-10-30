@@ -339,3 +339,99 @@ fn metadata_ir_checks_phase_aliases_and_escaped_dump() {
     entries.push(entries[0].clone());
     assert!(nir::phases::validate(&package).is_err());
 }
+
+fn callable_normal_form_world() -> Package {
+    let mut package = world();
+    package.normal_forms.push(nir::normal_forms::Head {
+        declaration: id(20),
+        collector: None,
+        role: nir::normal_forms::Role::Opaque,
+        parameters: vec![nir::normal_forms::Parameter {
+            declaration: id(21),
+            binding: LocalId {
+                owner: 20,
+                index: 0,
+            },
+            kind: nir::normal_forms::Kind::Value,
+            ty: callable(),
+        }],
+        requirements: vec![],
+    });
+    package
+}
+fn callable_normal_form(declaration: DeclarationId, arguments: Vec<Term>) -> Term {
+    Term::NormalForm {
+        head: id(20),
+        sort: nir::Sort::Type,
+        arguments: vec![Term::FunctionValue {
+            declaration,
+            arguments,
+        }],
+    }
+}
+
+#[test]
+fn frozen_callable_type_inputs_need_declaration_signature_evidence_without_execution() {
+    let package = callable_normal_form_world();
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let ty = Term::Primitive(Primitive::Type);
+    let valid = callable_normal_form(id(3), vec![]);
+    assert_eq!(
+        vm.decode_immutable_input(&valid, &ty).unwrap(),
+        Value::Type(valid.clone())
+    );
+    for invalid in [
+        callable_normal_form(id(99), vec![]),
+        callable_normal_form(id(1), vec![]),
+        callable_normal_form(id(2), vec![]),
+        callable_normal_form(id(3), vec![boolean()]),
+    ] {
+        assert!(
+            vm.decode_immutable_input(&invalid, &ty).is_err(),
+            "{invalid}"
+        );
+        assert!(vm.decode_immutable_input(&valid, &ty).is_ok());
+    }
+    assert!(vm.events().is_empty());
+}
+
+#[test]
+fn frozen_callable_type_inputs_check_contracts_phase_and_safety() {
+    for (phase, is_unsafe, requirement, expected) in [
+        (FunctionPhase::Runtime, false, true, ErrorKind::Type),
+        (FunctionPhase::Comptime, true, true, ErrorKind::Type),
+        (
+            FunctionPhase::Comptime,
+            false,
+            false,
+            ErrorKind::TypeContractRejected,
+        ),
+    ] {
+        let mut package = callable_normal_form_world();
+        package.functions.drain(0..2);
+        package.functions[0].phase = phase;
+        package.functions[0].is_unsafe = is_unsafe;
+        package.functions[0].requirements = vec![nir::program::TypePredicate::Bool(requirement)];
+        if phase == FunctionPhase::Runtime {
+            let runtime = package.functions.remove(0);
+            package
+                .runtime_function_identities
+                .push(nir::program::RuntimeFunctionIdentity {
+                    declaration: runtime.declaration,
+                    type_parameters: runtime.type_parameters,
+                    signature: runtime.signature,
+                });
+        }
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        assert_eq!(
+            vm.decode_immutable_input(
+                &callable_normal_form(id(3), vec![]),
+                &Term::Primitive(Primitive::Type),
+            )
+            .unwrap_err()
+            .kind,
+            expected
+        );
+        assert!(vm.events().is_empty());
+    }
+}

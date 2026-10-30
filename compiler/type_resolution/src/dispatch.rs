@@ -110,6 +110,123 @@ impl<'a> DeclarationWorld<'a> {
             })
             .collect()
     }
+    /// Signature evidence for a frozen callable, without body traversal.
+    /// Formation predicates are discharged by the enclosing admission pass.
+    pub fn callable_signature(
+        &self,
+        declaration: Id,
+        arguments: &[Term],
+        frames: &[Vec<nir::Sort>],
+        fuel: &mut usize,
+    ) -> Option<Term> {
+        *fuel = fuel.checked_sub(self.package.normal_forms.len())?;
+        if let Some(head) = self
+            .package
+            .normal_forms
+            .iter()
+            .find(|h| h.declaration == declaration)
+        {
+            if !arguments.is_empty() {
+                return None;
+            }
+            *fuel = fuel.checked_sub(head.parameters.len())?;
+            for parameter in &head.parameters {
+                nir::type_computations::charge_term(&parameter.ty, fuel).ok()?;
+            }
+            return head.callable_type().ok();
+        }
+        *fuel = fuel.checked_sub(self.package.runtime_function_identities.len())?;
+        let (parameters, signature, qualifiers) = if let Some(identity) = self
+            .package
+            .runtime_function_identities
+            .iter()
+            .find(|f| f.declaration == declaration)
+        {
+            (&identity.type_parameters, &identity.signature, None)
+        } else {
+            *fuel = fuel.checked_sub(self.package.functions.len())?;
+            let function = self
+                .package
+                .functions
+                .iter()
+                .find(|f| f.declaration == declaration)?;
+            (
+                &function.type_parameters,
+                &function.signature,
+                Some((
+                    function.phase == n::FunctionPhase::Comptime,
+                    function.is_unsafe,
+                )),
+            )
+        };
+        let domains = self.input_domains(parameters, fuel).ok()?;
+        let descriptor = nir::normal_forms::Head {
+            declaration,
+            collector: None,
+            role: nir::normal_forms::Role::Opaque,
+            requirements: vec![],
+            parameters: parameters
+                .iter()
+                .zip(&domains)
+                .enumerate()
+                .map(|(index, (id, domain))| nir::normal_forms::Parameter {
+                    declaration: *id,
+                    binding: n::LocalId {
+                        owner: declaration.local,
+                        index: index as u32,
+                    },
+                    kind: if *domain == Term::Primitive(nir::Primitive::Type) {
+                        nir::normal_forms::Kind::Type
+                    } else {
+                        nir::normal_forms::Kind::Value
+                    },
+                    ty: domain.clone(),
+                })
+                .collect(),
+        };
+        descriptor
+            .check_arguments_in_scope_with_callables_budgeted_in(
+                arguments,
+                |id| {
+                    self.package
+                        .normal_forms
+                        .iter()
+                        .any(|h| h.declaration == id && h.role == nir::normal_forms::Role::Tuple)
+                },
+                |id| {
+                    self.package
+                        .normal_forms
+                        .iter()
+                        .any(|h| h.declaration == id && h.role == nir::normal_forms::Role::TypeList)
+                },
+                |ty, variant, fuel| {
+                    nir::normal_forms::nominal_value_fields_budgeted(
+                        self.package,
+                        ty,
+                        variant,
+                        fuel,
+                    )
+                },
+                |_, _| false,
+                |id, args, frames, fuel| self.callable_signature(id, args, frames, fuel),
+                frames,
+                fuel,
+                self.package.target,
+            )
+            .ok()?;
+        let signature =
+            nir::DeclarationSubstitution::bounded(parameters, &domains, arguments, frames, fuel)
+                .ok()?
+                .instantiate_bounded(signature, fuel)
+                .ok()?;
+        Some(match qualifiers {
+            Some((comptime, is_unsafe)) => signature
+                .with_comptime_phase(comptime)
+                .with_unsafe_call_requirement(is_unsafe),
+            None => signature,
+        })
+    }
+
     pub fn input_binders(&self, parameters: &[Id]) -> Vec<nir::DeclarationParameter> {
         parameters
             .iter()

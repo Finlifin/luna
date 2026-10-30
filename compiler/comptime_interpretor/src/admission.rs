@@ -67,7 +67,8 @@ impl Interpreter<'_> {
             )
             .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
         self.integer_operation(None, |budget| budget.consume(work))?;
-        let work = type_value_work(ty, &self.normal_forms)
+        let work = self
+            .closed_type_description_work(ty)
             .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
         self.integer_operation(None, |budget| budget.consume(work))?;
         ty.check_scope(&[])
@@ -319,7 +320,7 @@ impl Interpreter<'_> {
                     .unwrap_or(usize::MAX)
                     .min(100_000);
                 let before = fuel;
-                let checked = metadata.check_arguments_in_scope_with_collections_budgeted_in(
+                let checked = metadata.check_arguments_in_scope_with_callables_budgeted_in(
                     arguments,
                     |head| {
                         self.normal_forms
@@ -330,6 +331,7 @@ impl Interpreter<'_> {
                         .is_some_and(|head| head.role == nir::normal_forms::Role::TypeList),
                     |ty, variant, fuel| self.normal_value_fields(ty, variant, fuel),
                     |value, domain| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)),
+                    |id, args, frames, fuel| self.normal_callable_signature(id, args, frames, fuel),
                     &[], &mut fuel, self.target);
                 self.budget.steps -= (before - fuel) as u64;
                 checked.map_err(|_| {
@@ -345,6 +347,15 @@ impl Interpreter<'_> {
                 self.check_normal_requirements(metadata, arguments, source)?;
                 for ty in arguments {
                     self.admit_type(ty, depth + 1)?;
+                }
+            }
+            Term::FunctionValue {
+                declaration,
+                arguments,
+            } => {
+                self.admit_callable_identity(*declaration, arguments, source)?;
+                for argument in arguments {
+                    self.admit_type(argument, depth + 1)?;
                 }
             }
             Term::Tuple(types)

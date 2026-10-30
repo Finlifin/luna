@@ -4,6 +4,12 @@ use std::collections::{HashMap, HashSet};
 
 impl Package {
     pub fn validate_index(&self) -> Result<(), String> {
+        let mut callable_keys = HashSet::new();
+        for identity in &self.callable_identities {
+            if !callable_keys.insert(&identity.key) {
+                return Err("duplicate IIR callable signature evidence".into());
+            }
+        }
         let mut template_targets = HashSet::new();
         for table in &self.templates {
             for key in table.targets() {

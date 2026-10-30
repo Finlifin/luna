@@ -1886,12 +1886,36 @@ impl<'a> Interpreter<'a> {
         Ok(())
     }
     fn type_description_work(&self, ty: &Term) -> Option<usize> {
-        scoped_type_value_work_with_evidence_in(
+        if ty.sort() != nir::Sort::Type {
+            return None;
+        }
+        self.term_description_work(ty)
+    }
+    fn term_description_work(&self, ty: &Term) -> Option<usize> {
+        scoped_term_value_work_with_callables_in(
             ty,
             &self.normal_forms,
             &self.abstract_type_parameters,
             &self.abstract_value_parameters,
             |ty, variant, fuel| self.normal_value_fields(ty, variant, fuel),
+            |id, args, frames, fuel| self.normal_callable_signature(id, args, frames, fuel),
+            self.target,
+        )
+    }
+    fn closed_type_description_work(&self, ty: &Term) -> Option<usize> {
+        if ty.sort() != nir::Sort::Type {
+            return None;
+        }
+        self.closed_term_description_work(ty)
+    }
+    fn closed_term_description_work(&self, ty: &Term) -> Option<usize> {
+        scoped_term_value_work_with_callables_in(
+            ty,
+            &self.normal_forms,
+            &BTreeSet::new(),
+            &BTreeMap::new(),
+            |ty, variant, fuel| self.normal_value_fields(ty, variant, fuel),
+            |id, args, frames, fuel| self.normal_callable_signature(id, args, frames, fuel),
             self.target,
         )
     }
@@ -2101,12 +2125,13 @@ impl<'a> Interpreter<'a> {
         }
         self.tick(None)?;
         for ty in &types {
-            let work = scoped_term_value_work_with_evidence_in(
+            let work = scoped_term_value_work_with_callables_in(
                 ty,
                 &self.normal_forms,
                 &self.abstract_type_parameters,
                 &self.abstract_value_parameters,
                 |ty, variant, fuel| self.normal_value_fields(ty, variant, fuel),
+                |id, args, frames, fuel| self.normal_callable_signature(id, args, frames, fuel),
                 self.target,
             )
             .ok_or_else(|| self.failure(ErrorKind::Type, None))? as u64;
@@ -4497,6 +4522,16 @@ impl<'a> Interpreter<'a> {
         arguments: &[Term],
         fuel: &mut usize,
     ) -> Result<(), ErrorKind> {
+        self.validate_function_inputs_in_scope(parameters, arguments, &[], fuel)
+    }
+
+    fn validate_function_inputs_in_scope(
+        &self,
+        parameters: &[DeclarationId],
+        arguments: &[Term],
+        frames: &[Vec<nir::Sort>],
+        fuel: &mut usize,
+    ) -> Result<(), ErrorKind> {
         *fuel = fuel
             .checked_sub(parameters.len())
             .ok_or(ErrorKind::StepsExhausted)?;
@@ -4504,7 +4539,7 @@ impl<'a> Interpreter<'a> {
             return Err(ErrorKind::Type);
         }
         let substitution = self
-            .function_substitution_bounded(parameters, arguments, &[], fuel)
+            .function_substitution_bounded(parameters, arguments, frames, fuel)
             .map_err(|error| {
                 if matches!(error, nir::type_computations::Error::Budget) {
                     ErrorKind::StepsExhausted
@@ -4538,7 +4573,7 @@ impl<'a> Interpreter<'a> {
                         ErrorKind::Type
                     }
                 })?;
-                argument.check_scope(&[]).map_err(|_| ErrorKind::Type)?;
+                argument.check_scope(frames).map_err(|_| ErrorKind::Type)?;
                 let Term::NormalForm { head, .. } = &domain else {
                     return Err(ErrorKind::Type);
                 };
@@ -4556,7 +4591,9 @@ impl<'a> Interpreter<'a> {
                 }
                 continue;
             }
-            if domain == Term::Primitive(Primitive::Object) || self.list_element(&domain).is_some()
+            if domain == Term::Primitive(Primitive::Object)
+                || self.list_element(&domain).is_some()
+                || matches!(domain.callable_signature(), Term::Function { .. })
             {
                 nir::type_computations::charge_term(&domain, fuel)
                     .map_err(|_| ErrorKind::StepsExhausted)?;
@@ -4578,14 +4615,15 @@ impl<'a> Interpreter<'a> {
                         ty: domain.clone(),
                     }],
                 };
-                contract.check_arguments_in_scope_with_collections_budgeted_in(
+                contract.check_arguments_in_scope_with_callables_budgeted_in(
                     std::slice::from_ref(argument),
                     |id| self.normal_forms.get(&id).is_some_and(|head| head.role == nir::normal_forms::Role::Tuple),
                     |id| self.normal_forms.get(&id).is_some_and(|head| head.role == nir::normal_forms::Role::TypeList),
                     |ty, variant, fuel| self.normal_value_fields(ty, variant, fuel),
                     |value, domain| matches!(value, Term::Rigid { declaration, sort: nir::Sort::ComptimeValue }
                         if self.abstract_value_parameters.get(declaration) == Some(domain)),
-                    &[], fuel, self.target,
+                    |id, args, frames, fuel| self.normal_callable_signature(id, args, frames, fuel),
+                    frames, fuel, self.target,
                 ).map_err(|_| if *fuel == 0 { ErrorKind::StepsExhausted } else { ErrorKind::Type })?;
                 continue;
             }
@@ -6800,6 +6838,7 @@ impl Interpreter<'_> {
 /// Bound shape inspection for a concrete type value. Scoped binders inside a
 /// function type are legitimate; free runtime environments/value-store handles
 /// and active rigid inputs require elaboration support outside this interpreter.
+#[cfg(test)]
 fn type_value_work(
     ty: &Term,
     heads: &BTreeMap<DeclarationId, &nir::normal_forms::Head>,
@@ -6864,6 +6903,7 @@ fn scoped_type_value_work_with_evidence_in(
 
 // Instance identities contain completed value arguments as well as types.
 // Use the same bounded structural validation without imposing a Type root.
+#[cfg(test)]
 fn instance_argument_work(
     argument: &Term,
     heads: &BTreeMap<DeclarationId, &nir::normal_forms::Head>,
@@ -6903,6 +6943,26 @@ fn scoped_term_value_work_with_evidence_in(
     parameters: &BTreeSet<DeclarationId>,
     value_parameters: &BTreeMap<DeclarationId, Term>,
     nominal_fields: impl Fn(&Term, Option<u32>, &mut usize) -> Option<Vec<Term>>,
+    target: Option<nir::target::TargetData>,
+) -> Option<usize> {
+    scoped_term_value_work_with_callables_in(
+        ty,
+        heads,
+        parameters,
+        value_parameters,
+        nominal_fields,
+        |_, _, _, _| None,
+        target,
+    )
+}
+
+fn scoped_term_value_work_with_callables_in(
+    ty: &Term,
+    heads: &BTreeMap<DeclarationId, &nir::normal_forms::Head>,
+    parameters: &BTreeSet<DeclarationId>,
+    value_parameters: &BTreeMap<DeclarationId, Term>,
+    nominal_fields: impl Fn(&Term, Option<u32>, &mut usize) -> Option<Vec<Term>>,
+    callable_signature: impl Fn(DeclarationId, &[Term], &[Vec<nir::Sort>], &mut usize) -> Option<Term>,
     target: Option<nir::target::TargetData>,
 ) -> Option<usize> {
     // A leaf needs neither a heap traversal stack nor an empty shared frame.
@@ -7009,7 +7069,7 @@ fn scoped_term_value_work_with_evidence_in(
                     }
                 }
                 metadata
-                    .check_arguments_in_scope_with_collections_budgeted_in(
+                    .check_arguments_in_scope_with_callables_budgeted_in(
                         arguments,
                         |head| {
                             heads
@@ -7034,6 +7094,7 @@ fn scoped_term_value_work_with_evidence_in(
                             } => bound_domains.get(&(*depth, *index)) == Some(domain),
                             _ => false,
                         },
+                        &callable_signature,
                         &frame_slice
                             .iter()
                             .map(|frame| frame.iter().map(|p| p.sort).collect())

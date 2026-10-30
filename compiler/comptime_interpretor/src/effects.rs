@@ -61,7 +61,7 @@ impl Interpreter<'_> {
     }
     fn effect_operation_work(&self, operation: &Operation) -> Option<usize> {
         operation.arguments.iter().try_fold(1usize, |sum, ty| {
-            sum.checked_add(instance_argument_work(ty, &self.normal_forms)?)
+            sum.checked_add(self.closed_term_description_work(ty)?)
         })
     }
 
@@ -80,7 +80,7 @@ impl Interpreter<'_> {
         {
             work = work.checked_add(1)?;
             for argument in &key.arguments {
-                work = work.checked_add(instance_argument_work(argument, &self.normal_forms)?)?;
+                work = work.checked_add(self.closed_term_description_work(argument)?)?;
             }
         }
         Some(work)
@@ -177,7 +177,7 @@ impl Interpreter<'_> {
                     let work = self
                         .effect_operation_work(&handler.operation)
                         .and_then(|n| {
-                            n.checked_add(type_value_work(&handler.signature, &self.normal_forms)?)
+                            n.checked_add(self.closed_type_description_work(&handler.signature)?)
                         })
                         .and_then(|n| n.checked_add(environment.len()))
                         .and_then(|n| n.checked_add(previous.len()))
@@ -737,7 +737,7 @@ impl Interpreter<'_> {
                 arguments, fields, ..
             } => {
                 for ty in arguments {
-                    let work = instance_argument_work(ty, &self.normal_forms).ok_or_else(|| {
+                    let work = self.closed_term_description_work(ty).ok_or_else(|| {
                         self.failure(ErrorKind::RepresentationSizeLimit, Some(source))
                     })?;
                     self.effect_charge(work, Some(source))?;
@@ -764,7 +764,7 @@ impl Interpreter<'_> {
             }
             Value::RuntimeFunction { arguments, .. } => {
                 for ty in arguments {
-                    let work = instance_argument_work(ty, &self.normal_forms).ok_or_else(|| {
+                    let work = self.closed_term_description_work(ty).ok_or_else(|| {
                         self.failure(ErrorKind::RepresentationSizeLimit, Some(source))
                     })?;
                     self.effect_charge(work, Some(source))?;

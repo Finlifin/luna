@@ -8,6 +8,121 @@ pub(super) enum PreparedTraitInstance {
 }
 
 impl Interpreter<'_> {
+    /// Resolve representation evidence without invoking a callable. Formation
+    /// predicates remain part of admission; signature lookup cannot prove them.
+    pub(super) fn normal_callable_signature(
+        &self,
+        declaration: DeclarationId,
+        arguments: &[Term],
+        frames: &[Vec<nir::Sort>],
+        fuel: &mut usize,
+    ) -> Option<Term> {
+        *fuel = fuel.checked_sub(1)?;
+        if let Some(graph) = self.graph {
+            *fuel = fuel.checked_sub(graph.callable_identities.len())?;
+            let identity = graph.callable_identities.iter().find(|identity| {
+                identity.key.declaration == declaration && identity.key.arguments == arguments
+            })?;
+            nir::type_computations::charge_term(&identity.signature, fuel).ok()?;
+            return Some(identity.signature.clone());
+        }
+        if let Some(head) = self.normal_forms.get(&declaration) {
+            if !arguments.is_empty() {
+                return None;
+            }
+            *fuel = fuel.checked_sub(head.parameters.len())?;
+            for parameter in &head.parameters {
+                nir::type_computations::charge_term(&parameter.ty, fuel).ok()?;
+            }
+            return head.callable_type().ok();
+        }
+        let (parameters, signature, qualifiers) =
+            if let Some(identity) = self.runtime_function_identities.get(&declaration) {
+                (&identity.type_parameters, &identity.signature, None)
+            } else {
+                let function = self.functions.get(&declaration)?;
+                (
+                    &function.type_parameters,
+                    &function.signature,
+                    Some((
+                        function.phase == nir::program::FunctionPhase::Comptime,
+                        function.is_unsafe,
+                    )),
+                )
+            };
+        self.validate_function_inputs_in_scope(parameters, arguments, frames, fuel)
+            .ok()?;
+        let signature = self
+            .function_substitution_bounded(parameters, arguments, frames, fuel)
+            .ok()?
+            .instantiate_bounded(signature, fuel)
+            .ok()?;
+        Some(match qualifiers {
+            Some((comptime, is_unsafe)) => signature
+                .with_comptime_phase(comptime)
+                .with_unsafe_call_requirement(is_unsafe),
+            None => signature,
+        })
+    }
+
+    pub(super) fn admit_callable_identity(
+        &mut self,
+        declaration: DeclarationId,
+        arguments: &[Term],
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        if self.normal_forms.contains_key(&declaration) {
+            return if arguments.is_empty() {
+                Ok(())
+            } else {
+                Err(self.failure(ErrorKind::Type, Some(source)))
+            };
+        }
+        if let Some(identity) = self.runtime_function_identities.get(&declaration).copied() {
+            // Transport-only metadata is published after producer-side
+            // formation checks. It cannot authorize a runtime invocation.
+            return self.admit_function_inputs(&identity.type_parameters, arguments, source);
+        }
+        let definition = self
+            .functions
+            .get(&declaration)
+            .copied()
+            .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source)))?;
+        self.admit_function_inputs(&definition.type_parameters, arguments, source)?;
+        for requirement in &definition.requirements {
+            let requirement =
+                self.specialize_function_predicate(definition, arguments, requirement, source)?;
+            if let Some(requirement) =
+                self.bind_invocation_contract(&requirement, None, source, 0)?
+            {
+                self.check_type_contract(&requirement, source)?;
+            }
+        }
+        for capability in &definition.capabilities {
+            let nir::program::TypePredicate::Trait(bound) = self.specialize_function_predicate(
+                definition,
+                arguments,
+                &nir::program::TypePredicate::Trait(capability.clone()),
+                source,
+            )?
+            else {
+                unreachable!("trait substitution preserves predicate kind");
+            };
+            let open = bound.subject.check_scope(&[]).is_err()
+                || bound
+                    .interface_arguments
+                    .iter()
+                    .any(|ty| ty.check_scope(&[]).is_err());
+            if self.comptime_only && open {
+                continue;
+            }
+            if !self.capabilities_hold_parameters(std::slice::from_ref(&bound), &[], &[]) {
+                return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn function_substitution_bounded<'inputs>(
         &self,
         parameters: &[DeclarationId],

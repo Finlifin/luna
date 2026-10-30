@@ -5220,3 +5220,71 @@ Validation from `/home/fin/luna`:
   exit 0, 52 tests passed; report `/tmp/luna-tools-3rkawdy_/result.json`.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
   exit 0; report `/tmp/luna-tools-8llopq85/result.json`.
+
+### Callable values across normalization, admission and IIR (2026-10-30)
+
+Final-language position: functions are ordinary comptime values when used as
+inputs to an opaque definition. This follows `docs/comptime/purity-and-normal-form.md`:
+NF parameters receive ordinary values, runtime functions cannot be invoked at
+comptime, and opaque heads do not unfold. The implementation must preserve a
+function's declaration inputs, phase, safety and contracts as its value moves
+between elaboration, invocation and the completed artifact. It must not invent
+an NF-specific function category or turn an identity appearing in a Type into
+an executable body dependency. This work leaves opaque-head non-injectivity
+and PTC equality rules unchanged.
+
+The first source reproducer failed because normalization sent a restored
+runtime function identity through closed export. Its generic inputs correctly
+contained the caller's Bound Type, which closed export must reject. Scoped
+normalization now retains the existing FunctionValue representation, meters it,
+and checks it under the caller's telescope. Closed export remains strict.
+
+The VM now obtains callable signatures from its declaration world during NF
+construction, immutable admission and scoped type-description checks. Generic
+input validation shares the signature resolver's budget. Source function phase
+and unsafe qualifiers are reconstructed from their declaration metadata;
+transport-only runtime signatures retain their existing qualifiers. Signature
+matching is representation evidence only. Immutable admission separately
+checks formation predicates and capabilities, and does not run function bodies.
+Runtime identity metadata still relies on its documented producer-side formation
+checks; it grants no comptime execution permission.
+
+Materialization resolves the same evidence from DeclarationWorld. IIR retains
+completed CallableIdentity entries with an InstanceKey and a qualified signature,
+including S-expression Display. The signature's nominal/type dependencies are
+closed without materializing a body. IIR validates identity links and rejects
+missing or duplicate evidence. The reference VM uses this retained evidence for
+cleanup/effect-context type and instance checks, without looking up source bodies.
+This is distinct from runtime template tag storage, which has execution-specific
+contracts and does not represent comptime callable identities.
+
+The source tests cover scoped runtime descriptors, VM construction with runtime,
+comptime and unsafe identities, nested nominal fields, IIR dependency closure,
+and rejection of missing/duplicate retained evidence. Immutable host-input tests
+reject unknown declarations, wrong signatures/phase/safety, generic arity errors
+and failed formation contracts, and confirm that admission emits no execution
+events. The real-sysroot example is
+`development/examples/sysroot-callable-type-inputs.fl`.
+
+Remaining boundary: directly returning a scoped comptime Closure still requires
+restoration of its executable/capture environment; it is not reclassified as a
+runtime identity by this change. Capturing closures and quoted code are not
+silently frozen as declaration-only FunctionValue terms. Completing those paths
+must preserve their own environment/context semantics.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test scoped_comptime_callables --test scoped_comptime_aggregates --test normal_patterns`:
+  exit 0, 57 tests passed; `/tmp/luna-tools-mutx0774/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p iir`:
+  exit 0, 91 tests passed; `/tmp/luna-tools-anoi229o/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --test immutable_normal_inputs`:
+  exit 0, 318 tests passed; `/tmp/luna-tools-hgc9qasg/result.json`.
+  The earlier run caught a regression that allowed scoped types through closed
+  representation copy. Separate closed/scoped helpers fixed that regression;
+  the existing rejection test now passes without changing its expectation.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0; `/tmp/luna-tools-qg20zxwf/result.json`.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- development/examples/sysroot-callable-type-inputs.fl --sysroot library --test-native`:
+  exit 0, one native test passed with zero failures;
+  `/tmp/luna-tools-snows9t7/result.json`.

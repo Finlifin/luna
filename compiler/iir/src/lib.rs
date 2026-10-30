@@ -29,6 +29,22 @@ impl fmt::Display for InstanceKey {
         f.write_str("))")
     }
 }
+/// Declaration evidence for a callable retained only inside immutable types.
+/// This records its completed signature, not an executable instance or a tag.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CallableIdentity {
+    pub key: InstanceKey,
+    pub signature: Term,
+}
+impl fmt::Display for CallableIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(callable-identity {} (signature {}))",
+            self.key, self.signature
+        )
+    }
+}
 #[derive(Clone, Debug, PartialEq)]
 pub struct FunctionInstance {
     pub key: InstanceKey,
@@ -97,6 +113,7 @@ pub struct Package {
     pub nominals: Vec<NominalInstance>,
     pub interfaces: Vec<InterfaceContract>,
     pub normal_forms: Vec<nir::normal_forms::Head>,
+    pub callable_identities: Vec<CallableIdentity>,
     pub functions: Vec<FunctionInstance>,
     /// Declaration-derived contracts demanded by concrete effect rows, even
     /// when the operation is never requested or handled in this graph.
@@ -151,6 +168,22 @@ impl Package {
     /// reference, including references embedded in defaults and patterns.
     pub fn validate(&self, fuel: &mut usize) -> Result<(), String> {
         self.validate_index()?;
+        for identity in &self.callable_identities {
+            if !matches!(
+                identity.signature.callable_signature(),
+                Term::Function { .. }
+            ) {
+                return Err("IIR callable identity has a non-callable signature".into());
+            }
+            identity
+                .signature
+                .check_scope(&[])
+                .map_err(|e| e.to_string())?;
+            self.validate_type(&identity.signature, fuel)?;
+            for argument in &identity.key.arguments {
+                self.validate_type(argument, fuel)?;
+            }
+        }
         for table in &self.templates {
             self.validate_type(table.logical_type(), fuel)?;
             for target in table.targets() {
@@ -654,6 +687,21 @@ impl Package {
             }
             *fuel -= 1;
             match ty {
+                Term::FunctionValue {
+                    declaration,
+                    arguments,
+                } => {
+                    *fuel = fuel
+                        .checked_sub(self.callable_identities.len())
+                        .ok_or("IIR callable identity lookup budget exhausted")?;
+                    if !self.callable_identities.iter().any(|identity| {
+                        identity.key.declaration == *declaration
+                            && identity.key.arguments == *arguments
+                    }) {
+                        return Err("IIR frozen callable has no signature evidence".into());
+                    }
+                    pending.extend(arguments);
+                }
                 Term::ErrorResult { errors, result } => {
                     pending.push(result);
                     pending.extend(errors);
@@ -749,6 +797,13 @@ impl fmt::Display for Package {
             f.write_str(" (effect-contracts")?;
             for contract in &self.effect_contracts {
                 write!(f, " {contract}")?;
+            }
+            f.write_str(")")?;
+        }
+        if !self.callable_identities.is_empty() {
+            f.write_str(" (callable-identities")?;
+            for identity in &self.callable_identities {
+                write!(f, " {identity}")?;
             }
             f.write_str(")")?;
         }

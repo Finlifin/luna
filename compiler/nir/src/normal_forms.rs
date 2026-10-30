@@ -766,8 +766,10 @@ impl Head {
     /// Admit frozen callable identities using declaration-world evidence.
     ///
     /// `callable_signature` must resolve the declaration, validate its ordered
-    /// generic inputs and formation contracts, and specialize its signature in
-    /// `frames`. It shares the caller's fuel; unknown or invalid identities
+    /// generic input representations, and specialize its signature in `frames`.
+    /// Formation predicates must still be checked by the enclosing admission
+    /// pass; signature evidence alone does not prove a contract.
+    /// It shares the caller's fuel; unknown or invalid identities
     /// return `None`. A frozen value's declaration ID is not itself evidence.
     /// The returned signature retains phase, safety and collector qualifiers.
     /// This check neither invokes a function nor unfolds an opaque NF head.

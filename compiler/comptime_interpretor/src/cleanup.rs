@@ -51,13 +51,15 @@ impl Interpreter<'_> {
                 nir::visit::expressions(&function.function, &mut fuel, |expr, fuel| {
                     let mut insert =
                         |operation: &nir::effects::Operation, ty: &Term| -> Result<(), String> {
-                            let work = type_value_work(ty, &self.normal_forms)
+                            let work = self
+                                .closed_type_description_work(ty)
                                 .ok_or("effect cleanup contract budget exhausted")?;
                             *fuel = fuel
                                 .checked_sub(work + 1)
                                 .ok_or("effect cleanup contract budget exhausted")?;
                             for argument in &operation.arguments {
-                                let work = instance_argument_work(argument, &self.normal_forms)
+                                let work = self
+                                    .closed_term_description_work(argument)
                                     .ok_or("effect cleanup contract budget exhausted")?;
                                 *fuel = fuel
                                     .checked_sub(work)
@@ -379,7 +381,7 @@ impl<'a> Interpreter<'a> {
             .arguments
             .iter()
             .try_fold(1usize, |work, argument| {
-                work.checked_add(instance_argument_work(argument, &self.normal_forms)?)
+                work.checked_add(self.closed_term_description_work(argument)?)
             })
             .ok_or_else(|| self.failure(ErrorKind::StepsExhausted, Some(source)))?;
         self.charge_preparation(work).map_err(|mut error| {
@@ -478,7 +480,8 @@ impl<'a> Interpreter<'a> {
         Ok(())
     }
     fn copy_type_work(&mut self, ty: &Term, source: SourceRange) -> Result<(), Error> {
-        let work = type_value_work(ty, &self.normal_forms)
+        let work = self
+            .closed_type_description_work(ty)
             .ok_or_else(|| self.failure(ErrorKind::RepresentationSizeLimit, Some(source)))?;
         self.copy_work(work, source)
     }
@@ -1582,7 +1585,8 @@ impl<'a> Interpreter<'a> {
         for function in &schedule.functions {
             self.tick(None)?;
             for argument in &function.instance.arguments {
-                let work = instance_argument_work(argument, &self.normal_forms)
+                let work = self
+                    .closed_term_description_work(argument)
                     .ok_or_else(|| self.failure(ErrorKind::StepsExhausted, None))?;
                 self.charge_preparation(work)?;
             }

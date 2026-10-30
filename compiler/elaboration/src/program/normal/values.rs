@@ -42,6 +42,18 @@ impl Checker<'_, '_> {
             Value::Type(_) => {
                 return Err(error(span, "normal-form Type input contains a non-Type"));
             }
+            Value::RuntimeFunction {
+                declaration,
+                arguments,
+            } => {
+                // The required invocation restored these declaration inputs
+                // into the caller's telescope. Closed export deliberately
+                // rejects Bound terms; scoped normalization retains them.
+                Term::FunctionValue {
+                    declaration,
+                    arguments,
+                }
+            }
             Value::Record {
                 declaration,
                 arguments,

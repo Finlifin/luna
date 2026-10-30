@@ -110,6 +110,7 @@ struct Builder<'a> {
     interface_contracts: Vec<iir::InterfaceContract>,
     effect_contracts: Vec<iir::effects::Contract>,
     effect_instances: HashSet<nir::effects::Operation>,
+    callable_identities: Vec<iir::CallableIdentity>,
 }
 /// Bounded, transactional: failure returns no partially materialized world.
 pub fn dispatch_instances(
@@ -125,7 +126,7 @@ pub fn dispatch_instances(
         None,
         None,
     )
-    .map(|(dispatch, _, _, _, _, _, _)| dispatch)
+    .map(|(dispatch, ..)| dispatch)
 }
 /// Prepare transitive dispatch dependencies of explicit entry points and the
 /// parent/capability closure of concrete implementations retained by the NIR VM.
@@ -146,7 +147,7 @@ pub fn dispatch_instances_for_roots(
         None,
         None,
     )
-    .map(|(dispatch, _, _, _, _, _, _)| dispatch)
+    .map(|(dispatch, ..)| dispatch)
 }
 
 /// Prepare reachable dispatch while retaining ordinary Type telescopes for
@@ -165,7 +166,7 @@ pub fn dispatch_instances_for_invocation(
         None,
         None,
     )
-    .map(|(dispatch, _, _, _, _, _, _)| dispatch)
+    .map(|(dispatch, ..)| dispatch)
 }
 
 /// Resolve one concrete method through the same checked dispatch closure used
@@ -190,7 +191,7 @@ pub fn resolve_method_instance(
         None,
     );
     match result {
-        Ok((_, _, _, _, remaining, _, _)) => {
+        Ok((_, _, _, _, remaining, ..)) => {
             *fuel = remaining;
             selected.ok_or_else(|| "method selection produced no body identity".into())
         }
@@ -237,7 +238,7 @@ pub fn normalize_inline_annotations(
         None,
     );
     match result {
-        Ok((_, _, _, _, remaining, _, _)) => {
+        Ok((_, _, _, _, remaining, ..)) => {
             *fuel = remaining;
             Ok(())
         }
@@ -268,7 +269,7 @@ pub fn resolve_quote_method_instance(
         None,
     );
     match result {
-        Ok((_, _, _, _, remaining, _, _)) => {
+        Ok((_, _, _, _, remaining, ..)) => {
             *fuel = remaining;
             selected.ok_or("quote selection produced no body identity".into())
         }
@@ -296,7 +297,7 @@ pub fn dispatch_instances_in_context(
         Some((context, assumptions)),
         None,
     )
-    .map(|(dispatch, _, _, _, _, _, _)| dispatch)
+    .map(|(dispatch, ..)| dispatch)
 }
 /// Materialize an explicit set of function instances. Failure publishes no
 /// partial graph; recursive calls reuse the same instance identity.
@@ -320,16 +321,24 @@ pub fn instantiate_with_types(
     expansion: &dyn Expansion,
 ) -> Result<iir::Package, String> {
     nir::phases::validate(package).map_err(|e| format!("IIR input phase: {}", e.message))?;
-    let (mut dispatch, functions, nominals, interfaces, _, expansion_sources, effect_contracts) =
-        build(
-            package,
-            budget,
-            Roots::Iir(roots),
-            runtime_bindings.clone(),
-            types,
-            None,
-            Some(expansion),
-        )?;
+    let (
+        mut dispatch,
+        functions,
+        nominals,
+        interfaces,
+        _,
+        expansion_sources,
+        effect_contracts,
+        callable_identities,
+    ) = build(
+        package,
+        budget,
+        Roots::Iir(roots),
+        runtime_bindings.clone(),
+        types,
+        None,
+        Some(expansion),
+    )?;
     let mut template_fuel = budget.steps;
     let templates =
         captured_templates::storage(&functions, package, &dispatch, &mut template_fuel)?;
@@ -362,6 +371,7 @@ pub fn instantiate_with_types(
         nominals,
         interfaces,
         normal_forms: package.normal_forms.clone(),
+        callable_identities,
     };
     let mut validation_fuel = budget.steps;
     output.validate(&mut validation_fuel)?;
@@ -395,6 +405,7 @@ fn build(
         usize,
         Vec<n::ExpansionSource>,
         Vec<iir::effects::Contract>,
+        Vec<iir::CallableIdentity>,
     ),
     String,
 > {
@@ -454,6 +465,7 @@ fn build(
         interface_contracts: vec![],
         effect_contracts: vec![],
         effect_instances: HashSet::new(),
+        callable_identities: vec![],
     };
     for ty in type_roots {
         let ty = builder.normalized_type(ty)?;
@@ -612,6 +624,7 @@ fn build(
         builder.fuel,
         builder.quote_sources,
         builder.effect_contracts,
+        builder.callable_identities,
     ))
 }
 impl Builder<'_> {
@@ -2241,6 +2254,48 @@ impl Builder<'_> {
         }
         let mut children = Vec::new();
         match &ty {
+            Term::FunctionValue {
+                declaration,
+                arguments,
+            } => {
+                // A callable inside a type identity is data. Validate its
+                // declaration and obligations without materializing its body.
+                let signature = self
+                    .world
+                    .callable_signature(*declaration, arguments, &[], &mut self.fuel)
+                    .ok_or("IIR callable identity has invalid declaration inputs")?;
+                nir::type_computations::charge_term(&signature, &mut self.fuel)
+                    .map_err(|e| e.to_string())?;
+                children.push(signature.clone());
+                self.callable_identities.push(iir::CallableIdentity {
+                    key: iir::InstanceKey {
+                        declaration: *declaration,
+                        arguments: arguments.clone(),
+                    },
+                    signature,
+                });
+                if let Some(function) = self
+                    .package
+                    .functions
+                    .iter()
+                    .find(|f| f.declaration == *declaration)
+                {
+                    let binders = self.input_binders(&function.type_parameters);
+                    self.formation_requirements_with_parameters(
+                        &function.requirements,
+                        &binders,
+                        arguments,
+                    )?;
+                    for capability in &function.capabilities {
+                        let bound = capability
+                            .instantiate_parameters(&binders, arguments)
+                            .map_err(|e| e.to_string())?;
+                        self.queue
+                            .push_back(Task::Interface(bound.interface_instance(), bound.subject));
+                    }
+                }
+                children.extend(arguments.iter().cloned());
+            }
             Term::Nominal {
                 declaration,
                 arguments,
@@ -2502,7 +2557,7 @@ impl Builder<'_> {
                         .find(|h| h.declaration == *head)
                         .ok_or("IIR normal-form type has no head declaration")?;
                     descriptor
-                        .check_arguments_in_scope_with_collections_budgeted_in(
+                        .check_arguments_in_scope_with_callables_budgeted_in(
                             arguments,
                             |head| {
                                 self.package.normal_forms.iter().any(|metadata| {
@@ -2525,6 +2580,9 @@ impl Builder<'_> {
                                 )
                             },
                             |_, _| false,
+                            |id, args, frames, fuel| {
+                                self.world.callable_signature(id, args, frames, fuel)
+                            },
                             &[],
                             &mut self.fuel,
                             self.package.target,
