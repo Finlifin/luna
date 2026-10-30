@@ -6930,3 +6930,37 @@ Validation from /home/fin/luna:
   exit 0, 133 source tests passed; `/tmp/luna-tools-5yvgw75w/result.json`.
 
 No full workspace test suite was run.
+
+
+## Contextual Tuple construction shares the admitted-list writer (2026-10-31)
+
+The VM no longer constructs a compact Type-list directly when contextual
+argument evaluation delivers a Tuple type. It retrieves the Tuple head's
+single value-input domain, checks the existing registered list layout, and
+freezes the collected values through `freeze_admitted_list` with the current
+invocation budget. The resulting application still passes through
+`complete_normal_type`, including the inner head's formation requirements.
+Headless legacy syntax retains its existing structural tuple behavior.
+
+The contextual-input regression now covers empty and populated tuples under
+two different registered List identities and both input evaluation orders.
+It continues to reject violated inner formation requirements and unregistered
+Tuple heads. No runtime effects are evaluated by the freezing step, and no
+normal-form head body is unfolded. This removes another independent writer;
+it does not change the shared encoder's legacy Type-list storage convention.
+
+Validation from /home/fin/luna:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --no-fail-fast`:
+  exit 0, 531 passed; `/tmp/luna-tools-ej30gjsx/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0; `/tmp/luna-tools-3z04vs6g/result.json`; `git diff --check` passed.
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test normal_form_inference --test comptime_clause_inputs --test type_spreads --no-fail-fast`:
+  exit 0, 143 passed; `/tmp/luna-tools-z9u24_2t/result.json`.
+
+No full workspace test suite was run.
+
+Public-library validation on the final implementation:
+`python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
+exit 0, five native tests passed; `/tmp/luna-tools-_7shvh4h/result.json`.

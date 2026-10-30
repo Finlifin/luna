@@ -3469,7 +3469,38 @@ impl<'a> Interpreter<'a> {
     ) -> Result<Value, Error> {
         match head {
             Some(head) => {
-                self.complete_normal_type(head, vec![Term::TypeListValue(elements)], source)
+                let metadata = *self
+                    .normal_forms
+                    .get(&head)
+                    .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
+                let [parameter] = metadata.parameters.as_slice() else {
+                    return Err(self.failure(ErrorKind::Type, Some(source)));
+                };
+                if metadata.role != nir::normal_forms::Role::Tuple
+                    || parameter.kind != nir::normal_forms::Kind::Value
+                    || !self.is_type_list_input(&parameter.ty)
+                {
+                    return Err(self.failure(ErrorKind::Type, Some(source)));
+                }
+                let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+                let mut remaining = before;
+                let value = nir::comptime_values::freeze_admitted_list(
+                    &parameter.ty,
+                    elements,
+                    &mut remaining,
+                );
+                self.budget.steps -= (before - remaining) as u64;
+                let value = value.map_err(|error| {
+                    self.failure(
+                        if error == nir::comptime_values::Error::Budget {
+                            ErrorKind::StepsExhausted
+                        } else {
+                            ErrorKind::Type
+                        },
+                        Some(source),
+                    )
+                })?;
+                self.complete_normal_type(head, vec![value], source)
             }
             None => Ok(Value::Type(Term::Tuple(elements))),
         }

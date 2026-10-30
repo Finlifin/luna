@@ -397,47 +397,56 @@ fn contextual_tuple_types_preserve_the_head_before_and_after_their_context_arriv
         parameters: vec![],
         result: Box::new(ty(P::Type)),
     };
-    for order in [vec![0, 1], vec![1, 0]] {
-        package.functions[0].body.kind = K::NormalFormType {
-            head: id(4),
-            plan: Some(NormalFormInputPlan {
-                preparations: vec![],
-                order,
-                bindings: vec![
-                    LocalId { owner: 3, index: 1 },
-                    LocalId { owner: 3, index: 2 },
-                ],
-            }),
-            arguments: vec![
-                type_input(ty(P::Type)),
-                NormalFormArgument::Tuple {
-                    source,
-                    type_head: Some(id(2)),
-                    items: vec![type_input(ty(P::Bool)), type_input(ty(P::U8))],
-                },
-            ],
-        };
-        assert!(package.functions[0].body.to_string().contains("(type-head"));
-        let expected = Value::Type(Term::NormalForm {
-            head: id(4),
-            sort: Sort::Type,
-            arguments: vec![ty(P::Type), tuple_type(vec![ty(P::Bool), ty(P::U8)])],
-        });
-        let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
-        assert_eq!(vm.invoke(id(3), vec![]).unwrap(), expected);
+    for list_identity in [id(1), id(7)] {
+        let mut package = package.clone();
+        package.normal_forms[0].declaration = list_identity;
+        if let Term::NormalForm { head, .. } = &mut package.normal_forms[1].parameters[0].ty {
+            *head = list_identity;
+        }
+        for elements in [vec![], vec![ty(P::Bool), ty(P::U8)]] {
+            for order in [vec![0, 1], vec![1, 0]] {
+                package.functions[0].body.kind = K::NormalFormType {
+                    head: id(4),
+                    plan: Some(NormalFormInputPlan {
+                        preparations: vec![],
+                        order,
+                        bindings: vec![
+                            LocalId { owner: 3, index: 1 },
+                            LocalId { owner: 3, index: 2 },
+                        ],
+                    }),
+                    arguments: vec![
+                        type_input(ty(P::Type)),
+                        NormalFormArgument::Tuple {
+                            source,
+                            type_head: Some(id(2)),
+                            items: elements.iter().cloned().map(type_input).collect(),
+                        },
+                    ],
+                };
+                assert!(package.functions[0].body.to_string().contains("(type-head"));
+                let expected = Value::Type(Term::NormalForm {
+                    head: id(4),
+                    sort: Sort::Type,
+                    arguments: vec![ty(P::Type), tuple_type(elements.clone())],
+                });
+                let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+                assert_eq!(vm.invoke(id(3), vec![]).unwrap(), expected);
 
-        // A contextual Tuple construction must enforce the inner head's
-        // formation contract, not just the surrounding normal-form contract.
-        let mut denied = package.clone();
-        denied.normal_forms[1]
-            .requirements
-            .push(TypePredicate::Equal(ty(P::Bool), ty(P::U8)));
-        let mut vm = Interpreter::new(&denied, Budget::default()).unwrap();
-        assert!(vm.invoke(id(3), vec![]).is_err());
-        let mut unbound = package.clone();
-        unbound.normal_forms[1].role = nir::normal_forms::Role::Opaque;
-        let mut vm = Interpreter::new(&unbound, Budget::default()).unwrap();
-        assert!(vm.invoke(id(3), vec![]).is_err());
+                // A contextual Tuple construction must enforce the inner head's
+                // formation contract, not just the surrounding normal-form contract.
+                let mut denied = package.clone();
+                denied.normal_forms[1]
+                    .requirements
+                    .push(TypePredicate::Equal(ty(P::Bool), ty(P::U8)));
+                let mut vm = Interpreter::new(&denied, Budget::default()).unwrap();
+                assert!(vm.invoke(id(3), vec![]).is_err());
+                let mut unbound = package.clone();
+                unbound.normal_forms[1].role = nir::normal_forms::Role::Opaque;
+                let mut vm = Interpreter::new(&unbound, Budget::default()).unwrap();
+                assert!(vm.invoke(id(3), vec![]).is_err());
+            }
+        }
     }
 }
 
