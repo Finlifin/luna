@@ -5683,3 +5683,29 @@ Validation from `/home/fin/luna`, exit 0:
   `/tmp/luna-tools-mnswg9mz/result.json`; `git diff --check` passed.
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes complete_shipped_sysroot_invokes_comptime_qualified_type_traits`:
   real sysroot invocation passed; `/tmp/luna-tools-fxcbgoen/result.json`.
+
+## Return unused member-discovery fuel (2026-10-31)
+
+Member discovery now uses the capability world's existing metered resolver
+rather than discarding a fixed 10,000-step reservation per capability query.
+Receiver-interface inference exposes a metered API as well; its old by-value
+entrypoint delegates to the same implementation. Validation, substitution and
+failure paths debit the shared allowance, and the caller receives unused fuel.
+Failure cannot reset the allowance or be reclassified as an absent candidate.
+
+Receiver head matching still reserves a bounded subquery (half its remaining
+allowance), and the underlying capability solver retains bounded candidate
+allowances. This change removes the extra discovery-layer reservation waste;
+it does not claim exact instruction-level accounting throughout the solver.
+The earlier pending-export recovery gap is unaffected.
+
+Validation from `/home/fin/luna`, exit 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution -p luna --test receiver_sources --test trait_phases`:
+  10 receiver discovery tests and 63 trait phase/source tests passed;
+  `/tmp/luna-tools-lrk19moy/result.json`. The new tests verify unused fuel,
+  charged unsuccessful inference, zero-budget Pending, and eight simple
+  competing sources reaching the real ambiguity diagnostic instead of an
+  artificial unresolved result from repeated fixed reservations.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  `/tmp/luna-tools-ryf9g3oa/result.json`; `git diff --check` passed.

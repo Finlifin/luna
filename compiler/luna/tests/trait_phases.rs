@@ -1345,3 +1345,24 @@ fn implicit_associated_noncallable_does_not_fall_back_to_ordinary_method() {
         "{failure}"
     );
 }
+
+#[test]
+fn concrete_source_search_retains_budget_for_multiple_small_candidates() {
+    let mut source = String::from("struct Subject {}\n");
+    for i in 0..8 {
+        source.push_str(&format!(
+            "
+            pure comptime trait Protocol{i} {{comptime fn read(self)->bool;}}
+            comptime impl Protocol{i} for Subject {{comptime fn read(self)->bool {{true}}}}
+        "
+        ));
+    }
+    source.push_str("comptime fn run()->bool {Subject{}.read()}");
+    let failure = compile(&source, Emit::Nir)
+        .err()
+        .expect("eight distinct sources");
+    assert!(
+        failure.contains("ambiguous visible trait member"),
+        "{failure}"
+    );
+}

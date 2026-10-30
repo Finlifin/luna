@@ -146,18 +146,19 @@ impl Checker<'_, '_> {
                     {
                         continue;
                     }
-                    let allowance = Budget {
+                    let mut allowance = Budget {
                         steps: budget.steps.min(10_000),
                         ..budget
                     };
-                    budget.steps -= allowance.steps;
-                    let inferred = head.infer_interface_from_subject(
+                    let reserved = allowance.steps;
+                    let inferred = head.infer_interface_from_subject_metered(
                         subject,
                         &self.context,
-                        allowance,
+                        &mut allowance,
                         self.implementation_index.parameter_domains(),
                         Some(self.implementation_index.nominal_layouts()),
                     );
+                    budget.steps -= reserved - allowance.steps;
                     let source = match inferred {
                         Ok(source) => source,
                         Err(
@@ -194,13 +195,8 @@ impl Checker<'_, '_> {
                     if inherited.is_empty() {
                         continue;
                     }
-                    let allowance = Budget {
-                        steps: budget.steps.min(10_000),
-                        ..budget
-                    };
-                    budget.steps -= allowance.steps;
                     let resolution = self
-                        .resolve_trait_capability(&source, subject, allowance)
+                        .resolve_trait_capability_metered(&source, subject, &mut budget)
                         .map_err(|message| error(span, message))?;
                     match resolution.selection {
                         crate::implementation::Selection::Selected(_) => {

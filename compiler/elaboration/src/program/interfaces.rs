@@ -2774,6 +2774,14 @@ impl Checker<'_, '_> {
         subject: &Term,
         budget: Budget,
     ) -> Result<crate::implementation::TypeResolution, String> {
+        self.resolve_trait_capability_metered(interface, subject, &mut { budget })
+    }
+    pub(super) fn resolve_trait_capability_metered(
+        &self,
+        interface: &n::InterfaceInstance,
+        subject: &Term,
+        budget: &mut Budget,
+    ) -> Result<crate::implementation::TypeResolution, String> {
         let assumptions = self.capability_assumptions();
         crate::capabilities::World {
             index: &self.implementation_index,
@@ -2782,7 +2790,7 @@ impl Checker<'_, '_> {
             assumptions: &assumptions,
             context: &self.context,
         }
-        .resolve_instance(interface, subject, budget)
+        .resolve_instance_metered(interface, subject, budget)
         .map(|r| r.types)
     }
     pub(super) fn resolve_inherent_capability(

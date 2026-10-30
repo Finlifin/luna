@@ -495,7 +495,26 @@ impl ImplementationHead {
         &self,
         subject: &Term,
         context: &Context,
-        mut budget: Budget,
+        budget: Budget,
+        domains: &BTreeMap<DeclarationId, Term>,
+        layouts: Option<&nir::program::Package>,
+    ) -> Result<nir::program::InterfaceInstance, TypeAssessment> {
+        self.infer_interface_from_subject_metered(
+            subject,
+            context,
+            &mut { budget },
+            domains,
+            layouts,
+        )
+    }
+
+    /// Return unused discovery fuel, including on failure. Receiver matching
+    /// still reserves its bounded subquery allowance; it does not report work.
+    pub fn infer_interface_from_subject_metered(
+        &self,
+        subject: &Term,
+        context: &Context,
+        budget: &mut Budget,
         domains: &BTreeMap<DeclarationId, Term>,
         layouts: Option<&nir::program::Package>,
     ) -> Result<nir::program::InterfaceInstance, TypeAssessment> {
@@ -506,9 +525,13 @@ impl ImplementationHead {
             .steps
             .checked_sub(self.type_parameters.len())
             .ok_or_else(|| {
+                budget.steps = 0;
                 TypeAssessment::Pending("interface discovery budget exhausted".into())
             })?;
-        budget.steps = validate(self, subject, &[], budget).map_err(TypeAssessment::Pending)?;
+        budget.steps = validate(self, subject, &[], *budget).map_err(|reason| {
+            budget.steps = 0;
+            TypeAssessment::Pending(reason)
+        })?;
         // Match a local receiver projection of the head. Its incomplete proof
         // never escapes: retaining the original argument equations would turn
         // the values we are trying to discover into assumed query inputs.
@@ -529,7 +552,7 @@ impl ImplementationHead {
             context,
             Budget {
                 steps: matching_steps,
-                ..budget
+                ..*budget
             },
             domains,
             layouts,

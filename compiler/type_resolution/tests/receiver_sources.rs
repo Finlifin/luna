@@ -233,3 +233,52 @@ fn malformed_interface_output_cannot_escape_receiver_discovery() {
         [ty(Primitive::Bool)]
     );
 }
+
+#[test]
+fn metered_discovery_returns_unused_fuel_and_charges_failed_queries() {
+    let candidate = head(Term::Optional(Box::new(input(1))), &[1], vec![input(1)]);
+    let subject = Term::Optional(Box::new(ty(Primitive::Bool)));
+    let mut budget = Budget {
+        steps: 10_000,
+        ..Budget::default()
+    };
+    let found = candidate
+        .infer_interface_from_subject_metered(
+            &subject,
+            &Context::default(),
+            &mut budget,
+            &BTreeMap::new(),
+            None,
+        )
+        .unwrap();
+    assert_eq!(found.arguments, [ty(Primitive::Bool)]);
+    assert!(budget.steps > 0 && budget.steps < 10_000);
+    let mut empty = Budget {
+        steps: 0,
+        ..Budget::default()
+    };
+    assert!(matches!(
+        candidate.infer_interface_from_subject_metered(
+            &subject,
+            &Context::default(),
+            &mut empty,
+            &BTreeMap::new(),
+            None,
+        ),
+        Err(TypeAssessment::Pending(_))
+    ));
+    assert_eq!(empty.steps, 0);
+    let unresolved = head(Term::Optional(Box::new(input(1))), &[1, 2], vec![input(2)]);
+    let before = budget.steps;
+    assert!(matches!(
+        unresolved.infer_interface_from_subject_metered(
+            &subject,
+            &Context::default(),
+            &mut budget,
+            &BTreeMap::new(),
+            None,
+        ),
+        Err(TypeAssessment::Pending(_))
+    ));
+    assert!(budget.steps < before);
+}
