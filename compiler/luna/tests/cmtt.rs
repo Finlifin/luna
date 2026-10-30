@@ -10916,3 +10916,35 @@ fn contextual_data_trait_calls_execute_default_bodies_and_public_preconditions()
     let failure = support::compile_with_protocols(&wrong, &Default::default()).unwrap_err();
     assert!(failure.contains("precondition"), "{failure}");
 }
+
+#[test]
+#[ignore = "code generator signatures do not yet bind ordinary comptime Type inputs"]
+fn generic_code_defaults_preserve_expression_context_and_pattern_outputs() {
+    let source = "typealias Type = .Type'builtin;
+        comptime fn identity_code(comptime T:Type)-><x:T|-T> {'(x)}
+        comptime fn forward(comptime T:Type, .code:<x:T|-T> = identity_code(T))-><x:T|-T> {code}
+        comptime fn binding_code(comptime T:Type)-><T -| value:T> {'<value>}
+        comptime fn pattern_forward(comptime T:Type, .code:<T -| value:T> = binding_code(T))-><T -| value:T> {code}
+        fn pick(comptime T:Type, item:T)->T {
+            let selected=~[x=item]<forward(T)>;
+            let ~<pattern_forward(T)> = selected;
+            value
+        }
+        fn run()->bool {pick(bool,true) and not pick(bool,false)}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn clause_generic_code_defaults_preserve_context_and_outputs() {
+    let source = "comptime fn identity_code()-><x:T|-T> where T {'(x)}
+        comptime fn forward(.code:<x:T|-T> = identity_code<T>())-><x:T|-T> where T {code}
+        comptime fn binding_code()-><T -| value:T> where T {'<value>}
+        comptime fn pattern_forward(.code:<T -| value:T> = binding_code<T>())-><T -| value:T> where T {code}
+        fn pick(item:T)->T where T {
+            let selected=~[x=item]<forward<T>()>;
+            let ~<pattern_forward<T>()> = selected;
+            value
+        }
+        fn run()->bool {pick<bool>(true) and not pick<bool>(false)}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}

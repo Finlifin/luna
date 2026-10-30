@@ -4,7 +4,7 @@ use super::*;
 impl Value {
     /// Restore types in an owned value graph, including executable closure data.
     /// Shared capture cells remain shared in the new graph, but never alias the
-    /// producer's cells. Cycles and contextual code need separate transport rules.
+    /// producer's cells. Code keeps its runtime identities; cycles need separate rules.
     pub fn restore_scoped_types(
         &self,
         parameters: &[nir::DeclarationParameter],
@@ -19,6 +19,7 @@ impl Value {
             steps,
             storage: BTreeMap::new(),
             closures: BTreeMap::new(),
+            codes: BTreeMap::new(),
         }
         .value(self, 0)
     }
@@ -31,6 +32,7 @@ struct Restore<'a> {
     steps: &'a mut u64,
     storage: BTreeMap<usize, Option<Storage>>,
     closures: BTreeMap<usize, Option<Arc<Closure>>>,
+    codes: BTreeMap<(u8, usize), CodeValue>,
 }
 impl Restore<'_> {
     fn spend(&mut self, count: usize) -> Result<(), ErrorKind> {
@@ -114,6 +116,49 @@ impl Restore<'_> {
             self.storage.insert(key, Some(restored.clone()));
             Value::Storage(restored)
         })
+    }
+
+    #[inline(never)]
+    fn code(&mut self, code: &CodeValue) -> Result<Value, ErrorKind> {
+        use nir::code_values::{ExpressionCode, PatternCode};
+        let key = match code {
+            CodeValue::Expression(code) => (0, Arc::as_ptr(code) as usize),
+            CodeValue::Pattern(code) => (1, Arc::as_ptr(code) as usize),
+        };
+        if let Some(restored) = self.codes.get(&key) {
+            return Ok(Value::Code(restored.clone()));
+        }
+        // Validate complete bodies and context membership before copying. This
+        // is transport evidence, never permission to execute or splice the code.
+        code.charge(self.steps)?;
+        let restored = match code {
+            CodeValue::Expression(code) => CodeValue::Expression(Arc::new(ExpressionCode {
+                body: Some(self.body(code.body.as_ref().ok_or(ErrorKind::Unsupported)?)?),
+                result: self.ty(&code.result)?,
+                context: code
+                    .context
+                    .iter()
+                    .map(|(id, ty)| Ok((*id, self.ty(ty)?)))
+                    .collect::<Result<_, ErrorKind>>()?,
+                ports: code.ports.clone(),
+                defaults: code.defaults.clone(),
+            })),
+            CodeValue::Pattern(code) => {
+                let mut body = code.body.as_ref().ok_or(ErrorKind::Unsupported)?.clone();
+                body.rewrite_types(&mut |ty| self.ty(ty))?;
+                CodeValue::Pattern(Arc::new(PatternCode {
+                    body: Some(body),
+                    subject: self.ty(&code.subject)?,
+                    outputs: code
+                        .outputs
+                        .iter()
+                        .map(|(name, (id, ty))| Ok((name.clone(), (*id, self.ty(ty)?))))
+                        .collect::<Result<_, ErrorKind>>()?,
+                }))
+            }
+        };
+        self.codes.insert(key, restored.clone());
+        Ok(Value::Code(restored))
     }
 
     #[inline(never)]
@@ -256,10 +301,10 @@ impl Restore<'_> {
 
             Value::Closure(closure) => self.closure(closure, depth)?,
 
-            Value::Code(_)
-            | Value::Pointer(_)
-            | Value::ComptimeReference(_)
-            | Value::RuntimeTraitMethod(_) => return Err(ErrorKind::Unsupported),
+            Value::Code(code) => self.code(code)?,
+            Value::Pointer(_) | Value::ComptimeReference(_) | Value::RuntimeTraitMethod(_) => {
+                return Err(ErrorKind::Unsupported);
+            }
             value => {
                 self.spend(
                     value
@@ -390,6 +435,128 @@ mod tests {
         assert_eq!(a.environment[&slot], Value::Storage(restored.clone()));
         assert!(matches!(&closure.body.kind, K::TypeValue(ty) if ty == &rigid));
         assert_ne!(restored, &cell);
+    }
+
+    #[test]
+    fn code_restores_types_and_preserves_ports_defaults_and_output_identity() {
+        use nir::code_values::{ExpressionCode, PatternCode};
+        use nir::program::Pattern;
+        let (parameters, arguments) = inputs();
+        let rigid = Term::Rigid {
+            declaration: parameters[0].declaration,
+            sort: nir::Sort::Type,
+        };
+        let input = LocalId { owner: 1, index: 0 };
+        let output = LocalId { owner: 1, index: 1 };
+        let external = LocalId { owner: 2, index: 0 };
+        let body = Arc::new(Expr {
+            source: SourceRange { start: 0, end: 1 },
+            ty: rigid.clone(),
+            kind: K::Local(input),
+        });
+        let expression = Arc::new(ExpressionCode {
+            body: Some(body.clone()),
+            result: rigid.clone(),
+            context: [(input, rigid.clone())].into_iter().collect(),
+            ports: [("value".into(), input)].into_iter().collect(),
+            defaults: [(input, external)].into_iter().collect(),
+        });
+        let pattern = Arc::new(PatternCode {
+            subject: rigid.clone(),
+            outputs: [("bound".into(), (output, rigid.clone()))]
+                .into_iter()
+                .collect(),
+            body: Some(Pattern::Observe {
+                binding: input,
+                inner: Box::new(Pattern::Then {
+                    first: Box::new(Pattern::Wild),
+                    value: Box::new((*body).clone()),
+                    next: Box::new(Pattern::Binding {
+                        binding: output,
+                        inner: Box::new(Pattern::Wild),
+                    }),
+                }),
+            }),
+        });
+        let packet = Value::Tuple(vec![
+            Value::Code(CodeValue::Expression(expression.clone())),
+            Value::Code(CodeValue::Pattern(pattern.clone())),
+            Value::Code(CodeValue::Expression(expression.clone())),
+        ]);
+        let mut steps = 10000;
+        let Value::Tuple(values) = packet
+            .restore_scoped_types(&parameters, &arguments, &[], &mut steps)
+            .unwrap()
+        else {
+            panic!("tuple")
+        };
+        let [
+            Value::Code(CodeValue::Expression(a)),
+            Value::Code(CodeValue::Pattern(b)),
+            Value::Code(CodeValue::Expression(c)),
+        ] = values.as_slice()
+        else {
+            panic!("codes")
+        };
+        assert!(Arc::ptr_eq(a, c));
+        assert!(!Arc::ptr_eq(a, &expression));
+        assert_eq!(a.result, arguments[0]);
+        assert_eq!(a.context[&input], arguments[0]);
+        assert_eq!(a.ports, expression.ports);
+        assert_eq!(a.defaults, expression.defaults);
+        assert_eq!(a.body.as_ref().unwrap().ty, arguments[0]);
+        assert_eq!(b.subject, arguments[0]);
+        assert_eq!(b.outputs["bound"], (output, arguments[0].clone()));
+        let Pattern::Observe { inner, .. } = b.body.as_ref().unwrap() else {
+            panic!("observe")
+        };
+        let Pattern::Then { value, .. } = inner.as_ref() else {
+            panic!("then")
+        };
+        assert_eq!(value.ty, arguments[0]);
+        assert_eq!(expression.result, rigid);
+        assert_eq!(pattern.subject, rigid);
+        let used = 10000 - steps;
+        assert_eq!(
+            packet.restore_scoped_types(&parameters, &arguments, &[], &mut (used - 1)),
+            Err(ErrorKind::StepsExhausted)
+        );
+        assert!(
+            packet
+                .restore_scoped_types(&parameters, &arguments, &[], &mut used.clone())
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn code_transport_rejects_pending_bodies_and_invalid_ports() {
+        use nir::code_values::ExpressionCode;
+        let (parameters, arguments) = inputs();
+        for pending in [true, false] {
+            let code = Value::Code(CodeValue::Expression(Arc::new(ExpressionCode {
+                body: (!pending).then(|| {
+                    Arc::new(Expr {
+                        source: SourceRange { start: 0, end: 1 },
+                        ty: arguments[0].clone(),
+                        kind: K::Literal(nir::program::Literal::Bool(true)),
+                    })
+                }),
+                result: arguments[0].clone(),
+                context: BTreeMap::new(),
+                defaults: BTreeMap::new(),
+                ports: [("missing".into(), LocalId { owner: 1, index: 0 })]
+                    .into_iter()
+                    .collect(),
+            })));
+            assert_eq!(
+                code.restore_scoped_types(&parameters, &arguments, &[], &mut 1000),
+                Err(if pending {
+                    ErrorKind::Unsupported
+                } else {
+                    ErrorKind::Type
+                })
+            );
+        }
     }
 
     #[test]

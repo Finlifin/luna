@@ -34,7 +34,7 @@ impl fmt::Display for CodeValue {
 }
 
 impl CodeValue {
-    fn charge(&self, steps: &mut u64) -> Result<(), ErrorKind> {
+    pub(super) fn charge(&self, steps: &mut u64) -> Result<(), ErrorKind> {
         fn entry(steps: &mut u64, size: usize) -> Result<(), ErrorKind> {
             *steps = steps
                 .checked_sub(size as u64)

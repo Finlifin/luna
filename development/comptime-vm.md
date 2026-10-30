@@ -5847,3 +5847,48 @@ Validation from `/home/fin/luna`:
   `/tmp/luna-tools-rbjmw44o/result.json`.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
   passed, `/tmp/luna-tools-su7kr3pj/result.json`; git diff --check passed.
+
+## Scoped quoted-code payload transport (2026-10-31)
+
+VM scoped restoration now handles complete ExpressionCode and PatternCode
+witnesses. It substitutes expression bodies, runtime context/result domains,
+pattern subjects, output domains and embedded pattern observation expressions.
+Runtime LocalIds, explicit port names/default connections and successful pattern
+binding identities stay unchanged. Repeated references to the same code object
+reuse one restored witness within the result graph. The producer remains intact.
+
+This is transport, not a splice certificate: no code body executes, no runtime
+storage is synthesized, and code remains outside ordinary Type/value identities.
+The existing completeness/port checks run before cloning; phase, contextual
+substitution and resource checks still belong to consumers. Pending code bodies
+and malformed port mappings fail. Type substitution and copying share the caller
+budget, including failure and retry.
+
+A source probe uncovered a separate frontend gap. Both expression and pattern
+code generator signatures collect ordinary data inputs without installing an
+earlier `comptime T: Type` input in the dependent annotation telescope. The
+reproducer fails with `type annotation requires an earlier comptime Type
+parameter` before VM transport. The expected-success test
+`generic_code_defaults_preserve_expression_context_and_pattern_outputs` is
+explicitly ignored pending that implementation. It must not be counted as a
+working source feature. Relevant entrypoints are form_contextual_generator in
+program/cmtt/generators.rs and ensure_pattern_generator in patterns/generators.rs;
+fixing admission alone is insufficient without invocation-time dependent input
+substitution. Existing clause-generic generation remains operational.
+
+Validation from `/home/fin/luna`, exit 0 unless noted:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib scoped_restore`:
+  6 tests passed, including code metadata/body restoration, identity sharing,
+  invalid ports, pending bodies and budget failure/retry;
+  `/tmp/luna-tools-sr0vvsjd/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt generic_code_defaults`:
+  initial probe failed at the dependent annotation boundary (exit 101);
+  `/tmp/luna-tools-ubcrwv23/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt code_defaults`:
+  clause-generic expr/pattern defaults passed; the above ordinary-parameter
+  probe was explicitly ignored; `/tmp/luna-tools-c4rbgmqs/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt_phase_boundaries`:
+  all 3 tests passed, including the matrix of forbidden comptime storage in
+  runtime code interfaces; `/tmp/luna-tools-kkvt3ihu/result.json`.
+- Formatting: `/tmp/luna-tools-bolpp_64/result.json`; git diff --check passed.
