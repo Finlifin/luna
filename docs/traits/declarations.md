@@ -9,7 +9,7 @@ Trait 声明告诉调用者可以依赖什么。方法描述操作，关联项�
 ## 语法
 
 ~~~text
-trait_def -> trait id (:- expr)? clauses? { (assoc_decl | definition | statement)* }
+trait_def -> (pure comptime)? trait id (:- expr)? clauses? { (assoc_decl | definition | statement)* }
 assoc_decl -> assoc id(<parameter*>)?: expr (= default)? clauses?
 impl_trait_def -> comptime? impl expr for expr clauses? { (assoc_decl | definition | statement)* }
 trait_bound_decl_clause -> id :- expr
@@ -17,6 +17,12 @@ normal_form_head_application -> expr<argument*>
 ~~~
 
 Trait 内的方法可以只有签名，末尾使用分号；带默认主体的方法采用普通函数定义。属性和执行阶段见[两相](../comptime/the-comptime-phases-of-traits.md)。
+
+`pure comptime trait` 将整个接口限定为 comptime phase，`pure` 在这里表示 only，
+不表示方法纯度。关联项、方法和默认成员无需逐项添加 phase 属性；实现仍写
+`comptime impl`，需要在编译时执行的方法仍显式声明 `comptime fn`。普通 trait
+与 pure comptime trait 可以分别为同一类型提供同名方法；未限定的 comptime
+成员查找优先使用后者的合法来源，完整限制见上述两相章节。
 
 父接口和 trait bound 中 `:-` 右侧的 expr 可以组合多个约束，例如 `trait Report :- Reading + Named`、`where T :- Reading + Named`。这里复用表达式的 `+` 形式；否定约束写在子句中，例如 `requires not (T :- Disabled)`。
 

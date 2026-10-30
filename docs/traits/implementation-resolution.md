@@ -68,7 +68,9 @@ Pair<Box<T>, i32>               Pair<Box<◇>, i32>               2
 
 ### 名称来源
 
-实现精度仅在已经确定的接口来源内比较。两个不同 trait 的同名方法，不以实现头更精确者获胜。接收者视角和解引用路径的次序见[适配](../type/receiver-adaptation.md)。
+实现精度仅在已经确定的接口来源内比较。两个不同 trait 的同名方法，不以实现头更精确者获胜。
+
+未限定的 comptime 成员查找先按 [pure comptime 来源优先级](../comptime/the-comptime-phases-of-traits.md#同名方法的-comptime-来源优先级)确定接口来源；这是跨来源的阶段规则，不把较粗的 pure comptime 实现与另一 trait 的较精确实现放进同一个结构排序。来源已固定后，本章的未决、缺相和冲突处理照常适用。接收者视角和解引用路径的次序见[适配](../type/receiver-adaptation.md)。
 
 ## 常见示例
 

@@ -370,7 +370,7 @@ const_def -> const id (: expr)? = expr
 newtype_def -> newtype id(<parameter*>)? = expr
 typealias_def -> typealias id(<parameter*>)? = expr
 -- 无主体的签名声明以分号结束；函数类别与所在上下文决定其合法性。
-trait_def -> trait id (:- expr)? clauses? { (assoc_decl | definition | statement)* }
+trait_def -> (pure comptime)? trait id (:- expr)? clauses? { (assoc_decl | definition | statement)* }
 -- 父 trait 的 expr 同样接受 A + B + C；复用表达式组合，不限于单一 trait。
 assoc_decl -> assoc id(<parameter*>)?: expr (= expr)? clauses?
 impl_def -> comptime? impl expr clauses? { (definition | statement)* }

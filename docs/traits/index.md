@@ -11,7 +11,7 @@ Trait 是一种名义接口抽象，借鉴了 Haskell 类型类和 Rust trait �
 ## 语法
 
 ~~~text
-trait_def -> trait id (:- expr)? clauses? { (assoc_decl | definition | statement)* }
+trait_def -> (pure comptime)? trait id (:- expr)? clauses? { (assoc_decl | definition | statement)* }
 impl_trait_def -> comptime? impl expr for expr clauses? { (assoc_decl | definition | statement)* }
 impl_def -> comptime? impl expr clauses? { (definition | statement)* }
 derive_def -> comptime? derive expr for expr clauses?
@@ -45,7 +45,7 @@ dyn_cast -> expr.dyn(expr)
 | 哪个包可以添加实现，哪些重叠会冲突？ | [包归属与一致性](coherence.md) |
 | 实现依赖运行时对象时怎样绑定和传递？ | [替换与依赖交付](../type/substitution-inference.md) |
 | 成员怎样选择来源和适配接收者？ | [成员投影](../type/member-projection.md)、[接收者适配](../type/receiver-adaptation.md) |
-| Trait phase 与函数执行阶段有什么区别？ | [Trait 两相](../comptime/the-comptime-phases-of-traits.md) |
+| Trait 两相、pure comptime trait 与同名方法的阶段优先级是什么？ | [Trait 两相](../comptime/the-comptime-phases-of-traits.md) |
 | 怎样定义、指定和检查派生策略？ | [派生与策略](derivation.md) |
 | 怎样隐藏具体类型并保留可调用接口？ | [动态接口](dynamic-interfaces.md) |
 | 运算、字面量和 handler 怎样使用 trait？ | [语法协议与能力入口](protocols.md) |
@@ -55,6 +55,8 @@ dyn_cast -> expr.dyn(expr)
 调用者满足 trait 的要求，就应能使用其接口。实现不能增加接口没有要求调用者提供的前提、错误处理能力或效应处理能力，也不能削弱结果保证。实现中的额外依赖必须被合法封闭，或由接口已经表达的环境关系取得。
 
 成员来源在定义检查时固定。实例化可以确定该来源的具体实现和关联项，不重新选择另一个同名接口。结构精度决定同一实现查询中候选的优先级；它不取代不同接口之间的名称消歧。
+
+未限定的 comptime 成员查找另有声明级规则：优先考虑 `pure comptime trait` 的合法实现来源，只有同层唯一才能选定；这不改变显式接口查询，也不允许按结构精度在两个不同 trait 之间选赢家。
 
 ## 常见示例
 
