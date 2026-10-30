@@ -186,3 +186,60 @@ fn malformed_operands_and_comparison_budgets_fail_without_fabricating_results() 
         Value::Bool(true)
     );
 }
+
+#[test]
+fn runtime_direct_calls_prove_residual_clauses_and_recover_after_rejection() {
+    use nir::program::{Literal, TraitRequirement, TypePredicate};
+    let runtime = |local, requirement| {
+        let mut f = function(local, expr(p(P::Bool), K::Literal(Literal::Bool(true))));
+        f.phase = FunctionPhase::Runtime;
+        f.requirements = vec![requirement];
+        f
+    };
+    let mut missing_trait = runtime(4, TypePredicate::Bool(true));
+    missing_trait.capabilities.push(TraitRequirement {
+        interface: id(90),
+        interface_arguments: vec![],
+        subject: p(P::Bool),
+    });
+    let mut generic = runtime(5, TypePredicate::Bool(true));
+    generic.type_parameters.push(id(91));
+    let package = Package {
+        functions: vec![
+            runtime(0, TypePredicate::Equal(p(P::Bool), p(P::Bool))),
+            runtime(1, TypePredicate::Bool(false)),
+            runtime(
+                2,
+                TypePredicate::Equal(
+                    Term::Rigid {
+                        declaration: id(92),
+                        sort: nir::Sort::Type,
+                    },
+                    p(P::Bool),
+                ),
+            ),
+            runtime(3, TypePredicate::Equal(p(P::Bool), p(P::U8))),
+            missing_trait,
+            generic,
+        ],
+        ..Default::default()
+    };
+    let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+    for (local, expected) in [
+        (1, ErrorKind::TypeContractRejected),
+        (2, ErrorKind::TypeContractUnresolved),
+        // Without a supplied solver, distinct types do not manufacture a
+        // disequality proof; preserve the existing unknown result.
+        (3, ErrorKind::TypeContractUnresolved),
+        (4, ErrorKind::InvalidCallPlan),
+        (5, ErrorKind::Type),
+    ] {
+        assert_eq!(vm.invoke(id(local), vec![]).unwrap_err().kind, expected);
+        assert_eq!(vm.invoke(id(0), vec![]).unwrap(), Value::Bool(true));
+    }
+    let mut comptime = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    assert_eq!(
+        comptime.invoke(id(0), vec![]).unwrap_err().kind,
+        ErrorKind::PhaseMismatch
+    );
+}

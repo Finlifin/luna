@@ -253,3 +253,39 @@ test {
     let result = inspect_tuple_type_inline();
     assumes result;
 }
+
+trait TupleReady {
+    fn ready(self) -> bool;
+}
+impl TupleReady for bool {
+    fn ready(self) -> bool { self }
+}
+impl TupleReady for u8 {
+    fn ready(self) -> bool { self == 7 }
+}
+
+fn tuple_ready(values: Tuple<.Es = [A, B]>) -> bool
+where A :- TupleReady, B :- TupleReady
+{
+    var result = false;
+    inline for (index, element) in values'tuple_enumerate {
+        result = element.ready();
+    }
+    result
+}
+
+fn tuple_shape(value: T)
+where T, A, B, requires T == Tuple<.Es = [A, B]>
+{
+    inline for (index, element) in value'tuple_enumerate {
+        let held = element;
+    }
+}
+
+test {
+    let number: u8 = 7;
+    let forward = tuple_ready((false, number));
+    let reverse = tuple_ready((number, false));
+    tuple_shape<Tuple<.Es = [bool, u8]>, bool, u8>((true, number));
+    assumes forward and not reverse;
+}

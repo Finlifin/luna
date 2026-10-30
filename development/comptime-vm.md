@@ -7278,3 +7278,48 @@ Validation in `/home/fin/luna`:
 
 The two baseline generic tuple-iteration VM failures remain follow-up work;
 no full language suite was run.
+
+### Runtime reference invocation checks residual formation clauses
+
+The two generic tuple-iteration failures above came from direct runtime
+invocation, not tuple projection or pattern selection. Both generated `walk`
+bodies had no remaining type parameters. One retained the now-concrete
+`Tuple<bool, u8> == Tuple<bool, u8>` requirement; the other retained concrete
+Ready capabilities for bool and u8. `prepare_invocation` rejected every
+runtime function with any retained requirement or capability before checking
+that evidence.
+
+Direct runtime invocation now uses ordinary callable admission for constrained
+bodies and closes/checks invocation requirements after input binding. The VM
+uses its own dispatch/type-contract evidence; it does not erase clauses or
+assume that a source-produced body is authorized. Uninstantiated generic
+functions still fail, missing trait evidence still fails, false requirements
+are rejected, unknown requirements remain unresolved, and comptime invocation
+still cannot execute runtime bodies. Unconstrained direct calls avoid the
+additional callable-admission step.
+
+Regression tests invoke rejected and accepted functions repeatedly in the
+same VM to check recovery. Distinct primitive types without a supplied type
+solver still produce Unknown, consistent with the pre-existing equality
+contract; the new test does not manufacture a disequality proof. The two
+original generic tuple-iteration tests now pass unchanged, including their
+call-order and IIR-instantiation assertions. The sysroot example exercises
+trait-constrained tuple iteration in both field orders and a generic tuple
+shape equality.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor`:
+  532 passed, exit 0; `/tmp/luna-tools-fk7pyd98/result.json`. This was before
+  retaining the unconstrained-call fast path; the constrained path is unchanged.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor -p luna --test type_equality --test inline_control --test cmtt_type_inputs --test comptime_inline_loops --test normal_patterns --no-fail-fast`:
+  final implementation passed all selected groups, exit 0;
+  `/tmp/luna-tools-ksgq1_s8/result.json`.
+
+Temporary tracing used to locate the failure was removed. No full language
+suite was run; canonical collection representation migration is still pending.
+- Final selected source/VM groups: 330 tests passed in total.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
+  14 native tests passed, exit 0; `/tmp/luna-tools-tdfmpkk2/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-42j58g6_/result.json`; `git diff --check` passed.

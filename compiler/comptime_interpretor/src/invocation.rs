@@ -656,12 +656,16 @@ impl<'a> Interpreter<'a> {
                     .functions
                     .get(id)
                     .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;
-                if !definition.type_parameters.is_empty()
-                    || (!self.comptime_only
-                        && (!definition.requirements.is_empty()
-                            || !definition.capabilities.is_empty()))
-                {
+                if !definition.type_parameters.is_empty() {
                     return Err(self.failure(ErrorKind::Type, None));
+                }
+                // A residual runtime body can retain closed formation clauses.
+                // Prove them against this VM's dispatch world rather than
+                // rejecting every constrained direct function or erasing them.
+                if !self.comptime_only
+                    && (!definition.requirements.is_empty() || !definition.capabilities.is_empty())
+                {
+                    self.admit_callable_identity(*id, &[], definition.body.source)?;
                 }
                 (
                     definition.parameters.as_slice(),
@@ -698,7 +702,7 @@ impl<'a> Interpreter<'a> {
             &mut environment,
             body.source,
         )?;
-        if self.comptime_only {
+        if self.comptime_only || matches!(function, Value::Function(_)) {
             if let Some(id) = origin {
                 let definition = self
                     .invocation_definition(id, &function)
