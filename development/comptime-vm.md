@@ -4381,3 +4381,42 @@ Validation in /home/fin/luna:
   exit 0, five selected tests, `/tmp/luna-tools-_6svghld/result.json`.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
   exit 0, `/tmp/luna-tools-hipxfp2v/result.json`; `git diff --check`: exit 0.
+
+### Compile dynamic function and trait instances
+
+ComptimeFunctionInstance now lowers to admission, ordinary linear clause-input
+code, and instance completion. The immutable descriptor contains declaration and
+packet/result types, never executable child expressions or invocation values.
+Admission runs before clause effects; completion validates current packet values
+and uses the existing declaration-domain and requirement checks on cache hits.
+The tree and bytecode paths share admission and packet residualization.
+
+Direct dynamic trait callees retain their interface identity until BeginCall.
+This preserves interface programs, declaration-side parameter bindings and the
+frozen clause inputs used to specialize defaults. Stored method values retain
+the existing contract-erasure restrictions. Clause return/control transfer skips
+completion and invocation. New descriptors and suspended instance state have
+S-expression dumps.
+
+A source test exposed an existing elaboration boundary: saving a callable with
+optional parameters as an ordinary function value still reports missing parameter
+protocol metadata. This change does not fix that boundary. Source tests separately
+exercise ordinary stored instances and direct dynamic calls with optional inputs;
+no source-admission check was weakened. Another initial test incorrectly required
+an arbitrary explicit argument to equal a clause input; its interface contract was
+corrected to describe the actual returned argument.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_traits --test dynamic_trait_clauses --test comptime_clause_inputs`:
+  exit 0, 61 tests, `/tmp/luna-tools-3hhhbu3l/result.json`. New source tests
+  assert compiled entry counts, not just computed values.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-0yie8zjn/result.json`, including effect-free rejection
+  of malformed instance metadata in both execution routes and recovery.
+  An earlier unit build exposed a private test helper; its visibility is now
+  shared within the crate under cfg(test), without changing the runtime API.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test library_hash --test library_comptime_comparison`:
+  exit 0, `/tmp/luna-tools-btm_gg6m/result.json`; library comparisons and
+  hash behavior remain valid, including compiled hash wrapper/body coverage.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0, `/tmp/luna-tools-duzcp96s/result.json`; `git diff --check`: exit 0.

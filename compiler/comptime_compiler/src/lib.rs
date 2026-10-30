@@ -3,6 +3,7 @@
 pub mod bit_updates;
 pub mod bits;
 pub mod closures;
+pub mod instances;
 pub mod leaf_inputs;
 pub mod lists;
 pub mod normal_types;
@@ -39,6 +40,16 @@ impl fmt::Display for ErrorConversion {
 
 #[derive(Debug)]
 pub enum Op {
+    BeginInstance {
+        destination: Register,
+        constructor: Arc<instances::Constructor>,
+    },
+    FinishInstance {
+        destination: Register,
+        packet: Register,
+        constructor: Arc<instances::Constructor>,
+        direct: bool,
+    },
     PreparePredicate {
         valid: bool,
     },
@@ -443,6 +454,19 @@ impl fmt::Display for Program {
                 instruction.source.start, instruction.source.end
             )?;
             match &instruction.op {
+                Op::BeginInstance {
+                    destination,
+                    constructor,
+                } => write!(f, "(begin-instance %{destination} {constructor})")?,
+                Op::FinishInstance {
+                    destination,
+                    packet,
+                    constructor,
+                    direct,
+                } => write!(
+                    f,
+                    "(finish-instance %{destination} (packet %{packet}) (direct {direct}) {constructor})"
+                )?,
                 Op::PreparePredicate { valid } => write!(f, "(prepare-predicate {valid})")?,
                 Op::CheckPredicate {
                     value,
@@ -992,6 +1016,7 @@ impl fmt::Display for Program {
 
 enum Work<'a> {
     Expression(&'a Expr, Register),
+    DirectCallee(&'a Expr, Register),
     Emit(SourceRange, Op),
     Label(usize),
     EndLoop(LocalId),
@@ -1129,6 +1154,7 @@ fn compile_root<'a>(
         }
     };
     while let Some(task) = work.pop() {
+        let direct_callee = matches!(&task, Work::DirectCallee(..));
         *fuel = fuel.checked_sub(1).ok_or(Error::Budget(source))?;
         match task {
             Work::Emit(source, op) => instructions.push(Instruction { source, op }),
@@ -1150,7 +1176,7 @@ fn compile_root<'a>(
                     op: Op::LeaveScope,
                 });
             }
-            Work::Expression(expr, dst) => {
+            Work::Expression(expr, dst) | Work::DirectCallee(expr, dst) => {
                 let source = expr.source;
                 let mut fresh = || {
                     let slot = registers;
@@ -1193,6 +1219,34 @@ fn compile_root<'a>(
                     continue;
                 }
                 match &expr.kind {
+                    K::ComptimeFunctionInstance {
+                        declaration,
+                        subject,
+                    } => {
+                        let constructor = Arc::new(instances::Constructor {
+                            declaration: *declaration,
+                            input: copy_term(&subject.ty, fuel, source)?,
+                            output: copy_term(&expr.ty, fuel, source)?,
+                        });
+                        let packet = fresh();
+                        emit(
+                            &mut work,
+                            Op::FinishInstance {
+                                destination: dst,
+                                packet,
+                                constructor: constructor.clone(),
+                                direct: direct_callee,
+                            },
+                        );
+                        work.push(Work::Expression(subject, packet));
+                        emit(
+                            &mut work,
+                            Op::BeginInstance {
+                                destination: dst,
+                                constructor,
+                            },
+                        );
+                    }
                     K::EnumName(_) | K::SymbolName(_) | K::TextQuery { .. } => {
                         use observations::{Kind as O, Observation};
                         let (kind, operand) = match &expr.kind {
@@ -1469,7 +1523,7 @@ fn compile_root<'a>(
                             },
                         );
                         if !matches!(callee.kind, K::TraitMethod { .. }) {
-                            work.push(Work::Expression(callee, target));
+                            work.push(Work::DirectCallee(callee, target));
                         }
                     }
                     K::Field { value, .. } | K::AnonymousField { value, .. } => {

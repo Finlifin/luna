@@ -136,7 +136,7 @@ impl Interpreter<'_> {
         Ok(value)
     }
 
-    fn bound_default_expression(
+    pub(super) fn bound_default_expression(
         &mut self,
         expression: &Expr,
         binders: &[nir::DeclarationParameter],
@@ -200,6 +200,119 @@ impl Interpreter<'_> {
         Ok((binders, arguments))
     }
 
+    pub(super) fn admit_dynamic_trait_instance(
+        &mut self,
+        declaration: DeclarationId,
+        input: &Term,
+        output: &Term,
+        source: SourceRange,
+    ) -> Result<Option<(DeclarationId, usize)>, Error> {
+        self.integer_operation(Some(source), |budget| budget.consume(1))?;
+        let Some(origin) = self.method_origins.get(&declaration) else {
+            return Ok(None);
+        };
+        let interface =
+            origin.ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(source)))?;
+        let (parameters, contract) = self
+            .method_contracts
+            .get(&(interface, declaration))
+            .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(source)))?;
+        if !self.comptime_only
+            || !contract.signature.is_comptime_callable()
+            || !output.is_comptime_callable()
+        {
+            return Err(self.failure(ErrorKind::PhaseMismatch, Some(source)));
+        }
+        let count = parameters.len();
+        let interface_count = count
+            .checked_sub(1 + contract.type_parameters.len())
+            .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(source)))?;
+        let Term::Tuple(domains) = input else {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        };
+        if domains.len() != count || count < 1 + interface_count {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        }
+        Ok(Some((interface, interface_count)))
+    }
+
+    pub(super) fn admit_dynamic_function_instance(
+        &self,
+        declaration: DeclarationId,
+        input: &Term,
+        output: &Term,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        if !self.comptime_only {
+            return Err(self.failure(ErrorKind::PhaseMismatch, Some(source)));
+        }
+        let definition = self
+            .functions
+            .get(&declaration)
+            .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source)))?;
+        if definition.phase != nir::program::FunctionPhase::Comptime
+            || !output.is_comptime_callable()
+        {
+            return Err(self.failure(ErrorKind::PhaseMismatch, Some(source)));
+        }
+        let Term::Tuple(domains) = input else {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        };
+        if domains.len() != definition.type_parameters.len() {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        }
+        Ok(())
+    }
+
+    // The tuple here is the NIR clause packet, not a language tuple-type rule.
+    // Current values are checked even when the resulting instance is cached.
+    pub(super) fn dynamic_instance_expression(
+        &mut self,
+        declaration: DeclarationId,
+        input: &Term,
+        output: &Term,
+        origin: Option<(DeclarationId, usize)>,
+        packet: Value,
+        source: SourceRange,
+    ) -> Result<Expr, Error> {
+        let (Term::Tuple(domains), Value::Tuple(values)) = (input, packet) else {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        };
+        if values.len() != domains.len() {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        }
+        self.integer_operation(Some(source), |budget| budget.consume(values.len()))?;
+        let mut arguments = Vec::with_capacity(values.len());
+        for (value, domain) in values.into_iter().zip(domains) {
+            if !self.has_type(&value, domain) {
+                return Err(self.failure(ErrorKind::Type, Some(source)));
+            }
+            arguments.push(self.residual_input_term(value, source)?);
+        }
+        let kind = if let Some((interface, count)) = origin {
+            if arguments.len() < 1 + count {
+                return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
+            }
+            K::TraitMethod {
+                interface,
+                member: declaration,
+                subject: arguments[0].clone(),
+                interface_arguments: arguments[1..1 + count].to_vec(),
+                method_arguments: arguments[1 + count..].to_vec(),
+            }
+        } else {
+            K::FunctionInstance {
+                declaration,
+                arguments,
+            }
+        };
+        Ok(Expr {
+            source,
+            ty: output.clone(),
+            kind,
+        })
+    }
+
     pub(super) fn prepare_dynamic_trait_instance(
         &mut self,
         expr: &Expr,
@@ -212,60 +325,25 @@ impl Interpreter<'_> {
         else {
             return Ok(PreparedTraitInstance::Unrelated);
         };
-        self.integer_operation(Some(expr.source), |budget| budget.consume(1))?;
-        let Some(origin) = self.method_origins.get(declaration) else {
+        let Some(origin) =
+            self.admit_dynamic_trait_instance(*declaration, &subject.ty, &expr.ty, expr.source)?
+        else {
             return Ok(PreparedTraitInstance::Unrelated);
         };
-        let interface =
-            origin.ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(expr.source)))?;
-        let member = *declaration;
-        let (parameters, contract) = self
-            .method_contracts
-            .get(&(interface, member))
-            .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(expr.source)))?;
-        if !self.comptime_only
-            || !contract.signature.is_comptime_callable()
-            || !expr.ty.is_comptime_callable()
-        {
-            return Err(self.failure(ErrorKind::PhaseMismatch, Some(expr.source)));
-        }
-        let count = parameters.len();
-        let interface_count = count
-            .checked_sub(1 + contract.type_parameters.len())
-            .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(expr.source)))?;
-        let Term::Tuple(domains) = &subject.ty else {
-            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-        };
-        if domains.len() != count || count < 1 + interface_count {
-            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-        }
-        let values = match self.eval(subject, environment)? {
-            Flow::Value(Value::Tuple(values)) => values,
-            Flow::Value(_) => return Err(self.failure(ErrorKind::Type, Some(expr.source))),
+        let packet = match self.eval(subject, environment)? {
+            Flow::Value(value) => value,
             flow => return Ok(PreparedTraitInstance::Control(flow)),
         };
-        if values.len() != domains.len() {
-            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-        }
-        self.integer_operation(Some(expr.source), |budget| budget.consume(values.len()))?;
-        let mut inputs = Vec::with_capacity(values.len());
-        for (value, domain) in values.into_iter().zip(domains) {
-            if !self.has_type(&value, domain) {
-                return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-            }
-            inputs.push(self.residual_input_term(value, expr.source)?);
-        }
-        Ok(PreparedTraitInstance::Ready(Expr {
-            source: expr.source,
-            ty: expr.ty.clone(),
-            kind: K::TraitMethod {
-                interface,
-                member,
-                subject: inputs[0].clone(),
-                interface_arguments: inputs[1..1 + interface_count].to_vec(),
-                method_arguments: inputs[1 + interface_count..].to_vec(),
-            },
-        }))
+        Ok(PreparedTraitInstance::Ready(
+            self.dynamic_instance_expression(
+                *declaration,
+                &subject.ty,
+                &expr.ty,
+                Some(origin),
+                packet,
+                expr.source,
+            )?,
+        ))
     }
 
     pub(super) fn eval_comptime_function_instance(
@@ -287,56 +365,21 @@ impl Interpreter<'_> {
         else {
             unreachable!()
         };
-        if !self.comptime_only {
-            return Err(self.failure(ErrorKind::PhaseMismatch, Some(expr.source)));
-        }
-        let definition = self
-            .functions
-            .get(declaration)
-            .copied()
-            .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(expr.source)))?;
-        if definition.phase != nir::program::FunctionPhase::Comptime
-            || !expr.ty.is_comptime_callable()
-        {
-            return Err(self.failure(ErrorKind::PhaseMismatch, Some(expr.source)));
-        }
-        let Term::Tuple(domains) = &subject.ty else {
-            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-        };
-        if domains.len() != definition.type_parameters.len() {
-            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-        }
+        self.admit_dynamic_function_instance(*declaration, &subject.ty, &expr.ty, expr.source)?;
         let packet = match self.eval(subject, environment)? {
             Flow::Value(value) => value,
             flow => return Ok(flow),
         };
-        let Value::Tuple(values) = packet else {
-            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-        };
-        if values.len() != domains.len() {
-            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-        }
-        self.integer_operation(Some(expr.source), |budget| budget.consume(values.len()))?;
-        let mut arguments = Vec::with_capacity(values.len());
-        for (value, domain) in values.into_iter().zip(domains) {
-            if !self.has_type(&value, domain) {
-                return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-            }
-            arguments.push(self.residual_input_term(value, expr.source)?);
-        }
-        // Instance creation validates declared domains and requirements on each
-        // evaluation, including cache hits. No partially admitted key is stored.
-        self.eval_function_instance(
-            &Expr {
-                source: expr.source,
-                ty: expr.ty.clone(),
-                kind: K::FunctionInstance {
-                    declaration: *declaration,
-                    arguments,
-                },
-            },
-            environment,
-        )
+        let instance = self.dynamic_instance_expression(
+            *declaration,
+            &subject.ty,
+            &expr.ty,
+            None,
+            packet,
+            expr.source,
+        )?;
+        // Revalidate declaration domains and requirements, including cache hits.
+        self.eval_function_instance(&instance, environment)
     }
 }
 
@@ -410,6 +453,66 @@ mod tests {
             },
         }
     }
+    #[test]
+    fn linear_instance_admission_precedes_effects_and_recovers() {
+        let package = package();
+        let trace = LocalId { owner: 2, index: 1 };
+        for compiled in [false, true] {
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            for valid in [false, true, false, true] {
+                let mut body = expression(&package);
+                let source = body.source;
+                let K::ComptimeFunctionInstance { subject, .. } = &mut body.kind else {
+                    unreachable!()
+                };
+                let packet = subject.as_ref().clone();
+                subject.kind = K::Block {
+                    statements: vec![Expr {
+                        source,
+                        ty: Term::Primitive(Primitive::Void),
+                        kind: K::Assign {
+                            place: nir::program::Place {
+                                root: trace,
+                                fields: vec![],
+                            },
+                            value: Box::new(Expr {
+                                source,
+                                ty: Term::Primitive(Primitive::Bool),
+                                kind: K::Literal(Literal::Bool(true)),
+                            }),
+                        },
+                    }],
+                    result: Some(Box::new(packet)),
+                };
+                if !valid {
+                    subject.ty = Term::Primitive(Primitive::Bool);
+                }
+                let mut env = Environment::from([
+                    (LocalId { owner: 2, index: 0 }, Value::Bool(true)),
+                    (trace, Value::Bool(false)),
+                ]);
+                let result = if compiled {
+                    let code = Arc::new(comptime_compiler::compile(&body, &mut 10000).unwrap());
+                    let dump = code.to_string();
+                    assert!(dump.contains("(begin-instance "));
+                    assert!(dump.contains("(finish-instance "));
+                    vm.execute_code(&code, &mut env)
+                } else {
+                    vm.eval(&body, &mut env)
+                };
+                if valid {
+                    assert!(matches!(result.unwrap(), Flow::Value(Value::Closure(_))));
+                } else {
+                    assert_eq!(result.unwrap_err().kind, ErrorKind::Type);
+                }
+                assert_eq!(
+                    vm.local_value(&env, trace, Some(source)).unwrap(),
+                    Value::Bool(valid)
+                );
+            }
+        }
+    }
+
     #[test]
     fn failed_input_never_populates_instance_cache_and_can_recover() {
         let package = package();

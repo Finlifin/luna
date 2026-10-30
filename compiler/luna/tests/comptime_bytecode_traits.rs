@@ -112,3 +112,75 @@ fn nested_interface_exits_keep_independent_entry_snapshots() {
         assert_eq!(vm.bytecode_invocations() - before, 3);
     }
 }
+
+#[test]
+fn dynamic_trait_instances_keep_interface_defaults_and_contracts_in_bytecode() {
+    let package = support::compile(
+        "trait Choose {
+            comptime fn choose(.value:bool=flag)->result:bool
+            where flag:bool, ensures result == value;
+        }
+        struct Host {}
+        impl Choose for Host {
+            comptime fn choose(input:bool)->bool where flag:bool {input}
+        }
+        comptime fn run(flag:bool)->bool {Host.as(Choose).choose<flag>()}
+        comptime fn overridden(flag:bool)->bool {Host.as(Choose).choose<flag>(.value=flag)}",
+    );
+    for name in ["run", "overridden"] {
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        for flag in [true, false, true] {
+            let before = vm.bytecode_invocations();
+            assert_eq!(
+                vm.invoke(support::id(&package, name), vec![Value::Bool(flag)])
+                    .unwrap(),
+                Value::Bool(flag)
+            );
+            assert_eq!(vm.bytecode_invocations() - before, 2, "{name}");
+        }
+    }
+    let mut forged = package.clone();
+    forged
+        .functions
+        .iter_mut()
+        .find(|f| f.name == "choose")
+        .unwrap()
+        .body
+        .kind = nir::program::ExprKind::Literal(nir::program::Literal::Bool(true));
+    let mut vm = Interpreter::for_comptime(&forged, Budget::default()).unwrap();
+    for flag in [false, true, false, true] {
+        let before = vm.bytecode_invocations();
+        let result = vm.invoke(support::id(&forged, "run"), vec![Value::Bool(flag)]);
+        if flag {
+            assert_eq!(result.unwrap(), Value::Bool(true));
+        } else {
+            assert_eq!(result.unwrap_err().kind, ErrorKind::ProgramContractRejected);
+        }
+        assert_eq!(vm.bytecode_invocations() - before, 2);
+    }
+}
+
+#[test]
+fn dynamic_ordinary_instances_freeze_inputs_and_specialize_defaults_in_bytecode() {
+    let package = support::compile(
+        "comptime fn choose(.value:bool=flag)->bool where flag:bool {value}
+        comptime fn select()->bool where flag:bool {flag}
+        comptime fn run()->bool {
+            var flag=true;
+            let first=select<flag>;
+            flag=false;
+            let second=select<flag>;
+            first() and not second() and not choose<flag>()
+        }
+        comptime fn early()->bool {choose<do {return true;}>()}",
+    );
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    for (name, count) in [("run", 4), ("early", 1), ("run", 4)] {
+        let before = vm.bytecode_invocations();
+        assert_eq!(
+            vm.invoke(support::id(&package, name), vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(vm.bytecode_invocations() - before, count, "{name}");
+    }
+}

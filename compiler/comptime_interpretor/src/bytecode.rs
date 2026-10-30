@@ -13,6 +13,8 @@ pub(super) struct Frame {
     interface: Option<Box<interface::InterfaceCall>>,
     waiting: Option<Waiting>,
     calls: BTreeMap<usize, PendingCall>,
+    instance_origins: BTreeMap<usize, Option<(DeclarationId, usize)>>,
+    instance_methods: BTreeMap<usize, Expr>,
     closures: BTreeMap<usize, PendingClosure>,
     bit_updates: BTreeMap<usize, (Arc<comptime_compiler::bit_updates::Plan>, usize, usize)>,
     normal_types: BTreeMap<usize, super::normal_types::Inputs>,
@@ -38,6 +40,7 @@ enum Waiting {
 struct PendingCall {
     callee: Value,
     normal_head: Option<DeclarationId>,
+    trait_defaults: Option<(Vec<nir::DeclarationParameter>, Vec<Term>)>,
     interface: Option<(nir::contracts::ProgramContract, Vec<LocalId>)>,
     arguments: Vec<Option<PreparedArgument>>,
     parameter_bindings: Vec<LocalId>,
@@ -137,7 +140,19 @@ impl fmt::Display for Frame {
         if let Some(staged) = &self.staged {
             write!(f, " {staged}")?;
         }
-        write!(f, " (normal-types")?;
+        write!(f, " (instance-origins")?;
+        for (slot, origin) in &self.instance_origins {
+            write!(f, " (%{slot}")?;
+            if let Some((interface, count)) = origin {
+                write!(f, " (interface {interface} {count})")?;
+            }
+            write!(f, ")")?;
+        }
+        write!(f, ") (instance-methods")?;
+        for (slot, method) in &self.instance_methods {
+            write!(f, " (%{slot} {method})")?;
+        }
+        write!(f, ") (normal-types")?;
         for (slot, inputs) in &self.normal_types {
             write!(f, " (%{slot} {inputs})")?;
         }
@@ -146,6 +161,13 @@ impl fmt::Display for Frame {
             write!(f, " ({id} (callee {})", call.callee)?;
             if let Some(head) = call.normal_head {
                 write!(f, " (normal-head {head})")?;
+            }
+            if let Some((binders, arguments)) = &call.trait_defaults {
+                write!(f, " (trait-defaults")?;
+                for (binder, argument) in binders.iter().zip(arguments) {
+                    write!(f, " ({} {argument})", binder.declaration)?;
+                }
+                write!(f, ")")?;
             }
             write!(f, " (arguments")?;
             for value in &call.arguments {
@@ -549,7 +571,7 @@ impl<'a> Interpreter<'a> {
     }
 
     #[cfg(test)]
-    fn execute_code(
+    pub(super) fn execute_code(
         &mut self,
         code: &Arc<Program>,
         environment: &mut Environment,
@@ -763,6 +785,8 @@ impl<'a> Interpreter<'a> {
             interface: None,
             waiting: None,
             calls: BTreeMap::new(),
+            instance_origins: BTreeMap::new(),
+            instance_methods: BTreeMap::new(),
             normal_types: BTreeMap::new(),
             closures: BTreeMap::new(),
             bit_updates: BTreeMap::new(),
@@ -829,6 +853,61 @@ impl<'a> Interpreter<'a> {
                 source: Some(source),
             };
             match &instruction.op {
+                Op::BeginInstance {
+                    destination,
+                    constructor,
+                } => {
+                    let origin = self.admit_dynamic_trait_instance(
+                        constructor.declaration,
+                        &constructor.input,
+                        &constructor.output,
+                        source,
+                    )?;
+                    if origin.is_none() {
+                        self.admit_dynamic_function_instance(
+                            constructor.declaration,
+                            &constructor.input,
+                            &constructor.output,
+                            source,
+                        )?;
+                    }
+                    frame.instance_origins.insert(*destination, origin);
+                }
+                Op::FinishInstance {
+                    destination,
+                    packet,
+                    constructor,
+                    direct,
+                } => {
+                    let origin = frame
+                        .instance_origins
+                        .remove(destination)
+                        .ok_or_else(missing)?;
+                    let packet = frame.slots[*packet].take().ok_or_else(missing)?;
+                    let instance = self.dynamic_instance_expression(
+                        constructor.declaration,
+                        &constructor.input,
+                        &constructor.output,
+                        origin,
+                        packet,
+                        source,
+                    )?;
+                    if origin.is_some() && *direct {
+                        // Keep interface identity until call preparation. Resolving just
+                        // the implementation here would erase its contract and defaults.
+                        frame.instance_methods.insert(*destination, instance);
+                    } else {
+                        let result = if origin.is_some() {
+                            self.eval_trait_method(&instance, &mut frame.environment, false)?
+                        } else {
+                            self.eval_function_instance(&instance, &mut frame.environment)?
+                        };
+                        let Flow::Value(value) = result else {
+                            return Err(missing());
+                        };
+                        frame.slots[*destination] = Some(value);
+                    }
+                }
                 Op::PreparePredicate { valid } => {
                     if !valid {
                         return Err(self.failure(ErrorKind::Type, Some(source)));
@@ -1744,6 +1823,16 @@ impl<'a> Interpreter<'a> {
                     prepare_defaults,
                     method,
                 } => {
+                    let dynamic_method = frame.instance_methods.remove(callee);
+                    let trait_defaults = if *prepare_defaults {
+                        dynamic_method
+                            .as_ref()
+                            .map(|method| self.trait_default_inputs(method))
+                            .transpose()?
+                    } else {
+                        None
+                    };
+                    let method = method.as_deref().or(dynamic_method.as_ref());
                     let (interface_program, interface_parameters) = if let Some(method) = method {
                         self.interface_call_contract(method, source)?
                     } else {
@@ -1790,6 +1879,7 @@ impl<'a> Interpreter<'a> {
                         PendingCall {
                             callee,
                             normal_head,
+                            trait_defaults,
                             interface: interface_parameters
                                 .map(|parameters| (interface_program, parameters)),
                             arguments: (0..count).map(|_| None).collect(),
@@ -1868,7 +1958,9 @@ impl<'a> Interpreter<'a> {
                     dynamic,
                 } => {
                     let pending = frame.calls.get_mut(call).ok_or_else(missing)?;
-                    let expression = if *dynamic
+                    let expression = if let Some((binders, arguments)) = &pending.trait_defaults {
+                        Arc::new(self.bound_default_expression(value, binders, arguments)?)
+                    } else if *dynamic
                         && matches!(&pending.callee,
                         Value::Closure(closure) if closure.declaration_instance().is_some())
                     {
