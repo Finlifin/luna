@@ -41,7 +41,7 @@ impl Interpreter<'_> {
         self.interpret_staged_argument(input, environment, depth)
     }
 
-    fn interpret_staged_argument(
+    pub(super) fn interpret_staged_argument(
         &mut self,
         input: &A,
         environment: &mut Environment,

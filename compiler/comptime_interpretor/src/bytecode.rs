@@ -107,6 +107,113 @@ impl fmt::Display for Frame {
     }
 }
 
+pub(super) struct InputFrame {
+    pub code: Frame,
+    pub finish: InputFinish,
+}
+pub(super) enum InputFinish {
+    Ready,
+    Preparation {
+        exports: Vec<(LocalId, usize)>,
+        source: SourceRange,
+    },
+    Staged {
+        shape: comptime_compiler::normal_types::Shape,
+        depth: usize,
+        source: SourceRange,
+    },
+}
+pub(super) struct InputResult {
+    pub flow: Result<Flow, Error>,
+    pub environment: Environment,
+    pub staged: Option<(
+        comptime_compiler::normal_types::Shape,
+        normal_inputs::StagedNormalInput,
+    )>,
+}
+impl fmt::Display for InputFinish {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ready => write!(f, "(input-finish ready)"),
+            Self::Preparation { exports, source } => {
+                write!(
+                    f,
+                    "(input-finish preparation (source {} {}) (exports",
+                    source.start, source.end
+                )?;
+                for (binding, slot) in exports {
+                    write!(f, " ({binding} %{slot})")?;
+                }
+                write!(f, "))")
+            }
+            Self::Staged {
+                shape,
+                depth,
+                source,
+            } => write!(
+                f,
+                "(input-finish staged (depth {depth}) (source {} {}) {shape})",
+                source.start, source.end
+            ),
+        }
+    }
+}
+impl fmt::Display for InputFrame {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(input-frame {} {})", self.finish, self.code)
+    }
+}
+impl InputFinish {
+    pub fn complete(
+        self,
+        vm: &mut Interpreter<'_>,
+        mut code: Frame,
+        mut flow: Result<Flow, Error>,
+    ) -> InputResult {
+        let mut staged = None;
+        match self {
+            Self::Ready => {}
+            Self::Preparation { exports, source } => {
+                if matches!(&flow, Ok(Flow::Value(_))) {
+                    if exports.iter().any(|(_, slot)| code.slots[*slot].is_none()) {
+                        flow = Err(vm.failure(ErrorKind::MissingBinding, Some(source)));
+                    } else {
+                        code.imported.extend(exports);
+                    }
+                }
+            }
+            Self::Staged {
+                shape,
+                depth,
+                source,
+            } => {
+                vm.depth = depth;
+                if matches!(&flow, Ok(Flow::Value(_))) {
+                    match code
+                        .staged
+                        .as_mut()
+                        .and_then(|state| state.completed.take())
+                    {
+                        Some(value) => staged = Some((shape, value)),
+                        None => flow = Err(vm.failure(ErrorKind::InvalidControlFlow, Some(source))),
+                    }
+                }
+            }
+        }
+        InputResult {
+            flow,
+            environment: code.restore_environment(),
+            staged,
+        }
+    }
+}
+impl InputFrame {
+    fn run(mut self, vm: &mut Interpreter<'_>) -> InputResult {
+        let flow = vm.run_fragment(&mut self.code);
+        self.finish.complete(vm, self.code, flow)
+    }
+}
+
 impl Frame {
     pub(super) fn deliver(&mut self, value: Value) -> Result<(), Error> {
         let Some(Waiting::Call(destination)) = self.waiting else {
@@ -282,18 +389,20 @@ impl<'a> Interpreter<'a> {
         self.bytecode_staged_inputs
     }
 
-    pub(super) fn try_stage_bytecode(
+    fn contextual_code_available(&self) -> bool {
+        self.comptime_only
+            && self.cleanup_schedule.is_none()
+            && self.graph.is_none()
+            && self.effect_state.environment.is_empty()
+    }
+
+    pub(super) fn start_staged_input(
         &mut self,
         input: &nir::program::NormalFormArgument,
         environment: &mut Environment,
         depth: usize,
-    ) -> Result<Option<std::ops::ControlFlow<Flow, normal_inputs::StagedNormalInput>>, Error> {
-        if !self.comptime_only
-            || self.cleanup_schedule.is_some()
-            || self.graph.is_some()
-            || !self.effect_state.environment.is_empty()
-            || depth != 0
-        {
+    ) -> Result<Option<InputFrame>, Error> {
+        if !self.contextual_code_available() || depth != 0 {
             return Ok(None);
         }
         let Some((program, shape)) =
@@ -301,27 +410,71 @@ impl<'a> Interpreter<'a> {
         else {
             return Ok(None);
         };
-        let mut frame = self.start_frame(&Arc::new(program), environment)?;
-        let original_depth = self.depth;
+        let code = self.start_frame(&Arc::new(program), environment)?;
         self.bytecode_staged_inputs += 1;
-        let result = self.run_fragment(&mut frame);
-        self.depth = original_depth;
-        let staged = frame
-            .staged
-            .as_mut()
-            .and_then(|state| state.completed.take());
-        *environment = frame.restore_environment();
-        let result = match result? {
+        Ok(Some(InputFrame {
+            code,
+            finish: InputFinish::Staged {
+                shape,
+                depth: self.depth,
+                source: input.source(),
+            },
+        }))
+    }
+
+    pub(super) fn try_stage_bytecode(
+        &mut self,
+        input: &nir::program::NormalFormArgument,
+        environment: &mut Environment,
+        depth: usize,
+    ) -> Result<Option<std::ops::ControlFlow<Flow, normal_inputs::StagedNormalInput>>, Error> {
+        let Some(frame) = self.start_staged_input(input, environment, depth)? else {
+            return Ok(None);
+        };
+        let result = frame.run(self);
+        *environment = result.environment;
+        Ok(Some(match result.flow? {
             Flow::Value(_) => {
-                let mut staged = staged.ok_or_else(|| {
-                    self.failure(ErrorKind::InvalidControlFlow, Some(input.source()))
-                })?;
+                let (shape, mut staged) = result.staged.expect("completed staged fragment");
                 self.rekey_staged_input(input, &shape, &mut staged)?;
                 std::ops::ControlFlow::Continue(staged)
             }
             flow => std::ops::ControlFlow::Break(flow),
+        }))
+    }
+
+    pub(super) fn start_contextual_input(
+        &mut self,
+        input: &nir::program::NormalFormArgument,
+        expected: &Term,
+        environment: &mut Environment,
+    ) -> Result<Option<InputFrame>, Error> {
+        if !self.contextual_code_available() {
+            return Ok(None);
+        }
+        let Some(program) = self.compile_bytecode(|fuel| {
+            comptime_compiler::compile_contextual_input(input, expected, fuel)
+        })?
+        else {
+            return Ok(None);
         };
-        Ok(Some(result))
+        let code = self.start_frame(&Arc::new(program), environment)?;
+        self.bytecode_contextual_inputs += 1;
+        Ok(Some(InputFrame {
+            code,
+            finish: InputFinish::Ready,
+        }))
+    }
+
+    pub(super) fn interpret_contextual_input(
+        &mut self,
+        input: &nir::program::NormalFormArgument,
+        expected: &Term,
+        environment: &mut Environment,
+    ) -> Result<Flow, Error> {
+        let mut literals = BTreeMap::new();
+        self.prepare_normal_argument(input, expected, &mut literals, 0)?;
+        self.eval_normal_argument(input, &mut literals, environment)
     }
 
     pub(super) fn evaluate_contextual_argument(
@@ -330,35 +483,23 @@ impl<'a> Interpreter<'a> {
         expected: &Term,
         environment: &mut Environment,
     ) -> Result<Flow, Error> {
-        if self.comptime_only
-            && self.cleanup_schedule.is_none()
-            && self.graph.is_none()
-            && self.effect_state.environment.is_empty()
-        {
-            if let Some(program) = self.compile_bytecode(|fuel| {
-                comptime_compiler::compile_contextual_input(input, expected, fuel)
-            })? {
-                let mut frame = self.start_frame(&Arc::new(program), environment)?;
-                self.bytecode_contextual_inputs += 1;
-                let result = self.run_fragment(&mut frame);
-                *environment = frame.restore_environment();
-                return result;
-            }
+        if let Some(frame) = self.start_contextual_input(input, expected, environment)? {
+            let result = frame.run(self);
+            *environment = result.environment;
+            return result.flow;
         }
-        let mut literals = BTreeMap::new();
-        self.prepare_normal_argument(input, expected, &mut literals, 0)?;
-        self.eval_normal_argument(input, &mut literals, environment)
+        self.interpret_contextual_input(input, expected, environment)
     }
 
     pub fn bytecode_contextual_inputs(&self) -> usize {
         self.bytecode_contextual_inputs
     }
 
-    pub(super) fn evaluate_input_preparation(
+    pub(super) fn start_input_preparation(
         &mut self,
         preparation: &nir::program::NormalFormPreparation,
         environment: &mut Environment,
-    ) -> Result<Flow, Error> {
+    ) -> Result<Option<InputFrame>, Error> {
         let source = preparation.expression.source;
         if let K::LetPattern {
             pattern: nir::program::Pattern::Tuple(fields),
@@ -378,7 +519,7 @@ impl<'a> Interpreter<'a> {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         }
         let Some(code) = self.invocation_code(&preparation.expression, None)? else {
-            return self.eval(&preparation.expression, environment);
+            return Ok(None);
         };
         let mut exports = Vec::with_capacity(bindings.len());
         for binding in bindings {
@@ -389,20 +530,25 @@ impl<'a> Interpreter<'a> {
                 .map_err(|_| self.failure(ErrorKind::MissingBinding, Some(source)))?;
             exports.push((binding, code.locals()[index].1));
         }
-        let mut frame = self.start_frame(&code, environment)?;
+        let code = self.start_frame(&code, environment)?;
         self.bytecode_input_preparations += 1;
-        let mut result = self.run_fragment(&mut frame);
-        if matches!(&result, Ok(Flow::Value(_))) {
-            if exports.iter().any(|(_, slot)| frame.slots[*slot].is_none()) {
-                result = Err(self.failure(ErrorKind::MissingBinding, Some(source)));
-            } else {
-                // Move committed packet bindings out with the imported caller
-                // values. Transfers and failures export no temporary bindings.
-                frame.imported.extend(exports);
-            }
-        }
-        *environment = frame.restore_environment();
-        result
+        Ok(Some(InputFrame {
+            code,
+            finish: InputFinish::Preparation { exports, source },
+        }))
+    }
+
+    pub(super) fn evaluate_input_preparation(
+        &mut self,
+        preparation: &nir::program::NormalFormPreparation,
+        environment: &mut Environment,
+    ) -> Result<Flow, Error> {
+        let Some(frame) = self.start_input_preparation(preparation, environment)? else {
+            return self.eval(&preparation.expression, environment);
+        };
+        let result = frame.run(self);
+        *environment = result.environment;
+        result.flow
     }
 
     pub fn bytecode_input_preparations(&self) -> usize {

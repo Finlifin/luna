@@ -35,7 +35,7 @@ enum Completion {
     Staged(StagedNormalInput),
 }
 
-struct Frame<'a> {
+pub(super) struct Frame<'a> {
     head: DeclarationId,
     source: SourceRange,
     arguments: &'a [Argument],
@@ -74,6 +74,11 @@ impl fmt::Display for Frame<'_> {
     }
 }
 
+pub(super) enum Progress {
+    Input(bytecode::InputFrame),
+    Complete(Flow),
+}
+
 impl<'a> Frame<'a> {
     fn new(
         head: DeclarationId,
@@ -94,6 +99,101 @@ impl<'a> Frame<'a> {
             drain: false,
             terminal: false,
         }
+    }
+
+    pub(super) fn next_input(
+        &mut self,
+        vm: &mut Interpreter<'_>,
+        environment: &mut Environment,
+    ) -> Result<Progress, Error> {
+        let result = self.next_input_inner(vm, environment);
+        if matches!(&result, Err(_) | Ok(Progress::Complete(_))) {
+            self.terminal = true;
+        }
+        result
+    }
+
+    fn next_input_inner(
+        &mut self,
+        vm: &mut Interpreter<'_>,
+        environment: &mut Environment,
+    ) -> Result<Progress, Error> {
+        loop {
+            let completion = match self.advance(vm, environment)? {
+                Request::Preparation(preparation) => {
+                    if let Some(frame) = vm.start_input_preparation(preparation, environment)? {
+                        return Ok(Progress::Input(frame));
+                    }
+                    match vm.eval(&preparation.expression, environment)? {
+                        Flow::Value(_) => Completion::Prepared,
+                        flow => return Ok(Progress::Complete(flow)),
+                    }
+                }
+                Request::Ready(argument, expected) => {
+                    if let Some(frame) =
+                        vm.start_contextual_input(argument, expected, environment)?
+                    {
+                        return Ok(Progress::Input(frame));
+                    }
+                    match vm.interpret_contextual_input(argument, expected, environment)? {
+                        Flow::Value(value) => Completion::Value(value),
+                        flow => return Ok(Progress::Complete(flow)),
+                    }
+                }
+                Request::Stage(argument) => {
+                    if let Some(frame) = vm.start_staged_input(argument, environment, 0)? {
+                        return Ok(Progress::Input(frame));
+                    }
+                    match vm.interpret_staged_argument(argument, environment, 0)? {
+                        std::ops::ControlFlow::Continue(value) => Completion::Staged(value),
+                        std::ops::ControlFlow::Break(flow) => return Ok(Progress::Complete(flow)),
+                    }
+                }
+                Request::Complete => {
+                    let bindings =
+                        std::mem::replace(&mut self.bindings, normal_types::Bindings::new(0));
+                    let arguments = bindings
+                        .finish()
+                        .ok_or_else(|| vm.failure(ErrorKind::Type, Some(self.source)))?;
+                    return Ok(Progress::Complete(Flow::Value(vm.complete_normal_type(
+                        self.head,
+                        arguments,
+                        self.source,
+                    )?)));
+                }
+            };
+            self.receive(vm, environment, completion)?;
+        }
+    }
+
+    pub(super) fn accept_input(
+        &mut self,
+        vm: &mut Interpreter<'_>,
+        environment: &mut Environment,
+        result: bytecode::InputResult,
+    ) -> Result<Option<Flow>, Error> {
+        if self.terminal || self.waiting.is_none() {
+            return Err(vm.failure(ErrorKind::InvalidControlFlow, Some(self.source)));
+        }
+        *environment = result.environment;
+        self.terminal = true;
+        let completion = match result.flow? {
+            Flow::Value(value) => match &self.waiting {
+                Some(Waiting::Preparation(_)) => Completion::Prepared,
+                Some(Waiting::Ready { .. }) => Completion::Value(value),
+                Some(Waiting::Stage { argument, .. }) => {
+                    let (shape, mut value) = result.staged.ok_or_else(|| {
+                        vm.failure(ErrorKind::InvalidControlFlow, Some(self.source))
+                    })?;
+                    vm.rekey_staged_input(argument, &shape, &mut value)?;
+                    Completion::Staged(value)
+                }
+                None => return Err(vm.failure(ErrorKind::InvalidControlFlow, Some(self.source))),
+            },
+            flow => return Ok(Some(flow)),
+        };
+        self.receive(vm, environment, completion)?;
+        Ok(None)
     }
 
     fn domain(&self, vm: &mut Interpreter<'_>, slot: usize) -> Result<(Term, bool), Error> {
@@ -251,39 +351,7 @@ impl Interpreter<'_> {
             )
         })?;
         let mut frame = Frame::new(*head, expr.source, arguments, plan);
-        loop {
-            let completion = match frame.advance(self, environment)? {
-                Request::Preparation(preparation) => {
-                    match self.evaluate_input_preparation(preparation, environment)? {
-                        Flow::Value(_) => Completion::Prepared,
-                        flow => return Ok(flow),
-                    }
-                }
-                Request::Ready(argument, expected) => {
-                    match self.evaluate_contextual_argument(argument, expected, environment)? {
-                        Flow::Value(value) => Completion::Value(value),
-                        flow => return Ok(flow),
-                    }
-                }
-                Request::Stage(argument) => {
-                    match self.stage_normal_argument(argument, environment, 0)? {
-                        std::ops::ControlFlow::Continue(value) => Completion::Staged(value),
-                        std::ops::ControlFlow::Break(flow) => return Ok(flow),
-                    }
-                }
-                Request::Complete => break,
-            };
-            frame.receive(self, environment, completion)?;
-        }
-        let arguments = frame
-            .bindings
-            .finish()
-            .ok_or_else(|| self.failure(ErrorKind::Type, Some(expr.source)))?;
-        Ok(Flow::Value(self.complete_normal_type(
-            *head,
-            arguments,
-            expr.source,
-        )?))
+        self.run_normal_plan(&mut frame, environment)
     }
 }
 
@@ -377,6 +445,30 @@ mod tests {
         assert!(!failed.bindings.contains(0));
         assert_eq!(
             failed.advance(&mut vm, &mut env).err().unwrap().kind,
+            ErrorKind::InvalidControlFlow
+        );
+        vm.budget = Budget::default();
+        let mut failed = Frame::new(id(0), SOURCE, &arguments, &ordered);
+        env.insert(local(90), Value::Bool(true));
+        let Progress::Input(bytecode::InputFrame { mut code, finish }) =
+            failed.next_input(&mut vm, &mut env).unwrap()
+        else {
+            panic!("expected compiled input");
+        };
+        vm.budget.steps = 0;
+        let flow = vm.run_fragment(&mut code);
+        let result = finish.complete(&mut vm, code, flow);
+        assert_eq!(
+            failed
+                .accept_input(&mut vm, &mut env, result)
+                .unwrap_err()
+                .kind,
+            ErrorKind::StepsExhausted
+        );
+        assert_eq!(env.remove(&local(90)), Some(Value::Bool(true)));
+        assert!(env.is_empty());
+        assert_eq!(
+            failed.next_input(&mut vm, &mut env).err().unwrap().kind,
             ErrorKind::InvalidControlFlow
         );
         vm.budget = Budget::default();

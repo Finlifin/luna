@@ -2826,3 +2826,32 @@ nominal/alias scheduling and a stack-integrated plan continuation are unfinished
 This change removes a duplicate driver and a native call boundary between compiled
 fragments and compiled invocations, not every native recursion boundary. Contract
 and unsupported-body evaluation still use their existing migration paths.
+
+## Normal-plan requests run on the shared activation stack
+
+A normal-form plan can now serve as a root of the invocation driver. Its compiled
+preparation, ready and staged inputs become stack entries with explicit completion
+state, so the plan no longer calls a nested fragment driver for each operand.
+Function calls and defaults inside those inputs use the same stack. Input completion
+centralizes preparation export, staged-result extraction, logical-depth restoration
+and caller-environment recovery. Nominal/alias callers reuse the same start/finish
+entrypoints without maintaining a second version of those rules. Input frames and
+completion state expose S-expression dumps.
+
+The entry into a normal-form plan is still the migration evaluator. Compiling a
+function that contains a plan still selects that carrier before body execution;
+a bytecode plan-suspension instruction and nested plan activation remain unfinished.
+Nominal/alias outer scheduling is also still on its existing migration path. No
+whole-VM completion or performance improvement is claimed by this stage.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_defaults --test comptime_bytecode_types --test type_spreads --test comptime_clause_inputs --test nominal_value_parameters`:
+  `/tmp/luna-tools-wdegx_il/result.json`, exit 0. Covers default calls and transfers,
+  contextual domains, source-ordered/reordered inputs and nominal/alias consumers.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-qo5bpl3u/result.json`, exit 0. Extended packet cleanup coverage
+  to value-before-Type staging, and checked that compiled-input budget failure
+  restores caller state and leaves the suspended plan terminal.
+- Managed `cargo fmt --all`: `/tmp/luna-tools-t0y2a4yc/result.json`, exit 0;
+  `git diff --check` passed.

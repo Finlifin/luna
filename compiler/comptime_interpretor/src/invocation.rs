@@ -70,9 +70,17 @@ impl Execution<'_> {
     }
 }
 
-struct Completion {
-    flow: Result<Flow, Error>,
-    defaults: Option<Environment>,
+enum Completion {
+    Ordinary {
+        flow: Result<Flow, Error>,
+        defaults: Option<Environment>,
+    },
+    Input(bytecode::InputResult),
+}
+
+enum StackContext<'a> {
+    Execution(Execution<'a>),
+    Input(bytecode::InputFinish),
 }
 
 impl<'a> Interpreter<'a> {
@@ -83,14 +91,22 @@ impl<'a> Interpreter<'a> {
         context: Option<(iir::InstanceKey, Vec<iir::cleanup::ContextKey>)>,
     ) -> Result<Value, Error> {
         let activation = self.begin_invocation(function, arguments, context)?;
-        match self.run_executions(Some(Execution::Invocation(activation)), None)? {
+        match self.run_executions(Some(Execution::Invocation(activation)), None, None)? {
             Flow::Value(value) => Ok(value),
             _ => Err(self.failure(ErrorKind::InvalidControlFlow, None)),
         }
     }
 
     pub(super) fn run_fragment(&mut self, frame: &mut bytecode::Frame) -> Result<Flow, Error> {
-        self.run_executions(None, Some(frame))
+        self.run_executions(None, Some(frame), None)
+    }
+
+    pub(super) fn run_normal_plan(
+        &mut self,
+        frame: &mut normal_plan::Frame<'_>,
+        environment: &mut Environment,
+    ) -> Result<Flow, Error> {
+        self.run_executions(None, None, Some((frame, environment)))
     }
 
     // Function bodies, defaults and a borrowed fragment root share one driver.
@@ -99,8 +115,9 @@ impl<'a> Interpreter<'a> {
         &mut self,
         mut execution: Option<Execution<'a>>,
         mut root: Option<&mut bytecode::Frame>,
+        mut plan: Option<(&mut normal_plan::Frame<'_>, &mut Environment)>,
     ) -> Result<Flow, Error> {
-        let mut stack: Vec<(Execution<'a>, bytecode::Frame)> = Vec::new();
+        let mut stack: Vec<(StackContext<'a>, bytecode::Frame)> = Vec::new();
         let mut result = None;
         loop {
             if let Some(mut active) = execution.take() {
@@ -112,7 +129,7 @@ impl<'a> Interpreter<'a> {
                                 Execution::Invocation(_) => self.bytecode_invocations += 1,
                                 Execution::Default { .. } => self.bytecode_default_evaluations += 1,
                             }
-                            stack.push((active, code_frame));
+                            stack.push((StackContext::Execution(active), code_frame));
                             None
                         }
                         Err(error) => Some(self.complete_execution(active, Err(error))),
@@ -125,14 +142,24 @@ impl<'a> Interpreter<'a> {
                 };
             }
             if let Some(delivered) = result.take() {
+                let (flow, defaults) = match delivered {
+                    Completion::Input(input) => {
+                        let (frame, environment) = plan.as_mut().expect("input plan root");
+                        if let Some(flow) = frame.accept_input(self, environment, input)? {
+                            return Ok(flow);
+                        }
+                        continue;
+                    }
+                    Completion::Ordinary { flow, defaults } => (flow, defaults),
+                };
                 let Some(parent) = stack
                     .last_mut()
                     .map(|(_, code)| code)
                     .or_else(|| root.as_deref_mut())
                 else {
-                    return delivered.flow;
+                    return flow;
                 };
-                let propagation = match parent.receive(delivered.flow, delivered.defaults) {
+                let propagation = match parent.receive(flow, defaults) {
                     Ok(None) => None,
                     Ok(Some(flow)) => Some(Ok(flow)),
                     Err(error) => Some(Err(error)),
@@ -140,12 +167,22 @@ impl<'a> Interpreter<'a> {
                 if let Some(flow) = propagation {
                     // Defaults may return from their enclosing invocation.
                     // Restore each activation before propagating a transfer/error.
-                    if let Some((mut parent, code)) = stack.pop() {
-                        *parent.parts().2 = code.restore_environment();
-                        result = Some(self.complete_execution(parent, flow));
+                    if let Some((parent, code)) = stack.pop() {
+                        result = Some(self.complete_stack(parent, code, flow));
                         continue;
                     }
                     return flow;
+                }
+            }
+            if stack.is_empty() {
+                if let Some((frame, environment)) = plan.as_mut() {
+                    match frame.next_input(self, environment)? {
+                        normal_plan::Progress::Input(bytecode::InputFrame { code, finish }) => {
+                            stack.push((StackContext::Input(finish), code));
+                        }
+                        normal_plan::Progress::Complete(flow) => return Ok(flow),
+                    }
+                    continue;
                 }
             }
             let code = stack
@@ -168,7 +205,7 @@ impl<'a> Interpreter<'a> {
                     match self.begin_invocation(callee, arguments, None) {
                         Ok(child) => execution = Some(Execution::Invocation(child)),
                         Err(error) => {
-                            result = Some(Completion {
+                            result = Some(Completion::Ordinary {
                                 flow: Err(error),
                                 defaults: None,
                             })
@@ -181,14 +218,28 @@ impl<'a> Interpreter<'a> {
                         Err(error) => Err(error),
                         _ => unreachable!("handled suspension"),
                     };
-                    if let Some((mut completed, code)) = stack.pop() {
-                        *completed.parts().2 = code.restore_environment();
-                        result = Some(self.complete_execution(completed, flow));
+                    if let Some((completed, code)) = stack.pop() {
+                        result = Some(self.complete_stack(completed, code, flow));
                     } else {
                         return flow;
                     }
                 }
             }
+        }
+    }
+
+    fn complete_stack(
+        &mut self,
+        context: StackContext<'a>,
+        code: bytecode::Frame,
+        flow: Result<Flow, Error>,
+    ) -> Completion {
+        match context {
+            StackContext::Execution(mut execution) => {
+                *execution.parts().2 = code.restore_environment();
+                self.complete_execution(execution, flow)
+            }
+            StackContext::Input(finish) => Completion::Input(finish.complete(self, code, flow)),
         }
     }
 
@@ -198,11 +249,11 @@ impl<'a> Interpreter<'a> {
         flow: Result<Flow, Error>,
     ) -> Completion {
         match execution {
-            Execution::Invocation(activation) => Completion {
+            Execution::Invocation(activation) => Completion::Ordinary {
                 flow: self.complete_invocation(activation, flow).map(Flow::Value),
                 defaults: None,
             },
-            Execution::Default { environment, .. } => Completion {
+            Execution::Default { environment, .. } => Completion::Ordinary {
                 flow,
                 defaults: Some(environment),
             },
@@ -848,7 +899,7 @@ mod tests {
         assert_eq!(vm.depth, 1);
         assert_eq!(vm.effect_state.invocation, parent_identity);
         assert!(matches!(
-            vm.run_executions(Some(Execution::Invocation(parent)), None)
+            vm.run_executions(Some(Execution::Invocation(parent)), None, None)
                 .unwrap(),
             Flow::Value(Value::Bool(true))
         ));

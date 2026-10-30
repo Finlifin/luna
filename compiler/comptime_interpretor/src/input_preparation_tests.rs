@@ -210,7 +210,7 @@ fn normal_plan_cleans_exported_bindings_and_executes_trailing_empty_packets() {
         }],
         ..Default::default()
     };
-    for invalid in [true, false] {
+    for (invalid, reversed) in [(true, false), (false, false), (true, true), (false, true)] {
         let first = preparation(tuple(vec![
             expr(
                 Primitive::Type,
@@ -236,7 +236,7 @@ fn normal_plan_cleans_exported_bindings_and_executes_trailing_empty_packets() {
                     )),
                 ],
                 plan: Some(NormalFormInputPlan {
-                    order: vec![0, 1],
+                    order: if reversed { vec![1, 0] } else { vec![0, 1] },
                     bindings: vec![local(10), local(11)],
                     preparations: vec![first, empty],
                 }),
@@ -247,6 +247,7 @@ fn normal_plan_cleans_exported_bindings_and_executes_trailing_empty_packets() {
         env.insert(local(0), Value::Bool(false));
         let result = vm.eval(&body, &mut env);
         assert_eq!(env.len(), 1);
+        assert_eq!(vm.bytecode_staged_inputs(), usize::from(reversed));
         if invalid {
             assert_eq!(result.unwrap_err().kind, ErrorKind::MissingBinding);
             assert_eq!(env.get(&local(0)), Some(&Value::Bool(true)));
