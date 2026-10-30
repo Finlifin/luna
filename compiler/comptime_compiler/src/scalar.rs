@@ -5,6 +5,8 @@ use std::fmt;
 
 #[derive(Clone, Copy, Debug)]
 pub enum ScalarKind {
+    ComptimeIntegerConvert,
+    IntegerRepresentation,
     Integer(Option<IntegerOp>),
     Compare(IntegerOp),
     Float(Option<FloatOp>),
@@ -19,6 +21,12 @@ pub struct Scalar<'a> {
 impl<'a> Scalar<'a> {
     pub fn expression(expr: &'a Expr) -> Option<(Self, &'a Expr, Option<&'a Expr>)> {
         let (kind, left, right) = match &expr.kind {
+            K::ComptimeIntegerConvert(value) => {
+                (ScalarKind::ComptimeIntegerConvert, value.as_ref(), None)
+            }
+            K::IntegerRepresentation(value) => {
+                (ScalarKind::IntegerRepresentation, value.as_ref(), None)
+            }
             K::IntegerBinary { op, left, right } => (
                 ScalarKind::Integer(Some(*op)),
                 left.as_ref(),
@@ -73,6 +81,8 @@ impl<'a> Scalar<'a> {
 impl fmt::Display for Scalar<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.kind {
+            ScalarKind::ComptimeIntegerConvert => write!(f, "(comptime-integer-convert")?,
+            ScalarKind::IntegerRepresentation => write!(f, "(integer-representation")?,
             ScalarKind::Float(None) => write!(f, "(float negate")?,
             ScalarKind::Float(Some(op)) => write!(f, "(float {op}")?,
             ScalarKind::Integer(None) => write!(f, "(integer negate")?,

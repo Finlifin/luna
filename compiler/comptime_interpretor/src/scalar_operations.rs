@@ -2,12 +2,16 @@
 //! Signature checks precede operand work. Integer operands are checked in source
 //! order; comparisons preserve their existing evaluate-both-then-check rule.
 use super::*;
+#[path = "scalar_conversions.rs"]
+mod conversions;
 use comptime_compiler::scalar::{Scalar, ScalarKind};
 use comptime_runtime::machine::{Error as MError, MachineInteger};
 use nir::program::IntegerOp;
 
 #[derive(Clone, Copy)]
 pub(super) enum Plan {
+    ComptimeIntegerConvert,
+    IntegerRepresentation,
     Integer(Option<IntegerOp>),
     Machine {
         signed: bool,
@@ -35,6 +39,26 @@ impl Interpreter<'_> {
         let invalid = || self.failure(ErrorKind::Type, Some(source));
         let never = Term::Primitive(Primitive::Never);
         match scalar.kind {
+            ScalarKind::ComptimeIntegerConvert => {
+                if !self.comptime_only {
+                    return Err(self.failure(ErrorKind::PhaseMismatch, Some(source)));
+                }
+                if scalar.right.is_some()
+                    || !nir::program::comptime_integer_conversion_valid(scalar.left, scalar.result)
+                {
+                    return Err(invalid());
+                }
+                Ok(Plan::ComptimeIntegerConvert)
+            }
+            ScalarKind::IntegerRepresentation => {
+                if scalar.right.is_some()
+                    || !nir::program::integer_representation_valid(scalar.left, scalar.result)
+                {
+                    return Err(invalid());
+                }
+                Ok(Plan::IntegerRepresentation)
+            }
+
             ScalarKind::Float(op) => {
                 self.prepare_float(scalar, op, source)?;
                 Ok(Plan::Float(op))
@@ -139,7 +163,10 @@ impl Interpreter<'_> {
         value: &Value,
         source: SourceRange,
     ) -> Result<(), Error> {
-        if matches!(plan, Plan::Compare(_)) {
+        if matches!(
+            plan,
+            Plan::Compare(_) | Plan::ComptimeIntegerConvert | Plan::IntegerRepresentation
+        ) {
             return Ok(());
         }
         if matches!(value, Value::AbstractValue { .. }) {
@@ -149,7 +176,9 @@ impl Interpreter<'_> {
             Plan::Float(_) => true,
             Plan::Integer(_) => matches!(value, Value::Integer(_)),
             Plan::Machine { signed, width, .. } => machine(value, signed, width).is_ok(),
-            Plan::Compare(_) => unreachable!(),
+            Plan::Compare(_) | Plan::ComptimeIntegerConvert | Plan::IntegerRepresentation => {
+                unreachable!()
+            }
         };
         if valid {
             Ok(())
@@ -167,6 +196,8 @@ impl Interpreter<'_> {
         source: SourceRange,
     ) -> Result<Value, Error> {
         match plan {
+            Plan::ComptimeIntegerConvert => self.convert_comptime_integer(scalar, a, source),
+            Plan::IntegerRepresentation => self.read_integer_representation(scalar, a, source),
             Plan::Float(op) => self.float_values(scalar, op, a, b, source),
             Plan::Integer(op) => {
                 let Value::Integer(left) = a else {

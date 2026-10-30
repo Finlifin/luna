@@ -4723,3 +4723,39 @@ Validation in /home/fin/luna:
 - `python3 -B development/check.py --timeout 900 -- run -p luna -- development/examples/sysroot-meta-lists.fl --sysroot library --test-native`:
   exit 0, `/tmp/luna-tools-8r7dey4b/result.json`; the native collector case now
   includes mapping computed prefix offsets through the public BitVec binding.
+
+### Compile exact integer conversions and representation reads
+
+ComptimeIntegerConvert and IntegerRepresentation now use the shared scalar
+instruction path. Their operand expressions execute on the VM invocation stack;
+these primitives no longer force the enclosing function back to recursive tree
+interpretation. Both carriers share signature admission and final value checks.
+Phase and signature rejection precede operand effects; exact conversion checks
+range after evaluating the operand once and never truncates overflowing values.
+Representation reads mask using the selected target width, not host pointer size.
+Early return bypasses conversion, and errors do not poison later calls.
+
+Scalar dumps identify both operations explicitly. Code caching retains operation
+descriptors only; invocation result caching is unchanged. This removes a fallback
+path without claiming a measured speedup or completing other unsupported nodes.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-t_xsplgb/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib scalar_conversion`:
+  exit 0, `/tmp/luna-tools-thndcwq2/result.json`; tree/VM admission, operand
+  effects, overflow, missing target, phase rejection and recovery.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_integer_conversion`:
+  exit 0, `/tmp/luna-tools-t9gfk9u0/result.json`; six source cases, including
+  compiled activation counts, signed exact conversion, single evaluation, early
+  return, runtime residual rejection and representation widths 8/32/64/128.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-b2o1lnqi/result.json`.
+- `python3 -B development/library_check.py --stage hash-protocols --stage sysroot-hash --timeout 900`:
+  exit 0, `/tmp/luna-library-8bvbgrsz/summary.json`; 13 Hash protocol cases
+  and three real-sysroot native cases, including runtime/comptime agreement.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- development/examples/sysroot-meta-bindings.fl --sysroot library --build-target x86_64 linux 64 --invoke-comptime run`:
+  exit 0 with `(bool true)`, `/tmp/luna-tools-ail7xc_t/result.json`; public
+  meta.to_usize/from_usize compose with List mapping and checked struct building.
+- `git diff --check`: exit 0. Existing unrelated unreachable-pattern warnings
+  remain; no full-workspace test claim is made.
