@@ -4496,3 +4496,41 @@ Validation in /home/fin/luna:
   no-retry regression and checks actual compiled entry counts.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
   exit 0, `/tmp/luna-tools-93wi7eyn/result.json`; `git diff --check`: exit 0.
+
+### Compile computations inside value-structure patterns
+
+Value tuple, struct, variant, anonymous-record, optional-present and error-result
+patterns now lower to shape admission followed by ordered field observations and
+child code. NIR carries a shallow structure descriptor, with a borrowed view for
+the tree matcher and a metered owned copy for bytecode. Both engines use the same
+shape/identity/arity checks and per-field observation routines. Anonymous-record
+labels are checked when their field is reached: failure of an earlier field
+skips later label validation as well as later computation.
+
+Projected pattern registers retain only a parent register and field index. The
+VM follows these read-only paths with metered traversal against the current
+activation's subject. It does not clone every aggregate on the path; wildcard
+fields have no value destination at all. Actual pattern bindings retain the
+existing value-copy semantics. Projections never enter immutable code caches.
+S-expression dumps include shallow shapes, escaped names and projection links.
+No benchmark speedup is claimed by this structural change.
+
+TypeTuple, nominal Type and normal-form argument patterns keep their existing
+parameter-domain conversion and provenance checks. Computations nested in those
+type patterns still select the tree path before execution. The depth/fallback
+regressions now exercise TypeTuple; deep value tuple and Or patterns are linear.
+This is value decomposition, not a special Tuple type-identity or NF rule.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-82p3iqqh/result.json`; includes ordered malformed-label
+  rejection, prior-effect preservation, shape dumps and independent fallback.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_patterns --test comptime_bytecode_matching --test comptime_bytecode_qualified --test comptime_bytecode_types --test library_comptime_comparison`:
+  exit 0, `/tmp/luna-tools-ju1tv758/result.json`. An initial source test omitted
+  whitespace between the success-pattern suffix and arrow, lexing as !=; the
+  fixture spelling was corrected without changing parsing rules.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_patterns --test negated_nominal_patterns --test normal_patterns`:
+  exit 0, `/tmp/luna-tools-loczbr7b/result.json`; includes nested alternatives,
+  cross-field bindings, all supported value shapes and compiled entry counts.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-0flzwp6v/result.json`; `git diff --check`: exit 0.

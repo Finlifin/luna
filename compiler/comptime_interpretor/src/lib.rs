@@ -6334,6 +6334,7 @@ mod pattern_budget_tests;
 mod pattern_journal;
 #[cfg(test)]
 mod pattern_remap_tests;
+mod pattern_structure;
 use pattern_journal::{PatternBindings, PatternJournal};
 
 impl Interpreter<'_> {
@@ -6411,41 +6412,14 @@ impl Interpreter<'_> {
         {
             return Err(self.failure(ErrorKind::TypeContractUnresolved, None));
         }
+        if let Some((shape, fields)) = nir::pattern_structure::View::from_pattern(pattern) {
+            return self.match_value_structure(shape, fields, input, environment, undo);
+        }
         let matched = match pattern {
             Pattern::CodeEvidence { .. } => {
                 return Err(self.failure(ErrorKind::TypeContractUnresolved, None));
             }
             Pattern::OptionalAbsent => matches!(input, Value::Optional { value: None, .. }),
-            Pattern::OptionalPresent(inner) => {
-                let Value::Optional {
-                    value: Some(value), ..
-                } = input
-                else {
-                    return Ok(Flow::Value(Value::Bool(false)));
-                };
-                return self.match_pattern_field(inner, value, environment, undo, Some(0));
-            }
-            Pattern::ErrorResult { label, inner } => {
-                let Value::ErrorResult { ty, error, value } = input else {
-                    return Ok(Flow::Value(Value::Bool(false)));
-                };
-                let Term::ErrorResult { errors, .. } = ty else {
-                    return Err(self.failure(ErrorKind::Type, None));
-                };
-                let selected = match error {
-                    None => label.is_none(),
-                    Some(index) => {
-                        let actual = errors
-                            .get(*index)
-                            .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-                        label.as_ref() == Some(actual)
-                    }
-                };
-                if !selected {
-                    return Ok(Flow::Value(Value::Bool(false)));
-                }
-                return self.match_pattern_field(inner, value, environment, undo, Some(0));
-            }
             Pattern::Wild => true,
             Pattern::Unit => matches!(input, Value::Unit),
             Pattern::Literal(..) => return self.match_literal(pattern, input, environment, undo),
@@ -6476,40 +6450,12 @@ impl Interpreter<'_> {
             Pattern::TypeTuple(..) => {
                 return self.match_type_tuple(pattern, input, environment, undo);
             }
-            Pattern::AnonymousRecord { names, fields } => {
-                let Value::AnonymousRecord(values) = input else {
-                    return Ok(Flow::Value(Value::Bool(false)));
-                };
-                if names.len() != fields.len() || values.len() != fields.len() {
-                    return Err(self.failure(ErrorKind::Type, None));
-                }
-                for (index, ((name, pattern), (actual, value))) in
-                    names.iter().zip(fields).zip(values).enumerate()
-                {
-                    self.integer_operation(None, |budget| {
-                        budget.consume(name.len().saturating_add(actual.len()).saturating_add(1))
-                    })?;
-                    if name != actual {
-                        return Err(self.failure(ErrorKind::Type, None));
-                    }
-                    if !matches!(
-                        value!(self.match_pattern_field(
-                            pattern,
-                            value,
-                            environment,
-                            undo,
-                            Some(index)
-                        )),
-                        Value::Bool(true)
-                    ) {
-                        return Ok(Flow::Value(Value::Bool(false)));
-                    }
-                }
-                true
-            }
-            Pattern::Tuple(..) | Pattern::Record { .. } | Pattern::Variant { .. } => {
-                return self.match_tuple(pattern, input, environment, undo);
-            }
+            Pattern::OptionalPresent(_)
+            | Pattern::ErrorResult { .. }
+            | Pattern::AnonymousRecord { .. }
+            | Pattern::Tuple(_)
+            | Pattern::Record { .. }
+            | Pattern::Variant { .. } => unreachable!("value structure dispatched above"),
         };
         Ok(Flow::Value(Value::Bool(matched)))
     }
@@ -7117,69 +7063,6 @@ impl Interpreter<'_> {
             }
         }
         Ok(Flow::Value(Value::Bool(true)))
-    }
-
-    #[inline(never)]
-    fn match_tuple(
-        &mut self,
-        pattern: &nir::program::Pattern,
-        input: &Value,
-        environment: &mut Environment,
-        undo: &mut PatternJournal,
-    ) -> Result<Flow, Error> {
-        use nir::program::Pattern;
-        let matched = match pattern {
-            Pattern::Tuple(fields)
-            | Pattern::Record { fields, .. }
-            | Pattern::Variant { fields, .. } => {
-                let values = match (pattern, input) {
-                    (Pattern::Tuple(_), Value::Tuple(values)) => Some(values),
-                    (
-                        Pattern::Record { declaration, .. },
-                        Value::Record {
-                            declaration: actual,
-                            fields,
-                            ..
-                        },
-                    ) if declaration == actual => Some(fields),
-                    (
-                        Pattern::Variant {
-                            declaration, index, ..
-                        },
-                        Value::Variant {
-                            declaration: actual,
-                            index: found,
-                            fields,
-                            ..
-                        },
-                    ) if declaration == actual && index == found => Some(fields),
-                    _ => None,
-                };
-                if let Some(values) = values.filter(|values| values.len() == fields.len()) {
-                    let mut found = true;
-                    for (index, (pattern, value)) in fields.iter().zip(values).enumerate() {
-                        if !matches!(
-                            value!(self.match_pattern_field(
-                                pattern,
-                                value,
-                                environment,
-                                undo,
-                                Some(index)
-                            )),
-                            Value::Bool(true)
-                        ) {
-                            found = false;
-                            break;
-                        }
-                    }
-                    found
-                } else {
-                    false
-                }
-            }
-            _ => unreachable!("pattern dispatcher selected an incompatible evaluator"),
-        };
-        Ok(Flow::Value(Value::Bool(matched)))
     }
 }
 

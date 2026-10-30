@@ -5,8 +5,8 @@ use nir::program::Pattern as P;
 use std::collections::BTreeSet;
 
 /// Flatten sequential pattern computation onto the ordinary expression worklist.
-/// Structural subpatterns remain atomic; a failure jumps to the candidate's
-/// existing scope rollback before any later computation can execute.
+/// Value structures expose one field at a time. A failure jumps to the candidate's
+/// existing scope rollback before any later field observation or computation.
 pub(super) fn lower<'a>(
     pattern: &'a P,
     subject: Register,
@@ -28,6 +28,64 @@ pub(super) fn lower<'a>(
     let mut code = Vec::new();
     while let Some(task) = pending.pop() {
         *fuel = fuel.checked_sub(1).ok_or(Error::Budget(source))?;
+        if let Task::Pattern(pattern, input, failed) = &task {
+            if let Some((shape, fields)) = nir::pattern_structure::View::from_pattern(pattern) {
+                *fuel = fuel
+                    .checked_sub(fields.len().saturating_add(1))
+                    .ok_or(Error::Budget(source))?;
+                match shape {
+                    nir::pattern_structure::View::AnonymousRecord { names, .. } => {
+                        for name in names {
+                            *fuel = fuel
+                                .checked_sub(name.len().saturating_add(1))
+                                .ok_or(Error::Budget(source))?;
+                        }
+                    }
+                    nir::pattern_structure::View::ErrorResult { label: Some(label) } => {
+                        nir::type_computations::charge_term(label, fuel)
+                            .map_err(|_| Error::Budget(source))?;
+                    }
+                    _ => {}
+                }
+                let shape = Arc::new(shape.to_owned());
+                for (index, field) in fields.iter().enumerate().rev() {
+                    let destination = if matches!(field, P::Wild) {
+                        None
+                    } else {
+                        Some(fresh())
+                    };
+                    if let Some(destination) = destination {
+                        pending.push(Task::Pattern(field, destination, *failed));
+                    }
+                    pending.push(Task::Code(Work::Emit(
+                        source,
+                        Op::PatternStructureField {
+                            destination,
+                            value: *input,
+                            shape: shape.clone(),
+                            index,
+                        },
+                    )));
+                }
+                code.push(Work::Emit(
+                    source,
+                    Op::CheckPatternStructure {
+                        destination: condition,
+                        value: *input,
+                        shape,
+                    },
+                ));
+                code.push(Work::Emit(
+                    source,
+                    Op::Branch {
+                        condition,
+                        when: false,
+                        target: *failed,
+                    },
+                ));
+                continue;
+            }
+        }
         match task {
             Task::Pattern(P::Then { first, value, next }, input, failed) => {
                 let transformed = fresh();

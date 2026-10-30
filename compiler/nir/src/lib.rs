@@ -12,6 +12,7 @@ pub mod enum_encoding;
 pub mod float_formation;
 pub mod integer_formation;
 mod nominal_parameters;
+pub mod pattern_structure;
 pub mod program;
 mod trait_parameters;
 pub use trait_parameters::{

@@ -304,13 +304,13 @@ fn match_dump_keeps_pattern_bindings_guards_and_exhaustion_explicit() {
 #[test]
 fn deep_pattern_control_is_linear_while_owned_structures_keep_the_depth_bound() {
     use nir::program::{MatchArm, Pattern};
-    for structural in [false, true] {
+    for kind in 0..3 {
         let mut pattern = Pattern::Wild;
         for _ in 0..200 {
-            pattern = if structural {
-                Pattern::Tuple(vec![pattern])
-            } else {
-                Pattern::Or(vec![pattern])
+            pattern = match kind {
+                0 => Pattern::Or(vec![pattern]),
+                1 => Pattern::TypeTuple(vec![pattern]),
+                _ => Pattern::Tuple(vec![pattern]),
             };
         }
         let body = expr(K::Match {
@@ -322,14 +322,18 @@ fn deep_pattern_control_is_linear_while_owned_structures_keep_the_depth_bound() 
             }],
         });
         let result = compile(&body, &mut 10000);
-        if structural {
+        if kind == 1 {
             assert!(matches!(result, Err(Error::Unsupported(_))));
         } else {
             assert_eq!(
                 result
                     .unwrap()
                     .to_string()
-                    .matches("(commit-scope)")
+                    .matches(if kind == 0 {
+                        "(commit-scope)"
+                    } else {
+                        "(check-pattern-structure "
+                    })
                     .count(),
                 200
             );
@@ -738,4 +742,32 @@ fn normal_plan_templates_own_inputs_and_capture_only_free_bindings() {
     assert!(dump.contains("(type-input-plan %"));
     assert!(dump.contains("(order 0 1)"));
     assert_eq!(dump, code.to_string());
+}
+
+#[test]
+fn structure_shape_dumps_escape_labels_and_keep_computation_outside_metadata() {
+    use nir::program::{MatchArm, Pattern};
+    let body = expr(K::Match {
+        value: Box::new(expr(K::Unit)),
+        arms: vec![MatchArm {
+            pattern: Pattern::AnonymousRecord {
+                names: vec!["quote\"".into(), "line\n".into()],
+                fields: vec![
+                    Pattern::Wild,
+                    Pattern::Then {
+                        first: Box::new(Pattern::Wild),
+                        value: Box::new(expr(K::Unit)),
+                        next: Box::new(Pattern::Wild),
+                    },
+                ],
+            },
+            guard: None,
+            body: expr(K::Unit),
+        }],
+    });
+    let dump = compile(&body, &mut 1000).unwrap().to_string();
+    assert!(dump.contains("(names \"quote\\\"\" \"line\\n\")"));
+    assert!(dump.contains("(pattern-structure-field (destination)"));
+    assert_eq!(dump, compile(&body, &mut 1000).unwrap().to_string());
+    assert!(matches!(compile(&body, &mut 5), Err(Error::Budget(_))));
 }

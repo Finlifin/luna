@@ -276,7 +276,7 @@ fn staged_patterns_compile_or_fall_back_before_operand_effects() {
             next: Box::new(Pattern::Wild),
         };
         let pattern = if nested {
-            Pattern::Tuple(vec![sequential])
+            Pattern::TypeTuple(vec![sequential])
         } else {
             sequential
         };
@@ -302,8 +302,10 @@ fn staged_patterns_compile_or_fall_back_before_operand_effects() {
                         value: Box::new(if nested {
                             Expr {
                                 source: SOURCE,
-                                ty: Term::Tuple(vec![Term::Primitive(Primitive::Bool)]),
-                                kind: K::Tuple(vec![boolean(true)]),
+                                ty: Term::Primitive(Primitive::Type),
+                                kind: K::TypeValue(Term::Tuple(vec![Term::Primitive(
+                                    Primitive::Bool,
+                                )])),
                             }
                         } else {
                             boolean(true)

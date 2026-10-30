@@ -22,6 +22,7 @@ pub(super) struct Frame {
     pc: usize,
     slots: Vec<Option<Value>>,
     scopes: Vec<PatternScope>,
+    pattern_inputs: BTreeMap<usize, (usize, usize)>,
 }
 
 #[derive(Default)]
@@ -166,6 +167,10 @@ impl fmt::Display for Frame {
             if let Some(value) = value {
                 write!(f, " (slot {slot} {value})")?;
             }
+        }
+        write!(f, ") (pattern-inputs")?;
+        for (slot, (base, index)) in &self.pattern_inputs {
+            write!(f, " (%{slot} (base %{base}) (field {index}))")?;
         }
         write!(f, ") (scopes")?;
         for scope in &self.scopes {
@@ -848,6 +853,45 @@ impl<'a> Interpreter<'a> {
         self.bytecode_input_preparations
     }
 
+    fn bytecode_pattern_input<'frame>(
+        &mut self,
+        frame: &'frame Frame,
+        mut slot: usize,
+        source: SourceRange,
+    ) -> Result<&'frame Value, Error> {
+        let mut path = Vec::new();
+        while let Some((base, index)) = frame.pattern_inputs.get(&slot) {
+            self.tick(Some(source))?;
+            if path.len() >= frame.slots.len() {
+                return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
+            }
+            path.push(*index);
+            slot = *base;
+        }
+        let mut value = frame.slots[slot]
+            .as_ref()
+            .ok_or_else(|| self.failure(ErrorKind::MissingBinding, Some(source)))?;
+        for index in path.into_iter().rev() {
+            value = match value {
+                Value::Tuple(fields)
+                | Value::Record { fields, .. }
+                | Value::Variant { fields, .. } => fields.get(index),
+                Value::AnonymousRecord(fields) => fields.get(index).map(|(_, value)| value),
+                Value::Optional {
+                    value: Some(value), ..
+                }
+                | Value::ErrorResult { value, .. }
+                    if index == 0 =>
+                {
+                    Some(value.as_ref())
+                }
+                _ => None,
+            }
+            .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
+        }
+        Ok(value)
+    }
+
     pub(super) fn start_frame(
         &mut self,
         code: &Arc<Program>,
@@ -873,6 +917,7 @@ impl<'a> Interpreter<'a> {
             staged: None,
             pc: 0,
             scopes: Vec::new(),
+            pattern_inputs: BTreeMap::new(),
             slots: (0..code.registers()).map(|_| None).collect(),
         };
         for &(binding, slot) in code.locals() {
@@ -1704,6 +1749,27 @@ impl<'a> Interpreter<'a> {
                     frame.slots[*destination] = Some(Value::Tuple(values));
                 }
 
+                Op::CheckPatternStructure {
+                    destination,
+                    value,
+                    shape,
+                } => {
+                    let input = self.bytecode_pattern_input(frame, *value, source)?;
+                    let matched = self.prepare_pattern_structure(shape.view(), input)?;
+                    frame.slots[*destination] = Some(Value::Bool(matched));
+                }
+                Op::PatternStructureField {
+                    destination,
+                    value,
+                    shape,
+                    index,
+                } => {
+                    let input = self.bytecode_pattern_input(frame, *value, source)?;
+                    self.pattern_structure_field(shape.view(), input, *index)?;
+                    if let Some(destination) = destination {
+                        frame.pattern_inputs.insert(*destination, (*value, *index));
+                    }
+                }
                 Op::MatchPattern {
                     destination,
                     value,
@@ -1718,7 +1784,7 @@ impl<'a> Interpreter<'a> {
                             candidate.insert(*id, self.checkpoint_representation(value, source)?);
                         }
                     }
-                    let subject = frame.slots[*value].as_ref().ok_or_else(missing)?;
+                    let subject = self.bytecode_pattern_input(frame, *value, source)?;
                     let (matched, exports) =
                         self.match_pattern_with_bindings(pattern, subject, &mut candidate)?;
                     let Flow::Value(Value::Bool(matched)) = matched else {
@@ -1738,7 +1804,7 @@ impl<'a> Interpreter<'a> {
                     value,
                     observe,
                 } => {
-                    let value = frame.slots[*value].as_ref().ok_or_else(missing)?.clone();
+                    let value = self.bytecode_pattern_input(frame, *value, source)?.clone();
                     if *observe {
                         if frame.slots[*local].is_some() {
                             return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));

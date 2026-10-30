@@ -248,3 +248,58 @@ fn transfers_and_errors_unwind_active_candidate_journals() {
         }
     }
 }
+
+#[test]
+fn later_record_labels_are_checked_only_after_earlier_patterns_succeed() {
+    let package = Package::default();
+    let input = LocalId { owner: 1, index: 3 };
+    for compiled in [false, true] {
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        for (first_matches, arity) in [(false, 2), (true, 2), (true, 1), (false, 2)] {
+            let body = expr(K::Match {
+                value: Box::new(expr(K::Local(input))),
+                arms: vec![
+                    MatchArm {
+                        pattern: P::AnonymousRecord {
+                            names: vec!["first".into(), "second".into()],
+                            fields: vec![
+                                P::Then {
+                                    first: Box::new(P::Wild),
+                                    value: Box::new(effect()),
+                                    next: Box::new(P::Literal(Literal::Bool(!first_matches))),
+                                },
+                                P::Wild,
+                            ],
+                        },
+                        guard: None,
+                        body: boolean(true),
+                    },
+                    MatchArm {
+                        pattern: P::Wild,
+                        guard: None,
+                        body: boolean(false),
+                    },
+                ],
+            });
+            let mut fields = vec![
+                ("first".into(), Value::Bool(true)),
+                ("wrong".into(), Value::Bool(false)),
+            ];
+            fields.truncate(arity);
+            let mut env = Environment::from([
+                (input, Value::AnonymousRecord(fields)),
+                (TRACE, Value::Bool(false)),
+            ]);
+            let result = execute(&mut vm, &body, &mut env, compiled);
+            if first_matches || arity != 2 {
+                assert_eq!(result.unwrap_err().kind, ErrorKind::Type);
+            } else {
+                assert!(matches!(result.unwrap(), Flow::Value(Value::Bool(false))));
+            }
+            assert_eq!(
+                vm.local_value(&env, TRACE, Some(SOURCE)).unwrap(),
+                Value::Bool(arity == 2)
+            );
+        }
+    }
+}

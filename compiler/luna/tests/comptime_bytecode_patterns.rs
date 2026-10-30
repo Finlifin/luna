@@ -164,3 +164,70 @@ fn failed_outer_guard_does_not_retry_a_successful_or_candidate() {
     );
     assert_eq!(vm.bytecode_invocations(), 1);
 }
+
+#[test]
+fn structure_fields_resume_computations_with_prior_bindings() {
+    let package = support::compile(
+        "comptime fn flip(value:bool)->bool {not value}
+        comptime fn keep(...properties:T)->T where T {properties}
+        struct Pair {first:bool,second:bool}
+        enum Packet {none,two(bool,bool)}
+        comptime fn tupled(flag:bool)->bool {
+            (flag,not flag) match {(x and flip(x) is y,z and z==y is same)=>same}
+        }
+        comptime fn recorded(flag:bool)->bool {
+            Pair {first:flag,second:not flag} match {
+                {first:(x and flip(x) is y),second:(z and z==y is same)}=>same
+            }
+        }
+        comptime fn variant(flag:bool)->bool {
+            let packet:Packet=.two(flag,not flag);
+            packet match {.two(x and flip(x) is y,z and z==y is same)=>same,.none=>false}
+        }
+        comptime fn nested(flag:bool)->bool {
+            (flag,true) match {
+                (((x and flip(x) is (y if y)) or (x and x is y)),_)=>y
+            }
+        }
+        comptime fn anonymous(flag:bool)->bool {
+            keep {first:flag,second:not flag} match {
+                {first:(x and flip(x) is y),second:(z and z==y is same)}=>same
+            }
+        }
+        comptime fn optional(flag:bool)->bool {
+            let value:?bool=flag;
+            value match {(x and flip(x) is y)?=>y==not flag,null=>false}
+        }
+        comptime fn qualified(flag:bool)->bool {
+            let value:!Packet bool=flag;
+            value match {(x and flip(x) is y)! =>y==not flag,error _=>false}
+        }",
+    );
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let mut tree = Interpreter::new(&package, Budget::default()).unwrap();
+    for flag in [true, false, true] {
+        for (name, calls) in [
+            ("tupled", 2),
+            ("recorded", 2),
+            ("variant", 2),
+            ("optional", 2),
+            ("qualified", 2),
+            ("nested", 2),
+            ("anonymous", 3),
+        ] {
+            let id = support::id(&package, name);
+            let before = vm.bytecode_invocations();
+            assert_eq!(
+                vm.invoke(id, vec![Value::Bool(flag)]).unwrap(),
+                Value::Bool(true),
+                "{name}"
+            );
+            assert_eq!(
+                tree.invoke(id, vec![Value::Bool(flag)]).unwrap(),
+                Value::Bool(true),
+                "{name}"
+            );
+            assert_eq!(vm.bytecode_invocations() - before, calls, "{name}");
+        }
+    }
+}

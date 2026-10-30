@@ -40,6 +40,17 @@ impl fmt::Display for ErrorConversion {
 
 #[derive(Debug)]
 pub enum Op {
+    CheckPatternStructure {
+        destination: Register,
+        value: Register,
+        shape: Arc<nir::pattern_structure::Structure>,
+    },
+    PatternStructureField {
+        destination: Option<Register>,
+        value: Register,
+        shape: Arc<nir::pattern_structure::Structure>,
+        index: usize,
+    },
     BindPattern {
         local: Register,
         value: Register,
@@ -464,6 +475,26 @@ impl fmt::Display for Program {
                 instruction.source.start, instruction.source.end
             )?;
             match &instruction.op {
+                Op::CheckPatternStructure {
+                    destination,
+                    value,
+                    shape,
+                } => write!(
+                    f,
+                    "(check-pattern-structure %{destination} %{value} {shape})"
+                )?,
+                Op::PatternStructureField {
+                    destination,
+                    value,
+                    shape,
+                    index,
+                } => {
+                    write!(f, "(pattern-structure-field (destination")?;
+                    if let Some(slot) = destination {
+                        write!(f, " %{slot}")?;
+                    }
+                    write!(f, ") (value %{value}) (index {index}) {shape})")?;
+                }
                 Op::BindPattern {
                     local,
                     value,
