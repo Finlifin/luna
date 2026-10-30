@@ -54,11 +54,8 @@ impl Checker<'_, '_> {
             .chain(self.type_parameters[&owner].iter().copied())
             .collect();
         let inputs: Vec<_> = std::iter::once(subject).chain(origin.arguments).collect();
-        contract
-            .ty
-            .instantiate_parameters(&self.input_binders(&parameters), &inputs)
+        self.instantiate_input_types(&contract.ty, &parameters, &inputs, value.span)
             .map(Some)
-            .map_err(|e| error(value.span, e.to_string()))
     }
 
     fn declaration_interface_sources(
@@ -126,9 +123,13 @@ impl Checker<'_, '_> {
             let inputs: Vec<_> = std::iter::once(subject.clone())
                 .chain(instance.arguments)
                 .collect();
+            let frames = self.call_input_frames();
+            let substitution = self
+                .input_substitution(&parameters, &inputs, &frames)
+                .map_err(|e| error(span, e.to_string()))?;
             for parent in parents?.unwrap_or_default() {
-                let parent = parent
-                    .instantiate_parameters(&self.input_binders(&parameters), &inputs)
+                let parent = substitution
+                    .instantiate_interface_bounded(&parent, &mut fuel)
                     .map_err(|e| error(span, e.to_string()))?;
                 for argument in &parent.arguments {
                     crate::associated::charge_projection_copy(argument, &mut fuel)
@@ -275,10 +276,7 @@ impl Checker<'_, '_> {
         let inputs: Vec<_> = std::iter::once(subject.clone())
             .chain(origin.arguments.iter().cloned())
             .collect();
-        let ty = contract
-            .ty
-            .instantiate_parameters(&self.input_binders(&parameters), &inputs)
-            .map_err(|e| error(span, e.to_string()))?;
+        let ty = self.instantiate_input_types(&contract.ty, &parameters, &inputs, span)?;
         let deferred = !established
             && ty != p(P::Type)
             && self.defer_contract_projection(

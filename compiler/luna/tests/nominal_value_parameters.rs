@@ -6371,3 +6371,52 @@ fn type_valued_indices_preserve_overridden_method_preconditions() {
     );
     assert!(support::compile_with_protocols(&stronger, &Default::default()).is_err());
 }
+
+#[test]
+fn type_valued_indices_preserve_associated_public_signatures() {
+    let source = "typealias Type=.Type'builtin;
+        trait Shape where T,index:T {assoc Output:Type=bool;}
+        struct Holder {}
+        impl Shape<Type,bool> for Holder {}
+        pub fn keep(value:Holder.as(Shape<Type,bool>).Output)->Holder.as(Shape<Type,bool>).Output {value}
+        fn run()->bool {keep(true)}";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    let inherited = source
+        .replace(
+            "struct Holder",
+            "trait Child :- Shape<T,index> where T,index:T {} struct Holder",
+        )
+        .replace(
+            "pub fn keep",
+            "impl Child<Type,bool> for Holder {} pub fn keep",
+        )
+        .replace("Holder.as(Shape<Type,bool>)", "Holder.as(Child<Type,bool>)");
+    assert_eq!(
+        support::run_iir(&inherited, "run", vec![]),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn type_valued_indices_preserve_declared_parent_associated_domains() {
+    let source = "typealias Type=.Type'builtin;
+        trait Shape where T,index:T {assoc Output:Type=bool;}
+        trait Child :- Shape<Type,bool> {
+            fn keep(value:Self.as(Shape<Type,bool>).Output)->Self.as(Shape<Type,bool>).Output {value}
+        }
+        struct Holder {}
+        impl Shape<Type,bool> for Holder {}
+        impl Child for Holder {}
+        fn run()->bool {Holder.as(Child).keep(true)}";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    for invalid in [
+        source.replace("impl Shape<Type,bool> for Holder {}", ""),
+        source.replace(
+            "impl Shape<Type,bool> for Holder {}",
+            "impl Shape<Type,Type> for Holder {}",
+        ),
+        source.replace(".keep(true)", ".keep('x')"),
+    ] {
+        assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+    }
+}

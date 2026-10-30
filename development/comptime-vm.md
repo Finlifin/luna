@@ -3586,3 +3586,29 @@ Validation in /home/fin/luna:
   the expanded-suite failure recorded in the previous stage.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
   exit 0, `/tmp/luna-tools-gr7qgzqm/result.json`; `git diff --check`: exit 0.
+
+### Declaration projections and concrete parent obligations
+
+Declaration-only member-domain lookup and inherited interface traversal now use
+completed input domains while retaining the caller telescope. These paths still
+read declaration contracts without manufacturing implementation evidence.
+Concrete implementation checks specialize parent and Self-capability obligations
+through the same bounded trait input context before proving them.
+
+Source coverage includes public function signatures returning associated types,
+lookup through a value-indexed child trait, and a default method whose declared
+parent fixes Type-valued inputs. Missing parent implementations, a different
+parent instance and a wrong associated argument type remain rejected.
+The original combined public/inherited regression failed at the concrete child
+implementation (`/tmp/luna-tools-bwoyzx7d/result.json`); a temporary diagnostic
+trace identified check_interfaces as the remaining failure after declaration
+substitution was migrated. The trace code was removed before final validation.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test trait_phases --test trait_purity --test sysroot_preludes`:
+  exit 0, `/tmp/luna-tools-x64ytm5z/result.json`, no exclusions.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-16dxwph4/result.json`; `git diff --check`: exit 0.
+
+The remaining contextual-code and ordinary-argument requirement substitution
+paths still require their own audit; this is not a blanket completion claim.

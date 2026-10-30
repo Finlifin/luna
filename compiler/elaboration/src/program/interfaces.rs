@@ -1309,13 +1309,12 @@ impl Checker<'_, '_> {
                     context: &context,
                 };
                 for (requirement, kind) in requirements {
-                    let requirement = requirement
-                        .instantiate_parameters(
-                            &contract
-                                .binders_with_self(&mut 100_000)
-                                .map_err(|e| error(span, e))?,
-                            &arguments,
-                        )
+                    let mut fuel = 100_000;
+                    let requirement = contract
+                        .input_substitution(&arguments, &[], &mut fuel)
+                        .and_then(|substitution| {
+                            substitution.instantiate_requirement_bounded(&requirement, &mut fuel)
+                        })
                         .map_err(|e| error(span, e.to_string()))?;
                     if world.given(&requirement, Budget::default()).is_some() {
                         continue;
