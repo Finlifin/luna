@@ -60,3 +60,9 @@ fn preserve(comptime T: Type,
 不会成为 runtime 数据。完整 sysroot 示例为
 `development/examples/sysroot-scoped-descriptors.fl`。这提供泛型描述数据的
 传递能力；尚不意味着 StructBuilder 已能发布带泛型子句的定义。
+
+Type 参数也可供 requires 中的描述函数调用使用，例如先声明
+`pure comptime fn Layout<fields: meta.List<Descriptor>> -> Type { bool }`，
+再约束 `Layout<describe(T)> == Layout<[Descriptor {kind: T}]>`。
+这里比较的是两个 Type；描述数据只是构造 Type 的输入，不会把程序状态命题
+交给 PTC。不同描述实参也不能反过来证明不透明工厂的结果不等。

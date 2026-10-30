@@ -5138,3 +5138,42 @@ encoding remains a separate pending migration.
 - Final required-invocation unit checks passed again after module extraction
   and the exact-budget assertion, `/tmp/luna-tools-7sune5og/result.json`.
 - Formatting and `git diff --check` passed.
+
+
+### Staged Type inputs in declaration contracts
+
+The descriptor-invocation limitation recorded above is fixed. Contract checking
+runs after signature publication, when `active_signatures` no longer contains
+the declaration. `signature_comptime_input` now also recognizes the current
+contract-checking scope, while retaining the owner check and requiring an
+existing staged binding. This is shared by expression reads, projections and
+normal input observations. It does not provide a value for a runtime parameter
+or bypass the program/type predicate classifier.
+
+Coverage exercises descriptor-producing calls in Type equality, disjunction,
+negation of primitive Type equality, multiple independent Type inputs and a
+method receiver preceding the staged inputs. Invalid applications are rejected;
+unknown Type observations cannot assume the condition they are computing.
+Opaque factories remain non-injective: different descriptor arguments do not
+prove unequal result types. This follows `docs/type/propositional-constraints/
+theory-solvers.md` and is checked as an Unknown rejection, not implemented as
+an additional structural disequality rule.
+
+Evidence (cwd `/home/fin/luna`):
+
+- The original reproducer failed with required input unavailable in
+  `/tmp/luna-tools-kjwmx7kk/result.json`, then passed after the scope fix.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test scoped_comptime_aggregates --test staged_aggregate_contracts --test snapshot_contracts`:
+  all three groups passed (8, 31 and 2 tests),
+  `/tmp/luna-tools-7oz1cfrq/result.json`.
+
+The real-sysroot descriptor example now combines staged defaults with a
+requires Type equality over `meta.List<Descriptor>` inputs. Scoped executable
+and mutable result restoration and the NIR Type-list encoding migration remain
+separate unfinished work.
+
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- development/examples/sysroot-scoped-descriptors.fl --sysroot library --test-native`:
+  one native test passed, `/tmp/luna-tools-2dieep85/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test execution contract`:
+  all 76 selected contract cases passed, `/tmp/luna-tools-kg44ak3c/result.json`.
+- Formatting and `git diff --check` passed.

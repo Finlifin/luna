@@ -7,8 +7,11 @@ comptime fn describe(T: Type) -> meta.List<Descriptor> {
     [Descriptor {kind: T}]
 }
 
+pure comptime fn Layout<fields: meta.List<Descriptor>> -> Type { bool }
+
 fn preserve(comptime T: Type,
     comptime .schema: meta.List<Descriptor> = defer describe(T), value: T) -> T
+where requires Layout<describe(T)> == Layout<[Descriptor {kind: T}]>
 {
     value
 }

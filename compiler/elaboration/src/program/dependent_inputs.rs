@@ -48,7 +48,11 @@ impl Checker<'_, '_> {
 
     pub(super) fn signature_comptime_input(&self, binding: n::LocalId) -> Option<(Term, Term)> {
         let owner = self.signature_owner?;
-        if !self.active_signatures.contains(&owner) || binding.owner != owner.def_id.raw() {
+        // Contract elaboration follows signature publication, so its staged
+        // inputs remain available after the active-signature guard is removed.
+        if (!self.active_signatures.contains(&owner) && !self.checking_contract)
+            || binding.owner != owner.def_id.raw()
+        {
             return None;
         }
         if let Some(symbol) = self.type_input_bindings.get(&binding) {
