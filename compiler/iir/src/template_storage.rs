@@ -332,6 +332,74 @@ mod tests {
     }
 
     #[test]
+    fn package_targets_retain_ordinary_collection_inputs_in_tag_identity() {
+        use nir::normal_forms::{Head, Kind, Parameter, Role};
+        let target = key(10).declaration;
+        let input = key(11).declaration;
+        let list_head = key(20).declaration;
+        let domain = Term::NormalForm {
+            head: list_head,
+            sort: Sort::Type,
+            arguments: vec![Term::Primitive(Primitive::Bool)],
+        };
+        let mut package = nir::program::Package {
+            normal_forms: vec![Head {
+                declaration: list_head,
+                role: Role::TypeList,
+                collector: None,
+                parameters: vec![Parameter {
+                    declaration: key(21).declaration,
+                    binding: nir::program::LocalId {
+                        owner: 20,
+                        index: 0,
+                    },
+                    kind: Kind::Type,
+                    ty: Term::Primitive(Primitive::Type),
+                }],
+                requirements: vec![],
+            }],
+            function_parameters: vec![nir::function_parameters::Declaration {
+                declaration: target,
+                parameters: vec![input],
+                domains: vec![domain.clone()],
+            }],
+            runtime_function_identities: vec![nir::program::RuntimeFunctionIdentity {
+                declaration: target,
+                type_parameters: vec![input],
+                signature: signature(),
+            }],
+            ..Default::default()
+        };
+        let selected = [true, false].map(|flag| InstanceKey {
+            declaration: target,
+            arguments: vec![Term::NominalValue {
+                ty: Box::new(domain.clone()),
+                variant: None,
+                fields: vec![Term::Bool(flag)],
+            }],
+        });
+        let table =
+            TemplateStorage::from_package(signature(), selected.to_vec(), &package, &mut 10000)
+                .unwrap();
+        assert_eq!(table.decode(0).unwrap(), &selected[0]);
+        assert_eq!(table.decode(1).unwrap(), &selected[1]);
+        assert!(
+            TemplateStorage::from_package(signature(), selected.to_vec(), &package, &mut 0)
+                .is_err()
+        );
+        package.normal_forms[0].role = Role::Opaque;
+        assert!(
+            TemplateStorage::from_package(signature(), selected.to_vec(), &package, &mut 10000)
+                .is_err()
+        );
+        package.normal_forms[0].role = Role::TypeList;
+        assert!(
+            TemplateStorage::from_package(signature(), selected.to_vec(), &package, &mut 10000)
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn malformed_domains_and_exhausted_budgets_do_not_publish_tables() {
         let ty = signature();
         assert!(TemplateStorage::new(ty.clone(), vec![], &mut 100).is_err());

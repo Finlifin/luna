@@ -25,61 +25,26 @@ pub fn validate_arguments(
     arguments: &[Term],
     fuel: &mut usize,
 ) -> Result<(), String> {
-    let substitution =
-        crate::DeclarationSubstitution::bounded(parameters, domains, arguments, &[], fuel)
-            .map_err(|error| error.to_string())?;
-    for (index, argument) in arguments.iter().enumerate() {
-        let domain = domains
-            .get(index)
-            .unwrap_or(&Term::Primitive(crate::Primitive::Type));
-        let domain = substitution
-            .instantiate_bounded(domain, fuel)
-            .map_err(|error| error.to_string())?;
-        if domain == Term::Primitive(crate::Primitive::Type) {
-            continue;
-        }
-        if let Term::TypeListValue(elements) = argument {
-            let Term::NormalForm {
-                head: declaration, ..
-            } = &domain
-            else {
-                return Err("callable type-list domain is not a bound meta.List<Type>".into());
-            };
-            let mut found = None;
-            for head in &package.normal_forms {
-                *fuel = fuel
-                    .checked_sub(1)
-                    .ok_or("callable type-list evidence budget exhausted")?;
-                if head.declaration == *declaration {
-                    if found.is_some() {
-                        return Err("ambiguous callable type-list representation evidence".into());
+    crate::validate_declaration_arguments_with_collections_in(
+        parameters,
+        domains,
+        arguments,
+        fuel,
+        |ty, variant, fuel| {
+            crate::normal_forms::nominal_value_fields_budgeted(package, ty, variant, fuel)
+                .ok_or_else(|| {
+                    if *fuel == 0 {
+                        crate::NominalAdmissionError::Budget
+                    } else {
+                        "callable input lacks validated layout evidence".into()
                     }
-                    found = Some(head);
-                }
-            }
-            if !found.is_some_and(|head| head.is_type_list_instance(&domain))
-                || elements
-                    .iter()
-                    .any(|element| element.sort() != crate::Sort::Type)
-            {
-                return Err("callable type-list lacks matching meta.List<Type> evidence".into());
-            }
-            continue;
-        }
-        crate::nominal_parameters::validate_symbolic_value_in(
-            argument,
-            &domain,
-            fuel,
-            |ty, variant, fuel| {
-                crate::normal_forms::nominal_value_fields_budgeted(package, ty, variant, fuel)
-                    .ok_or_else(|| "callable input lacks validated layout evidence".into())
-            },
-            |_, _, _| false,
-            package.target,
-        )
-        .map_err(|error| error.to_string())?;
-    }
-    Ok(())
+                })
+        },
+        |_, _, _| false,
+        |domain, fuel| crate::normal_forms::list_element_budgeted(package, domain, fuel),
+        package.target,
+    )
+    .map_err(|error| error.to_string())
 }
 
 impl fmt::Display for Declaration {

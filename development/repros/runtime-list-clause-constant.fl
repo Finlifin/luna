@@ -1,0 +1,18 @@
+{- Pending: defer this required local constant until the callable's clause
+   inputs arrive. Run with the real sysroot; the current frontend evaluates
+   flags[0] while flags is still symbolic and reports interpretation Type.
+-}
+fn selected_flag() -> bool
+where flags: meta.List<bool>
+{
+    const flag = flags[0];
+    flag
+}
+
+test {
+    let first = selected_flag<[true, false]>;
+    let second = selected_flag<[false, true]>;
+    let first_value = first();
+    let second_value = second();
+    assumes first_value and not second_value;
+}

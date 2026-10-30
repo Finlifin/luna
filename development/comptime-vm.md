@@ -7016,3 +7016,54 @@ No full workspace test suite was run.
 Public-library validation on the final implementation:
 `python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
 exit 0, six native tests passed; `/tmp/luna-tools-62nacpnt/result.json`.
+
+
+## Callable instance inputs use general value admission (2026-10-31)
+
+`function_parameters::validate_arguments` now delegates to recursive declaration
+admission with registered nominal and collection layouts. The prior direct
+Type-list branch and separate per-input loop are removed. Concrete callable
+inputs are checked in dependency order, including domains supplied by later
+parameters; scope, scalar ranges, collection fields and budget failures use the
+same checks as other admitted declaration values. Body contracts remain with
+invocation and are not inferred from successful input admission.
+
+This helper is consumed by materialization and IIR template storage. A new
+storage regression selects the same runtime declaration with two different
+ordinary boolean-list inputs and verifies distinct retained target identities.
+Missing layout authority rejects both entries; exhaustion can be retried with
+a fresh budget. NIR tests cover ordinary Type lists, nested boolean lists,
+forward dependent domains, integer range boundaries and escaping bound values.
+Existing compact-list evidence tests remain unchanged.
+
+The public-library example additionally stores two runtime callable instances
+with different list clause inputs and invokes both with ordinary runtime boolean
+arguments. IIR coverage checks that the two clause vectors retain separate tag
+identities. This stage migrates the callable input boundary, not the canonical
+frozen list encoder or extraction of list elements into runtime function bodies.
+
+Validation from /home/fin/luna:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p iir -p materialization --no-fail-fast`:
+  exit 0, 588 passed; `/tmp/luna-tools-wk0qyqci/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0; `/tmp/luna-tools-pd2fy0nw/result.json`; `git diff --check` passed.
+
+An independent deferred-constant gap was observed while constructing the native
+case: inside `fn selected_flag() -> bool where flags: meta.List<bool>`, the body
+`{ const flag = flags[0]; flag }` requests required evaluation before the clause
+input has a concrete value. The sysroot command failed with interpretation Type
+at `flags[0]`; `/tmp/luna-tools-wi1w2l3f/result.json`. The direct body `{ flags[0] }` then
+reached the comptime-only runtime-storage restriction, as recorded in
+`/tmp/luna-tools-jtd9ke2q/result.json`. The original local-const form is retained
+in `development/repros/runtime-list-clause-constant.fl` and still needs deferred
+required-evaluation work. The final native callable-storage case returns an
+ordinary runtime boolean parameter; it proves collection-bearing instance
+transport, not evaluation of the list inside that runtime function. The pending
+reproduction has not been converted into a passing expectation.
+
+Final public-library validation:
+`python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
+exit 0, seven native tests passed; `/tmp/luna-tools-ntfmesq4/result.json`.
+No full workspace test suite was run. The pending local-constant reproduction
+is explicitly outside this passing native example.

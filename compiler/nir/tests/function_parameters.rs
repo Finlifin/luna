@@ -173,3 +173,85 @@ fn callable_list_inputs_require_unique_representation_evidence_and_recover() {
         .is_ok()
     );
 }
+
+#[test]
+fn callable_collections_preserve_dependent_domains_and_scalar_ranges() {
+    use nir::function_parameters::validate_arguments;
+    use nir::normal_forms::{Head, Kind, Parameter, Role};
+    let list = |element| Term::NormalForm {
+        head: id(20),
+        sort: Sort::Type,
+        arguments: vec![element],
+    };
+    let frozen = |domain: &Term, fields| Term::NominalValue {
+        ty: Box::new(domain.clone()),
+        variant: None,
+        fields,
+    };
+    let package = Package {
+        normal_forms: vec![Head {
+            declaration: id(20),
+            role: Role::TypeList,
+            collector: None,
+            parameters: vec![Parameter {
+                declaration: id(21),
+                binding: nir::program::LocalId {
+                    owner: 20,
+                    index: 0,
+                },
+                kind: Kind::Type,
+                ty: Term::Primitive(Primitive::Type),
+            }],
+            requirements: vec![],
+        }],
+        ..Default::default()
+    };
+    let bools = list(Term::Primitive(Primitive::Bool));
+    let types = list(Term::Primitive(Primitive::Type));
+    let nested = list(bools.clone());
+    for (domain, value) in [
+        (bools.clone(), frozen(&bools, vec![Term::Bool(true)])),
+        (
+            types.clone(),
+            frozen(&types, vec![Term::Primitive(Primitive::Bool)]),
+        ),
+        (
+            nested.clone(),
+            frozen(&nested, vec![frozen(&bools, vec![])]),
+        ),
+    ] {
+        let domains = [
+            Term::Rigid {
+                declaration: id(2),
+                sort: Sort::Type,
+            },
+            Term::Primitive(Primitive::Type),
+        ];
+        let arguments = [value, domain];
+        validate_arguments(&package, &[id(1), id(2)], &domains, &arguments, &mut 10000).unwrap();
+        assert!(
+            validate_arguments(&package, &[id(1), id(2)], &domains, &arguments, &mut 0).is_err()
+        );
+        validate_arguments(&package, &[id(1), id(2)], &domains, &arguments, &mut 10000).unwrap();
+    }
+    let bytes = list(Term::Primitive(Primitive::U8));
+    for (number, accepted) in [(255, true), (256, false)] {
+        let input = frozen(
+            &bytes,
+            vec![Term::Integer(comptime_runtime::Integer::from_u128(number))],
+        );
+        assert_eq!(
+            validate_arguments(&package, &[id(1)], &[bytes.clone()], &[input], &mut 10000).is_ok(),
+            accepted
+        );
+    }
+    let invalid = frozen(
+        &bools,
+        vec![Term::Bound {
+            depth: 0,
+            index: 0,
+            sort: Sort::ComptimeValue,
+        }],
+    );
+    assert!(validate_arguments(&package, &[id(1)], &[bools], &[invalid], &mut 10000).is_err());
+}

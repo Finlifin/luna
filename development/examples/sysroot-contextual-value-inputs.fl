@@ -153,3 +153,17 @@ test {
         .as(FirstItem<meta.List<bool>>).first()[0];
     assumes flag and type_ok and nested;
 }
+
+fn selected_flag(value: bool) -> bool
+where flags: meta.List<bool>
+{
+    value
+}
+
+test {
+    let first = selected_flag<[true, false]>;
+    let second = selected_flag<[false, true]>;
+    let first_value = first(true);
+    let second_value = second(false);
+    assumes first_value and not second_value;
+}
