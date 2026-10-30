@@ -6272,3 +6272,76 @@ Validation from /home/fin/luna:
 
 No full workspace suite was run. The remaining legacy collection representation
 is an implementation gap, not a restriction of Flurry normal-form arguments.
+
+## Contextual collection domains and source-order preparation (2026-10-31)
+
+NormalFormArgument now calls its contextual collection nodes List and ListSpread.
+The bytecode compiler, staged interpreter, NIR traversal, free-binding/copy-budget
+walks and program-verification consumers use the same generic nodes. Their dumps
+are `(contextual-list-input ...)` and `(contextual-list-spread ...)`; no new
+language syntax or parser-specific list category was introduced. The enclosing
+head signature supplies the list domain, as it already did in interpretation.
+
+Static normal-form observation now obtains that signature and applies bounded
+ordinary declaration substitution. A collected value is formed under the full
+list domain, including the empty case. Collection observations wait for their
+Type-domain inputs when those explicit/default inputs occur later in the source
+plan. This reorders only bounded reads of immutable evidence; it neither runs
+producers nor changes the execution plan. Unknown inputs remain unknown. Scalar
+applications do not scan the head registry or build a domain telescope unless
+they contain a contextual collection.
+
+Literal list spreads already routed to the variadic tail are normalized to
+ordinary positional inputs before preparation. This gives their elements the
+same source-order preparation as non-spread operands, including expressions
+whose Type context is supplied later. It does not flatten computed producers,
+execute a list to discover its width, or bypass the completed domain checks.
+The source-order regression records 1, 2 and 3 from an element, a spread element
+and a later Type input, respectively, and requires the final trace to be 123.
+
+The empty-list regression reproduced a real baseline identity mismatch:
+`Indexed<>` was observed with an empty TypeListValue while an equivalent named
+List<bool> input retained its nominal value domain. Baseline evidence:
+`/tmp/luna-tools-finehrq1/result.json`, exit 101. The regression now also covers
+nonempty bool inputs, mixed spreads, dependent u8 inputs and comptime invocation;
+normal-form bodies deliberately do not terminate, so unfolding cannot pass it.
+Unit checks cover missing/unregistered list domains, distinct empty list domains,
+wrong-domain spreads and bounded copy exhaustion.
+
+Validation from /home/fin/luna:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test normal_form_inference --test cmtt --test cmtt_type_inputs --test comptime_clause_inputs --test normal_form_methods --no-fail-fast`:
+  exit 0, 661 passed; `/tmp/luna-tools-wrhawb89/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p comptime_compiler -p comptime_interpretor --no-fail-fast`:
+  exit 0, 1018 passed across these crates and their integration targets;
+  `/tmp/luna-tools-j3o7pel8/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib known_`:
+  exit 0, 13 passed; `/tmp/luna-tools-ikmtuicp/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test execution normal_`:
+  59 passed, two existing failures; `/tmp/luna-tools-m04mc_pk/result.json`.
+  Both failures reproduced after restoring just this stage's owned source files
+  to commit 1bb8d3e7 (`/tmp/luna-tools-3i9sywxc/result.json`, exit 101):
+  late_normal_form_input_staging_limits_depth_on_a_small_stack reports
+  StepsExhausted rather than DepthExhausted, and
+  variadic_normal_type_collection_evaluates_each_input_once_in_source_order
+  rejects Interpreter::new invocation with ErrorKind::Type. Their expectations
+  were not changed. All 15 temporarily replaced owned files were restored
+  byte-for-byte; pre-existing worktree changes were not included in the swap.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0, `/tmp/luna-tools-lg19aurp/result.json`; `git diff --check` passed.
+
+The first sysroot probe put a function call directly inside assumes, outside the
+currently supported effect-free program-predicate subset
+(`/tmp/luna-tools-qnedkpb1/result.json`, exit 1). The example now evaluates the
+call normally and supplies its local boolean result to the same predicate.
+
+The previous section's contextual-expression observer gap is addressed here.
+Legacy TypeListValue/TypeListConcat term storage still remains; this stage does
+not claim complete removal of that internal representation or completion of all
+normal-form elaboration. No full workspace suite was run.
+
+Final sysroot validation:
+`python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
+exit 0, all three LLVM native tests passed;
+`/tmp/luna-tools-pkfzao80/result.json`. This includes the new empty-collection
+identity and source-order checks through the public meta.List binding.

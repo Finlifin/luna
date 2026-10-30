@@ -42,3 +42,70 @@ fn retained_effect_inputs_infer_through_callback_signatures() {
     let bare = source.replace("read<Shape<bool>>()=>true", "read<bool>()=>true");
     assert!(support::compile_with_protocols(&bare, &Default::default()).is_err());
 }
+
+#[test]
+fn collected_normal_form_values_keep_the_declared_list_domain() {
+    for (arguments, whole) in [
+        ("", ".items=[]"),
+        ("true,false", ".items=[true,false]"),
+        ("true,...[false,true]", ".items=[true,false,true]"),
+        (".T=.u8'builtin", ".T=.u8'builtin,.items=[]"),
+        ("7,9,.T=.u8'builtin", ".T=.u8'builtin,.items=[7,9]"),
+    ] {
+        let source = format!(
+            "typealias Type=.Type'builtin;
+            pure comptime fn List<T>->Type {{T}}
+            pure comptime fn Indexed<.T:Type=bool,...items:List<T>>->Type {{while true {{}} bool}}
+            struct Holder where T {{}}
+            fn holder()->Holder<Indexed<{arguments}>> {{Holder<Indexed<{whole}>>{{}}}}
+            comptime fn run()->bool {{
+                let collected=Indexed<{arguments}>;
+                let supplied=Indexed<{whole}>;
+                collected == supplied
+            }}"
+        );
+        let package = support::compile_with_source_bindings(
+            &source,
+            &Default::default(),
+            luna::protocols::type_constructors::Selectors {
+                meta_list: Some("input.List"),
+                ..Default::default()
+            },
+        )
+        .unwrap_or_else(|failure| panic!("{arguments}: {failure}"));
+        assert_eq!(
+            luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+            comptime_interpretor::Value::Bool(true),
+            "{arguments}"
+        );
+    }
+}
+
+#[test]
+fn contextual_collection_spreads_execute_once_before_later_type_inputs() {
+    let source = "typealias Type=.Type'builtin;
+        typealias Integer=.Integer'builtin;
+        pure comptime fn List<T>->Type {T}
+        pure comptime fn Indexed<.T:Type=bool,...items:List<T>>->Type {while true {} bool}
+        comptime fn run()->bool {
+            var trace:Integer=0;
+            let actual=Indexed<
+                do {trace = trace * 10 + 1;true},
+                ...[do {trace = trace * 10 + 2;false}],
+                .T=do {trace = trace * 10 + 3;bool}>;
+            trace == 123 and actual == Indexed<.items=[true,false]>
+        }";
+    let package = support::compile_with_source_bindings(
+        source,
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            meta_list: Some("input.List"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}

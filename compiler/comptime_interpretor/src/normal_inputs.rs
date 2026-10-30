@@ -8,7 +8,7 @@ use std::ops::ControlFlow;
 
 pub(super) enum StagedNormalInput {
     Value(Value),
-    TypeList {
+    List {
         key: usize,
         items: Vec<(bool, Self)>,
     },
@@ -80,12 +80,12 @@ impl Interpreter<'_> {
                     }
                     Work::List(input, items, start) => {
                         let children = values.split_off(start);
-                        values.push(StagedNormalInput::TypeList {
+                        values.push(StagedNormalInput::List {
                             key: input as *const A as usize,
                             items: items
                                 .iter()
                                 .zip(children)
-                                .map(|(item, value)| (matches!(item, A::TypeListSpread(_)), value))
+                                .map(|(item, value)| (matches!(item, A::ListSpread(_)), value))
                                 .collect(),
                         });
                     }
@@ -106,7 +106,7 @@ impl Interpreter<'_> {
                         self.depth += 1;
                         work.push(Work::Exit(input));
                         match input {
-                            A::TypeListSpread(value) | A::Value(value) => {
+                            A::ListSpread(value) | A::Value(value) => {
                                 values.push(StagedNormalInput::Value(staged_value!(
                                     self.eval(value, environment)
                                 )));
@@ -114,8 +114,8 @@ impl Interpreter<'_> {
                             A::Integer { .. } | A::Unit { .. } => {
                                 values.push(StagedNormalInput::Literal(input as *const A as usize))
                             }
-                            A::TypeList { items, .. } | A::Tuple { items, .. } => {
-                                work.push(if matches!(input, A::TypeList { .. }) {
+                            A::List { items, .. } | A::Tuple { items, .. } => {
+                                work.push(if matches!(input, A::List { .. }) {
                                     Work::List(input, items, values.len())
                                 } else {
                                     Work::Tuple(input, values.len())
@@ -238,7 +238,7 @@ impl Interpreter<'_> {
                             Some(PreparedNormalInput::Value(value)) => completed = Some(value),
                             _ => return Err(self.failure(ErrorKind::Type, Some(source))),
                         },
-                        StagedNormalInput::TypeList { key, items } => {
+                        StagedNormalInput::List { key, items } => {
                             let Some(PreparedNormalInput::ListType(ty)) = literals.remove(&key)
                             else {
                                 return Err(self.failure(ErrorKind::Type, Some(source)));

@@ -126,7 +126,7 @@ impl Checker<'_, '_> {
                         _ => known = false,
                     }
                 }
-                n::NormalFormArgument::TypeListSpread(value) => {
+                n::NormalFormArgument::ListSpread(value) => {
                     match self.known_normal_input_in(value, 0, &mut budget, bindings) {
                         Some(value) => parts.push(value),
                         _ => known = false,
@@ -163,7 +163,7 @@ impl Checker<'_, '_> {
                     n::NormalFormArgument::Value(value) => {
                         fields.push(self.known_normal_input_in(value, 0, &mut budget, bindings)?);
                     }
-                    n::NormalFormArgument::TypeListSpread(value) => {
+                    n::NormalFormArgument::ListSpread(value) => {
                         let Term::NominalValue {
                             ty: actual,
                             variant: None,
@@ -475,7 +475,7 @@ impl Checker<'_, '_> {
                 kind: K::ComptimeValue(known),
             };
             items.push(if spread {
-                n::NormalFormArgument::TypeListSpread(value)
+                n::NormalFormArgument::ListSpread(value)
             } else {
                 n::NormalFormArgument::Value(value)
             });
@@ -991,7 +991,7 @@ impl Checker<'_, '_> {
                     }
                     let value = self.expr(input, (!dependent).then_some(&element_type))?;
                     items.push(if spread {
-                        n::NormalFormArgument::TypeListSpread(value)
+                        n::NormalFormArgument::ListSpread(value)
                     } else {
                         n::NormalFormArgument::Value(value)
                     });
@@ -1006,7 +1006,7 @@ impl Checker<'_, '_> {
                             }
                         }),
                 );
-                arguments[slot] = Some(n::NormalFormArgument::TypeList {
+                arguments[slot] = Some(n::NormalFormArgument::List {
                     source: source(expr.span),
                     items,
                 });
@@ -1310,6 +1310,123 @@ impl Checker<'_, '_> {
         self.known_normal_input_in(expr, depth, budget, &BTreeMap::new())
     }
 
+    fn known_normal_arguments(
+        &self,
+        head: DeclarationId,
+        arguments: &[n::NormalFormArgument],
+        plan: Option<&n::NormalFormInputPlan>,
+        depth: usize,
+        budget: &mut comptime_runtime::Budget,
+        bindings: &BTreeMap<n::LocalId, std::sync::Arc<Term>>,
+    ) -> Option<Vec<Term>> {
+        budget
+            .consume(arguments.len().saturating_add(bindings.len()))
+            .ok()?;
+        if let Some(plan) = plan {
+            if !plan.preparations.is_empty()
+                || !plan.valid(arguments.len())
+                || plan.bindings.iter().any(|id| bindings.contains_key(id))
+            {
+                return None;
+            }
+        }
+        // The signature is the source of a collection's domain, including an
+        // empty collection. Never infer that domain from the first element.
+        let mut parameters = None;
+        if arguments
+            .iter()
+            .any(|argument| matches!(argument, n::NormalFormArgument::List { .. }))
+        {
+            for (owner, inputs) in &self.normal_parameters {
+                budget.consume(1).ok()?;
+                if matches_declaration(self.package, &self.package_identities, *owner, head) {
+                    parameters = Some(inputs.as_slice());
+                    break;
+                }
+            }
+        }
+        if parameters.is_some_and(|inputs| inputs.len() != arguments.len()) {
+            return None;
+        }
+        let order: Vec<_> =
+            plan.map_or_else(|| (0..arguments.len()).collect(), |plan| plan.order.clone());
+        let mut scoped = bindings.clone();
+        let mut values = vec![None; arguments.len()];
+        let mut ids = Vec::new();
+        let mut domains = Vec::new();
+        let mut completed = Vec::new();
+        let mut pending = order;
+        while !pending.is_empty() {
+            let before = pending.len();
+            let mut deferred = Vec::new();
+            for slot in pending {
+                let domain = if let Some(parameters) = parameters {
+                    Some(
+                        nir::DeclarationSubstitution::bounded(
+                            &ids,
+                            &domains,
+                            &completed,
+                            &[],
+                            &mut budget.steps,
+                        )
+                        .and_then(|substitution| {
+                            substitution.instantiate_bounded(&parameters[slot].2, &mut budget.steps)
+                        })
+                        .ok()?,
+                    )
+                } else {
+                    None
+                };
+                if matches!(arguments[slot], n::NormalFormArgument::List { .. }) {
+                    if let (Some(parameters), Some(domain)) = (parameters, domain.as_ref()) {
+                        budget
+                            .consume(parameters.len().saturating_mul(ids.len().saturating_add(1)))
+                            .ok()?;
+                        let mut waiting = false;
+                        for (id, _, _) in parameters {
+                            if !ids.contains(id) {
+                                nir::type_computations::charge_term(domain, &mut budget.steps)
+                                    .ok()?;
+                                if domain.mentions_rigid(*id) {
+                                    waiting = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if waiting {
+                            deferred.push(slot);
+                            continue;
+                        }
+                    }
+                }
+                let value = collect_known_normal_argument(
+                    &arguments[slot],
+                    domain.as_ref(),
+                    self.protocols.meta_list,
+                    budget,
+                    |value, budget| self.known_normal_input_in(value, depth + 1, budget, &scoped),
+                )?;
+                if let Some(plan) = plan {
+                    scoped.insert(
+                        plan.bindings[slot],
+                        std::sync::Arc::new(clone_known_term(&value, budget)?),
+                    );
+                }
+                if let (Some(parameters), Some(domain)) = (parameters, domain) {
+                    ids.push(parameters[slot].0);
+                    domains.push(domain);
+                    completed.push(clone_known_term(&value, budget)?);
+                }
+                values[slot] = Some(value);
+            }
+            if deferred.len() == before {
+                return None;
+            }
+            pending = deferred;
+        }
+        values.into_iter().collect()
+    }
+
     pub(in crate::program) fn known_normal_input_in(
         &self,
         expr: &n::Expr,
@@ -1390,45 +1507,14 @@ impl Checker<'_, '_> {
                 arguments,
                 plan,
             } => {
-                let arguments = if let Some(plan) = plan {
-                    // This inspects immutable construction only. Calls,
-                    // assignments and contextual conversions still require
-                    // invocation through the original plan. Known branches
-                    // below supply context without removing that plan.
-                    budget
-                        .consume(arguments.len().saturating_add(bindings.len()))
-                        .ok()?;
-                    if !plan.preparations.is_empty()
-                        || !plan.valid(arguments.len())
-                        || plan.bindings.iter().any(|id| bindings.contains_key(id))
-                    {
-                        return None;
-                    }
-                    let mut scoped = bindings.clone();
-                    let mut values = vec![None; arguments.len()];
-                    for &slot in &plan.order {
-                        let value = collect_known_normal_argument(
-                            &arguments[slot],
-                            budget,
-                            |value, budget| {
-                                self.known_normal_input_in(value, depth + 1, budget, &scoped)
-                            },
-                        )?;
-                        let bound = clone_known_term(&value, budget)?;
-                        scoped.insert(plan.bindings[slot], std::sync::Arc::new(bound));
-                        values[slot] = Some(value);
-                    }
-                    values.into_iter().collect::<Option<Vec<_>>>()?
-                } else {
-                    arguments
-                        .iter()
-                        .map(|argument| {
-                            collect_known_normal_argument(argument, budget, |value, budget| {
-                                self.known_normal_input_in(value, depth + 1, budget, bindings)
-                            })
-                        })
-                        .collect::<Option<Vec<_>>>()?
-                };
+                let arguments = self.known_normal_arguments(
+                    *head,
+                    arguments,
+                    plan.as_ref(),
+                    depth,
+                    budget,
+                    bindings,
+                )?;
                 Some(Term::NormalForm {
                     head: *head,
                     sort: Sort::Type,
@@ -2064,7 +2150,7 @@ impl Checker<'_, '_> {
             });
         }
         if let H::List(items) = &input.kind {
-            return Ok(n::NormalFormArgument::TypeList {
+            return Ok(n::NormalFormArgument::List {
                 source: source(input.span),
                 items: items
                     .iter()
@@ -2242,38 +2328,75 @@ impl Checker<'_, '_> {
 // expansion (e.g. repeated tuple duplication).
 fn collect_known_normal_argument(
     argument: &n::NormalFormArgument,
+    domain: Option<&Term>,
+    list_head: Option<DeclarationId>,
     budget: &mut comptime_runtime::Budget,
     mut known: impl FnMut(&n::Expr, &mut comptime_runtime::Budget) -> Option<Term>,
 ) -> Option<Term> {
     budget.consume(1).ok()?;
-    let n::NormalFormArgument::TypeList { items, .. } = argument else {
+    let n::NormalFormArgument::List { items, .. } = argument else {
         return known(argument.expression()?, budget);
     };
+    let domain = domain?;
+    let Term::NormalForm {
+        head,
+        sort: Sort::Type,
+        arguments,
+    } = domain
+    else {
+        return None;
+    };
+    if Some(*head) != list_head {
+        return None;
+    }
+    let [element] = arguments.as_slice() else {
+        return None;
+    };
+    if element.sort() != Sort::Type {
+        return None;
+    }
+    let types = *element == p(P::Type);
     let mut collected = Vec::new();
     for item in items {
         budget.consume(1).ok()?;
         match item {
             n::NormalFormArgument::Value(expr) => {
                 let value = known(expr, budget)?;
-                if value.sort() != Sort::Type {
+                if types && value.sort() != Sort::Type {
                     return None;
                 }
                 collected.push(value);
             }
-            n::NormalFormArgument::TypeListSpread(expr) => {
-                let Term::TypeListValue(types) = known(expr, budget)? else {
-                    return None;
+            n::NormalFormArgument::ListSpread(expr) => {
+                let fields = match known(expr, budget)? {
+                    Term::TypeListValue(fields) if types => {
+                        if fields.iter().any(|ty| ty.sort() != Sort::Type) {
+                            return None;
+                        }
+                        fields
+                    }
+                    Term::NominalValue {
+                        ty,
+                        variant: None,
+                        fields,
+                    } if !types && ty.as_ref() == domain => fields,
+                    _ => return None,
                 };
-                budget.consume(types.len()).ok()?;
-                if types.iter().any(|ty| ty.sort() != Sort::Type) {
-                    return None;
-                }
-                collected.extend(types);
+                budget.consume(fields.len()).ok()?;
+                collected.extend(fields);
             }
             _ => return None,
         }
     }
-    Some(Term::TypeListValue(collected))
+    Some(if types {
+        Term::TypeListValue(collected)
+    } else {
+        Term::NominalValue {
+            ty: Box::new(clone_known_term(domain, budget)?),
+            variant: None,
+            fields: collected,
+        }
+    })
 }
 
 /// A type relation needs a proof in either direction. A failed equality query
@@ -2452,13 +2575,22 @@ mod tests {
         use super::collect_known_normal_argument;
         use nir::program::{Expr, ExprKind as K, NormalFormArgument as A, SourceRange};
         use nir::{Primitive, Sort};
+        let list_id = nir::DeclarationId {
+            package: 0,
+            local: 90,
+        };
+        let list = Term::NormalForm {
+            head: list_id,
+            sort: Sort::Type,
+            arguments: vec![Term::Primitive(Primitive::Type)],
+        };
         let source = SourceRange { start: 0, end: 0 };
         let expr = |kind| Expr {
             source,
             ty: Term::Primitive(Primitive::Type),
             kind,
         };
-        let input = |items| A::TypeList { source, items };
+        let input = |items| A::List { source, items };
         let flag = Term::Primitive(Primitive::Bool);
         let byte = Term::Primitive(Primitive::U8);
         let resolve = |e: &Expr, budget: &mut Budget| match &e.kind {
@@ -2468,16 +2600,24 @@ mod tests {
         };
         let valid = input(vec![
             A::Value(expr(K::TypeValue(flag.clone()))),
-            A::TypeListSpread(expr(K::TypeListValue(vec![byte.clone(), flag.clone()]))),
-            A::TypeListSpread(expr(K::TypeListValue(vec![]))),
+            A::ListSpread(expr(K::TypeListValue(vec![byte.clone(), flag.clone()]))),
+            A::ListSpread(expr(K::TypeListValue(vec![]))),
         ]);
         assert_eq!(
-            collect_known_normal_argument(&valid, &mut Budget::default(), resolve),
+            collect_known_normal_argument(
+                &valid,
+                Some(&list),
+                Some(list_id),
+                &mut Budget::default(),
+                resolve
+            ),
             Some(Term::TypeListValue(vec![flag.clone(), byte, flag.clone()]))
         );
         assert!(
             collect_known_normal_argument(
                 &valid,
+                Some(&list),
+                Some(list_id),
                 &mut Budget {
                     steps: 1,
                     max_limbs: 4096
@@ -2486,12 +2626,21 @@ mod tests {
             )
             .is_none()
         );
-        assert!(collect_known_normal_argument(&valid, &mut Budget::default(), resolve).is_some());
+        assert!(
+            collect_known_normal_argument(
+                &valid,
+                Some(&list),
+                Some(list_id),
+                &mut Budget::default(),
+                resolve
+            )
+            .is_some()
+        );
         for invalid in [
             A::Value(expr(K::TypeListValue(vec![]))),
-            A::TypeListSpread(expr(K::TypeValue(flag))),
-            A::TypeListSpread(expr(K::TypeListValue(vec![Term::Bool(true)]))),
-            A::TypeListSpread(expr(K::TypeValue(Term::Rigid {
+            A::ListSpread(expr(K::TypeValue(flag))),
+            A::ListSpread(expr(K::TypeListValue(vec![Term::Bool(true)]))),
+            A::ListSpread(expr(K::TypeValue(Term::Rigid {
                 declaration: nir::DeclarationId {
                     package: 1,
                     local: 1,
@@ -2502,6 +2651,8 @@ mod tests {
             assert!(
                 collect_known_normal_argument(
                     &input(vec![invalid]),
+                    Some(&list),
+                    Some(list_id),
                     &mut Budget::default(),
                     resolve
                 )
@@ -2514,13 +2665,131 @@ mod tests {
         ]);
         let mut visits = 0;
         assert!(
-            collect_known_normal_argument(&unknown, &mut Budget::default(), |e, b| {
-                visits += 1;
-                resolve(e, b)
-            })
+            collect_known_normal_argument(
+                &unknown,
+                Some(&list),
+                Some(list_id),
+                &mut Budget::default(),
+                |e, b| {
+                    visits += 1;
+                    resolve(e, b)
+                }
+            )
             .is_none()
         );
         assert_eq!(visits, 1);
+    }
+
+    #[test]
+    fn known_collections_require_a_domain_and_preserve_non_type_list_identity() {
+        use nir::program::{Expr, ExprKind as K, NormalFormArgument as A, SourceRange};
+        let source = SourceRange { start: 0, end: 0 };
+        let head = nir::DeclarationId {
+            package: 0,
+            local: 90,
+        };
+        let domain = |element| Term::NormalForm {
+            head,
+            sort: nir::Sort::Type,
+            arguments: vec![element],
+        };
+        let boolean = domain(Term::Primitive(Primitive::Bool));
+        let character = domain(Term::Primitive(Primitive::Char));
+        let nominal = |ty: &Term, fields| Term::NominalValue {
+            ty: Box::new(ty.clone()),
+            variant: None,
+            fields,
+        };
+        let empty = A::List {
+            source,
+            items: vec![],
+        };
+        let resolve = |expr: &Expr, budget: &mut Budget| match &expr.kind {
+            K::ComptimeValue(value) => super::clone_known_term(value, budget),
+            _ => None,
+        };
+        assert_eq!(
+            super::collect_known_normal_argument(
+                &empty,
+                Some(&boolean),
+                Some(head),
+                &mut Budget::default(),
+                resolve
+            ),
+            Some(nominal(&boolean, vec![]))
+        );
+        assert_eq!(
+            super::collect_known_normal_argument(
+                &empty,
+                Some(&character),
+                Some(head),
+                &mut Budget::default(),
+                resolve
+            ),
+            Some(nominal(&character, vec![]))
+        );
+        assert!(
+            super::collect_known_normal_argument(
+                &empty,
+                None,
+                Some(head),
+                &mut Budget::default(),
+                resolve
+            )
+            .is_none()
+        );
+        assert!(
+            super::collect_known_normal_argument(
+                &empty,
+                Some(&boolean),
+                None,
+                &mut Budget::default(),
+                resolve
+            )
+            .is_none()
+        );
+        let spread = |ty: &Term, value| A::List {
+            source,
+            items: vec![A::ListSpread(Expr {
+                source,
+                ty: ty.clone(),
+                kind: K::ComptimeValue(value),
+            })],
+        };
+        let values = nominal(&boolean, vec![Term::Bool(true), Term::Bool(false)]);
+        assert_eq!(
+            super::collect_known_normal_argument(
+                &spread(&boolean, values.clone()),
+                Some(&boolean),
+                Some(head),
+                &mut Budget::default(),
+                resolve
+            ),
+            Some(values.clone())
+        );
+        assert!(
+            super::collect_known_normal_argument(
+                &spread(&boolean, values),
+                Some(&character),
+                Some(head),
+                &mut Budget::default(),
+                resolve
+            )
+            .is_none()
+        );
+        assert!(
+            super::collect_known_normal_argument(
+                &empty,
+                Some(&boolean),
+                Some(head),
+                &mut Budget {
+                    steps: 1,
+                    max_limbs: 4096
+                },
+                resolve
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -2845,6 +3114,27 @@ impl Checker<'_, '_> {
                     }
                 }
             }
+            // Flatten only literal list spreads already routed to the
+            // collector. Their elements then use the ordinary positional
+            // preparation path, preserving effects before later arguments.
+            if list_spreads.iter().any(|index| matches!(&inputs[*index], Arg::Expand(value) if matches!(value.kind, H::List(_)))) {
+                let mut expanded = Vec::new();
+                for (index, input) in inputs.iter().enumerate() {
+                    self.required_steps = self.required_steps.checked_sub(1)
+                        .ok_or_else(|| error(span, "normal-form collection routing budget exhausted"))?;
+                    if list_spreads.contains(&index)
+                        && let Arg::Expand(value) = input
+                        && let H::List(elements) = value.kind
+                    {
+                        self.required_steps = self.required_steps.checked_sub(elements.len() as u64)
+                            .ok_or_else(|| error(span, "normal-form collection routing budget exhausted"))?;
+                        expanded.extend(elements.iter().map(Arg::Positional));
+                    } else {
+                        expanded.push(input.clone());
+                    }
+                }
+                return self.defaulted_normal_expression(owner, &expanded, span, expected);
+            }
             let packet_contexts = if inputs.iter().any(|input| matches!(input, Arg::Expand(_))) {
                 self.spread_packet_layout(&layout_inputs, &positional_types, span)?
             } else {
@@ -2878,7 +3168,7 @@ impl Checker<'_, '_> {
                             &mut prepared_bindings,
                             span,
                         )?;
-                        collected.push(n::NormalFormArgument::TypeListSpread(value));
+                        collected.push(n::NormalFormArgument::ListSpread(value));
                         continue;
                     }
 
@@ -3222,7 +3512,7 @@ impl Checker<'_, '_> {
                 }
                 let dependent = parameters.iter().any(|(id, _, _)| ty.mentions_rigid(*id));
                 let checked = if let Some(RoutedNormalInput::Collected(items)) = explicit {
-                    Ok(n::NormalFormArgument::TypeList {
+                    Ok(n::NormalFormArgument::List {
                         source: source(span),
                         items: items.clone(),
                     })
@@ -3247,7 +3537,7 @@ impl Checker<'_, '_> {
                 };
                 let budget_before = budget.steps;
                 known[slot] = match &value {
-                    n::NormalFormArgument::TypeList { items, .. } if !dependent => {
+                    n::NormalFormArgument::List { items, .. } if !dependent => {
                         self.known_collected_list_in(items, &ty, &prepared_bindings)
                     }
                     _ => value.expression().and_then(|value| {

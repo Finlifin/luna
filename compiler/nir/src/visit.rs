@@ -648,7 +648,7 @@ fn walk_mut(
             Node::Argument(argument) => {
                 use crate::program::NormalFormArgument as A;
                 match argument {
-                    A::TypeListSpread(value) | A::Value(value) => work.push(Node::Expr(value)),
+                    A::ListSpread(value) | A::Value(value) => work.push(Node::Expr(value)),
                     A::Unit { .. } | A::Integer { .. } => {}
                     A::If {
                         condition,
@@ -666,7 +666,7 @@ fn walk_mut(
                         work.extend(statements.iter_mut().map(Node::Expr));
                         work.extend(result.as_deref_mut().map(Node::Argument));
                     }
-                    A::TypeList { items, .. } | A::Tuple { items, .. } => {
+                    A::List { items, .. } | A::Tuple { items, .. } => {
                         work.extend(items.iter_mut().map(Node::Argument))
                     }
                     A::Match { value, arms, .. } => {

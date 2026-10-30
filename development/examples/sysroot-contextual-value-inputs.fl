@@ -66,3 +66,27 @@ test {
     let indexed_ok = ~<build_indexed()>;
     assumes indexed_ok;
 }
+
+pure comptime fn Collection<.T: Type = bool, ...items: meta.List<T>> -> Type {
+    bool
+}
+
+fn empty_collection() -> Holder<Collection<>> {
+    Holder<Collection<.items = []>> {flag: true}
+}
+
+comptime fn collection_identity() -> bool {
+    var trace: Integer = 0;
+    let actual = Collection<
+        do {trace = trace * 10 + 1; true},
+        ...[do {trace = trace * 10 + 2; false}],
+        .T = do {trace = trace * 10 + 3; bool}>;
+    trace == 123 and actual == Collection<.items = [true, false]>
+}
+
+test {
+    const identity_ok = collection_identity();
+    assumes identity_ok;
+    let empty_ok = empty_collection().flag;
+    assumes empty_ok;
+}

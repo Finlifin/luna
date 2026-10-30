@@ -5250,7 +5250,7 @@ impl Walker<'_> {
                 };
                 Ok((self.materialize_aggregate(value, ty, state)?, ty.clone()))
             }
-            nir::program::NormalFormArgument::TypeList { items, .. } => {
+            nir::program::NormalFormArgument::List { items, .. } => {
                 for item in items {
                     if !state.facts.is_reachable() {
                         break;

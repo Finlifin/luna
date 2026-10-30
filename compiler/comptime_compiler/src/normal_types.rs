@@ -281,13 +281,13 @@ pub(super) fn compile_input<'a>(
                 let items: Vec<Shape> = shapes.split_off(start);
                 let diverges = items.iter().any(|item| item.diverges);
                 let kind = match argument {
-                    A::TypeList {
+                    A::List {
                         items: original, ..
                     } => ShapeKind::List(
                         original
                             .iter()
                             .zip(items)
-                            .map(|(item, shape)| (matches!(item, A::TypeListSpread(_)), shape))
+                            .map(|(item, shape)| (matches!(item, A::ListSpread(_)), shape))
                             .collect(),
                     ),
                     A::Tuple { type_head, .. } => ShapeKind::Tuple {
@@ -327,7 +327,7 @@ pub(super) fn compile_input<'a>(
                 }
                 let slot = fresh();
                 let scalar = match argument {
-                    A::Value(value) | A::TypeListSpread(value) => {
+                    A::Value(value) | A::ListSpread(value) => {
                         code.push(Work::Expression(value, slot));
                         Some(Input::Value(copy_term(&value.ty, fuel, value.source)?))
                     }
@@ -455,7 +455,7 @@ pub(super) fn compile_input<'a>(
                         }
                         None
                     }
-                    A::TypeList { items, .. } | A::Tuple { items, .. } => {
+                    A::List { items, .. } | A::Tuple { items, .. } => {
                         *fuel = fuel
                             .checked_sub(items.len())
                             .ok_or(Error::Budget(argument.source()))?;
@@ -463,7 +463,7 @@ pub(super) fn compile_input<'a>(
                         for item in items.iter().rev() {
                             pending.push(Task::Append(
                                 slot,
-                                matches!(item, A::TypeListSpread(_)),
+                                matches!(item, A::ListSpread(_)),
                                 item.source(),
                             ));
                             pending.push(Task::Enter(item, depth + 1));
@@ -557,7 +557,7 @@ mod tests {
             ),
             Err(Error::Unsupported(_))
         ));
-        let wide = A::TypeList {
+        let wide = A::List {
             source: SOURCE,
             items: vec![A::Unit { source: SOURCE }; 100],
         };

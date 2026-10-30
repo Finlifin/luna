@@ -719,13 +719,13 @@ fn charge_node_observed(
             Node::Argument(argument) => {
                 use n::NormalFormArgument as A;
                 match argument {
-                    A::Value(value) | A::TypeListSpread(value) => {
+                    A::Value(value) | A::ListSpread(value) => {
                         work.push((Node::Expr(value), depth + 1));
                         0
                     }
                     A::Integer { spelling, .. } => spelling.len(),
                     A::Unit { .. } => 0,
-                    A::Tuple { items, .. } | A::TypeList { items, .. } => {
+                    A::Tuple { items, .. } | A::List { items, .. } => {
                         charge_width(steps, items.len())?;
                         work.extend(items.iter().map(|value| (Node::Argument(value), depth + 1)));
                         0

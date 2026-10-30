@@ -153,7 +153,7 @@ mod tests {
 
     #[test]
     fn staged_code_owns_literals_and_bounds_all_compilation_work() {
-        let input = A::TypeList {
+        let input = A::List {
             source: SOURCE,
             items: vec![
                 A::Integer {

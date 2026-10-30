@@ -526,7 +526,7 @@ fn nested_contextual_containers_preserve_domains_and_tuple_heads() {
         spelling: "17".into(),
         negative: false,
     };
-    let list = |items| A::TypeList {
+    let list = |items| A::List {
         source: SOURCE,
         items,
     };
@@ -640,10 +640,10 @@ fn contextual_container_checks_do_not_reorder_operand_effects() {
         for valid in [false, true, false, true] {
             let body = container_body(
                 list_ty.clone(),
-                A::TypeList {
+                A::List {
                     source: SOURCE,
                     items: vec![
-                        A::TypeListSpread(Expr {
+                        A::ListSpread(Expr {
                             source: SOURCE,
                             ty: list_ty.clone(),
                             kind: K::Local(source),
@@ -679,7 +679,7 @@ fn contextual_container_checks_do_not_reorder_operand_effects() {
         // Preparation checks even a later contextual literal before any code runs.
         let body = container_body(
             list_ty.clone(),
-            A::TypeList {
+            A::List {
                 source: SOURCE,
                 items: vec![
                     effect.clone(),
@@ -1331,10 +1331,10 @@ fn staged_list_spreads_finish_after_all_operand_effects() {
         owner: 92,
         index: 1,
     };
-    let input = A::TypeList {
+    let input = A::List {
         source: SOURCE,
         items: vec![
-            A::TypeListSpread(Expr {
+            A::ListSpread(Expr {
                 source: SOURCE,
                 ty: ty.clone(),
                 kind: K::Local(seed),

@@ -339,13 +339,13 @@ impl fmt::Display for NormalFormInputPlan {
 #[derive(Clone, Debug, PartialEq)]
 pub enum NormalFormArgument {
     /// Collect expressions into one contextual comptime list in source order.
-    TypeList {
+    List {
         source: SourceRange,
         items: Vec<Self>,
     },
     Value(Expr),
     /// Expand a completed list of the collector's exact contextual list type.
-    TypeListSpread(Expr),
+    ListSpread(Expr),
     Unit {
         source: SourceRange,
     },
@@ -395,13 +395,13 @@ impl fmt::Display for NormalMatchArm {
 impl NormalFormArgument {
     pub fn expression(&self) -> Option<&Expr> {
         match self {
-            Self::TypeListSpread(value) | Self::Value(value) => Some(value),
+            Self::ListSpread(value) | Self::Value(value) => Some(value),
             _ => None,
         }
     }
     pub fn expression_mut(&mut self) -> Option<&mut Expr> {
         match self {
-            Self::TypeListSpread(value) | Self::Value(value) => Some(value),
+            Self::ListSpread(value) | Self::Value(value) => Some(value),
             _ => None,
         }
     }
@@ -410,7 +410,7 @@ impl NormalFormArgument {
         let mut result = Vec::new();
         while let Some(input) = pending.pop() {
             match input {
-                Self::TypeListSpread(value) | Self::Value(value) => result.push(value),
+                Self::ListSpread(value) | Self::Value(value) => result.push(value),
                 Self::Integer { .. } | Self::Unit { .. } => {}
                 Self::If {
                     condition,
@@ -422,7 +422,7 @@ impl NormalFormArgument {
                     pending.push(else_input);
                     pending.push(then_input);
                 }
-                Self::TypeList { items, .. } | Self::Tuple { items, .. } => {
+                Self::List { items, .. } | Self::Tuple { items, .. } => {
                     pending.extend(items.iter().rev())
                 }
                 Self::Match { value, arms, .. } => {
@@ -453,7 +453,7 @@ impl NormalFormArgument {
         let mut result = Vec::new();
         while let Some(input) = pending.pop() {
             match input {
-                Self::TypeListSpread(value) | Self::Value(value) => result.push(value),
+                Self::ListSpread(value) | Self::Value(value) => result.push(value),
                 Self::Integer { .. } | Self::Unit { .. } => {}
                 Self::If {
                     condition,
@@ -465,7 +465,7 @@ impl NormalFormArgument {
                     pending.push(else_input);
                     pending.push(then_input);
                 }
-                Self::TypeList { items, .. } | Self::Tuple { items, .. } => {
+                Self::List { items, .. } | Self::Tuple { items, .. } => {
                     pending.extend(items.iter_mut().rev())
                 }
                 Self::Match { value, arms, .. } => {
@@ -496,7 +496,7 @@ impl NormalFormArgument {
         let mut patterns = Vec::new();
         while let Some(input) = pending.pop() {
             match input {
-                Self::TypeList { items, .. } | Self::Tuple { items, .. } => {
+                Self::List { items, .. } | Self::Tuple { items, .. } => {
                     pending.extend(items.iter().rev())
                 }
                 Self::Match { arms, .. } => {
@@ -527,7 +527,7 @@ impl NormalFormArgument {
         let mut patterns = Vec::new();
         while let Some(input) = pending.pop() {
             match input {
-                Self::TypeList { items, .. } | Self::Tuple { items, .. } => {
+                Self::List { items, .. } | Self::Tuple { items, .. } => {
                     pending.extend(items.iter_mut().rev())
                 }
                 Self::Match { arms, .. } => {
@@ -578,11 +578,11 @@ impl NormalFormArgument {
                     }
                     results.push(any);
                 }
-                Work::Input(Self::TypeList { items, .. } | Self::Tuple { items, .. }) => {
+                Work::Input(Self::List { items, .. } | Self::Tuple { items, .. }) => {
                     work.push(Work::Any(items.len()));
                     work.extend(items.iter().rev().map(Work::Input));
                 }
-                Work::Input(Self::TypeListSpread(value) | Self::Value(value)) => {
+                Work::Input(Self::ListSpread(value) | Self::Value(value)) => {
                     results.push(never(value))
                 }
                 Work::Input(Self::Integer { .. } | Self::Unit { .. }) => results.push(false),
@@ -627,12 +627,12 @@ impl NormalFormArgument {
     }
     pub fn source(&self) -> SourceRange {
         match self {
-            Self::TypeListSpread(value) | Self::Value(value) => value.source,
+            Self::ListSpread(value) | Self::Value(value) => value.source,
             Self::Unit { source }
             | Self::Integer { source, .. }
             | Self::If { source, .. }
             | Self::Block { source, .. }
-            | Self::TypeList { source, .. }
+            | Self::List { source, .. }
             | Self::Tuple { source, .. }
             | Self::Match { source, .. } => *source,
         }
@@ -641,7 +641,7 @@ impl NormalFormArgument {
 impl fmt::Display for NormalFormArgument {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::TypeListSpread(value) => write!(f, "(type-list-spread {value})"),
+            Self::ListSpread(value) => write!(f, "(contextual-list-spread {value})"),
             Self::Value(value) => write!(f, "{value}"),
             Self::If {
                 source,
@@ -667,8 +667,8 @@ impl fmt::Display for NormalFormArgument {
                 }
                 f.write_str("))")
             }
-            Self::TypeList { source, items } => {
-                write!(f, "(type-list-input (source {source}) (items")?;
+            Self::List { source, items } => {
+                write!(f, "(contextual-list-input (source {source}) (items")?;
                 for item in items {
                     write!(f, " {item}")?;
                 }

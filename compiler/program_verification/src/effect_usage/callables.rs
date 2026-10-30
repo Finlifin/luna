@@ -135,11 +135,11 @@ fn argument_binds(
                     pending.push(result);
                 }
             }
-            A::TypeList { items, .. } | A::Tuple { items, .. } => {
+            A::List { items, .. } | A::Tuple { items, .. } => {
                 step(fuel, items.len())?;
                 pending.extend(items);
             }
-            A::TypeListSpread(_) | A::Value(_) | A::Unit { .. } | A::Integer { .. } => {}
+            A::ListSpread(_) | A::Value(_) | A::Unit { .. } | A::Integer { .. } => {}
         }
     }
     Ok(())

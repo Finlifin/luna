@@ -3698,7 +3698,7 @@ impl<'a> Interpreter<'a> {
                     PreparedNormalInput::Value(value),
                 );
             }
-            A::TypeListSpread(value) | A::Value(value) => {
+            A::ListSpread(value) | A::Value(value) => {
                 self.prepare_normal_value_type(&value.ty, expected, value.source)?;
             }
             A::Integer {
@@ -3727,14 +3727,14 @@ impl<'a> Interpreter<'a> {
                 self.prepare_normal_argument(then_input, expected, literals, depth + 1)?;
                 self.prepare_normal_argument(else_input, expected, literals, depth + 1)?;
             }
-            A::TypeList { source, items } => {
+            A::List { source, items } => {
                 let element = self.normal_list_domain(expected, items.len(), *source)?;
                 literals.insert(
                     input as *const A as usize,
                     PreparedNormalInput::ListType(expected.clone()),
                 );
                 for item in items {
-                    let element_type = if matches!(item, A::TypeListSpread(_)) {
+                    let element_type = if matches!(item, A::ListSpread(_)) {
                         expected
                     } else {
                         &element
@@ -3817,7 +3817,7 @@ impl<'a> Interpreter<'a> {
         self.tick(Some(input.source()))?;
         self.depth += 1;
         let result = (|| match input {
-            A::TypeListSpread(value) | A::Value(value) => self.eval(value, environment),
+            A::ListSpread(value) | A::Value(value) => self.eval(value, environment),
             A::Integer { .. } | A::Unit { .. } => literals
                 .remove(&(input as *const A as usize))
                 .and_then(|prepared| match prepared {
@@ -3844,7 +3844,7 @@ impl<'a> Interpreter<'a> {
                     environment,
                 )
             }
-            A::TypeList { items, .. } => {
+            A::List { items, .. } => {
                 let Some(PreparedNormalInput::ListType(ty)) =
                     literals.remove(&(input as *const A as usize))
                 else {
@@ -3856,7 +3856,7 @@ impl<'a> Interpreter<'a> {
                     self.append_normal_list_item(
                         &ty,
                         &mut values,
-                        matches!(item, A::TypeListSpread(_)),
+                        matches!(item, A::ListSpread(_)),
                         value,
                         item.source(),
                     )?;

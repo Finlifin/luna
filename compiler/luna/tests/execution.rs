@@ -34141,7 +34141,7 @@ fn variadic_normal_heads_collect_type_lists_without_replacing_the_head() {
         .find(|h| h.declaration != list)
         .unwrap();
     assert_eq!(tuple.parameters[0].kind, nir::normal_forms::Kind::Value);
-    assert!(package.to_string().contains("(type-list-input"));
+    assert!(package.to_string().contains("(contextual-list-input"));
     let expected = |elements| {
         Value::Type(Term::NormalForm {
             head: tuple.declaration,
@@ -34531,7 +34531,7 @@ fn normal_type_list_spreads_preserve_elements_order_and_single_evaluation() {
         .find(|f| f.name == "Tuple")
         .unwrap()
         .declaration;
-    assert!(package.to_string().contains("(type-list-spread"));
+    assert!(package.to_string().contains("(contextual-list-spread"));
     for elements in [
         vec![],
         vec![Term::Primitive(P::Char), Term::Primitive(P::Bool)],

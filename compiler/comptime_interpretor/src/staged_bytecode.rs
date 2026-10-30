@@ -35,7 +35,7 @@ impl fmt::Display for Input {
         match self {
             Self::Value(value) => write!(f, "(staged-value {value})"),
             Self::Literal(key) => write!(f, "(staged-literal {key})"),
-            Self::TypeList { key, items } => {
+            Self::List { key, items } => {
                 write!(f, "(staged-list {key}")?;
                 for (spread, value) in items {
                     write!(f, " (item (spread {spread}) {value})")?;
@@ -119,7 +119,7 @@ impl State {
             Op::Container { value, list, .. } => {
                 let items = self.containers.remove(value).unwrap_or_default();
                 let input = if *list {
-                    Input::TypeList { key: *value, items }
+                    Input::List { key: *value, items }
                 } else {
                     Input::Tuple {
                         key: *value,
@@ -155,10 +155,10 @@ impl Interpreter<'_> {
             keys.insert(shape.slot, input as *const A as usize);
             match (input, &shape.kind) {
                 (
-                    A::Integer { .. } | A::Unit { .. } | A::Value(_) | A::TypeListSpread(_),
+                    A::Integer { .. } | A::Unit { .. } | A::Value(_) | A::ListSpread(_),
                     K::Scalar(_),
                 ) => {}
-                (A::TypeList { items, .. }, K::List(children)) => {
+                (A::List { items, .. }, K::List(children)) => {
                     pairs.extend(items.iter().zip(children.iter().map(|(_, child)| child)))
                 }
                 (
@@ -200,7 +200,7 @@ impl Interpreter<'_> {
             let key = match input {
                 Input::Value(_) => continue,
                 Input::Literal(key) => key,
-                Input::TypeList { key, items } => {
+                Input::List { key, items } => {
                     pending.extend(items.iter_mut().map(|(_, child)| child));
                     key
                 }

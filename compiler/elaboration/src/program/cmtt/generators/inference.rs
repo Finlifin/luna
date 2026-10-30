@@ -1196,7 +1196,7 @@ impl Checker<'_, '_> {
                 kind: K::ComptimeValue(value),
             };
             items.push(if spread {
-                n::NormalFormArgument::TypeListSpread(value)
+                n::NormalFormArgument::ListSpread(value)
             } else {
                 n::NormalFormArgument::Value(value)
             });

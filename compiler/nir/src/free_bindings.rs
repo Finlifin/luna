@@ -479,10 +479,10 @@ fn normal(
     }
     charge(fuel, 1)?;
     match argument {
-        A::Value(value) | A::TypeListSpread(value) => {
+        A::Value(value) | A::ListSpread(value) => {
             scan(value, scope, free, fuel, depth + 1, dependencies)?
         }
-        A::TypeList { items, .. } | A::Tuple { items, .. } => {
+        A::List { items, .. } | A::Tuple { items, .. } => {
             for item in items {
                 normal(item, scope, free, fuel, depth + 1, dependencies)?;
             }
