@@ -620,7 +620,7 @@ fn check_associated_publication(comptime: bool) {
 }
 
 #[test]
-fn generated_comptime_only_trait_cannot_publish_as_an_ordinary_trait() {
+fn generated_comptime_only_trait_preserves_identity_on_publication() {
     let arena = HirArena::new();
     let mut package = Package::new();
     let mut batch = DefinitionBatch::new(&mut package);
@@ -643,19 +643,14 @@ fn generated_comptime_only_trait_cannot_publish_as_an_ordinary_trait() {
     )
     .unwrap();
     batch.define(definition, None, None).unwrap();
-    let failure = publish(
+    let (_, checked) = publish(
         &mut batch,
         &mut 1000,
         &BTreeMap::from([(0, 73)]),
         &Protocols::default(),
         None,
     )
-    .unwrap_err();
-    assert!(
-        failure
-            .to_string()
-            .contains("comptime-only trait member resolution"),
-        "{failure}"
-    );
-    assert_eq!(batch.published().num_defs(), 0);
+    .unwrap();
+    assert!(checked.traits[0].comptime_only);
+    assert_eq!(batch.published().num_defs(), 1);
 }

@@ -59,7 +59,11 @@ impl Checker<'_, '_> {
         &mut self,
         inspect_only: bool,
     ) -> Result<Vec<EvaluatedAttribute>, Error> {
-        if self.package.definition_attributes.is_empty() {
+        if self.package.definition_attributes.is_empty()
+            && !self.package.owners().any(|(_, info)| {
+                matches!(&info.node.expect_item().kind, ItemKind::Trait(def) if def.comptime_only)
+            })
+        {
             return Ok(Vec::new());
         }
         let attributes = self.evaluate_attributes()?;

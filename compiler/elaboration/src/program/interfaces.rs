@@ -253,12 +253,6 @@ impl Checker<'_, '_> {
             let ItemKind::Trait(def) = &item.kind else {
                 continue;
             };
-            if def.comptime_only {
-                return Err(error(
-                    item.span,
-                    "elaboration is not implemented for comptime-only trait member resolution",
-                ));
-            }
             self.signature_owner = Some(owner);
             let mut names = BTreeSet::new();
             let mut associated = Vec::new();
@@ -285,6 +279,7 @@ impl Checker<'_, '_> {
             traits.insert(
                 declaration(self.package, &self.package_identities, owner),
                 n::Trait {
+                    comptime_only: def.comptime_only,
                     parameter_types: self
                         .trait_parameter_types
                         .get(&owner)
@@ -447,6 +442,15 @@ impl Checker<'_, '_> {
             let interface = instance.as_ref().map(|i| i.declaration);
             if let Some(interface) = interface {
                 let contract = &traits[&interface];
+                if contract.comptime_only
+                    && !matches!(&item.kind, ItemKind::Impl(def)
+                        if def.phase == hir::ImplementationPhase::Comptime)
+                {
+                    return Err(error(
+                        item.span,
+                        "comptime-only trait requires comptime impl",
+                    ));
+                }
                 let arguments: Vec<_> = std::iter::once(subject.clone())
                     .chain(interface_arguments.iter().cloned())
                     .collect();
@@ -1335,6 +1339,17 @@ impl Checker<'_, '_> {
                             error(span, format!("{kind} implementation query failed: {e}"))
                         })?
                         .types;
+                    if contract.comptime_only && kind == "parent interface" {
+                        if let crate::implementation::Selection::Selected(selected) =
+                            resolution.selection
+                        {
+                            if !implementations.iter().any(|parent| {
+                                parent.declaration == selected && parent.phases.comptime
+                            }) {
+                                return Err(error(span, "parent interface lacks comptime phase"));
+                            }
+                        }
+                    }
                     if !matches!(
                         resolution.selection,
                         crate::implementation::Selection::Selected(_)

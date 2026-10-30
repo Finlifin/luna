@@ -670,12 +670,147 @@ fn comptime_only_trait_identity_survives_lowering_without_changing_functions() {
     ] {
         assert!(text.contains(modifiers), "{modifiers}: {text}");
     }
-    // The new identity must not silently be compiled with ordinary trait lookup.
-    let failure = compile(source, Emit::Nir)
-        .err()
-        .expect("unsupported resolution");
+    let Artifact::Nir(text) = compile(source, Emit::Nir).unwrap() else {
+        panic!()
+    };
+    assert!(text.to_string().contains("(comptime-only true)"), "{text}");
+}
+
+#[test]
+fn comptime_only_trait_members_execute_with_explicit_interface_identity() {
+    let source = "
+        pure comptime trait Code {
+            comptime fn value()->bool;
+            comptime fn default_value()->bool {true}
+            assoc Flag: bool = true;
+        }
+        struct Subject {}
+        comptime impl Code for Subject { comptime fn value()->bool {true} }
+        comptime fn run()->bool {Subject.as(Code).value() and Subject.as(Code).default_value()}
+    ";
+    let package = support::compile(source);
+    let contract = package.traits.iter().find(|t| t.name == "Code").unwrap();
+    assert!(contract.comptime_only);
     assert!(
-        failure.contains("comptime-only trait member resolution"),
+        contract
+            .methods
+            .iter()
+            .all(|m| m.phase == nir::program::TraitPhase::Comptime)
+    );
+    assert!(
+        contract
+            .associated
+            .iter()
+            .all(|m| m.phase == nir::program::TraitPhase::Comptime)
+    );
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn comptime_only_trait_rejects_runtime_implementation_even_when_empty() {
+    for body in ["", "comptime fn value()->bool;"] {
+        let source = format!(
+            "pure comptime trait Code {{{body}}} struct Subject {{}} impl Code for Subject {{}}"
+        );
+        let failure = compile(&source, Emit::Nir).err().expect("invalid phase");
+        assert!(
+            failure.contains("comptime-only trait requires comptime impl"),
+            "{failure}"
+        );
+    }
+}
+
+#[test]
+fn comptime_only_trait_member_attributes_are_idempotent_but_cannot_disable_phase() {
+    let source = phase_source("pure comptime trait Code { ^staged comptime fn value()->bool; }");
+    let package = support::compile(&source);
+    assert!(package.traits.iter().any(|t| t.comptime_only));
+    let source = phase_source(
+        "pure comptime trait Code { ^{comptime_phase: false} comptime fn value()->bool; }",
+    );
+    let failure = compile(&source, Emit::Nir).err().expect("invalid override");
+    assert!(
+        failure.contains("comptime-only trait cannot contain runtime phase members"),
         "{failure}"
     );
+}
+
+#[test]
+fn nir_rejects_forged_runtime_members_and_contributions_of_comptime_only_traits() {
+    let source = "
+        pure comptime trait Code {comptime fn value()->bool; assoc Flag: bool = true;}
+        struct Subject {}
+        comptime impl Code for Subject {comptime fn value()->bool {true}}
+    ";
+    let original = support::compile(source);
+    nir::phases::validate(&original).unwrap();
+    for associated in [false, true] {
+        let mut package = original.clone();
+        let contract = package
+            .traits
+            .iter_mut()
+            .find(|t| t.name == "Code")
+            .unwrap();
+        if associated {
+            contract.associated[0].phase = nir::program::TraitPhase::Runtime;
+        } else {
+            contract.methods[0].phase = nir::program::TraitPhase::Runtime;
+        }
+        let failure = nir::phases::validate(&package).unwrap_err();
+        assert_eq!(
+            failure.message,
+            "comptime-only trait contains runtime phase members"
+        );
+    }
+    let mut package = original.clone();
+    package.implementations[0].phases.runtime = true;
+    assert_eq!(
+        nir::phases::validate(&package).unwrap_err().message,
+        "comptime-only trait has a runtime implementation"
+    );
+    nir::phases::validate(&original).unwrap();
+}
+
+#[test]
+fn comptime_only_trait_does_not_authorize_runtime_use_of_ordinary_fn() {
+    let source = "
+        pure comptime trait Code {fn value()->bool;}
+        struct Subject {}
+        comptime impl Code for Subject {fn value()->bool {true}}
+        fn run()->bool {Subject.as(Code).value()}
+    ";
+    let failure = compile(source, Emit::Nir).err().expect("runtime use");
+    assert!(
+        failure.contains("comptime-only trait method requires comptime context"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn comptime_only_child_requires_comptime_parent_contribution() {
+    for parent_phase in ["", "comptime "] {
+        let source = format!(
+            "
+            trait Parent {{}}
+            pure comptime trait Child :- Parent {{}}
+            struct Subject {{}}
+            {parent_phase}impl Parent for Subject {{}}
+            comptime impl Child for Subject {{}}
+        "
+        );
+        if parent_phase.is_empty() {
+            let failure = compile(&source, Emit::Nir)
+                .err()
+                .expect("missing parent phase");
+            assert!(
+                failure.contains("parent interface lacks comptime phase"),
+                "{failure}"
+            );
+        } else {
+            compile(&source, Emit::Nir).unwrap();
+        }
+    }
 }

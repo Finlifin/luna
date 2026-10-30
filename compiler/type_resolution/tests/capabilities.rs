@@ -143,6 +143,7 @@ fn qualification_abstract_absence_is_pending_and_parent_assumptions_are_scoped()
     let index = index(&implementations);
     let context = context();
     let traits = vec![Trait {
+        comptime_only: false,
         parameter_types: Vec::new(),
         associated: vec![],
         requirements: vec![],
@@ -315,6 +316,7 @@ fn parameterized_parent_assumptions_substitute_all_interface_arguments() {
     let index = Index::default();
     let context = context();
     let traits = vec![Trait {
+        comptime_only: false,
         parameter_types: Vec::new(),
         associated: vec![],
         requirements: vec![],
@@ -355,6 +357,7 @@ fn subject_guarantees_preserve_substitution_scope_and_budget() {
         sort: Sort::Type,
     };
     let same = Trait {
+        comptime_only: false,
         parameter_types: Vec::new(),
         associated: vec![],
         declaration: id(100),
@@ -370,6 +373,7 @@ fn subject_guarantees_preserve_substitution_scope_and_budget() {
         ],
     };
     let child = Trait {
+        comptime_only: false,
         parameter_types: Vec::new(),
         associated: vec![],
         declaration: id(110),
@@ -428,6 +432,7 @@ fn given_capabilities_follow_parameter_edges_with_full_subject_identity() {
     };
     let traits = vec![
         Trait {
+            comptime_only: false,
             parameter_types: Vec::new(),
             associated: vec![],
             declaration: id(100),
@@ -444,6 +449,7 @@ fn given_capabilities_follow_parameter_edges_with_full_subject_identity() {
             }],
         },
         Trait {
+            comptime_only: false,
             parameter_types: Vec::new(),
             associated: vec![],
             declaration: id(110),
@@ -539,6 +545,7 @@ fn given_capabilities_follow_parameter_edges_with_full_subject_identity() {
 
 fn marker(n: u32) -> Trait {
     Trait {
+        comptime_only: false,
         parameter_types: Vec::new(),
         associated: vec![],
         requirements: vec![],
@@ -2158,6 +2165,7 @@ fn external_value_domains_preserve_only_subject_guarantees_through_parents() {
         sort,
     };
     let parent = Trait {
+        comptime_only: false,
         declaration: id(801),
         self_parameter: id(802),
         type_parameters: vec![id(803), id(804)],
@@ -2176,6 +2184,7 @@ fn external_value_domains_preserve_only_subject_guarantees_through_parents() {
         ],
     };
     let child = Trait {
+        comptime_only: false,
         declaration: id(811),
         self_parameter: id(812),
         type_parameters: vec![id(813), id(814)],
@@ -2251,6 +2260,7 @@ fn repeated_value_indices_do_not_prove_absence_from_an_unknown_input() {
         .register_parameter_domain(id(2), Term::Primitive(Primitive::Bool))
         .unwrap();
     let traits = [Trait {
+        comptime_only: false,
         declaration: id(100),
         self_parameter: id(101),
         type_parameters: vec![id(102), id(103)],

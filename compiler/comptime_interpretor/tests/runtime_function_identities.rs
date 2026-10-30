@@ -171,6 +171,7 @@ fn an_identity_cannot_be_called_even_without_the_comptime_entry_gate() {
 fn trait_package() -> Package {
     let mut package = package();
     package.traits.push(nir::program::Trait {
+        comptime_only: false,
         parameter_types: Vec::new(),
         associated: vec![],
         requirements: vec![],
@@ -287,6 +288,7 @@ fn generator_method_contract_cannot_enter_ordinary_interpreter_dispatch() {
     let mut package = package();
     Interpreter::new(&package, Budget::default()).unwrap();
     package.traits.push(nir::program::Trait {
+        comptime_only: false,
         parameter_types: vec![],
         associated: vec![],
         requirements: vec![],

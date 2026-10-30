@@ -45,6 +45,7 @@ fn projection(t: Term, args: Vec<Term>) -> Term {
 }
 fn contract() -> Trait {
     Trait {
+        comptime_only: false,
         parameter_types: Vec::new(),
         declaration: id(1),
         self_parameter: id(3),

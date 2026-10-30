@@ -11718,6 +11718,7 @@ fn parameterized_interface_package() -> Package {
     let parameter = n::LocalId { owner: 1, index: 0 };
     let mut package = Package::default();
     package.traits.push(n::Trait {
+        comptime_only: false,
         parameter_types: Vec::new(),
         associated: vec![],
         requirements: vec![],
@@ -12002,6 +12003,7 @@ fn parameterized_interface_nir_parent_requirements_keep_their_arguments() {
         }],
     });
     package.traits.push(Trait {
+        comptime_only: false,
         parameter_types: Vec::new(),
         associated: vec![],
         requirements: vec![],

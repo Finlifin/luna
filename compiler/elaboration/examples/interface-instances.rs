@@ -7,6 +7,7 @@ fn id(local: u32) -> Id {
 fn main() {
     let mut package = Package::default();
     package.traits.push(Trait {
+        comptime_only: false,
         parameter_types: Vec::new(),
         associated: vec![],
         requirements: vec![],

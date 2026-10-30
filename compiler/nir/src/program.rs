@@ -2445,6 +2445,8 @@ impl fmt::Display for AssociatedContract {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Trait {
+    /// All interface members belong to the comptime phase; not function purity.
+    pub comptime_only: bool,
     /// Ordered declaration input domains. Empty is the compact all-Type form;
     /// otherwise there must be exactly one domain per declaration parameter.
     pub parameter_types: Vec<Term>,
@@ -2513,8 +2515,8 @@ impl fmt::Display for Trait {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "(trait {} (self-parameter {}) (name {:?}) (type-parameters",
-            self.declaration, self.self_parameter, self.name
+            "(trait {} (self-parameter {}) (name {:?}) (comptime-only {}) (type-parameters",
+            self.declaration, self.self_parameter, self.name, self.comptime_only
         )?;
         for parameter in &self.type_parameters {
             write!(f, " {parameter}")?;

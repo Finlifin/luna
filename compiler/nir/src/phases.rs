@@ -127,7 +127,37 @@ pub fn machine_arithmetic_functions(
     }
     let mut membership_fuel = 100_000usize;
     let mut membership = BTreeMap::new();
+    let mut comptime_only = BTreeSet::new();
     for interface in &package.traits {
+        if interface.comptime_only {
+            membership_fuel = membership_fuel
+                .checked_sub(
+                    interface
+                        .methods
+                        .len()
+                        .saturating_add(interface.associated.len())
+                        .saturating_add(1),
+                )
+                .ok_or(Error {
+                    source: SourceRange { start: 0, end: 0 },
+                    message: "trait phase validation budget exhausted",
+                })?;
+            comptime_only.insert(interface.declaration);
+            if interface
+                .methods
+                .iter()
+                .any(|member| member.phase != crate::program::TraitPhase::Comptime)
+                || interface
+                    .associated
+                    .iter()
+                    .any(|member| member.phase != crate::program::TraitPhase::Comptime)
+            {
+                return Err(Error {
+                    source: SourceRange { start: 0, end: 0 },
+                    message: "comptime-only trait contains runtime phase members",
+                });
+            }
+        }
         let mut methods = BTreeMap::new();
         for member in &interface.methods {
             membership_fuel = membership_fuel
@@ -141,6 +171,16 @@ pub fn machine_arithmetic_functions(
         membership.insert(interface.declaration, methods);
     }
     for definition in &package.implementations {
+        if definition.phases.runtime
+            && definition
+                .interface
+                .is_some_and(|id| comptime_only.contains(&id))
+        {
+            return Err(Error {
+                source: SourceRange { start: 0, end: 0 },
+                message: "comptime-only trait has a runtime implementation",
+            });
+        }
         if (!definition.phases.runtime && !definition.phases.comptime)
             || (definition.interface.is_none() && definition.phases.comptime)
         {
@@ -719,6 +759,11 @@ pub fn machine_arithmetic_functions(
                                 .iter()
                                 .find(|definition| definition.declaration == *interface)
                                 .ok_or_else(|| error("trait method has no interface contract"))?;
+                            if contract.comptime_only && !ct {
+                                return Err(error(
+                                    "comptime-only trait method requires comptime context",
+                                ));
+                            }
                             let method = contract
                                 .methods
                                 .iter()

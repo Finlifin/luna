@@ -5439,3 +5439,35 @@ HIR dump expectation (`/tmp/luna-tools-2lila6wq/result.json`). HEAD already emit
 `source-origins` while that assertion omits it; this change does not alter package
 dumping. The focused declaration/dump checks above pass. Initial local failures
 in the new parser fixture and Rust test harness were corrected before these runs.
+
+### Comptime-only trait phase admission (2026-10-31)
+
+NIR now retains the declaration's comptime-only identity. Attribute phase planning
+provides implicit comptime membership for its members even without attributes;
+redundant true metadata is idempotent and false metadata is rejected. Function
+execution and purity remain unchanged. Explicit interface calls, default methods
+and associated defaults use the ordinary comptime implementation path. Ordinary
+impl is rejected even for an empty interface. Concrete parent implementations
+must provide the comptime contribution. Generated declarations publish through
+the same checks and retain the identity.
+
+NIR phase validation rejects forged runtime members or implementation availability
+and runtime use of an ordinary fn through a comptime-only interface. This replaces
+the previous blanket unsupported-declaration diagnostic. Unqualified member-source
+priority and builtin protocol migration are still outstanding; callers in this
+stage use explicit interface views. Abstract parent capability assumptions retain
+the existing evidence representation; phase-aware deferred capability evidence
+needs further work along with source resolution.
+
+Validation from `/home/fin/luna`, exit 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test trait_phases`:
+  37 tests, `/tmp/luna-tools-s8u9dcfj/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --test generated_traits --test attribute_phases --test derivation`:
+  `/tmp/luna-tools-kkmd8waz/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p nir --test trait_parameters`:
+  `/tmp/luna-tools-k8dqs56s/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution --test capabilities --test associated`:
+  `/tmp/luna-tools-v1qiaipm/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  `/tmp/luna-tools-vb42j4jk/result.json`; `git diff --check` passed.

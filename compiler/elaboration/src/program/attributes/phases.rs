@@ -27,6 +27,8 @@ pub fn member_phases(
 ) -> Result<Vec<MemberPhase>, MergeFailure> {
     let failure = |source, message: String| MergeFailure { source, message };
     let mut containers = BTreeMap::new();
+    let mut output = Vec::new();
+    let mut slots = BTreeMap::new();
     for (container, info) in package.owners() {
         let item = info.node.expect_item();
         let location = source(item.span);
@@ -39,6 +41,14 @@ pub fn member_phases(
             _ => continue,
         };
         for owner in members {
+            if matches!(&item.kind, ItemKind::Trait(def) if def.comptime_only) {
+                slots.insert(*owner, output.len());
+                output.push(MemberPhase {
+                    owner: *owner,
+                    phase: hir::ImplementationPhase::Comptime,
+                    source: location,
+                });
+            }
             let levels = (usize::BITS - containers.len().leading_zeros()) as usize + 1;
             budget
                 .consume(levels.saturating_mul(16))
@@ -51,7 +61,6 @@ pub fn member_phases(
             }
         }
     }
-    let mut output = Vec::new();
     for target in merged {
         let location = target
             .iter()
@@ -103,7 +112,19 @@ pub fn member_phases(
         budget
             .consume(1)
             .map_err(|e| failure(location, e.to_string()))?;
-        output.push(MemberPhase {
+        if !enabled
+            && containers.get(&owner).is_some_and(|container| {
+                package.item(*container).is_some_and(
+                    |item| matches!(&item.kind, ItemKind::Trait(def) if def.comptime_only),
+                )
+            })
+        {
+            return Err(failure(
+                location,
+                "comptime-only trait cannot contain runtime phase members".into(),
+            ));
+        }
+        let entry = MemberPhase {
             owner,
             source: location,
             phase: if enabled {
@@ -111,7 +132,13 @@ pub fn member_phases(
             } else {
                 hir::ImplementationPhase::Runtime
             },
-        });
+        };
+        if let Some(index) = slots.get(&owner) {
+            output[*index] = entry;
+        } else {
+            slots.insert(owner, output.len());
+            output.push(entry);
+        }
     }
     Ok(output)
 }

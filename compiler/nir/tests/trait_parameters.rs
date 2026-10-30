@@ -102,6 +102,7 @@ fn record_indices_validate_nested_scalar_domains_and_recover_after_failure() {
 
 fn declaration() -> Trait {
     Trait {
+        comptime_only: false,
         parameter_types: vec![
             Term::Primitive(Primitive::Type),
             Term::Rigid {

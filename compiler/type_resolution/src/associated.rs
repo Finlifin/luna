@@ -993,6 +993,7 @@ mod view_tests {
             subject: Box::new(subject.clone()),
         };
         let mut traits = vec![Trait {
+            comptime_only: false,
             parameter_types: Vec::new(),
             declaration: id(1),
             self_parameter: id(1),
@@ -1197,6 +1198,7 @@ mod shared_cache_tests {
             subject: Box::new(Term::Primitive(Primitive::Bool)),
         };
         let traits = vec![Trait {
+            comptime_only: false,
             parameter_types: Vec::new(),
             declaration: id(1),
             self_parameter: id(1),

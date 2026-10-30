@@ -48,6 +48,7 @@ fn trait_package(ids: &[DeclarationId]) -> nir::program::Package {
         traits: ids
             .iter()
             .map(|&declaration| nir::program::Trait {
+                comptime_only: false,
                 parameter_types: Vec::new(),
                 associated: vec![],
                 declaration,
