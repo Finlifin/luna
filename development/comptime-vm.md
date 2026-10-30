@@ -3210,3 +3210,44 @@ Validation from `/home/fin/luna`:
   `/tmp/luna-tools-b1o2jct3/result.json`, exit 0 without exclusions.
 - Managed formatting: `/tmp/luna-tools-xmsl_0nc/result.json`, exit 0;
   `git diff --check` passed.
+
+## Runtime tree execution preserves depth failure and recovery
+
+The second recorded stack overflow had two causes. Runtime tree invocations
+entered the linear bytecode driver even when its existing eligibility rules
+could never select bytecode. The tree recursion retained that driver's large
+frame at every call. The shared eligibility query now selects tree evaluation
+after ordinary invocation admission and preparation, and rejoins the same
+completion/restoration boundary. Cleanup schedules, effects, phase checks and
+bytecode eligibility are unchanged.
+
+This restored the original 20-level runtime regression. Extending it to require
+normal rejection at the default 128-call depth budget exposed a second oversized
+frame: metadata, enum/text observations and integer conversions had accumulated
+inside the common expression dispatcher. Those evaluators now live in
+`observations.rs`, retaining their original checks and behavior. In the same
+unoptimized x86_64 binary, objdump reports the common eval_inner frame changing
+from 0x4548 bytes (17736) to 0x48 bytes (72). These are build-specific stack-frame
+measurements, not a throughput claim.
+
+The source IIR test now attempts 200 recursive calls, checks DepthExhausted, then
+successfully reuses the same interpreter for its original entry. It still checks
+execution after discarding the source package and absence of runtime template
+instantiation events. Neither host stack size nor default depth budget changed.
+Tree execution still uses native recursion; this is not a claim that arbitrary
+user-configured depth limits or every unsupported-bytecode path are stackless.
+
+Validation from `/home/fin/luna`:
+
+- The isolated original failure was reproduced in
+  `/tmp/luna-tools-sv8c7iwj/result.json`; the stronger depth case initially
+  overflowed in `/tmp/luna-tools-k_ua2dov/result.json` after the routing fix alone.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test instantiation concrete_graph_executes_without_source_templates -- --nocapture`:
+  `/tmp/luna-tools-jb2w64n_/result.json`, exit 0 with the added depth/recovery check.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-7dorjura/result.json`, exit 0 on the complete implementation.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test instantiation --test staged_aggregate_contracts --test sysroot_preludes`:
+  `/tmp/luna-tools-e37e3zpr/result.json`, exit 0 without exclusions: all 57
+  instantiation, 31 staged aggregate and 8 sysroot cases passed.
+- Managed formatting: `/tmp/luna-tools-62uq4jx5/result.json`, exit 0;
+  `git diff --check` passed. The earlier template fixture failures remain separate.

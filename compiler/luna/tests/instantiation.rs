@@ -430,6 +430,13 @@ fn concrete_graph_executes_without_source_templates() {
     );
     assert_eq!(
         interpreter
+            .invoke_instance(recursive, vec![Value::UnsignedInteger(200)])
+            .unwrap_err()
+            .kind,
+        comptime_interpretor::ErrorKind::DepthExhausted
+    );
+    assert_eq!(
+        interpreter
             .invoke_instance(&output.roots[0], vec![])
             .unwrap(),
         Value::UnsignedInteger(41)

@@ -116,7 +116,15 @@ impl<'a> Interpreter<'a> {
         arguments: Vec<Value>,
         context: Option<(iir::InstanceKey, Vec<iir::cleanup::ContextKey>)>,
     ) -> Result<Value, Error> {
-        let activation = self.begin_invocation(function, arguments, context)?;
+        let mut activation = self.begin_invocation(function, arguments, context)?;
+        if !self.bytecode_invocation_available() {
+            // Tree execution must not retain the large linear VM dispatcher
+            // frame at every native recursive call. Admission, completion and
+            // restoration still use the shared invocation boundaries.
+            let frame = &mut activation.frame;
+            let result = self.eval(frame.body.expression(), &mut frame.environment);
+            return self.complete_invocation(activation, result);
+        }
         match self.run_executions(Some(Execution::Invocation(activation)), None, None)? {
             Some(Flow::Value(value)) => Ok(value),
             _ => Err(self.failure(ErrorKind::InvalidControlFlow, None)),

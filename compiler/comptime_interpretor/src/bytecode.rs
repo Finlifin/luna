@@ -389,16 +389,19 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    pub(super) fn bytecode_invocation_available(&self) -> bool {
+        self.comptime_only
+            && self.cleanup_schedule.is_none()
+            && self.graph.is_none()
+            && self.effect_state.environment.is_empty()
+    }
+
     pub(super) fn invocation_code(
         &mut self,
         body: &Expr,
         stable_code: Option<DeclarationId>,
     ) -> Result<Option<Arc<Program>>, Error> {
-        if !self.comptime_only
-            || self.cleanup_schedule.is_some()
-            || self.graph.is_some()
-            || !self.effect_state.environment.is_empty()
-        {
+        if !self.bytecode_invocation_available() {
             return Ok(None);
         }
         // Decide the execution route before any instruction has run.
