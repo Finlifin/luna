@@ -6,7 +6,7 @@ use comptime_interpretor::Value;
 
 fn source(body: &str) -> String {
     format!(
-        "{}\nmod comparison {{ {} }}\nmod resources {{ {} }}\nmod conversion {{ {} }}\nmod traits {{ {} }}\npub use traits.*;\n{body}",
+        "mod primitives {{ {} }} use primitives.*;\nmod comparison {{ {} }}\nmod resources {{ {} }}\nmod conversion {{ {} }}\nmod traits {{ {} }}\npub use traits.*;\n{body}",
         include_str!("../../../library/builtin/primitives.fl"),
         support::with_attrs(include_str!(
             "../../../library/builtin/numeric/comparison.fl"
@@ -478,4 +478,21 @@ fn root_dispatch_preserves_generic_parents_of_concrete_implementations() {
             .retain(|i| i.interface != Some(parent));
         assert!(materialize(&missing, &[root.clone()], Default::default()).is_err());
     }
+}
+
+#[test]
+#[ignore = "requires trait-method callable and eager BitVec and/or bytecode"]
+fn shipped_text_hash_runs_its_loop_in_bytecode() {
+    use comptime_interpretor::{Budget, Interpreter};
+    let package = support::compile(&source(
+        "comptime fn staged()->u64 {\"é\".as(Hash).comptime_hash()}",
+    ));
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let result = vm.invoke(support::id(&package, "staged"), vec![]).unwrap();
+    assert_eq!(result, Value::UnsignedInteger(0x0ac21707b7181e01));
+    assert_eq!(
+        vm.bytecode_invocations(),
+        2,
+        "wrapper and shipped hash body must both compile"
+    );
 }

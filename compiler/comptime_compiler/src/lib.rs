@@ -7,6 +7,7 @@ pub mod leaf_inputs;
 pub mod lists;
 pub mod normal_types;
 pub mod objects;
+pub mod observations;
 mod patterns;
 pub mod scalar;
 pub mod staged_inputs;
@@ -38,6 +39,12 @@ impl fmt::Display for ErrorConversion {
 
 #[derive(Debug)]
 pub enum Op {
+    CheckObservation(Arc<observations::Observation>),
+    Observe {
+        destination: Register,
+        value: Register,
+        observation: Arc<observations::Observation>,
+    },
     BeginBitUpdate {
         identity: Register,
         plan: Arc<bit_updates::Plan>,
@@ -428,6 +435,14 @@ impl fmt::Display for Program {
                 instruction.source.start, instruction.source.end
             )?;
             match &instruction.op {
+                Op::CheckObservation(observation) => {
+                    write!(f, "(check-observation {observation})")?
+                }
+                Op::Observe {
+                    destination,
+                    value,
+                    observation,
+                } => write!(f, "(observe %{destination} %{value} {observation})")?,
                 Op::BeginBitUpdate { identity, plan } => {
                     write!(f, "(begin-bit-update %{identity} {plan})")?
                 }
@@ -1157,6 +1172,32 @@ fn compile_root<'a>(
                     continue;
                 }
                 match &expr.kind {
+                    K::EnumName(_) | K::SymbolName(_) | K::TextQuery { .. } => {
+                        use observations::{Kind as O, Observation};
+                        let (kind, operand) = match &expr.kind {
+                            K::EnumName(operand) => (O::EnumName, operand.as_ref()),
+                            K::SymbolName(operand) => (O::SymbolName, operand.as_ref()),
+                            K::TextQuery { subject, query } => (O::Text(*query), subject.as_ref()),
+                            _ => unreachable!(),
+                        };
+                        let observation = Arc::new(Observation {
+                            kind,
+                            input: copy_term(&operand.ty, fuel, source)?,
+                            output: copy_term(&expr.ty, fuel, source)?,
+                            operand_source: operand.source,
+                        });
+                        let value = fresh();
+                        emit(
+                            &mut work,
+                            Op::Observe {
+                                destination: dst,
+                                value,
+                                observation: observation.clone(),
+                            },
+                        );
+                        work.push(Work::Expression(operand, value));
+                        emit(&mut work, Op::CheckObservation(observation));
+                    }
                     K::BitSlice { .. }
                     | K::BitIndex(..)
                     | K::BitWindow { .. }

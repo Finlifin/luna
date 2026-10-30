@@ -56,38 +56,95 @@ impl Interpreter<'_> {
             _ => unreachable!("expression dispatcher selected an incompatible observation"),
         }
     }
-    #[inline(never)]
-    pub(super) fn eval_enum_name(
+    pub(super) fn eval_observation(
         &mut self,
         expr: &Expr,
         environment: &mut Environment,
     ) -> Result<Flow, Error> {
-        match &expr.kind {
-            K::EnumName(operand) => {
-                if expr.ty != Term::Primitive(Primitive::Str)
-                    || !matches!(operand.ty, Term::Nominal { .. })
+        use comptime_compiler::observations::{Kind as O, Observation};
+        let (kind, operand) = match &expr.kind {
+            K::EnumName(operand) => (O::EnumName, operand.as_ref()),
+            K::SymbolName(operand) => (O::SymbolName, operand.as_ref()),
+            K::TextQuery { subject, query } => (O::Text(*query), subject.as_ref()),
+            _ => unreachable!("observation dispatcher"),
+        };
+        let observation = Observation {
+            kind,
+            input: &operand.ty,
+            output: &expr.ty,
+            operand_source: operand.source,
+        };
+        self.check_observation(&observation, expr.source)?;
+        let value = value!(self.eval(operand, environment));
+        self.observe_value(&observation, value, expr.source)
+            .map(Flow::Value)
+    }
+    pub(super) fn check_observation(
+        &self,
+        observation: &comptime_compiler::observations::Observation<impl std::borrow::Borrow<Term>>,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        use comptime_compiler::observations::Kind as O;
+        let input: &Term = observation.input.borrow();
+        let output: &Term = observation.output.borrow();
+        match observation.kind {
+            O::EnumName => {
+                if *output != Term::Primitive(Primitive::Str)
+                    || !matches!(*input, Term::Nominal { .. })
                 {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+                    return Err(self.failure(ErrorKind::Type, Some(source)));
                 }
-                let Term::Nominal { declaration, .. } = &operand.ty else {
+                let Term::Nominal { declaration, .. } = input else {
                     unreachable!()
                 };
                 let is_enum = if let Some(graph) = self.graph {
                     graph.nominals.iter().any(|nominal| {
-                        nominal.ty == operand.ty
+                        nominal.ty == *input
                             && matches!(nominal.definition, iir::NominalDefinition::Enum(_))
                     })
                 } else {
                     self.enums.contains_key(declaration)
                 };
                 if !is_enum {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+                    return Err(self.failure(ErrorKind::Type, Some(source)));
                 }
-                let value = value!(self.eval(operand, environment));
-                if !self.has_type(&value, &operand.ty) {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+            }
+            O::SymbolName => {
+                let never = Term::Primitive(Primitive::Never);
+                let expected = if *input == never {
+                    never.clone()
+                } else {
+                    Term::Primitive(Primitive::Str)
+                };
+                if *output != expected
+                    || (*input != never && *input != Term::Primitive(Primitive::Symbol))
+                {
+                    return Err(self.failure(ErrorKind::Type, Some(source)));
                 }
-                self.retain_residual(operand.source, &value)?;
+            }
+            O::Text(query) => {
+                if !query.validate(input, output) {
+                    return Err(self.failure(ErrorKind::Type, Some(source)));
+                }
+            }
+        }
+        Ok(())
+    }
+    pub(super) fn observe_value(
+        &mut self,
+        observation: &comptime_compiler::observations::Observation<impl std::borrow::Borrow<Term>>,
+        value: Value,
+        source: SourceRange,
+    ) -> Result<Value, Error> {
+        use comptime_compiler::observations::Kind as O;
+        let input: &Term = observation.input.borrow();
+        let output: &Term = observation.output.borrow();
+        match observation.kind {
+            O::EnumName => {
+                if !self.has_type(&value, input) {
+                    return Err(self.failure(ErrorKind::Type, Some(source)));
+                }
+                self.retain_residual(observation.operand_source, &value)?;
                 let Value::Variant {
                     declaration,
                     index,
@@ -95,7 +152,7 @@ impl Interpreter<'_> {
                     ..
                 } = value
                 else {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+                    return Err(self.failure(ErrorKind::Type, Some(source)));
                 };
                 let definition = if let Some(graph) = self.graph {
                     graph
@@ -119,92 +176,57 @@ impl Interpreter<'_> {
                     .as_ref()
                     .and_then(|definition| definition.variants.get(index))
                     .map(|variant| variant.name.as_str())
-                    .ok_or_else(|| self.failure(ErrorKind::Type, Some(expr.source)))?;
+                    .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
                 self.budget.steps = self
                     .budget
                     .steps
                     .checked_sub(name.len() as u64)
-                    .ok_or_else(|| self.failure(ErrorKind::StepsExhausted, Some(expr.source)))?;
-                Ok(Flow::Value(Value::String(name.into())))
+                    .ok_or_else(|| self.failure(ErrorKind::StepsExhausted, Some(source)))?;
+                Ok(Value::String(name.into()))
             }
-            _ => unreachable!("expression dispatcher selected an incompatible observation"),
-        }
-    }
-    #[inline(never)]
-    pub(super) fn eval_symbol_name(
-        &mut self,
-        expr: &Expr,
-        environment: &mut Environment,
-    ) -> Result<Flow, Error> {
-        match &expr.kind {
-            K::SymbolName(operand) => {
-                let never = Term::Primitive(Primitive::Never);
-                let expected = if operand.ty == never {
-                    never.clone()
-                } else {
-                    Term::Primitive(Primitive::Str)
+            O::SymbolName => {
+                let Value::Symbol(name) = value else {
+                    return Err(self.failure(ErrorKind::Type, Some(source)));
                 };
-                if expr.ty != expected
-                    || (operand.ty != never && operand.ty != Term::Primitive(Primitive::Symbol))
-                {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                }
-                let Value::Symbol(name) = value!(self.eval(operand, environment)) else {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                };
-                Ok(Flow::Value(Value::String(name)))
+                Ok(Value::String(name))
             }
-            _ => unreachable!("expression dispatcher selected an incompatible observation"),
-        }
-    }
-    #[inline(never)]
-    pub(super) fn eval_text_query(
-        &mut self,
-        expr: &Expr,
-        environment: &mut Environment,
-    ) -> Result<Flow, Error> {
-        match &expr.kind {
-            K::TextQuery { subject, query } => {
-                if !query.validate(&subject.ty, &expr.ty) {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                }
-                let Value::Tuple(values) = value!(self.eval(subject, environment)) else {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+            O::Text(query) => {
+                let Value::Tuple(values) = value else {
+                    return Err(self.failure(ErrorKind::Type, Some(source)));
                 };
                 let text = match values.first() {
                     Some(Value::String(text)) if !query.is_symbol() => text,
                     Some(Value::Symbol(text)) if query.is_symbol() => text,
-                    _ => return Err(self.failure(ErrorKind::Type, Some(expr.source))),
+                    _ => return Err(self.failure(ErrorKind::Type, Some(source))),
                 };
                 match query {
                     nir::program::TextQueryKind::ByteLength
                     | nir::program::TextQueryKind::SymbolByteLength
                         if values.len() == 1 =>
                     {
-                        Ok(Flow::Value(Value::UnsignedInteger(text.len() as u128)))
+                        Ok(Value::UnsignedInteger(text.len() as u128))
                     }
                     nir::program::TextQueryKind::Byte | nir::program::TextQueryKind::SymbolByte
                         if values.len() == 2 =>
                     {
                         let Value::UnsignedInteger(index) = values[1] else {
-                            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+                            return Err(self.failure(ErrorKind::Type, Some(source)));
                         };
                         if index > u64::MAX as u128 {
-                            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+                            return Err(self.failure(ErrorKind::Type, Some(source)));
                         }
                         let byte = usize::try_from(index)
                             .ok()
                             .and_then(|index| text.as_bytes().get(index));
-                        Ok(Flow::Value(Value::Optional {
-                            ty: expr.ty.clone(),
+                        Ok(Value::Optional {
+                            ty: output.clone(),
                             value: byte
                                 .map(|byte| Box::new(Value::UnsignedInteger(u128::from(*byte)))),
-                        }))
+                        })
                     }
-                    _ => Err(self.failure(ErrorKind::Type, Some(expr.source))),
+                    _ => Err(self.failure(ErrorKind::Type, Some(source))),
                 }
             }
-            _ => unreachable!("expression dispatcher selected an incompatible observation"),
         }
     }
     #[inline(never)]

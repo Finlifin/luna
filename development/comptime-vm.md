@@ -4264,3 +4264,38 @@ Validation in /home/fin/luna:
   exit 0, `/tmp/luna-tools-7axc13rv/result.json`.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
   exit 0, `/tmp/luna-tools-1pw0d97i/result.json`; `git diff --check`: exit 0.
+
+### Compile text and name observations
+
+TextQuery, SymbolName and EnumName now lower to a typed admission check followed
+by operand bytecode and a value observation. Tree execution shares both helpers;
+it borrows input/output types rather than copying them on each observation.
+Enum observations retain nominal checks, residual delivery and name-copy budget.
+Text queries retain UTF-8 byte indexing and optional out-of-range results.
+
+Source coverage invokes the shipped text wrappers and checks compiled frame
+counts, empty/multibyte strings, maximum indices, symbol/enum names and early
+return. NIR tests check that invalid observation shapes fail before operand
+effects. The hash fixture now supplies the primitives module imported by the
+shipped comparison module, rather than flattening those declarations at root.
+
+The full shipped text-hash compilation regression remains explicitly ignored:
+its result is correct, but both wrapper and method fall back, with zero compiled
+frames. Diagnostic lowering identified TraitMethod and BitVec And/Or as the
+remaining unsupported nodes. The expectation of two compiled frames is retained
+for the next implementation stage, not weakened to count fallback as completion.
+Temporary lowering diagnostics were removed.
+
+Validation in /home/fin/luna:
+- Initial observation test selected the runtime byte wrapper because of a
+  duplicate leaf name; renamed the new entry to read_byte. Initial library_hash
+  run failed on the fixture's missing primitives module. After fixing that
+  dependency, 11 existing tests passed and the new compilation regression failed
+  with 0 rather than 2 compiled frames (`/tmp/luna-tools-8rfc5cjy/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-grjzpamh/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_observations --test library_hash`:
+  exit 0, `/tmp/luna-tools-jtlvuad0/result.json`; observation suite and 11 hash
+  tests passed, one known incomplete compilation regression ignored as above.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-_i_ldog3/result.json`; `git diff --check`: exit 0.

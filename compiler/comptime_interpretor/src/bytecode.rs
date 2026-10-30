@@ -794,6 +794,17 @@ impl<'a> Interpreter<'a> {
                 source: Some(source),
             };
             match &instruction.op {
+                Op::CheckObservation(observation) => self.check_observation(observation, source)?,
+                Op::Observe {
+                    destination,
+                    value,
+                    observation,
+                } => {
+                    let value = frame.slots[*value].take().ok_or_else(missing)?;
+                    frame.slots[*destination] =
+                        Some(self.observe_value(observation, value, source)?);
+                }
+
                 Op::BeginBitUpdate { identity, plan } => {
                     frame.slots[plan.local].as_ref().ok_or_else(missing)?;
                     self.charge_preparation(plan.selections.len())?;
@@ -3429,3 +3440,7 @@ mod normal_type_tests;
 #[cfg(test)]
 #[path = "input_preparation_tests.rs"]
 mod input_preparation_tests;
+
+#[cfg(test)]
+#[path = "bytecode_observations.rs"]
+mod observation_tests;
