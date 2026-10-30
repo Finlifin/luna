@@ -177,3 +177,55 @@ fn taking_bits_compiles_scalar_and_encoded_enum_representations() {
         assert_eq!(tree.invoke(id, vec![argument]).unwrap(), expected, "{name}");
     }
 }
+
+#[test]
+fn bit_writeback_compiles_without_losing_rhs_updates_or_snapshots() {
+    let package = support::compile(
+        "typealias Word=.u16'builtin;
+        struct Packet {word:Word, other:Word}
+        comptime fn overlap()->Word {
+            var word:Word=0x1234;
+            word'bitvec[4..12] = word'bitvec[0..8];word
+        }
+        comptime fn nested()->Word {
+            var word:Word=0;word'bitvec[4..12][2..6] = 0xF;word
+        }
+        comptime fn rhs_update()->Word {
+            let packet=Packet {word:0x1234,other:0};
+            packet.word'bitvec[0..8] = do {
+                packet.word = 0xABCD;packet.other = 99;0x12
+            };
+            if packet.other == 99 {packet.word} else {0}
+        }
+        comptime fn snapshot()->Word {
+            var word:Word=0x1234;let saved=word'bitvec;
+            word'bitvec[0..8] = 0xAB;saved.as(Word)
+        }
+        comptime fn empty()->Word {
+            var word:Word=0x1234;word'bitvec[16..16] = 0;word
+        }",
+    );
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let mut tree = Interpreter::new(&package, Budget::default()).unwrap();
+    for (name, expected) in [
+        ("overlap", 0x1344),
+        ("nested", 0x3c0),
+        ("rhs_update", 0xab12),
+        ("snapshot", 0x1234),
+        ("empty", 0x1234),
+    ] {
+        let before = vm.bytecode_invocations();
+        let id = support::id(&package, name);
+        assert_eq!(
+            vm.invoke(id, vec![]).unwrap(),
+            Value::UnsignedInteger(expected),
+            "{name}"
+        );
+        assert_eq!(vm.bytecode_invocations() - before, 1, "{name}");
+        assert_eq!(
+            tree.invoke(id, vec![]).unwrap(),
+            Value::UnsignedInteger(expected),
+            "{name}"
+        );
+    }
+}

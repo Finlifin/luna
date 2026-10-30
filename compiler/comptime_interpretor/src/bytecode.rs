@@ -1497,6 +1497,30 @@ impl<'a> Interpreter<'a> {
                         Some(self.construct_record(ty, *declaration, values, source)?);
                 }
 
+                Op::WriteBits {
+                    local,
+                    value,
+                    fields,
+                    storage_type,
+                    output,
+                    start,
+                    end,
+                } => {
+                    let Value::BitVec(rhs) = frame.slots[*value].take().ok_or_else(missing)? else {
+                        return Err(self.failure(ErrorKind::Type, Some(source)));
+                    };
+                    let target = frame.slots[*local].as_mut().ok_or_else(missing)?;
+                    self.write_bit_place(
+                        target,
+                        fields,
+                        storage_type,
+                        *start,
+                        *end,
+                        rhs,
+                        output,
+                        source,
+                    )?;
+                }
                 Op::CheckBinding(local) => {
                     frame.slots[*local].as_ref().ok_or_else(missing)?;
                 }

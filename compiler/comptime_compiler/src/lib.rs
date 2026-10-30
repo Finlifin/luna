@@ -248,6 +248,15 @@ pub enum Op {
         fields: Vec<Register>,
     },
 
+    WriteBits {
+        local: Register,
+        value: Register,
+        fields: Vec<(FieldOwner, usize)>,
+        storage_type: Term,
+        output: Term,
+        start: usize,
+        end: usize,
+    },
     CheckBinding(Register),
     WritePlace {
         local: Register,
@@ -725,6 +734,24 @@ impl fmt::Display for Program {
                     write!(f, "))")?;
                 }
 
+                Op::WriteBits {
+                    local,
+                    value,
+                    fields,
+                    storage_type,
+                    output,
+                    start,
+                    end,
+                } => {
+                    write!(
+                        f,
+                        "(write-bits %{local} %{value} (storage-type {storage_type}) (output {output}) (range {start} {end}) (fields"
+                    )?;
+                    for (owner, index) in fields {
+                        write!(f, " (field {owner} {index})")?;
+                    }
+                    write!(f, "))")?;
+                }
                 Op::CheckBinding(local) => write!(f, "(check-binding {local})")?,
                 Op::WritePlace {
                     local,
@@ -2148,6 +2175,34 @@ fn compile_root(
                             },
                         );
                         work.push(Work::Expression(value, src));
+                    }
+                    K::BitAssign {
+                        place,
+                        storage_type,
+                        start,
+                        end,
+                        value,
+                    } => {
+                        *fuel = fuel
+                            .checked_sub(place.fields.len())
+                            .ok_or(Error::Budget(source))?;
+                        let local = *locals.entry(place.root).or_insert_with(&mut fresh);
+                        let input = fresh();
+                        emit(&mut work, Op::Unit(dst));
+                        emit(
+                            &mut work,
+                            Op::WriteBits {
+                                local,
+                                value: input,
+                                fields: place.fields.clone(),
+                                storage_type: copy_term(storage_type, fuel, source)?,
+                                output: copy_term(&expr.ty, fuel, source)?,
+                                start: *start,
+                                end: *end,
+                            },
+                        );
+                        work.push(Work::Expression(value, input));
+                        emit(&mut work, Op::CheckBinding(local));
                     }
                     K::Assign { place, value } => {
                         *fuel = fuel

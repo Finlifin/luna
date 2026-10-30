@@ -15,6 +15,7 @@ mod code_values;
 pub use code_values::CodeValue;
 mod bit_operations;
 mod bit_representation;
+mod bit_writeback;
 mod dynamic_instances;
 mod environment;
 mod field_access;
@@ -5425,56 +5426,16 @@ impl<'a> Interpreter<'a> {
             let Value::BitVec(rhs) = value!(self.eval(expression, environment)) else {
                 return Err(self.failure(ErrorKind::Type, Some(expr.source)));
             };
-            if start > end
-                || end - start != rhs.width()
-                || expr.ty != Term::Primitive(Primitive::Void)
-            {
-                return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-            }
-            let storage = match environment.get(&place.root) {
-                Some(Value::Storage(storage)) => Some(storage.clone()),
-                _ => None,
-            };
-            let mut locked = storage
-                .as_ref()
-                .map(|storage| {
-                    storage
-                        .0
-                        .lock()
-                        .map_err(|_| self.failure(ErrorKind::InvalidPointer, Some(expr.source)))
-                })
-                .transpose()?;
-            let mut target = match &mut locked {
-                Some(value) => &mut **value,
-                None => environment.get_mut(&place.root).unwrap(),
-            };
-            for (expected, index) in &place.fields {
-                target = match (expected, target) {
-                    (
-                        nir::program::FieldOwner::Nominal(expected),
-                        Value::Record {
-                            declaration,
-                            fields,
-                            ..
-                        },
-                    ) => {
-                        if declaration == expected {
-                            fields.get_mut(*index)
-                        } else {
-                            None
-                        }
-                    }
-                    (nir::program::FieldOwner::Anonymous, Value::AnonymousRecord(fields)) => {
-                        fields.get_mut(*index).map(|(_, value)| value)
-                    }
-                    _ => None,
-                }
-                .ok_or_else(|| self.failure(ErrorKind::Type, Some(expr.source)))?;
-            }
-            let changed =
-                self.replaced_bit_value(expr.source, storage_type, target, start, &rhs)?;
-            // Commit only after all checks and bounded construction succeed.
-            *target = changed;
+            self.write_bit_place(
+                environment.get_mut(&place.root).unwrap(),
+                &place.fields,
+                storage_type,
+                start,
+                end,
+                rhs,
+                &expr.ty,
+                expr.source,
+            )?;
             Value::Unit
         };
         Ok(Flow::Value(result))

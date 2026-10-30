@@ -4205,3 +4205,29 @@ Validation in /home/fin/luna:
   exit 0, `/tmp/luna-tools-lmxr6jea/result.json`.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
   exit 0, `/tmp/luna-tools-8g8ykqfs/result.json`; `git diff --check`: exit 0.
+
+### Compile fixed-range bit writeback
+
+BitAssign now lowers binding admission, RHS evaluation and final writeback to
+separate linear instructions. The write instruction resolves the current root
+and field path after the RHS. It shares checked value replacement with tree
+interpretation and commits only after width/domain checks and bounded value
+construction succeed. Storage cells remain shared; a previously read BitVec
+remains a snapshot. Dumps include the storage/output types, range and field path.
+
+Source coverage requires compiled entry for overlapping and nested ranges,
+empty ranges, snapshots and RHS writes to both the target and sibling fields.
+Malformed NIR cases verify that failed replacement retains completed RHS writes
+without a partial bit update, then successfully update on the same interpreter.
+Dynamic BitUpdate selections and runtime pointer writes are not compiled here;
+this stage provides their reusable final value-write operation.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_bits`:
+  exit 0, `/tmp/luna-tools-iyew8yfh/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-1gh__dm3/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test execution writeback`:
+  exit 0, 16 selected tests, `/tmp/luna-tools-x2ihouf6/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-chy6_xai/result.json`; `git diff --check`: exit 0.
