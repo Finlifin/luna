@@ -227,9 +227,21 @@ fn mixed_calls_preserve_the_bound_tuple_normal_form() {
     let nir::Term::Function { result, .. } = &packet.signature else {
         panic!()
     };
-    assert!(
-        matches!(result.as_ref(), nir::Term::NormalForm { head, arguments, .. }
-        if *head == tuple && matches!(arguments.as_slice(), [nir::Term::TypeListValue(fields)] if fields.len() == 2))
+    assert_eq!(
+        result.as_ref(),
+        &nir::Term::NormalForm {
+            head: tuple,
+            sort: nir::Sort::Type,
+            arguments: vec![nir::Term::NominalValue {
+                ty: Box::new(nir::Term::NormalForm {
+                    head: id(&package, "List"),
+                    sort: nir::Sort::Type,
+                    arguments: vec![nir::Term::Primitive(nir::Primitive::Type)],
+                }),
+                variant: None,
+                fields: vec![nir::Term::Primitive(nir::Primitive::Bool); 2],
+            }],
+        }
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),

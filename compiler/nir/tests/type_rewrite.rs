@@ -94,22 +94,28 @@ fn symbolic_type_lists_concatenate_after_substitution_without_changing_heads() {
     };
     let boolean = Term::Primitive(Primitive::Bool);
     let byte = Term::Primitive(Primitive::U8);
-    let list = Term::list_concat(
-        Term::NormalForm {
-            head: nir::DeclarationId {
-                package: 91,
-                local: 9,
-            },
-            sort: nir::Sort::Type,
-            arguments: vec![Term::Primitive(nir::Primitive::Type)],
+    let domain = Term::NormalForm {
+        head: nir::DeclarationId {
+            package: 91,
+            local: 9,
         },
+        sort: nir::Sort::Type,
+        arguments: vec![Term::Primitive(nir::Primitive::Type)],
+    };
+    let frozen = |fields| Term::NominalValue {
+        ty: Box::new(domain.clone()),
+        variant: None,
+        fields,
+    };
+    let list = Term::list_concat(
+        domain.clone(),
         vec![
-            Term::TypeListValue(vec![boolean.clone()]),
+            frozen(vec![boolean.clone()]),
             Term::Rigid {
                 declaration: input,
                 sort: Sort::ComptimeValue,
             },
-            Term::TypeListValue(vec![byte.clone()]),
+            frozen(vec![byte.clone()]),
         ],
     )
     .unwrap();
@@ -127,7 +133,7 @@ fn symbolic_type_lists_concatenate_after_substitution_without_changing_heads() {
                     declaration: input,
                     sort: Sort::ComptimeValue,
                 }],
-                &[Term::TypeListValue(middle.clone())],
+                &[frozen(middle.clone())],
             )
             .unwrap();
         let mut elements = vec![boolean.clone()];

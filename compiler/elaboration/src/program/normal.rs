@@ -2342,7 +2342,6 @@ fn take_known_list_elements(
     budget: &mut comptime_runtime::Budget,
 ) -> Option<Vec<Term>> {
     let fields = match value {
-        Term::TypeListValue(fields) if *element == p(P::Type) => fields,
         Term::NominalValue {
             ty,
             variant: None,
@@ -2855,6 +2854,8 @@ mod tests {
             );
         }
         for bad in [
+            Term::TypeListValue(vec![]),
+            Term::TypeListValue(vec![Term::Primitive(Primitive::Bool)]),
             nominal(&bool_domain, vec![Term::Primitive(Primitive::Bool)]),
             nominal(&type_domain, vec![Term::Bool(true)]),
             Term::NominalValue {

@@ -496,10 +496,14 @@ fn contextual_tuple_types_preserve_the_head_before_and_after_their_context_arriv
 fn registered_list_heads_admit_reduced_inputs_and_reject_pending_concatenation() {
     let package = package();
     let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
-    let parts = vec![
-        Term::TypeListValue(vec![ty(P::Bool)]),
-        Term::TypeListValue(vec![ty(P::U8)]),
-    ];
+    let parts = [P::Bool, P::U8]
+        .into_iter()
+        .map(|element| Term::NominalValue {
+            ty: Box::new(list_type()),
+            variant: None,
+            fields: vec![ty(element)],
+        })
+        .collect::<Vec<_>>();
     let pending = Term::NormalForm {
         head: id(2),
         sort: Sort::Type,

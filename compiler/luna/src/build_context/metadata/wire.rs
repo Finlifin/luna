@@ -281,9 +281,8 @@ impl Writer {
                 self.byte(18)?;
                 self.fields(fields, d)?;
             }
-            T::TypeListValue(values) => {
-                self.byte(19)?;
-                self.terms(values, d)?;
+            T::TypeListValue(_) => {
+                return Err(failure("legacy Type-list value lacks its declared domain"));
             }
             T::NominalValue {
                 ty,
@@ -567,7 +566,9 @@ impl<'a> Reader<'a> {
             16 => T::Record(self.fields(d)?),
             17 => T::TupleValue(self.terms(d)?),
             18 => T::RecordValue(self.fields(d)?),
-            19 => T::TypeListValue(self.terms(d)?),
+            // Reserved retired tag: a payload without its declaration domain
+            // cannot be upgraded by guessing a list head from the receiver.
+            19 => return Err(failure("legacy Type-list value lacks its declared domain")),
             20 => {
                 let ty = Box::new(self.term(d)?);
                 let variant = if self.flag()? {

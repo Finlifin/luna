@@ -7643,3 +7643,53 @@ Final targeted evidence:
 
 No full workspace/source-language suite was run. Unrelated working changes,
 including the existing resource-effects implementation, were not staged.
+
+### Require the original list domain at composition and transport boundaries
+
+Residual list composition and known-list expansion no longer accept the
+legacy domainless TypeListValue payload. Even an empty list must retain its
+original declaration domain; an expected domain cannot be used to relabel it.
+Ordinary frozen inputs continue through the same element-sort, scope and exact
+domain checks. Substitution rejects a missing/foreign domain without changing
+the template, then accepts a valid input on the same template.
+
+Metadata wire v1 now rejects retired tag 19 on both encoding and decoding,
+including legacy values nested inside opaque normal-form arguments. Tag 19
+stays reserved. Ordinary lists use the existing nominal-value tag 20 with their
+exact domain, and residual concatenations use tag 36. The wire documentation
+also corrects the already-retired tag 32 and documents existing tags 35/36.
+This is an intentional compatibility break for old domainless packets; producers
+must regenerate them with their original domain. It does not infer a domain
+from a field's expected type or unfold a normal-form head.
+
+The resident stream regression sends a retired-tag packet between valid
+requests, checks parse rejection with no cached fallback, then successfully
+reuses a subsequent valid request. Round-trip tests retain distinct list heads,
+empty/nonempty values, and opaque enclosing identities. Other legacy internal
+readers and the Term::TypeListValue variant remain for later removal.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p iir -p ptc -p elaboration --no-fail-fast`:
+  984 passed, exit 0; `/tmp/luna-tools-81g5vnhv/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test metadata_wire --test build_context --test compilation_cache --test type_lists --test extended_calls --test contextual_spreads --test comptime_bytecode_lists --no-fail-fast`:
+  126 passed outside compilation_cache. That target had one pass and ten
+  failures from missing primitive fixture bindings/build dependencies;
+  exit 101, `/tmp/luna-tools-xp8v41eg/result.json`. Independent fixture commit
+  8e4ce6c4 repairs them; its compilation_cache rerun passed all 11 tests,
+  `/tmp/luna-tools-lafnkwje/result.json`. No cache implementation changed.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor -p type_resolution --no-fail-fast`:
+  792 tests passed in fully passing targets. Two additional targets had 43
+  passes and two failures while constructing old domainless concatenation
+  fixtures; `/tmp/luna-tools-es9rlg13/result.json`, exit 101. Those fixtures
+  now use explicit domains and preserve their original incomplete/reduced
+  boundary assertions.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --test normal_values --test type_list_inputs --no-fail-fast`:
+  all 45 tests passed, exit 0; `/tmp/luna-tools-1tfqr3vr/result.json`.
+
+No full language suite or performance benchmark was run. Source-level tests
+include the real build library, but this phase did not rerun native sysroot
+builder acceptance from the preceding representation migration.
+
+Final formatting: `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`
+exited 0; `/tmp/luna-tools-82gt_z2g/result.json`. `git diff --check` passed.

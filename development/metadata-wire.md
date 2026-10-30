@@ -1,7 +1,7 @@
 # Package metadata wire v1
 
-`--packages-v1` accepts one `--package-metadata-v1 HEX` argument. Resident
-`--packages-stream-v1` requests carry the same argument using the existing
+`luna packages <command>` accepts one `--package-metadata-v1 HEX` argument.
+Resident `luna serve packages-v1` requests carry the same argument using the existing
 hex-argument frame encoding. This is an explicit immutable input, not a path,
 source expression, environment lookup or instruction to execute a factory.
 The standalone implicit-sysroot CLI does not yet accept this option.
@@ -82,7 +82,7 @@ means a flag followed by a term only when the flag is 1. Field sequences use
 | 16 | Record Type | field sequence |
 | 17 | Tuple value | term sequence |
 | 18 | Record value | field sequence |
-| 19 | Type-list value | term sequence |
+| 19 | Retired domainless Type-list value | rejected; tag remains reserved |
 | 20 | Nominal value | Type term, variant-present flag, optional u32 variant as u64, field term sequence |
 | 21 | Optional value | Type term, term? |
 | 22 | Error-result Type | error-label sequence, result Type term |
@@ -95,9 +95,11 @@ means a flag followed by a term only when the flag is 1. Field sequences use
 | 29 | Closure-context Type | none |
 | 30 | Closure-context value | Type sequence |
 | 31 | Contextual closure Type | context term, signature term |
-| 32 | Type-list concatenation | term sequence |
+| 32 | Retired domainless list concatenation | rejected; tag remains reserved |
 | 33 | Computation Type | operation sequence of (declaration, argument term sequence), result Type term |
 | 34 | Associated Type query | interface declaration, member declaration, argument term sequence, subject Type term |
+| 35 | Normal-form function Type | signature term, collector-present flag, optional collector index as u64 |
+| 36 | Declared-domain list concatenation | Type term, component term sequence |
 
 Primitive tags 0 through 24, in order:
 `Type Object Bool Char Str Symbol Integer Float Unit Void Never I8 I16 I32 I64
@@ -109,7 +111,9 @@ are never converted through host floating-point or fixed-width integers.
 
 The structural tuple tag is an internal descriptor view. It does not replace
 Flurry's normal-form `Tuple` identity, which is encoded with tag 12 and its
-Type-list input. Object is transported using its existing typed nominal-value
+ordinary list input. Lists, including Type-element and empty lists, use tag 20
+with the exact declared list Type, no variant and ordered fields. Their element
+sort does not erase the domain or select a special value category. Object is transported using its existing typed nominal-value
 entry packets; keys, original field domains and values all survive transport.
 
 Runtime references, store handles, free variables, callable values and closure
@@ -119,9 +123,12 @@ arguments. Error-result Types remain separate wrappers; no effect ABI is inferre
 from an error label. Associated queries retain their interface, member, subject
 and arguments without selecting an implementation or unfolding the query.
 
-Tags 33 and 34 extend the previously reserved v1 tag space. Existing encodings
-remain unchanged; earlier readers reject these new tags instead of misreading
-them. This is not a general NIR serializer. Future additions require explicit
+Tags 33 through 36 extend the previously reserved v1 tag space; earlier readers
+reject unknown tags instead of misreading them. Retired tags 19 and 32 are now
+rejected explicitly, including inside a normal-form argument. Old packets using
+these domainless encodings must be regenerated from their original declared
+domains; neither the decoder nor the caller's expected type invents a list head.
+Other accepted encodings remain unchanged. This is not a general NIR serializer. Future additions require explicit
 tag/version compatibility work; diagnostic Display is not a parser.
 
 ## Cache and failure behavior

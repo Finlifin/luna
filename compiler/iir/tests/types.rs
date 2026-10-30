@@ -583,17 +583,23 @@ fn incomplete_type_list_concatenation_cannot_enter_iir() {
         package: 91,
         local: 1,
     };
-    let term = Term::list_concat(
-        Term::NormalForm {
-            head: nir::DeclarationId {
-                package: 91,
-                local: 9,
-            },
-            sort: nir::Sort::Type,
-            arguments: vec![Term::Primitive(nir::Primitive::Type)],
+    let domain = Term::NormalForm {
+        head: nir::DeclarationId {
+            package: 91,
+            local: 9,
         },
+        sort: nir::Sort::Type,
+        arguments: vec![Term::Primitive(nir::Primitive::Type)],
+    };
+    let frozen = |fields| Term::NominalValue {
+        ty: Box::new(domain.clone()),
+        variant: None,
+        fields,
+    };
+    let term = Term::list_concat(
+        domain.clone(),
         vec![
-            Term::TypeListValue(vec![Term::Primitive(Primitive::Bool)]),
+            frozen(vec![Term::Primitive(Primitive::Bool)]),
             Term::Rigid {
                 declaration: input,
                 sort: Sort::ComptimeValue,
@@ -612,7 +618,7 @@ fn incomplete_type_list_concatenation_cannot_enter_iir() {
                 declaration: input,
                 sort: Sort::ComptimeValue,
             }],
-            &[Term::TypeListValue(vec![])],
+            &[frozen(vec![])],
         )
         .unwrap();
     completed_type(&completed, &BTreeSet::new(), &mut 100).unwrap();

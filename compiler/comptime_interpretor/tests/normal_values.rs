@@ -378,10 +378,22 @@ fn unreduced_type_list_concatenations_do_not_cross_completed_value_boundaries() 
         package: 1,
         local: 17,
     };
-    let parts = vec![
-        Term::TypeListValue(vec![Term::Primitive(Primitive::Bool)]),
-        Term::TypeListValue(vec![Term::Primitive(Primitive::U8)]),
-    ];
+    let domain = Term::NormalForm {
+        head: DeclarationId {
+            package: 91,
+            local: 9,
+        },
+        sort: nir::Sort::Type,
+        arguments: vec![Term::Primitive(Primitive::Type)],
+    };
+    let parts = [Primitive::Bool, Primitive::U8]
+        .into_iter()
+        .map(|element| Term::NominalValue {
+            ty: Box::new(domain.clone()),
+            variant: None,
+            fields: vec![Term::Primitive(element)],
+        })
+        .collect::<Vec<_>>();
     let applied = |input| Term::NormalForm {
         head,
         sort: nir::Sort::Type,
@@ -390,31 +402,11 @@ fn unreduced_type_list_concatenations_do_not_cross_completed_value_boundaries() 
     // Public IR constructors can bypass the canonical constructor. Scope-valid
     // does not imply reduced: this must not create a second completed identity.
     let unfinished = applied(Term::ListConcat {
-        ty: Box::new(Term::NormalForm {
-            head: nir::DeclarationId {
-                package: 91,
-                local: 9,
-            },
-            sort: nir::Sort::Type,
-            arguments: vec![Term::Primitive(nir::Primitive::Type)],
-        }),
+        ty: Box::new(domain.clone()),
         parts: parts.clone(),
     });
     unfinished.check_scope(&[]).unwrap();
-    let completed = applied(
-        Term::list_concat(
-            Term::NormalForm {
-                head: nir::DeclarationId {
-                    package: 91,
-                    local: 9,
-                },
-                sort: nir::Sort::Type,
-                arguments: vec![Term::Primitive(nir::Primitive::Type)],
-            },
-            parts,
-        )
-        .unwrap(),
-    );
+    let completed = applied(Term::list_concat(domain, parts).unwrap());
     let package = nir::program::Package::default();
     let mut interpreter =
         comptime_interpretor::Interpreter::new(&package, comptime_interpretor::Budget::default())

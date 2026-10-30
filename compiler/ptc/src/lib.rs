@@ -2467,7 +2467,11 @@ mod tuple_classification_tests {
             sort: Sort::Type,
             arguments: vec![Term::ListConcat {
                 ty: Box::new(list.clone()),
-                parts: vec![Term::TypeListValue(vec![boolean.clone()])],
+                parts: vec![Term::NominalValue {
+                    ty: Box::new(list.clone()),
+                    variant: None,
+                    fields: vec![boolean.clone()],
+                }],
             }],
         };
         assert!(matches!(

@@ -1486,11 +1486,15 @@ fn metadata_wire_stream_invalidates_and_recovers_without_stale_fallback() {
         .unwrap()
     };
     let first = encoded(true);
+    let mut legacy = first.clone();
+    // The last two bytes are the Bool value tag and its one-byte payload.
+    legacy.replace_range(first.len() - 4..first.len() - 2, "13");
     let payloads = [
         Some(first.clone()),
         Some(first.to_uppercase()),
         Some(encoded(false)),
         Some("zz".into()),
+        Some(legacy),
         Some(encode_hex(&[]).unwrap()),
         None,
         Some(first.clone()),
@@ -1519,8 +1523,8 @@ fn metadata_wire_stream_invalidates_and_recovers_without_stale_fallback() {
     luna::package_stream::serve(&mut std::io::Cursor::new(frames), &mut output, 4).unwrap();
     let output = String::from_utf8(output).unwrap();
     let replies = output.lines().collect::<Vec<_>>();
-    assert_eq!(replies.len(), 7);
-    for index in [0, 1, 2, 6] {
+    assert_eq!(replies.len(), 8);
+    for index in [0, 1, 2, 7] {
         assert!(
             replies[index].contains("(exit-code 0)"),
             "{}",
@@ -1530,15 +1534,28 @@ fn metadata_wire_stream_invalidates_and_recovers_without_stale_fallback() {
     assert!(replies[0].contains("(reused false)"));
     assert!(replies[1].contains("(reused true)"));
     assert!(replies[2].contains("(reused false)"));
-    assert!(replies[3].contains("(exit-code 2)") && replies[3].contains("metadata wire"));
-    for index in [4, 5] {
+    for index in [3, 4] {
+        assert!(
+            replies[index].contains("(exit-code 2)")
+                && replies[index].contains("metadata wire")
+                && replies[index].contains("(reused false)"),
+            "{}",
+            replies[index]
+        );
+    }
+    assert!(
+        replies[4].contains("lacks its declared domain"),
+        "{}",
+        replies[4]
+    );
+    for index in [5, 6] {
         assert!(
             replies[index].contains("(exit-code 1)") && replies[index].contains("(reused false)"),
             "{}",
             replies[index]
         );
     }
-    assert!(replies[6].contains("(reused true)"));
+    assert!(replies[7].contains("(reused true)"));
     let mut duplicate = base;
     duplicate.extend([
         "--package-metadata-v1".into(),

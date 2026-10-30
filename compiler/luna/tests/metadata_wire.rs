@@ -86,7 +86,18 @@ fn wire_preserves_nominal_normal_form_optional_and_numeric_identity() {
     let normal = T::NormalForm {
         head: id,
         sort: Sort::Type,
-        arguments: vec![T::TypeListValue(vec![T::Primitive(P::U32)])],
+        arguments: vec![T::NominalValue {
+            ty: Box::new(T::NormalForm {
+                head: DeclarationId {
+                    package: 200,
+                    local: 8,
+                },
+                sort: Sort::Type,
+                arguments: vec![T::Primitive(P::Type)],
+            }),
+            variant: None,
+            fields: vec![T::Primitive(P::U32)],
+        }],
     };
     let optional = T::Optional(Box::new(nominal.clone()));
     let mut budget = comptime_runtime::Budget::default();
@@ -326,4 +337,70 @@ fn wire_checks_scope_inside_associated_subjects() {
     encoded.truncate(encoded.len() - 4);
     encoded.push_str(concat!("1b", "0000000000000000", "0000000000000000", "00"));
     assert!(decode_hex(&encoded).is_err());
+}
+
+#[test]
+fn wire_requires_declared_domains_for_type_lists_including_nested_inputs() {
+    let domain = |local| T::NormalForm {
+        head: DeclarationId {
+            package: 200,
+            local,
+        },
+        sort: Sort::Type,
+        arguments: vec![T::Primitive(P::Type)],
+    };
+    let opaque = |argument| T::NormalForm {
+        head: DeclarationId {
+            package: 200,
+            local: 30,
+        },
+        sort: Sort::Type,
+        arguments: vec![argument],
+    };
+    for fields in [vec![], vec![T::Primitive(P::Bool)]] {
+        let frozen = |local| T::NominalValue {
+            ty: Box::new(domain(local)),
+            variant: None,
+            fields: fields.clone(),
+        };
+        let inputs = packet(vec![
+            ("first".into(), entry(domain(10), frozen(10))),
+            ("second".into(), entry(domain(11), frozen(11))),
+            (
+                "nested".into(),
+                entry(T::Primitive(P::Type), opaque(frozen(10))),
+            ),
+        ]);
+        let encoded = encode_hex(&inputs).unwrap();
+        assert_eq!(decode_hex(&encoded).unwrap(), inputs);
+        assert_ne!(frozen(10), frozen(11));
+        for (ty, legacy) in [
+            (domain(10), T::TypeListValue(fields.clone())),
+            (
+                T::Primitive(P::Type),
+                opaque(T::TypeListValue(fields.clone())),
+            ),
+        ] {
+            let bad = packet(vec![("legacy".into(), entry(ty, legacy))]);
+            assert!(
+                encode_hex(&bad)
+                    .unwrap_err()
+                    .contains("lacks its declared domain")
+            );
+        }
+        assert_eq!(encode_hex(&decode_hex(&encoded).unwrap()).unwrap(), encoded);
+    }
+    // Preserve the retired tag number; never reinterpret old bytes as an
+    // ordinary list or infer the missing head from the receiving field type.
+    let mut old = encode_hex(&packet(vec![(
+        "x".into(),
+        entry(T::Primitive(P::Bool), T::Bool(true)),
+    )]))
+    .unwrap();
+    old.replace_range(78..80, "13");
+    let failure = decode_hex(&old).unwrap_err();
+    assert!(
+        failure.contains("legacy Type-list value lacks its declared domain"),
+        "{failure}"
+    );
 }

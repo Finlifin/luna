@@ -188,3 +188,49 @@ fn list_domain_participates_in_dependencies_rewriting_and_budget() {
     };
     assert!(dependent.runtime_dependencies().contains(&runtime));
 }
+
+#[test]
+fn type_list_composition_never_invents_a_missing_or_foreign_domain() {
+    let ty = domain(Term::Primitive(P::Type));
+    let other = Term::NormalForm {
+        head: id(9),
+        sort: Sort::Type,
+        arguments: vec![Term::Primitive(P::Type)],
+    };
+    let residual = Term::list_concat(
+        ty.clone(),
+        vec![list(&ty, vec![Term::Primitive(P::Bool)]), variable()],
+    )
+    .unwrap();
+    let original = residual.clone();
+    let binder = DeclarationParameter {
+        declaration: id(2),
+        sort: Sort::ComptimeValue,
+    };
+    for fields in [vec![], vec![Term::Primitive(P::U8)]] {
+        for bad in [
+            Term::TypeListValue(fields.clone()),
+            list(&other, fields.clone()),
+        ] {
+            assert_eq!(
+                Term::list_concat(ty.clone(), vec![bad.clone()]),
+                Err(TypeError::InvalidListComponent)
+            );
+            let malformed = Term::ListConcat {
+                ty: Box::new(ty.clone()),
+                parts: vec![bad.clone()],
+            };
+            assert!(malformed.check_scope(&[]).is_err());
+            assert!(residual.instantiate_parameters(&[binder], &[bad]).is_err());
+            assert_eq!(residual, original);
+        }
+        let mut expected = vec![Term::Primitive(P::Bool)];
+        expected.extend(fields.clone());
+        assert_eq!(
+            residual
+                .instantiate_parameters(&[binder], &[list(&ty, fields)])
+                .unwrap(),
+            list(&ty, expected)
+        );
+    }
+}

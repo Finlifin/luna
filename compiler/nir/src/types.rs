@@ -226,7 +226,7 @@ pub enum Term {
     },
     /// Internal product view and legacy unbound frontend representation.
     /// The language's `Tuple<...Es: meta.List<Type>>` type is a `NormalForm`
-    /// with one `TypeListValue` input; this view does not replace its identity.
+    /// with one ordinary list value input; this view does not replace its identity.
     Tuple(Vec<Term>),
     /// Closed named product. Field order is retained in the representation;
     /// representation equality alone does not decide permutation equivalence.
@@ -614,8 +614,7 @@ impl Term {
             }
             match part {
                 Self::ListConcat { parts, .. } => pending.extend(parts.into_iter().rev()),
-                Self::TypeListValue(elements)
-                | Self::NominalValue {
+                Self::NominalValue {
                     fields: elements, ..
                 } => {
                     fields.extend(elements);
@@ -663,7 +662,6 @@ impl Term {
             Sort::ComptimeValue
         };
         match self {
-            Self::TypeListValue(fields) => types && fields.iter().all(|field| field.sort() == sort),
             Self::NominalValue {
                 ty,
                 variant: None,
