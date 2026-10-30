@@ -6500,3 +6500,51 @@ fn type_valued_indices_infer_enum_payloads_from_partial_contexts() {
     );
     assert!(support::compile_with_protocols(&wrong_index, &Default::default()).is_err());
 }
+
+#[test]
+fn type_valued_indices_complete_dependent_nominal_defaults() {
+    let source = "typealias Type=.Type'builtin;
+        struct Tagged where T,index:T,.copy:T=index {value:bool}
+        fn run()->bool {let value:Tagged<Type,bool,.copy=bool> = Tagged<Type,bool>{value:true};value.value}";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    let wrong = source.replace(".copy=bool", ".copy=Type");
+    assert!(support::compile_with_protocols(&wrong, &Default::default()).is_err());
+}
+
+#[test]
+fn type_valued_indices_complete_function_type_defaults() {
+    let source = "typealias Type=.Type'builtin;
+        struct Tagged where T,index:T {value:bool}
+        fn read(value:Tagged<T,index>)->bool where T,index:T,.U:Type=bool {value.value}
+        fn run()->bool {read<Type,bool>(Tagged<Type,bool>{value:true})}";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn type_valued_indices_complete_inherited_function_type_defaults() {
+    let source = "typealias Type=.Type'builtin;
+        struct Tagged where T,index:T {
+            value:bool,
+            fn read(self)->bool where .U:Type=bool {self.value}
+        }
+        fn run()->bool {Tagged<Type,bool>{value:true}.read()}";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn inherited_type_defaults_preserve_indices_and_allow_overrides() {
+    let source = "typealias Type=.Type'builtin;
+        struct Tagged where T,index:T {
+            value:bool,
+            fn select(self,other:U)->U where .U:Type=Tagged<T,index> {other}
+        }
+        fn run()->bool {
+            let selected=Tagged<Type,bool>{value:false}.select(Tagged<Type,bool>{value:true});
+            selected.value and Tagged<Type,bool>{value:false}.select<.U=bool>(true)
+        }";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    let wrong = source.replace("select(Tagged<Type,bool>", "select(Tagged<Type,Type>");
+    assert!(support::compile_with_protocols(&wrong, &Default::default()).is_err());
+    let scalar = source.replace("Tagged<Type,bool>", "Tagged<bool,true>");
+    assert_eq!(support::run_iir(&scalar, "run", vec![]), Value::Bool(true));
+}

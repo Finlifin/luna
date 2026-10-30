@@ -1174,13 +1174,13 @@ impl<'h> Checker<'_, 'h> {
                     "type default references itself or a later parameter",
                 ));
             }
-            default
-                .instantiate_parameters_in_scope(
-                    &self.input_binders(&parameters),
-                    &arguments,
-                    &caller_frames,
-                )
-                .map_err(|e| error(span, e.to_string()))
+            self.instantiate_input_types_in_scope(
+                &default,
+                &parameters,
+                &arguments,
+                &caller_frames,
+                span,
+            )
         })();
         self.alias_substitution = saved_substitution;
         self.context = saved_context;

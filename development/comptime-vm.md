@@ -3740,3 +3740,33 @@ Validation in /home/fin/luna:
   exit 0, `/tmp/luna-tools-we46dsbe/result.json`, no exclusions.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
   exit 0, `/tmp/luna-tools-xyn5t139/result.json`; `git diff --check`: exit 0.
+
+### Inherited declaration inputs complete method type defaults
+
+Type-clause default completion now uses declaration-domain substitution in the
+saved caller scope. A method can inherit `T, index:T` from its owner and complete
+its own default when `T` is Type and `index` is a Type value. Previously the final
+substitution still required the source comptime-value sort; the executable
+reproduction failed with `expected comptime-value, got type` in
+`/tmp/luna-tools-9h16uys4/result.json`.
+
+Regression coverage executes nominal defaults, explicitly supplied function
+inputs, inherited method defaults, defaults containing the inherited nominal
+index, and explicit overrides. It also checks ordinary scalar indices and
+rejects mismatched nominal identities. Default evaluation order, cyclic/default
+reference checks, and declaration admission remain in place.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test cmtt_methods --test sysroot_preludes`:
+  exit 0, `/tmp/luna-tools-1ecicncb/result.json`, no exclusions.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-9z5ra111/result.json`; `git diff --check`: exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test default_calls`:
+  exit 0, `/tmp/luna-tools-dp82id8n/result.json`, no exclusions.
+
+Separate open inference gap: removing `<Type,bool>` from the call in
+`type_valued_indices_complete_function_type_defaults` reports `NeedsContext`
+(`/tmp/luna-tools-h0d_64te/result.json`). Explicit inputs work. Ordinary call
+Scheme inference retains fixed parameter sorts; unlike implementation matching,
+it still needs domain staging when solving a preceding input changes a later
+input's sort. This change fixes default substitution, not that inference path.
