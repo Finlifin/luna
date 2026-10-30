@@ -25,15 +25,11 @@ fn unsupported_work_and_invalid_transfers_never_publish_partial_code() {
     let body = expr(K::If {
         condition: Box::new(expr(K::Unit)),
         then_branch: Box::new(expr(K::Unit)),
-        // Pattern-local executable code still needs suspended continuations.
+        // Definition-only evidence cannot become executable code.
         else_branch: Some(Box::new(expr(K::Match {
             value: Box::new(expr(K::Unit)),
             arms: vec![nir::program::MatchArm {
-                pattern: nir::program::Pattern::Then {
-                    first: Box::new(nir::program::Pattern::Wild),
-                    value: Box::new(expr(K::Unit)),
-                    next: Box::new(nir::program::Pattern::Wild),
-                },
+                pattern: nir::program::Pattern::CodeEvidence { outputs: vec![] },
                 guard: None,
                 body: expr(K::Unit),
             }],

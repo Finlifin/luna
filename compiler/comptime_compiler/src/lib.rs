@@ -2081,33 +2081,20 @@ fn compile_root<'a>(
                         labels.push(None);
                         let mut sequence = vec![Work::Expression(value, subject)];
                         for arm in arms {
-                            let candidate = patterns::prepare(&arm.pattern, fuel, source)?;
-                            let bindings = candidate
-                                .bindings
-                                .into_iter()
-                                .map(|id| (id, *locals.entry(id).or_insert_with(&mut fresh)))
-                                .collect();
                             let next = labels.len();
                             labels.push(None);
                             sequence.push(Work::BeginScope(source));
-                            sequence.push(Work::Emit(
+                            sequence.extend(patterns::lower(
+                                &arm.pattern,
+                                subject,
+                                condition,
+                                next,
+                                &mut locals,
+                                &mut fresh,
+                                fuel,
                                 source,
-                                Op::MatchPattern {
-                                    destination: condition,
-                                    value: subject,
-                                    pattern: candidate.pattern,
-                                    bindings,
-                                },
-                            ));
-                            sequence.push(Work::Emit(
-                                source,
-                                Op::Branch {
-                                    condition,
-                                    when: false,
-                                    target: next,
-                                },
-                            ));
-                            for guard in candidate.guards.into_iter().chain(arm.guard.iter()) {
+                            )?);
+                            if let Some(guard) = &arm.guard {
                                 sequence.push(Work::Expression(guard, condition));
                                 sequence.push(Work::Emit(
                                     guard.source,
@@ -2252,40 +2239,25 @@ fn compile_root<'a>(
                         guard,
                         otherwise,
                     } => {
-                        let candidate = patterns::prepare(pattern, fuel, source)?;
-                        let bindings = candidate
-                            .bindings
-                            .into_iter()
-                            .map(|id| (id, *locals.entry(id).or_insert_with(&mut fresh)))
-                            .collect();
                         let subject = fresh();
                         let condition = fresh();
                         let failed = labels.len();
                         labels.push(None);
                         let done = labels.len();
                         labels.push(None);
-                        let mut sequence = vec![
-                            Work::Expression(value, subject),
-                            Work::BeginScope(source),
-                            Work::Emit(
-                                source,
-                                Op::MatchPattern {
-                                    destination: condition,
-                                    value: subject,
-                                    pattern: candidate.pattern,
-                                    bindings,
-                                },
-                            ),
-                            Work::Emit(
-                                source,
-                                Op::Branch {
-                                    condition,
-                                    when: false,
-                                    target: failed,
-                                },
-                            ),
-                        ];
-                        for guard in candidate.guards.into_iter().chain(guard.as_deref()) {
+                        let mut sequence =
+                            vec![Work::Expression(value, subject), Work::BeginScope(source)];
+                        sequence.extend(patterns::lower(
+                            pattern,
+                            subject,
+                            condition,
+                            failed,
+                            &mut locals,
+                            &mut fresh,
+                            fuel,
+                            source,
+                        )?);
+                        if let Some(guard) = guard.as_deref() {
                             sequence.push(Work::Expression(guard, condition));
                             sequence.push(Work::Emit(
                                 guard.source,

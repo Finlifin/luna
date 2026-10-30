@@ -358,12 +358,6 @@ pub(super) fn compile_input<'a>(
                         pending.push(Task::Code(Work::Label(done)));
                         pending.push(Task::Code(Work::Emit(*source, Op::NonExhaustiveMatch)));
                         for arm in arms.iter().rev() {
-                            let candidate = patterns::prepare(&arm.pattern, fuel, *source)?;
-                            let bindings = candidate
-                                .bindings
-                                .into_iter()
-                                .map(|id| (id, *locals.entry(id).or_insert_with(&mut *fresh)))
-                                .collect();
                             let next = labels.len();
                             labels.push(None);
                             pending.push(Task::Code(Work::EndScope(*source)));
@@ -376,8 +370,7 @@ pub(super) fn compile_input<'a>(
                                 arm.body.source(),
                             ));
                             pending.push(Task::Enter(&arm.body, depth + 1));
-                            for guard in candidate.guards.into_iter().chain(arm.guard.iter()).rev()
-                            {
+                            for guard in arm.guard.iter().rev() {
                                 pending.push(Task::Code(Work::Emit(
                                     guard.source,
                                     Op::Branch {
@@ -388,23 +381,21 @@ pub(super) fn compile_input<'a>(
                                 )));
                                 pending.push(Task::Code(Work::Expression(guard, condition)));
                             }
-                            pending.push(Task::Code(Work::Emit(
+                            for step in patterns::lower(
+                                &arm.pattern,
+                                subject,
+                                condition,
+                                next,
+                                locals,
+                                fresh,
+                                fuel,
                                 *source,
-                                Op::Branch {
-                                    condition,
-                                    when: false,
-                                    target: next,
-                                },
-                            )));
-                            pending.push(Task::Code(Work::Emit(
-                                *source,
-                                Op::MatchPattern {
-                                    destination: condition,
-                                    value: subject,
-                                    pattern: candidate.pattern,
-                                    bindings,
-                                },
-                            )));
+                            )?
+                            .into_iter()
+                            .rev()
+                            {
+                                pending.push(Task::Code(step));
+                            }
                             pending.push(Task::Code(Work::BeginScope(*source)));
                         }
                         None

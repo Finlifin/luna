@@ -95,8 +95,8 @@ fn default_failure_prevents_entry_and_restores_the_caller() {
 fn default_matches_select_their_carrier_without_replaying_the_caller() {
     for (default, compiled_defaults) in [
         ("value match { true => false, false => true }", 1),
-        // Sequential pattern computation still needs the tree carrier.
-        ("value match { _ and not value is output => output }", 0),
+        // Sequential pattern computations use the default continuation too.
+        ("value match { _ and not value is output => output }", 1),
     ] {
         let package = support::compile(&format!(
             "comptime fn choose(value: bool, .result: bool = {default}) -> bool {{ result }}

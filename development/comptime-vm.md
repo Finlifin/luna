@@ -4420,3 +4420,37 @@ Validation in /home/fin/luna:
   hash behavior remain valid, including compiled hash wrapper/body coverage.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
   exit 0, `/tmp/luna-tools-duzcp96s/result.json`; `git diff --check`: exit 0.
+
+### Linear sequential pattern computations
+
+The pattern compiler now flattens Then and Guard chains with a metered heap
+worklist. First-pattern success precedes expression execution and matching of
+its result; each failure branches to the enclosing candidate's existing scope
+rollback. Completed external effects are retained. Expressions use ordinary
+invocation continuations, including calls, defaults and control transfers.
+The same lowering serves expression matches, let patterns and contextual/NF
+input matches. No instruction recursively executes a pattern expression.
+
+Structural patterns remain atomic. Executable patterns nested under structural
+fields, Observe, Remap or Or still select the tree path before any execution;
+this stage does not claim complete pattern linearization. CodeEvidence remains
+non-executable. Previous unsupported-code cache tests now use CodeEvidence;
+the staged-input test covers both linear Then and a still unsupported Observe
+wrapper, checking that neither route replays an operand effect.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-ckrigjdp/result.json`. Earlier runs identified the
+  second pattern-lowering consumer in normal_types and two obsolete fallback
+  assertions; all consumers and independent fallback checks were updated.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_patterns --test comptime_bytecode_defaults --test comptime_bytecode_types`:
+  exit 0, `/tmp/luna-tools-dwzosu2l/result.json`. Tests assert compiled frame
+  counts as well as results, ordering, early return and successful bindings.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-z65ex58l/result.json`; `git diff --check`: exit 0.
+
+Separate open design boundary: docs/functions/higher-order-functions.md and
+parameters.md define default evaluation and ordinary higher-order identities,
+but do not settle whether different default computations can inhabit the same
+optional-parameter callable type. Asked the author; no local-source tracking or
+implicit protocol erasure was introduced while that decision is pending.

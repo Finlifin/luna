@@ -1,37 +1,87 @@
 //! Admit structural patterns before publishing any invocation code. Patterns
-//! containing executable expressions need their own suspended VM continuations.
+//! Sequential computations use the expression worklist and invocation continuations.
 use super::*;
 use nir::program::Pattern as P;
 use std::collections::BTreeSet;
 
-pub(super) struct Candidate<'a> {
-    pub pattern: Arc<P>,
-    pub bindings: Vec<LocalId>,
-    pub guards: Vec<&'a Expr>,
-}
-
-pub(super) fn prepare<'a>(
-    mut pattern: &'a P,
+/// Flatten sequential pattern computation onto the ordinary expression worklist.
+/// Structural subpatterns remain atomic; a failure jumps to the candidate's
+/// existing scope rollback before any later computation can execute.
+pub(super) fn lower<'a>(
+    pattern: &'a P,
+    subject: Register,
+    condition: Register,
+    failed: usize,
+    locals: &mut BTreeMap<LocalId, Register>,
+    fresh: &mut impl FnMut() -> Register,
     fuel: &mut usize,
     source: SourceRange,
-) -> Result<Candidate<'a>, Error> {
-    let mut guards = Vec::new();
-    while let P::Guard {
-        pattern: inner,
-        condition,
-    } = pattern
-    {
-        *fuel = fuel.checked_sub(1).ok_or(Error::Budget(source))?;
-        guards.push(condition.as_ref());
-        pattern = inner;
+) -> Result<Vec<Work<'a>>, Error> {
+    enum Task<'a> {
+        Pattern(&'a P, Register),
+        Expression(&'a Expr, Register),
+        Guard(&'a Expr),
     }
-    guards.reverse();
-    let (pattern, bindings) = copy(pattern, fuel, source)?;
-    Ok(Candidate {
-        pattern,
-        bindings,
-        guards,
-    })
+    let mut pending = vec![Task::Pattern(pattern, subject)];
+    let mut code = Vec::new();
+    while let Some(task) = pending.pop() {
+        *fuel = fuel.checked_sub(1).ok_or(Error::Budget(source))?;
+        match task {
+            Task::Pattern(P::Then { first, value, next }, input) => {
+                let transformed = fresh();
+                pending.push(Task::Pattern(next, transformed));
+                pending.push(Task::Expression(value, transformed));
+                pending.push(Task::Pattern(first, input));
+            }
+            Task::Pattern(
+                P::Guard {
+                    pattern,
+                    condition: guard,
+                },
+                input,
+            ) => {
+                pending.push(Task::Guard(guard));
+                pending.push(Task::Pattern(pattern, input));
+            }
+            Task::Expression(value, destination) => code.push(Work::Expression(value, destination)),
+            Task::Guard(guard) => {
+                code.push(Work::Expression(guard, condition));
+                code.push(Work::Emit(
+                    guard.source,
+                    Op::Branch {
+                        condition,
+                        when: false,
+                        target: failed,
+                    },
+                ));
+            }
+            Task::Pattern(pattern, value) => {
+                let (pattern, bindings) = copy(pattern, fuel, source)?;
+                let bindings = bindings
+                    .into_iter()
+                    .map(|id| (id, *locals.entry(id).or_insert_with(&mut *fresh)))
+                    .collect();
+                code.push(Work::Emit(
+                    source,
+                    Op::MatchPattern {
+                        destination: condition,
+                        value,
+                        pattern,
+                        bindings,
+                    },
+                ));
+                code.push(Work::Emit(
+                    source,
+                    Op::Branch {
+                        condition,
+                        when: false,
+                        target: failed,
+                    },
+                ));
+            }
+        }
+    }
+    Ok(code)
 }
 
 pub(super) fn copy(

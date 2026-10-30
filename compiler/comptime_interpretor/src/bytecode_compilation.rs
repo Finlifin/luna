@@ -54,16 +54,12 @@ fn unsupported_and_invalid_compilation_probes_keep_their_work_charges() {
         ErrorKind::InvalidControlFlow
     );
     assert!(vm.budget.steps < before);
-    // A nested executable pattern is unsupported by the bytecode compiler.
+    // Definition-only evidence is not executable bytecode.
     let unsupported = Expr {
         kind: K::Match {
             value: Box::new(body()),
             arms: vec![nir::program::MatchArm {
-                pattern: nir::program::Pattern::Then {
-                    first: Box::new(nir::program::Pattern::Wild),
-                    value: Box::new(body()),
-                    next: Box::new(nir::program::Pattern::Wild),
-                },
+                pattern: nir::program::Pattern::CodeEvidence { outputs: vec![] },
                 guard: None,
                 body: body(),
             }],

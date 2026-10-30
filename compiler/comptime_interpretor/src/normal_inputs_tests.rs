@@ -265,51 +265,62 @@ fn staged_bytecode_preserves_selected_shapes_and_delayed_preflight() {
 }
 
 #[test]
-fn unsupported_staged_code_is_selected_before_operand_effects() {
+fn staged_patterns_compile_or_fall_back_before_operand_effects() {
     use nir::program::{MatchArm, Pattern};
     let package = Package::default();
     let trace = LocalId { owner: 7, index: 0 };
-    let input = A::Value(expr(
-        Primitive::Bool,
-        K::Block {
-            statements: vec![expr(
-                Primitive::Void,
-                K::Assign {
-                    place: Place {
-                        root: trace,
-                        fields: vec![],
-                    },
-                    value: Box::new(expr(
-                        Primitive::Bool,
-                        K::Not(Box::new(expr(Primitive::Bool, K::Local(trace)))),
-                    )),
-                },
-            )],
-            result: Some(Box::new(expr(
-                Primitive::Bool,
-                K::Match {
-                    value: Box::new(boolean(true)),
-                    arms: vec![MatchArm {
-                        pattern: Pattern::Then {
-                            first: Box::new(Pattern::Wild),
-                            value: Box::new(boolean(false)),
-                            next: Box::new(Pattern::Wild),
+    for nested in [false, true] {
+        let sequential = Pattern::Then {
+            first: Box::new(Pattern::Wild),
+            value: Box::new(boolean(false)),
+            next: Box::new(Pattern::Wild),
+        };
+        let pattern = if nested {
+            Pattern::Observe {
+                binding: LocalId { owner: 7, index: 1 },
+                inner: Box::new(sequential),
+            }
+        } else {
+            sequential
+        };
+        let input = A::Value(expr(
+            Primitive::Bool,
+            K::Block {
+                statements: vec![expr(
+                    Primitive::Void,
+                    K::Assign {
+                        place: Place {
+                            root: trace,
+                            fields: vec![],
                         },
-                        guard: None,
-                        body: boolean(true),
-                    }],
-                },
-            ))),
-        },
-    ));
-    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
-    let mut env = Environment::new();
-    env.insert(trace, Value::Bool(false));
-    let result = vm.stage_normal_argument(&input, &mut env, 0).unwrap();
-    assert!(matches!(
-        result,
-        ControlFlow::Continue(StagedNormalInput::Value(Value::Bool(true)))
-    ));
-    assert_eq!(env.get(&trace), Some(&Value::Bool(true)));
-    assert_eq!(vm.bytecode_staged_inputs(), 0);
+                        value: Box::new(expr(
+                            Primitive::Bool,
+                            K::Not(Box::new(expr(Primitive::Bool, K::Local(trace)))),
+                        )),
+                    },
+                )],
+                result: Some(Box::new(expr(
+                    Primitive::Bool,
+                    K::Match {
+                        value: Box::new(boolean(true)),
+                        arms: vec![MatchArm {
+                            pattern,
+                            guard: None,
+                            body: boolean(true),
+                        }],
+                    },
+                ))),
+            },
+        ));
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let mut env = Environment::new();
+        env.insert(trace, Value::Bool(false));
+        let result = vm.stage_normal_argument(&input, &mut env, 0).unwrap();
+        assert!(matches!(
+            result,
+            ControlFlow::Continue(StagedNormalInput::Value(Value::Bool(true)))
+        ));
+        assert_eq!(env.get(&trace), Some(&Value::Bool(true)));
+        assert_eq!(vm.bytecode_staged_inputs(), usize::from(!nested));
+    }
 }
