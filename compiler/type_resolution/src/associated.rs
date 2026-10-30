@@ -1616,11 +1616,34 @@ fn charge_completed_value(
     context: &crate::ptc::Context,
     fuel: &mut usize,
 ) -> Result<(), String> {
-    nir::completed_values::validate_with_declarations(
+    nir::completed_values::validate_with_layout_evidence_in(
         value,
         layouts.newtypes.iter(),
-        &|head| context.is_tuple_head(head),
+        &|ty| {
+            let nir::Term::NormalForm { head, .. } = ty else {
+                return None;
+            };
+            if !context.is_tuple_head(*head) {
+                return None;
+            }
+            let heads = &layouts.normal_forms;
+            let slot = heads
+                .binary_search_by_key(head, |metadata| metadata.declaration)
+                .ok()?;
+            // Duplicate declarations cannot provide unique layout authority.
+            if slot
+                .checked_sub(1)
+                .is_some_and(|prior| heads[prior].declaration == *head)
+                || heads
+                    .get(slot + 1)
+                    .is_some_and(|next| next.declaration == *head)
+            {
+                return None;
+            }
+            heads[slot].tuple_elements(ty)
+        },
         &|id, fuel| nir::completed_values::lookup_nominal(layouts, id, fuel),
+        layouts.target,
         fuel,
     )
     .map_err(str::to_owned)

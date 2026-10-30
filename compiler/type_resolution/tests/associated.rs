@@ -1085,3 +1085,120 @@ fn associated_queries_complete_dependent_type_value_domains() {
         );
     });
 }
+
+#[test]
+fn completed_associated_tuples_follow_current_declaration_layout_evidence() {
+    use nir::normal_forms::{Head, Kind, Parameter, Role};
+    use nir::program::{InterfaceInstance, Literal, LocalId};
+    let list = Term::NormalForm {
+        head: id(50),
+        sort: Sort::Type,
+        arguments: vec![ty(P::Type)],
+    };
+    let head = Head {
+        declaration: id(51),
+        role: Role::Tuple,
+        collector: None,
+        requirements: vec![],
+        parameters: vec![Parameter {
+            declaration: id(52),
+            binding: LocalId {
+                owner: 51,
+                index: 0,
+            },
+            kind: Kind::Value,
+            ty: list.clone(),
+        }],
+    };
+    let tuple = Term::NormalForm {
+        head: id(51),
+        sort: Sort::Type,
+        arguments: vec![Term::NominalValue {
+            ty: Box::new(list.clone()),
+            variant: None,
+            fields: vec![ty(P::Bool)],
+        }],
+    };
+    let mut interface = contract();
+    interface.associated[0].ty = tuple.clone();
+    interface.associated[0].default = None;
+    let mut provider = implementation(ty(P::Bool), ty(P::Bool));
+    let mut payload = value(ty(P::Bool));
+    payload.ty = tuple;
+    let mut flag = value(ty(P::Bool));
+    flag.ty = ty(P::Bool);
+    flag.kind = ExprKind::Literal(Literal::Bool(true));
+    payload.kind = ExprKind::Tuple(vec![flag]);
+    provider.associated[0].1 = payload.clone();
+    let traits = [interface];
+    let implementations = [provider];
+    let mut index = Index::default();
+    index
+        .insert(
+            ImplementationHead {
+                parameter_types: vec![],
+                declaration: id(4),
+                interface: Some(id(1)),
+                interface_arguments: vec![],
+                subject: ty(P::Bool),
+                type_parameters: vec![],
+                requirements: vec![],
+            },
+            Budget::default(),
+        )
+        .unwrap();
+    let mut context = Context::default();
+    context.admit_tuple_head(id(51));
+    context.admit_list_inference_head(id(50));
+    let resolve = |index: &Index| {
+        World {
+            index,
+            implementations: &implementations,
+            traits: &traits,
+            assumptions: &[],
+            context: &context,
+        }
+        .resolve_associated_value_plan_budgeted(
+            &InterfaceInstance {
+                declaration: id(1),
+                arguments: vec![],
+            },
+            id(2),
+            &ty(P::Bool),
+            Budget::default(),
+        )
+    };
+    assert!(resolve(&index).is_err());
+    index.set_normal_form_metadata(vec![head.clone()]);
+    assert_eq!(resolve(&index).unwrap().0.value, payload);
+    let revision = index.revision();
+    index.set_normal_form_metadata(vec![head.clone()]);
+    assert_eq!(index.revision(), revision);
+    for invalid in [
+        Head {
+            role: Role::Opaque,
+            ..head.clone()
+        },
+        Head {
+            parameters: vec![Parameter {
+                ty: Term::NormalForm {
+                    head: id(99),
+                    sort: Sort::Type,
+                    arguments: vec![ty(P::Type)],
+                },
+                ..head.parameters[0].clone()
+            }],
+            ..head.clone()
+        },
+    ] {
+        index.set_normal_form_metadata(vec![invalid]);
+        assert!(index.revision() > revision);
+        assert!(resolve(&index).is_err());
+        index.set_normal_form_metadata(vec![head.clone()]);
+        assert_eq!(resolve(&index).unwrap().0.value, payload);
+    }
+    index.set_normal_form_metadata(vec![head.clone(), head.clone()]);
+    assert!(resolve(&index).is_err());
+    index.set_normal_form_metadata(vec![head]);
+    assert_eq!(resolve(&index).unwrap().0.value, payload);
+}

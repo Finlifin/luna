@@ -6444,9 +6444,47 @@ Validation from /home/fin/luna:
 - Formatting used `python3 -B development/command.py --timeout 120 -- cargo fmt --all`;
   exit 0, `/tmp/luna-tools-uhdnumzg/result.json`; `git diff --check` passed.
 
-This does not complete storage migration. The type-resolution implementation
-index currently keeps nominal layouts without the normal-form metadata needed
-by the new entrypoint, and its existing caller remains on the legacy adapter;
-elaboration also still uses the legacy adapter. Those evidence paths and all
-canonical producers must migrate before switching frozen list storage. No full
-workspace suite was run.
+This does not complete storage migration. The type-resolution and elaboration
+callers remained on legacy adapters at this stage. Correction after inspecting
+Index::set_normal_form_metadata and DeclarationWorld::new: the index already
+stores normal-form metadata and invalidates its revision on changes; the earlier
+claim that it lacked this metadata was incorrect. Consumers still need to use
+that evidence before switching canonical frozen list storage. No full workspace
+suite was run.
+
+
+## Associated layout evidence across resolution and elaboration (2026-10-31)
+
+Associated completed-value resolution now reads the implementation index's
+existing, sorted normal-form metadata. It requires both the registered tuple
+role in the type context and a unique owning declaration, then borrows fields
+through Head::tuple_elements. Missing metadata, duplicate heads, opaque roles
+and mismatched list domains cannot provide reconstruction authority. The
+existing metadata revision mechanism continues to invalidate selection evidence.
+
+Elaboration now passes its bound tuple view to completed-value validation. That
+view accepts ordinary list payloads through the current declaration signature;
+legacy payloads retain their existing path during migration. Both callers pass
+the actual target through recursive completed-value checks.
+
+The resolution regression exercises actual associated-value queries across
+metadata removal/replacement/restoration, wrong collector domains, duplicate
+head identities, and unchanged metadata revision stability. It uses a typed
+ordinary list payload rather than a legacy TypeListValue input.
+
+Validation from /home/fin/luna:
+
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution --test associated`:
+  exit 0, 25 passed; `/tmp/luna-tools-shyl1ysq/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution --no-fail-fast`:
+  exit 0, 299 passed; `/tmp/luna-tools-sy3c10ey/result.json`.
+- Source integration command:
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test associated_signatures --test associated_purity --test builder_invocations --test normal_form_methods --test type_spreads --no-fail-fast`;
+  exit 0, 188 passed; `/tmp/luna-tools-exh3e_3r/result.json`.
+- Formatting: `python3 -B development/command.py --timeout 120 -- cargo fmt --all`,
+  exit 0, `/tmp/luna-tools-_dhi7uzf/result.json`; `git diff --check` passed.
+
+The completed-value production callers now use layout evidence. Other term
+consumers and canonical writers still require coordinated storage migration;
+this is not a complete removal of TypeListValue/TypeListConcat. No full workspace
+suite was run.

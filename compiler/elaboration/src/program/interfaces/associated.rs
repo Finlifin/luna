@@ -382,10 +382,10 @@ impl Checker<'_, '_> {
                     self.required_steps -= (before - fuel) as u64;
                     let template = specialized.map_err(|e| error(span, e))?.into_expression();
                     let before = fuel;
-                    let completed = nir::completed_values::validate_with_declarations(
+                    let completed = nir::completed_values::validate_with_layout_evidence_in(
                         &template,
                         self.newtypes.values(),
-                        &|head| self.protocols.tuple == Some(head),
+                        &|ty| self.bound_tuple_elements(ty),
                         &|id, fuel| {
                             *fuel = fuel.checked_sub(1)?;
                             match (self.structs.get(&id), self.enums.get(&id)) {
@@ -398,6 +398,7 @@ impl Checker<'_, '_> {
                                 _ => None,
                             }
                         },
+                        self.target,
                         &mut fuel,
                     );
                     self.required_steps -= (before - fuel) as u64;

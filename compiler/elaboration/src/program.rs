@@ -2912,6 +2912,10 @@ impl Checker<'_, '_> {
                 if let [Term::TypeListValue(elements)] = arguments.as_slice() {
                     return Some(elements);
                 }
+                let owner = self.normal_parameters.keys().find(|owner| {
+                    matches_declaration(self.package, &self.package_identities, **owner, *head)
+                })?;
+                return self.normal_form_head_metadata(*owner)?.tuple_elements(ty);
             }
         }
         None
