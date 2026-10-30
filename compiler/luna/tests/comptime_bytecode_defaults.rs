@@ -299,3 +299,45 @@ fn default_control_flow_exits_the_caller_without_entering_the_callee() {
     assert_eq!(vm.bytecode_invocations(), 1);
     assert_eq!(vm.bytecode_default_evaluations(), 1);
 }
+
+#[test]
+fn repeated_defaults_reuse_code_without_reusing_values_or_calls() {
+    let package = support::compile(
+        "typealias Integer = .Integer'builtin;
+        comptime fn next(value:Integer)->Integer {value + 1}
+        comptime fn choose(value:Integer, .result:Integer=next(value))->Integer {result}
+        comptime fn run()->bool {
+            var index:Integer=0;
+            var total:Integer=0;
+            while index < 100 {
+                total = total + choose(index);
+                index = index + 1;
+            }
+            total == 5050
+        }",
+    );
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let mut tree = Interpreter::new(&package, Budget::default()).unwrap();
+    for round in 1..=2 {
+        assert_eq!(
+            vm.invoke(support::id(&package, "run"), vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            tree.invoke(support::id(&package, "run"), vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(vm.bytecode_invocations(), 201 * round);
+        assert_eq!(vm.bytecode_default_evaluations(), 100 * round);
+        assert_eq!(vm.bytecode_compilations(), 4);
+    }
+    let next = support::id(&package, "next");
+    assert_eq!(
+        vm.events()
+            .iter()
+            .filter(|event| matches!(event,
+        comptime_interpretor::Event::EnterFunction(id) if *id==next))
+            .count(),
+        200
+    );
+}

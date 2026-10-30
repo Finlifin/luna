@@ -4103,3 +4103,30 @@ Validation in /home/fin/luna:
   exit 0, `/tmp/luna-tools-qm2sb36z/result.json`.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
   exit 0, `/tmp/luna-tools-4u2w4wrj/result.json`; `git diff --check`: exit 0.
+
+### Reuse prepared default-expression code
+
+Default execution frames now enter the same owned-code compilation cache as
+closure invocation frames. The immutable template Arc is the code identity;
+every evaluation still creates its current declaration-side environment, reads
+the prepared inputs, calls producers, checks contracts and delivers a new value.
+Dynamically specialized templates with distinct Arc identities remain distinct.
+This does not cache defaults' results or change the Type-only invocation-result
+cache policy.
+
+A two-round source loop supplies 100 different explicit arguments per round.
+All 200 default evaluations enter their producer, compute the per-input result
+and contribute to the expected sum. The four code bodies (wrapper, callee,
+producer and default expression) compile once each. Existing default failure,
+early-control-flow, source-order and selected-instance cases remain in the
+same focused suite.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_defaults`:
+  exit 0, `/tmp/luna-tools-83c4wozk/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-9zxt0nmi/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-ip0zjlbp/result.json`; `git diff --check`: exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test default_calls --test comptime_clause_inputs --test comptime_bytecode_closures --test library_meta_objects`:
+  exit 0, `/tmp/luna-tools-yr08jax3/result.json`.

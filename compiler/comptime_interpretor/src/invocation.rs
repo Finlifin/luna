@@ -205,6 +205,7 @@ impl<'a> Interpreter<'a> {
                             Body::Package(_) => None,
                         }
                     }
+                    Execution::Default { expression, .. } => Some(expression.clone()),
                     _ => None,
                 };
                 let (expression, identity, environment) = active.parts();
