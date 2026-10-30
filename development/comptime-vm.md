@@ -6387,3 +6387,31 @@ Validation from /home/fin/luna:
   `/tmp/luna-library-83ylwmm1/summary.json`.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`
   and `git diff --check` were run before commit. No full workspace suite.
+
+
+## Shared clause list input contracts (2026-10-31)
+
+Ordinary function specialization no longer has a TypeListValue-only admission
+branch. List clause arguments use the same registered collection-domain
+contract as other ordinary values and normal-form inputs. This removes a second
+implementation of list authority, element-sort and scope checks. The contract
+accepts both the legacy encoding and ordinary typed list payloads without
+changing canonical writers or normal-form identity.
+
+A direct specialization-contract regression checks both representations with
+empty/nonempty inputs, malformed elements, bound Type variables under valid,
+missing and wrong-sort frames, budget exhaustion and a subsequent successful
+check. The interpreter suite and source clause/spread tests exercise existing
+invocation paths as well; no test expectation was weakened.
+
+Validation from /home/fin/luna:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --no-fail-fast`:
+  exit 0, 530 passed; `/tmp/luna-tools-g9t7ftyt/result.json`.
+- Source integration command:
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_clause_inputs --test type_spreads --test normal_form_inference --no-fail-fast`;
+  exit 0, 142 passed; `/tmp/luna-tools-lmjau6jg/result.json`.
+- Formatting: `python3 -B development/command.py --timeout 120 -- cargo fmt --all`,
+  exit 0, `/tmp/luna-tools-ziwez6fl/result.json`; `git diff --check` passed.
+
+Canonical storage migration remains outstanding. No full workspace suite.

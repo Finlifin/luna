@@ -4557,32 +4557,6 @@ impl<'a> Interpreter<'a> {
             if domain == Term::Primitive(Primitive::Type) {
                 continue;
             }
-            if let Term::TypeListValue(elements) = argument {
-                nir::type_computations::charge_term(argument, fuel).map_err(|failure| {
-                    if matches!(failure, nir::type_computations::Error::Budget) {
-                        ErrorKind::StepsExhausted
-                    } else {
-                        ErrorKind::Type
-                    }
-                })?;
-                argument.check_scope(frames).map_err(|_| ErrorKind::Type)?;
-                let Term::NormalForm { head, .. } = &domain else {
-                    return Err(ErrorKind::Type);
-                };
-                // Constructor metadata was validated for uniqueness when this
-                // interpreter was created. Never infer the role from spelling.
-                if !self
-                    .normal_forms
-                    .get(head)
-                    .is_some_and(|head| head.is_type_list_instance(&domain))
-                    || elements
-                        .iter()
-                        .any(|element| element.sort() != nir::Sort::Type)
-                {
-                    return Err(ErrorKind::Type);
-                }
-                continue;
-            }
             if domain == Term::Primitive(Primitive::Object)
                 || self.list_element(&domain).is_some()
                 || matches!(domain.callable_signature(), Term::Function { .. })
@@ -7623,6 +7597,87 @@ mod computation_type_tests {
 #[cfg(test)]
 mod normal_input_data_tests {
     use super::*;
+
+    #[test]
+    fn clause_list_inputs_share_domain_scope_and_budget_validation() {
+        let list_id = DeclarationId {
+            package: 2,
+            local: 1,
+        };
+        let parameter = DeclarationId {
+            package: 2,
+            local: 2,
+        };
+        let element = DeclarationId {
+            package: 2,
+            local: 3,
+        };
+        let package = Package {
+            normal_forms: vec![nir::normal_forms::Head {
+                declaration: list_id,
+                role: nir::normal_forms::Role::TypeList,
+                collector: None,
+                requirements: vec![],
+                parameters: vec![nir::normal_forms::Parameter {
+                    declaration: element,
+                    binding: LocalId { owner: 1, index: 0 },
+                    kind: nir::normal_forms::Kind::Type,
+                    ty: Term::Primitive(Primitive::Type),
+                }],
+            }],
+            ..Default::default()
+        };
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let domain = Term::NormalForm {
+            head: list_id,
+            sort: nir::Sort::Type,
+            arguments: vec![Term::Primitive(Primitive::Type)],
+        };
+        vm.declaration_parameter_domains
+            .insert(parameter, domain.clone());
+        vm.declaration_parameter_sorts
+            .insert(parameter, nir::Sort::ComptimeValue);
+        let nominal = |fields| Term::NominalValue {
+            ty: Box::new(domain.clone()),
+            variant: None,
+            fields,
+        };
+        let check = |input: Term, frames: &[Vec<nir::Sort>], fuel: &mut usize| {
+            vm.validate_function_inputs_in_scope(&[parameter], &[input], frames, fuel)
+        };
+        for fields in [vec![], vec![Term::Primitive(Primitive::Bool)]] {
+            for input in [Term::TypeListValue(fields.clone()), nominal(fields)] {
+                assert!(check(input.clone(), &[], &mut 10000).is_ok());
+                assert_eq!(
+                    check(input.clone(), &[], &mut 0),
+                    Err(ErrorKind::StepsExhausted)
+                );
+                assert!(check(input, &[], &mut 10000).is_ok());
+            }
+        }
+        let bound = Term::Bound {
+            depth: 0,
+            index: 0,
+            sort: nir::Sort::Type,
+        };
+        for input in [
+            Term::TypeListValue(vec![bound.clone()]),
+            nominal(vec![bound]),
+        ] {
+            assert_eq!(check(input.clone(), &[], &mut 10000), Err(ErrorKind::Type));
+            assert!(check(input.clone(), &[vec![nir::Sort::Type]], &mut 10000).is_ok());
+            assert_eq!(
+                check(input, &[vec![nir::Sort::ComptimeValue]], &mut 10000),
+                Err(ErrorKind::Type)
+            );
+        }
+        for input in [
+            Term::TypeListValue(vec![Term::Bool(true)]),
+            nominal(vec![Term::Bool(true)]),
+        ] {
+            assert_eq!(check(input, &[], &mut 10000), Err(ErrorKind::Type));
+        }
+    }
 
     #[test]
     fn freezing_named_callables_does_not_erase_captures_or_specialization() {
