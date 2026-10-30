@@ -9,6 +9,8 @@ use crate::{
 };
 use nir::{DeclarationId, Sort, Term, TypeError};
 
+mod domain_staging;
+
 pub struct Scheme {
     /// Empty preserves Type-only callers; otherwise one sort per clause input.
     pub parameter_sorts: Vec<Sort>,

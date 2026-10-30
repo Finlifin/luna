@@ -3770,3 +3770,38 @@ Separate open inference gap: removing `<Type,bool>` from the call in
 Scheme inference retains fixed parameter sorts; unlike implementation matching,
 it still needs domain staging when solving a preceding input changes a later
 input's sort. This change fixes default substitution, not that inference path.
+
+### Ordinary call inference stages dependent declaration domains
+
+The previously recorded `read(Tagged<Type,bool>{...})` inference gap is closed
+for ordinary generic calls. A declaration-aware Scheme entrypoint observes
+candidate-local proposals, completes input domains in declaration order, and
+rebuilds the candidate if a dependent input changes sort. It retains inference
+slot identities, including provisional ordinary Type inputs, and replays actual
+argument/result relations against the domain-specialized signature. Previously
+known proposals are constrained again. Candidate completion still discharges
+all relations; the caller still performs declaration admission and requirements.
+
+This path is connected to independent ordinary input preparation, final generic
+call checking and generic call descriptions used by deferred signatures.
+Domain completion uses the shared DeclarationSubstitution, preserves the caller
+scope, and does not unfold normal-form heads. Staging and observations have
+bounded work; exhausted candidates do not mutate the reusable Scheme.
+
+Tests cover Type-valued and scalar indices, defaults, deferred forwarding,
+ordinary comptime Type inputs, shared-index conflicts, invalid input domains,
+and declaration requirements. Solver tests additionally cover provisional slots,
+caller-bound Type values, scope escape, expected-result conflicts, insufficient
+information, budget failure and recovery using the unchanged Scheme.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution`:
+  exit 0, `/tmp/luna-tools-9h7hyw2c/result.json`, no exclusions.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test default_calls --test open_functions --test sysroot_preludes`:
+  exit 0, `/tmp/luna-tools-nbpgjdwo/result.json`, no exclusions.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-9j3485zj/result.json`; `git diff --check`: exit 0.
+
+Remaining scope: effect input inference, spread-specific inference and CMTT
+entrypoints still contain fixed-sort Scheme consumers. This is not a claim that
+all dependent inference paths are complete.

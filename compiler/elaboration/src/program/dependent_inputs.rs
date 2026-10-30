@@ -156,6 +156,10 @@ impl Checker<'_, '_> {
                 result: Box::new(result),
             },
         };
+        let input_domains = generics
+            .iter()
+            .map(|id| self.trait_input_domain(*id).unwrap_or_else(|| p(P::Type)))
+            .collect::<Vec<_>>();
         let scope = self.call_inference_domains();
         let discharge_effects = self.active_effect_environment().is_some()
             && !matches!(expected, Some(Term::Computation { .. }));
@@ -174,7 +178,9 @@ impl Checker<'_, '_> {
                 })
                 .collect::<Vec<_>>();
             let mut candidate = scheme
-                .infer_sparse_scoped_types_mode(
+                .infer_declared_sparse_types_mode(
+                    generics,
+                    &input_domains,
                     &actual,
                     expected,
                     None,

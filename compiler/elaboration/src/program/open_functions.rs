@@ -5956,6 +5956,10 @@ impl Checker<'_, '_> {
             self.function_type_plan(owner, &fixed, expr.span)?;
         let signature =
             self.instantiate_input_types(&signature, &all_generic, &template, expr.span)?;
+        let input_domains = generic
+            .iter()
+            .map(|id| self.trait_input_domain(*id).unwrap_or_else(|| p(P::Type)))
+            .collect::<Vec<_>>();
         let scheme = crate::calls::Scheme {
             parameter_sorts: self
                 .input_binders(&generic)
@@ -5997,7 +6001,9 @@ impl Checker<'_, '_> {
             }
         }
         let mut initial = scheme
-            .infer_sparse_scoped_types_mode(
+            .infer_declared_sparse_types_mode(
+                &generic,
+                &input_domains,
                 &actual,
                 target,
                 None,
@@ -6094,7 +6100,9 @@ impl Checker<'_, '_> {
                     }
                 }
                 initial = scheme
-                    .infer_sparse_scoped_types_mode(
+                    .infer_declared_sparse_types_mode(
+                        &generic,
+                        &input_domains,
                         &actual,
                         target,
                         None,

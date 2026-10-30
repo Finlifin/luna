@@ -6201,6 +6201,10 @@ impl Checker<'_, '_> {
                     .map_err(|e| error(expr.span, e.to_string()))?,
             ),
         };
+        let input_domains = parameters
+            .iter()
+            .map(|id| self.trait_input_domain(*id).unwrap_or_else(|| p(P::Type)))
+            .collect::<Vec<_>>();
         let scheme = crate::calls::Scheme {
             parameter_sorts: self
                 .input_binders(&parameters)
@@ -6228,7 +6232,9 @@ impl Checker<'_, '_> {
         // bidirectional checking effective for nested calls, this avoids
         // recursively repeating context-free attempts along an identity chain.
         let mut initial = scheme
-            .infer_sparse_scoped_types_mode(
+            .infer_declared_sparse_types_mode(
+                &parameters,
+                &input_domains,
                 &initial_types,
                 expected,
                 partial,
@@ -6343,7 +6349,9 @@ impl Checker<'_, '_> {
                 })
                 .collect();
             let mut candidate = scheme
-                .infer_sparse_scoped_types_mode(
+                .infer_declared_sparse_types_mode(
+                    &parameters,
+                    &input_domains,
                     &actual,
                     expected,
                     partial,

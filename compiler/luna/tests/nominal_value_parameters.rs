@@ -6548,3 +6548,60 @@ fn inherited_type_defaults_preserve_indices_and_allow_overrides() {
     let scalar = source.replace("Tagged<Type,bool>", "Tagged<bool,true>");
     assert_eq!(support::run_iir(&scalar, "run", vec![]), Value::Bool(true));
 }
+
+#[test]
+fn type_valued_indices_infer_function_inputs_before_completing_defaults() {
+    let source = "typealias Type=.Type'builtin;
+        struct Tagged where T,index:T {value:bool}
+        fn read(value:Tagged<T,index>)->bool where T,index:T,.U:Type=bool {value.value}
+        fn run()->bool {read(Tagged<Type,bool>{value:true})}";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    let deferred = source.replace(
+        "fn run()->bool {read(",
+        "fn forward(value:defer Tagged<Type,bool>)->bool {read(value)} fn run()->bool {forward(",
+    );
+    assert_eq!(
+        support::run_iir(&deferred, "run", vec![]),
+        Value::Bool(true)
+    );
+    let scalar = source.replace("Tagged<Type,bool>", "Tagged<bool,true>");
+    assert_eq!(support::run_iir(&scalar, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn dependent_call_staging_keeps_shared_index_constraints() {
+    let source = "typealias Type=.Type'builtin;
+        struct Tagged where T,index:T {value:bool}
+        fn same(a:Tagged<T,index>,b:Tagged<T,index>)->bool where T,index:T {a.value and b.value}
+        fn run()->bool {same(Tagged<Type,bool>{value:true},Tagged<Type,bool>{value:true})}";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    let wrong = source.replace(
+        ",Tagged<Type,bool>{value:true}",
+        ",Tagged<Type,Type>{value:true}",
+    );
+    assert!(support::compile_with_protocols(&wrong, &Default::default()).is_err());
+    let malformed = source.replace("Tagged<Type,bool>", "Tagged<bool,Type>");
+    assert!(support::compile_with_protocols(&malformed, &Default::default()).is_err());
+    let constrained = source.replace(
+        "where T,index:T {a.value",
+        "where T,index:T, requires Tagged<T,index> == Tagged<Type,bool> {a.value",
+    );
+    assert_eq!(
+        support::run_iir(&constrained, "run", vec![]),
+        Value::Bool(true)
+    );
+    let wrong_requirement = constrained.replace(
+        "same(Tagged<Type,bool>{value:true},Tagged<Type,bool>{value:true})",
+        "same(Tagged<Type,Type>{value:true},Tagged<Type,Type>{value:true})",
+    );
+    assert!(support::compile_with_protocols(&wrong_requirement, &Default::default()).is_err());
+}
+
+#[test]
+fn dependent_call_staging_combines_ordinary_type_arguments() {
+    let source = "typealias Type=.Type'builtin;
+        struct Tagged where T,index:T {value:bool}
+        fn select(comptime R:Type,tag:Tagged<T,index>,value:R)->R where T,index:T {value}
+        fn run()->bool {select(bool,Tagged<Type,bool>{value:true},true)}";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+}

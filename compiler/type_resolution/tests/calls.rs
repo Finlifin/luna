@@ -2505,3 +2505,187 @@ fn bound_list_head_proposes_element_types_without_an_inverse_equality_rule() {
         .unwrap();
     assert_eq!(instance.type_arguments, vec![primitive(P::Bool)]);
 }
+
+#[test]
+fn dependent_call_domains_replay_relations_and_preserve_provisional_slots() {
+    let ids = [
+        DeclarationId {
+            package: 501,
+            local: 1,
+        },
+        DeclarationId {
+            package: 501,
+            local: 2,
+        },
+    ];
+    let head = DeclarationId {
+        package: 501,
+        local: 3,
+    };
+    let nominal = |arguments| Term::Nominal {
+        declaration: head,
+        arguments,
+    };
+    let domains = [
+        primitive(P::Type),
+        Term::Rigid {
+            declaration: ids[0],
+            sort: Sort::Type,
+        },
+    ];
+    let mut source = scheme(
+        vec![
+            nominal(vec![
+                generic(0),
+                Term::Bound {
+                    depth: 1,
+                    index: 1,
+                    sort: Sort::ComptimeValue,
+                },
+            ]),
+            generic(2),
+        ],
+        generic(2),
+        3,
+    );
+    source.parameter_sorts = vec![Sort::Type, Sort::ComptimeValue, Sort::Type];
+    let original = source.signature.clone();
+    let mut context = type_resolution::ptc::Context::default();
+    context.admit_nominal_constructor(head);
+    let actual = [
+        Some(nominal(vec![primitive(P::Type), primitive(P::Bool)])),
+        Some(primitive(P::U8)),
+    ];
+    let infer = |actual: &[Option<Term>], expected: Option<&Term>, budget| {
+        source.infer_declared_sparse_types_mode(
+            &ids,
+            &domains,
+            actual,
+            expected,
+            None,
+            &context,
+            budget,
+            false,
+            &[],
+        )
+    };
+    let result = infer(&actual, None, Budget::default())
+        .unwrap()
+        .finish()
+        .unwrap();
+    assert_eq!(
+        result.type_arguments,
+        vec![primitive(P::Type), primitive(P::Bool), primitive(P::U8)]
+    );
+    assert_eq!(result.result, primitive(P::U8));
+    assert!(
+        infer(&actual, Some(&primitive(P::Bool)), Budget::default())
+            .and_then(|value| value.finish())
+            .is_err()
+    );
+    assert!(
+        infer(
+            &actual,
+            None,
+            Budget {
+                steps: 1,
+                max_depth: 1
+            }
+        )
+        .is_err()
+    );
+    assert!(
+        infer(&[None, None], None, Budget::default())
+            .unwrap()
+            .finish()
+            .is_err()
+    );
+    assert!(
+        infer(&actual, None, Budget::default())
+            .unwrap()
+            .finish()
+            .is_ok()
+    );
+    assert_eq!(source.signature, original);
+}
+
+#[test]
+fn dependent_call_domain_staging_preserves_caller_type_bindings() {
+    let ids = [
+        DeclarationId {
+            package: 502,
+            local: 1,
+        },
+        DeclarationId {
+            package: 502,
+            local: 2,
+        },
+    ];
+    let head = DeclarationId {
+        package: 502,
+        local: 3,
+    };
+    let nominal = |arguments| Term::Nominal {
+        declaration: head,
+        arguments,
+    };
+    let mut source = scheme(
+        vec![nominal(vec![
+            generic(0),
+            Term::Bound {
+                depth: 1,
+                index: 1,
+                sort: Sort::ComptimeValue,
+            },
+        ])],
+        primitive(P::Bool),
+        2,
+    );
+    source.parameter_sorts = vec![Sort::Type, Sort::ComptimeValue];
+    let domains = [
+        primitive(P::Type),
+        Term::Rigid {
+            declaration: ids[0],
+            sort: Sort::Type,
+        },
+    ];
+    let local = Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: Sort::Type,
+    };
+    let actual = [Some(nominal(vec![primitive(P::Type), local.clone()]))];
+    let mut context = type_resolution::ptc::Context::default();
+    context.admit_nominal_constructor(head);
+    let result = source
+        .infer_declared_sparse_types_mode(
+            &ids,
+            &domains,
+            &actual,
+            None,
+            None,
+            &context,
+            Budget::default(),
+            false,
+            &[(Sort::Type, Some(primitive(P::Type)))],
+        )
+        .unwrap()
+        .finish()
+        .unwrap();
+    assert_eq!(result.type_arguments, vec![primitive(P::Type), local]);
+    assert!(
+        source
+            .infer_declared_sparse_types_mode(
+                &ids,
+                &domains,
+                &actual,
+                None,
+                None,
+                &context,
+                Budget::default(),
+                false,
+                &[]
+            )
+            .is_err()
+    );
+}
