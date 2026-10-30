@@ -26,6 +26,7 @@ mod list_index;
 mod list_operations;
 mod memory;
 mod normal_inputs;
+mod normal_plan;
 mod normal_terms;
 mod normal_types;
 mod normal_values;
@@ -3636,105 +3637,18 @@ impl<'a> Interpreter<'a> {
                 .any(|p| p.expression.ty == Term::Primitive(Primitive::Never));
         self.prepare_normal_type(*head, &expr.ty, arguments.len(), diverges, expr.source)?;
         if plan.is_some() {
-            nir::copy_budget::charge_type_rewrite(expr, &mut self.budget.steps).map_err(
-                |error| {
-                    self.failure(
-                        match error {
-                            nir::copy_budget::CopyBudgetExhausted::Steps => {
-                                ErrorKind::StepsExhausted
-                            }
-                            nir::copy_budget::CopyBudgetExhausted::Depth => {
-                                ErrorKind::DepthExhausted
-                            }
-                        },
-                        Some(expr.source),
-                    )
-                },
-            )?;
+            return self.eval_normal_plan(expr, environment);
         }
         let mut bindings = normal_types::Bindings::new(arguments.len());
-        let mut pending: Vec<
-            Option<(
-                Box<nir::program::NormalFormArgument>,
-                normal_inputs::StagedNormalInput,
-            )>,
-        > = (0..arguments.len()).map(|_| None).collect();
-        let mut pending_slots = BTreeSet::new();
-        let order: Vec<_> = plan
-            .as_ref()
-            .map(|plan| plan.order.clone())
-            .unwrap_or_else(|| (0..arguments.len()).collect());
-        let mut preparations = plan.iter().flat_map(|p| &p.preparations).peekable();
-        for (position, slot) in order.into_iter().enumerate() {
-            while preparations.peek().is_some_and(|p| p.before == position) {
-                let preparation = preparations.next().unwrap();
-                value!(self.evaluate_input_preparation(preparation, environment));
-            }
-            let parameter = &metadata.parameters[slot];
-            let mut instantiated = plan.as_ref().map(|_| Box::new(arguments[slot].clone()));
-            if let Some(input) = &mut instantiated {
-                self.specialize_contextual_input(input, &bindings.parameters, &bindings.arguments)?;
-            }
-            let argument = instantiated.as_deref().unwrap_or(&arguments[slot]);
+        for (slot, argument) in arguments.iter().enumerate() {
             let expected = self.instantiate_contextual_domain(
-                &parameter.ty,
+                &metadata.parameters[slot].ty,
                 &bindings.parameters,
                 &bindings.arguments,
                 expr.source,
             )?;
-            let unresolved = metadata
-                .parameters
-                .iter()
-                .any(|p| expected.mentions_rigid(p.declaration));
-            if unresolved && plan.is_some() {
-                // Box before staging: contextual literal identities stay valid
-                // while the pending input moves through this invocation.
-                let argument = instantiated.take().unwrap();
-                let staged = match self.stage_normal_argument(&argument, environment, 0)? {
-                    std::ops::ControlFlow::Continue(value) => value,
-                    std::ops::ControlFlow::Break(flow) => return Ok(flow),
-                };
-                pending[slot] = Some((argument, staged));
-                pending_slots.insert(slot);
-                continue;
-            }
             let value = value!(self.evaluate_contextual_argument(argument, &expected, environment));
-            if let Some(plan) = plan {
-                environment.insert(plan.bindings[slot], value.clone());
-            }
             self.bind_normal_input(*head, &mut bindings, slot, value, argument.source())?;
-            for index in pending_slots.iter().copied().collect::<Vec<_>>() {
-                self.tick(Some(expr.source))?;
-                let expected = self.instantiate_contextual_domain(
-                    &metadata.parameters[index].ty,
-                    &bindings.parameters,
-                    &bindings.arguments,
-                    expr.source,
-                )?;
-                if metadata
-                    .parameters
-                    .iter()
-                    .any(|p| expected.mentions_rigid(p.declaration))
-                {
-                    continue;
-                }
-                let (mut input, staged) = pending[index].take().unwrap();
-                pending_slots.remove(&index);
-                self.specialize_contextual_input(
-                    &mut input,
-                    &bindings.parameters,
-                    &bindings.arguments,
-                )?;
-                let mut literals = BTreeMap::new();
-                self.prepare_normal_argument(&input, &expected, &mut literals, 0)?;
-                let value =
-                    self.finish_staged_normal_argument(staged, &mut literals, input.source(), 0)?;
-                environment.insert(plan.as_ref().unwrap().bindings[index], value.clone());
-                self.bind_normal_input(*head, &mut bindings, index, value, input.source())?;
-            }
-        }
-        for preparation in preparations {
-            value!(self.evaluate_input_preparation(preparation, environment));
         }
         let arguments = bindings
             .finish()

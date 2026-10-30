@@ -2764,3 +2764,36 @@ evaluator, and fragment compilation is still per invocation. The next VM step is
 to suspend/resume the plan itself using the existing ready, staged and preparation
 fragment channels. Separately, the confirmed baseline trait-method failures remain
 unfinished frontend work; this stage does not repair or mask them.
+
+## Explicit normal-form input-plan continuations
+
+Normal-form plans now keep preparation position, source input order, pending boxed
+inputs, completed substitutions and outstanding fragment requests in a resumable
+frame. The driver evaluates preparation, contextual-ready and staged requests and
+supplies a matching completion before advancing. Pending literal storage remains
+stable when the frame moves. Semantic failures terminate the frame; protocol
+misuse cannot advance an outstanding request or resume a completed frame. The
+frame has a stable S-expression dump. Binding snapshots use the bounded value
+representation copier before committing either the substitution or local export.
+
+This is the scheduling-state migration, not complete plan bytecode support. The
+plan driver still runs inside the migration evaluator; connecting these frames
+to the invocation driver's stack, migrating nominal/alias scheduling and compiling
+reusable plan templates remain unfinished. No speedup is claimed.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-f258yejx/result.json`, exit 0. Includes resume protocol,
+  movement of a suspended frame with pending literals, budget-failure atomicity,
+  terminal failure behavior, existing preparation exports and cleanup tests.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_spreads --test comptime_clause_inputs --test comptime_bytecode_types --test nominal_value_parameters`:
+  `/tmp/luna-tools-1zm1usyi/result.json`, exit 0 after the terminal-state
+  guard addition. Covers argument order, deferred
+  domains, transfers, trailing empty packets and repeated plan activation.
+- Managed `cargo fmt --all`: `/tmp/luna-tools-mp2nw1qm/result.json`, exit 0;
+  `git diff --check` passed.
+
+The 11 associated-call failures recorded in the preceding stage were separately
+fixed by `17d321f4`; the nominal-value suite now passes all 265 cases. This does
+not imply that all frontend or VM work is complete.
