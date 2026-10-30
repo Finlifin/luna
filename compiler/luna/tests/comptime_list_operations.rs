@@ -1874,3 +1874,62 @@ fn adjacent_list_dedup_propagates_unknown_type_equality() {
     let error = luna::invocation::invoke(&package, "run", 1_000_000).unwrap_err();
     assert!(error.contains("TypeContractUnresolved"), "{error}");
 }
+
+#[test]
+fn checked_list_query_evaluates_index_once_before_reading_receiver() {
+    let package = compile(
+        "typealias Integer = .Integer'builtin;
+        comptime fn run()->bool {
+            var values: meta.List<bool> = [true, true];
+            let saved = values;
+            var calls: Integer = 0;
+            let found = values.get(do {
+                calls = calls + 1;
+                values = [false];
+                0
+            });
+            (found matches false?) and calls == 1
+                and values.length() == 1 and saved.length() == 2 and saved[0]
+        }",
+    )
+    .unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn checked_list_query_does_not_catch_index_expression_failures() {
+    let package = compile(
+        "typealias Integer = .Integer'builtin;
+        comptime fn fail()->?bool {
+            let values: meta.List<bool> = [true];
+            let indices: meta.List<Integer> = [];
+            values.get(indices[0])
+        }
+        comptime fn recover()->bool {
+            let values: meta.List<bool> = [true];
+            values.get(0) matches true?
+        }",
+    )
+    .unwrap();
+    let mut vm = comptime_interpretor::Interpreter::for_comptime(
+        &package,
+        comptime_interpretor::Budget {
+            steps: 100_000,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        vm.invoke(support::id(&package, "fail"), vec![])
+            .unwrap_err()
+            .kind,
+        comptime_interpretor::ErrorKind::IndexOutOfBounds
+    );
+    assert_eq!(
+        vm.invoke(support::id(&package, "recover"), vec![]).unwrap(),
+        Value::Bool(true)
+    );
+}

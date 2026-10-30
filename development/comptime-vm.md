@@ -5776,3 +5776,27 @@ Validation from `/home/fin/luna`, exit 0:
   `/tmp/luna-tools-b0yxdf5f/result.json`; `git diff --check` passed.
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes complete_shipped_sysroot_invokes_comptime_qualified_type_traits`:
   real sysroot invocation passed; `/tmp/luna-tools-rodbu7zs/result.json`.
+
+## Checked List queries (2026-10-31)
+
+The public List implementation now provides pure comptime get/first/last.
+Ordinary Integer comparisons guard indexing, with no new intrinsic or machine
+index conversion. Missing elements return an outer null; nested optional values,
+Type heads and list snapshots retain their normal identities. The receiver is
+read after ordinary argument evaluation, and argument failures still propagate.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_list_operations`:
+  59 passed, one new fixture had invalid block syntax (exit 101);
+  `/tmp/luna-tools-99cgun84/result.json`. This includes the expanded collection
+  example's boundary, nested optional, snapshot and opaque Type cases.
+- After correcting the fixture to `do { ... }`,
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_list_operations checked_list_query`:
+  both argument-order/failure-recovery tests passed, exit 0;
+  `/tmp/luna-tools-jxwg6jzx/result.json`.
+- `python3 -B development/library_check.py --stage sysroot-meta --timeout 300`:
+  the real sysroot native test passed, exit 0 and value_matches true;
+  `/tmp/luna-library-0sikoxc8/summary.json`.
+- Formatting completed via development/command.py cargo fmt --all;
+  `/tmp/luna-tools-jul0ajw7/result.json`; git diff --check passed.

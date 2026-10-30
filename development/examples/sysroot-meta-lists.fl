@@ -58,7 +58,7 @@ comptime fn run() -> bool {
         and unused.length() == 0 and unused_filter.length() == 0
         and reducers_and_searches() and named_metadata() and stable_sorting()
         and exact_integer_division() and value_receivers() and indexed_pairing() and bulk_extension()
-        and prefix_layout() and adjacent_groups()
+        and prefix_layout() and adjacent_groups() and checked_queries()
 }
 
 comptime fn Bits(width: Integer) -> Type {
@@ -249,4 +249,30 @@ comptime fn adjacent_groups() -> bool {
         and single.dedup_by(|a, b| invalid_callback()).length() == 1
         and empty.is_sorted_by(|a, b| invalid_callback())
         and single.is_sorted_by(|a, b| invalid_callback())
+}
+
+
+pure comptime fn QueryIdentity<T> -> Type { T }
+
+comptime fn checked_queries() -> bool {
+    let values: meta.List<Integer> = [4, 8, 16];
+    let empty: meta.List<Integer> = [];
+    let optional: meta.List<?Integer> = [null, 7];
+    let types: meta.List<Type> = [QueryIdentity<bool>, bool];
+    let huge: Integer = 340282366920938463463374607431768211456;
+    let nested: meta.List<meta.List<Integer>> = [[1, 2], []];
+    var copied = nested.first() match { value? => value, null => return false };
+    copied.append(3);
+    (values.get(0) matches 4?) and (values.last() matches 16?)
+        and (values.first() matches 4?) and (values.get(1) matches 8?)
+        and (values.get(-1) matches null) and (values.get(3) matches null)
+        and (values.get(huge) matches null) and (values.get(-huge) matches null)
+        and (empty.first() matches null) and (empty.last() matches null)
+        and (optional.first() match { value? => value matches null, null => false })
+        and (optional.last() match { value? => value matches 7?, null => false })
+        and (optional.get(2) matches null)
+        and (types.first() match { value? => value == QueryIdentity<bool>, null => false })
+        and (types.last() match { value? => value == bool, null => false })
+        and copied.length() == 3 and nested[0].length() == 2
+        and (nested.last() match { value? => value.length() == 0, null => false })
 }

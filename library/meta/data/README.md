@@ -174,3 +174,35 @@ filter 保留的是原条目，不是回调对参数局部副本的修改。flat
 不承诺线性构造成本。真实 sysroot 示例为
 `development/examples/sysroot-object-traversal.fl`，包含异构数据、回调状态、
 空输入、normal-form Type 身份，以及从筛选后的描述生成并使用 runtime struct。
+
+## List 安全索引查询
+
+`values.get(index)`、`values.first()` 和 `values.last()` 返回 `?T`，是 List
+的固有 `pure comptime` 方法。get 的有效范围是 `0 <= index < length`；负数、
+长度位置及更大的索引返回 null。first/last 对空列表返回 null，对非空列表返回
+首／末元素。索引使用精确 Integer，超出机器整数范围的值也按边界比较处理。
+
+```flurry
+comptime fn first_size() -> Integer {
+    let sizes: meta.List<Integer> = [4, 8, 16];
+    sizes.first().unwrap_or(0)
+}
+
+comptime fn has_null_element() -> bool {
+    let values: meta.List<?Integer> = [null];
+    values.get(0) match {
+        element? => element matches null,
+        null => false,
+    }
+}
+```
+
+查询仅增加一层可选性；已有 null 元素仍是“查到了一个 null”，不会变成越界。
+结果是普通值快照，修改返回的嵌套 List 不改变原列表；Type 元素保留完整的
+normal-form 身份。方法不构造源码指针或可写元素视图。
+
+接收者和索引遵循普通调用求值次序。索引表达式只求值一次；若它改写接收者
+所在槽位，方法从更新后的槽位读取。索引表达式本身的错误、预算耗尽及非法表示
+仍传播，只有已求得索引的越界被转换为 null，不把任意 invocation 失败吞掉。
+真实 sysroot 用例 `development/examples/sysroot-meta-lists.fl` 覆盖空值层次、
+超大正负索引、嵌套快照与 Type 身份。

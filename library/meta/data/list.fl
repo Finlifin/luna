@@ -13,6 +13,24 @@ impl List<T> where T {
         bindings.list_length(self)
     }
 
+    {-
+        Checked lookup returns an absent outer optional for an invalid index.
+        A present optional element keeps its own presence layer. Exact Integer
+        bounds are checked before indexing; no target-sized conversion is needed.
+    -}
+    pub pure comptime fn get(self, index: Integer) -> ?T {
+        if index < 0 or index >= self.length() { return null; }
+        self[index]
+    }
+
+    pub pure comptime fn first(self) -> ?T {
+        self.get(0)
+    }
+
+    pub pure comptime fn last(self) -> ?T {
+        self.get(self.length() - 1)
+    }
+
     pub pure comptime fn concat(self, right: List<T>) -> List<T> {
         bindings.compiler_list_concat(self, right)
     }
