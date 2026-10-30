@@ -1094,14 +1094,11 @@ impl Checker<'_, '_> {
                             "associated value cannot be supplied by a method",
                         ));
                     }
-                    let expected = contract
-                        .ty
-                        .instantiate_parameters(
-                            &trait_definition
-                                .binders_with_self(&mut 100_000)
-                                .map_err(|e| error(item.span, e))?,
-                            &arguments,
-                        )
+                    let expected = trait_definition
+                        .input_substitution(&arguments, &[], &mut 100_000)
+                        .and_then(|substitution| {
+                            substitution.instantiate_bounded(&contract.ty, &mut 100_000)
+                        })
                         .map_err(|e| error(item.span, e.to_string()))?;
                     let (initializer, parameters, substitution) = if let Some(actual) =
                         supplied_associated.remove(&contract.name)

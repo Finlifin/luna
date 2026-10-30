@@ -84,9 +84,11 @@ impl World<'_> {
             .chain(arguments.iter().cloned())
             .collect();
         charge_projection_substitution(&member.ty, &parameters, &inputs, &mut fuel)?;
-        let member_type = member
-            .ty
-            .instantiate_parameters(&parameters, &inputs)
+        let substitution = contract
+            .input_substitution(&inputs, &[], &mut fuel)
+            .map_err(|e| e.to_string())?;
+        let member_type = substitution
+            .instantiate_bounded(&member.ty, &mut fuel)
             .map_err(|e| e.to_string())?;
         if member_type != Term::Primitive(Primitive::Type) {
             return Err("associated projection member is not Type-valued".into());
@@ -150,8 +152,8 @@ impl World<'_> {
                     nir::program::TypePredicate::Bool(_) => (),
                 }
             }
-            let requirement = requirement
-                .instantiate_parameters(&parameters, &inputs)
+            let requirement = substitution
+                .instantiate_predicate_bounded(requirement, &mut fuel)
                 .map_err(|e| e.to_string())?;
             if !matches!(
                 self.context
@@ -166,8 +168,8 @@ impl World<'_> {
             for argument in &capability.interface_arguments {
                 charge_projection_substitution(argument, &parameters, &inputs, &mut fuel)?;
             }
-            let capability = capability
-                .instantiate_parameters(&parameters, &inputs)
+            let capability = substitution
+                .instantiate_requirement_bounded(capability, &mut fuel)
                 .map_err(|e| e.to_string())?;
             if self.given(&capability, query_budget).is_some() {
                 continue;
@@ -237,19 +239,29 @@ impl World<'_> {
         if values.next().is_some() {
             return Err("selected implementation has duplicate associated Type values".into());
         }
-        if value.ty != Term::Primitive(Primitive::Type) {
-            return Err("selected associated value has a non-Type contract".into());
-        }
-        let ExprKind::TypeValue(value) = &value.kind else {
-            return Err("selected associated value is not a completed Type template".into());
-        };
         let binders = implementation
             .parameter_binders()
             .map_err(|e| e.to_string())?;
-        charge_projection_substitution(value, &binders, &evidence.type_arguments, &mut fuel)?;
-        let value = value
-            .instantiate_parameters(&binders, &evidence.type_arguments)
+        nir::copy_budget::charge_substitution(value, &binders, &evidence.type_arguments, &mut fuel)
+            .map_err(|_| "associated Type substitution budget exhausted")?;
+        let substitution = nir::DeclarationSubstitution::bounded(
+            &implementation.type_parameters,
+            &implementation.parameter_types,
+            &evidence.type_arguments,
+            &[],
+            &mut fuel,
+        )
+        .map_err(|e| e.to_string())?;
+        let mut completed = value.clone();
+        completed
+            .rewrite_types(&mut |ty| substitution.instantiate_bounded(ty, &mut fuel))
             .map_err(|e| e.to_string())?;
+        if completed.ty != Term::Primitive(Primitive::Type) {
+            return Err("selected associated value has a non-Type contract".into());
+        }
+        let ExprKind::TypeValue(value) = completed.kind else {
+            return Err("selected associated value is not a completed Type template".into());
+        };
         charge_projection_copy(&value, &mut fuel)?;
         value.check_scope(&[]).map_err(|e| e.to_string())?;
         if value.sort() != nir::Sort::Type {
@@ -561,9 +573,11 @@ impl Normalizer<'_, '_, '_> {
                         &inputs,
                         &mut self.remaining,
                     )?;
-                    let ty = member
-                        .ty
-                        .instantiate_parameters_in_scope(&binders, &inputs, &self.frames)
+                    let ty = contract
+                        .input_substitution(&inputs, &self.frames, &mut self.remaining)
+                        .and_then(|substitution| {
+                            substitution.instantiate_bounded(&member.ty, &mut self.remaining)
+                        })
                         .map_err(|e| e.to_string())?;
                     if ty != Term::Primitive(Primitive::Type) {
                         return Err("associated projection member is not Type-valued".into());
@@ -637,9 +651,11 @@ impl Normalizer<'_, '_, '_> {
                             &inputs,
                             &mut self.remaining,
                         )?;
-                        let ty = member
-                            .ty
-                            .instantiate_parameters(&binders, &inputs)
+                        let ty = contract
+                            .input_substitution(&inputs, &[], &mut self.remaining)
+                            .and_then(|substitution| {
+                                substitution.instantiate_bounded(&member.ty, &mut self.remaining)
+                            })
                             .map_err(|e| e.to_string())?;
                         if ty != Term::Primitive(Primitive::Type) {
                             return Err("associated projection member is not Type-valued".into());
@@ -1387,9 +1403,11 @@ impl World<'_> {
             .chain(interface.arguments.iter().cloned())
             .collect();
         charge_projection_substitution(&member.ty, &parameters, &inputs, &mut fuel)?;
-        let member_type = member
-            .ty
-            .instantiate_parameters(&parameters, &inputs)
+        let substitution = contract
+            .input_substitution(&inputs, &[], &mut fuel)
+            .map_err(|e| e.to_string())?;
+        let member_type = substitution
+            .instantiate_bounded(&member.ty, &mut fuel)
             .map_err(|e| e.to_string())?;
         // Reserve a disjoint allowance for each proof/search rather than
         // resetting the full caller budget at every formation obligation.
@@ -1450,8 +1468,8 @@ impl World<'_> {
                     nir::program::TypePredicate::Bool(_) => (),
                 }
             }
-            let requirement = requirement
-                .instantiate_parameters(&parameters, &inputs)
+            let requirement = substitution
+                .instantiate_predicate_bounded(requirement, &mut fuel)
                 .map_err(|e| e.to_string())?;
             if !matches!(
                 self.context
@@ -1466,8 +1484,8 @@ impl World<'_> {
             for argument in &capability.interface_arguments {
                 charge_projection_substitution(argument, &parameters, &inputs, &mut fuel)?;
             }
-            let capability = capability
-                .instantiate_parameters(&parameters, &inputs)
+            let capability = substitution
+                .instantiate_requirement_bounded(capability, &mut fuel)
                 .map_err(|e| e.to_string())?;
             if self.given(&capability, query_budget).is_some() {
                 continue;
@@ -1533,8 +1551,17 @@ impl World<'_> {
             .map_err(|e| e.to_string())?;
         nir::copy_budget::charge_substitution(value, &binders, &evidence.type_arguments, &mut fuel)
             .map_err(|_| "associated value substitution budget exhausted")?;
-        let mut value = value
-            .instantiate_parameters(&binders, &evidence.type_arguments)
+        let substitution = nir::DeclarationSubstitution::bounded(
+            &implementation.type_parameters,
+            &implementation.parameter_types,
+            &evidence.type_arguments,
+            &[],
+            &mut fuel,
+        )
+        .map_err(|e| e.to_string())?;
+        let mut value = value.clone();
+        value
+            .rewrite_types(&mut |ty| substitution.instantiate_bounded(ty, &mut fuel))
             .map_err(|e| e.to_string())?;
         // Compare completed type views without unfolding opaque normal-form heads.
         let mut cache = std::collections::HashMap::new();

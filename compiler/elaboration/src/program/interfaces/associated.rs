@@ -226,11 +226,11 @@ impl Checker<'_, '_> {
             .find(|i| i.declaration == selected)
             .unwrap();
         let mut value = value
-            .instantiate_parameters(
-                &implementation
-                    .parameter_binders()
-                    .map_err(|e| error(span, e.to_string()))?,
+            .instantiate_declaration_parameters_in_scope(
+                &implementation.type_parameters,
+                &implementation.parameter_types,
                 &evidence.type_arguments,
+                &[],
             )
             .map_err(|e| error(span, e.to_string()))?;
         if matches!(value.ty, Term::Primitive(_))
@@ -400,7 +400,15 @@ impl Checker<'_, '_> {
                 .ok_or_else(|| error(span, "associated value initializer is missing"))?;
             constants::charge_copy(&value, &mut self.required_steps, span)?;
             value
-                .instantiate_parameters(&self.input_binders(&parameters), &arguments)
+                .instantiate_declaration_parameters_in_scope(
+                    &parameters,
+                    &parameters
+                        .iter()
+                        .map(|id| self.trait_input_domain(*id).unwrap_or(p(P::Type)))
+                        .collect::<Vec<_>>(),
+                    &arguments,
+                    &[],
+                )
                 .map_err(|e| error(span, e.to_string()))
         })();
         self.selected_associated_implementation = saved_selection;

@@ -1021,3 +1021,66 @@ fn prepared_methods_preserve_default_binders_and_pending_contracts() {
         );
     }
 }
+
+#[test]
+fn associated_queries_complete_dependent_type_value_domains() {
+    let index = Term::Rigid {
+        declaration: id(9),
+        sort: Sort::ComptimeValue,
+    };
+    let mut interface = contract();
+    interface.type_parameters = vec![id(8), id(9)];
+    interface.parameter_types = vec![ty(P::Type), rigid(8)];
+    let mut selected = implementation(ty(P::Bool), holder(index.clone()));
+    selected.type_parameters = interface.type_parameters.clone();
+    selected.parameter_types = interface.parameter_types.clone();
+    selected.interface_arguments = vec![rigid(8), index];
+    let inputs = vec![ty(P::Type), ty(P::Bool)];
+    let root = projection(ty(P::Bool), inputs.clone());
+    with_world(&[interface], &[selected], |world| {
+        assert!(
+            world
+                .resolve_associated_type(
+                    &root,
+                    Budget {
+                        steps: 0,
+                        ..Budget::default()
+                    }
+                )
+                .is_err()
+        );
+        let resolved = world
+            .resolve_associated_type(&root, Budget::default())
+            .unwrap();
+        assert_eq!(resolved.value, holder(ty(P::Bool)));
+        assert_eq!(resolved.evidence.type_arguments, inputs);
+        let value = world
+            .resolve_associated_value_plan_budgeted(
+                &nir::program::InterfaceInstance {
+                    declaration: id(1),
+                    arguments: inputs,
+                },
+                id(2),
+                &ty(P::Bool),
+                Budget::default(),
+            )
+            .unwrap()
+            .0;
+        assert!(
+            matches!(value.value.kind, ExprKind::TypeValue(ref result) if *result == holder(ty(P::Bool)))
+        );
+        let invalid = projection(ty(P::Bool), vec![ty(P::Bool), ty(P::Bool)]);
+        assert!(
+            world
+                .resolve_associated_type(&invalid, Budget::default())
+                .is_err()
+        );
+        assert_eq!(
+            world
+                .resolve_associated_type(&root, Budget::default())
+                .unwrap()
+                .value,
+            resolved.value
+        );
+    });
+}

@@ -603,3 +603,52 @@ fn program_contract_substitution_preserves_scope_for_type_valued_indices() {
         result
     );
 }
+
+#[test]
+fn dependent_value_expressions_become_type_values_after_domain_completion() {
+    use nir::program::{Expr, ExprKind, SourceRange};
+    let ids = [
+        DeclarationId {
+            package: 1,
+            local: 91,
+        },
+        DeclarationId {
+            package: 1,
+            local: 92,
+        },
+    ];
+    let domain = Term::Rigid {
+        declaration: ids[0],
+        sort: Sort::Type,
+    };
+    let template = Expr {
+        ty: domain.clone(),
+        source: SourceRange { start: 0, end: 0 },
+        kind: ExprKind::ComptimeValue(Term::Rigid {
+            declaration: ids[1],
+            sort: Sort::ComptimeValue,
+        }),
+    };
+    let domains = [p(Primitive::Type), domain];
+    let typed = template
+        .instantiate_declaration_parameters_in_scope(
+            &ids,
+            &domains,
+            &[p(Primitive::Type), p(Primitive::Bool)],
+            &[],
+        )
+        .unwrap();
+    assert_eq!(typed.ty, p(Primitive::Type));
+    assert!(matches!(typed.kind, ExprKind::TypeValue(ty) if ty == p(Primitive::Bool)));
+    assert!(
+        template
+            .instantiate_declaration_parameters_in_scope(
+                &ids,
+                &domains,
+                &[p(Primitive::Bool), p(Primitive::Bool)],
+                &[]
+            )
+            .is_err()
+    );
+    assert!(matches!(template.kind, ExprKind::ComptimeValue(_)));
+}

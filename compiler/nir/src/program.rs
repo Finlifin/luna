@@ -4168,8 +4168,19 @@ impl Expr {
                     }
                 }
             }
-            ExprKind::TypeValue(ty) | ExprKind::ComptimeValue(ty) => {
+            ExprKind::TypeValue(ty) => {
                 *ty = rewriter.ty(ty)?;
+            }
+            ExprKind::ComptimeValue(value) => {
+                *value = rewriter.ty(value)?;
+                // A dependent value input can acquire Type as its domain after
+                // specialization. Publish the same representation as any other
+                // Type value; do not leave a data-value node around a Type term.
+                if self.ty == Term::Primitive(crate::Primitive::Type)
+                    && value.sort() == crate::Sort::Type
+                {
+                    self.kind = ExprKind::TypeValue(value.clone());
+                }
             }
             ExprKind::TypeListValue(types) => {
                 for ty in types {

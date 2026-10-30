@@ -6246,3 +6246,60 @@ fn type_valued_trait_indices_preserve_pointer_method_contracts() {
         }";
     assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
 }
+
+#[test]
+fn type_valued_indices_preserve_associated_type_defaults() {
+    let source = "typealias Type=.Type'builtin;
+        struct Tagged where T,index:T {value:bool}
+        trait Shape where T,index:T {assoc Output:Type=Tagged<T,index>;}
+        struct Holder {}
+        impl Shape<Type,bool> for Holder {}
+        fn run()->bool {
+            let value:Holder.as(Shape<Type,bool>).Output=Tagged<Type,bool>{value:true};
+            value.value
+        }";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    let invalid = source.replace("Output=Tagged<Type,bool>", "Output=Tagged<Type,Type>");
+    assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+}
+
+#[test]
+fn type_valued_indices_preserve_generic_associated_defaults() {
+    let source = "typealias Type=.Type'builtin;
+        struct Tagged where T,index:T {value:bool}
+        trait Shape where T,index:T {assoc Output:Type=Tagged<T,index>;}
+        struct Holder where T,index:T {}
+        impl Shape<T,index> for Holder<T,index> where T,index:T {}
+        fn run()->bool {
+            let value:Holder<Type,bool>.as(Shape<Type,bool>).Output=Tagged<Type,bool>{value:true};
+            value.value
+        }";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    let inherited = source
+        .replace(
+            "struct Holder",
+            "trait Child :- Shape<T,index> where T,index:T {} struct Holder",
+        )
+        .replace(
+            "fn run",
+            "impl Child<T,index> for Holder<T,index> where T,index:T {} fn run",
+        )
+        .replace("Holder<Type,bool>.as(Shape", "Holder<Type,bool>.as(Child");
+    assert_eq!(
+        support::run_iir(&inherited, "run", vec![]),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn type_valued_indices_preserve_associated_constants() {
+    let source = "typealias Type=.Type'builtin;
+        trait Value where T,index:T {assoc data:T=index;}
+        struct Holder where T,index:T {}
+        impl Value<T,index> for Holder<T,index> where T,index:T {}
+        fn run()->bool {
+            let value:Holder<Type,bool>.as(Value<Type,bool>).data=true;
+            value and Holder<bool,true>.as(Value<bool,true>).data
+        }";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+}

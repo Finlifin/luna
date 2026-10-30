@@ -3477,3 +3477,38 @@ Validation in `/home/fin/luna`:
 These results close the staged and composed-memory failures above. They do not
 claim every declaration-substitution consumer elsewhere in the compiler has
 been migrated or that arbitrary dependent program verification is complete.
+
+### Associated items specialize through declaration domains
+
+Associated defaults and selected implementation values now use their declared
+input domains, allowing a dependent value parameter to receive a Type value.
+The associated query engine applies the same bounded substitution to member
+types, requirements, capabilities, selected templates and preserved projections.
+Selection evidence, member identity, scope checks and completed-value validation
+remain required. Normal-form heads are not unfolded.
+
+NIR expression rewriting now represents a completed Type-valued dependent input
+as TypeValue, rather than leaving a ComptimeValue node around a Type term. This
+also supports an ordinary `assoc data:T=index` when T becomes Type.
+
+Source regressions execute concrete and generic defaults, inherited lookup, and
+the same dependent associated declaration with both boolean and Type inputs.
+They reject a mismatched nominal index. Independent NIR and solver regressions
+cover representation, exact selected arguments, invalid domains, budget failure
+and recovery. Initial source failures are preserved in
+`/tmp/luna-tools-jec50f_f/result.json` (default substitution),
+`/tmp/luna-tools-5fa2synr/result.json` (generic selected value), and
+`/tmp/luna-tools-cjuv1uxe/result.json` (dependent Type-value representation).
+
+Validation in `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p type_resolution`:
+  exit 0, `/tmp/luna-tools-piqix059/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test trait_phases --test trait_purity --test sysroot_preludes`:
+  exit 0, `/tmp/luna-tools-shlfshrt/result.json`, no exclusions.
+- `python3 -B development/check.py --timeout 900 -- test -p materialization -p program_verification`:
+  exit 0, `/tmp/luna-tools-29lv_trn/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-75u0awz7/result.json`; `git diff --check`: exit 0.
+
+Other declaration-substitution consumers still require audit. This stage does
+not claim all associated initializer or dependent specification paths complete.
