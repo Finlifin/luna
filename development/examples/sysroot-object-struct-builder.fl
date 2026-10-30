@@ -1,0 +1,38 @@
+{- Ordered field descriptions travel through Object and checked publication. -}
+pure comptime fn Identity<T> -> Type { T }
+
+comptime fn Schema() -> Type {
+    let fields: Object = {ready: bool, count: u32};
+    let draft = meta.StructBuilder.from_object(fields, .name = .Packet) match {
+        value? => value,
+        null => return bool,
+    };
+    draft.Build()
+}
+
+typealias Packet = Schema();
+
+comptime fn describe() -> bool {
+    let fields: Object = {ready: bool, wrapped: Identity<bool>};
+    let draft = meta.StructBuilder.from_object(fields) match {
+        value? => value,
+        null => return false,
+    };
+    let accepted = draft.add_fields_from_object({count: u32});
+    let rejected = draft.add_fields_from_object({extra: bool, invalid: true});
+    let generated = draft.Build();
+    let names = generated.struct_field_names();
+    let types = generated.struct_field_types();
+    accepted and not rejected and names.length() == 3
+        and names[0] == .ready and names[1] == .wrapped and names[2] == .count
+        and types[1] == Identity<bool> and types[2] == u32
+}
+
+const correct = describe();
+
+test {
+    inline if correct { assumes true; } else { assumes false; };
+    let packet = Packet {ready: true, count: 23};
+    assumes packet.ready;
+    assumes packet.count == 23;
+}

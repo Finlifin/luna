@@ -2723,3 +2723,74 @@ fn contextual_data_consumer_publishes_structs_through_the_complete_sysroot() {
         "(bool true)"
     );
 }
+
+#[test]
+fn struct_builder_object_descriptions_preserve_order_and_normal_form_heads() {
+    let fixture = Fixture::new(
+        "typealias Type = .Type'builtin;
+        pure comptime fn Identity<T> -> Type { T }
+        comptime fn inspect() -> bool {
+            let fields: meta.Object = {flag: bool, wrapped: Identity<bool>};
+            let draft = meta.StructBuilder.from_object(fields, .name = .Record) match {
+                value? => value, null => return false,
+            };
+            let snapshot = draft;
+            let added = draft.add_fields_from_object({last: bool});
+            let result = draft.Build();
+            let names = result.struct_field_names();
+            let types = result.struct_field_types();
+            let old_names = snapshot.Build().struct_field_names();
+            added and names.length() == 3 and names[0] == .flag
+                and names[1] == .wrapped and names[2] == .last
+                and types[0] == bool and types[1] == Identity<bool>
+                and old_names.length() == 2 and fields.length() == 2
+        }",
+    );
+    assert_eq!(fixture.invoke_meta("inspect").unwrap().1, Value::Bool(true));
+}
+
+#[test]
+fn struct_builder_object_rejection_is_atomic_and_empty_input_is_valid() {
+    let fixture = Fixture::new(
+        "typealias Type = .Type'builtin;
+        comptime fn inspect() -> bool {
+            let draft = meta.StructBuilder.new();
+            draft.add_field(.original, bool);
+            let positional = draft.add_fields_from_object({accepted: bool, bool});
+            let wrong = draft.add_fields_from_object({accepted: bool, invalid: true});
+            let optional: ?Type = bool;
+            let layered = draft.add_fields_from_object({accepted: bool, invalid: optional});
+            let empty = draft.add_fields_from_object({});
+            let unchanged = draft.Build().struct_field_names();
+            let absent = meta.StructBuilder.from_object({accepted: bool, invalid: false});
+            let empty_draft = meta.StructBuilder.from_object({}) match {
+                value? => value, null => return false,
+            };
+            not positional and not wrong and not layered and empty
+                and unchanged.length() == 1 and unchanged[0] == .original
+                and (absent matches null)
+                and empty_draft.Build().struct_field_names().length() == 0
+                and draft.add_fields_from_object({recovered: bool})
+                and draft.Build().struct_field_names().length() == 2
+        }",
+    );
+    assert_eq!(fixture.invoke_meta("inspect").unwrap().1, Value::Bool(true));
+}
+
+#[test]
+fn struct_builder_object_duplicates_reach_checked_publication() {
+    let fixture = Fixture::new(
+        "typealias Type = .Type'builtin;
+        comptime fn Build() -> Type {
+            let draft = meta.StructBuilder.from_object({flag: bool, flag: bool}) match {
+                value? => value, null => return bool,
+            };
+            draft.Build()
+        }",
+    );
+    let error = fixture
+        .invoke_meta("Build")
+        .err()
+        .expect("duplicate fields must fail");
+    assert!(error.contains("duplicate"), "{error}");
+}

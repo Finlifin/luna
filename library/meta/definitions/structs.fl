@@ -2,6 +2,7 @@ use bindings;
 use builtin.{Integer, Symbol, Type};
 
 use List;
+use bindings.Object;
 
 {-
   Private construction data for a concrete struct. Fields retain their supplied
@@ -25,6 +26,37 @@ impl StructBuilder {
             field_names: subject.struct_field_names(),
             field_types: subject.struct_field_types(),
         }
+    }
+
+    {-
+        A field description is an ordered Object of named Type values.
+        Positional entries or other value domains reject the entire input.
+        Duplicate field names remain visible to checked publication at Build.
+    -}
+    pub comptime fn from_object(fields: Object, .name: Symbol = .Generated) -> ?Self {
+        let draft = Self.new(.name = name);
+        if draft.add_fields_from_object(fields) { draft } else { null }
+    }
+
+    pub comptime fn add_fields_from_object(self, fields: Object) -> bool {
+        var names: List<Symbol> = [];
+        var types: List<Type> = [];
+        let length = fields.length();
+        var index: Integer = 0;
+        while index < length {
+            let name = fields.key(index) match {
+                name? => name,
+                null => return false,
+            };
+            let field_type = fields.value<Type>(index) match {
+                T? => T,
+                null => return false,
+            };
+            names.append(name);
+            types.append(field_type);
+            index += 1;
+        };
+        self.add_fields(names, types)
     }
 
     pub comptime fn add_field(self, name: Symbol, field_type: Type) {
