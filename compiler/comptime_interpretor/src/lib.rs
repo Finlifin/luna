@@ -25,6 +25,7 @@ mod list_append;
 mod list_index;
 mod list_operations;
 mod memory;
+mod nominal_inputs;
 mod normal_inputs;
 mod normal_plan;
 mod normal_terms;
@@ -4482,171 +4483,11 @@ impl<'a> Interpreter<'a> {
                     })?;
             }
         }
-        let mut specialized = specialize.then(|| arguments.clone());
-        let mut types = parameters
-            .iter()
-            .map(|parameter| Term::Rigid {
-                declaration: parameter.declaration,
-                sort: parameter.sort,
-            })
-            .collect::<Vec<_>>();
-        let mut ready = BTreeSet::new();
-        let mut pending = (0..arguments.len()).map(|_| None).collect::<Vec<_>>();
-        let mut pending_slots = BTreeSet::new();
-        let mut preparations = preparations.iter().peekable();
-        for position in 0..arguments.len() {
-            while preparations.peek().is_some_and(|p| p.before == position) {
-                value!(self.evaluate_input_preparation(preparations.next().unwrap(), environment));
-            }
-            let slot = order.as_ref().map_or(position, |order| order[position]);
-            if let Some(specialized) = &mut specialized {
-                self.specialize_contextual_input(&mut specialized[slot], &parameters, &types)?;
-            }
-            let argument = specialized
-                .as_ref()
-                .map_or(&arguments[slot], |inputs| &inputs[slot]);
-            if parameters[slot].sort == nir::Sort::Type
-                && let nir::program::NormalFormArgument::Value(value) = argument
-                && !matches!(
-                    value.ty,
-                    Term::Primitive(Primitive::Type | Primitive::Never)
-                )
-            {
-                return Err(self.failure(ErrorKind::Type, Some(value.source)));
-            }
-            let domain = domains
-                .get(slot)
-                .unwrap_or(&Term::Primitive(Primitive::Type));
-            let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
-            let mut remaining = before;
-            let expected = nir::type_computations::instantiate_parameters_bounded(
-                domain,
-                &parameters,
-                &types,
-                &[],
-                &mut remaining,
-            );
-            self.budget.steps -= (before - remaining) as u64;
-            let expected = expected.map_err(|error| {
-                self.failure(
-                    if matches!(error, nir::type_computations::Error::Budget) {
-                        ErrorKind::StepsExhausted
-                    } else {
-                        ErrorKind::Type
-                    },
-                    Some(argument.source()),
-                )
-            })?;
-            let unresolved = parameters.iter().enumerate().any(|(i, parameter)| {
-                !ready.contains(&i) && expected.mentions_rigid(parameter.declaration)
-            });
-            if unresolved {
-                pending_slots.insert(slot);
-                pending[slot] = Some(
-                    match self.stage_normal_argument(argument, environment, 0)? {
-                        std::ops::ControlFlow::Continue(staged) => staged,
-                        std::ops::ControlFlow::Break(flow) => return Ok(flow),
-                    },
-                );
-            } else {
-                if alias.is_some()
-                    && let nir::program::NormalFormArgument::Value(value) = argument
-                    && value.ty != expected
-                    && value.ty != Term::Primitive(Primitive::Never)
-                {
-                    return Err(self.failure(ErrorKind::Type, Some(value.source)));
-                }
-                let value =
-                    value!(self.evaluate_contextual_argument(argument, &expected, environment));
-                if let Some(bindings) = bindings {
-                    let copy = self.checkpoint_representation(&value, argument.source())?;
-                    environment.insert(bindings[slot], copy);
-                }
-                types[slot] = self.residual_input_term(value, argument.source())?;
-                ready.insert(slot);
-            }
-            // Captures are stored after own inputs. Resolve pending inputs as
-            // soon as their domains become available, without replaying effects.
-            loop {
-                let mut progress = false;
-                self.integer_operation(Some(expr.source), |budget| {
-                    budget.consume(pending_slots.len())
-                })?;
-                for index in pending_slots.iter().copied().collect::<Vec<_>>() {
-                    let domain = domains
-                        .get(index)
-                        .unwrap_or(&Term::Primitive(Primitive::Type));
-                    let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
-                    let mut remaining = before;
-                    let expected = nir::type_computations::instantiate_parameters_bounded(
-                        domain,
-                        &parameters,
-                        &types,
-                        &[],
-                        &mut remaining,
-                    );
-                    self.budget.steps -= (before - remaining) as u64;
-                    let expected = expected.map_err(|error| {
-                        self.failure(
-                            if matches!(error, nir::type_computations::Error::Budget) {
-                                ErrorKind::StepsExhausted
-                            } else {
-                                ErrorKind::Type
-                            },
-                            Some(arguments[index].source()),
-                        )
-                    })?;
-                    if parameters.iter().enumerate().any(|(i, parameter)| {
-                        !ready.contains(&i) && expected.mentions_rigid(parameter.declaration)
-                    }) {
-                        continue;
-                    }
-                    if let Some(specialized) = &mut specialized {
-                        self.specialize_contextual_input(
-                            &mut specialized[index],
-                            &parameters,
-                            &types,
-                        )?;
-                    }
-                    let input = specialized
-                        .as_ref()
-                        .map_or(&arguments[index], |inputs| &inputs[index]);
-                    if alias.is_some()
-                        && let nir::program::NormalFormArgument::Value(value) = input
-                        && value.ty != expected
-                        && value.ty != Term::Primitive(Primitive::Never)
-                    {
-                        return Err(self.failure(ErrorKind::Type, Some(value.source)));
-                    }
-                    let mut literals = BTreeMap::new();
-                    self.prepare_normal_argument(input, &expected, &mut literals, 0)?;
-                    pending_slots.remove(&index);
-                    let staged = pending[index].take().unwrap();
-                    let value = self.finish_staged_normal_argument(
-                        staged,
-                        &mut literals,
-                        input.source(),
-                        0,
-                    )?;
-                    if let Some(bindings) = bindings {
-                        let copy = self.checkpoint_representation(&value, input.source())?;
-                        environment.insert(bindings[index], copy);
-                    }
-                    types[index] = self.residual_input_term(value, input.source())?;
-                    ready.insert(index);
-                    progress = true;
-                }
-                if !progress {
-                    break;
-                }
-            }
+        let mut frame = nominal_inputs::Frame::new(expr, &parameters, domains, specialize);
+        if let Some(flow) = self.run_nominal_inputs(&mut frame, environment)? {
+            return Ok(flow);
         }
-        for preparation in preparations {
-            value!(self.evaluate_input_preparation(preparation, environment));
-        }
-        if ready.len() != arguments.len() {
-            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-        }
+        let types = frame.finish();
         let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
         let mut remaining = before;
         let ids = parameters.iter().map(|p| p.declaration).collect::<Vec<_>>();

@@ -94,8 +94,40 @@ impl fmt::Display for Frame<'_> {
 }
 
 pub(super) enum Progress {
+    InputsComplete,
     Input(bytecode::InputFrame),
     Complete(Flow),
+}
+
+pub(super) trait InputPlan {
+    fn next_input(
+        &mut self,
+        vm: &mut Interpreter<'_>,
+        environment: &mut Environment,
+    ) -> Result<Progress, Error>;
+    fn accept_input(
+        &mut self,
+        vm: &mut Interpreter<'_>,
+        environment: &mut Environment,
+        result: bytecode::InputResult,
+    ) -> Result<Option<Flow>, Error>;
+}
+impl InputPlan for Frame<'_> {
+    fn next_input(
+        &mut self,
+        vm: &mut Interpreter<'_>,
+        environment: &mut Environment,
+    ) -> Result<Progress, Error> {
+        Frame::next_input(self, vm, environment)
+    }
+    fn accept_input(
+        &mut self,
+        vm: &mut Interpreter<'_>,
+        environment: &mut Environment,
+        result: bytecode::InputResult,
+    ) -> Result<Option<Flow>, Error> {
+        Frame::accept_input(self, vm, environment, result)
+    }
 }
 
 impl<'a> Frame<'a> {

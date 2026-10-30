@@ -2890,3 +2890,37 @@ Validation from `/home/fin/luna`:
   early-return cases now also require the enclosing function to execute bytecode.
 - Managed `cargo fmt --all`: `/tmp/luna-tools-w4s66g1v/result.json`, exit 0;
   `git diff --check` passed.
+
+## Resumable nominal and alias input collection
+
+Nominal/newtype and typealias inputs now use an explicit collection frame and the
+same fragment/activation driver as NF plans. The scheduler retains source order,
+preparation position, stable pending input storage, completed declaration slots
+and terminal state. Nominal capture domains keep fixed-point wakeup: own inputs
+may precede the captured Type inputs needed to finish them. Typealias value-domain
+checks remain distinct. The driver returns a separate input-completion signal;
+it does not manufacture a language value before declaration admission.
+
+The original newtype capture-first admission, type requirements, capability checks
+and transparent alias expansion still run after collection. These final steps and
+the nominal/alias bytecode suspension entry are not migrated yet. NF plan semantics
+and opaque normal-form heads are unchanged.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-yypnk2wp/result.json`, exit 0. Added a suspended-input test
+  with a trailing captured Type, frame movement, deferred integer formation,
+  input completion distinct from expression results, and terminal-state rejection.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test type_spreads --test comptime_bytecode_types`:
+  `/tmp/luna-tools-wr1wedpe/result.json`, exit 0. Includes nominal/alias early
+  returns, dependent domains, alias packet effects and captured newtype admission.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test newtypes`:
+  `/tmp/luna-tools-j4gnj61f/result.json`, exit 0, all 211 cases.
+- The first combined source run (`/tmp/luna-tools-57vcantx/result.json`) passed
+  `comptime_clause_inputs` but stopped in `newtypes`: its standalone fixture
+  writer omitted the ordinary bool binding, causing HIR errors before semantic
+  execution. It now uses the shared primitive-binding fixture helper; existing
+  expectations were retained. No production primitive lookup was changed.
+- Managed formatting check: `/tmp/luna-tools-13jk9h2s/result.json`, exit 0;
+  `git diff --check` passed.

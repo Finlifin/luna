@@ -118,13 +118,14 @@ impl<'a> Interpreter<'a> {
     ) -> Result<Value, Error> {
         let activation = self.begin_invocation(function, arguments, context)?;
         match self.run_executions(Some(Execution::Invocation(activation)), None, None)? {
-            Flow::Value(value) => Ok(value),
+            Some(Flow::Value(value)) => Ok(value),
             _ => Err(self.failure(ErrorKind::InvalidControlFlow, None)),
         }
     }
 
     pub(super) fn run_fragment(&mut self, frame: &mut bytecode::Frame) -> Result<Flow, Error> {
-        self.run_executions(None, Some(frame), None)
+        self.run_executions(None, Some(frame), None)?
+            .ok_or_else(|| self.failure(ErrorKind::InvalidControlFlow, None))
     }
 
     pub(super) fn run_normal_plan(
@@ -132,6 +133,17 @@ impl<'a> Interpreter<'a> {
         frame: &mut normal_plan::Frame<'_>,
         environment: &mut Environment,
     ) -> Result<Flow, Error> {
+        self.run_executions(None, None, Some((frame, environment)))?
+            .ok_or_else(|| self.failure(ErrorKind::InvalidControlFlow, None))
+    }
+
+    /// None means all inputs are ready for declaration admission. A flow is an
+    /// early transfer, never a fabricated value standing in for the input list.
+    pub(super) fn run_nominal_inputs(
+        &mut self,
+        frame: &mut nominal_inputs::Frame<'_>,
+        environment: &mut Environment,
+    ) -> Result<Option<Flow>, Error> {
         self.run_executions(None, None, Some((frame, environment)))
     }
 
@@ -141,8 +153,8 @@ impl<'a> Interpreter<'a> {
         &mut self,
         mut execution: Option<Execution<'a>>,
         mut root: Option<&mut bytecode::Frame>,
-        mut plan: Option<(&mut normal_plan::Frame<'_>, &mut Environment)>,
-    ) -> Result<Flow, Error> {
+        mut plan: Option<(&mut dyn normal_plan::InputPlan, &mut Environment)>,
+    ) -> Result<Option<Flow>, Error> {
         let mut stack: Vec<StackEntry<'a>> = Vec::new();
         let mut result = None;
         loop {
@@ -187,7 +199,7 @@ impl<'a> Interpreter<'a> {
                         } else {
                             let (frame, environment) = plan.as_mut().expect("input plan root");
                             if let Some(flow) = frame.accept_input(self, environment, input)? {
-                                return Ok(flow);
+                                return Ok(Some(flow));
                             }
                         }
                         continue;
@@ -199,7 +211,7 @@ impl<'a> Interpreter<'a> {
                     .and_then(StackEntry::code)
                     .or_else(|| root.as_deref_mut())
                 else {
-                    return flow;
+                    return flow.map(Some);
                 };
                 let propagation = match parent.receive(flow, defaults) {
                     Ok(None) => None,
@@ -213,7 +225,7 @@ impl<'a> Interpreter<'a> {
                         result = Some(self.complete_stack(parent, code, flow));
                         continue;
                     }
-                    return flow;
+                    return flow.map(Some);
                 }
             }
             if let Some(StackEntry::Plan(active)) = stack.last_mut() {
@@ -240,7 +252,8 @@ impl<'a> Interpreter<'a> {
                         normal_plan::Progress::Input(bytecode::InputFrame { code, finish }) => {
                             stack.push(StackEntry::Code(StackContext::Input(finish), code));
                         }
-                        normal_plan::Progress::Complete(flow) => return Ok(flow),
+                        normal_plan::Progress::Complete(flow) => return Ok(Some(flow)),
+                        normal_plan::Progress::InputsComplete => return Ok(None),
                     }
                     continue;
                 }
@@ -296,7 +309,7 @@ impl<'a> Interpreter<'a> {
                     if let Some(StackEntry::Code(completed, code)) = stack.pop() {
                         result = Some(self.complete_stack(completed, code, flow));
                     } else {
-                        return flow;
+                        return flow.map(Some);
                     }
                 }
             }
@@ -976,7 +989,7 @@ mod tests {
         assert!(matches!(
             vm.run_executions(Some(Execution::Invocation(parent)), None, None)
                 .unwrap(),
-            Flow::Value(Value::Bool(true))
+            Some(Flow::Value(Value::Bool(true)))
         ));
         assert_eq!(vm.depth, 0);
         assert_eq!(vm.effect_state.invocation, 0);
