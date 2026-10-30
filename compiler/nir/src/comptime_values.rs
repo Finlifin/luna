@@ -26,9 +26,9 @@ impl std::fmt::Display for Error {
 /// scope before calling this representation boundary. Shape alone grants no
 /// authority to treat an arbitrary opaque normal-form head as a list.
 ///
-/// Keep the legacy compact Type payload canonical until all readers and
-/// symbolic producers migrate together; never publish two identities for one
-/// admitted value. Ordinary payloads retain their exact declared domain.
+/// All element domains, including Type, retain the same ordinary value carrier
+/// and exact declared list domain. Readers may decode legacy compact payloads,
+/// but producers must not discard list identity based on the element type.
 pub fn freeze_admitted_list(
     domain: &Term,
     fields: Vec<Term>,
@@ -65,14 +65,10 @@ pub(crate) fn encode_admitted_list(domain: Term, fields: Vec<Term>) -> Result<Te
     if fields.iter().any(|field| field.sort() != sort) {
         return Err(Error::Invalid("admitted list element has the wrong sort"));
     }
-    Ok(if types {
-        Term::TypeListValue(fields)
-    } else {
-        Term::NominalValue {
-            ty: Box::new(domain),
-            variant: None,
-            fields,
-        }
+    Ok(Term::NominalValue {
+        ty: Box::new(domain),
+        variant: None,
+        fields,
     })
 }
 

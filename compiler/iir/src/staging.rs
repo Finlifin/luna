@@ -3383,7 +3383,11 @@ mod tests {
         };
         assert_eq!(
             constant(&heads, &list, &mut 100, 0).unwrap(),
-            Term::TypeListValue(vec![Term::Primitive(Primitive::Bool)])
+            Term::NominalValue {
+                ty: Box::new(list.ty.clone()),
+                variant: None,
+                fields: vec![Term::Primitive(Primitive::Bool)]
+            }
         );
         let ordinary = Expr {
             kind: K::TypeList(vec![expr(

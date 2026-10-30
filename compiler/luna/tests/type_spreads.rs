@@ -1,4 +1,6 @@
 //! Clause expansion preserves opaque heads, routing and comptime producers.
+#[path = "support/frozen_lists.rs"]
+mod frozen_lists;
 use comptime_interpretor::{Budget, Interpreter, Value};
 #[path = "support/execution.rs"]
 mod execution_support;
@@ -499,10 +501,13 @@ fn mixed_head_spreads_retain_composite_dependent_literal_context() {
                 nir::Term::NormalForm {
                     head: id(&package, "Tuple"),
                     sort: nir::Sort::Type,
-                    arguments: vec![nir::Term::TypeListValue(vec![
-                        nir::Term::Primitive(nir::Primitive::U8),
-                        nir::Term::Primitive(nir::Primitive::Bool)
-                    ])]
+                    arguments: vec![frozen_lists::types(
+                        &package,
+                        vec![
+                            nir::Term::Primitive(nir::Primitive::U8),
+                            nir::Term::Primitive(nir::Primitive::Bool)
+                        ]
+                    )]
                 },
                 nir::Term::TupleValue(vec![
                     nir::Term::Integer(comptime_runtime::Integer::from_u128(7)),
@@ -1563,7 +1568,7 @@ fn named_type_list_supply_accepts_literal_prefix_packets_in_source_order() {
             vec![
                 nir::Term::Primitive(nir::Primitive::Bool),
                 nir::Term::Bool(true),
-                nir::Term::TypeListValue(vec![nir::Term::Primitive(nir::Primitive::Bool)])
+                frozen_lists::types(&package, vec![nir::Term::Primitive(nir::Primitive::Bool)])
             ]
         );
         assert_eq!(execution_support::calls(&package, &vm), calls);
@@ -1665,7 +1670,7 @@ fn computed_prefix_packets_share_the_named_type_list_input_plan() {
                 vec![
                     nir::Term::Primitive(nir::Primitive::Bool),
                     nir::Term::Bool(true),
-                    nir::Term::TypeListValue(vec![nir::Term::Primitive(nir::Primitive::Bool)])
+                    frozen_lists::types(&package, vec![nir::Term::Primitive(nir::Primitive::Bool)])
                 ]
             );
             assert_eq!(calls(&package, &vm), expected_calls);
@@ -1771,7 +1776,7 @@ fn named_type_list_packets_compose_with_dependent_defaults() {
                 nir::Term::Primitive(nir::Primitive::Bool),
                 nir::Term::Bool(true),
                 nir::Term::Bool(copy),
-                nir::Term::TypeListValue(elements)
+                frozen_lists::types(&package, elements)
             ]
         );
         assert_eq!(calls(&package, &vm), expected_calls);
@@ -1811,7 +1816,7 @@ fn named_type_list_packets_retain_generic_type_alias_parameters() {
             nir::Term::Primitive(nir::Primitive::U8),
             nir::Term::Primitive(nir::Primitive::Bool),
             nir::Term::Primitive(nir::Primitive::Bool),
-            nir::Term::TypeListValue(vec![nir::Term::Primitive(nir::Primitive::U8)])
+            frozen_lists::types(&package, vec![nir::Term::Primitive(nir::Primitive::U8)])
         ]
     );
 }
@@ -1858,10 +1863,13 @@ fn defaulted_normal_heads_collect_type_items_in_source_order() {
         };
         assert_eq!(
             arguments.last(),
-            Some(&nir::Term::TypeListValue(vec![
-                nir::Term::Primitive(nir::Primitive::Bool),
-                nir::Term::Primitive(nir::Primitive::U8)
-            ]))
+            Some(&frozen_lists::types(
+                &package,
+                vec![
+                    nir::Term::Primitive(nir::Primitive::Bool),
+                    nir::Term::Primitive(nir::Primitive::U8)
+                ]
+            ))
         );
         assert_eq!(calls(&package, &vm), expected_calls);
     }
@@ -1959,11 +1967,14 @@ fn defaulted_type_collectors_spread_lists_once_in_source_order() {
         assert_eq!(arguments[2], nir::Term::Bool(false));
         assert_eq!(
             arguments[3],
-            nir::Term::TypeListValue(vec![
-                nir::Term::Primitive(nir::Primitive::Bool),
-                nir::Term::Primitive(nir::Primitive::U8),
-                nir::Term::Primitive(nir::Primitive::Bool)
-            ])
+            frozen_lists::types(
+                &package,
+                vec![
+                    nir::Term::Primitive(nir::Primitive::Bool),
+                    nir::Term::Primitive(nir::Primitive::U8),
+                    nir::Term::Primitive(nir::Primitive::Bool)
+                ]
+            )
         );
         assert_eq!(calls(&package, &vm), expected_calls);
     }
@@ -2050,7 +2061,7 @@ fn required_prefix_heads_collect_after_computed_packets() {
             vec![
                 nir::Term::Primitive(nir::Primitive::Bool),
                 nir::Term::Bool(true),
-                nir::Term::TypeListValue(elements)
+                frozen_lists::types(&package, elements)
             ]
         );
         assert_eq!(calls(&package, &vm), expected_calls);
@@ -2151,10 +2162,13 @@ fn collected_type_list_contracts_check_deferred_inputs_and_recover() {
         vec![
             nir::Term::Primitive(nir::Primitive::Bool),
             nir::Term::Primitive(nir::Primitive::Bool),
-            nir::Term::TypeListValue(vec![
-                nir::Term::Primitive(nir::Primitive::Bool),
-                nir::Term::Primitive(nir::Primitive::Bool)
-            ])
+            frozen_lists::types(
+                &package,
+                vec![
+                    nir::Term::Primitive(nir::Primitive::Bool),
+                    nir::Term::Primitive(nir::Primitive::Bool)
+                ]
+            )
         ]
     );
     assert_eq!(
@@ -2358,9 +2372,11 @@ fn normal_form_type_list_requirements_keep_the_collected_input_kind() {
         let nir::Term::NormalForm { arguments, .. } = inner.as_ref() else {
             panic!("head was erased")
         };
-        assert!(
-            matches!(&arguments[1],nir::Term::TypeListValue(types) if types.len()==if suffix.is_empty(){0}else{2})
-        );
+        let nir::Term::NominalValue { fields, .. } = &arguments[1] else {
+            panic!("collected input lost its ordinary value carrier")
+        };
+        assert_eq!(fields.len(), if suffix.is_empty() { 0 } else { 2 });
+        assert_eq!(arguments[1], frozen_lists::types(&package, fields.clone()));
         let invalid = source.replace("Indexed<bool", "Indexed<'x''type");
         assert!(compile_with_protocols(&invalid, &protocols).is_err());
     }

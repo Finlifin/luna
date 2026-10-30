@@ -549,7 +549,7 @@ impl Checker<'_, '_> {
                                 Some(head) => C::NormalTuple {
                                     head,
                                     fields,
-                                    list_domain: None,
+                                    list_domain: self.bound_tuple_list_domain(),
                                 },
                                 None => C::Tuple(fields),
                             }

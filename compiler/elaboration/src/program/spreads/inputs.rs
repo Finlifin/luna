@@ -204,7 +204,7 @@ impl Checker<'_, '_> {
                         Some(head) => Input::NormalTuple {
                             head,
                             fields,
-                            list_domain: None,
+                            list_domain: self.bound_tuple_list_domain(),
                         },
                         None => Input::Tuple(fields),
                     }
@@ -435,7 +435,7 @@ impl Checker<'_, '_> {
                     Some(head) => crate::calls::InputContext::NormalTuple {
                         head,
                         fields,
-                        list_domain: None,
+                        list_domain: self.bound_tuple_list_domain(),
                     },
                     None => crate::calls::InputContext::Tuple(fields),
                 };

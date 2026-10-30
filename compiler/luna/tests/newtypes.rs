@@ -1,3 +1,5 @@
+#[path = "support/frozen_lists.rs"]
+mod frozen_lists;
 #[path = "support/primitive_bindings.rs"]
 mod primitive_bindings;
 use luna::{
@@ -5000,7 +5002,7 @@ fn empty_tuple_context_keeps_tuple_identity_and_runtime_spread_effects() {
                 empty_values += 1;
                 if tuple {
                     assert!(matches!(&expr.ty, nir::Term::NormalForm { arguments, .. }
-                        if matches!(arguments.as_slice(), [nir::Term::TypeListValue(fields)] if fields.is_empty())));
+                        if matches!(arguments.as_slice(), [input] if *input == frozen_lists::types(&package, vec![]))));
                 } else {
                     assert_eq!(expr.ty, nir::Term::Tuple(vec![]));
                 }
@@ -5040,10 +5042,13 @@ fn type_list_collectors_preserve_program_effects_without_unfolding_tuple() {
     };
     assert_eq!(
         arguments,
-        vec![nir::Term::TypeListValue(vec![
-            nir::Term::Primitive(nir::Primitive::Char),
-            nir::Term::Primitive(nir::Primitive::Bool)
-        ])]
+        vec![frozen_lists::types(
+            &package,
+            vec![
+                nir::Term::Primitive(nir::Primitive::Char),
+                nir::Term::Primitive(nir::Primitive::Bool)
+            ]
+        )]
     );
     assert!(compile_selected(&source.replace("seen=true", "seen=false"), Emit::Nir, true).is_err());
 }
@@ -5065,10 +5070,13 @@ fn type_list_collectors_join_branch_effects_and_stop_after_return() {
         };
         assert_eq!(
             arguments,
-            vec![nir::Term::TypeListValue(vec![
-                nir::Term::Primitive(nir::Primitive::Bool),
-                nir::Term::Primitive(nir::Primitive::Char)
-            ])]
+            vec![frozen_lists::types(
+                &package,
+                vec![
+                    nir::Term::Primitive(nir::Primitive::Bool),
+                    nir::Term::Primitive(nir::Primitive::Char)
+                ]
+            )]
         );
     }
     assert!(
@@ -5323,10 +5331,13 @@ fn explicit_tuple_type_inputs_keep_type_construction_and_early_return() {
             arguments: vec![nir::Term::NormalForm {
                 head: tuple,
                 sort: nir::Sort::Type,
-                arguments: vec![nir::Term::TypeListValue(vec![
-                    nir::Term::Primitive(nir::Primitive::Char),
-                    nir::Term::Primitive(nir::Primitive::Bool),
-                ])],
+                arguments: vec![frozen_lists::types(
+                    &package,
+                    vec![
+                        nir::Term::Primitive(nir::Primitive::Char),
+                        nir::Term::Primitive(nir::Primitive::Bool),
+                    ]
+                )],
             }],
         })
     );

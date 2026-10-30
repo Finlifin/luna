@@ -229,7 +229,7 @@ fn type_list_freezing_preserves_list_identity_order_and_opaque_heads() {
     };
     let elements = vec![opaque, Term::Primitive(Primitive::Bool)];
     let list = ordinary_type_list(elements.clone());
-    let expected = Term::TypeListValue(elements.clone());
+    let expected = frozen_types(elements.clone());
     assert_eq!(
         list.to_string(),
         format!(
@@ -248,7 +248,7 @@ fn type_list_freezing_preserves_list_identity_order_and_opaque_heads() {
     assert_ne!(expected, Term::TupleValue(elements));
     assert_eq!(
         ordinary_type_list(vec![]).into_normal_term(&mut Budget::default()),
-        Ok(Term::TypeListValue(vec![]))
+        Ok(frozen_types(vec![]))
     );
     assert_ne!(ordinary_type_list(vec![]), Value::Tuple(vec![]));
     let nested = Value::Tuple(vec![list]);
@@ -660,5 +660,20 @@ fn ordinary_type_list(types: Vec<nir::Term>) -> Value {
             arguments: vec![nir::Term::Primitive(nir::Primitive::Type)],
         },
         values: types.into_iter().map(Value::Type).collect(),
+    }
+}
+
+fn frozen_types(fields: Vec<Term>) -> Term {
+    Term::NominalValue {
+        ty: Box::new(Term::NormalForm {
+            head: DeclarationId {
+                package: 4294967294,
+                local: 0,
+            },
+            sort: nir::Sort::Type,
+            arguments: vec![Term::Primitive(nir::Primitive::Type)],
+        }),
+        variant: None,
+        fields,
     }
 }

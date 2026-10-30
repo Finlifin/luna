@@ -1,4 +1,6 @@
 //! Contextual meta.List<Type> construction retains expression evaluation.
+#[path = "support/frozen_lists.rs"]
+mod frozen_lists;
 #[path = "support/execution.rs"]
 mod support;
 use comptime_interpretor::{Budget, Interpreter, Value};
@@ -545,10 +547,10 @@ fn constructed_type_lists_feed_normal_heads_without_unfolding() {
     let expected = Value::Type(Term::NormalForm {
         head: support::id(&package, "Product"),
         sort: nir::Sort::Type,
-        arguments: vec![Term::TypeListValue(vec![
-            Term::Primitive(P::U8),
-            Term::Primitive(P::Bool),
-        ])],
+        arguments: vec![frozen_lists::types(
+            &package,
+            vec![Term::Primitive(P::U8), Term::Primitive(P::Bool)],
+        )],
     });
     for name in ["Build", "Named"] {
         let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
@@ -590,11 +592,14 @@ fn generic_aliases_preserve_type_list_inputs_and_opaque_heads() {
     let expected = Value::Type(Term::NormalForm {
         head: support::id(&package, "Product"),
         sort: nir::Sort::Type,
-        arguments: vec![Term::TypeListValue(vec![
-            Term::Primitive(P::U8),
-            Term::Primitive(P::Bool),
-            Term::Primitive(P::U8),
-        ])],
+        arguments: vec![frozen_lists::types(
+            &package,
+            vec![
+                Term::Primitive(P::U8),
+                Term::Primitive(P::Bool),
+                Term::Primitive(P::U8),
+            ],
+        )],
     });
     for name in ["Chosen", "Forwarded"] {
         assert_eq!(

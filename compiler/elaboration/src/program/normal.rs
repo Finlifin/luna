@@ -2603,12 +2603,11 @@ mod tests {
                 &mut Budget::default(),
                 resolve
             ),
-            Some(Term::TypeListValue(vec![
-                flag.clone(),
-                byte.clone(),
-                flag.clone(),
-                byte
-            ]))
+            Some(Term::NominalValue {
+                ty: Box::new(list.clone()),
+                variant: None,
+                fields: vec![flag.clone(), byte.clone(), flag.clone(), byte],
+            })
         );
         assert!(
             collect_known_normal_argument(
@@ -3276,7 +3275,7 @@ impl Checker<'_, '_> {
                                 Some(head) => C::NormalTuple {
                                     head,
                                     fields,
-                                    list_domain: None,
+                                    list_domain: self.bound_tuple_list_domain(),
                                 },
                                 None => C::Tuple(fields),
                             })

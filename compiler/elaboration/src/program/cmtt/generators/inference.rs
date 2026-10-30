@@ -40,7 +40,7 @@ impl Checker<'_, '_> {
                 for (index,field) in fields.iter().enumerate() {
                     contexts.push(self.generator_partial_input_hint(field,targets.and_then(|fields|fields.get(index)),parameters,packets,depth+1)?);
                 }
-                Ok(match self.protocols.tuple {Some(head)=>C::NormalTuple{head,fields:contexts,list_domain:None},None=>C::Tuple(contexts)})
+                Ok(match self.protocols.tuple {Some(head)=>C::NormalTuple{head,fields:contexts,list_domain:self.bound_tuple_list_domain()},None=>C::Tuple(contexts)})
             }
             H::CollectedProperties(fields) => {
                 let targets = match &expected {Some(Term::Record(fields))=>Some(fields), _=>None};

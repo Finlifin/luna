@@ -122,7 +122,7 @@ impl<'h> RoutedArgument<'h> {
                 Some(head) => C::NormalTuple {
                     head,
                     fields,
-                    list_domain: None,
+                    list_domain: checker.bound_tuple_list_domain(),
                 },
                 None => C::Tuple(fields),
             },
@@ -180,7 +180,7 @@ impl<'h> RoutedArgument<'h> {
             Some(head) => C::NormalTuple {
                 head,
                 fields,
-                list_domain: None,
+                list_domain: checker.bound_tuple_list_domain(),
             },
             None => C::Tuple(fields),
         })

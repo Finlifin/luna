@@ -7355,3 +7355,50 @@ Validation in `/home/fin/luna`:
 
 The three source groups contain 114 passing tests. No full language suite was
 run; mutable/unknown producer widths intentionally remain deferred.
+
+### Freeze Type-element lists as ordinary values with their declared domain
+
+The admitted-list encoder now emits `NominalValue { ty, variant: None, fields }`
+for every element domain. Type elements no longer select a domainless compact
+encoding. This preserves distinct declared list identities, including empty
+lists, and retains opaque normal-form heads in list elements. Element sorts,
+scope, rewriting and budget checks remain in their existing admission paths.
+
+Partial call contexts now obtain the collection domain from the bound Tuple
+head's declared parameter. This covers ordinary calls, effects, spreads and
+CMTT generator inputs. A context with missing domain information must not
+manufacture a different completed identity from a later admitted value. The
+change does not equate legacy and ordinary payloads or unfold normal-form
+heads. Source expectations independently construct the ordinary carrier from
+the registered list declaration rather than calling the production encoder.
+
+Legacy `TypeListValue` readers and IR variants remain during migration;
+this is not complete deletion of the old representation. Existing raw legacy
+terms are not asserted equal to freshly frozen values. Unknown-domain legacy
+context support in type_resolution also remains to be removed separately.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test contextual_spreads --test cmtt --no-fail-fast`:
+  exit 0; `/tmp/luna-tools-5il1y45p/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_lists --test tuple_type_syntax --test comptime_bytecode_types --test comptime_bytecode_lists --test library_protocols --test normal_form_inference --test normal_form_methods --test cmtt_type_inputs --test cmtt --test contextual_spreads --test type_spreads --test newtypes --no-fail-fast`:
+  1,117 passed and one existing fixture failure, exit 101;
+  `/tmp/luna-tools-v3m2bp3q/result.json`. The conversion-protocol fixture embeds
+  host-library-conversion.fl, which imports builtin.{bool,u8}, without defining
+  that module. Both the import and missing module are present at HEAD a70e0889;
+  the failure occurs during name resolution, before list encoding.
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p iir -p comptime_interpretor -p type_resolution -p materialization -p elaboration --no-fail-fast`:
+  all selected core tests passed, exit 0;
+  `/tmp/luna-tools-64nf2_0_/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_spreads normal_form_type_list_requirements_keep_the_collected_input_kind`:
+  exit 0 after making the ordinary carrier/domain assertion explicit;
+  `/tmp/luna-tools-t38env2r/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-q31c7hps/result.json`; `git diff --check` passed.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
+  15 native sysroot tests passed, exit 0;
+  `/tmp/luna-tools-d7co1jqt/result.json`.
+
+No full language suite was run. The conversion fixture import failure is
+separate from the ordinary-list migration and is not counted as a pass.

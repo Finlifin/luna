@@ -2636,7 +2636,7 @@ impl Checker<'_, '_> {
                                 Some(head) => crate::calls::InputContext::NormalTuple {
                                     head,
                                     fields,
-                                    list_domain: None,
+                                    list_domain: self.bound_tuple_list_domain(),
                                 },
                                 None => crate::calls::InputContext::Tuple(fields),
                             })
@@ -2916,6 +2916,14 @@ impl Checker<'_, '_> {
                 .then(|| self.normal_form_head_metadata(*owner))
                 .flatten()
         })
+    }
+    fn bound_tuple_list_domain(&self) -> Option<Term> {
+        let head = self.bound_tuple_metadata()?;
+        let [parameter] = head.parameters.as_slice() else {
+            return None;
+        };
+        self.is_type_list_type(&parameter.ty)
+            .then(|| parameter.ty.clone())
     }
     fn bound_tuple_elements<'a>(&self, ty: &'a Term) -> Option<&'a [Term]> {
         if !matches!(ty, Term::NormalForm { head, sort: Sort::Type, .. } if Some(*head) == self.protocols.tuple)

@@ -1,4 +1,6 @@
 //! Parentheses construct values; Tuple is an explicit normal-form type head.
+#[path = "support/frozen_lists.rs"]
+mod frozen_lists;
 #[path = "support/execution.rs"]
 mod support;
 use comptime_interpretor::Value;
@@ -181,10 +183,13 @@ fn grouping_and_tuple_values_remain_distinct_from_type_construction() {
     assert_eq!(head, support::id(&package, "Tuple"));
     assert_eq!(
         arguments,
-        vec![Term::TypeListValue(vec![
-            Term::Primitive(Primitive::U8),
-            Term::Primitive(Primitive::Bool)
-        ])]
+        vec![frozen_lists::types(
+            &package,
+            vec![
+                Term::Primitive(Primitive::U8),
+                Term::Primitive(Primitive::Bool)
+            ]
+        )]
     );
 }
 

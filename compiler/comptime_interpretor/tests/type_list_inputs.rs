@@ -28,7 +28,11 @@ fn tuple_type(elements: Vec<Term>) -> Term {
     Term::NormalForm {
         head: id(2),
         sort: Sort::Type,
-        arguments: vec![Term::TypeListValue(elements)],
+        arguments: vec![Term::NominalValue {
+            ty: Box::new(list_type()),
+            variant: None,
+            fields: elements,
+        }],
     }
 }
 fn package() -> Package {
@@ -428,7 +432,22 @@ fn contextual_tuple_types_preserve_the_head_before_and_after_their_context_arriv
                 let expected = Value::Type(Term::NormalForm {
                     head: id(4),
                     sort: Sort::Type,
-                    arguments: vec![ty(P::Type), tuple_type(elements.clone())],
+                    arguments: vec![
+                        ty(P::Type),
+                        Term::NormalForm {
+                            head: id(2),
+                            sort: Sort::Type,
+                            arguments: vec![Term::NominalValue {
+                                ty: Box::new(Term::NormalForm {
+                                    head: list_identity,
+                                    sort: Sort::Type,
+                                    arguments: vec![ty(P::Type)],
+                                }),
+                                variant: None,
+                                fields: elements.clone(),
+                            }],
+                        },
+                    ],
                 });
                 let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
                 assert_eq!(vm.invoke(id(3), vec![]).unwrap(), expected);

@@ -666,7 +666,7 @@ fn residual_type_lists_compose_with_aggregates_without_becoming_closed_constants
         }],
     };
     let types = ordinary_type_list(vec![bool_ty(), ty.clone(), ty.clone()]);
-    let expected = Term::TypeListValue(vec![bool_ty(), ty.clone(), ty.clone()]);
+    let expected = frozen_types(vec![bool_ty(), ty.clone(), ty.clone()]);
     let authority = [(id(10), bool_ty())].into_iter().collect();
     for (value, expected) in [
         (types.clone(), expected.clone()),
@@ -1031,5 +1031,20 @@ fn ordinary_type_list(types: Vec<nir::Term>) -> Value {
             arguments: vec![nir::Term::Primitive(nir::Primitive::Type)],
         },
         values: types.into_iter().map(Value::Type).collect(),
+    }
+}
+
+fn frozen_types(fields: Vec<Term>) -> Term {
+    Term::NominalValue {
+        ty: Box::new(Term::NormalForm {
+            head: DeclarationId {
+                package: 4294967294,
+                local: 0,
+            },
+            sort: nir::Sort::Type,
+            arguments: vec![Term::Primitive(nir::Primitive::Type)],
+        }),
+        variant: None,
+        fields,
     }
 }

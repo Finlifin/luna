@@ -1,4 +1,6 @@
 //! Compile repository library declarations, rather than fixture copies.
+#[path = "support/frozen_lists.rs"]
+mod frozen_lists;
 #[path = "support/execution.rs"]
 #[allow(dead_code)]
 mod support;
@@ -915,7 +917,7 @@ fn repository_tuple_and_meta_definitions_preserve_identity_and_execute() {
                 .iter()
                 .any(|function| function.declaration == head)
         );
-        assert_eq!(arguments, vec![Term::TypeListValue(fields)]);
+        assert_eq!(arguments, vec![frozen_lists::types(&package, fields)]);
     }
 }
 
@@ -1114,12 +1116,10 @@ fn repository_tuple_head_preserves_type_identity_and_value_layout() {
     );
     assert_eq!(
         arguments,
-        vec![nir::Term::TypeListValue(vec![
-            nir::Term::Primitive(
-                nir::Primitive::Bool
-            );
-            2
-        ])]
+        vec![frozen_lists::types(
+            &package,
+            vec![nir::Term::Primitive(nir::Primitive::Bool); 2]
+        )]
     );
 }
 

@@ -593,7 +593,7 @@ fn nested_contextual_containers_preserve_domains_and_tuple_heads() {
                         Term::NormalForm {
                             head: tuple_head,
                             sort: nir::Sort::Type,
-                            arguments: vec![Term::TypeListValue(vec![
+                            arguments: vec![frozen_types(vec![
                                 Term::Primitive(Primitive::Bool),
                                 Term::Primitive(Primitive::Void)
                             ])]
@@ -1297,7 +1297,7 @@ fn contextual_type_tuples_accept_scoped_parameters_in_every_input_order() {
                             Term::NormalForm {
                                 head: tuple_head,
                                 sort: nir::Sort::Type,
-                                arguments: vec![Term::TypeListValue(vec![
+                                arguments: vec![frozen_types(vec![
                                     Term::Rigid {
                                         declaration: authorized,
                                         sort: nir::Sort::Type
@@ -1637,5 +1637,13 @@ fn dynamic_normal_calls_compile_and_preserve_order_plan_checks_and_identity() {
             );
             assert_eq!(vm.depth, 0);
         }
+    }
+}
+
+fn frozen_types(fields: Vec<Term>) -> Term {
+    Term::NominalValue {
+        ty: Box::new(container_list(Term::Primitive(Primitive::Type))),
+        variant: None,
+        fields,
     }
 }

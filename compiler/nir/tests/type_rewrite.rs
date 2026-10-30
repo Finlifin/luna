@@ -138,7 +138,18 @@ fn symbolic_type_lists_concatenate_after_substitution_without_changing_heads() {
             Term::NormalForm {
                 head,
                 sort: Sort::Type,
-                arguments: vec![Term::TypeListValue(elements)]
+                arguments: vec![Term::NominalValue {
+                    ty: Box::new(Term::NormalForm {
+                        head: DeclarationId {
+                            package: 91,
+                            local: 9
+                        },
+                        sort: Sort::Type,
+                        arguments: vec![Term::Primitive(Primitive::Type)],
+                    }),
+                    variant: None,
+                    fields: elements
+                }]
             }
         );
     }
@@ -166,7 +177,18 @@ fn symbolic_type_lists_concatenate_after_substitution_without_changing_heads() {
             vec![]
         )
         .unwrap(),
-        Term::TypeListValue(vec![])
+        Term::NominalValue {
+            ty: Box::new(Term::NormalForm {
+                head: DeclarationId {
+                    package: 91,
+                    local: 9
+                },
+                sort: Sort::Type,
+                arguments: vec![Term::Primitive(Primitive::Type)],
+            }),
+            variant: None,
+            fields: vec![]
+        }
     );
 }
 

@@ -19,7 +19,11 @@ fn admitted_lists_share_one_encoding_and_preserve_domains_and_scopes() {
     for fields in [vec![], vec![boolean.clone()]] {
         assert_eq!(
             freeze_admitted_list(&types, fields.clone(), &mut 1000).unwrap(),
-            Term::TypeListValue(fields)
+            Term::NominalValue {
+                ty: Box::new(types.clone()),
+                variant: None,
+                fields
+            }
         );
     }
     let bools = domain(boolean);
@@ -52,7 +56,11 @@ fn admitted_lists_share_one_encoding_and_preserve_domains_and_scopes() {
         frozen
             .substitute_partial(&[Some(Term::Primitive(P::Bool))])
             .unwrap(),
-        Term::TypeListValue(vec![Term::Primitive(P::Bool)])
+        Term::NominalValue {
+            ty: Box::new(types.clone()),
+            variant: None,
+            fields: vec![Term::Primitive(P::Bool)]
+        }
     );
 }
 
@@ -92,4 +100,36 @@ fn list_encoding_rejects_malformed_shape_sort_and_budget_without_poisoning_retry
         Err(Error::Budget)
     );
     assert!(freeze_admitted_list(&bools, fields, &mut 1000).is_ok());
+}
+
+#[test]
+fn type_elements_do_not_erase_the_declared_list_identity() {
+    let first = domain(Term::Primitive(P::Type));
+    let mut second = first.clone();
+    let Term::NormalForm { head, .. } = &mut second else {
+        unreachable!()
+    };
+    head.local += 1;
+    for fields in [vec![], vec![Term::Primitive(P::Bool)]] {
+        let a = freeze_admitted_list(&first, fields.clone(), &mut 1000).unwrap();
+        let b = freeze_admitted_list(&second, fields.clone(), &mut 1000).unwrap();
+        assert_ne!(a, b);
+        assert_ne!(a, Term::TypeListValue(fields.clone()));
+        assert_eq!(
+            a,
+            Term::NominalValue {
+                ty: Box::new(first.clone()),
+                variant: None,
+                fields: fields.clone()
+            }
+        );
+        assert_eq!(
+            b,
+            Term::NominalValue {
+                ty: Box::new(second.clone()),
+                variant: None,
+                fields
+            }
+        );
+    }
 }

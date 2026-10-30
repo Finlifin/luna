@@ -1,4 +1,6 @@
 //! Type equality uses host proofs and retains opaque normal-form identity.
+#[path = "support/frozen_lists.rs"]
+mod frozen_lists;
 #[path = "support/execution.rs"]
 #[allow(dead_code)]
 mod support;
@@ -285,10 +287,10 @@ fn contextual_normal_containers_execute_with_ordinary_list_identity() {
                     .collect(),
             };
             let arguments = if name == "Pair" {
-                vec![Term::TypeListValue(vec![
-                    Term::Primitive(primitive),
-                    Term::Primitive(Primitive::Bool),
-                ])]
+                vec![frozen_lists::types(
+                    &package,
+                    vec![Term::Primitive(primitive), Term::Primitive(Primitive::Bool)],
+                )]
             } else {
                 vec![
                     Term::Primitive(primitive),
