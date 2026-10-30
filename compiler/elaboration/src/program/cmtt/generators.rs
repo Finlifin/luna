@@ -2338,9 +2338,9 @@ impl Checker<'_, '_> {
                 Term::NormalForm {
                     head,
                     sort: Sort::Type,
-                    arguments,
+                    ..
                 } if Some(*head) == self.protocols.tuple => {
-                    let [Term::TypeListValue(fields)] = arguments.as_slice() else {
+                    let Some(fields) = self.bound_tuple_elements(ty) else {
                         return false;
                     };
                     pending.extend(fields.iter().map(|ty| (ty, depth + 1)));

@@ -230,3 +230,26 @@ test {
     let result = inspect_tuple_pattern(pair);
     assumes result;
 }
+
+comptime fn tuple_data_code(value: Tuple<.Es = [bool, bool]>) -> <|- bool> {
+    let (left, right) = value;
+    let result = left and right;
+    '(result)
+}
+
+test {
+    let result = ~<tuple_data_code((true, true))>;
+    assumes result;
+}
+
+fn inspect_tuple_type_inline() -> bool {
+    inline if Tuple<.Es = [bool, u8]> is do {
+        ('bool, 'u8) => true,
+        _ => false,
+    }
+}
+
+test {
+    let result = inspect_tuple_type_inline();
+    assumes result;
+}

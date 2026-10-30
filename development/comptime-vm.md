@@ -7238,3 +7238,43 @@ alter the metadata-backed Tuple path. No full language suite was run.
 Final source rerun: `/tmp/luna-tools-g5mnkapa/result.json`, exit 0, all 93
 passed. Final formatting: `python3 -B development/command.py --timeout 120 -- cargo fmt --all`,
 exit 0 (`/tmp/luna-tools-_xqhn052/result.json`); `git diff --check` passed.
+
+### Staged tuple inspection uses declared layout views
+
+Known immutable pattern inspection now carries Tuple head metadata and calls
+its exact-domain tuple field view. Inline selection uses the same inspector;
+ordinary frozen list payloads no longer become Unknown merely because they
+are not encoded as TypeListValue. Missing, opaque or foreign-domain metadata
+still returns Unknown, and an earlier unknown alternative cannot be skipped
+to select a later wildcard or bind its names. Length mismatches under valid
+metadata remain definite mismatches. Budget exhaustion stays distinct from
+mismatch and does not poison later independent inspection.
+
+CMTT generator data-domain checking also uses the shared bound tuple field
+view. It retains the existing recursion/work bound, input-domain checks and
+normal-form identity. The sysroot example exercises both a typed tuple data
+argument to a code generator and inline inspection of a Tuple Type value.
+Canonical TypeListValue migration remains pending.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib known_patterns`:
+  5 passed, exit 0; `/tmp/luna-tools-nm1h4sdd/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt_type_inputs --test inline_control --test comptime_inline_loops --test normal_patterns --no-fail-fast`:
+  324 passed, 2 failed, exit 101; `/tmp/luna-tools-poblc6eo/result.json`.
+  The failures are `tuple_iteration_resolves_each_generic_elements_trait_evidence`
+  and `tuple_iteration_uses_generic_shape_evidence_without_unfolding_heads`,
+  both runtime VM Type errors at inline_control.rs:4832/4851.
+- Baseline isolation restored only this change's three implementation files
+  temporarily to HEAD `f9fbbdab`, ran
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test inline_control tuple_iteration_`,
+  then restored the exact worktree bytes in a finally block. Both failures
+  reproduce unchanged; 5 pass, 2 fail, exit 101,
+  `/tmp/luna-tools-m99zc13a/result.json`. Expectations were not changed.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
+  13 native tests passed, exit 0; `/tmp/luna-tools-452n78ii/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-oh5z303v/result.json`; `git diff --check` passed.
+
+The two baseline generic tuple-iteration VM failures remain follow-up work;
+no full language suite was run.

@@ -12,7 +12,7 @@ impl Checker<'_, '_> {
         bindings: &mut BTreeMap<n::LocalId, std::sync::Arc<Term>>,
     ) -> Option<bool> {
         PatternInspector {
-            tuple_head: self.protocols.tuple,
+            tuple_head: self.bound_tuple_metadata(),
             evaluate:
                 |expr: &n::Expr,
                  depth,
@@ -27,7 +27,7 @@ impl Checker<'_, '_> {
 
 pub(in crate::program) struct PatternInspector<E> {
     pub(in crate::program) evaluate: E,
-    pub(in crate::program) tuple_head: Option<nir::DeclarationId>,
+    pub(in crate::program) tuple_head: Option<nir::normal_forms::Head>,
 }
 
 impl<E> PatternInspector<E>
@@ -171,18 +171,8 @@ where
                 let values = match (pattern, value) {
                     (Pat::Tuple(_), Term::TupleValue(values))
                     | (Pat::TypeTuple(_), Term::Tuple(values)) => values,
-                    (
-                        Pat::TypeTuple(_),
-                        Term::NormalForm {
-                            head,
-                            sort: Sort::Type,
-                            arguments,
-                        },
-                    ) if Some(*head) == self.tuple_head => {
-                        let [Term::TypeListValue(values)] = arguments.as_slice() else {
-                            return None;
-                        };
-                        values
+                    (Pat::TypeTuple(_), Term::NormalForm { .. }) => {
+                        self.tuple_head.as_ref()?.tuple_elements(value)?
                     }
                     (Pat::TypeTuple(_), Term::Primitive(P::Unit)) => return None,
                     (
@@ -554,5 +544,148 @@ mod tests {
             );
             assert_eq!(result, None);
         }
+    }
+    #[test]
+    fn type_tuple_inspection_reads_declared_payloads_and_keeps_unknown_order() {
+        use nir::normal_forms::{Head, Kind, Parameter, Role};
+        let decl = |local| nir::DeclarationId { package: 81, local };
+        let domain = Term::NormalForm {
+            head: decl(1),
+            sort: Sort::Type,
+            arguments: vec![p(P::Type)],
+        };
+        let metadata = Head {
+            declaration: decl(2),
+            role: Role::Tuple,
+            collector: Some(0),
+            requirements: vec![],
+            parameters: vec![Parameter {
+                declaration: decl(3),
+                binding: id(0),
+                kind: Kind::Value,
+                ty: domain.clone(),
+            }],
+        };
+        let tuple = |value| Term::NormalForm {
+            head: decl(2),
+            sort: Sort::Type,
+            arguments: vec![value],
+        };
+        let ordinary = tuple(Term::NominalValue {
+            ty: Box::new(domain),
+            variant: None,
+            fields: vec![p(P::Bool)],
+        });
+        let pattern = n::Pattern::TypeTuple(vec![n::Pattern::Binding {
+            binding: id(1),
+            inner: Box::new(n::Pattern::Wild),
+        }]);
+        let inspect =
+            |pattern: &n::Pattern,
+             value: &Term,
+             head,
+             budget: &mut comptime_runtime::Budget,
+             bindings: &mut BTreeMap<n::LocalId, std::sync::Arc<Term>>| {
+                PatternInspector {
+                    tuple_head: head,
+                    evaluate:
+                        |_: &n::Expr,
+                         _: usize,
+                         _: &mut comptime_runtime::Budget,
+                         _: &BTreeMap<n::LocalId, std::sync::Arc<Term>>| {
+                            None
+                        },
+                }
+                .inspect(pattern, value, 0, budget, bindings)
+            };
+        for value in [&ordinary, &tuple(Term::TypeListValue(vec![p(P::Bool)]))] {
+            let mut bindings = BTreeMap::new();
+            assert_eq!(
+                inspect(
+                    &pattern,
+                    value,
+                    Some(metadata.clone()),
+                    &mut Default::default(),
+                    &mut bindings
+                ),
+                Some(true)
+            );
+            assert_eq!(bindings.get(&id(1)).map(|t| t.as_ref()), Some(&p(P::Bool)));
+        }
+        let alternatives = n::Pattern::Or(vec![
+            pattern.clone(),
+            n::Pattern::Binding {
+                binding: id(9),
+                inner: Box::new(n::Pattern::Wild),
+            },
+        ]);
+        let foreign = tuple(Term::NominalValue {
+            ty: Box::new(Term::NormalForm {
+                head: decl(8),
+                sort: Sort::Type,
+                arguments: vec![p(P::Type)],
+            }),
+            variant: None,
+            fields: vec![p(P::Bool)],
+        });
+        for (value, head) in [
+            (&ordinary, None),
+            (&foreign, Some(metadata.clone())),
+            (
+                &ordinary,
+                Some(Head {
+                    role: Role::Opaque,
+                    ..metadata.clone()
+                }),
+            ),
+        ] {
+            let mut bindings = BTreeMap::new();
+            assert_eq!(
+                inspect(
+                    &alternatives,
+                    value,
+                    head,
+                    &mut Default::default(),
+                    &mut bindings
+                ),
+                None
+            );
+            assert!(!bindings.contains_key(&id(9)));
+        }
+        let empty = tuple(Term::TypeListValue(vec![]));
+        assert_eq!(
+            inspect(
+                &pattern,
+                &empty,
+                Some(metadata.clone()),
+                &mut Default::default(),
+                &mut BTreeMap::new()
+            ),
+            Some(false)
+        );
+        let mut budget = comptime_runtime::Budget {
+            steps: 0,
+            max_limbs: 4096,
+        };
+        assert_eq!(
+            inspect(
+                &pattern,
+                &ordinary,
+                Some(metadata.clone()),
+                &mut budget,
+                &mut BTreeMap::new()
+            ),
+            None
+        );
+        assert_eq!(
+            inspect(
+                &pattern,
+                &ordinary,
+                Some(metadata),
+                &mut Default::default(),
+                &mut BTreeMap::new()
+            ),
+            Some(true)
+        );
     }
 }
