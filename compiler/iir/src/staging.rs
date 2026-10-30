@@ -11,6 +11,8 @@ use nir::program::{Expr, ExprKind as K, Function, Literal, LocalId};
 use nir::{Primitive, Sort, Term};
 use std::collections::BTreeSet;
 mod error_values;
+mod general;
+use general::fold_general_input;
 mod lists;
 mod patterns;
 mod preparation;
@@ -2476,101 +2478,6 @@ fn fold_boolean_control<'layout>(
                 kind: K::Literal(Literal::Bool(value)),
             }
         }
-    };
-    if result.ty != expr.ty {
-        return Err("staged selected value type differs from expression type".into());
-    }
-    constant(heads, &result, fuel, depth)?;
-    result.source = expr.source;
-    Ok(result)
-}
-
-fn fold_general_input<'layout>(
-    heads: impl Into<Layouts<'layout>>,
-    expr: &Expr,
-    fuel: &mut usize,
-    depth: usize,
-) -> Result<Expr, String> {
-    let heads = heads.into();
-    if depth >= 128 {
-        return Err("staged expression depth exceeded".into());
-    }
-    charge(fuel, 1)?;
-    let selected = match &expr.kind {
-        K::SymbolName(value) => {
-            if value.ty != Term::Primitive(Primitive::Symbol)
-                || expr.ty != Term::Primitive(Primitive::Str)
-            {
-                return Err("invalid Symbol tag_name types".into());
-            }
-            let value = fold_input(heads, value, fuel, depth + 1)?;
-            let Term::Symbol(name) = constant(heads, &value, fuel, depth + 1)? else {
-                return Err("tag_name requires a completed Symbol".into());
-            };
-            charge(fuel, name.len())?;
-            Some(Expr {
-                source: expr.source,
-                ty: expr.ty.clone(),
-                kind: K::Literal(Literal::String(name.to_string())),
-            })
-        }
-        K::Discard(value) => {
-            // Discard the result, not the evaluation or its failures.
-            fold_input(heads, value, fuel, depth + 1)?;
-            Some(Expr {
-                kind: K::Unit,
-                ty: Term::Primitive(Primitive::Void),
-                source: expr.source,
-            })
-        }
-        K::AnonymousField { .. } | K::Field { .. } => {
-            Some(fold_record_field(heads, expr, fuel, depth)?)
-        }
-        K::IntegerBinary { op, .. } if op.is_comparison() => {
-            Some(fold_integer_comparison(heads, expr, fuel, depth)?)
-        }
-        K::IntegerNegate(_) | K::IntegerBinary { .. } => {
-            Some(fold_machine_input(heads, expr, fuel, depth)?)
-        }
-        K::Block { statements, result } => {
-            let mut locals = std::collections::BTreeMap::new();
-            for statement in statements {
-                if let K::Let { binding, value } = &statement.kind {
-                    let value = fold_local_input(heads, value, &locals, fuel, depth + 1)?;
-                    if locals.insert(*binding, value).is_some() {
-                        return Err("duplicate staged block binding".into());
-                    }
-                } else if let K::LetPattern {
-                    pattern,
-                    value,
-                    guard: None,
-                    otherwise: None,
-                } = &statement.kind
-                {
-                    let value = fold_local_input(heads, value, &locals, fuel, depth + 1)?;
-                    bind_staged_pattern(heads, pattern, &value, &mut locals, fuel, depth + 1)?;
-                } else {
-                    // Discarded expressions still evaluate, including failures.
-                    fold_local_input(heads, statement, &locals, fuel, depth + 1)?;
-                }
-            }
-            Some(if let Some(result) = result {
-                fold_local_input(heads, result, &locals, fuel, depth + 1)?
-            } else {
-                Expr {
-                    ty: Term::Primitive(Primitive::Void),
-                    source: expr.source,
-                    kind: K::Unit,
-                }
-            })
-        }
-        _ => None,
-    };
-    let mut result = if let Some(value) = selected {
-        value
-    } else {
-        constant(heads, expr, fuel, depth)?;
-        expr.clone()
     };
     if result.ty != expr.ty {
         return Err("staged selected value type differs from expression type".into());

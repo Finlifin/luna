@@ -3179,3 +3179,34 @@ Expanded checks exposed additional failures, retained for follow-up:
 Final source regression:
 `python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters type_valued_indices_specialize_runtime_function_instances`:
 `/tmp/luna-tools-_tblahne/result.json`, exit 0. `git diff --check` passed.
+
+## Staged folding reaches its logical depth limit without stack overflow
+
+The previously failing IIR scalar/block/discard depth regression now passes on
+the unchanged test-thread stack. General folding used one large match containing
+all branch-local Expr temporaries. In the unoptimized x86_64 test binary,
+`objdump -Cd` showed a 0x2ff8-byte (12280-byte) general-fold frame, compounded by
+recursive dispatch and local preparation. A depth limit alone could not prevent
+host stack exhaustion before reaching that limit.
+
+Node-specific general folding now lives in `staging/general.rs`, separated from
+dispatch and final validation. The dispatcher forwards result slots instead of
+retaining temporaries for unrelated branches. The measured block path uses a
+0x6c8-byte validation frame, 0x3b8-byte dispatch frame and 0x10a8-byte block frame
+(6952 bytes together). Other recursion frames remain unchanged; these are frame
+sizes for this build, not a release performance benchmark.
+
+No stack-size override, reduced language depth limit, budget change or test skip
+was introduced. Symbol conversion, field/scalar operations, block local binding,
+discarded evaluation, result-type validation and source propagation retain their
+existing behavior. The runtime IIR execution stack overflow is still separate.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p iir --lib nested_scalar_comparisons_and_blocks_reach_logical_depth_limits -- --nocapture`:
+  `/tmp/luna-tools-6vezg22u/result.json`, exit 0, including depths 16, 64, 127,
+  128 and 160 and successful recovery after depth rejection.
+- `python3 -B development/check.py --timeout 900 -- test -p iir --lib --tests`:
+  `/tmp/luna-tools-b1o2jct3/result.json`, exit 0 without exclusions.
+- Managed formatting: `/tmp/luna-tools-xmsl_0nc/result.json`, exit 0;
+  `git diff --check` passed.
