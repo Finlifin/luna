@@ -114,6 +114,7 @@ impl<'a> Interpreter<'a> {
             bytecode_invocations: 0,
             bytecode_default_evaluations: 0,
             bytecode_staged_inputs: 0,
+            bytecode_contextual_inputs: 0,
             bytecode_compilations: 0,
             bytecode_compilation_steps: 0,
             bytecode_cache: Default::default(),

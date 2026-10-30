@@ -2676,3 +2676,39 @@ still use the migration evaluator. Staged fragments are compiled per invocation;
 no end-to-end speedup or complete input-plan bytecode support is claimed. The next
 integration should move outer plan scheduling into VM continuations while retaining
 this distinct staged-result channel and the shared normal-form binding state.
+
+## Bytecode fragments for inputs with known contextual domains
+
+A separate `compile_contextual_input` entrypoint now emits whole-shape preflight
+followed by ordinary contextual input code. The value exits through the usual
+fragment result channel. NF and nominal input plans use this path for ready inputs,
+complementing staged fragments for inputs whose domains are still pending.
+Unsupported code is selected before that operand executes; execution errors never
+replay the operand through the tree path.
+
+Invocation-local construction state now separates optional NF head/binding state
+from prepared contextual values. A standalone fragment has no synthetic head,
+parameter declaration or normal-form identity. Nested real NF constructors retain
+independent state and opaque identity. The compiler owns the contextual domain
+and shape, charges their copies, and dumps the preflight in S-expression form.
+
+Validation from `/home/fin/luna`, successful runs exit 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-nkpyxsh8/result.json`. New cases verify preflight precedes
+  operand effects even for an invalid unselected branch, valid literal formation,
+  nested opaque NF identity and owned compiler metadata with bounded work.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_types --test comptime_clause_inputs --test builder_invocations --test execution`:
+  `/tmp/luna-tools-13o6z1xw/result.json`. Source cases compare ready and deferred
+  argument orders across u8 and Integer, assert actual fragment/default counters,
+  and check early return from a ready input as well as a staged input.
+- Managed `cargo fmt --all`: `/tmp/luna-tools-zr0zsz_9/result.json`;
+  `git diff --check` passed.
+- The initial compiler dump assertion expected bare `u8` rather than NIR's
+  `(primitive u8)` rendering (`/tmp/luna-tools-q7bxx10w/result.json`); corrected
+  the assertion to use the established Term display, without changing semantics.
+
+Outer input-plan scheduling, binding export from preparation expressions and
+specialization still use the migration path. Ready and staged fragments currently
+compile per invocation; this is execution coverage, not a measured speedup or a
+claim that complete input plans are now linear VM programs.

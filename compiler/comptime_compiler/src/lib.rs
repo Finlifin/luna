@@ -36,6 +36,11 @@ impl fmt::Display for ErrorConversion {
 #[derive(Debug)]
 pub enum Op {
     Stage(staged_inputs::Instruction),
+    BeginContextualInput {
+        destination: Register,
+        expected: Arc<Term>,
+        input: Arc<normal_types::Shape>,
+    },
     BeginNormalType {
         destination: Register,
         constructor: Arc<normal_types::Constructor>,
@@ -448,6 +453,14 @@ impl fmt::Display for Program {
                     write!(f, "))")?;
                 }
                 Op::Stage(operation) => write!(f, "{operation}")?,
+                Op::BeginContextualInput {
+                    destination,
+                    expected,
+                    input,
+                } => write!(
+                    f,
+                    "(begin-contextual-input %{destination} (expected {expected}) {input})"
+                )?,
                 Op::BeginNormalType {
                     destination,
                     constructor,
@@ -845,9 +858,20 @@ pub fn compile_staged_input(
     compile_root(Root::Staged(input), fuel).map(|(program, shape)| (program, shape.unwrap()))
 }
 
+/// Compile an input with a known domain, prechecking its entire contextual
+/// shape before any operand executes. This constructs a value, not an NF head.
+pub fn compile_contextual_input(
+    input: &nir::program::NormalFormArgument,
+    expected: &Term,
+    fuel: &mut usize,
+) -> Result<Program, Error> {
+    compile_root(Root::Contextual(input, expected), fuel).map(|(program, _)| program)
+}
+
 enum Root<'a> {
     Expression(&'a Expr),
     Staged(&'a nir::program::NormalFormArgument),
+    Contextual(&'a nir::program::NormalFormArgument, &'a Term),
 }
 fn compile_root(
     root: Root<'_>,
@@ -855,7 +879,7 @@ fn compile_root(
 ) -> Result<(Program, Option<normal_types::Shape>), Error> {
     let source = match root {
         Root::Expression(body) => body.source,
-        Root::Staged(input) => input.source(),
+        Root::Staged(input) | Root::Contextual(input, _) => input.source(),
     };
     let initial_fuel = *fuel;
     let mut instructions = Vec::new();
@@ -878,6 +902,49 @@ fn compile_root(
             ],
             None,
         ),
+        Root::Contextual(input, expected) => {
+            let mut fresh = || {
+                let slot = registers;
+                registers += 1;
+                slot
+            };
+            let (shape, code) = normal_types::compile_input(
+                input,
+                0,
+                &mut fresh,
+                fuel,
+                &mut labels,
+                &mut locals,
+                false,
+            )?;
+            let mut work = vec![
+                Work::Emit(
+                    source,
+                    Op::Finish {
+                        value: 0,
+                        explicit: false,
+                    },
+                ),
+                Work::Emit(
+                    source,
+                    Op::NormalResult {
+                        destination: 0,
+                        value: shape.slot,
+                        diverges: shape.diverges,
+                    },
+                ),
+            ];
+            work.extend(code.into_iter().rev());
+            work.push(Work::Emit(
+                source,
+                Op::BeginContextualInput {
+                    destination: 0,
+                    expected: Arc::new(copy_term(expected, fuel, source)?),
+                    input: Arc::new(shape),
+                },
+            ));
+            (work, None)
+        }
         Root::Staged(input) => {
             let mut fresh = || {
                 let slot = registers;

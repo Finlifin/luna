@@ -1402,3 +1402,95 @@ fn staged_list_spreads_finish_after_all_operand_effects() {
         }
     }
 }
+
+#[test]
+fn known_contextual_domains_precheck_all_branches_before_effects() {
+    let package = container_package();
+    let trace = LocalId {
+        owner: 95,
+        index: 0,
+    };
+    for invalid in [true, false] {
+        let input = A::Block {
+            source: SOURCE,
+            statements: vec![expr(
+                Primitive::Void,
+                K::Assign {
+                    place: Place {
+                        root: trace,
+                        fields: vec![],
+                    },
+                    value: Box::new(expr(Primitive::Bool, K::Literal(Literal::Bool(true)))),
+                },
+            )],
+            result: Some(Box::new(A::If {
+                source: SOURCE,
+                condition: expr(Primitive::Bool, K::Literal(Literal::Bool(true))),
+                then_input: Box::new(A::Integer {
+                    source: SOURCE,
+                    spelling: "17".into(),
+                    negative: false,
+                }),
+                else_input: Box::new(A::Integer {
+                    source: SOURCE,
+                    spelling: if invalid { "256" } else { "23" }.into(),
+                    negative: false,
+                }),
+            })),
+        };
+        for compiled in [false, true] {
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            let mut env = Environment::new();
+            env.insert(trace, Value::Bool(false));
+            let expected = Term::Primitive(Primitive::U8);
+            let result = if compiled {
+                vm.evaluate_contextual_argument(&input, &expected, &mut env)
+            } else {
+                let mut prepared = BTreeMap::new();
+                vm.prepare_normal_argument(&input, &expected, &mut prepared, 0)
+                    .and_then(|()| vm.eval_normal_argument(&input, &mut prepared, &mut env))
+            };
+            assert_eq!(vm.bytecode_contextual_inputs(), usize::from(compiled));
+            if invalid {
+                assert_eq!(result.unwrap_err().kind, ErrorKind::Type);
+                assert_eq!(env.get(&trace), Some(&Value::Bool(false)));
+            } else {
+                assert!(matches!(
+                    result.unwrap(),
+                    Flow::Value(Value::UnsignedInteger(17))
+                ));
+                assert_eq!(env.get(&trace), Some(&Value::Bool(true)));
+            }
+            assert_eq!(env.len(), 1);
+        }
+    }
+}
+
+#[test]
+fn contextual_fragment_does_not_replace_nested_normal_form_identity() {
+    let package = container_package();
+    let input = A::Value(container_body(
+        Term::Primitive(Primitive::Bool),
+        A::Value(expr(Primitive::Bool, K::Literal(Literal::Bool(true)))),
+    ));
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let result = vm
+        .evaluate_contextual_argument(
+            &input,
+            &Term::Primitive(Primitive::Type),
+            &mut Environment::new(),
+        )
+        .unwrap();
+    let Flow::Value(value) = result else {
+        panic!("transfer")
+    };
+    assert_eq!(
+        value,
+        Value::Type(Term::NormalForm {
+            head: package.normal_forms[0].declaration,
+            sort: nir::Sort::Type,
+            arguments: vec![Term::Primitive(Primitive::Bool), Term::Bool(true)],
+        })
+    );
+    assert_eq!(vm.bytecode_contextual_inputs(), 1);
+}

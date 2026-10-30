@@ -498,6 +498,17 @@ fn deferred_normal_inputs_run_bytecode_before_their_domains_arrive() {
             }, .T=if touched { List<element> } else { bool }>;
             if touched { result } else { bool }
         }
+        comptime fn Ready(element: Type) -> Type {
+            var touched = false;
+            let result = Payload<.T=List<element>, do {
+                touched = not touched;
+                if enabled() { [17, 23] } else { [29] }
+            }>;
+            if touched { result } else { bool }
+        }
+        comptime fn ReadyEarly(element: Type) -> Type {
+            Payload<.T=List<element>, do { return bool; [17, 23] }>
+        }
         comptime fn Early(element: Type) -> Type {
             Payload<do { return bool; [17, 23] }, .T=do { while true {} List<element> }>
         }",
@@ -509,6 +520,34 @@ fn deferred_normal_inputs_run_bytecode_before_their_domains_arrive() {
             sort: nir::Sort::Type,
             arguments: vec![Term::Primitive(primitive)],
         };
+        let before = vm.bytecode_staged_inputs();
+        let contextual = vm.bytecode_contextual_inputs();
+        let defaults = vm.bytecode_default_evaluations();
+        assert_eq!(
+            vm.invoke(
+                support::id(&package, "Ready"),
+                vec![Value::Type(Term::Primitive(primitive))]
+            )
+            .unwrap(),
+            Value::Type(Term::NormalForm {
+                head: support::id(&package, "Payload"),
+                sort: nir::Sort::Type,
+                arguments: vec![
+                    list.clone(),
+                    Term::NominalValue {
+                        ty: Box::new(list.clone()),
+                        variant: None,
+                        fields: [17, 23]
+                            .into_iter()
+                            .map(|n| Term::Integer(comptime_runtime::Integer::from_u128(n)))
+                            .collect(),
+                    }
+                ],
+            })
+        );
+        assert_eq!(vm.bytecode_staged_inputs() - before, 0);
+        assert_eq!(vm.bytecode_contextual_inputs() - contextual, 2);
+        assert_eq!(vm.bytecode_default_evaluations() - defaults, 1);
         let before = vm.bytecode_staged_inputs();
         let defaults = vm.bytecode_default_evaluations();
         assert_eq!(
@@ -523,7 +562,7 @@ fn deferred_normal_inputs_run_bytecode_before_their_domains_arrive() {
                 arguments: vec![
                     list.clone(),
                     Term::NominalValue {
-                        ty: Box::new(list),
+                        ty: Box::new(list.clone()),
                         variant: None,
                         fields: [17, 23]
                             .into_iter()
@@ -545,5 +584,15 @@ fn deferred_normal_inputs_run_bytecode_before_their_domains_arrive() {
             Value::Type(Term::Primitive(Primitive::Bool))
         );
         assert_eq!(vm.bytecode_staged_inputs() - before, 1);
+        let contextual = vm.bytecode_contextual_inputs();
+        assert_eq!(
+            vm.invoke(
+                support::id(&package, "ReadyEarly"),
+                vec![Value::Type(Term::Primitive(primitive))]
+            )
+            .unwrap(),
+            Value::Type(Term::Primitive(Primitive::Bool))
+        );
+        assert_eq!(vm.bytecode_contextual_inputs() - contextual, 2);
     }
 }

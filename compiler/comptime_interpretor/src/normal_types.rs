@@ -55,27 +55,38 @@ impl fmt::Display for Bindings {
         write!(f, ")")
     }
 }
-pub(super) struct Inputs {
+pub(super) struct Normal {
     pub head: DeclarationId,
     pub bindings: Bindings,
+}
+pub(super) struct Inputs {
+    pub normal: Option<Normal>,
     pub prepared: BTreeMap<usize, Prepared>,
 }
 impl Inputs {
     pub fn new(head: DeclarationId, count: usize) -> Self {
         Self {
-            head,
-            bindings: Bindings::new(count),
+            normal: Some(Normal {
+                head,
+                bindings: Bindings::new(count),
+            }),
+            prepared: BTreeMap::new(),
+        }
+    }
+    pub fn contextual() -> Self {
+        Self {
+            normal: None,
             prepared: BTreeMap::new(),
         }
     }
 }
 impl fmt::Display for Inputs {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "(normal-inputs (head {}) {} (prepared",
-            self.head, self.bindings
-        )?;
+        write!(f, "(contextual-inputs")?;
+        if let Some(normal) = &self.normal {
+            write!(f, " (normal (head {}) {})", normal.head, normal.bindings)?;
+        }
+        write!(f, " (prepared")?;
         for (slot, value) in &self.prepared {
             write!(f, " (%{slot} {value})")?;
         }
@@ -112,17 +123,21 @@ impl Interpreter<'_> {
         input: &comptime_compiler::normal_types::Shape,
         source: SourceRange,
     ) -> Result<(), Error> {
+        let normal = inputs
+            .normal
+            .as_ref()
+            .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
         let metadata = *self
             .normal_forms
-            .get(&inputs.head)
+            .get(&normal.head)
             .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
-        if index != inputs.bindings.arguments.len() || index >= metadata.parameters.len() {
+        if index != normal.bindings.arguments.len() || index >= metadata.parameters.len() {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         }
         let expected = self.instantiate_contextual_domain(
             &metadata.parameters[index].ty,
-            &inputs.bindings.parameters,
-            &inputs.bindings.arguments,
+            &normal.bindings.parameters,
+            &normal.bindings.arguments,
             source,
         )?;
         inputs.prepared.clear();
@@ -156,7 +171,7 @@ impl Interpreter<'_> {
         self.integer_operation(Some(source), |budget| budget.consume(count))?;
         Ok(element)
     }
-    fn prepare_normal_shape(
+    pub(super) fn prepare_normal_shape(
         &mut self,
         shape: &comptime_compiler::normal_types::Shape,
         expected: &Term,
@@ -397,8 +412,12 @@ impl Interpreter<'_> {
         value: Value,
         source: SourceRange,
     ) -> Result<(), Error> {
-        let slot = inputs.bindings.arguments.len();
-        self.bind_normal_input(inputs.head, &mut inputs.bindings, slot, value, source)
+        let normal = inputs
+            .normal
+            .as_mut()
+            .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
+        let slot = normal.bindings.arguments.len();
+        self.bind_normal_input(normal.head, &mut normal.bindings, slot, value, source)
     }
     pub(super) fn bind_normal_input(
         &mut self,

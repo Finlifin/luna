@@ -769,6 +769,7 @@ pub struct Interpreter<'a> {
     bytecode_invocations: usize,
     bytecode_default_evaluations: usize,
     bytecode_staged_inputs: usize,
+    bytecode_contextual_inputs: usize,
     bytecode_compilations: usize,
     bytecode_compilation_steps: u64,
     bytecode_cache: bytecode::CodeCache,
@@ -1632,6 +1633,7 @@ impl<'a> Interpreter<'a> {
             bytecode_invocations: 0,
             bytecode_default_evaluations: 0,
             bytecode_staged_inputs: 0,
+            bytecode_contextual_inputs: 0,
             bytecode_compilations: 0,
             bytecode_compilation_steps: 0,
             bytecode_cache: Default::default(),
@@ -3694,9 +3696,7 @@ impl<'a> Interpreter<'a> {
                 pending_slots.insert(slot);
                 continue;
             }
-            let mut literals = BTreeMap::new();
-            self.prepare_normal_argument(argument, &expected, &mut literals, 0)?;
-            let value = value!(self.eval_normal_argument(argument, &mut literals, environment));
+            let value = value!(self.evaluate_contextual_argument(argument, &expected, environment));
             if let Some(plan) = plan {
                 environment.insert(plan.bindings[slot], value.clone());
             }
@@ -4640,9 +4640,8 @@ impl<'a> Interpreter<'a> {
                 {
                     return Err(self.failure(ErrorKind::Type, Some(value.source)));
                 }
-                let mut literals = BTreeMap::new();
-                self.prepare_normal_argument(argument, &expected, &mut literals, 0)?;
-                let value = value!(self.eval_normal_argument(argument, &mut literals, environment));
+                let value =
+                    value!(self.evaluate_contextual_argument(argument, &expected, environment));
                 if let Some(bindings) = bindings {
                     let copy = self.checkpoint_representation(&value, argument.source())?;
                     environment.insert(bindings[slot], copy);

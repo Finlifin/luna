@@ -593,3 +593,39 @@ mod tests {
         assert!(escaped.to_string().contains("\"1\\\"\\n\""));
     }
 }
+
+#[cfg(test)]
+mod contextual_fragment_tests {
+    use super::*;
+    use nir::program::NormalFormArgument as A;
+
+    #[test]
+    fn contextual_fragment_owns_domain_and_prechecks_before_operands() {
+        let source = SourceRange { start: 1, end: 2 };
+        let (program, work) = {
+            let input = A::Integer {
+                source,
+                spelling: "17".into(),
+                negative: false,
+            };
+            let expected = Term::Primitive(Primitive::U8);
+            let program = compile_contextual_input(&input, &expected, &mut 10000).unwrap();
+            let work = program.storage_work();
+            let mut insufficient = work - 1;
+            assert!(matches!(
+                compile_contextual_input(&input, &expected, &mut insufficient),
+                Err(Error::Budget(_))
+            ));
+            (program, work)
+        };
+        assert!(work > 0);
+        assert!(matches!(
+            program.instructions().first().unwrap().op,
+            Op::BeginContextualInput { .. }
+        ));
+        let dump = program.to_string();
+        assert!(dump.contains(&format!("(expected {})", Term::Primitive(Primitive::U8))));
+        assert!(dump.contains("(normal-literal "));
+        assert!(!dump.contains("(begin-normal-type "));
+    }
+}

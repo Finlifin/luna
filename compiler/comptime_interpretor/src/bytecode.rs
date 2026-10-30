@@ -380,6 +380,36 @@ impl<'a> Interpreter<'a> {
         Ok(Some(result))
     }
 
+    pub(super) fn evaluate_contextual_argument(
+        &mut self,
+        input: &nir::program::NormalFormArgument,
+        expected: &Term,
+        environment: &mut Environment,
+    ) -> Result<Flow, Error> {
+        if self.comptime_only
+            && self.cleanup_schedule.is_none()
+            && self.graph.is_none()
+            && self.effect_state.environment.is_empty()
+        {
+            if let Some(program) = self.compile_bytecode(|fuel| {
+                comptime_compiler::compile_contextual_input(input, expected, fuel)
+            })? {
+                let mut frame = self.start_frame(&Arc::new(program), environment)?;
+                self.bytecode_contextual_inputs += 1;
+                let result = self.run_fragment(&mut frame);
+                *environment = frame.restore_environment();
+                return result;
+            }
+        }
+        let mut literals = BTreeMap::new();
+        self.prepare_normal_argument(input, expected, &mut literals, 0)?;
+        self.eval_normal_argument(input, &mut literals, environment)
+    }
+
+    pub fn bytecode_contextual_inputs(&self) -> usize {
+        self.bytecode_contextual_inputs
+    }
+
     pub(super) fn start_frame(
         &mut self,
         code: &Arc<Program>,
@@ -634,6 +664,15 @@ impl<'a> Interpreter<'a> {
                     };
                     frame.slots[*destination] = Some(value);
                 }
+                Op::BeginContextualInput {
+                    destination,
+                    expected,
+                    input,
+                } => {
+                    let mut state = super::normal_types::Inputs::contextual();
+                    self.prepare_normal_shape(input, expected, &mut state.prepared, 0)?;
+                    frame.normal_types.insert(*destination, state);
+                }
                 Op::BeginNormalType {
                     destination,
                     constructor,
@@ -737,7 +776,11 @@ impl<'a> Interpreter<'a> {
                     self.bind_compiled_normal_input(input, value, source)?;
                 }
                 Op::FinishNormalType { destination } => {
-                    let input = frame.normal_types.remove(destination).ok_or_else(missing)?;
+                    let input = frame
+                        .normal_types
+                        .remove(destination)
+                        .and_then(|input| input.normal)
+                        .ok_or_else(missing)?;
                     frame.slots[*destination] = Some(self.complete_normal_type(
                         input.head,
                         input.bindings.finish().ok_or_else(missing)?,
