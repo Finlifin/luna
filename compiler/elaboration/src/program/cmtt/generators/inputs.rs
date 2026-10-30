@@ -686,30 +686,29 @@ impl Checker<'_, '_> {
                     "code generator type defaults remain unresolved",
                 ));
             }
-            let domains = self.trait_domains(owner)?;
             let all = self.type_parameters[&owner].clone();
             for &slot in &deferred_clauses {
                 if self.checking_code_generator {
                     // Definition checking retains abstract clause inputs. A
                     // real invocation validates defaults before emitting code.
-                    if domains[slot] == p(P::Type) {
-                        let index = parameters.iter().position(|id| *id == all[slot]).unwrap();
-                        if candidate
-                            .type_argument(index)
-                            .map_err(|e| call_inference_error(site.span, e))?
-                            .is_none()
-                        {
-                            candidate
-                                .constrain_type_argument(
-                                    index,
-                                    &Term::Rigid {
-                                        declaration: all[slot],
-                                        sort: Sort::Type,
-                                    },
-                                    crate::ptc::Budget::default(),
-                                )
-                                .map_err(|e| call_inference_error(site.span, e))?;
-                        }
+                    let index = parameters.iter().position(|id| *id == all[slot]).unwrap();
+                    if candidate
+                        .type_argument(index)
+                        .map_err(|e| call_inference_error(site.span, e))?
+                        .is_none()
+                    {
+                        candidate
+                            .constrain_type_argument(
+                                index,
+                                &Term::Rigid {
+                                    declaration: all[slot],
+                                    sort: candidate
+                                        .type_argument_sort(index)
+                                        .map_err(|e| call_inference_error(site.span, e))?,
+                                },
+                                crate::ptc::Budget::default(),
+                            )
+                            .map_err(|e| call_inference_error(site.span, e))?;
                     }
                     continue;
                 }

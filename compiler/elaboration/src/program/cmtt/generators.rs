@@ -786,12 +786,15 @@ impl Checker<'_, '_> {
             .iter()
             .enumerate()
             .map(|(index, id)| {
+                let sort = candidate
+                    .type_argument_sort(index)
+                    .map_err(|e| call_inference_error(span, e))?;
                 candidate
                     .type_argument(index)
                     .map(|value| {
                         value.unwrap_or(Term::Rigid {
                             declaration: *id,
-                            sort: self.input_binders(&[*id])[0].sort,
+                            sort,
                         })
                     })
                     .map_err(|e| call_inference_error(span, e))

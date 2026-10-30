@@ -915,6 +915,13 @@ impl CallCandidate {
                 .clone(),
         )
     }
+    /// The current candidate's input sort, after dependent-domain staging.
+    pub fn type_argument_sort(&self, index: usize) -> Result<Sort, Error> {
+        self.parameter_sorts
+            .get(index)
+            .copied()
+            .ok_or(Error::TypeArgumentCount)
+    }
     pub fn constrain_type_argument(
         &mut self,
         index: usize,

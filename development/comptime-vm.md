@@ -3840,3 +3840,38 @@ Validation in /home/fin/luna:
   exit 0, `/tmp/luna-tools-49f0s0iu/result.json`, no exclusions.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
   exit 0, `/tmp/luna-tools-up0nigo1/result.json`; `git diff --check`: exit 0.
+
+### CMTT generator calls share dependent-domain inference
+
+Generator call candidates now use declaration-domain staging. Deferred Type and
+value defaults both retain inference slots; dependency availability is inspected
+in declaration form, while default values constrain their candidate slots only
+after preparation. This removes the separate rigid-value replacement path that
+lost domain evidence when a default completed to a Type value.
+
+Generator inference views use the candidate's completed input sort for unresolved
+placeholders. Definition checking retains abstract deferred inputs of either
+sort without executing defaults; real invocations still require completion.
+The initial Type-indexed generator failed in
+`/tmp/luna-tools-8byw7rxe/result.json`; the deferred index default failed in
+`/tmp/luna-tools-liywpirl/result.json`. Broader checks exposed a definition-side
+forwarding regression (`/tmp/luna-tools-0u416hh6/result.json`), fixed by extending
+the existing abstract-default handling to value slots rather than executing or
+inventing defaults during definition checking.
+
+Source regressions execute data-input and quoted-code-input inference,
+Type-valued defaults in generated nominal types and scalar-index equivalents.
+A conflicting generated result type remains rejected. Existing generator tests
+cover default ordering, forwarding, invocation effects and phase boundaries.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --test cmtt_methods --test cmtt_phase_boundaries --test nominal_value_parameters --test sysroot_preludes`:
+  exit 0, `/tmp/luna-tools-77inh35c/result.json`, no exclusions.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-acyknh6u/result.json`; `git diff --check`: exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution --test calls`:
+  exit 0, `/tmp/luna-tools-k6cam0w_/result.json`, no exclusions.
+
+Remaining consumers include spread-specific inference and the speculative
+CMTT data-result hint path. This does not claim all inference entrypoints are
+integrated with domain staging.

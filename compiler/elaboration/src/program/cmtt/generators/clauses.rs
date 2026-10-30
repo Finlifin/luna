@@ -57,7 +57,6 @@ impl Checker<'_, '_> {
         expected_context: Option<&crate::calls::InputContext>,
         span: Span,
     ) -> Result<crate::calls::CallCandidate, Error> {
-        let domains = self.trait_domains(owner)?;
         let all = self.type_parameters[&owner].clone();
         loop {
             self.required_steps = self
@@ -65,39 +64,29 @@ impl Checker<'_, '_> {
                 .checked_sub(1)
                 .ok_or_else(|| error(span, "generator default inference budget exhausted"))?;
             let before = completed.types.len() + completed.clauses.len();
-            let mut binders = Vec::new();
-            let mut values = Vec::new();
-            let mut unavailable = Vec::new();
-            for slot in deferred {
-                if domains[*slot] == p(P::Type) {
-                    continue;
-                }
-                if let Some(value) = completed.clauses.get(slot) {
-                    binders.push(nir::DeclarationParameter {
-                        declaration: all[*slot],
-                        sort: Sort::ComptimeValue,
-                    });
-                    values.push(self.copy_alias_type(value, span)?);
-                } else {
-                    unavailable.push(all[*slot]);
-                }
-            }
-            let frame = if base.parameter_sorts.is_empty() {
-                vec![Sort::Type; base.type_parameters]
-            } else {
-                base.parameter_sorts.clone()
-            };
-            let signature = self.instantiate_generator_type_in_scope(
-                &base.signature,
-                &binders,
-                &values,
-                &[frame],
-                span,
-            )?;
+            let unavailable = deferred
+                .iter()
+                .filter(|slot| !completed.clauses.contains_key(slot))
+                .map(|slot| all[*slot])
+                .collect::<Vec<_>>();
+            let signature = self.copy_alias_type(&base.signature, span)?;
+            // Inspect dependencies in declaration form; inference itself retains
+            // one slot for every input, including value defaults.
+            let declared = signature
+                .substitute(
+                    &parameters
+                        .iter()
+                        .map(|id| Term::Rigid {
+                            declaration: *id,
+                            sort: self.input_binders(&[*id])[0].sort,
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .map_err(|e| error(span, e.to_string()))?;
             let Term::Function {
                 parameters: inputs,
                 result,
-            } = signature.callable_signature()
+            } = declared.callable_signature()
             else {
                 unreachable!()
             };
@@ -121,18 +110,27 @@ impl Checker<'_, '_> {
                 type_parameters: base.type_parameters,
                 signature,
             };
+            let input_domains = parameters
+                .iter()
+                .map(|id| self.trait_input_domain(*id).unwrap_or_else(|| p(P::Type)))
+                .collect::<Vec<_>>();
             let mut candidate = scheme
-                .infer_partial_types_in_context(
+                .infer_declared_sparse_types_mode(
+                    parameters,
+                    &input_domains,
                     &evidence,
                     expected,
+                    None,
                     &self.context,
                     crate::ptc::Budget::default(),
+                    false,
+                    &[],
                 )
                 .map_err(|e| call_inference_error(span, e))?;
             let Term::Function {
                 parameters: inputs,
                 result,
-            } = scheme.signature.callable_signature()
+            } = declared.callable_signature()
             else {
                 unreachable!()
             };
@@ -164,12 +162,10 @@ impl Checker<'_, '_> {
             )?;
             for slot in deferred {
                 if let Some(value) = completed.clauses.get(slot) {
-                    if domains[*slot] == p(P::Type) {
-                        let index = parameters.iter().position(|id| *id == all[*slot]).unwrap();
-                        candidate
-                            .constrain_type_argument(index, value, crate::ptc::Budget::default())
-                            .map_err(|e| call_inference_error(span, e))?;
-                    }
+                    let index = parameters.iter().position(|id| *id == all[*slot]).unwrap();
+                    candidate
+                        .constrain_type_argument(index, value, crate::ptc::Budget::default())
+                        .map_err(|e| call_inference_error(span, e))?;
                     continue;
                 }
                 if self.checking_code_generator {
@@ -180,6 +176,9 @@ impl Checker<'_, '_> {
                     .iter()
                     .enumerate()
                     .map(|(index, id)| {
+                        let sort = candidate
+                            .type_argument_sort(index)
+                            .map_err(|e| call_inference_error(span, e))?;
                         candidate
                             .type_argument(index)
                             .map(|value| {
@@ -187,7 +186,7 @@ impl Checker<'_, '_> {
                                     unknown.insert(*id);
                                     Term::Rigid {
                                         declaration: *id,
-                                        sort: self.input_binders(&[*id])[0].sort,
+                                        sort,
                                     }
                                 })
                             })
@@ -236,12 +235,10 @@ impl Checker<'_, '_> {
                     break;
                 }
                 let value = self.generator_clause_default(owner, *slot, &prefix)?;
-                if domains[*slot] == p(P::Type) {
-                    let index = parameters.iter().position(|id| *id == all[*slot]).unwrap();
-                    candidate
-                        .constrain_type_argument(index, &value, crate::ptc::Budget::default())
-                        .map_err(|e| call_inference_error(span, e))?;
-                }
+                let index = parameters.iter().position(|id| *id == all[*slot]).unwrap();
+                candidate
+                    .constrain_type_argument(index, &value, crate::ptc::Budget::default())
+                    .map_err(|e| call_inference_error(span, e))?;
                 plan[*slot] = self.copy_alias_type(&value, span)?;
                 completed.clauses.insert(*slot, value);
             }
@@ -359,8 +356,8 @@ impl Checker<'_, '_> {
                 if must_wait {
                     deferred.push(index);
                     waiting.insert(parameters[index]);
+                    inferred.push(parameters[index]);
                     let sort = if *domain == p(P::Type) {
-                        inferred.push(parameters[index]);
                         Sort::Type
                     } else {
                         Sort::ComptimeValue

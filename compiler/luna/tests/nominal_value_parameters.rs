@@ -6658,3 +6658,44 @@ fn dependent_effect_inputs_use_result_context_and_group_defaults() {
         }";
     assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
 }
+
+#[test]
+fn dependent_generator_inputs_infer_type_valued_indices() {
+    let source = "typealias Type=.Type'builtin;
+        struct Tagged where T,index:T {value:bool}
+        comptime fn build(value:Tagged<T,index>)-><|-bool> where T,index:T {'(true)}
+        fn run()->bool {~<build(Tagged<Type,bool>{value:true})>}";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    let defaults = source.replace(
+        "where T,index:T {'(true)}",
+        "where T,index:T,.copy:T=index {'(true)}",
+    );
+    assert_eq!(
+        support::run_iir(&defaults, "run", vec![]),
+        Value::Bool(true)
+    );
+    let code = source
+        .replace("value:Tagged<T,index>", "code:<|-Tagged<T,index>>")
+        .replace(
+            "build(Tagged<Type,bool>{value:true})",
+            "build('(Tagged<Type,bool>{value:true}))",
+        );
+    assert_eq!(support::run_iir(&code, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn dependent_generator_defaults_preserve_generated_type_identity() {
+    let source = "typealias Type=.Type'builtin;
+        struct Tagged where T,index:T {value:bool}
+        comptime fn build(value:Tagged<T,index>)-><|-Tagged<T,copy>>
+            where T,index:T,.copy:T=index {'(Tagged<T,copy>{value:true})}
+        fn run()->bool {
+            let value:Tagged<Type,bool> = ~<build(Tagged<Type,bool>{value:false})>;
+            value.value
+        }";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    let wrong = source.replace("let value:Tagged<Type,bool>", "let value:Tagged<Type,Type>");
+    assert!(support::compile_with_protocols(&wrong, &Default::default()).is_err());
+    let scalar = source.replace("Tagged<Type,bool>", "Tagged<bool,true>");
+    assert_eq!(support::run_iir(&scalar, "run", vec![]), Value::Bool(true));
+}

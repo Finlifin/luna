@@ -2569,10 +2569,9 @@ fn dependent_call_domains_replay_relations_and_preserve_provisional_slots() {
             &[],
         )
     };
-    let result = infer(&actual, None, Budget::default())
-        .unwrap()
-        .finish()
-        .unwrap();
+    let candidate = infer(&actual, None, Budget::default()).unwrap();
+    assert_eq!(candidate.type_argument_sort(1).unwrap(), Sort::Type);
+    let result = candidate.finish().unwrap();
     assert_eq!(
         result.type_arguments,
         vec![primitive(P::Type), primitive(P::Bool), primitive(P::U8)]
