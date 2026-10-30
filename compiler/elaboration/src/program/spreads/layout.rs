@@ -630,15 +630,11 @@ impl Checker<'_, '_> {
             }
             _ => None,
         };
-        Ok(known
-            .filter(|value| self.is_type_list_type(&value.ty))
-            .and_then(|value| {
-                if let K::TypeListValue(elements) = &value.kind {
-                    Some(elements.len())
-                } else {
-                    None
-                }
-            }))
+        let Some(known) = known.filter(|value| self.is_type_list_type(&value.ty)) else {
+            return Ok(None);
+        };
+        completed_list_constructor_width(known, &p(P::Type), fuel)
+            .map_err(|message| error(value.span, message))
     }
 
     // Conjunctive equality requirements are available at every legal call.
@@ -878,5 +874,150 @@ impl Checker<'_, '_> {
             Term::Tuple(fields) => Some(fields.len()),
             _ => None,
         })
+    }
+}
+
+// This is a width hint after the caller establishes the list domain, not value
+// admission. Never execute element producers, follow calls or fold concatenation
+// here: argument order and mutable generator state belong to ordinary checking.
+fn completed_list_constructor_width(
+    value: &n::Expr,
+    element: &Term,
+    fuel: &mut usize,
+) -> Result<Option<usize>, &'static str> {
+    *fuel = fuel
+        .checked_sub(1)
+        .ok_or("spread list width budget exhausted")?;
+    match &value.kind {
+        K::TypeList(fields) => {
+            *fuel = fuel
+                .checked_sub(fields.len())
+                .ok_or("spread list width budget exhausted")?;
+            Ok(fields
+                .iter()
+                .all(|field| field.ty == *element)
+                .then_some(fields.len()))
+        }
+        K::TypeListValue(fields) if *element == p(P::Type) => {
+            *fuel = fuel
+                .checked_sub(fields.len())
+                .ok_or("spread list width budget exhausted")?;
+            Ok(fields
+                .iter()
+                .all(|field| field.sort() == Sort::Type)
+                .then_some(fields.len()))
+        }
+        K::ComptimeValue(Term::NominalValue {
+            ty,
+            variant: None,
+            fields,
+        }) if ty.as_ref() == &value.ty => {
+            *fuel = fuel
+                .checked_sub(fields.len())
+                .ok_or("spread list width budget exhausted")?;
+            // The list identity is exact; full payload admission still occurs
+            // at the ordinary value boundary, not in this layout hint.
+            Ok(Some(fields.len()))
+        }
+        _ => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod list_width_tests {
+    use super::*;
+
+    #[test]
+    fn immutable_list_width_reads_representation_without_running_producers() {
+        let domain = Term::NormalForm {
+            head: DeclarationId {
+                package: 53,
+                local: 1,
+            },
+            sort: Sort::Type,
+            arguments: vec![p(P::Type)],
+        };
+        let expr = |ty, kind| n::Expr {
+            source: n::SourceRange { start: 0, end: 1 },
+            ty,
+            kind,
+        };
+        let producer = expr(
+            p(P::Type),
+            K::Call {
+                callee: Box::new(expr(
+                    Term::Function {
+                        parameters: vec![],
+                        result: Box::new(p(P::Type)),
+                    },
+                    K::Function(DeclarationId {
+                        package: 53,
+                        local: 2,
+                    }),
+                )),
+                arguments: vec![],
+                parameter_bindings: vec![],
+            },
+        );
+        let ordinary = expr(domain.clone(), K::TypeList(vec![producer.clone()]));
+        let frozen = expr(
+            domain.clone(),
+            K::ComptimeValue(Term::NominalValue {
+                ty: Box::new(domain.clone()),
+                variant: None,
+                fields: vec![p(P::Bool)],
+            }),
+        );
+        let compact = expr(domain.clone(), K::TypeListValue(vec![p(P::Bool)]));
+        for value in [&ordinary, &frozen, &compact] {
+            assert_eq!(
+                completed_list_constructor_width(value, &p(P::Type), &mut 100),
+                Ok(Some(1))
+            );
+            assert!(completed_list_constructor_width(value, &p(P::Type), &mut 1).is_err());
+            assert_eq!(
+                completed_list_constructor_width(value, &p(P::Type), &mut 100),
+                Ok(Some(1))
+            );
+        }
+        // Calls producing a list are unknown. Calls inside a known constructor
+        // are not evaluated merely to obtain its syntactic arity.
+        let call = expr(domain.clone(), producer.kind);
+        assert_eq!(
+            completed_list_constructor_width(&call, &p(P::Type), &mut 100),
+            Ok(None)
+        );
+        let wrong = expr(
+            domain.clone(),
+            K::TypeList(vec![expr(p(P::Bool), K::Literal(n::Literal::Bool(true)))]),
+        );
+        assert_eq!(
+            completed_list_constructor_width(&wrong, &p(P::Type), &mut 100),
+            Ok(None)
+        );
+        let foreign = expr(
+            domain.clone(),
+            K::ComptimeValue(Term::NominalValue {
+                ty: Box::new(Term::NormalForm {
+                    head: DeclarationId {
+                        package: 53,
+                        local: 9,
+                    },
+                    sort: Sort::Type,
+                    arguments: vec![p(P::Type)],
+                }),
+                variant: None,
+                fields: vec![],
+            }),
+        );
+        assert_eq!(
+            completed_list_constructor_width(&foreign, &p(P::Type), &mut 100),
+            Ok(None)
+        );
+        let empty = expr(domain, K::TypeList(vec![]));
+        assert_eq!(
+            completed_list_constructor_width(&empty, &p(P::Type), &mut 100),
+            Ok(Some(0))
+        );
     }
 }

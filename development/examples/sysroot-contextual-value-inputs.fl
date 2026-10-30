@@ -289,3 +289,20 @@ test {
     tuple_shape<Tuple<.Es = [bool, u8]>, bool, u8>((true, number));
     assumes forward and not reverse;
 }
+
+comptime fn packet_fields() -> meta.List<Type> {
+    [bool, u8]
+}
+const PacketFields = packet_fields();
+
+fn typed_packet() -> Tuple<.Es = PacketFields> {
+    (true, 7)
+}
+fn consume_packet(flag: bool, number: u8) -> bool {
+    flag and number == 7
+}
+
+test {
+    let result = consume_packet(...typed_packet());
+    assumes result;
+}

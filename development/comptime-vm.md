@@ -7323,3 +7323,35 @@ suite was run; canonical collection representation migration is still pending.
   14 native tests passed, exit 0; `/tmp/luna-tools-tdfmpkk2/result.json`.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
   exit 0; `/tmp/luna-tools-42j58g6_/result.json`; `git diff --check` passed.
+
+### Spread width hints accept ordinary immutable list carriers
+
+The explicit packet return-type probe previously read completed list widths
+only from K::TypeListValue. It now also accepts a fixed ordinary list
+constructor and a frozen ordinary list value with the exact declared domain.
+The caller still establishes the meta.List<Type> domain before querying this
+hint, and mutable generator bindings remain excluded. This is context-layout
+information, not element admission or a replacement for checking the packet.
+
+The query charges its inspection budget, verifies constructor element domains,
+and does not execute element expressions or follow producer calls. Calls
+inside a fixed constructor do not hide its arity; a call returning a list
+remains unknown. Foreign frozen domains are not reused. Tests include empty
+lists, all three carriers, budget exhaustion/recovery and unknown producers.
+The sysroot example uses a comptime-produced list as a named Tuple input,
+returns that tuple from a function, and spreads it into ordinary parameters.
+Canonical TypeListValue migration remains unfinished.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib list_width_tests`:
+  passed, exit 0; `/tmp/luna-tools-55q_10be/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_spreads --test contextual_spreads --test spread_control --no-fail-fast`:
+  all selected groups passed, exit 0; `/tmp/luna-tools-sjublo8_/result.json`.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
+  15 native tests passed, exit 0; `/tmp/luna-tools-9cc7txln/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-aebo_3du/result.json`; `git diff --check` passed.
+
+The three source groups contain 114 passing tests. No full language suite was
+run; mutable/unknown producer widths intentionally remain deferred.
