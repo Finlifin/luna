@@ -1,4 +1,5 @@
 -- Native optional operations, with resources supplied by a separate package.
+use builtin.{bool};
 use optional.OptionalOps;
 
 fn invert(value: bool) -> bool {not value}

@@ -10,6 +10,17 @@ from host_examples import execution_result
 
 
 class NativeExampleOutputTests(unittest.TestCase):
+    def test_existing_builtin_input_is_reused_without_duplicate_app_edge(self):
+        example = host_examples.Example('(bool true)', dependencies=(
+            ('resources', 'library/builtin/protocols/resources.fl'),
+            ('builtin', 'library/builtin/primitives.fl')))
+        arguments = example.inputs(Path('entry.fl'), 'test')
+        edges = [tuple(arguments[index + 1:index + 4])
+                 for index, value in enumerate(arguments) if value == '--dependency']
+        self.assertEqual(edges.count(('1', 'builtin', '3')), 1)
+        self.assertEqual(arguments.count('--package'), 3)
+        self.assertIn(('2', 'primitives', '3'), edges)
+
     def test_subcommands_preserve_source_and_package_inputs(self):
         self.assertEqual(host_examples.Example('true').inputs(Path('entry.fl'), 'build'),
                          ['build', 'entry.fl'])
@@ -24,7 +35,7 @@ class NativeExampleOutputTests(unittest.TestCase):
         edges = [tuple(arguments[index + 1:index + 4])
                  for index, value in enumerate(arguments) if value == '--dependency']
         self.assertEqual(edges, [('1', 'tuples', '2'), ('1', 'meta', '3'),
-                                 ('1', 'resources', '4'), ('2', 'meta', '3'), ('2', 'primitives', '5'),
+                                 ('1', 'resources', '4'), ('2', 'meta', '3'), ('1', 'builtin', '5'), ('2', 'primitives', '5'),
                                  ('3', 'builtin', '5'), ('4', 'primitives', '5')])
         self.assertEqual(arguments[-2:], ['--primary', '1'])
         self.assertIn(str(host_examples.ROOT / 'library/builtin/types/tuple.fl'), arguments)

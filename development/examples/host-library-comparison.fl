@@ -1,4 +1,5 @@
 -- Load comparison.fl and resources.fl as explicit dependencies.
+use builtin.{Symbol, bool, i128, isize, u32, usize};
 use comparison.{Eq, Ord};
 
 fn lower(a: T, b: T) -> T where T :- Ord + resources.Copy {
@@ -15,8 +16,8 @@ test boolean_order {
 }
 
 test signed_boundaries {
-    let low: .i128'builtin = -170141183460469231731687303715884105728;
-    let high: .i128'builtin = 170141183460469231731687303715884105727;
+    let low: i128 = -170141183460469231731687303715884105728;
+    let high: i128 = 170141183460469231731687303715884105727;
     let smaller = lower(low, high);
     let forward = low.as(Ord).cmp(high) matches .less;
     let backward = high.as(Ord).cmp(low) matches .greater;
@@ -24,8 +25,8 @@ test signed_boundaries {
 }
 
 test default_methods {
-    let a: .u32'builtin = 7;
-    let b: .u32'builtin = 9;
+    let a: u32 = 7;
+    let b: u32 = 9;
     let smaller = lower(b, a);
     let reflexive = a.as(Ord).le(a) and a.as(Ord).ge(a);
     let strict = b.as(Ord).gt(a) and not a.as(Ord).gt(b);
@@ -40,18 +41,18 @@ test unicode_characters {
 }
 
 test symbolic_names {
-    let state: .Symbol'builtin = .ready;
+    let state: Symbol = .ready;
     let same = state.as(Eq).eq(.ready);
     let other = state.as(Eq).ne(.waiting);
     assumes same and other;
 }
 
 test platform_integers {
-    let negative: .isize'builtin = -7;
-    let positive: .isize'builtin = 9;
+    let negative: isize = -7;
+    let positive: isize = 9;
     let signed = lower(positive, negative);
-    let zero: .usize'builtin = 0;
-    let other: .usize'builtin = 9;
+    let zero: usize = 0;
+    let other: usize = 9;
     let unsigned = lower(other, zero);
     let distinct = other.as(Eq).ne(zero);
     assumes signed == negative and unsigned == zero and distinct;

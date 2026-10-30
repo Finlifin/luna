@@ -1,11 +1,12 @@
+use builtin.{bool, u8};
 use conversion.{Into, From};
 
 struct Flag { value: bool }
 impl Into<bool> for Flag {
     fn into(self) -> bool { self.value }
 }
-impl Into<.u8'builtin> for Flag {
-    fn into(self) -> .u8'builtin { if self.value { 7 } else { 3 } }
+impl Into<u8> for Flag {
+    fn into(self) -> u8 { if self.value { 7 } else { 3 } }
 }
 impl From<bool> for Flag {
     fn from(source: bool) -> Self { Flag {value: source} }
@@ -31,7 +32,7 @@ fn round_trip() -> bool {
 
 fn distinct_targets() -> bool {
     let bit = convert<Flag, bool>(Flag {value: true});
-    let code = convert<Flag, .u8'builtin>(Flag {value: false});
+    let code = convert<Flag, u8>(Flag {value: false});
     bit and code == 3
 }
 

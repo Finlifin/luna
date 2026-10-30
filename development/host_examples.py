@@ -47,6 +47,10 @@ class Example:
                 primitives = len(self.dependencies) + 2
                 arguments.extend(['--package', str(primitives), str(primitives * 101),
                                   'builtin', str(ROOT / 'library/builtin/primitives.fl')])
+            if identities.get('builtin') != primitives:
+                if 'builtin' in identities:
+                    raise ValueError('example builtin alias conflicts with primitive package')
+                arguments.extend(['--dependency', '1', 'builtin', str(primitives)])
             for name in primitive_consumers:
                 alias = 'builtin' if name == 'meta' else 'primitives'
                 arguments.extend(['--dependency', str(identities[name]), alias, str(primitives),

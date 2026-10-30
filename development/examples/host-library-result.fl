@@ -1,4 +1,5 @@
 -- Native error results retain their error identity through library operations.
+use builtin.{bool, u32};
 use fallible.ErrorResultOps;
 
 fn invert(value: bool) -> bool {not value}
@@ -18,13 +19,13 @@ fn recover_trial(ok: bool, succeed: bool) -> bool {
     var called = false;
     var retired = false;
     let state = Recovery {called: called.ref, retired: retired.ref};
-    let recover = |reason: bool| -> !.u32'builtin bool {
+    let recover = |reason: bool| -> !u32 bool {
         assumes not state.called.*;
         state.called.* = true;
         if reason {true} else {error 42}
     };
     let input: !bool bool = if ok {true} else {error succeed};
-    let result = input.as(ErrorResultOps<bool, bool>).or_else<.u32'builtin>(recover);
+    let result = input.as(ErrorResultOps<bool, bool>).or_else<u32>(recover);
     let valid = result match {
         value! => value and (ok or succeed),
         error reason => reason == 42 and not ok and not succeed,

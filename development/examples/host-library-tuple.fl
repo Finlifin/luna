@@ -1,5 +1,6 @@
 -- Use real Tuple/meta.List packages; every tuple is consumed once.
 -- Run: python3 -B development/host_examples.py library-tuple --release-driver --compare-optimization
+use builtin.{Type, bool};
 use tuples.Tuple;
 
 fn reverse(pair: Tuple<bool, bool>) -> Tuple<bool, bool> {
@@ -7,12 +8,12 @@ fn reverse(pair: Tuple<bool, bool>) -> Tuple<bool, bool> {
     (second, first)
 }
 
-comptime fn FieldTypes() -> meta.List<.Type'builtin> {
+comptime fn FieldTypes() -> meta.List<Type> {
     [Tuple<bool, bool>, Tuple<bool>, Tuple<>]
 }
 
 fn run() -> bool {
-    let packet: Tuple<...FieldTypes()> = (reverse((false, true)), (true,), ());
+    let packet: Tuple<.Es = FieldTypes()> = (reverse((false, true)), (true,), ());
     let ((first, second), (third,), ()) = packet;
     first and not second and third
 }

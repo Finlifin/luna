@@ -122,3 +122,12 @@ luna serve packages-v1 --cache-entries 8
 `/tmp/luna-library-f01o3ubh/summary.json`。这次运行也纠正了两个旧示例遗漏
 普通 `bool` 导入的问题，并给属性检查的包图补齐 builtin primitive 依赖。
 未向 resolver 恢复隐式 primitive 名称。对应 runner 的 13 项单元测试通过。
+
+Native 多包验收（2026-10-31）：
+`python3 -B development/library_check.py --stage native-option --stage native-result --stage native-tuple --stage native-conversion --stage native-resources --stage native-comparison --timeout 300`
+退出 0；六阶段共 19 个源码测试通过，证据为
+`/tmp/luna-library-ccm25mmi/summary.json`。这些示例从 builtin 导入具名
+primitive 绑定，不再直接访问编译器符号；Tuple 使用具名 `Es` 输入。
+应用到 builtin 的依赖显式建立，已有 primitive 包复用且不重复添加依赖边。
+`test_host_examples.py` 的 12 项及 `test_library_check.py` 的 13 项
+Python 单元测试均通过；`git diff --check` 通过，未运行全量语言测试。

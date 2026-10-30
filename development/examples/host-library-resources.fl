@@ -1,12 +1,13 @@
 -- Supply library/builtin/protocols/resources.fl as package resources.
--- --test-native --copy-protocol resources.Copy --drop-protocol resources.Drop
+-- Use luna packages test with resources.Copy and resources.Drop protocol bindings.
+use builtin.{Symbol, bool, u32};
 use resources.{Once, Clone, Copy, Drop};
 
 test clone_scalar {
-    let tag: .Symbol'builtin = .ready;
+    let tag: Symbol = .ready;
     let cloned_tag = tag.as(Clone).clone();
     assumes cloned_tag == tag and tag == .ready;
-    let original: .u32'builtin = 41;
+    let original: u32 = 41;
     let cloned = original.as(Clone).clone();
     assumes original == 41 and cloned == original;
 }
