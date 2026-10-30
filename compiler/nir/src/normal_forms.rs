@@ -241,6 +241,17 @@ pub fn supported_input_type_with_collections_in(
                     return false;
                 }
             }
+            Term::Function { .. }
+            | Term::ComptimeFunction(_)
+            | Term::NormalFormFunction(..)
+            | Term::UnsafeFunction(_) => {
+                // Runtime callable identities are ordinary comptime data too.
+                // Their signature may describe runtime-only argument domains;
+                // admitting the identity does not execute the function.
+                if !nominal_domain_scope(ty, prior, &mut remaining) {
+                    return false;
+                }
+            }
             Term::AssociatedType { .. } => {
                 // Declaration-side projections are symbolic domains, just as
                 // a prior Type input is. Selection must resolve the actual
@@ -739,6 +750,39 @@ impl Head {
         fuel: &mut usize,
         target: Option<crate::target::TargetData>,
     ) -> Result<(), ApplicationError> {
+        self.check_arguments_in_scope_with_callables_budgeted_in(
+            arguments,
+            is_tuple,
+            is_list,
+            nominal_fields,
+            declared,
+            |_, _, _, _| None,
+            frames,
+            fuel,
+            target,
+        )
+    }
+
+    /// Admit frozen callable identities using declaration-world evidence.
+    ///
+    /// `callable_signature` must resolve the declaration, validate its ordered
+    /// generic inputs and formation contracts, and specialize its signature in
+    /// `frames`. It shares the caller's fuel; unknown or invalid identities
+    /// return `None`. A frozen value's declaration ID is not itself evidence.
+    /// The returned signature retains phase, safety and collector qualifiers.
+    /// This check neither invokes a function nor unfolds an opaque NF head.
+    pub fn check_arguments_in_scope_with_callables_budgeted_in(
+        &self,
+        arguments: &[Term],
+        is_tuple: impl Fn(DeclarationId) -> bool,
+        is_list: impl Fn(DeclarationId) -> bool,
+        nominal_fields: impl Fn(&Term, Option<u32>, &mut usize) -> Option<Vec<Term>>,
+        declared: impl Fn(&Term, &Term) -> bool,
+        callable_signature: impl Fn(DeclarationId, &[Term], &[Vec<Sort>], &mut usize) -> Option<Term>,
+        frames: &[Vec<Sort>],
+        fuel: &mut usize,
+        target: Option<crate::target::TargetData>,
+    ) -> Result<(), ApplicationError> {
         let mut remaining = *fuel;
         let result = (|| {
             if arguments.len() != self.parameters.len() {
@@ -806,205 +850,226 @@ impl Head {
                         return Err(ApplicationError::InputType { index });
                     }
                     remaining -= 1;
-                    let accepted =
-                        match (&expected, argument) {
-                            (
-                                _,
-                                Term::Rigid {
-                                    sort: Sort::ComptimeValue,
-                                    ..
-                                }
-                                | Term::Bound {
-                                    sort: Sort::ComptimeValue,
-                                    ..
-                                },
-                            ) => {
-                                expected != Term::Primitive(Primitive::Type)
-                                    && declared(argument, &expected)
+                    let accepted = match (&expected, argument) {
+                        (
+                            _,
+                            Term::Rigid {
+                                sort: Sort::ComptimeValue,
+                                ..
                             }
-                            (Term::Optional(payload), Term::OptionalValue { ty, value })
-                                if ty.as_ref() == &expected =>
-                            {
-                                if let Some(value) = value {
-                                    work.push(((**payload).clone(), value.as_ref(), depth + 1));
-                                }
-                                true
-                            }
-                            (Term::ErrorResult { .. }, Term::ErrorValue { value, .. }) => {
-                                let payload = crate::error_results::frozen_payload_domain(
-                                    argument,
-                                    &expected,
-                                    &mut remaining,
-                                )
+                            | Term::Bound {
+                                sort: Sort::ComptimeValue,
+                                ..
+                            },
+                        ) => {
+                            expected != Term::Primitive(Primitive::Type)
+                                && declared(argument, &expected)
+                        }
+                        (
+                            Term::Function { .. }
+                            | Term::ComptimeFunction(_)
+                            | Term::NormalFormFunction(..)
+                            | Term::UnsafeFunction(_),
+                            Term::FunctionValue {
+                                declaration,
+                                arguments,
+                            },
+                        ) => {
+                            argument
+                                .check_scope(frames)
                                 .map_err(|_| ApplicationError::InputType { index })?;
-                                work.push((payload.clone(), value.as_ref(), depth + 1));
-                                true
-                            }
-                            (
-                                Term::NormalForm {
-                                    head,
-                                    sort: Sort::Type,
-                                    arguments,
-                                },
-                                Term::TypeListValue(fields),
-                            ) if is_list(*head)
-                                && arguments.as_slice() == [Term::Primitive(Primitive::Type)] =>
-                            {
-                                if fields.len() > remaining {
-                                    return Err(ApplicationError::InputType { index });
-                                }
-                                work.extend(fields.iter().map(|value| {
-                                    (Term::Primitive(Primitive::Type), value, depth + 1)
-                                }));
-                                true
-                            }
-                            (
-                                Term::NormalForm {
-                                    head,
-                                    sort: Sort::Type,
-                                    arguments,
-                                },
-                                Term::NominalValue {
-                                    ty,
-                                    variant: None,
-                                    fields,
-                                },
-                            ) if ty.as_ref() == &expected && is_list(*head) => {
-                                let [element] = arguments.as_slice() else {
-                                    return Err(ApplicationError::InputType { index });
-                                };
-                                if element.sort() != Sort::Type
-                                    || *element == Term::Primitive(Primitive::Type)
-                                    || fields.len() > remaining
-                                {
-                                    return Err(ApplicationError::InputType { index });
-                                }
-                                for value in fields {
-                                    crate::type_computations::charge_term(element, &mut remaining)
-                                        .map_err(|_| ApplicationError::InputType { index })?;
-                                    work.push((element.clone(), value, depth + 1));
-                                }
-                                true
-                            }
-                            (
-                                Term::Nominal { .. },
-                                Term::NominalValue {
-                                    ty,
-                                    variant,
-                                    fields,
-                                },
-                            ) if ty.as_ref() == &expected => {
-                                let types = nominal_fields(&expected, *variant, &mut remaining)
+                            let signature =
+                                callable_signature(*declaration, arguments, frames, &mut remaining)
                                     .ok_or(ApplicationError::InputType { index })?;
-                                if types.len() != fields.len() || fields.len() > remaining {
-                                    return Err(ApplicationError::InputType { index });
-                                }
-                                for (ty, value) in types.into_iter().zip(fields) {
-                                    crate::type_computations::charge_term(&ty, &mut remaining)
-                                        .map_err(|_| ApplicationError::InputType { index })?;
-                                    work.push((ty, value, depth + 1));
-                                }
-                                true
+                            crate::type_computations::charge_term(&signature, &mut remaining)
+                                .map_err(|_| ApplicationError::InputType { index })?;
+                            signature.check_scope(frames).is_ok() && signature == expected
+                        }
+                        (Term::Optional(payload), Term::OptionalValue { ty, value })
+                            if ty.as_ref() == &expected =>
+                        {
+                            if let Some(value) = value {
+                                work.push(((**payload).clone(), value.as_ref(), depth + 1));
                             }
-                            (
-                                Term::Primitive(Primitive::Object),
-                                Term::NominalValue {
-                                    ty,
-                                    variant: None,
-                                    fields,
-                                },
-                            ) if ty.as_ref() == &expected => {
-                                if fields.len() > remaining {
-                                    return Err(ApplicationError::InputType { index });
-                                }
-                                for entry in fields {
-                                    let (_, domain, value) = crate::objects::entry_parts(entry)
-                                        .ok_or(ApplicationError::InputType { index })?;
-                                    crate::type_computations::charge_term(domain, &mut remaining)
-                                        .map_err(|_| ApplicationError::InputType { index })?;
-                                    work.push((domain.clone(), value, depth + 1));
-                                }
-                                true
+                            true
+                        }
+                        (Term::ErrorResult { .. }, Term::ErrorValue { value, .. }) => {
+                            let payload = crate::error_results::frozen_payload_domain(
+                                argument,
+                                &expected,
+                                &mut remaining,
+                            )
+                            .map_err(|_| ApplicationError::InputType { index })?;
+                            work.push((payload.clone(), value.as_ref(), depth + 1));
+                            true
+                        }
+                        (
+                            Term::NormalForm {
+                                head,
+                                sort: Sort::Type,
+                                arguments,
+                            },
+                            Term::TypeListValue(fields),
+                        ) if is_list(*head)
+                            && arguments.as_slice() == [Term::Primitive(Primitive::Type)] =>
+                        {
+                            if fields.len() > remaining {
+                                return Err(ApplicationError::InputType { index });
                             }
-                            (Term::Record(fields), Term::RecordValue(values))
-                                if fields.len() == values.len() && fields.len() <= remaining =>
-                            {
-                                let mut names = BTreeSet::new();
-                                for ((name, ty), (label, value)) in fields.iter().zip(values) {
-                                    remaining = remaining
-                                        .checked_sub(name.len())
-                                        .and_then(|n| n.checked_sub(label.len()))
-                                        .ok_or(ApplicationError::InputType { index })?;
-                                    if name != label || !names.insert(name) {
-                                        return Err(ApplicationError::InputType { index });
-                                    }
-                                    work.push((ty.clone(), value, depth + 1));
-                                }
-                                true
-                            }
-                            (
-                                Term::NormalForm {
-                                    head,
-                                    sort: Sort::Type,
-                                    arguments,
-                                },
-                                Term::TupleValue(values),
-                            ) if is_tuple(*head) => {
-                                let [Term::TypeListValue(fields)] = arguments.as_slice() else {
-                                    return Err(ApplicationError::InputType { index });
-                                };
-                                if fields.len() != values.len() || fields.len() > remaining {
-                                    return Err(ApplicationError::InputType { index });
-                                }
-                                work.extend(
-                                    fields
-                                        .iter()
-                                        .zip(values)
-                                        .map(|(ty, value)| (ty.clone(), value, depth + 1)),
-                                );
-                                true
-                            }
-                            (Term::Tuple(fields), Term::TupleValue(values))
-                                if fields.len() == values.len() && fields.len() <= remaining =>
-                            {
-                                work.extend(
-                                    fields
-                                        .iter()
-                                        .zip(values)
-                                        .map(|(ty, value)| (ty.clone(), value, depth + 1)),
-                                );
-                                true
-                            }
-                            (Term::Primitive(Primitive::Type), value) => value.sort() == Sort::Type,
-                            (Term::ClosureContextType, Term::ClosureContextValue(_)) => true,
-                            (Term::Primitive(Primitive::BitVec(width)), Term::BitVec(value)) => {
-                                *width == value.width()
-                            }
-                            (Term::Primitive(Primitive::Void), Term::Unit) => true,
-                            (Term::Primitive(Primitive::Bool), Term::Bool(_)) => true,
-                            (Term::Primitive(Primitive::F16), Term::Float16(_)) => true,
-                            (Term::Primitive(Primitive::Bf16), Term::BFloat16(_)) => true,
-                            (Term::Primitive(Primitive::F32), Term::Float32(_)) => true,
-                            (Term::Primitive(Primitive::F64), Term::Float64(_)) => true,
-                            (Term::Primitive(Primitive::Integer), Term::Integer(_)) => true,
-                            (Term::Primitive(Primitive::Float), Term::Float(_)) => true,
-                            (Term::Primitive(Primitive::Char), Term::Char(_)) => true,
-                            (Term::Primitive(Primitive::Str), Term::String(_)) => true,
-                            (Term::Primitive(Primitive::Symbol), Term::Symbol(_)) => true,
-                            (Term::Primitive(primitive), Term::Integer(value)) => target
-                                .map_or_else(
-                                    || primitive.fixed_integer_layout(),
-                                    |target| target.integer_layout(*primitive),
-                                )
-                                .is_some_and(|(signed, width)| {
-                                    if signed {
-                                        value.to_signed(width).is_ok()
-                                    } else {
-                                        value.to_unsigned(width).is_ok()
-                                    }
+                            work.extend(
+                                fields.iter().map(|value| {
+                                    (Term::Primitive(Primitive::Type), value, depth + 1)
                                 }),
-                            _ => false,
-                        };
+                            );
+                            true
+                        }
+                        (
+                            Term::NormalForm {
+                                head,
+                                sort: Sort::Type,
+                                arguments,
+                            },
+                            Term::NominalValue {
+                                ty,
+                                variant: None,
+                                fields,
+                            },
+                        ) if ty.as_ref() == &expected && is_list(*head) => {
+                            let [element] = arguments.as_slice() else {
+                                return Err(ApplicationError::InputType { index });
+                            };
+                            if element.sort() != Sort::Type
+                                || *element == Term::Primitive(Primitive::Type)
+                                || fields.len() > remaining
+                            {
+                                return Err(ApplicationError::InputType { index });
+                            }
+                            for value in fields {
+                                crate::type_computations::charge_term(element, &mut remaining)
+                                    .map_err(|_| ApplicationError::InputType { index })?;
+                                work.push((element.clone(), value, depth + 1));
+                            }
+                            true
+                        }
+                        (
+                            Term::Nominal { .. },
+                            Term::NominalValue {
+                                ty,
+                                variant,
+                                fields,
+                            },
+                        ) if ty.as_ref() == &expected => {
+                            let types = nominal_fields(&expected, *variant, &mut remaining)
+                                .ok_or(ApplicationError::InputType { index })?;
+                            if types.len() != fields.len() || fields.len() > remaining {
+                                return Err(ApplicationError::InputType { index });
+                            }
+                            for (ty, value) in types.into_iter().zip(fields) {
+                                crate::type_computations::charge_term(&ty, &mut remaining)
+                                    .map_err(|_| ApplicationError::InputType { index })?;
+                                work.push((ty, value, depth + 1));
+                            }
+                            true
+                        }
+                        (
+                            Term::Primitive(Primitive::Object),
+                            Term::NominalValue {
+                                ty,
+                                variant: None,
+                                fields,
+                            },
+                        ) if ty.as_ref() == &expected => {
+                            if fields.len() > remaining {
+                                return Err(ApplicationError::InputType { index });
+                            }
+                            for entry in fields {
+                                let (_, domain, value) = crate::objects::entry_parts(entry)
+                                    .ok_or(ApplicationError::InputType { index })?;
+                                crate::type_computations::charge_term(domain, &mut remaining)
+                                    .map_err(|_| ApplicationError::InputType { index })?;
+                                work.push((domain.clone(), value, depth + 1));
+                            }
+                            true
+                        }
+                        (Term::Record(fields), Term::RecordValue(values))
+                            if fields.len() == values.len() && fields.len() <= remaining =>
+                        {
+                            let mut names = BTreeSet::new();
+                            for ((name, ty), (label, value)) in fields.iter().zip(values) {
+                                remaining = remaining
+                                    .checked_sub(name.len())
+                                    .and_then(|n| n.checked_sub(label.len()))
+                                    .ok_or(ApplicationError::InputType { index })?;
+                                if name != label || !names.insert(name) {
+                                    return Err(ApplicationError::InputType { index });
+                                }
+                                work.push((ty.clone(), value, depth + 1));
+                            }
+                            true
+                        }
+                        (
+                            Term::NormalForm {
+                                head,
+                                sort: Sort::Type,
+                                arguments,
+                            },
+                            Term::TupleValue(values),
+                        ) if is_tuple(*head) => {
+                            let [Term::TypeListValue(fields)] = arguments.as_slice() else {
+                                return Err(ApplicationError::InputType { index });
+                            };
+                            if fields.len() != values.len() || fields.len() > remaining {
+                                return Err(ApplicationError::InputType { index });
+                            }
+                            work.extend(
+                                fields
+                                    .iter()
+                                    .zip(values)
+                                    .map(|(ty, value)| (ty.clone(), value, depth + 1)),
+                            );
+                            true
+                        }
+                        (Term::Tuple(fields), Term::TupleValue(values))
+                            if fields.len() == values.len() && fields.len() <= remaining =>
+                        {
+                            work.extend(
+                                fields
+                                    .iter()
+                                    .zip(values)
+                                    .map(|(ty, value)| (ty.clone(), value, depth + 1)),
+                            );
+                            true
+                        }
+                        (Term::Primitive(Primitive::Type), value) => value.sort() == Sort::Type,
+                        (Term::ClosureContextType, Term::ClosureContextValue(_)) => true,
+                        (Term::Primitive(Primitive::BitVec(width)), Term::BitVec(value)) => {
+                            *width == value.width()
+                        }
+                        (Term::Primitive(Primitive::Void), Term::Unit) => true,
+                        (Term::Primitive(Primitive::Bool), Term::Bool(_)) => true,
+                        (Term::Primitive(Primitive::F16), Term::Float16(_)) => true,
+                        (Term::Primitive(Primitive::Bf16), Term::BFloat16(_)) => true,
+                        (Term::Primitive(Primitive::F32), Term::Float32(_)) => true,
+                        (Term::Primitive(Primitive::F64), Term::Float64(_)) => true,
+                        (Term::Primitive(Primitive::Integer), Term::Integer(_)) => true,
+                        (Term::Primitive(Primitive::Float), Term::Float(_)) => true,
+                        (Term::Primitive(Primitive::Char), Term::Char(_)) => true,
+                        (Term::Primitive(Primitive::Str), Term::String(_)) => true,
+                        (Term::Primitive(Primitive::Symbol), Term::Symbol(_)) => true,
+                        (Term::Primitive(primitive), Term::Integer(value)) => target
+                            .map_or_else(
+                                || primitive.fixed_integer_layout(),
+                                |target| target.integer_layout(*primitive),
+                            )
+                            .is_some_and(|(signed, width)| {
+                                if signed {
+                                    value.to_signed(width).is_ok()
+                                } else {
+                                    value.to_unsigned(width).is_ok()
+                                }
+                            }),
+                        _ => false,
+                    };
                     if !accepted {
                         return Err(ApplicationError::InputType { index });
                     }

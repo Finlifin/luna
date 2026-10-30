@@ -5177,3 +5177,46 @@ separate unfinished work.
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test execution contract`:
   all 76 selected contract cases passed, `/tmp/luna-tools-kg44ak3c/result.json`.
 - Formatting and `git diff --check` passed.
+
+### Callable evidence for normal-form inputs (2026-10-30)
+
+NIR now recognizes ordinary callable domains in NF input metadata, including
+runtime, comptime, unsafe and normal-form function signatures. Runtime payload
+domains (for example pointer parameters) are allowed inside these signatures:
+transporting a function identity at comptime does not invoke its runtime code.
+Signature scope still has to be valid with respect to earlier Type parameters.
+
+`Head::check_arguments_in_scope_with_callables_budgeted_in` admits a frozen
+`FunctionValue` only with declaration-world signature evidence. The resolver
+must validate the function's generic inputs and formation contracts, instantiate
+its signature in the caller's frames, and share the input checker's fuel.
+The checker validates scope and compares the full signature without erasing
+phase, safety or collector metadata. Nested aggregate fields use the same
+resolver and budget. Existing callers without callable evidence reject these
+values; a permissive abstract-variable evidence callback cannot admit them.
+
+This is the NIR admission interface, not completed source-level support for
+function-valued NF inputs. Remaining integration includes VM admission and
+scoped type-work validation, materialization, and scoped freezing/restoration
+of callable results. Do not replace declaration evidence with nominal layout
+queries or accept a function solely because its declaration ID exists.
+An end-to-end target is `Carrier<T, callback(T)>` where `Carrier` is a pure
+Type-returning definition and `callback` returns a generic function identity;
+the callable's signature and input contracts must survive every admission path.
+
+Ordinary runtime/comptime function defaults already worked before this change.
+`scoped_comptime_callables` records that baseline separately: a descriptor
+returns `identity<T>`, a defaulted callable receives it, and dispatch executes
+in the correct phase. The comptime case must be observed through invocation;
+consuming its constant from runtime without Splice tests a different boundary.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir --test normal_callable_inputs --test normal_inputs`:
+  declaration authority, qualifier mismatch, ordered generic input domains,
+  malformed and escaped signatures, nested values, exact budget and recovery;
+  exit 0, 27 tests passed; report `/tmp/luna-tools-7d32etl1/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test scoped_comptime_callables --test scoped_comptime_aggregates --test normal_patterns`:
+  exit 0, 52 tests passed; report `/tmp/luna-tools-3rkawdy_/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0; report `/tmp/luna-tools-8llopq85/result.json`.
