@@ -3307,3 +3307,35 @@ The fixed-sort `InferenceTerm::Instantiate` and matching decomposition cannot ye
 represent a dependent input whose completed domain changes its sort to Type. The
 two pending source regressions remain uncommitted; replay support alone does not
 establish end-to-end implementation selection.
+
+### Staged dependent-domain implementation inference
+
+Head inference can now resume when provisional assignments complete the domain
+of an unresolved input and change its argument sort. A bounded, candidate-local
+inspection supplies the known inputs; declaration-domain substitution specializes
+the remaining head. Each round removes known parameters and consumes the existing
+inference budget, reserving a separate replay share. The original declaration's
+head proofs and completed requirements are checked before returning the match.
+Fixed-sort inference variables and ordinary substitutions remain strict.
+
+Inherent method signature specialization now uses the same domain-aware input
+substitution as ordinary calls. Both pending source regressions execute
+`Key<Type,bool>` methods through IIR: inherent selection and explicit trait
+selection. Solver coverage additionally checks reversed dependency order, repeated
+input conflicts, invalid sorts/domains, budget exhaustion and subsequent recovery.
+No constructor-name exceptions or program-value PTC equations were added.
+
+Validation in `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution`: exit 0,
+  `/tmp/luna-tools-1ctngd0d/result.json`.
+- Final affected suites after removing an unnecessary domain clone:
+  `python3 -B development/check.py --timeout 900 -- test -p type_resolution -p luna --test implementation --test nominal_value_parameters --test trait_phases --test trait_purity`:
+  exit 0, 78 implementation, 272 nominal input, 30 phase, and 21 purity tests;
+  `/tmp/luna-tools-ez103db4/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0, `/tmp/luna-tools-b6fgyah8/result.json`; `git diff --check`: exit 0.
+
+This closes the two source selection failures recorded above. Unresolved domains
+remain pending; staging does not invert opaque normal-form heads or authorize
+export of incomplete candidate state. Other fixed-sort consumers still need their
+own contract audit; this is not a claim that all dependent-type paths are complete.

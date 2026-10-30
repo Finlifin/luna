@@ -6146,3 +6146,26 @@ fn type_valued_indices_specialize_runtime_function_instances() {
         assert_eq!(support::run_iir(&source, "run", vec![]), Value::Bool(true));
     }
 }
+
+#[test]
+fn type_valued_indices_select_inherent_implementations() {
+    let source = "typealias Type=.Type'builtin;
+        struct Key where T,value:T {payload:bool}
+        impl Key<T,value> where T,value:T {
+            fn read(self)->bool {self.payload}
+        }
+        fn run()->bool {Key<Type,bool>{payload:true}.read()}";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn type_valued_indices_select_trait_implementations() {
+    let source = "typealias Type=.Type'builtin;
+        struct Key where T,value:T {payload:bool}
+        trait Read {fn read(self)->bool;}
+        impl Read for Key<T,value> where T,value:T {
+            fn read(self)->bool {self.payload}
+        }
+        fn run()->bool {Key<Type,bool>{payload:true}.as(Read).read()}";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+}

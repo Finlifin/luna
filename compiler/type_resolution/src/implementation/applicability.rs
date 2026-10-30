@@ -1,5 +1,6 @@
 //! Type-only applicability. These proofs do not discharge phase, package
 //! coherence, associated members or runtime environment delivery obligations.
+mod domain_staging;
 use super::{Applicability, Error, ImplementationHead, Index, Selection};
 use crate::InferenceTerm as I;
 use crate::obligations::{Engine, State};
@@ -1063,6 +1064,18 @@ impl ImplementationHead {
             }
         }
         if pending {
+            if let Some(matched) = self.resume_completed_domains(
+                &candidate,
+                &types,
+                subject,
+                interface_arguments,
+                context,
+                inference_budget,
+                domains,
+                layouts,
+            )? {
+                return Ok(matched);
+            }
             return Err(TypeAssessment::Pending(
                 "head obligations are unsettled".into(),
             ));

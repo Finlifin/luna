@@ -3494,3 +3494,71 @@ fn replay_type_valued_dependent_inputs_checks_completed_domains() {
     );
     verify(&evidence, Budget::default()).unwrap();
 }
+
+#[test]
+fn dependent_head_inference_stages_domains_and_replays_original_declaration() {
+    use nir::program::TypePredicate;
+    use type_resolution::implementation::TypeAssessment;
+    let value = Term::Rigid {
+        declaration: id(2),
+        sort: Sort::ComptimeValue,
+    };
+    let query = node(10, vec![ty(P::Type), ty(P::Bool), ty(P::Bool)]);
+    let context = context();
+    for reversed in [false, true] {
+        let mut h = generic(
+            200,
+            node(10, vec![var(1), value.clone(), value.clone()]),
+            vec![id(1), id(2)],
+        );
+        h.parameter_types = vec![ty(P::Type), var(1)];
+        h.interface_arguments = vec![node(11, vec![value.clone()])];
+        h.requirements = vec![TypePredicate::Equal(
+            node(12, vec![value.clone()]),
+            node(12, vec![ty(P::Bool)]),
+        )];
+        if reversed {
+            h.type_parameters.reverse();
+            h.parameter_types.reverse();
+        }
+        let interfaces = vec![node(11, vec![ty(P::Bool)])];
+        let TypeAssessment::Applicable(evidence) =
+            h.assess_types(&query, &interfaces, &context, Budget::default())
+        else {
+            panic!("dependent domain should complete before the remaining input");
+        };
+        let mut expected = vec![ty(P::Type), ty(P::Bool)];
+        if reversed {
+            expected.reverse();
+        }
+        assert_eq!(evidence.type_arguments, expected);
+        h.verify_type_evidence(&evidence, &query, &interfaces, &context, Budget::default())
+            .unwrap();
+        for invalid in [
+            node(10, vec![ty(P::Type), ty(P::Bool), ty(P::Char)]),
+            node(10, vec![ty(P::Bool), ty(P::Bool), ty(P::Bool)]),
+            node(10, vec![ty(P::Type), Term::Bool(true), Term::Bool(true)]),
+        ] {
+            assert!(!matches!(
+                h.assess_types(&invalid, &interfaces, &context, Budget::default()),
+                TypeAssessment::Applicable(_)
+            ));
+        }
+        assert!(!matches!(
+            h.assess_types(
+                &query,
+                &interfaces,
+                &context,
+                Budget {
+                    steps: 50,
+                    ..Budget::default()
+                }
+            ),
+            TypeAssessment::Applicable(_)
+        ));
+        assert!(matches!(
+            h.assess_types(&query, &interfaces, &context, Budget::default()),
+            TypeAssessment::Applicable(_)
+        ));
+    }
+}

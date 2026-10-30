@@ -1914,13 +1914,12 @@ impl Checker<'_, '_> {
         // Resolution fixes implementation arguments. Method-local parameters
         // remain rigid until invocation inference completes them; this value
         // must not escape as a published generic function instance.
-        let ty = self.signatures[&owner]
-            .instantiate_parameters_in_scope(
-                &self.input_binders(&parameters[..arguments.len()]),
-                &arguments,
-                &self.call_input_frames(),
-            )
-            .map_err(|e| error(span, e.to_string()))?;
+        let ty = self.instantiate_input_types(
+            &self.signatures[&owner],
+            &parameters[..arguments.len()],
+            &arguments,
+            span,
+        )?;
         Ok(Some(n::Expr {
             ty: self.callable_type(owner, ty),
             source: source(span),

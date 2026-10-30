@@ -719,6 +719,15 @@ impl Engine {
     pub(crate) fn inspect_type(&self, term: &InferenceTerm) -> Result<Term, Error> {
         Ok(self.inference.freeze(term)?)
     }
+    /// Candidate-local observation, not an export of unsettled obligations.
+    pub(crate) fn inspect_type_metered(
+        &self,
+        term: &InferenceTerm,
+        budget: &mut Budget,
+    ) -> Result<Term, InferenceError> {
+        self.inference
+            .freeze_with_limits(term, &mut budget.steps, budget.max_depth)
+    }
     /// Export contains stable NIR terms only, never active variables or waiters.
     pub fn freeze(&self, term: &InferenceTerm) -> Result<Term, Error> {
         self.check_settled()?;
