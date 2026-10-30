@@ -5,6 +5,7 @@ use super::*;
 use comptime_interpretor::{Budget, Interpreter, Value};
 use std::collections::VecDeque;
 pub(super) mod prepared;
+mod restore;
 use prepared::PreparedRequired;
 
 impl Checker<'_, '_> {
@@ -1397,19 +1398,7 @@ impl Checker<'_, '_> {
             // A Type input can be transported without knowing its concrete
             // description. Use invocation-local rigid identities, then restore
             // the original telescope slots before returning to normalization.
-            let type_packet = match &result_type {
-                Term::Tuple(fields) => fields.iter().all(|ty| *ty == p(P::Type)),
-                Term::NormalForm { head, .. } if Some(*head) == self.protocols.tuple => {
-                    matches!(self.structural_type(&result_type, expr.span)?, Term::Tuple(fields)
-                        if fields.iter().all(|ty| *ty == p(P::Type)))
-                }
-                _ => false,
-            };
             if !defer_inputs
-                && (result_type == p(P::Type)
-                    || result_type == p(P::Bool)
-                    || self.is_type_list_type(&result_type)
-                    || type_packet)
                 && self.signature_owner.is_some()
                 && input_frames
                     .last()

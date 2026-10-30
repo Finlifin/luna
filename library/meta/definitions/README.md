@@ -35,3 +35,28 @@ typealias RecordType = Record();
 函数体或 trait／impl 的生成。贯通示例在
 `development/examples/sysroot-object-struct-builder.fl`：从 Object 生成 Type，
 反射校验后构造 runtime 值并执行 native 测试。
+
+## 泛型函数中的定义描述数据
+
+定义描述可以先保存在普通 struct、enum、可选值或嵌套 List 中，不必为了携带
+Type 而改用类型列表。显式 comptime Type 参数经过描述函数后仍保留调用者的
+绑定身份；它既不会提前变成具体类型，也不会因装进聚合值而丢失依赖。
+
+```flurry
+struct Descriptor { kind: Type }
+
+comptime fn describe(T: Type) -> meta.List<Descriptor> {
+    [Descriptor {kind: T}]
+}
+
+fn preserve(comptime T: Type,
+    comptime .schema: meta.List<Descriptor> = defer describe(T), value: T) -> T
+{
+    value
+}
+```
+
+调用 `preserve(u32, 23)` 时，schema 按普通默认实参规则生成，随实例化固定，
+不会成为 runtime 数据。完整 sysroot 示例为
+`development/examples/sysroot-scoped-descriptors.fl`。这提供泛型描述数据的
+传递能力；尚不意味着 StructBuilder 已能发布带泛型子句的定义。

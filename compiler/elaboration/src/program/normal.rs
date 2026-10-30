@@ -2,6 +2,7 @@
 use super::*;
 pub(super) mod known_patterns;
 mod known_scalars;
+mod values;
 
 /// Expand syntax before assigning dependent contexts. Evaluating a literal
 /// tuple first would default its numeric fields independently of preceding
@@ -451,108 +452,6 @@ impl Checker<'_, '_> {
         ty: &Term,
     ) -> Result<Term, Error> {
         self.normal_value_argument_at(value, ty, 0)
-    }
-
-    // Normalization can retain scoped Type descriptions. This is distinct from
-    // completed immutable export, which must continue rejecting open values.
-    pub(super) fn required_normal_term(
-        &mut self,
-        value: comptime_interpretor::Value,
-        span: Span,
-    ) -> Result<Term, Error> {
-        self.optional_normal_term(value, span)?
-            .ok_or_else(|| error(span, "normal-form input freezing failed: Unsupported"))
-    }
-
-    // Delivery-only values need no symbolic identity. Resource, scope and
-    // representation failures still propagate; only absent representation is optional.
-    pub(super) fn optional_normal_term(
-        &mut self,
-        value: comptime_interpretor::Value,
-        span: Span,
-    ) -> Result<Option<Term>, Error> {
-        use comptime_interpretor::Value;
-        let term = match value {
-            Value::Type(ty) if ty.sort() == Sort::Type => ty,
-            Value::Type(_) => {
-                return Err(error(span, "normal-form Type input contains a non-Type"));
-            }
-            Value::List { ty, values } => {
-                // Invocation results have already been admitted by the VM and
-                // restored to this call's telescope. Freeze children in that
-                // same scope rather than requiring closed Type descriptions.
-                let mut fields = Vec::with_capacity(values.len());
-                for value in values {
-                    let Some(field) = self.optional_normal_term(value, span)? else {
-                        return Ok(None);
-                    };
-                    fields.push(field);
-                }
-                if self.is_type_list_type(&ty) {
-                    Term::TypeListValue(fields)
-                } else {
-                    Term::NominalValue {
-                        ty: Box::new(ty),
-                        variant: None,
-                        fields,
-                    }
-                }
-            }
-            value => {
-                let parameters = self.visible_comptime_parameters(span)?;
-                let mut value_parameters = BTreeMap::new();
-                for id in &parameters {
-                    if let Some(domain) = self
-                        .trait_input_domain(*id)
-                        .filter(|domain| *domain != p(P::Type))
-                    {
-                        value_parameters.insert(*id, self.substituted_trait_domain(&domain, span)?);
-                    }
-                }
-                let parameters = parameters
-                    .into_iter()
-                    .filter(|id| !value_parameters.contains_key(id))
-                    .collect();
-                // Domain substitution consumes preparation fuel before the
-                // exporter receives its remaining allowance.
-                let steps = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-                let mut budget = comptime_runtime::Budget {
-                    steps,
-                    max_limbs: 4096,
-                };
-                let term = value.into_abstract_invocation_term(
-                    &mut budget,
-                    &parameters,
-                    &value_parameters,
-                );
-                self.required_steps -= (steps - budget.steps) as u64;
-                return term.map(Some).or_else(|failure| {
-                    if matches!(failure, comptime_interpretor::ErrorKind::Unsupported) {
-                        return Ok(None);
-                    }
-                    Err(error(
-                        span,
-                        format!("normal-form input freezing failed: {failure:?}"),
-                    ))
-                });
-            }
-        };
-        let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-        let before = fuel;
-        let bounded = nir::type_computations::charge_term(&term, &mut fuel);
-        self.required_steps -= (before - fuel) as u64;
-        bounded.map_err(|e| error(span, e.to_string()))?;
-        if let Term::TypeListValue(types) = &term {
-            if types.iter().any(|ty| ty.sort() != Sort::Type) {
-                return Err(error(
-                    span,
-                    "normal-form Type-list input contains a non-Type",
-                ));
-            }
-        }
-        term.check_scope(&self.call_input_frames())
-            .map_err(|e| error(span, e.to_string()))?;
-        Ok(Some(term))
     }
 
     fn normal_value_argument_at(

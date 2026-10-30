@@ -5082,3 +5082,59 @@ and collection nodes. Their removal requires migrating normal-form identity,
 substitution and structural views together; this stage does not claim that
 ordinary NF argument representation is finished. No source-language exception
 for `meta.List<Type>` is authorized by the remaining encoding.
+
+
+### Restore scoped aggregate invocation results
+
+Required invocation preparation no longer chooses whether a Type input may be
+transported by looking at a small whitelist of result domains. A struct, enum,
+newtype, optional, error result or nested data container can retain that Type
+input. The result restorer recursively rewrites both retained domains and child
+Type values into the original caller telescope, including Object entry domains.
+Mutable cells and executable capture graphs are not silently traversed: scoped
+results retaining those representations report an explicit unsupported boundary.
+
+Scoped normalization lives in `program/normal/values.rs`; result restoration
+lives in `program/required/restore.rs`. Freezing admitted aggregate data retains
+nominal identity and enum tags, checks scope, and meters recursion and output
+terms. The immutable closed-export boundary is unchanged. Unknown type
+observations still produce `TypeContractUnresolved`, and runtime Type inputs do
+not gain compile-time availability.
+
+A dependent nominal result also exposed a VM instance bug: declaration
+substitution rewrote body types in an empty frame, although those types live
+under the function's parameter telescope. Function-instance creation now retains
+that frame with bounded substitution; cached instances still enforce their
+invocation obligations.
+
+Source coverage compares restored signatures after independent bool and char
+substitutions against concrete invocations. Cases cover ordinary and generic
+structs, enums, newtypes, optional and error values, and nested optional fields.
+Runtime default specialization retains the descriptor as a nominal value in
+the instance key. The real-sysroot example uses `meta.List<Descriptor>` as a
+staged default and leaves only ordinary values at runtime.
+
+Evidence (cwd `/home/fin/luna`):
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  310 passed, `/tmp/luna-tools-jl_xqgcx/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test scoped_comptime_aggregates --test nominal_staging --test normal_patterns --test type_spreads`:
+  all four groups passed, `/tmp/luna-tools-_ge4g7yy/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib program::required`:
+  12 passed, `/tmp/luna-tools-zi2py879/result.json`.
+
+Remaining limits: scoped executable/mutable result restoration is not
+implemented. In addition, an explicit Type parameter used inside a descriptor
+invocation within a `requires` expression can still be unavailable during
+clause elaboration; for example `Carrier<describe(T)> ==
+Carrier<Descriptor {item:T}>` reports required input unavailable. Signature
+normalization and deferred default specialization are covered here, not a fix
+for that earlier clause-binding path. NIR's specialized frozen Type-list
+encoding remains a separate pending migration.
+
+- Real-sysroot `python3 -B development/check.py --timeout 900 -- run -p luna -- development/examples/sysroot-scoped-descriptors.fl --sysroot library --test-native`:
+  one native test passed for bool, u32 and char specializations;
+  `/tmp/luna-tools-6wdj3l2g/result.json`.
+- Final required-invocation unit checks passed again after module extraction
+  and the exact-budget assertion, `/tmp/luna-tools-7sune5og/result.json`.
+- Formatting and `git diff --check` passed.

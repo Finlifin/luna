@@ -1,5 +1,6 @@
 //! Checked source computations, separated from their invocation. This is an
 //! owned preparation result, not a Type or an inference-variable snapshot.
+use super::restore::{restore_required_packet, restore_required_type_input};
 use super::*;
 use comptime_interpretor::InvocationValue;
 
@@ -1137,99 +1138,6 @@ mod tests {
         assert_eq!(depth, 0);
         assert!(!quoted && !escaped);
     }
-}
-
-fn restore_required_packet(
-    steps: &mut u64,
-    value: Value,
-    parameters: &[nir::DeclarationParameter],
-    arguments: &[Term],
-    frames: &[Vec<Sort>],
-    span: Span,
-    depth: usize,
-) -> Result<Value, Error> {
-    if depth >= 128 {
-        return Err(error(span, "required type packet nesting limit exceeded"));
-    }
-    *steps = steps
-        .checked_sub(1)
-        .ok_or_else(|| error(span, "required type packet budget exhausted"))?;
-    Ok(match value {
-        Value::TypeParameter(declaration) => Value::Type(restore_required_type_input(
-            steps,
-            Term::Rigid {
-                declaration,
-                sort: Sort::Type,
-            },
-            parameters,
-            arguments,
-            frames,
-            span,
-        )?),
-        Value::Type(ty) => Value::Type(restore_required_type_input(
-            steps, ty, parameters, arguments, frames, span,
-        )?),
-        Value::List { ty, values } => Value::List {
-            ty: restore_required_type_input(steps, ty, parameters, arguments, frames, span)?,
-            values: values
-                .into_iter()
-                .map(|value| {
-                    restore_required_packet(
-                        steps,
-                        value,
-                        parameters,
-                        arguments,
-                        frames,
-                        span,
-                        depth + 1,
-                    )
-                })
-                .collect::<Result<_, _>>()?,
-        },
-        Value::Tuple(values) => Value::Tuple(
-            values
-                .into_iter()
-                .map(|value| {
-                    restore_required_packet(
-                        steps,
-                        value,
-                        parameters,
-                        arguments,
-                        frames,
-                        span,
-                        depth + 1,
-                    )
-                })
-                .collect::<Result<_, _>>()?,
-        ),
-        value => value,
-    })
-}
-
-fn restore_required_type_input(
-    steps: &mut u64,
-    ty: Term,
-    parameters: &[nir::DeclarationParameter],
-    arguments: &[Term],
-    frames: &[Vec<Sort>],
-    span: Span,
-) -> Result<Term, Error> {
-    if parameters.is_empty() {
-        return Ok(ty);
-    }
-    let mut fuel = usize::try_from(*steps).unwrap_or(usize::MAX);
-    let before = fuel;
-    let bounded = (|| {
-        nir::type_computations::charge_term(&ty, &mut fuel)?;
-        fuel = fuel
-            .checked_sub(parameters.len())
-            .ok_or(nir::type_computations::Error::Budget)?;
-        Ok::<_, nir::type_computations::Error>(())
-    })();
-    *steps -= (before - fuel) as u64;
-    bounded.map_err(|e| error(span, e.to_string()))?;
-    ty.instantiate_parameters_in_scope(parameters, arguments, frames)
-        .map_err(|e| error(span, e.to_string()))
 }
 
 pub(super) fn implementation_index(

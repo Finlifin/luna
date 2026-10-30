@@ -4736,8 +4736,36 @@ impl<'a> Interpreter<'a> {
                         .instantiate(&definition.signature)
                         .map_err(|_| self.failure(ErrorKind::Type, Some(expr.source)))?;
                     let mut body = definition.body.clone();
-                    body.rewrite_types(&mut |ty| substitution.instantiate(ty))
-                        .map_err(|_| self.failure(ErrorKind::Type, Some(expr.source)))?;
+                    // Body types live under the function's parameter telescope;
+                    // a declaration substitution must retain that frame.
+                    let Term::Function { parameters, .. } = signature.callable_signature() else {
+                        return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+                    };
+                    let frames = vec![parameters.iter().map(|p| p.sort).collect()];
+                    let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+                    let mut fuel = before;
+                    let rewritten = self
+                        .function_substitution_bounded(
+                            &definition.type_parameters,
+                            arguments,
+                            &frames,
+                            &mut fuel,
+                        )
+                        .and_then(|substitution| {
+                            body.rewrite_types(&mut |ty| substitution.instantiate(ty))
+                                .map_err(nir::type_computations::Error::Scope)
+                        });
+                    self.budget.steps -= (before - fuel) as u64;
+                    rewritten.map_err(|failure| {
+                        self.failure(
+                            if matches!(failure, nir::type_computations::Error::Budget) {
+                                ErrorKind::StepsExhausted
+                            } else {
+                                ErrorKind::Type
+                            },
+                            Some(expr.source),
+                        )
+                    })?;
                     let instance = Arc::new(Closure {
                         definition_source: None,
                         origin: Some(*declaration),
