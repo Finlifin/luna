@@ -1366,3 +1366,60 @@ fn concrete_source_search_retains_budget_for_multiple_small_candidates() {
         "{failure}"
     );
 }
+
+#[test]
+fn generic_comptime_child_checks_selected_parent_phase_at_concrete_use() {
+    for parent_phase in ["", "comptime "] {
+        let source = format!(
+            "
+            trait Parent {{}}
+            pure comptime trait Child :- Parent {{comptime fn read(self)->bool;}}
+            struct Subject {{}}
+            {parent_phase}impl Parent for Subject {{}}
+            comptime impl Child for T where T :- Parent {{
+                comptime fn read(self)->bool {{true}}
+            }}
+            comptime fn run()->bool {{Subject{{}}.as(Child).read()}}
+        "
+        );
+        if parent_phase.is_empty() {
+            let failure = compile(&source, Emit::Nir)
+                .err()
+                .expect("runtime parent is insufficient");
+            assert!(
+                failure.contains("parent interface lacks comptime phase"),
+                "{failure}"
+            );
+        } else {
+            let package = support::compile(&source);
+            assert_eq!(
+                luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+                comptime_interpretor::Value::Bool(true)
+            );
+        }
+    }
+}
+
+#[test]
+fn generic_comptime_child_does_not_fall_back_to_less_specific_parent_phase() {
+    let failure = compile(
+        "
+        trait Parent {}
+        pure comptime trait Child :- Parent {comptime fn read(self)->bool;}
+        struct Subject where T {}
+        comptime impl Parent for Subject<T> where T {}
+        impl Parent for Subject<bool> {}
+        comptime impl Child for T where T :- Parent {
+            comptime fn read(self)->bool {true}
+        }
+        comptime fn run()->bool {Subject<bool>{}.as(Child).read()}
+    ",
+        Emit::Nir,
+    )
+    .err()
+    .expect("selected precise parent has no comptime phase");
+    assert!(
+        failure.contains("parent interface lacks comptime phase"),
+        "{failure}"
+    );
+}

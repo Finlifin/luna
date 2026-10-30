@@ -2947,3 +2947,35 @@ fn type_valued_impl_inputs_specialize_capability_qualification() {
         }
     }
 }
+
+#[test]
+fn comptime_parent_phase_can_follow_only_comptime_only_given_evidence() {
+    let subject = boxed(Term::Primitive(Primitive::Bool));
+    for parent_comptime_only in [false, true] {
+        let mut parent = marker(101);
+        parent.comptime_only = parent_comptime_only;
+        let mut child = marker(102);
+        child.comptime_only = true;
+        child.parents.push(id(101).into());
+        let traits = vec![parent, child];
+        let mut child_impl = implementation(20, 102, subject.clone(), vec![], vec![]);
+        child_impl.phases.comptime = true;
+        let implementations = vec![child_impl];
+        let index = index(&implementations);
+        let context = context();
+        let assumptions = vec![requirement(101, subject.clone())];
+        let world = World {
+            index: &index,
+            implementations: &implementations,
+            traits: &traits,
+            assumptions: &assumptions,
+            context: &context,
+        };
+        let result = world.resolve(id(102), &subject, Budget::default());
+        if parent_comptime_only {
+            assert_eq!(result.unwrap().types.selection, Selection::Selected(id(20)));
+        } else {
+            assert!(result.unwrap_err().contains("phase remains unresolved"));
+        }
+    }
+}

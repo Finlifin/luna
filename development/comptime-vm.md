@@ -5709,3 +5709,42 @@ Validation from `/home/fin/luna`, exit 0:
   artificial unresolved result from repeated fixed reservations.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
   `/tmp/luna-tools-ryf9g3oa/result.json`; `git diff --check` passed.
+
+## Concrete parent phase evidence for generic comptime traits (2026-10-31)
+
+Investigation of pending generated exports found that production lowering does
+not yet install `Rib.pending_outputs`; current uses are resolver tests, while
+existing template ports are bound directly as ExpandedLocal. Trait-source
+recollection needs the general deferred-export producer/publication path first.
+Clearing a pending flag in member discovery would not implement that path.
+
+The capability world now validates comptime-only interfaces' parent phases
+AFTER selecting the implementation relationship. This closes the concrete-use
+hole left by generic implementation admission: an ordinary `Given Parent`
+previously bypassed the declaration's parent phase check, and a later concrete
+query could select a runtime-only parent. Phase validation now resolves the
+instantiated parent interface and checks the selected relationship's comptime
+contribution. It never filters out a more specific runtime-only relationship to
+select a less specific comptime implementation. Recursive parent queries remain
+under the same active-goal guard and shared budget.
+
+A Given capability of a parent declared pure comptime trait does certify its
+phase, so it remains usable without a concrete parent implementation in the
+current world. A Given ordinary parent provides no such guarantee; absence of
+a concrete phase witness remains unresolved rather than silently sufficient.
+Generic declaration admission can still defer ordinary-parent phase evidence;
+this change enforces it when the relationship is concretely resolved, rather
+than adding a new source-language phase-bound syntax.
+
+Validation from `/home/fin/luna`, exit 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution -p luna --test capabilities --test trait_phases`:
+  46 capability and 65 phase/source tests passed;
+  `/tmp/luna-tools-b8n8iy_8/result.json`. New source cases reject a concrete
+  runtime-only parent, execute the comptime-parent counterpart and reject
+  fallback to a less specific parent implementation. A world-level test
+  distinguishes ordinary Given evidence from comptime-only Given evidence.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  `/tmp/luna-tools-_h3yfqel/result.json`; `git diff --check` passed.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes complete_shipped_sysroot_invokes_comptime_qualified_type_traits`:
+  real sysroot invocation passed; `/tmp/luna-tools-tatcql84/result.json`.

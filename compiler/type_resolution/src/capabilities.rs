@@ -614,13 +614,89 @@ impl Solver<'_, '_> {
         self.remaining = self
             .remaining
             .saturating_sub(before_search - search_budget.steps);
+        // Phase availability is checked after selecting the implementation
+        // relationship. Filtering candidates by phase could silently choose a
+        // less specific implementation instead of reporting a missing phase.
+        let result = (|| {
+            let types = types?;
+            if let Selection::Selected(selected) = types.selection {
+                self.check_comptime_parent_phases(interface, subject, selected, budget, depth)?;
+            }
+            Ok(Resolution {
+                scope: self.scope.clone(),
+                types,
+                qualifications,
+                condition_support,
+            })
+        })();
         self.active.remove(&key);
-        Ok(Resolution {
-            scope: self.scope.clone(),
-            types: types?,
-            qualifications,
-            condition_support,
-        })
+        result
+    }
+
+    fn check_comptime_parent_phases(
+        &mut self,
+        interface: &InterfaceInstance,
+        subject: &Term,
+        selected: Id,
+        budget: Budget,
+        depth: usize,
+    ) -> Result<(), String> {
+        let Some(contract) = self
+            .world
+            .traits
+            .iter()
+            .find(|t| t.declaration == interface.declaration && t.comptime_only)
+        else {
+            return Ok(());
+        };
+        if !self.world.implementations.iter().any(|implementation| {
+            implementation.declaration == selected && implementation.phases.comptime
+        }) {
+            return Err("comptime-only interface lacks comptime phase".into());
+        }
+        let arguments: Vec<_> = std::iter::once(subject.clone())
+            .chain(interface.arguments.iter().cloned())
+            .collect();
+        let substitution = contract
+            .input_substitution(&arguments, &[], &mut self.remaining)
+            .map_err(|error| error.to_string())?;
+        for parent in &contract.parents {
+            let parent = substitution
+                .instantiate_interface_bounded(parent, &mut self.remaining)
+                .map_err(|error| error.to_string())?;
+            // A comptime-only declaration makes the phase part of the given
+            // interface's contract. Ordinary interface evidence cannot do so.
+            if self
+                .world
+                .traits
+                .iter()
+                .any(|t| t.declaration == parent.declaration && t.comptime_only)
+                && self
+                    .given(
+                        &TraitRequirement {
+                            subject: subject.clone(),
+                            interface: parent.declaration,
+                            interface_arguments: parent.arguments.clone(),
+                        },
+                        budget,
+                    )
+                    .is_some()
+            {
+                continue;
+            }
+            // A bare ordinary Given capability says only that a relationship
+            // exists; check the phase of its eventual concrete selection.
+            let resolution = self.resolve(&parent, subject, budget, depth + 1)?;
+            let Selection::Selected(selected) = resolution.types.selection else {
+                return Err("parent interface comptime phase remains unresolved".into());
+            };
+            if !self.world.implementations.iter().any(|implementation| {
+                implementation.declaration == selected && implementation.phases.comptime
+            }) {
+                return Err("parent interface lacks comptime phase".into());
+            }
+        }
+        Ok(())
     }
     fn given(
         &mut self,
