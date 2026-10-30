@@ -231,3 +231,36 @@ fn structure_fields_resume_computations_with_prior_bindings() {
         }
     }
 }
+
+#[test]
+fn retained_type_patterns_resume_calls_in_dependent_parameter_domains() {
+    let package = support::compile(
+        "typealias Type=.Type'builtin;
+        pure comptime fn Payload<T,value:T>->Type {T}
+        comptime fn flip(value:bool)->bool {not value}
+        comptime fn normal(flag:bool)->bool {
+            Payload<bool,flag> match {
+                Payload<(Kind if Kind == bool),(x and flip(x) is y)> => y==not flag,
+                _=>false,
+            }
+        }
+        ",
+    );
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let mut tree = Interpreter::new(&package, Budget::default()).unwrap();
+    for flag in [true, false, true] {
+        for name in ["normal"] {
+            let id = support::id(&package, name);
+            let before = vm.bytecode_invocations();
+            assert_eq!(
+                vm.invoke(id, vec![Value::Bool(flag)]).unwrap(),
+                Value::Bool(true)
+            );
+            assert_eq!(
+                tree.invoke(id, vec![Value::Bool(flag)]).unwrap(),
+                Value::Bool(true)
+            );
+            assert_eq!(vm.bytecode_invocations() - before, 2, "{name}");
+        }
+    }
+}

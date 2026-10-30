@@ -269,16 +269,16 @@ fn staged_patterns_compile_or_fall_back_before_operand_effects() {
     use nir::program::{MatchArm, Pattern};
     let package = Package::default();
     let trace = LocalId { owner: 7, index: 0 };
-    for nested in [false, true] {
+    for case in 0..3 {
         let sequential = Pattern::Then {
             first: Box::new(Pattern::Wild),
             value: Box::new(boolean(false)),
             next: Box::new(Pattern::Wild),
         };
-        let pattern = if nested {
-            Pattern::TypeTuple(vec![sequential])
-        } else {
-            sequential
+        let pattern = match case {
+            0 => sequential,
+            1 => Pattern::TypeTuple(vec![sequential]),
+            _ => Pattern::CodeEvidence { outputs: vec![] },
         };
         let input = A::Value(expr(
             Primitive::Bool,
@@ -299,7 +299,7 @@ fn staged_patterns_compile_or_fall_back_before_operand_effects() {
                 result: Some(Box::new(expr(
                     Primitive::Bool,
                     K::Match {
-                        value: Box::new(if nested {
+                        value: Box::new(if case == 1 {
                             Expr {
                                 source: SOURCE,
                                 ty: Term::Primitive(Primitive::Type),
@@ -322,12 +322,23 @@ fn staged_patterns_compile_or_fall_back_before_operand_effects() {
         let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         let mut env = Environment::new();
         env.insert(trace, Value::Bool(false));
-        let result = vm.stage_normal_argument(&input, &mut env, 0).unwrap();
-        assert!(matches!(
-            result,
-            ControlFlow::Continue(StagedNormalInput::Value(Value::Bool(true)))
-        ));
+        let result = vm.stage_normal_argument(&input, &mut env, 0);
+        if case == 2 {
+            assert!(matches!(
+                result,
+                Err(Error {
+                    kind: ErrorKind::TypeContractUnresolved,
+                    ..
+                })
+            ));
+        } else {
+            let result = result.unwrap();
+            assert!(matches!(
+                result,
+                ControlFlow::Continue(StagedNormalInput::Value(Value::Bool(true)))
+            ));
+        }
         assert_eq!(env.get(&trace), Some(&Value::Bool(true)));
-        assert_eq!(vm.bytecode_staged_inputs(), usize::from(!nested));
+        assert_eq!(vm.bytecode_staged_inputs(), usize::from(case != 2));
     }
 }

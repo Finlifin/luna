@@ -302,7 +302,7 @@ fn match_dump_keeps_pattern_bindings_guards_and_exhaustion_explicit() {
 }
 
 #[test]
-fn deep_pattern_control_is_linear_while_owned_structures_keep_the_depth_bound() {
+fn deep_pattern_control_and_structures_lower_with_linear_work() {
     use nir::program::{MatchArm, Pattern};
     for kind in 0..3 {
         let mut pattern = Pattern::Wild;
@@ -322,22 +322,12 @@ fn deep_pattern_control_is_linear_while_owned_structures_keep_the_depth_bound() 
             }],
         });
         let result = compile(&body, &mut 10000);
-        if kind == 1 {
-            assert!(matches!(result, Err(Error::Unsupported(_))));
-        } else {
-            assert_eq!(
-                result
-                    .unwrap()
-                    .to_string()
-                    .matches(if kind == 0 {
-                        "(commit-scope)"
-                    } else {
-                        "(check-pattern-structure "
-                    })
-                    .count(),
-                200
-            );
-        }
+        let marker = match kind {
+            0 => "(commit-scope)",
+            1 => "(begin-type-pattern ",
+            _ => "(check-pattern-structure ",
+        };
+        assert_eq!(result.unwrap().to_string().matches(marker).count(), 200);
         assert!(matches!(compile(&body, &mut 5), Err(Error::Budget(_))));
     }
 }

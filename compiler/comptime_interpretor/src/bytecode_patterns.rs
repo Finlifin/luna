@@ -303,3 +303,117 @@ fn later_record_labels_are_checked_only_after_earlier_patterns_succeed() {
         }
     }
 }
+
+#[test]
+fn type_fields_stop_after_failure_and_unwind_before_recovery() {
+    let package = Package::default();
+    for compiled in [false, true] {
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let mut env = Environment::from([(X, Value::Bool(false)), (TRACE, Value::Bool(false))]);
+        for reject_first in [false, true, false] {
+            let body = expr(K::Match {
+                value: Box::new(Expr {
+                    source: SOURCE,
+                    ty: Term::Primitive(Primitive::Type),
+                    kind: K::TypeValue(Term::Tuple(vec![
+                        Term::Primitive(Primitive::Bool),
+                        Term::Primitive(Primitive::Bool),
+                    ])),
+                }),
+                arms: vec![
+                    MatchArm {
+                        pattern: P::TypeTuple(vec![
+                            P::Then {
+                                first: Box::new(binding(X)),
+                                value: Box::new(effect()),
+                                next: Box::new(P::Literal(Literal::Bool(reject_first))),
+                            },
+                            P::Then {
+                                first: Box::new(P::Wild),
+                                value: Box::new(expr(K::Return(Some(Box::new(boolean(true)))))),
+                                next: Box::new(P::Wild),
+                            },
+                        ]),
+                        guard: None,
+                        body: boolean(false),
+                    },
+                    MatchArm {
+                        pattern: P::Wild,
+                        guard: None,
+                        body: boolean(false),
+                    },
+                ],
+            });
+            let result = execute(&mut vm, &body, &mut env, compiled).unwrap_or_else(|e| {
+                panic!("compiled={compiled} reject_first={reject_first}: {e:?}")
+            });
+            if reject_first {
+                assert!(matches!(result, Flow::Value(Value::Bool(false))));
+            } else {
+                assert!(matches!(result, Flow::Return(Value::Bool(true))));
+            }
+            assert_eq!(
+                vm.local_value(&env, X, Some(SOURCE)).unwrap(),
+                Value::Bool(false)
+            );
+            assert_eq!(
+                vm.local_value(&env, TRACE, Some(SOURCE)).unwrap(),
+                Value::Bool(true)
+            );
+        }
+    }
+}
+
+#[test]
+fn nominal_type_fields_convert_against_the_completed_telescope() {
+    let id = |local| DeclarationId { package: 1, local };
+    let mut package = Package::default();
+    package.structs.push(nir::program::Struct {
+        declaration: id(1),
+        name: "Dependent".into(),
+        parameter_types: vec![
+            Term::Primitive(Primitive::Type),
+            Term::Rigid {
+                declaration: id(2),
+                sort: nir::Sort::Type,
+            },
+        ],
+        type_parameters: vec![id(2), id(3)],
+        capabilities: vec![],
+        requirements: vec![],
+        fields: vec![],
+    });
+    for compiled in [false, true] {
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        for flag in [false, true] {
+            let body = expr(K::Match {
+                value: Box::new(Expr {
+                    source: SOURCE,
+                    ty: Term::Primitive(Primitive::Type),
+                    kind: K::TypeValue(Term::Nominal {
+                        declaration: id(1),
+                        arguments: vec![Term::Primitive(Primitive::Bool), Term::Bool(flag)],
+                    }),
+                }),
+                arms: vec![MatchArm {
+                    pattern: P::NominalType {
+                        declaration: id(1),
+                        fields: vec![
+                            P::Wild,
+                            P::Then {
+                                first: Box::new(binding(X)),
+                                value: Box::new(expr(K::Not(Box::new(expr(K::Local(X)))))),
+                                next: Box::new(binding(Y)),
+                            },
+                        ],
+                    },
+                    guard: None,
+                    body: expr(K::Local(Y)),
+                }],
+            });
+            assert!(
+                matches!(execute(&mut vm, &body, &mut Environment::new(), compiled).unwrap(), Flow::Value(Value::Bool(value)) if value == !flag)
+            );
+        }
+    }
+}

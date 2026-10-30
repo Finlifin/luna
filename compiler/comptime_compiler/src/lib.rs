@@ -40,6 +40,21 @@ impl fmt::Display for ErrorConversion {
 
 #[derive(Debug)]
 pub enum Op {
+    BeginTypePattern {
+        identity: Register,
+        destination: Register,
+        value: Register,
+        shape: nir::pattern_structure::TypeStructure,
+    },
+    TypePatternField {
+        identity: Register,
+        destination: Option<Register>,
+        value: Register,
+        index: usize,
+    },
+    FinishTypePattern {
+        identity: Register,
+    },
     CheckPatternStructure {
         destination: Register,
         value: Register,
@@ -475,6 +490,30 @@ impl fmt::Display for Program {
                 instruction.source.start, instruction.source.end
             )?;
             match &instruction.op {
+                Op::BeginTypePattern {
+                    identity,
+                    destination,
+                    value,
+                    shape,
+                } => write!(
+                    f,
+                    "(begin-type-pattern %{identity} (matched %{destination}) (value %{value}) {shape})"
+                )?,
+                Op::TypePatternField {
+                    identity,
+                    destination,
+                    value,
+                    index,
+                } => {
+                    write!(f, "(type-pattern-field %{identity} (destination")?;
+                    if let Some(destination) = destination {
+                        write!(f, " %{destination}")?;
+                    }
+                    write!(f, ") (value %{value}) (index {index}))")?;
+                }
+                Op::FinishTypePattern { identity } => {
+                    write!(f, "(finish-type-pattern %{identity})")?
+                }
                 Op::CheckPatternStructure {
                     destination,
                     value,

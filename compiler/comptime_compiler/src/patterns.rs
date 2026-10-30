@@ -5,7 +5,7 @@ use nir::program::Pattern as P;
 use std::collections::BTreeSet;
 
 /// Flatten sequential pattern computation onto the ordinary expression worklist.
-/// Value structures expose one field at a time. A failure jumps to the candidate's
+/// Value and Type structures expose one field at a time. A failure jumps to the candidate's
 /// existing scope rollback before any later field observation or computation.
 pub(super) fn lower<'a>(
     pattern: &'a P,
@@ -70,6 +70,57 @@ pub(super) fn lower<'a>(
                 code.push(Work::Emit(
                     source,
                     Op::CheckPatternStructure {
+                        destination: condition,
+                        value: *input,
+                        shape,
+                    },
+                ));
+                code.push(Work::Emit(
+                    source,
+                    Op::Branch {
+                        condition,
+                        when: false,
+                        target: *failed,
+                    },
+                ));
+                continue;
+            }
+        }
+        if let Task::Pattern(pattern, input, failed) = &task {
+            if let Some((shape, fields)) =
+                nir::pattern_structure::TypeStructure::from_pattern(pattern)
+            {
+                *fuel = fuel
+                    .checked_sub(fields.len().saturating_add(1))
+                    .ok_or(Error::Budget(source))?;
+                let identity = fresh();
+                pending.push(Task::Code(Work::Emit(
+                    source,
+                    Op::FinishTypePattern { identity },
+                )));
+                for (index, field) in fields.iter().enumerate().rev() {
+                    let destination = if matches!(field, P::Wild) {
+                        None
+                    } else {
+                        Some(fresh())
+                    };
+                    if let Some(destination) = destination {
+                        pending.push(Task::Pattern(field, destination, *failed));
+                    }
+                    pending.push(Task::Code(Work::Emit(
+                        source,
+                        Op::TypePatternField {
+                            identity,
+                            destination,
+                            value: *input,
+                            index,
+                        },
+                    )));
+                }
+                code.push(Work::Emit(
+                    source,
+                    Op::BeginTypePattern {
+                        identity,
                         destination: condition,
                         value: *input,
                         shape,

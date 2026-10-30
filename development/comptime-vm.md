@@ -4534,3 +4534,48 @@ Validation in /home/fin/luna:
   cross-field bindings, all supported value shapes and compiled entry counts.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
   exit 0, `/tmp/luna-tools-0flzwp6v/result.json`; `git diff --check`: exit 0.
+
+### Compile computations inside Type patterns
+
+TypeTuple, nominal Type and retained normal-form patterns now lower to explicit
+admission, ordered field conversion and completion instructions. Child patterns
+use the ordinary expression worklist, so calls, alternatives and early returns
+inside a Type pattern no longer force whole-body tree fallback. The two engines
+share admission and conversion routines. Nominal domains use the completed
+parameter telescope; NF domains use the preceding input prefix, preserving head
+identity without inspecting the head's body. Prefix arguments are borrowed,
+not cloned into a growing temporary vector. Domain substitution is budgeted.
+
+Active conversion state belongs to the invocation frame and candidate scope.
+Rollback removes that state and restores bindings; already executed assignments
+remain visible. Completion releases conversion state, and code caches retain
+neither subjects nor environments. State and instructions have S-expression
+Display implementations. Wildcards retain each existing domain-validation rule.
+Generated struct/enum metadata uses its shared owner while a domain is converted,
+so runtime-generated definitions do not require a borrowed package lifetime.
+
+CodeEvidence is still definition-only and cannot execute. Its fallback regression
+checks that the earlier operand effect occurs exactly once before rejection.
+Deep TypeTuple lowering now uses the metered worklist instead of owned recursive
+pattern copying. This extends the existing checked Type views; it does not add
+library-name matching or change Tuple/NF identity. No benchmark speedup is claimed.
+
+Source coverage uses a stable Type equality guard before a dependent NF value
+pattern. An unconstrained Type binder alone does not establish that domain in the
+current elaborator; contextual pattern elaboration remains a separate gap. The
+nominal Type decomposition is internal NIR and is tested there, not by inventing
+nominal source pattern syntax. The source test compares tree and VM results and
+requires both the containing function and nested call to execute as bytecode.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-_qalynql/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib bytecode::pattern_tests`:
+  exit 0, `/tmp/luna-tools-ygqz1haj/result.json`; includes dependent nominal
+  domains and TypeTuple failure/early-return recovery in tree and VM.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_patterns --test normal_patterns --test comptime_bytecode_types --test negated_nominal_patterns --test library_comptime_comparison`:
+  exit 0, `/tmp/luna-tools-7q880ugo/result.json`. Initial source fixtures exposed
+  the contextual-domain limitation and incorrectly used NF syntax for a nominal
+  head; corrected coverage uses supported source evidence plus direct NIR tests.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-c5tvyian/result.json`; `git diff --check`: exit 0.

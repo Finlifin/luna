@@ -23,6 +23,7 @@ pub(super) struct Frame {
     slots: Vec<Option<Value>>,
     scopes: Vec<PatternScope>,
     pattern_inputs: BTreeMap<usize, (usize, usize)>,
+    type_patterns: BTreeMap<usize, super::type_patterns::TypePattern>,
 }
 
 #[derive(Default)]
@@ -30,6 +31,7 @@ struct PatternScope {
     locals: Vec<usize>,
     previous: BTreeMap<usize, Option<Value>>,
     exports: BTreeSet<usize>,
+    type_patterns: Vec<usize>,
 }
 
 impl Frame {
@@ -61,6 +63,9 @@ impl Frame {
             kind: ErrorKind::InvalidControlFlow,
             source: None,
         })?;
+        for identity in scope.type_patterns {
+            self.type_patterns.remove(&identity);
+        }
         for slot in scope.locals {
             self.slots[slot] = None;
         }
@@ -77,6 +82,7 @@ impl Frame {
         })?;
         if let Some(parent) = self.scopes.last_mut() {
             parent.locals.extend(scope.locals);
+            parent.type_patterns.extend(scope.type_patterns);
             for (slot, previous) in scope.previous {
                 parent.previous.entry(slot).or_insert(previous);
                 if scope.exports.contains(&slot) {
@@ -172,6 +178,10 @@ impl fmt::Display for Frame {
         for (slot, (base, index)) in &self.pattern_inputs {
             write!(f, " (%{slot} (base %{base}) (field {index}))")?;
         }
+        write!(f, ") (type-patterns")?;
+        for (identity, state) in &self.type_patterns {
+            write!(f, " (%{identity} {state})")?;
+        }
         write!(f, ") (scopes")?;
         for scope in &self.scopes {
             write!(f, " (scope")?;
@@ -189,6 +199,10 @@ impl fmt::Display for Frame {
             write!(f, ") (exports")?;
             for slot in &scope.exports {
                 write!(f, " %{slot}")?;
+            }
+            write!(f, ") (type-patterns")?;
+            for identity in &scope.type_patterns {
+                write!(f, " %{identity}")?;
             }
             write!(f, "))")?;
         }
@@ -918,6 +932,7 @@ impl<'a> Interpreter<'a> {
             pc: 0,
             scopes: Vec::new(),
             pattern_inputs: BTreeMap::new(),
+            type_patterns: BTreeMap::new(),
             slots: (0..code.registers()).map(|_| None).collect(),
         };
         for &(binding, slot) in code.locals() {
@@ -1749,6 +1764,45 @@ impl<'a> Interpreter<'a> {
                     frame.slots[*destination] = Some(Value::Tuple(values));
                 }
 
+                Op::BeginTypePattern {
+                    identity,
+                    destination,
+                    value,
+                    shape,
+                } => {
+                    let input = self.bytecode_pattern_input(frame, *value, source)?;
+                    let state = self.prepare_type_pattern(*shape, input)?;
+                    let matched = state.is_some();
+                    frame.type_patterns.remove(identity);
+                    if let Some(state) = state {
+                        frame
+                            .scopes
+                            .last_mut()
+                            .ok_or_else(missing)?
+                            .type_patterns
+                            .push(*identity);
+                        frame.type_patterns.insert(*identity, state);
+                    }
+                    frame.slots[*destination] = Some(Value::Bool(matched));
+                }
+                Op::TypePatternField {
+                    identity,
+                    destination,
+                    value,
+                    index,
+                } => {
+                    let mut state = frame.type_patterns.remove(identity).ok_or_else(missing)?;
+                    let input = self.bytecode_pattern_input(frame, *value, source)?;
+                    let value =
+                        self.type_pattern_field(&mut state, input, *index, destination.is_none())?;
+                    frame.type_patterns.insert(*identity, state);
+                    if let Some(destination) = destination {
+                        frame.slots[*destination] = Some(value.ok_or_else(missing)?);
+                    }
+                }
+                Op::FinishTypePattern { identity } => {
+                    frame.type_patterns.remove(identity).ok_or_else(missing)?;
+                }
                 Op::CheckPatternStructure {
                     destination,
                     value,

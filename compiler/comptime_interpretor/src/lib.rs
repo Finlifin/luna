@@ -6335,6 +6335,7 @@ mod pattern_journal;
 #[cfg(test)]
 mod pattern_remap_tests;
 mod pattern_structure;
+mod type_patterns;
 use pattern_journal::{PatternBindings, PatternJournal};
 
 impl Interpreter<'_> {
@@ -6415,6 +6416,10 @@ impl Interpreter<'_> {
         if let Some((shape, fields)) = nir::pattern_structure::View::from_pattern(pattern) {
             return self.match_value_structure(shape, fields, input, environment, undo);
         }
+        if let Some((shape, fields)) = nir::pattern_structure::TypeStructure::from_pattern(pattern)
+        {
+            return self.match_type_structure(shape, fields, input, environment, undo);
+        }
         let matched = match pattern {
             Pattern::CodeEvidence { .. } => {
                 return Err(self.failure(ErrorKind::TypeContractUnresolved, None));
@@ -6441,16 +6446,10 @@ impl Interpreter<'_> {
             }
             Pattern::Remap { .. } => return self.match_remap(pattern, input, environment, undo),
             Pattern::Or(..) => return self.match_or(pattern, input, environment, undo),
-            Pattern::NominalType { .. } => {
-                return self.match_nominal_type(pattern, input, environment, undo);
-            }
-            Pattern::NormalForm { .. } => {
-                return self.match_normal_form(pattern, input, environment, undo);
-            }
-            Pattern::TypeTuple(..) => {
-                return self.match_type_tuple(pattern, input, environment, undo);
-            }
-            Pattern::OptionalPresent(_)
+            Pattern::TypeTuple(_)
+            | Pattern::NominalType { .. }
+            | Pattern::NormalForm { .. }
+            | Pattern::OptionalPresent(_)
             | Pattern::ErrorResult { .. }
             | Pattern::AnonymousRecord { .. }
             | Pattern::Tuple(_)
@@ -6744,159 +6743,6 @@ impl Interpreter<'_> {
         Ok(Flow::Value(Value::Bool(matched)))
     }
 
-    fn match_nominal_type(
-        &mut self,
-        pattern: &nir::program::Pattern,
-        input: &Value,
-        environment: &mut Environment,
-        undo: &mut PatternJournal,
-    ) -> Result<Flow, Error> {
-        let nir::program::Pattern::NominalType {
-            declaration,
-            fields,
-        } = pattern
-        else {
-            unreachable!()
-        };
-        let Value::Type(Term::Nominal {
-            declaration: actual,
-            arguments,
-        }) = input
-        else {
-            return Ok(Flow::Value(Value::Bool(false)));
-        };
-        if actual != declaration {
-            return Ok(Flow::Value(Value::Bool(false)));
-        }
-        let struct_definition = self.structs.get(declaration).cloned();
-        let enum_definition = self.enums.get(declaration).cloned();
-        let (binders, domains) = if let Some(def) = struct_definition.as_ref() {
-            (def.parameter_binders(), &def.parameter_types)
-        } else if let Some(def) = enum_definition.as_ref() {
-            (def.parameter_binders(), &def.parameter_types)
-        } else if let Some(def) = self.newtypes.get(declaration).copied() {
-            (def.parameter_binders(), &def.parameter_types)
-        } else {
-            return Err(self.failure(ErrorKind::Type, None));
-        };
-        let binders = binders.map_err(|_| self.failure(ErrorKind::Type, None))?;
-        if fields.len() != arguments.len() || binders.len() != arguments.len() {
-            return Err(self.failure(ErrorKind::Type, None));
-        }
-        // Domain substitution is based on the completed telescope, including captures.
-        for (index, (pattern, argument)) in fields.iter().zip(arguments).enumerate() {
-            self.tick(None)?;
-            let domain = domains
-                .get(index)
-                .unwrap_or(&Term::Primitive(Primitive::Type));
-            let before = self.budget.steps as usize;
-            let mut remaining = before;
-            let domain = nir::type_computations::instantiate_parameters_bounded(
-                domain,
-                &binders,
-                arguments,
-                &[],
-                &mut remaining,
-            );
-            self.budget.steps -= (before - remaining) as u64;
-            let domain = domain.map_err(|e| {
-                self.failure(
-                    if matches!(e, nir::type_computations::Error::Budget) {
-                        ErrorKind::StepsExhausted
-                    } else {
-                        ErrorKind::Type
-                    },
-                    None,
-                )
-            })?;
-            let value = self.normal_pattern_value(argument, &domain)?;
-            if !matches!(
-                value!(self.match_pattern_field(pattern, &value, environment, undo, None)),
-                Value::Bool(true)
-            ) {
-                return Ok(Flow::Value(Value::Bool(false)));
-            }
-        }
-        Ok(Flow::Value(Value::Bool(true)))
-    }
-
-    #[inline(never)]
-    fn match_normal_form(
-        &mut self,
-        pattern: &nir::program::Pattern,
-        input: &Value,
-        environment: &mut Environment,
-        undo: &mut PatternJournal,
-    ) -> Result<Flow, Error> {
-        let nir::program::Pattern::NormalForm {
-            head,
-            arguments: patterns,
-        } = pattern
-        else {
-            unreachable!()
-        };
-        let metadata = self
-            .normal_forms
-            .get(head)
-            .copied()
-            .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-        if patterns.len() != metadata.parameters.len() {
-            return Err(self.failure(ErrorKind::Type, None));
-        }
-        let Value::Type(input) = input else {
-            return Err(self.failure(ErrorKind::Type, None));
-        };
-        let Term::NormalForm {
-            head: actual,
-            arguments,
-            ..
-        } = input
-        else {
-            return Ok(Flow::Value(Value::Bool(false)));
-        };
-        // This compares retained declaration provenance, not result-type equality.
-        if actual != head {
-            return Ok(Flow::Value(Value::Bool(false)));
-        }
-        if arguments.len() != patterns.len() {
-            return Err(self.failure(ErrorKind::Type, None));
-        }
-        let work = self
-            .type_description_work(input)
-            .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-        self.integer_operation(None, |budget| budget.consume(work))?;
-        let mut type_parameters = Vec::new();
-        let mut type_arguments = Vec::new();
-        for ((pattern, argument), parameter) in
-            patterns.iter().zip(arguments).zip(&metadata.parameters)
-        {
-            let ty = parameter
-                .ty
-                .instantiate_parameters(&type_parameters, &type_arguments)
-                .map_err(|_| self.failure(ErrorKind::Type, None))?;
-            type_parameters.push(nir::DeclarationParameter {
-                declaration: parameter.declaration,
-                sort: if parameter.kind == nir::normal_forms::Kind::Type {
-                    nir::Sort::Type
-                } else {
-                    nir::Sort::ComptimeValue
-                },
-            });
-            type_arguments.push(argument.clone());
-            if matches!(pattern, nir::program::Pattern::Wild) {
-                continue;
-            }
-            let value = self.normal_pattern_value(argument, &ty)?;
-            if !matches!(
-                value!(self.match_pattern_field(pattern, &value, environment, undo, None)),
-                Value::Bool(true)
-            ) {
-                return Ok(Flow::Value(Value::Bool(false)));
-            }
-        }
-        Ok(Flow::Value(Value::Bool(true)))
-    }
-
     /// Invoke with an already evaluated value graph. Check every advertised
     /// domain before executing code, without reconstructing closure storage.
     pub fn invoke_with_typed_values(
@@ -7002,67 +6848,6 @@ impl Interpreter<'_> {
                 .and_then(|metadata| metadata.tuple_elements(ty)),
             _ => None,
         }
-    }
-
-    #[inline(never)]
-    fn match_type_tuple(
-        &mut self,
-        pattern: &nir::program::Pattern,
-        input: &Value,
-        environment: &mut Environment,
-        undo: &mut PatternJournal,
-    ) -> Result<Flow, Error> {
-        let nir::program::Pattern::TypeTuple(fields) = pattern else {
-            unreachable!()
-        };
-        let Value::Type(ty) = input else {
-            return Err(self.failure(ErrorKind::Type, None));
-        };
-        let types = match ty {
-            Term::Tuple(types) => types,
-            Term::NormalForm { head, .. } => {
-                let Some(types) = self
-                    .normal_forms
-                    .get(head)
-                    .and_then(|metadata| metadata.tuple_elements(ty))
-                else {
-                    return Err(self.failure(ErrorKind::TypeContractUnresolved, None));
-                };
-                types
-            }
-            Term::Primitive(Primitive::Unit) => {
-                return Err(self.failure(ErrorKind::TypeContractUnresolved, None));
-            }
-            Term::Primitive(_)
-            | Term::Pointer(_)
-            | Term::Function { .. }
-            | Term::ComptimeFunction(_) => return Ok(Flow::Value(Value::Bool(false))),
-            // Missing shape information is not negative classification evidence.
-            // In particular a normal-form body is never inspected here.
-            _ => return Err(self.failure(ErrorKind::TypeContractUnresolved, None)),
-        };
-        if fields.len() != types.len() {
-            return Ok(Flow::Value(Value::Bool(false)));
-        }
-        for (field, ty) in fields.iter().zip(types) {
-            let work = self
-                .type_description_work(ty)
-                .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-            self.integer_operation(None, |budget| budget.consume(work))?;
-            if !matches!(
-                value!(self.match_pattern_field(
-                    field,
-                    &Value::Type(ty.clone()),
-                    environment,
-                    undo,
-                    None
-                )),
-                Value::Bool(true)
-            ) {
-                return Ok(Flow::Value(Value::Bool(false)));
-            }
-        }
-        Ok(Flow::Value(Value::Bool(true)))
     }
 }
 

@@ -173,3 +173,73 @@ impl<T: fmt::Display, N: AsRef<[String]>> fmt::Display for Structure<T, N> {
         }
     }
 }
+
+/// A retained Type head and its input count; this never unfolds a definition.
+#[derive(Clone, Copy, Debug)]
+pub enum TypeStructure {
+    Tuple {
+        fields: usize,
+    },
+    Nominal {
+        declaration: DeclarationId,
+        fields: usize,
+    },
+    Normal {
+        head: DeclarationId,
+        fields: usize,
+    },
+}
+impl TypeStructure {
+    pub fn from_pattern(pattern: &Pattern) -> Option<(Self, &[Pattern])> {
+        Some(match pattern {
+            Pattern::TypeTuple(fields) => (
+                Self::Tuple {
+                    fields: fields.len(),
+                },
+                fields,
+            ),
+            Pattern::NominalType {
+                declaration,
+                fields,
+            } => (
+                Self::Nominal {
+                    declaration: *declaration,
+                    fields: fields.len(),
+                },
+                fields,
+            ),
+            Pattern::NormalForm { head, arguments } => (
+                Self::Normal {
+                    head: *head,
+                    fields: arguments.len(),
+                },
+                arguments,
+            ),
+            _ => return None,
+        })
+    }
+    pub fn fields(self) -> usize {
+        match self {
+            Self::Tuple { fields } | Self::Nominal { fields, .. } | Self::Normal { fields, .. } => {
+                fields
+            }
+        }
+    }
+}
+impl fmt::Display for TypeStructure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Tuple { fields } => write!(f, "(type-tuple-pattern-shape (fields {fields}))"),
+            Self::Nominal {
+                declaration,
+                fields,
+            } => write!(
+                f,
+                "(nominal-type-pattern-shape {declaration} (fields {fields}))"
+            ),
+            Self::Normal { head, fields } => {
+                write!(f, "(normal-pattern-shape {head} (fields {fields}))")
+            }
+        }
+    }
+}
