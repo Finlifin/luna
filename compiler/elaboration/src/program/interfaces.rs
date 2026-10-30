@@ -2004,13 +2004,18 @@ impl Checker<'_, '_> {
             return Ok(());
         };
         let mut frames = self.call_input_frames();
-        let specialized = signature
-            .instantiate_parameters_in_scope(
-                &self.declaration_binders(owner),
-                type_arguments,
-                &frames,
-            )
-            .map_err(|e| error(span, e.to_string()))?;
+        let parameters = self
+            .declaration_binders(owner)
+            .iter()
+            .map(|parameter| parameter.declaration)
+            .collect::<Vec<_>>();
+        let specialized = self.instantiate_input_types_in_scope(
+            signature,
+            &parameters,
+            type_arguments,
+            &frames,
+            span,
+        )?;
         let Term::Function {
             parameters: specialized_parameters,
             ..
@@ -2020,15 +2025,17 @@ impl Checker<'_, '_> {
         };
         let binding = self.prepare_call_binding(specialized_parameters, inputs, span)?;
         frames.push(ordinary.iter().map(|p| p.sort).collect());
-        let parameters = self.declaration_binders(owner);
         let arguments = type_arguments
             .iter()
             .map(|ty| ty.abstract_parameters(&[]))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| error(span, e.to_string()))?;
+        let substitution = self
+            .input_substitution(&parameters, &arguments, &frames)
+            .map_err(|e| error(span, e.to_string()))?;
         for requirement in requirements {
-            let requirement = requirement
-                .instantiate_parameters_in_scope(&parameters, &arguments, &frames)
+            let requirement = substitution
+                .instantiate_requirement_bounded(requirement, &mut 100_000)
                 .map_err(|e| error(span, e.to_string()))?;
             let requirement = n::TraitRequirement {
                 interface: requirement.interface,

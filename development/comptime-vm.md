@@ -3612,3 +3612,26 @@ Validation in /home/fin/luna:
 
 The remaining contextual-code and ordinary-argument requirement substitution
 paths still require their own audit; this is not a blanket completion claim.
+
+### Ordinary argument requirements retain declaration domains
+
+Ordinary-input type requirements and capability checks now specialize the callee
+signature and obligations through declaration input domains. The ordinary frame
+and the existing shift of caller arguments remain explicit before substituting
+ordinary argument bindings. A Type-valued declaration index therefore no longer
+causes unrelated ordinary Type requirements to fail with a source-sort mismatch.
+
+Regressions cover equality and trait requirements, generic forwarding, and a
+caller ordinary Type binding used both as a declaration index and as an ordinary
+argument (`keep<Type,U>(U,value)`). False equality inputs and missing trait
+implementations remain rejected. Both initial positive cases failed in
+`/tmp/luna-tools-39dcdee4/result.json`; the final forwarding coverage passes.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test instantiation --test trait_phases --test trait_purity --test sysroot_preludes`:
+  exit 0, `/tmp/luna-tools-k_z7bzps/result.json`, no exclusions.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-2wleg9h7/result.json`; `git diff --check`: exit 0.
+
+Contextual-code method contracts and other unreviewed substitution consumers
+remain outside this stage's completion claim.

@@ -6420,3 +6420,50 @@ fn type_valued_indices_preserve_declared_parent_associated_domains() {
         assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
     }
 }
+
+#[test]
+fn dependent_type_indices_preserve_ordinary_type_requirements() {
+    let source = "typealias Type=.Type'builtin;
+        fn keep(comptime U:Type,value:U)->U where T,index:T, requires U == bool {value}
+        fn run()->bool {keep<Type,bool>(bool,true)}";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    let invalid = source.replace("(bool,true)", "('x''type,'x')");
+    assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+}
+
+#[test]
+fn dependent_type_indices_preserve_ordinary_capabilities() {
+    let source = "typealias Type=.Type'builtin;
+        trait Allowed {} impl Allowed for bool {}
+        fn keep(comptime U:Type,value:U)->U where T,index:T, requires U :- Allowed {value}
+        fn run()->bool {keep<Type,bool>(bool,true)}";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    let invalid = source.replace("impl Allowed for bool {}", "");
+    assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+}
+
+#[test]
+fn dependent_type_indices_forward_ordinary_constraints_without_capture() {
+    for requirement in ["U == bool", "U :- Allowed"] {
+        let source = format!(
+            "typealias Type=.Type'builtin;
+            trait Allowed {{}} impl Allowed for bool {{}}
+            fn keep(comptime U:Type,value:U)->U
+            where T,index:T, requires {requirement}
+            {{value}}
+            fn forward(comptime U:Type,value:U)->U
+            where T,index:T, requires {requirement}
+            {{keep<T,index>(U,value)}}
+            fn run()->bool {{forward<Type,bool>(bool,true)}}"
+        );
+        assert_eq!(support::run_iir(&source, "run", vec![]), Value::Bool(true));
+        let scoped = source.replace("{keep<T,index>(U,value)}", "{keep<Type,U>(U,value)}");
+        assert_ne!(scoped, source);
+        assert_eq!(support::run_iir(&scoped, "run", vec![]), Value::Bool(true));
+        let invalid = source.replace(
+            "forward<Type,bool>(bool,true)",
+            "forward<Type,bool>('x''type,'x')",
+        );
+        assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+    }
+}

@@ -932,10 +932,18 @@ impl Checker<'_, '_> {
             .or_else(|| self.interface_signatures.get(&owner))
             .ok_or_else(|| error(span, "ordinary type requirement needs a function signature"))?;
         let mut frames = self.call_input_frames();
-        let declarations = self.declaration_binders(owner);
-        let signature = signature
-            .instantiate_parameters_in_scope(&declarations, arguments, &frames)
-            .map_err(|e| error(span, e.to_string()))?;
+        let declarations = self
+            .declaration_binders(owner)
+            .iter()
+            .map(|parameter| parameter.declaration)
+            .collect::<Vec<_>>();
+        let signature = self.instantiate_input_types_in_scope(
+            signature,
+            &declarations,
+            arguments,
+            &frames,
+            span,
+        )?;
         let Term::Function { parameters, .. } = signature.callable_signature() else {
             return Err(error(span, "expected a function signature"));
         };
@@ -947,9 +955,12 @@ impl Checker<'_, '_> {
             .map(|ty| ty.abstract_parameters(&[]))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| error(span, e.to_string()))?;
+        let substitution = self
+            .input_substitution(&declarations, &arguments, &frames)
+            .map_err(|e| error(span, e.to_string()))?;
         for requirement in requirements {
-            let requirement = requirement
-                .instantiate_parameters_in_scope(&declarations, &arguments, &frames)
+            let requirement = substitution
+                .instantiate_predicate(requirement)
                 .map_err(|e| error(span, e.to_string()))?;
             let requirement = required::map_requirement(
                 &requirement,
