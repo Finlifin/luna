@@ -627,41 +627,51 @@ fn append_fusion_requires_an_inert_suffix_and_matching_local() {
         sort: nir::Sort::Type,
         arguments: vec![Term::Primitive(Primitive::Bool)],
     };
-    for computed in [false, true] {
-        let mut suffix = Expr {
-            ty: ty.clone(),
-            ..expr(K::TypeList(vec![]))
-        };
-        if computed {
-            suffix = Expr {
+    for frozen in 0..3 {
+        for computed in [false, true] {
+            let mut suffix = Expr {
                 ty: ty.clone(),
-                ..expr(K::Block {
-                    statements: vec![],
-                    result: Some(Box::new(suffix)),
+                ..expr(if frozen == 1 {
+                    K::ComptimeValue(Term::NominalValue {
+                        ty: Box::new(ty.clone()),
+                        variant: None,
+                        fields: vec![],
+                    })
+                } else {
+                    K::TypeList(vec![])
                 })
             };
+            if computed {
+                suffix = Expr {
+                    ty: ty.clone(),
+                    ..expr(K::Block {
+                        statements: vec![],
+                        result: Some(Box::new(suffix)),
+                    })
+                };
+            }
+            let body = expr(K::Assign {
+                place: nir::program::Place {
+                    root: binding,
+                    fields: vec![],
+                },
+                value: Box::new(Expr {
+                    ty: ty.clone(),
+                    ..expr(K::ListConcat(
+                        Box::new(Expr {
+                            ty: ty.clone(),
+                            ..expr(K::Local(binding))
+                        }),
+                        Box::new(suffix),
+                    ))
+                }),
+            });
+            let code = compile(&body, &mut 1000).unwrap();
+            let dump = code.to_string();
+            assert_eq!(dump.contains("(list-append "), !computed, "{dump}");
+            assert_eq!(dump, compile(&body, &mut 1000).unwrap().to_string());
+            assert!(matches!(compile(&body, &mut 1), Err(Error::Budget(_))));
         }
-        let body = expr(K::Assign {
-            place: nir::program::Place {
-                root: binding,
-                fields: vec![],
-            },
-            value: Box::new(Expr {
-                ty: ty.clone(),
-                ..expr(K::ListConcat(
-                    Box::new(Expr {
-                        ty: ty.clone(),
-                        ..expr(K::Local(binding))
-                    }),
-                    Box::new(suffix),
-                ))
-            }),
-        });
-        let code = compile(&body, &mut 1000).unwrap();
-        let dump = code.to_string();
-        assert_eq!(dump.contains("(list-append "), !computed, "{dump}");
-        assert_eq!(dump, compile(&body, &mut 1000).unwrap().to_string());
-        assert!(matches!(compile(&body, &mut 1), Err(Error::Budget(_))));
     }
 }
 

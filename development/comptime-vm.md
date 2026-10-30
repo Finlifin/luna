@@ -7501,3 +7501,47 @@ No full language suite or native rebuild was run for this static staging change.
 Formatting: `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`
 exited 0; `/tmp/luna-tools-z7hhxz9_/result.json`. `git diff --check` passed.
 The final IIR/materialization run contains 117 passing tests.
+
+### Frozen suffixes participate in list append fusion
+
+Reference and bytecode execution now classify ComptimeValue suffixes (and
+frozen fields in literal list constructors) as inert reads. The existing
+append path still validates destination and suffix domains before mutation;
+this classification is not value admission. Blocks/callbacks keep ordinary
+snapshot evaluation, including blocks whose final value happens to be frozen.
+
+The paired interpreter/bytecode regression covers Bool and Type elements,
+local and frozen suffixes, owned buffers, projected value references and root
+storage. An owned list with spare capacity must retain its allocation. The
+complete-expression budget sweep checks malformed suffix rejection, atomic
+old-or-complete contents and same-VM recovery. Existing operation-level tests
+continue to require rollback when append itself fails. Invocation failure is
+not a transaction: bytecode may exhaust its budget after an append commits,
+while emitting its Unit result; the test explicitly preserves this distinction.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --test type_list_inputs`:
+  27 passed, exit 0; `/tmp/luna-tools-0_kwixqf/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_lists --test type_lists --no-fail-fast`:
+  32 passed, exit 0; `/tmp/luna-tools-vzwy2wgd/result.json`.
+
+An initial VM filter named bytecode_lists selected zero tests; it is not
+validation evidence. An attempted source target library_meta did not exist
+and was replaced with the actual type_lists target. The first complete budget
+sweep incorrectly assumed invocation-wide rollback; inspection of the trailing
+Unit instruction corrected that expectation without changing execution semantics.
+
+Final targeted runs:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib bytecode::list_tests`:
+  eight passed, exit 0; `/tmp/luna-tools-txuu6jx8/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler --test control`:
+  23 passed, exit 0; `/tmp/luna-tools-m539h2vz/result.json`.
+
+No full language suite was run. This restores allocation reuse for the new
+carrier; it does not claim linear-time append validation or measured wall-time
+speedup. Existing full-value validation costs remain.
+
+Formatting: `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`
+exited 0; `/tmp/luna-tools-nd2_lach/result.json`. `git diff --check` passed.

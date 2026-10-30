@@ -35,10 +35,13 @@ impl Interpreter<'_> {
             return None;
         }
         let simple = match &right.kind {
-            K::TypeList(fields) => fields
-                .iter()
-                .all(|field| matches!(field.kind, K::Local(_) | K::TypeValue(_) | K::Literal(_))),
-            K::TypeListValue(_) => true,
+            K::TypeList(fields) => fields.iter().all(|field| {
+                matches!(
+                    field.kind,
+                    K::Local(_) | K::TypeValue(_) | K::ComptimeValue(_) | K::Literal(_)
+                )
+            }),
+            K::TypeListValue(_) | K::ComptimeValue(_) => true,
             _ => false,
         };
         if !simple {
@@ -109,10 +112,13 @@ impl Interpreter<'_> {
             return None;
         }
         let simple = match &right.kind {
-            K::TypeList(fields) => fields
-                .iter()
-                .all(|field| matches!(field.kind, K::Local(_) | K::TypeValue(_) | K::Literal(_))),
-            K::TypeListValue(_) | K::Local(_) => true,
+            K::TypeList(fields) => fields.iter().all(|field| {
+                matches!(
+                    field.kind,
+                    K::Local(_) | K::TypeValue(_) | K::ComptimeValue(_) | K::Literal(_)
+                )
+            }),
+            K::TypeListValue(_) | K::ComptimeValue(_) | K::Local(_) => true,
             _ => false,
         };
         if !simple {
@@ -190,10 +196,13 @@ impl Interpreter<'_> {
             return None;
         }
         let simple = match &right.kind {
-            K::TypeList(fields) => fields
-                .iter()
-                .all(|field| matches!(field.kind, K::Local(_) | K::TypeValue(_) | K::Literal(_))),
-            K::TypeListValue(_) | K::Local(_) => true,
+            K::TypeList(fields) => fields.iter().all(|field| {
+                matches!(
+                    field.kind,
+                    K::Local(_) | K::TypeValue(_) | K::ComptimeValue(_) | K::Literal(_)
+                )
+            }),
+            K::TypeListValue(_) | K::ComptimeValue(_) | K::Local(_) => true,
             _ => false,
         };
         if !simple || !matches!(environment.get(&place.root)?, Value::List { .. }) {

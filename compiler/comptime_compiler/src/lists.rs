@@ -57,11 +57,14 @@ pub(crate) fn inert_suffix(expr: &Expr, fuel: &mut usize) -> Result<bool, Error>
             *fuel = fuel
                 .checked_sub(fields.len())
                 .ok_or(Error::Budget(expr.source))?;
-            fields
-                .iter()
-                .all(|field| matches!(field.kind, K::Local(_) | K::TypeValue(_) | K::Literal(_)))
+            fields.iter().all(|field| {
+                matches!(
+                    field.kind,
+                    K::Local(_) | K::TypeValue(_) | K::ComptimeValue(_) | K::Literal(_)
+                )
+            })
         }
-        K::TypeListValue(_) | K::Local(_) => true,
+        K::TypeListValue(_) | K::ComptimeValue(_) | K::Local(_) => true,
         _ => false,
     })
 }
