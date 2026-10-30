@@ -27,38 +27,54 @@ pub(super) fn fold(
     {
         return Err("invalid staged list operation types".into());
     }
-    let mut result = fold_input(heads, left, fuel, depth + 1)?;
-    constant(heads, &result, fuel, depth + 1)?;
-    let length = match &result.kind {
-        K::TypeListValue(values) => values.len(),
-        K::TypeList(values) => values.len(),
-        _ => return Err("staged list operation requires completed list data".into()),
-    };
+    let left = fold_input(heads, left, fuel, depth + 1)?;
+    let mut fields = elements(heads, left, fuel, depth + 1)?;
     if let Some(right) = right {
-        let other = fold_input(heads, right, fuel, depth + 1)?;
-        constant(heads, &other, fuel, depth + 1)?;
-        let count = match &other.kind {
-            K::TypeListValue(values) => values.len(),
-            K::TypeList(values) => values.len(),
-            _ => return Err("staged list operation requires completed list data".into()),
-        };
-        let count = length
-            .checked_add(count)
+        let right = fold_input(heads, right, fuel, depth + 1)?;
+        let other = elements(heads, right, fuel, depth + 1)?;
+        let count = fields
+            .len()
+            .checked_add(other.len())
             .filter(|count| *count <= 100_000)
             .ok_or("staged list representation size exceeded")?;
         charge(fuel, count.saturating_add(1))?;
-        match (&mut result.kind, other.kind) {
-            (K::TypeListValue(left), K::TypeListValue(right)) => left.extend(right),
-            (K::TypeList(left), K::TypeList(right)) => left.extend(right),
-            _ => return Err("staged list representation mismatch".into()),
-        }
-        result.source = expr.source;
-        Ok(result)
+        fields.extend(other);
+        Ok(Expr {
+            source: expr.source,
+            ty: expr.ty.clone(),
+            kind: K::TypeList(fields),
+        })
     } else {
         Ok(Expr {
             source: expr.source,
             ty: expr.ty.clone(),
-            kind: K::Literal(Literal::Integer(length.to_string())),
+            kind: K::Literal(Literal::Integer(fields.len().to_string())),
         })
+    }
+}
+
+// Read completed data through its declared domain. Legacy compact Type syntax
+// is decoded once at this boundary; all operations use ordinary expressions.
+pub(super) fn elements(
+    heads: Layouts<'_>,
+    value: Expr,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<Vec<Expr>, String> {
+    constant(heads, &value, fuel, depth)?;
+    match value.kind {
+        K::TypeList(fields) => Ok(fields),
+        K::TypeListValue(types) => {
+            charge(fuel, types.len())?;
+            Ok(types
+                .into_iter()
+                .map(|ty| Expr {
+                    source: value.source,
+                    ty: Term::Primitive(Primitive::Type),
+                    kind: K::TypeValue(ty),
+                })
+                .collect())
+        }
+        _ => Err("staged list operation requires completed list data".into()),
     }
 }

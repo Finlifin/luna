@@ -6575,3 +6575,40 @@ Validation from /home/fin/luna:
 This removes the remaining kind-counterexample dependency on legacy list
 payloads. It does not switch canonical list writers or remove all legacy term
 variants. No full workspace suite was run.
+
+
+## Signature-directed staged list operations (2026-10-31)
+
+Staged list construction and indexing now share one element-domain path for
+Type and ordinary value elements. Completed expression lists retain ordinary
+list syntax. A single reader decodes legacy compact Type-list syntax into
+ordinary Type-valued element expressions; length, concatenation and indexing
+operate on those expressions rather than inspecting a frozen TypeListValue.
+All fields are completed before selection, preserving failure behavior and
+preventing indexing from skipping an unavailable later element.
+
+The canonical constant writer is unchanged: frozen Type lists still use the
+legacy encoding during coordinated migration. One old IIR assertion expected
+ordinary construction to be rewritten into the compact syntax node; it now
+expects the ordinary completed construction. Existing constant identity and
+invalid-domain checks remain in place. New tests cover both mixed input orders,
+nested selection, empty concatenation, element/collector mismatches, unavailable
+fields, out-of-bounds access and budget failure followed by recovery.
+
+Validation from /home/fin/luna:
+
+- `python3 -B development/check.py --timeout 900 -- test -p iir --no-fail-fast`:
+  exit 0, 93 passed; `/tmp/luna-tools-c3w1xynu/result.json`.
+- Source integration command:
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test type_spreads --test comptime_clause_inputs --test cmtt --no-fail-fast`;
+  exit 0, 721 passed; `/tmp/luna-tools-61oisnln/result.json`.
+- Formatting: `python3 -B development/command.py --timeout 120 -- cargo fmt --all`,
+  exit 0, `/tmp/luna-tools-6c9s7483/result.json`; `git diff --check` passed.
+
+This removes a staged-operation dependency on the frozen Type-list encoding,
+not the canonical writer itself. Other producers/consumers and legacy term
+variants remain to migrate. No full workspace suite was run.
+
+Final public-library validation:
+`python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
+exit 0, three native tests passed; `/tmp/luna-tools-91od9u7m/result.json`.

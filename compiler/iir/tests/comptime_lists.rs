@@ -156,3 +156,100 @@ fn list_length_and_concat_fold_with_the_original_nominal_identity() {
         assert!(fold_value_with_layouts(layouts, &bad, &mut 100_000).is_err());
     }
 }
+
+#[test]
+fn mixed_completed_list_encodings_share_nested_operations_and_domain_checks() {
+    let heads = [head()];
+    let layouts = Layouts::new(&heads, &[]);
+    let type_domain = Term::Primitive(Primitive::Type);
+    let bool_type = Term::Primitive(Primitive::Bool);
+    let char_type = Term::Primitive(Primitive::Char);
+    let ordinary = list(
+        type_domain.clone(),
+        vec![expr(type_domain.clone(), K::TypeValue(bool_type.clone()))],
+    );
+    let legacy = Expr {
+        kind: K::TypeListValue(vec![char_type.clone()]),
+        ..ordinary.clone()
+    };
+    for (left, right, expected) in [
+        (ordinary.clone(), legacy.clone(), char_type.clone()),
+        (legacy.clone(), ordinary.clone(), bool_type.clone()),
+    ] {
+        let joined = expr(
+            ordinary.ty.clone(),
+            K::ListConcat(Box::new(left), Box::new(right)),
+        );
+        let nested = list(ordinary.ty.clone(), vec![joined.clone()]);
+        let selected = index(
+            index(nested, ordinary.ty.clone(), "0"),
+            type_domain.clone(),
+            "1",
+        );
+        let folded = fold_value_with_layouts(layouts, &selected, &mut 100_000).unwrap();
+        assert_eq!(folded.ty, type_domain);
+        assert_eq!(folded.kind, K::TypeValue(expected));
+        let length = expr(
+            Term::Primitive(Primitive::Integer),
+            K::ListLength(Box::new(joined)),
+        );
+        assert_eq!(
+            fold_value_with_layouts(layouts, &length, &mut 100_000)
+                .unwrap()
+                .kind,
+            K::Literal(Literal::Integer("2".into()))
+        );
+    }
+    let empty = list(type_domain.clone(), vec![]);
+    let joined = expr(
+        ordinary.ty.clone(),
+        K::ListConcat(Box::new(empty), Box::new(legacy.clone())),
+    );
+    let selected = index(joined, type_domain.clone(), "0");
+    assert_eq!(
+        fold_value_with_layouts(layouts, &selected, &mut 100_000)
+            .unwrap()
+            .kind,
+        K::TypeValue(char_type)
+    );
+    for bad in [
+        index(legacy.clone(), bool_type.clone(), "0"),
+        index(legacy.clone(), type_domain.clone(), "1"),
+        expr(
+            ordinary.ty.clone(),
+            K::ListConcat(
+                Box::new(ordinary.clone()),
+                Box::new(list(bool_type.clone(), vec![boolean(true)])),
+            ),
+        ),
+        index(
+            Expr {
+                kind: K::TypeListValue(vec![Term::Bool(true)]),
+                ..legacy
+            },
+            type_domain.clone(),
+            "0",
+        ),
+        index(
+            list(
+                type_domain.clone(),
+                vec![
+                    expr(type_domain, K::TypeValue(bool_type.clone())),
+                    expr(
+                        Term::Primitive(Primitive::Type),
+                        K::Local(LocalId {
+                            owner: 99,
+                            index: 0,
+                        }),
+                    ),
+                ],
+            ),
+            Term::Primitive(Primitive::Type),
+            "0",
+        ),
+    ] {
+        assert!(fold_value_with_layouts(layouts, &bad, &mut 100_000).is_err());
+    }
+    assert!(fold_value_with_layouts(layouts, &selected, &mut 1).is_err());
+    assert!(fold_value_with_layouts(layouts, &selected, &mut 100_000).is_ok());
+}

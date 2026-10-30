@@ -2086,46 +2086,30 @@ fn fold_type_list<'layout>(
     depth: usize,
 ) -> Result<Expr, String> {
     let heads = heads.into();
-    if let K::TypeList(fields) = &expr.kind {
-        if depth >= 128 {
-            return Err("staged type-list depth exceeded".into());
-        }
-        charge(fuel, fields.len().saturating_add(1))?;
-        if let Some(element) = heads.list_element(&expr.ty, fuel)? {
-            if element != Term::Primitive(Primitive::Type) {
-                let mut folded = Vec::with_capacity(fields.len());
-                for field in fields {
-                    if field.ty != element {
-                        return Err("staged list element type mismatch".into());
-                    }
-                    folded.push(fold_input(heads, field, fuel, depth + 1)?);
-                }
-                let result = Expr {
-                    source: expr.source,
-                    ty: expr.ty.clone(),
-                    kind: K::TypeList(folded),
-                };
-                constant(heads, &result, fuel, depth + 1)?;
-                return Ok(result);
-            }
-        }
-        let mut types = Vec::with_capacity(fields.len());
-        for field in fields {
-            if field.ty != Term::Primitive(Primitive::Type) {
-                return Err("staged type-list operand is not Type".into());
-            }
-            let value = fold_input(heads, field, fuel, depth + 1)?;
-            types.push(constant(heads, &value, fuel, depth + 1)?);
-        }
-        let value = Expr {
-            source: expr.source,
-            ty: expr.ty.clone(),
-            kind: K::TypeListValue(types),
-        };
-        constant(heads, &value, fuel, depth + 1)?;
-        return Ok(value);
+    let K::TypeList(fields) = &expr.kind else {
+        unreachable!()
+    };
+    if depth >= 128 {
+        return Err("staged list depth exceeded".into());
     }
-    unreachable!()
+    charge(fuel, fields.len().saturating_add(1))?;
+    let element = heads
+        .list_element(&expr.ty, fuel)?
+        .ok_or("staged list requires a bound list head")?;
+    let mut folded = Vec::with_capacity(fields.len());
+    for field in fields {
+        if field.ty != element {
+            return Err("staged list element type mismatch".into());
+        }
+        folded.push(fold_input(heads, field, fuel, depth + 1)?);
+    }
+    let result = Expr {
+        source: expr.source,
+        ty: expr.ty.clone(),
+        kind: K::TypeList(folded),
+    };
+    constant(heads, &result, fuel, depth + 1)?;
+    Ok(result)
 }
 
 #[inline(never)]
@@ -2143,54 +2127,27 @@ fn fold_type_list_index<'layout>(
     let K::TypeListIndex(values, index) = &expr.kind else {
         unreachable!()
     };
-    if let Some(element) = heads.list_element(&values.ty, fuel)? {
-        if element != Term::Primitive(Primitive::Type) {
-            if expr.ty != element || index.ty != Term::Primitive(Primitive::Integer) {
-                return Err("invalid staged list index types".into());
-            }
-            let values = fold_input(heads, values, fuel, depth + 1)?;
-            let K::TypeList(mut fields) = values.kind else {
-                return Err("staged list index requires completed list data".into());
-            };
-            let index = fold_input(heads, index, fuel, depth + 1)?;
-            let Term::Integer(index) = constant(heads, &index, fuel, depth + 1)? else {
-                return Err("staged list index requires an Integer".into());
-            };
-            let position = index
-                .to_u128()
-                .ok()
-                .and_then(|n| usize::try_from(n).ok())
-                .filter(|n| *n < fields.len())
-                .ok_or("staged list index is out of bounds")?;
-            let mut selected = fields.swap_remove(position);
-            selected.source = expr.source;
-            return Ok(selected);
-        }
-    }
-    if expr.ty != Term::Primitive(Primitive::Type)
-        || index.ty != Term::Primitive(Primitive::Integer)
-    {
-        return Err("invalid staged type-list index types".into());
+    let element = heads
+        .list_element(&values.ty, fuel)?
+        .ok_or("staged list requires a bound list head")?;
+    if expr.ty != element || index.ty != Term::Primitive(Primitive::Integer) {
+        return Err("invalid staged list index types".into());
     }
     let values = fold_input(heads, values, fuel, depth + 1)?;
-    let Term::TypeListValue(mut elements) = constant(heads, &values, fuel, depth + 1)? else {
-        return Err("staged type-list index requires completed list data".into());
-    };
+    let mut fields = lists::elements(heads, values, fuel, depth + 1)?;
     let index = fold_input(heads, index, fuel, depth + 1)?;
     let Term::Integer(index) = constant(heads, &index, fuel, depth + 1)? else {
-        return Err("staged type-list index requires an Integer".into());
+        return Err("staged list index requires an Integer".into());
     };
     let position = index
         .to_u128()
         .ok()
-        .and_then(|value| usize::try_from(value).ok())
-        .filter(|position| *position < elements.len())
-        .ok_or("staged type-list index is out of bounds")?;
-    Ok(Expr {
-        source: expr.source,
-        ty: expr.ty.clone(),
-        kind: K::TypeValue(elements.swap_remove(position)),
-    })
+        .and_then(|n| usize::try_from(n).ok())
+        .filter(|n| *n < fields.len())
+        .ok_or("staged list index is out of bounds")?;
+    let mut selected = fields.swap_remove(position);
+    selected.source = expr.source;
+    Ok(selected)
 }
 
 #[inline(never)]

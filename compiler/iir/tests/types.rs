@@ -396,7 +396,7 @@ fn type_list_constants_validate_embedded_types_and_domain_authority() {
     assert_eq!(
         iir::staging::fold_value_with_layouts(&package.normal_forms, &construction, &mut 10_000)
             .unwrap(),
-        value
+        construction
     );
     assert!(
         iir::staging::fold_value_with_layouts(&package.normal_forms, &construction, &mut 0)
