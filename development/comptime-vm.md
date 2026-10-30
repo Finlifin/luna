@@ -6230,3 +6230,45 @@ Final complete-sysroot verification:
 `python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`,
 `/tmp/luna-tools-_wjizzrk/result.json`, exit 0; LLVM native test passed for both
 named Tuple Es input and ordinary record-valued normal-form arguments.
+
+## Signature-directed contextual normal-form evidence (2026-10-31)
+
+Contextual producer inference no longer recognizes the Tuple declaration to
+construct its arguments. All source normal-form heads use their declared clause
+telescope, including dependent collector domains, positional collection, list
+spread, named whole-list inputs and empty collections. Static evidence reads
+immutable construction snapshots and constant initializer syntax; it does not
+invoke a producer or unfold a normal-form body. Equal branches can contribute
+evidence without selecting or executing either branch. Ordinary call checking
+still validates the full argument expressions, phases and constraints.
+
+The annotation formation path now constructs collection elements under the
+instantiated element domain, rather than calling type_expr on every element.
+List literals preserve declaration inputs structurally, as tuple-valued inputs
+already did. The shared collector retains symbolic Type-list concatenation in
+the existing internal representation. This is not completion of the larger
+removal of legacy TypeListValue/TypeListConcat and untyped NIR collection nodes.
+In particular, collect_known_normal_argument still assumes Type elements;
+its expression-path collection representation needs a subsequent generalization.
+Routing all annotations through that path was rejected after it lost symbolic
+inputs and confused empty non-Type collections with empty Type collections.
+The committed annotation path avoids that route and preserves those inputs.
+
+The new regression uses a user-defined Indexed<T, ...items: List<T>> head with
+an intentionally nonterminating body. It verifies bool collection, spread,
+named lists, immutable local lists and empty lists, and rejects mismatched
+value indices. The real-sysroot example uses the same public meta.List interface.
+The two previously recorded CMTT failures now pass without changing expectations.
+
+Validation from /home/fin/luna:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --test cmtt_type_inputs --test normal_form_inference --test comptime_clause_inputs --test normal_form_methods --no-fail-fast`:
+  exit 0, 659 tests passed; `/tmp/luna-tools-xispw396/result.json`.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
+  exit 0, both LLVM native tests passed;
+  `/tmp/luna-tools-bnt6p24b/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0; `/tmp/luna-tools-gmuxu4f4/result.json`. `git diff --check` passed.
+
+No full workspace suite was run. The remaining legacy collection representation
+is an implementation gap, not a restriction of Flurry normal-form arguments.

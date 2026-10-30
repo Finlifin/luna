@@ -590,10 +590,19 @@ impl Checker<'_, '_> {
         *fuel -= 1;
         let known = match value.kind {
             H::List(fields) => return Ok(Some(fields.len())),
-            H::ResolvedDef { def_id, .. } => self
-                .package
-                .definition_owner(def_id)
-                .and_then(|owner| self.constants.get(&owner)),
+            H::ResolvedDef { def_id, .. } => {
+                let owner = self.package.definition_owner(def_id);
+                let known = owner.and_then(|owner| self.constants.get(&owner));
+                if let Some(ItemKind::Const(_, initializer)) = owner
+                    .and_then(|owner| self.package.item(owner))
+                    .map(|item| &item.kind)
+                {
+                    if let Some(width) = self.completed_list_width(initializer, fuel, depth + 1)? {
+                        return Ok(Some(width));
+                    }
+                }
+                known
+            }
             H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id) => {
                 let binding = local(id);
                 // A preceding argument can change a mutable generator binding.

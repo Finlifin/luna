@@ -38,3 +38,31 @@ test {
     assumes tuple_ok;
     assumes record_ok;
 }
+
+pure comptime fn Indexed<T, ...items: meta.List<T>> -> Type {
+    bool
+}
+
+struct Holder where T {
+    flag: bool,
+}
+
+comptime fn inspect_holder(value: Holder<T>) -> Holder<T> where T {
+    value
+}
+
+comptime fn apply(lambda action: comptime fn(T) -> bool, value: T) -> <|- bool> where T {
+    let result = action(value);
+    '(result)
+}
+
+comptime fn build_indexed() -> <|- bool> {
+    let bits: meta.List<bool> = [true, false];
+    apply(_0.flag, inspect_holder<Indexed<bool, .items = bits>>(
+        Holder<Indexed<bool, .items = [true, false]>> {flag: true}))
+}
+
+test {
+    let indexed_ok = ~<build_indexed()>;
+    assumes indexed_ok;
+}

@@ -4111,7 +4111,7 @@ fn generator_explicit_registered_tuple_results_determine_layout() {
                 ..Default::default()
             },
         )
-        .unwrap();
+        .unwrap_or_else(|failure| panic!("{ty}: {failure}"));
         assert_eq!(
             luna::execution::interpret(&package, "run", 100_000).unwrap(),
             Value::Bool(true)

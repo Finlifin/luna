@@ -3965,29 +3965,21 @@ impl Checker<'_, '_> {
                     for slot in order {
                         let (_, _, ty) = &parameters[slot];
                         if variadic && slot + 1 == parameters.len() {
+                            let ty = self.instantiate_input_types(
+                                ty,
+                                &self.type_parameters[&owner][..type_arguments.len()],
+                                &type_arguments,
+                                expr.span,
+                            )?;
                             if let Some(input) =
                                 self.normal_type_list_supply(owner, &args[slot..], expr.span)?
                             {
-                                arguments[slot] = Some(self.normal_value_argument(input, ty)?);
-                                continue;
+                                arguments[slot] = Some(self.normal_value_argument(input, &ty)?);
+                            } else {
+                                arguments[slot] = Some(self.normal_collection_value_arguments(
+                                    &args[slot..], &ty, expr.span,
+                                )?);
                             }
-                            let mut parts = Vec::new();
-                            for argument in &args[slot..] {
-                                match argument {
-                                    Arg::Positional(value) => parts
-                                        .push(Term::TypeListValue(vec![self.type_expr(value)?])),
-                                    Arg::Expand(value) => {
-                                        parts.push(self.normal_value_argument(value, ty)?);
-                                    }
-                                    _ => {
-                                        return Err(error(
-                                            expr.span,
-                                            "unsupported type-list collection input",
-                                        ));
-                                    }
-                                }
-                            }
-                            arguments[slot] = Some(Term::type_list_concat(parts));
                             continue;
                         }
                         let argument = &args[slot];

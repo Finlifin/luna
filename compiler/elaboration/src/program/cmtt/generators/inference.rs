@@ -1083,6 +1083,80 @@ impl Checker<'_, '_> {
             };
             return Ok((value.sort() == Sort::ComptimeValue).then_some(value));
         }
+        match &argument.kind {
+            H::List(items) => {
+                let inputs: Vec<_> = items.iter().map(|item| (item, false)).collect();
+                return self.generator_static_collection_hint(&inputs, domain, depth, bindings);
+            }
+            H::Block(block) if block.stmts.is_empty() => {
+                return match block.expr {
+                    Some(value) => {
+                        self.generator_static_value_hint(value, domain, depth + 1, bindings)
+                    }
+                    None => Ok(None),
+                };
+            }
+            H::If(_, yes, Some(no)) if yes.stmts.is_empty() => {
+                let Some(yes) = yes.expr else { return Ok(None) };
+                let Some(left) =
+                    self.generator_static_value_hint(yes, domain, depth + 1, bindings)?
+                else {
+                    return Ok(None);
+                };
+                let right = self.generator_static_value_hint(no, domain, depth + 1, bindings)?;
+                return Ok((right.as_ref() == Some(&left)).then_some(left));
+            }
+            H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id)
+                if self.immutable.contains(&local(*id)) =>
+            {
+                let mut budget = comptime_runtime::Budget {
+                    steps: self.required_steps as usize,
+                    max_limbs: 4096,
+                };
+                let value = self
+                    .observed_generator_input(local(*id), &mut budget)
+                    .filter(|(actual, _)| actual == domain)
+                    .map(|(_, value)| value)
+                    .or_else(|| {
+                        self.generator_data
+                            .get(&local(*id))
+                            .and_then(Option::as_ref)
+                            .filter(|value| &value.ty == domain)
+                            .and_then(|value| self.known_normal_input(value, 0, &mut budget))
+                    });
+                self.required_steps = budget.steps as u64;
+                return Ok(value);
+            }
+            H::ResolvedDef { def_id, .. } => {
+                let mut budget = comptime_runtime::Budget {
+                    steps: self.required_steps as usize,
+                    max_limbs: 4096,
+                };
+                let value = self
+                    .package
+                    .definition_owner(*def_id)
+                    .and_then(|owner| self.constants.get(&owner))
+                    .filter(|value| &value.ty == domain)
+                    .and_then(|value| self.known_normal_input(value, 0, &mut budget));
+                self.required_steps = budget.steps as u64;
+                if value.is_some() {
+                    return Ok(value);
+                }
+                // Observe constant syntax without scheduling its invocation.
+                // Calls and unresolved inputs remain unknown; cycles are bounded
+                // by the same depth limit as aliases and collection evidence.
+                let Some(ItemKind::Const(_, initializer)) = self
+                    .package
+                    .definition_owner(*def_id)
+                    .and_then(|owner| self.package.item(owner))
+                    .map(|item| &item.kind)
+                else {
+                    return Ok(None);
+                };
+                return self.generator_static_value_hint(initializer, domain, depth + 1, None);
+            }
+            _ => {}
+        }
         if !matches!(argument.kind, H::Lit(_)) {
             return Ok(None);
         }
@@ -1099,6 +1173,37 @@ impl Checker<'_, '_> {
         Ok(value)
     }
 
+    fn generator_static_collection_hint(
+        &mut self,
+        inputs: &[(&Expr<'_>, bool)],
+        domain: &Term,
+        depth: usize,
+        bindings: Option<(&[DeclarationId], &[Term])>,
+    ) -> Result<Option<Term>, Error> {
+        let Some(element) = self.list_element_type(domain).cloned() else {
+            return Ok(None);
+        };
+        let mut items = Vec::with_capacity(inputs.len());
+        for &(input, spread) in inputs {
+            let ty = if spread { domain } else { &element };
+            let Some(value) = self.generator_static_value_hint(input, ty, depth + 1, bindings)?
+            else {
+                return Ok(None);
+            };
+            let value = n::Expr {
+                ty: self.copy_alias_type(ty, input.span)?,
+                source: source(input.span),
+                kind: K::ComptimeValue(value),
+            };
+            items.push(if spread {
+                n::NormalFormArgument::TypeListSpread(value)
+            } else {
+                n::NormalFormArgument::Value(value)
+            });
+        }
+        Ok(self.known_collected_list_in(&items, domain, &BTreeMap::new()))
+    }
+
     pub(super) fn generator_static_type_hint(
         &mut self,
         value: &Expr<'_>,
@@ -1113,6 +1218,10 @@ impl Checker<'_, '_> {
             return Ok(None);
         }
         match &value.kind {
+            H::Block(block) if block.stmts.is_empty() => match block.expr {
+                Some(value) => self.generator_static_type_hint(value, depth + 1, bindings),
+                None => Ok(None),
+            },
             H::Builtin(_) | H::TyType | H::TyVoid | H::TyNoReturn => {
                 self.type_expr(value).map(Some)
             }
@@ -1171,59 +1280,9 @@ impl Checker<'_, '_> {
                     return Ok(None);
                 }
                 self.ensure_signature(owner, value.span)?;
-                let id = declaration(self.package, &self.package_identities, owner);
-                let tuple = Some(id) == self.protocols.tuple;
-                if !tuple {
-                    return self.generator_static_normal_form_hint(
-                        owner, arguments, depth, bindings, value.span,
-                    );
-                }
-                let mut types = Vec::with_capacity(arguments.len());
-                for argument in *arguments {
-                    match argument {
-                        Arg::Positional(input) => {
-                            let Some(ty) =
-                                self.generator_static_type_hint(input, depth + 1, bindings)?
-                            else {
-                                return Ok(None);
-                            };
-                            types.push(ty);
-                        }
-                        Arg::Expand(input) if tuple => {
-                            let Some(items) =
-                                self.generator_static_type_list_hint(input, depth + 1, bindings)?
-                            else {
-                                return Ok(None);
-                            };
-                            types.extend(items);
-                        }
-                        Arg::Named(name, input)
-                            if tuple
-                                && arguments.len() == 1
-                                && matches!(signature.clause_params, [parameter] if parameter.name.name == name.name) =>
-                        {
-                            let Some(items) =
-                                self.generator_static_type_list_hint(input, depth + 1, bindings)?
-                            else {
-                                return Ok(None);
-                            };
-                            types.extend(items);
-                        }
-                        _ => return Ok(None),
-                    }
-                }
-                // Formation preserves the opaque head. In particular Tuple
-                // has ONE TypeList input, never a structural tuple identity.
-                let arguments = if tuple {
-                    vec![Term::TypeListValue(types)]
-                } else {
-                    types
-                };
-                Ok(Some(Term::NormalForm {
-                    head: id,
-                    sort: Sort::Type,
-                    arguments,
-                }))
+                self.generator_static_normal_form_hint(
+                    owner, arguments, depth, bindings, value.span,
+                )
             }
             H::ResolvedDef { def_id, .. } => {
                 let Some(owner) = self.package.definition_owner(*def_id) else {
@@ -1403,15 +1462,34 @@ impl Checker<'_, '_> {
         if clauses.len() != parameters.len() {
             return Ok(None);
         }
+        let collector = clauses.last().and_then(|clause| {
+            matches!(clause.kind, hir::clause::ClauseParamKind::Varadic(..))
+                .then_some(clauses.len() - 1)
+        });
+        let mut collected = Vec::new();
         let mut supplied = vec![None; parameters.len()];
         let mut positional = 0;
         for argument in arguments {
-            let (name, value) = match argument {
-                Arg::Positional(value) => (None, *value),
-                Arg::Named(name, value) => (Some(*name), *value),
+            let (name, value, spread) = match argument {
+                Arg::Positional(value) => (None, *value, false),
+                Arg::Named(name, value) => (Some(*name), *value, false),
+                Arg::Expand(value) => (None, *value, true),
                 _ => return Ok(None),
             };
-            let slot = Self::type_input_slot(&clauses, name, &mut positional, value.span)?;
+            let slot = if name.is_some_and(|name| {
+                collector.is_some_and(|index| clauses[index].name.name == name.name)
+            }) {
+                collector.unwrap()
+            } else {
+                Self::type_input_slot(&clauses, name, &mut positional, value.span)?
+            };
+            if name.is_none() && collector.is_some_and(|index| slot >= index) {
+                collected.push((value, spread));
+                continue;
+            }
+            if spread {
+                return Ok(None);
+            }
             let Some(cell) = supplied.get_mut(slot) else {
                 return Ok(None);
             };
@@ -1419,9 +1497,33 @@ impl Checker<'_, '_> {
                 return Ok(None);
             }
         }
+        if collector.is_some_and(|index| supplied[index].is_some()) && !collected.is_empty() {
+            return Ok(None);
+        }
         let binders = self.input_binders(&parameters);
         let mut completed = Vec::with_capacity(parameters.len());
         for (index, supplied) in supplied.into_iter().enumerate() {
+            let declared = &self.normal_parameters[&owner][index].2;
+            let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+            let bounded = nir::type_computations::charge_term(declared, &mut fuel);
+            self.required_steps = fuel as u64;
+            bounded.map_err(|e| error(span, e.to_string()))?;
+            let declared = declared.clone();
+            let domain =
+                self.instantiate_generator_type(&declared, &binders[..index], &completed, span)?;
+            if collector == Some(index) && supplied.is_none() {
+                let Some(value) = self.generator_static_collection_hint(
+                    &collected,
+                    &domain,
+                    depth + 1,
+                    outer_bindings,
+                )?
+                else {
+                    return Ok(None);
+                };
+                completed.push(value);
+                continue;
+            }
             let (value, bindings) = match supplied {
                 Some(value) => (value, outer_bindings),
                 None => {
@@ -1432,18 +1534,6 @@ impl Checker<'_, '_> {
                     (default, Some((parameters.as_slice(), completed.as_slice())))
                 }
             };
-            let declared = &self.normal_parameters[&owner][index].2;
-            let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-            let bounded = nir::type_computations::charge_term(declared, &mut fuel);
-            self.required_steps = fuel as u64;
-            bounded.map_err(|e| error(value.span, e.to_string()))?;
-            let declared = declared.clone();
-            let domain = self.instantiate_generator_type(
-                &declared,
-                &binders[..index],
-                &completed,
-                value.span,
-            )?;
             let hint = if domain == p(P::Type) {
                 self.generator_static_type_hint(value, depth + 1, bindings)?
             } else {
@@ -1458,53 +1548,6 @@ impl Checker<'_, '_> {
             sort: Sort::Type,
             arguments: completed,
         }))
-    }
-
-    fn generator_static_type_list_hint(
-        &mut self,
-        value: &Expr<'_>,
-        depth: usize,
-        bindings: Option<(&[DeclarationId], &[Term])>,
-    ) -> Result<Option<Vec<Term>>, Error> {
-        self.required_steps = self
-            .required_steps
-            .checked_sub(1)
-            .ok_or_else(|| error(value.span, "generator type list evidence budget exhausted"))?;
-        if depth >= 64 {
-            return Ok(None);
-        }
-        match &value.kind {
-            H::List(items) => {
-                let mut types = Vec::with_capacity(items.len());
-                for item in *items {
-                    let Some(ty) = self.generator_static_type_hint(item, depth + 1, bindings)?
-                    else {
-                        return Ok(None);
-                    };
-                    types.push(ty);
-                }
-                Ok(Some(types))
-            }
-            H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id)
-                if self.immutable.contains(&local(*id)) =>
-            {
-                let Some(Some(n::Expr {
-                    kind: K::TypeListValue(types),
-                    ..
-                })) = self.generator_data.get(&local(*id))
-                else {
-                    return Ok(None);
-                };
-                let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-                let bounded = types
-                    .iter()
-                    .try_for_each(|ty| nir::type_computations::charge_term(ty, &mut fuel));
-                self.required_steps = fuel as u64;
-                bounded.map_err(|e| error(value.span, e.to_string()))?;
-                Ok(Some(types.clone()))
-            }
-            _ => Ok(None),
-        }
     }
 
     // A common established type is only a hint. The ordinary checker still

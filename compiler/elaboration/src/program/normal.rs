@@ -114,19 +114,21 @@ impl Checker<'_, '_> {
             max_limbs: 4096,
         };
         let before = budget.steps;
-        let mut elements = Vec::new();
+        let mut parts = Vec::new();
         let mut known = true;
         for item in items {
             match item {
                 n::NormalFormArgument::Value(value) => {
                     match self.known_normal_input_in(value, 0, &mut budget, bindings) {
-                        Some(ty) => elements.push(ty),
-                        None => known = false,
+                        Some(ty) if ty.sort() == Sort::Type => {
+                            parts.push(Term::TypeListValue(vec![ty]))
+                        }
+                        _ => known = false,
                     }
                 }
                 n::NormalFormArgument::TypeListSpread(value) => {
                     match self.known_normal_input_in(value, 0, &mut budget, bindings) {
-                        Some(Term::TypeListValue(types)) => elements.extend(types),
+                        Some(value) => parts.push(value),
                         _ => known = false,
                     }
                 }
@@ -134,10 +136,10 @@ impl Checker<'_, '_> {
             }
         }
         self.required_steps -= (before - budget.steps) as u64;
-        known.then_some(Term::TypeListValue(elements))
+        known.then(|| Term::type_list_concat(parts))
     }
 
-    fn known_collected_list_in(
+    pub(super) fn known_collected_list_in(
         &mut self,
         items: &[n::NormalFormArgument],
         ty: &Term,
@@ -446,6 +448,47 @@ impl Checker<'_, '_> {
         Ok(parameters.into_iter().collect())
     }
 
+    /// Form a collected ordinary value in the declaration environment. Element
+    /// domains come from the instantiated collector, including non-Type values.
+    pub(super) fn normal_collection_value_arguments(
+        &mut self,
+        inputs: &[Arg<'_>],
+        domain: &Term,
+        span: Span,
+    ) -> Result<Term, Error> {
+        let element = self
+            .list_element_type(domain)
+            .cloned()
+            .ok_or_else(|| error(span, "variadic input requires a bound meta.List<T>"))?;
+        let mut items = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            let (value, spread) = match input {
+                Arg::Positional(value) => (*value, false),
+                Arg::Expand(value) => (*value, true),
+                _ => return Err(error(span, "unsupported normal-form collection input")),
+            };
+            let ty = if spread { domain } else { &element };
+            let known = self.normal_value_argument(value, ty)?;
+            let value = n::Expr {
+                ty: self.copy_alias_type(ty, value.span)?,
+                source: source(value.span),
+                kind: K::ComptimeValue(known),
+            };
+            items.push(if spread {
+                n::NormalFormArgument::TypeListSpread(value)
+            } else {
+                n::NormalFormArgument::Value(value)
+            });
+        }
+        self.known_collected_list_in(&items, domain, &BTreeMap::new())
+            .ok_or_else(|| {
+                error(
+                    span,
+                    "normal-form collection requires completed input values",
+                )
+            })
+    }
+
     pub(super) fn normal_value_argument(
         &mut self,
         value: &Expr<'_>,
@@ -596,6 +639,23 @@ impl Checker<'_, '_> {
                     .map(|(value, ty)| self.normal_value_argument_at(value, ty, depth + 1))
                     .collect::<Result<_, _>>()?,
             ));
+        }
+        if let H::List(values) = value.kind {
+            if let Some(element) = self.list_element_type(ty).cloned() {
+                let mut fields = Vec::with_capacity(values.len());
+                for value in values {
+                    fields.push(self.normal_value_argument_at(value, &element, depth + 1)?);
+                }
+                return Ok(if self.is_type_list_type(ty) {
+                    Term::TypeListValue(fields)
+                } else {
+                    Term::NominalValue {
+                        ty: Box::new(self.copy_alias_type(ty, value.span)?),
+                        variant: None,
+                        fields,
+                    }
+                });
+            }
         }
         let result = self.required_expression(value, Some(ty))?;
         self.required_normal_term(result, value.span)

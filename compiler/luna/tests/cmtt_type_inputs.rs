@@ -316,3 +316,53 @@ fn nested_required_calls_receive_ordinary_record_value_inputs() {
         fn run()->bool {~<emit()>}";
     assert_eq!(run(source, "run", vec![]), Value::Bool(true));
 }
+
+#[test]
+fn contextual_inference_routes_ordinary_variadic_normal_form_values() {
+    for (inputs, expected) in [
+        ("bool,true,false", "bool,.items=[true,false]"),
+        ("bool,...[true,false]", "bool,.items=[true,false]"),
+        ("bool,.items=[true,false]", "bool,.items=[true,false]"),
+        ("bool,.items=bits", "bool,.items=[true,false]"),
+        ("bool", "bool,.items=[]"),
+    ] {
+        let source = format!(
+            "typealias Type=.Type'builtin;
+            pure comptime fn List<T>->Type {{T}}
+            pure comptime fn Indexed<T,...items:List<T>>->Type {{while true {{}} bool}}
+            struct Holder where T {{flag:bool}}
+            comptime fn identity(value:Holder<T>)->Holder<T> where T {{value}}
+            comptime fn build(lambda action:comptime fn(T)->bool,value:T)-><|-bool> where T {{
+                let result=action(value);'(result)
+            }}
+            comptime fn outer()-><|-bool> {{
+                let bits:List<bool> = [true,false];
+                build(_0.flag, identity<Indexed<{inputs}>>(Holder<Indexed<{expected}>>{{flag:true}}))
+            }}
+            fn run()->bool {{~<outer()>}}"
+        );
+        let compile = |source: &str| {
+            support::compile_with_source_bindings(
+                source,
+                &Default::default(),
+                luna::protocols::type_constructors::Selectors {
+                    meta_list: Some("input.List"),
+                    ..Default::default()
+                },
+            )
+        };
+        let package = compile(&source).unwrap_or_else(|failure| panic!("{inputs}: {failure}"));
+        assert_eq!(
+            luna::execution::interpret(&package, "run", 100_000).unwrap(),
+            Value::Bool(true)
+        );
+        let wrong = source.replace(
+            &format!("Holder<Indexed<{expected}>>{{flag:true}}"),
+            "Holder<Indexed<bool,.items=[false,true]>>{flag:true}",
+        );
+        assert!(
+            compile(&wrong).is_err(),
+            "value indices must retain identity: {inputs}"
+        );
+    }
+}
