@@ -174,7 +174,7 @@ impl Checker<'_, '_> {
                     &resolved,
                     allowance,
                     &self.context,
-                    self.protocols.tuple,
+                    self.bound_tuple_metadata().as_ref(),
                     &|domain, fuel| self.collection_domain_budgeted(domain, fuel),
                     self.target,
                 );

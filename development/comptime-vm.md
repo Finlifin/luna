@@ -7197,3 +7197,44 @@ Final native run:
 passed all 10 tests, exit 0 (`/tmp/luna-tools-66g4_rmn/result.json`). Final
 format check also exited 0 (`/tmp/luna-tools-72qk6fkm/result.json`), and
 `git diff --check` passed.
+
+### Tuple coverage reads declaration layout evidence
+
+Coverage now receives the resolved Tuple head metadata rather than only its
+identity. Both direct domains and domains discovered through scoped type
+equality borrow fields using `Head::tuple_elements`, which checks the
+collector's exact declared list domain and handles ordinary list payloads as
+well as the transitional TypeListValue encoding. The structural tuple is a
+local coverage view; normal-form identity remains unchanged. Head bodies are
+not evaluated or unfolded to establish coverage.
+
+Elaboration's structural tuple query and representation-cycle check share
+one metadata lookup. The previous TypeListValue shortcut in the structural
+query is removed. Match coverage and error-handler coverage pass the same
+metadata contract, including through contextual type-equality queries.
+
+Tests cover both payload encodings, empty tuples, exact and missing boolean
+coverage, absent/opaque metadata, a list from a different domain, budget
+exhaustion and recovery, and scoped equality without leaking assumptions.
+The real sysroot example constructs `Tuple<.Es = Fields>` and exhaustively
+matches both possible first-field boolean values. Canonical list-value
+migration is still unfinished; this change removes consumer assumptions,
+not the transitional encoding itself.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib coverage`:
+  70 passed, exit 0; `/tmp/luna-tools-1ap61x8o/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test tuple_type_syntax --test normal_patterns --test negated_nominal_patterns --test effect_contracts --no-fail-fast`:
+  93 passed, exit 0; `/tmp/luna-tools-kigwk1gy/result.json`.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
+  11 native tests passed, exit 0; `/tmp/luna-tools-g31gezeb/result.json`.
+
+After this native run, the structural tuple helper regained its early
+non-Tuple return to avoid metadata lookup/copying on unrelated types. The
+same 93 source tests were rerun for this final guard; the change does not
+alter the metadata-backed Tuple path. No full language suite was run.
+
+Final source rerun: `/tmp/luna-tools-g5mnkapa/result.json`, exit 0, all 93
+passed. Final formatting: `python3 -B development/command.py --timeout 120 -- cargo fmt --all`,
+exit 0 (`/tmp/luna-tools-_xqhn052/result.json`); `git diff --check` passed.

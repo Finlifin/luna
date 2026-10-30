@@ -52,7 +52,7 @@ pub(crate) fn check_in_context_with_tuple_head(
     patterns: &[&Pattern],
     steps: usize,
     context: &Context,
-    tuple_head: Option<DeclarationId>,
+    tuple_head: Option<&nir::normal_forms::Head>,
 ) -> Coverage {
     check_metered(structs, enums, ty, patterns, steps, context, tuple_head).0
 }
@@ -64,7 +64,7 @@ pub(crate) fn check_metered(
     patterns: &[&Pattern],
     steps: usize,
     context: &Context,
-    tuple_head: Option<DeclarationId>,
+    tuple_head: Option<&nir::normal_forms::Head>,
 ) -> (Coverage, usize) {
     check_metered_in(
         structs, enums, ty, patterns, steps, context, tuple_head, None,
@@ -78,7 +78,7 @@ pub(crate) fn check_metered_in(
     patterns: &[&Pattern],
     steps: usize,
     context: &Context,
-    tuple_head: Option<DeclarationId>,
+    tuple_head: Option<&nir::normal_forms::Head>,
     target: Option<nir::target::TargetData>,
 ) -> (Coverage, usize) {
     check_metered_with_collections_in(
@@ -101,7 +101,7 @@ pub(crate) fn check_metered_with_collections_in(
     patterns: &[&Pattern],
     steps: usize,
     context: &Context,
-    tuple_head: Option<DeclarationId>,
+    tuple_head: Option<&nir::normal_forms::Head>,
     collection: &dyn Fn(&Term, &mut usize) -> Result<Option<Term>, nir::NominalAdmissionError>,
     target: Option<nir::target::TargetData>,
 ) -> (Coverage, usize) {
@@ -140,7 +140,7 @@ enum Head<'a> {
 struct Engine<'a> {
     collection: &'a dyn Fn(&Term, &mut usize) -> Result<Option<Term>, nir::NominalAdmissionError>,
     target: Option<nir::target::TargetData>,
-    tuple_head: Option<DeclarationId>,
+    tuple_head: Option<&'a nir::normal_forms::Head>,
     structs: &'a BTreeMap<DeclarationId, Struct>,
     enums: &'a BTreeMap<DeclarationId, Enum>,
     context: &'a Context,
@@ -161,19 +161,9 @@ impl Engine<'_> {
     // Runtime patterns, guards and coverage propositions never enter PTC.
     // The cache is local to one matrix/context; no assumptions escape its scope.
     fn domain(&mut self, ty: &Term) -> Result<Term, ()> {
-        if let Term::NormalForm {
-            head,
-            sort: nir::Sort::Type,
-            arguments,
-        } = ty
-        {
-            if Some(*head) == self.tuple_head {
-                if let [Term::TypeListValue(elements)] = arguments.as_slice() {
-                    crate::associated::charge_projection_copy(ty, &mut self.steps)
-                        .map_err(|_| ())?;
-                    return Ok(Term::Tuple(elements.clone()));
-                }
-            }
+        if let Some(elements) = self.tuple_head.and_then(|head| head.tuple_elements(ty)) {
+            crate::associated::charge_projection_copy(ty, &mut self.steps).map_err(|_| ())?;
+            return Ok(Term::Tuple(elements.to_vec()));
         }
         if matches!(
             ty,
@@ -206,7 +196,11 @@ impl Engine<'_> {
                     steps: ALLOWANCE,
                     max_depth: 128,
                 },
-                |head| Some(head) == self.tuple_head,
+                |id| {
+                    self.tuple_head.is_some_and(|head| {
+                        head.declaration == id && head.role == nir::normal_forms::Role::Tuple
+                    })
+                },
             )
             .0
         {
@@ -214,23 +208,12 @@ impl Engine<'_> {
             Ok(None) | Err(crate::ptc::UnknownReason::UnvalidatedModel) => ty.clone(),
             Err(_) => return Err(()),
         };
-        let domain = if let Term::NormalForm {
-            head,
-            sort: nir::Sort::Type,
-            arguments,
-        } = &domain
+        let domain = if let Some(elements) = self
+            .tuple_head
+            .and_then(|head| head.tuple_elements(&domain))
         {
-            if Some(*head) == self.tuple_head {
-                if let [Term::TypeListValue(elements)] = arguments.as_slice() {
-                    crate::associated::charge_projection_copy(&domain, &mut self.steps)
-                        .map_err(|_| ())?;
-                    Term::Tuple(elements.clone())
-                } else {
-                    domain
-                }
-            } else {
-                domain
-            }
+            crate::associated::charge_projection_copy(&domain, &mut self.steps).map_err(|_| ())?;
+            Term::Tuple(elements.to_vec())
         } else {
             domain
         };
@@ -1779,6 +1762,134 @@ mod optional_tests {
         let empty = Term::Optional(Box::new(Term::Primitive(Primitive::Never)));
         assert_eq!(
             check(&enums, &empty, &[&missing], 10000),
+            Coverage::Exhaustive
+        );
+    }
+}
+
+#[cfg(test)]
+mod tuple_layout_tests {
+    use super::*;
+    use nir::normal_forms::{Head, Kind, Parameter, Role};
+    use nir::{Primitive as P, Sort};
+
+    fn id(local: u32) -> DeclarationId {
+        DeclarationId { package: 73, local }
+    }
+    #[test]
+    fn tuple_coverage_uses_the_declared_list_domain_without_unfolding_heads() {
+        let domain = Term::NormalForm {
+            head: id(1),
+            sort: Sort::Type,
+            arguments: vec![Term::Primitive(P::Type)],
+        };
+        let head = Head {
+            declaration: id(2),
+            role: Role::Tuple,
+            collector: Some(0),
+            requirements: vec![],
+            parameters: vec![Parameter {
+                declaration: id(3),
+                binding: nir::program::LocalId { owner: 2, index: 0 },
+                kind: Kind::Value,
+                ty: domain.clone(),
+            }],
+        };
+        let tuple = |value| Term::NormalForm {
+            head: id(2),
+            sort: Sort::Type,
+            arguments: vec![value],
+        };
+        let list = |fields| Term::NominalValue {
+            ty: Box::new(domain.clone()),
+            variant: None,
+            fields,
+        };
+        let ty = tuple(list(vec![Term::Primitive(P::Bool)]));
+        let yes = Pattern::Tuple(vec![Pattern::Literal(Literal::Bool(true))]);
+        let no = Pattern::Tuple(vec![Pattern::Literal(Literal::Bool(false))]);
+        let check =
+            |ty: &Term, patterns: &[&Pattern], metadata: Option<&Head>, context: &Context, fuel| {
+                check_metered(
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
+                    ty,
+                    patterns,
+                    fuel,
+                    context,
+                    metadata,
+                )
+                .0
+            };
+        let context = Context::default();
+        for ty in [
+            &ty,
+            &tuple(Term::TypeListValue(vec![Term::Primitive(P::Bool)])),
+        ] {
+            assert_eq!(
+                check(ty, &[&yes, &no], Some(&head), &context, 100_000),
+                Coverage::Exhaustive
+            );
+            assert_eq!(
+                check(ty, &[&yes], Some(&head), &context, 100_000),
+                Coverage::Missing
+            );
+        }
+        assert_eq!(
+            check(
+                &tuple(list(vec![])),
+                &[&Pattern::Tuple(vec![])],
+                Some(&head),
+                &context,
+                100_000
+            ),
+            Coverage::Exhaustive
+        );
+        assert_eq!(
+            check(&ty, &[&yes, &no], Some(&head), &context, 0),
+            Coverage::Unknown
+        );
+        assert_eq!(
+            check(&ty, &[&yes, &no], Some(&head), &context, 100_000),
+            Coverage::Exhaustive
+        );
+        assert_ne!(
+            check(&ty, &[&yes, &no], None, &context, 100_000),
+            Coverage::Exhaustive
+        );
+        let opaque = Head {
+            role: Role::Opaque,
+            ..head.clone()
+        };
+        assert_ne!(
+            check(&ty, &[&yes, &no], Some(&opaque), &context, 100_000),
+            Coverage::Exhaustive
+        );
+        let foreign = tuple(Term::NominalValue {
+            ty: Box::new(Term::NormalForm {
+                head: id(9),
+                sort: Sort::Type,
+                arguments: vec![Term::Primitive(P::Type)],
+            }),
+            variant: None,
+            fields: vec![Term::Primitive(P::Bool)],
+        });
+        assert_ne!(
+            check(&foreign, &[&yes, &no], Some(&head), &context, 100_000),
+            Coverage::Exhaustive
+        );
+        let variable = Term::Rigid {
+            declaration: id(10),
+            sort: Sort::Type,
+        };
+        let mut equal = Context::default();
+        equal.assume(Formula::equal(variable.clone(), ty.clone()));
+        assert_eq!(
+            check(&variable, &[&yes, &no], Some(&head), &equal, 100_000),
+            Coverage::Exhaustive
+        );
+        assert_ne!(
+            check(&variable, &[&yes, &no], Some(&head), &context, 100_000),
             Coverage::Exhaustive
         );
     }

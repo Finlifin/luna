@@ -2909,24 +2909,20 @@ impl Checker<'_, '_> {
             },
         })
     }
+    fn bound_tuple_metadata(&self) -> Option<nir::normal_forms::Head> {
+        let identity = self.protocols.tuple?;
+        self.normal_parameters.keys().find_map(|owner| {
+            matches_declaration(self.package, &self.package_identities, *owner, identity)
+                .then(|| self.normal_form_head_metadata(*owner))
+                .flatten()
+        })
+    }
     fn bound_tuple_elements<'a>(&self, ty: &'a Term) -> Option<&'a [Term]> {
-        if let Term::NormalForm {
-            head,
-            sort: Sort::Type,
-            arguments,
-        } = ty
+        if !matches!(ty, Term::NormalForm { head, sort: Sort::Type, .. } if Some(*head) == self.protocols.tuple)
         {
-            if Some(*head) == self.protocols.tuple {
-                if let [Term::TypeListValue(elements)] = arguments.as_slice() {
-                    return Some(elements);
-                }
-                let owner = self.normal_parameters.keys().find(|owner| {
-                    matches_declaration(self.package, &self.package_identities, **owner, *head)
-                })?;
-                return self.normal_form_head_metadata(*owner)?.tuple_elements(ty);
-            }
+            return None;
         }
-        None
+        self.bound_tuple_metadata()?.tuple_elements(ty)
     }
     fn structural_type(&self, ty: &Term, span: Span) -> Result<Term, Error> {
         let ty = self.type_identity_view(ty, span)?;
@@ -3116,7 +3112,7 @@ impl Checker<'_, '_> {
             patterns,
             100_000,
             &self.context,
-            self.protocols.tuple,
+            self.bound_tuple_metadata().as_ref(),
             &|domain, fuel| self.collection_domain_budgeted(domain, fuel),
             self.target,
         )
@@ -3302,13 +3298,7 @@ impl Checker<'_, '_> {
         })
     }
     fn check_struct_cycles(&self) -> Result<(), Error> {
-        let tuple = self.protocols.tuple.and_then(|identity| {
-            self.normal_parameters.keys().find_map(|owner| {
-                matches_declaration(self.package, &self.package_identities, *owner, identity)
-                    .then(|| self.normal_form_head_metadata(*owner))
-                    .flatten()
-            })
-        });
+        let tuple = self.bound_tuple_metadata();
         let mut representations = crate::representations::Checker::new(
             tuple.as_ref(),
             &self.structs,

@@ -216,3 +216,17 @@ test {
     let set = inspect_flag_pattern(Flags<[true, false]> {enabled: true});
     assumes clear and not set;
 }
+
+fn inspect_tuple_pattern(value: Tuple<.Es = [bool, bool]>) -> bool {
+    value match {
+        (true, flag) => flag,
+        (false, _) => false,
+    }
+}
+
+test {
+    const Fields: meta.List<Type> = [bool, bool];
+    let pair: Tuple<.Es = Fields> = (true, true);
+    let result = inspect_tuple_pattern(pair);
+    assumes result;
+}
