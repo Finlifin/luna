@@ -54,7 +54,8 @@ pub enum InputContext {
         head: DeclarationId,
         fields: Vec<InputContext>,
         /// Preserve the domain of an ordinary frozen list from the checked
-        /// signature. None retains the legacy compact construction convention.
+        /// signature. None may borrow a settled input's domain, but cannot
+        /// authorize construction of a domainless list value.
         list_domain: Option<Term>,
     },
     /// A generative nominal type with partially known Type and value arguments.
@@ -787,13 +788,16 @@ impl CallCandidate {
                     let domain = list_domain
                         .as_ref()
                         .or_else(|| settled_input.and_then(|(domain, _)| domain));
-                    if let Some(domain) = domain {
-                        if !engine.is_type_list_domain(domain) {
-                            return Err(Error::TypeView("unbound tuple collection domain".into()));
-                        }
-                        crate::associated::charge_projection_copy(domain, fuel)
-                            .map_err(Error::TypeView)?;
+                    let domain = domain.ok_or_else(|| {
+                        Error::TypeView(
+                            "tuple context requires a declared collection domain".into(),
+                        )
+                    })?;
+                    if !engine.is_type_list_domain(domain) {
+                        return Err(Error::TypeView("unbound tuple collection domain".into()));
                     }
+                    crate::associated::charge_projection_copy(domain, fuel)
+                        .map_err(Error::TypeView)?;
                     let fields = fields
                         .iter()
                         .enumerate()
@@ -802,16 +806,12 @@ impl CallCandidate {
                             build(field, hint, engine, components, nesting, depth + 1, fuel)
                         })
                         .collect::<Result<Vec<_>, _>>()?;
-                    // Preserve the supplied packet representation. Converting
-                    // it to the legacy encoding here would change the input
-                    // identity before checking the complete type obligation.
-                    let input = match domain {
-                        Some(domain) => Term::NominalValue {
-                            ty: Box::new(domain.clone()),
-                            variant: None,
-                            fields,
-                        },
-                        None => Term::TypeListValue(fields),
+                    // Context formation uses the same ordinary carrier as
+                    // freezing; missing evidence never selects another identity.
+                    let input = Term::NominalValue {
+                        ty: Box::new(domain.clone()),
+                        variant: None,
+                        fields,
                     };
                     Ok(Term::NormalForm {
                         head: *head,

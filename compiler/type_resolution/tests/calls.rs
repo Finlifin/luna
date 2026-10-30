@@ -1383,7 +1383,7 @@ fn bound_tuple_inference_proposes_fields_and_preserves_context_identity() {
         .infer_partial_types_in_context(&[None], None, &context, Budget::default())
         .unwrap();
     let partial = C::NormalTuple {
-        list_domain: None,
+        list_domain: Some(package.normal_forms[0].parameters[0].ty.clone()),
         head,
         fields: vec![C::Known(primitive(P::U8)), C::Unknown],
     };
@@ -3043,4 +3043,64 @@ fn dependent_value_contexts_follow_completed_domains_without_erasing_evidence() 
             .and_then(|_| candidate.finish().map(|_| ()))
             .is_err()
     );
+}
+
+#[test]
+fn missing_tuple_collection_domains_do_not_manufacture_values_or_poison_retry() {
+    use type_resolution::{calls::InputContext as C, ptc::Context};
+    let head = DeclarationId {
+        package: 97,
+        local: 1,
+    };
+    let list_head = DeclarationId {
+        package: 97,
+        local: 2,
+    };
+    let domain = Term::NormalForm {
+        head: list_head,
+        sort: Sort::Type,
+        arguments: vec![primitive(P::Type)],
+    };
+    let mut world = Context::default();
+    world.admit_tuple_head(head);
+    world.admit_list_inference_head(list_head);
+    let producer = scheme(vec![generic(0)], generic(0), 1);
+    for fields in [vec![], vec![primitive(P::Bool)]] {
+        let mut candidate = producer
+            .infer_partial_types_in_context(&[None], None, &world, Budget::default())
+            .unwrap();
+        let mut context = C::NormalTuple {
+            head,
+            list_domain: None,
+            fields: fields.iter().cloned().map(C::Known).collect(),
+        };
+        let failure = candidate
+            .constrain_result_context(&context, Budget::default())
+            .unwrap_err();
+        assert!(
+            failure
+                .to_string()
+                .contains("requires a declared collection domain")
+        );
+        assert_eq!(candidate.parameter_type(0).unwrap(), None);
+        let C::NormalTuple { list_domain, .. } = &mut context else {
+            unreachable!()
+        };
+        *list_domain = Some(domain.clone());
+        candidate
+            .constrain_result_context(&context, Budget::default())
+            .unwrap();
+        assert_eq!(
+            candidate.finish().unwrap().result,
+            Term::NormalForm {
+                head,
+                sort: Sort::Type,
+                arguments: vec![Term::NominalValue {
+                    ty: Box::new(domain.clone()),
+                    variant: None,
+                    fields,
+                }],
+            }
+        );
+    }
 }

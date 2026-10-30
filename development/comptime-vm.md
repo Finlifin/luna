@@ -7402,3 +7402,30 @@ Validation in `/home/fin/luna`:
 
 No full language suite was run. The conversion fixture import failure is
 separate from the ordinary-list migration and is not counted as a pass.
+
+### Partial call contexts no longer synthesize domainless lists
+
+Removed the remaining TypeListValue constructor in type_resolution's partial
+context import. A NormalTuple context supplies its declared collector domain
+or borrows the exact domain of an already settled ordinary input. If neither
+exists, import fails before publishing inference facts instead of selecting a
+legacy representation. This removes the unknown-domain construction exception
+noted in the preceding migration. It does not remove legacy decoding elsewhere.
+
+The new regression exercises empty and nonempty contexts, checks that missing
+domain evidence leaves the parameter unresolved, then supplies the domain and
+finishes the same candidate with the correct ordinary value identity. Existing
+checks retain settled-domain borrowing, foreign-domain rejection and budget
+recovery. No language syntax or normal-form equality rule changes.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution --test calls`:
+  53 passed, exit 0; `/tmp/luna-tools-oshslih4/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --test contextual_spreads --test type_spreads --test spread_control --no-fail-fast`:
+  697 passed, exit 0; `/tmp/luna-tools-cq1hly78/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-jpl9kyoa/result.json`; `git diff --check` passed.
+
+No full language suite or native backend rebuild was needed for this
+context-import-only change; source checks cover its CMTT and spread consumers.
