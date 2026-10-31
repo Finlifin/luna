@@ -311,3 +311,52 @@ fn model_matching_cannot_turn_a_conditional_shape_into_a_regional_fact() {
     assert!(parent.commit(candidate).is_err());
     assert_eq!(parent.inspect(&I::Meta(input)).unwrap(), I::Meta(input));
 }
+
+#[test]
+fn dependent_symbolic_proposals_commit_without_temporary_search_identities() {
+    let mut parent = Engine::default();
+    let outer = parent.fresh(Sort::Type);
+    let inner = parent.fresh(Sort::Type);
+    let ambient = Term::Rigid {
+        declaration: DeclarationId {
+            package: 921,
+            local: 7,
+        },
+        sort: Sort::Type,
+    };
+    let problem = R::And(vec![
+        R::Equal(
+            I::Meta(outer),
+            I::Instantiate {
+                template: Term::Pointer(Box::new(Term::Bound {
+                    depth: 0,
+                    index: 0,
+                    sort: Sort::Type,
+                })),
+                arguments: vec![I::Meta(inner)],
+            },
+        ),
+        R::Equal(I::Meta(inner), I::Stable(ambient.clone())),
+    ]);
+    let Search::Proposed {
+        mut candidate,
+        obligation,
+        evidence,
+    } = parent
+        .search_type_inputs(&[outer, inner], &problem, &mut Budget::default())
+        .unwrap()
+    else {
+        panic!("dependent symbolic input should have a proposal")
+    };
+    assert_eq!(evidence.bindings.len(), 2);
+    assert_eq!(parent.inspect(&I::Meta(outer)).unwrap(), I::Meta(outer));
+    assert_eq!(parent.inspect(&I::Meta(inner)).unwrap(), I::Meta(inner));
+    candidate.advance(100, Budget::default());
+    assert!(candidate.state(obligation).unwrap().is_proven());
+    parent.commit(candidate).unwrap();
+    assert_eq!(
+        parent.freeze(&I::Meta(outer)).unwrap(),
+        Term::Pointer(Box::new(ambient.clone()))
+    );
+    assert_eq!(parent.freeze(&I::Meta(inner)).unwrap(), ambient);
+}

@@ -272,3 +272,44 @@ Type 输入搜索不再把 `T = U` 中外层 U 的不同具体模型解释直接
 - 最终计费与反例断言完成后，`python3 -B development/check.py --timeout 900 -- test -p ptc -p type_resolution`：443 项通过；`/tmp/luna-tools-zkeht2m2/result.json`。新增检查覆盖符号身份、分支等式、多个待解输入、循环拒绝、非事实候选、低预算恢复、证书重放及候选隔离。
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`：通过；`/tmp/luna-tools-6uo02w8a/result.json`。
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`：通过；`/tmp/luna-tools-o9wci2d6/result.json`。`git diff --check` 通过。
+
+
+## Dependent symbolic Type inputs reach a fixed point
+
+Model search previously excluded every candidate mentioning another requested
+input and stopped at the first unresolved input. Consequently `T = *S`,
+`S = ?V`, `V = U` could not recover `T = *?U` when U was ambient, although each
+binding is determined relative to U. The added regression failed with
+`Unknown(UnvalidatedModel)` before the change
+(`/tmp/luna-tools-0a7s9ru1/result.json`).
+
+Search now keeps unresolved inputs while proved bindings grow. Each pass
+substitutes already proved bindings into mentioned candidate shapes, excludes
+remaining requested identities, and proves every resulting input equality
+against the original private problem. It neither adds candidate equalities as
+assumptions nor unfolds normal-form heads. Repetition stops on no progress or the
+shared budget; ambiguity still needs two models in the same ambient world.
+Substitution copying and expanded candidate depth are metered. Type resolution
+continues to isolate proposals and reprove original obligations before commit.
+
+Checks cover both request orders, chained pointer/optional shapes, proof replay,
+opaque-head candidate preservation, negative/disjunctive occurrences, budget
+exhaustion without partial publication, and transactional engine integration.
+Budget-dependent search paths can finish with less work than a larger-budget
+probe, so a low-budget success is accepted only with replayed proofs rather than
+assuming a fixed execution-cost boundary.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p ptc -p type_resolution`: 447 passed (`/tmp/luna-tools-srp9kmkh/result.json`).
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: passed (`/tmp/luna-tools-avi2l8ni/result.json`).
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`: 3 passed (`/tmp/luna-tools-60yihh1d/result.json`).
+- `git diff --check`: passed.
+
+Remaining limitation: this is dependency closure over mentioned shapes, not
+arbitrary symbolic synthesis. An initial validated satisfying model is still
+required. For example `T = F<S>, S = U` with opaque F can still return Unknown
+because that initial model cannot be reified, even though candidate substitution
+and congruence prove `T = F<U>`; the unit test exercises those latter operations
+without pretending the full search succeeded.

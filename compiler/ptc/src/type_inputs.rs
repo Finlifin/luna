@@ -52,7 +52,7 @@ impl Context {
             Outcome::IllFormed(message) => return TypeInputOutcome::IllFormed(message),
         };
         let mut bindings = BTreeMap::new();
-        let mut symbolic_candidates = None;
+        let mut pending = Vec::new();
         for &variable in inputs {
             let Some(value) = model.types.get(&variable) else {
                 return TypeInputOutcome::Unknown(UnknownReason::UnvalidatedModel);
@@ -69,42 +69,48 @@ impl Context {
                 Outcome::Entailed(proof) => {
                     bindings.insert(variable, (value.clone(), proof));
                 }
-                Outcome::NotEntailed(alternative) => {
-                    let candidates = match &symbolic_candidates {
-                        Some(candidates) => candidates,
-                        None => {
-                            let candidates = match symbolic::candidates(&problem, inputs, budget) {
-                                Ok(candidates) => candidates,
-                                Err(reason) => return TypeInputOutcome::Unknown(reason),
-                            };
-                            symbolic_candidates.insert(candidates)
-                        }
-                    };
-                    match symbolic::binding(&problem, variable, candidates, budget) {
-                        Ok(Some(binding)) => {
-                            bindings.insert(variable, binding);
-                            continue;
-                        }
-                        Ok(None) => {}
-                        Err(reason) => return TypeInputOutcome::Unknown(reason),
+                Outcome::NotEntailed(alternative) => pending.push((variable, alternative)),
+                Outcome::Unknown { reason, .. } => return TypeInputOutcome::Unknown(reason),
+                Outcome::IllFormed(message) => return TypeInputOutcome::IllFormed(message),
+            }
+        }
+        // A solved input can expose a symbolic shape for another input. Keep
+        // all unresolved inputs until this dependency closure stops growing;
+        // request order must not decide whether an ambient solution is found.
+        while !pending.is_empty() {
+            let candidates = match symbolic::candidates(&problem, inputs, &bindings, budget) {
+                Ok(candidates) => candidates,
+                Err(reason) => return TypeInputOutcome::Unknown(reason),
+            };
+            let before = bindings.len();
+            let mut unresolved = Vec::new();
+            for (variable, alternative) in pending {
+                match symbolic::binding(&problem, variable, &candidates, budget) {
+                    Ok(Some(binding)) => {
+                        bindings.insert(variable, binding);
                     }
-                    // Two different ambient worlds do not establish ambiguity
-                    // for an input relative to one fixed surrounding interface.
-                    match symbolic::same_ambient(&model, &alternative, inputs, budget) {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            return TypeInputOutcome::Unknown(UnknownReason::UnvalidatedModel);
-                        }
-                        Err(reason) => return TypeInputOutcome::Unknown(reason),
-                    }
+                    Ok(None) => unresolved.push((variable, alternative)),
+                    Err(reason) => return TypeInputOutcome::Unknown(reason),
+                }
+            }
+            pending = unresolved;
+            if bindings.len() == before {
+                break;
+            }
+        }
+        if let Some((variable, alternative)) = pending.into_iter().next() {
+            // Different ambient worlds do not establish ambiguity relative
+            // to one fixed surrounding interface.
+            match symbolic::same_ambient(&model, &alternative, inputs, budget) {
+                Ok(true) => {
                     return TypeInputOutcome::Ambiguous {
                         variable,
                         candidate: model,
                         alternative,
                     };
                 }
-                Outcome::Unknown { reason, .. } => return TypeInputOutcome::Unknown(reason),
-                Outcome::IllFormed(message) => return TypeInputOutcome::IllFormed(message),
+                Ok(false) => return TypeInputOutcome::Unknown(UnknownReason::UnvalidatedModel),
+                Err(reason) => return TypeInputOutcome::Unknown(reason),
             }
         }
         TypeInputOutcome::Unique(TypeInputSolution { model, bindings })

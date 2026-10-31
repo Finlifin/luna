@@ -301,3 +301,102 @@ fn requested_aliases_and_branch_occurrences_do_not_authorize_symbolic_solutions(
     };
     assert_eq!(solution.bindings[&id(0)].0, var(9));
 }
+
+#[test]
+fn dependent_symbolic_inputs_reach_a_fixed_point_in_either_request_order() {
+    let context = Context::default();
+    let pointer = |ty| Term::Pointer(Box::new(ty));
+    let constraint = F::And(vec![
+        F::equal(var(0), pointer(var(1))),
+        F::equal(var(1), Term::Optional(Box::new(var(2)))),
+        F::equal(var(2), var(9)),
+    ]);
+    for inputs in [[id(0), id(1), id(2)], [id(2), id(1), id(0)]] {
+        let outcome =
+            context.search_type_inputs(&inputs, constraint.clone(), &mut Budget::default());
+        let O::Unique(solution) = outcome else {
+            panic!("{outcome}")
+        };
+        let problem = context
+            .type_input_context(&inputs, constraint.clone(), &mut Budget::default())
+            .unwrap();
+        assert_eq!(
+            solution.bindings[&id(0)].0,
+            pointer(Term::Optional(Box::new(var(9))))
+        );
+        assert_eq!(
+            solution.bindings[&id(1)].0,
+            Term::Optional(Box::new(var(9)))
+        );
+        assert_eq!(solution.bindings[&id(2)].0, var(9));
+        for (value, proof) in solution.bindings.values() {
+            problem.verify_proof(proof, Budget::default()).unwrap();
+            assert!(
+                value
+                    .rigid_parameters()
+                    .unwrap()
+                    .keys()
+                    .all(|id| !inputs.contains(id))
+            );
+        }
+    }
+    assert!(context.assumptions().is_empty());
+}
+
+#[test]
+fn dependent_search_never_exports_partial_or_unproved_bindings() {
+    let context = Context::default();
+    let pointer = |ty| Term::Pointer(Box::new(ty));
+    let inputs = [id(0), id(1)];
+    for relation in [
+        F::equal(var(0), pointer(var(1))).negate(),
+        F::Or(vec![
+            F::equal(var(0), pointer(var(1))),
+            F::equal(var(0), boolean()),
+        ]),
+    ] {
+        let outcome = context.search_type_inputs(
+            &inputs,
+            F::And(vec![relation, F::equal(var(1), var(9))]),
+            &mut Budget::default(),
+        );
+        assert!(
+            !matches!(outcome, O::Unique(_) | O::Inconsistent(_)),
+            "{outcome}"
+        );
+    }
+    let constraint = F::And(vec![
+        F::equal(var(0), pointer(var(1))),
+        F::equal(var(1), var(9)),
+    ]);
+    let mut measured = Budget::default();
+    let before = measured.steps;
+    assert!(matches!(
+        context.search_type_inputs(&inputs, constraint.clone(), &mut measured),
+        O::Unique(_)
+    ));
+    let used = before - measured.steps;
+    for steps in [0, 1, used / 2, used - 1, used] {
+        let outcome = context.search_type_inputs(
+            &inputs,
+            constraint.clone(),
+            &mut Budget {
+                steps,
+                ..Budget::default()
+            },
+        );
+        match outcome {
+            O::Unique(solution) => {
+                let problem = context
+                    .type_input_context(&inputs, constraint.clone(), &mut Budget::default())
+                    .unwrap();
+                for (_, proof) in solution.bindings.values() {
+                    problem.verify_proof(proof, Budget::default()).unwrap();
+                }
+            }
+            O::Unknown(UnknownReason::BudgetExhausted) if steps < used => {}
+            other => panic!("{steps}: {other}"),
+        }
+        assert!(context.assumptions().is_empty());
+    }
+}
