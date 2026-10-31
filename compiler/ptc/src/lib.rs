@@ -12,6 +12,8 @@ mod effects;
 mod error_results;
 mod learning;
 mod search;
+mod type_inputs;
+pub use type_inputs::{TypeInputOutcome, TypeInputSolution};
 mod theory_state;
 use theory_state::Classes;
 mod traits;
@@ -1596,6 +1598,15 @@ impl Search<'_> {
         Ok(integers.map(|integers| TheoryEvidence { integers, kinds }))
     }
     fn witness(&mut self, theory: &TheoryModel) -> Option<Model> {
+        // A bare theory model cannot interpret implementation-world predicates.
+        // Detect that boundary before allocating type witnesses that would be
+        // discarded regardless of their values.
+        for atom in self.atoms {
+            self.steps = self.steps.checked_sub(1)?;
+            if matches!(atom, Atom::Trait(_)) {
+                return None;
+            }
+        }
         let classes = &theory.classes;
         // Reify actual closed types, not arbitrary EUF domain elements. Missing
         // value-store, runtime or opaque-call interpretations keep Unknown.
@@ -1640,6 +1651,7 @@ impl Search<'_> {
                     &mut free,
                     &mut BTreeSet::new(),
                     &self.context.nominal_constructors,
+                    &mut self.steps,
                 )?;
                 types.insert(*declaration, value);
             }
@@ -1648,7 +1660,6 @@ impl Search<'_> {
         // a purported concrete model (opaque calls still require evidence).
         let mut atom_values = Vec::new();
         for atom in self.atoms {
-            self.steps = self.steps.checked_sub(1)?;
             atom_values.push(model_atom(
                 atom,
                 &types,
@@ -1783,7 +1794,9 @@ fn reify(
     free: &mut HashMap<usize, Term>,
     active: &mut BTreeSet<usize>,
     nominal: &BTreeSet<DeclarationId>,
+    fuel: &mut usize,
 ) -> Option<Term> {
+    *fuel = fuel.checked_sub(1)?;
     let root = classes.root(id);
     if !active.insert(root) {
         return None;
@@ -1798,21 +1811,31 @@ fn reify(
                 free,
                 active,
                 nominal,
+                fuel,
             )
         })
     } else {
-        let next = free.len();
-        Some(
-            free.entry(root)
-                .or_insert_with(|| {
-                    let mut ty = Term::Primitive(Primitive::Bool);
-                    for _ in 0..=next {
-                        ty = Term::Pointer(Box::new(ty));
-                    }
-                    ty
-                })
-                .clone(),
-        )
+        if !free.contains_key(&root) {
+            let mut candidate = Term::Primitive(Primitive::Bool);
+            loop {
+                candidate = Term::Pointer(Box::new(candidate));
+                // A fresh model element must not accidentally equal an explicit
+                // type appearing in a disequality (or another free class).
+                nir::type_computations::charge_term(&candidate, fuel).ok()?;
+                let mut used = terms.ids.contains_key(&candidate);
+                for value in free.values() {
+                    nir::type_computations::charge_term(value, fuel).ok()?;
+                    used |= value == &candidate;
+                }
+                if !used {
+                    free.insert(root, candidate);
+                    break;
+                }
+            }
+        }
+        let value = &free[&root];
+        nir::type_computations::charge_term(value, fuel).ok()?;
+        Some(value.clone())
     };
     active.remove(&root);
     result

@@ -103,3 +103,38 @@ occurrence 表，避免保存不再使用的全出现索引。
 - 小公式检查扩展至三个原子的全部 27 种部分赋值，对全部 8 种完整赋值检查冲突／unit
   语义；每个产生的证明用独立扫描器重放。另覆盖重复文字、宽子句、过期监视记录、
   预算中断后恢复与重新赋值。格式化和 `git diff --check` 通过。
+
+
+### 显式 Type 输入的模型搜索接口
+
+`Context::search_type_inputs` 接收明确列出的 rigid Type 输入与待求解约束，共享调用方
+预算。它在私有问题上下文中搜索满足模型，再逐一证明每个请求输入等于模型给出的值。
+仅满足约束不能得到 Unique；若存在不同赋值，返回 Ambiguous 及两个 witness。不可满足
+返回 False 的证明；模型重建不支持、预算不足和非法输入分别保留为 Unknown／IllFormed。
+未请求的环境变量可以出现在 witness 中，但不会作为输入 substitution 导出。
+
+`type_input_context` 重建证据的精确上下文，供独立 `verify_witness`／`verify_proof` 回放。
+Unique 中每个 binding 的证明目标必须是该变量与该值的等式；存在性 witness 的目标是
+False（它是该目标的反例）。反例生成器里的任意默认值不能通过这个确定性检查。
+重复请求被拒绝；即使请求变量未出现在约束中，也登记反身等式以明确包含在模型中。
+返回结果提供 S-expression dump。
+
+这个接口是明确约束问题的求解接口，不授权调用方将函数 requires 或候选待证义务
+提升为区域事实。尚未接入 elaboration 的候选事务；后续接线必须先做直接 unification，
+只在明确交付的待解输入上使用搜索，随后在原环境重新检查候选和全部剩余义务。
+当前 witness 仍只重建已有的闭合结构类型片段，不能替代符号 substitution；opaque
+normal-form 的不支持仍返回 Unknown，也不能由头部相等反解参数。完整 Type 解提取
+和统一持久 CDCL trail 仍未完成。
+
+自由等价类的模型值现在避开输入中已出现的具体类型及其他自由类，修正了如
+`T != *bool` 时默认仍选 `*bool` 而误退到 Unknown 的情况。重建及候选分配计入预算。
+trait atom 没有裸模型解释时，在分配类型 witness 前返回未决，避免浪费后续
+implementation-world 求解需要的额度；没有扩大原有预算。
+
+验证（工作目录 `/home/fin/luna`）：
+
+- `python3 -B development/check.py --timeout 900 -- test -p ptc -p type_resolution`：exit 0；`/tmp/luna-tools-td3evoor/result.json`。
+- 新增六项 Type-input 测试，覆盖析取排除、多变量、独立证据重放、歧义／无约束、
+  矛盾、预算恢复、作用域、环境变量隔离、opaque head 非单射及具体类型碰撞。
+- 首轮广泛回归暴露新增模型计量下 trait 查询的无效重建开销；提前检查模型解释边界后，
+  原 `trait_proposition_reuses_budget_after_formation_and_given_checks` 预算保持不变并通过。
