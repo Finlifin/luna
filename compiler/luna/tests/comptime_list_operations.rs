@@ -1933,3 +1933,104 @@ fn checked_list_query_does_not_catch_index_expression_failures() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn fallible_list_callbacks_preserve_success_error_and_optional_layers() {
+    let package = compile(
+        "typealias Integer=.Integer'builtin;typealias Type=.Type'builtin;
+        pure comptime fn Identity<T>->Type {T}
+        comptime fn scale(value:Integer)->!Integer Integer {value * 10}
+        comptime fn add(left:Integer,right:Integer)->!Integer Integer {left + right}
+        comptime fn absent(value:Integer)->!Integer ?Integer {null}
+        comptime fn forbidden(value:Integer)->!Integer Integer {
+            let empty:meta.List<Integer> = [];empty[0]
+        }
+        comptime fn run()->bool {
+            let values:meta.List<Integer> = [1,2,3];
+            let empty:meta.List<Integer> = [];
+            let types:meta.List<Type> = [Identity<bool>,bool];
+            let kept=types.try_map(|value:Type|->!Integer Type {value});
+            let mapped=values.try_map(scale);
+            let folded=values.try_fold(10,add);
+            let nested=values.try_map(absent);
+            let unused=empty.try_map(forbidden);
+            let original=empty.try_fold(7,|a,b|forbidden(b));
+            (mapped match {value! =>value.length()==3 and value[0]==10 and value[2]==30,error _=>false})
+                and (folded matches 16!)
+                and (nested match {value! =>value.length()==3 and (value[0] matches null),error _=>false})
+                and (unused match {value! =>value.length()==0,error _=>false})
+                and (original matches 7!)
+                and (kept match {value! => value[0]==Identity<bool> and value[1]==bool,error _=>false})
+        }",
+    ).unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 2_000_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn fallible_list_callbacks_stop_in_order_and_preserve_capture_effects() {
+    let package = compile(
+        "typealias Integer=.Integer'builtin;
+        comptime fn run()->bool {
+            var original:meta.List<Integer> = [1,2,3];
+            var visits:Integer=0;
+            let transform=|value:Integer|->!Integer Integer {
+                if value==0 {return visits;}
+                visits=visits * 10 + value;
+                original=[];
+                if value==2 {return error visits;}
+                value
+            };
+            let mapped=original.try_map(transform);
+            let trace=transform(0);
+            let fold=|left:Integer,right:Integer|->!Integer Integer {
+                if right==0 {return visits;}
+                visits=visits * 10 + right;
+                if right==2 {return error visits;}
+                left + right
+            };
+            let reduced=original.try_fold(0,fold);
+            let fold_trace=fold(0,0);
+            (mapped matches error 12) and (trace matches 12!)
+                and (reduced matches error 12) and (fold_trace matches 12!)
+                and visits==0 and original.length()==3
+        }",
+    )
+    .unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 2_000_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn fallible_lists_check_callback_phase_and_input_domain_even_when_empty() {
+    for (call, callback) in [
+        (
+            "xs.try_map(callback)",
+            "fn callback(value:bool)->!bool bool {value}",
+        ),
+        (
+            "xs.try_map(callback)",
+            "comptime fn callback(value:Integer)->!bool bool {true}",
+        ),
+        (
+            "xs.try_fold(false,callback)",
+            "fn callback(acc:bool,value:bool)->!bool bool {acc}",
+        ),
+        (
+            "xs.try_fold(false,callback)",
+            "comptime fn callback(acc:Integer,value:bool)->!bool Integer {acc}",
+        ),
+    ] {
+        let prefix = format!("typealias Integer = .Integer'builtin;{callback}");
+        compile(&prefix).unwrap();
+        let error = compile(&format!(
+            "{prefix} comptime fn run() {{let xs:meta.List<bool> = [];{call};}}"
+        ))
+        .unwrap_err();
+        assert!(!error.contains("parsing failed"), "{error}");
+    }
+}

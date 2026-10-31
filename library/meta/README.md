@@ -19,6 +19,25 @@ Object 的查询与编辑定义在固有 `impl Object` 中，可以通过接收�
 修改原列表位置，支持结构字段及跨方法转发，不需要取址或解引用。整体更新需要可重新绑定的位置；`let` 列表的查询仍可调用。带回调的遍历显式保存输入快照。需要显式元素类型时可使用
 `meta.List<T>.concat(left, right)`。旧的 `meta.length(values)` 等自由函数不再导出。
 
+`values.try_map(transform)` 接收返回 `!E U` 的编译期回调，交付 `!E meta.List<U>`；
+`values.try_fold(initial, combine)` 接收返回 `!E A` 的回调，交付 `!E A`。
+两者按输入快照顺序逐项调用，首个错误立即返回，不访问后续元素。空列表成功返回
+空映射结果或原累积值，不调用回调。错误不会回滚已经发生的回调副作用；
+`try_map` 的部分输出不会作为成功列表交付。可选元素保留各自的存在层次，
+`Type` 元素保留 normal-form 身份，不展开类型头。
+
+```flurry
+comptime fn checked_width(value: Integer) -> !Integer Integer {
+    if value < 0 { return error value; }
+    value * 8
+}
+
+comptime fn widths() -> !Integer meta.List<Integer> {
+    let inputs: meta.List<Integer> = [1, 2, 3];
+    inputs.try_map(checked_width)
+}
+```
+
 `values.append_all(other)` 把整个同元素域列表追加到当前接收者。`other` 保持值快照，
 `values.append_all(values)` 追加调用时取得的原内容，已有快照不变；空后缀仍遵守
 实参求值与可重新绑定位置的要求。字段接收者在实参求值之后读取当前内容，

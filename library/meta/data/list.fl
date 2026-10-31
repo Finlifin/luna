@@ -67,6 +67,42 @@ impl List<T> where T {
         }
     }
 
+    {-
+        Visit the fixed input snapshot in order and stop at the first error.
+        Partial output stays local; callback effects already performed are not
+        rolled back. Empty input succeeds without invoking the callback.
+    -}
+    pub comptime fn try_map(self, transform: %c comptime fn(T) -> !E U) -> !E List<U>
+    where E, U, c: Type.vars.Closure
+    {
+        let input = self;
+        let count = input.length();
+        var output: List<U> = [];
+        inline for index in 0..count {
+            transform(input[index]) match {
+                value! => output.append(value),
+                error failure => { return error failure; },
+            };
+        }
+        output
+    }
+
+    pub comptime fn try_fold(self, initial: A,
+        combine: %c comptime fn(A, T) -> !E A) -> !E A
+    where A, E, c: Type.vars.Closure
+    {
+        let input = self;
+        let count = input.length();
+        var accumulator = initial;
+        inline for index in 0..count {
+            accumulator = combine(accumulator, input[index]) match {
+                value! => value,
+                error failure => { return error failure; },
+            };
+        }
+        accumulator
+    }
+
     pub comptime fn fold(self, initial: A, combine: %c comptime fn(A, T) -> A) -> A
     where A, c: Type.vars.Closure
     {

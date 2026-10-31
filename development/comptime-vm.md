@@ -7853,3 +7853,34 @@ python3 -B development/check.py --timeout 900 -- test -p luna --test execution -
 
 No full language suite or performance benchmark was run. The unrelated
 pre-existing worktree changes remain outside this migration.
+
+## Fallible comptime collection callbacks
+
+`meta.List<T>.try_map` and `try_fold` now use ordinary comptime callbacks and
+error results. Each captures its input snapshot, invokes callbacks in order,
+and returns the first error without visiting the remaining suffix. Empty input
+returns a successful empty list or unchanged initial accumulator. Partial
+mapping output is private; error return does not roll back callback effects.
+Optional element layers and opaque Type identities are preserved. The methods
+use value-reference self and existing list operations, with no pointer API,
+new intrinsic, runtime Copy requirement or special error representation.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_list_operations`:
+  62 passed, exit 0; `/tmp/luna-tools-0s1da3xf/result.json`.
+- After adding callback rejection cases, `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_list_operations fallible_list`:
+  three passed, exit 0; `/tmp/luna-tools-2aptkor7/result.json`. Both positive
+  cases were rerun; negative inputs compile their callback declarations first,
+  then reject wrong callback phases/domains even with an empty receiver.
+- `python3 -B development/library_check.py --stage sysroot-meta --timeout 300`:
+  the public sysroot native acceptance passed, exit 0;
+  `/tmp/luna-library-u9szc022/summary.json`. Its comptime checks now also cover
+  successful and failed mapping/folding, preserved optional/Type payloads,
+  empty inputs, and persistent callback capture state after short-circuiting.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-gb56r1a4/result.json`; `git diff --check` passed.
+
+No full language suite was run. These methods inherit current immutable list
+construction costs; no linear-time output builder is claimed. General
+heterogeneous error-row inference remains separate unfinished work.
