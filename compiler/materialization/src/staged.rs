@@ -1,6 +1,6 @@
 //! Private required invocation during concrete staged-input preparation.
 use super::*;
-use comptime_interpretor::{ContractOutcome, Interpreter, Value};
+use comptime_interpretor::{ClosureIdentity, ContractOutcome, Interpreter, Value};
 
 // Reuse checked code and metadata, never an interpreter, environment or result.
 // The scratch root and dispatch table are cleared between independent invocations.
@@ -22,20 +22,6 @@ impl Snapshot {
             ty: Term::Primitive(nir::Primitive::Void),
             source: n::SourceRange { start: 0, end: 0 },
         };
-    }
-}
-
-#[derive(Clone)]
-struct ClosureIdentity(std::sync::Arc<comptime_interpretor::Closure>);
-impl PartialEq for ClosureIdentity {
-    fn eq(&self, other: &Self) -> bool {
-        std::sync::Arc::ptr_eq(&self.0, &other.0)
-    }
-}
-impl Eq for ClosureIdentity {}
-impl std::hash::Hash for ClosureIdentity {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        std::ptr::hash(std::sync::Arc::as_ptr(&self.0), state);
     }
 }
 
@@ -302,7 +288,7 @@ impl Builder<'_> {
                 if matches!(ty.callable_signature(), Term::Function { .. })
                     && ty.is_comptime_callable() == closure.ty().is_comptime_callable() =>
             {
-                let identity = ClosureIdentity(closure.clone());
+                let identity = ClosureIdentity::new(closure);
                 if let Some(previous) = graph.closures.get(&identity) {
                     let (binding, previous_type) = previous
                         .as_ref()

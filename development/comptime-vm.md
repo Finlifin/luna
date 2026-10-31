@@ -8510,3 +8510,39 @@ Reports: `/tmp/luna-tools-yhvjdy23/result.json` (crate checks),
 `/tmp/luna-tools-rnydyf8u/result.json` (formatting). Aggregate/closure graph
 construction and NF term encoding remain separate consumers and are not unified
 by this scalar extraction. No whole-language completion or timing claim.
+
+## Share owning closure identities and borrow capture validation
+
+Constant and staged snapshot tables now share `ClosureIdentity`, an opaque
+owning Arc key with pointer equality and hashing. A key retains its closure
+allocation for the snapshot's full lifetime, including across multiple values
+materialized with the same table. This replaces the constant materializer's
+unowned integer-address keys and the staged materializer's private duplicate
+key implementation. Keys are graph identities only: they do not enter terms,
+persistent caches, dumps or type equality. Output binding order still follows
+the explicit vector of encounter-ordered bindings, not hash-table iteration.
+
+Closure snapshot validation now inspects owned capture storage through the same
+metered guard as staged freezing. It no longer clones each storage payload before
+checking it. Ownership failure, recursive lock acquisition and budget exhaustion
+propagate without abandoning consumed fuel; returned errors release the guards.
+The existing source tests cover shared mutable closures, independent snapshots,
+nested sharing, callback rejection and CMTT staging.
+
+Validation from `/home/fin/luna`, all commands exited 0:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt local_constant
+python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt_methods --test comptime_bytecode_traits --test comptime_staged_values
+python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt snapshot
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+git diff --check
+```
+
+Reports: `/tmp/luna-tools-43plnqy_/result.json` (15 local-constant tests),
+`/tmp/luna-tools-v6_692wq/result.json` (CMTT methods and VM integration),
+`/tmp/luna-tools-67okc3tq/result.json` (snapshot tests), and
+`/tmp/luna-tools-ifeagnt7/result.json` (formatting).
+Constant expression construction itself still has an owned capture conversion;
+this commit removes eager copies from validation, not from every materialization
+consumer. Full graph conversion and NF freezing remain separate work.

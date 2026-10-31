@@ -1,7 +1,7 @@
 //! Completed module and associated constants. Cached expressions reconstruct frozen value
 //! graphs; active inference, caller premises and interpreter storage do not enter.
 use super::*;
-use comptime_interpretor::Value;
+use comptime_interpretor::{ClosureIdentity, Value};
 mod observations;
 use observations::ObservationScope;
 
@@ -10,10 +10,10 @@ struct Materialization {
     // Nominal generator fields use the same recursive data boundary as tuples.
     generator_fields: bool,
     type_scope: BTreeSet<DeclarationId>,
-    // Keys identify interpreter closures only during this one snapshot. Their
-    // addresses never enter NIR, diagnostics, persistent caches or dumps.
-    closures: BTreeMap<usize, (n::LocalId, Term)>,
-    active: BTreeSet<usize>,
+    // Owning identities remain valid across all values materialized in this
+    // snapshot; no addresses enter NIR, diagnostics or persistent caches.
+    closures: std::collections::HashMap<ClosureIdentity, (n::LocalId, Term)>,
+    active: std::collections::HashSet<ClosureIdentity>,
     bindings: Vec<n::Expr>,
 }
 
@@ -865,17 +865,22 @@ impl Checker<'_, '_> {
                 "active comptime value reference cannot escape in a closure snapshot",
             )),
             Value::Storage(cell) => {
-                let value = cell
-                    .read()
-                    .map_err(|cause| error(span, format!("capture read failed: {cause:?}")))?;
-                self.validate_closure_snapshot(
-                    &value,
-                    span,
-                    depth + 1,
-                    active,
-                    completed,
-                    type_scope,
-                )
+                let mut steps = self.required_steps;
+                let checked = cell.inspect_owned(&mut steps, 128, |value, steps| {
+                    self.required_steps = *steps;
+                    let result = self.validate_closure_snapshot(
+                        value,
+                        span,
+                        depth + 1,
+                        active,
+                        completed,
+                        type_scope,
+                    );
+                    *steps = self.required_steps;
+                    result
+                });
+                self.required_steps = steps;
+                checked.map_err(|cause| error(span, format!("capture read failed: {cause:?}")))?
             }
             Value::Tuple(fields) | Value::Record { fields, .. } | Value::Variant { fields, .. } => {
                 if let Value::Record { arguments, .. } | Value::Variant { arguments, .. } = value {
@@ -3675,7 +3680,7 @@ impl Checker<'_, '_> {
                         arguments: arguments.to_vec(),
                     }
                 } else {
-                    let identity = std::sync::Arc::as_ptr(&closure) as usize;
+                    let identity = ClosureIdentity::new(&closure);
                     if let Some((binding, previous_type)) = snapshot.closures.get(&identity) {
                         if previous_type != &ty {
                             return Err(error(span, "shared constant closure type mismatch"));
@@ -3686,7 +3691,7 @@ impl Checker<'_, '_> {
                             kind: K::Local(*binding),
                         });
                     }
-                    if !snapshot.active.insert(identity) {
+                    if !snapshot.active.insert(identity.clone()) {
                         return Err(error(
                             span,
                             "cyclic closure environment cannot be materialized as a constant",
