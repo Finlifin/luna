@@ -323,6 +323,29 @@ impl Search<'_> {
         }
     }
 
+    fn clause_conflict(&mut self, trace: Vec<usize>, assignment: &[Option<bool>]) -> Conflict {
+        let mut conflict = Conflict::boolean(assignment);
+        // Explanation is optional. Retain the original certificate and its
+        // conservative support if the bounded dependency walk is interrupted.
+        let allowance = (self.steps / 8).min(4096);
+        let mut work = allowance;
+        let explained = self
+            .boolean
+            .as_mut()
+            .unwrap()
+            .clauses(self.atoms.len(), &mut work)
+            .and_then(|cnf| cnf.explain(&trace, assignment, &mut work));
+        self.steps -= allowance - work;
+        let trace = if let Ok((trace, support)) = explained {
+            conflict.support = support;
+            trace
+        } else {
+            trace
+        };
+        conflict.tree = super::ProofTree::ClauseConflict(trace);
+        conflict
+    }
+
     fn enter(&mut self, assignment: &mut [Option<bool>], depth: usize) -> Step {
         if depth >= self.max_depth || self.tick().is_err() {
             return Step::Return(SearchResult::Unknown(UnknownReason::BudgetExhausted));
@@ -387,8 +410,7 @@ impl Search<'_> {
                     return Step::Return(SearchResult::Unknown(UnknownReason::BudgetExhausted));
                 }
                 Ok(Propagation::Conflict(trace)) => {
-                    let mut conflict = Conflict::boolean(assignment);
-                    conflict.tree = super::ProofTree::ClauseConflict(trace);
+                    let conflict = self.clause_conflict(trace, assignment);
                     return Step::Return(SearchResult::Unsat(conflict));
                 }
                 Ok(Propagation::Unit {
@@ -396,9 +418,8 @@ impl Search<'_> {
                     value,
                     trace,
                 }) => {
-                    let mut reason = Conflict::boolean(assignment);
-                    reason.support.insert(index);
-                    reason.tree = super::ProofTree::ClauseConflict(trace);
+                    assignment[index] = Some(!value);
+                    let reason = self.clause_conflict(trace, assignment);
                     assignment[index] = Some(value);
                     return Step::Descend(
                         Frame::Learned {
@@ -670,6 +691,61 @@ mod tests {
             }
             .to_string(),
             "(positive-frame (atom 3) (negative-result unknown))"
+        );
+    }
+    #[test]
+    fn root_unit_reason_excludes_unrelated_entry_assignments() {
+        let atom = |local| {
+            Formula::equal(
+                Term::Rigid {
+                    declaration: DeclarationId { package: 89, local },
+                    sort: Sort::Type,
+                },
+                Term::Primitive(Primitive::Bool),
+            )
+        };
+        let a = atom(0);
+        let b = atom(1);
+        let formula = Formula::And(vec![
+            Formula::Or(vec![a.clone(), a]),
+            Formula::Or(vec![b.clone(), b.negate()]),
+        ]);
+        let context = Context::default();
+        let mut atoms = Vec::new();
+        let mut terms = Terms::default();
+        collect(&formula, &mut atoms, &mut terms, 0, 128, &[]).unwrap();
+        let mut search = Search {
+            boolean: None,
+            learned: learning::Clauses::default(),
+            context: &context,
+            formula: &formula,
+            atoms: &atoms,
+            terms: &terms,
+            steps: 100000,
+            max_depth: 128,
+        };
+        let mut assignment = [None, Some(true)];
+        let Step::Descend(
+            Frame::Learned {
+                index,
+                value,
+                reason,
+            },
+            _,
+        ) = search.enter(&mut assignment, 0)
+        else {
+            panic!("root clauses must supply a unit");
+        };
+        assert_eq!((index, value), (0, true));
+        assert_eq!(reason.support, std::collections::BTreeSet::from([0]));
+        assert_eq!(assignment, [Some(true), Some(true)]);
+        search
+            .check_tree(&reason.tree, &mut [Some(false), None], 0)
+            .unwrap();
+        assert!(
+            search
+                .check_tree(&reason.tree, &mut [None, Some(true)], 0)
+                .is_err()
         );
     }
 }

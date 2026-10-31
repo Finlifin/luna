@@ -13,13 +13,13 @@ pub(crate) enum Propagation {
     },
     None,
 }
-enum Status {
+pub(super) enum Status {
     Open,
     Unit(Literal),
     Conflict,
 }
 impl Cnf {
-    fn initial(
+    pub(super) fn initial(
         &self,
         assignment: &[Option<bool>],
         fuel: &mut usize,
@@ -34,7 +34,7 @@ impl Cnf {
         Ok(values)
     }
 
-    fn status(
+    pub(super) fn status(
         &self,
         clause: usize,
         values: &[Option<bool>],
@@ -144,6 +144,16 @@ mod tests {
     use crate::{Atom, Equality, Formula, boolean::Circuit, evaluate};
     use nir::{Primitive, Term};
 
+    fn check_explanation(cnf: &Cnf, trace: &[usize], assignment: &[Option<bool>]) {
+        let (trace, support) = cnf.explain(trace, assignment, &mut 10000).unwrap();
+        let reduced: Vec<_> = assignment
+            .iter()
+            .enumerate()
+            .map(|(i, value)| if support.contains(&i) { *value } else { None })
+            .collect();
+        cnf.replay(&trace, &reduced, &mut 10000).unwrap();
+    }
+
     #[test]
     fn partial_propagations_agree_with_all_source_completions() {
         let atoms = [Primitive::Bool, Primitive::U8].map(|p| {
@@ -200,6 +210,7 @@ mod tests {
                 match result {
                     Propagation::Conflict(trace) => {
                         conflicts += 1;
+                        check_explanation(&cnf, &trace, &assignment);
                         assert!(!(0..4).any(completion_is_model));
                         assert_eq!(cnf.replay(&trace, &assignment, &mut 10000), Ok(()));
                     }
@@ -217,6 +228,7 @@ mod tests {
                         }
                         let mut opposite = assignment;
                         opposite[index] = Some(!value);
+                        check_explanation(&cnf, &trace, &opposite);
                         assert_eq!(cnf.replay(&trace, &opposite, &mut 10000), Ok(()));
                         assert_eq!(
                             cnf.replay(&trace, &assignment, &mut 10000),

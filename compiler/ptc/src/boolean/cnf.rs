@@ -1,5 +1,6 @@
 //! Linear Tseitin encoding. Auxiliary variables are private Boolean identities,
 //! never theory atoms or source-level inference variables.
+mod explanation;
 mod propagation;
 pub(crate) use propagation::Propagation;
 
