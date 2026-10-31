@@ -1569,3 +1569,66 @@ fn dynamic_trait_defaults_specialize_comptime_value_inputs_per_invocation() {
         );
     }
 }
+
+#[test]
+fn code_session_reuses_code_but_not_values_or_world_authority() {
+    use comptime_interpretor::CodeSession;
+    use std::sync::Arc;
+    let source = Arc::new(package());
+    let mut session = CodeSession::new(source.clone());
+    let expected = Value::FunctionInstance {
+        declaration: id(2),
+        arguments: vec![Term::Primitive(Primitive::Bool)],
+    };
+    for attempt in 0..3 {
+        let mut vm = Interpreter::for_comptime(&source, Budget::default()).unwrap();
+        let value = vm
+            .with_code_session(&mut session, |vm| vm.invoke(id(1), vec![]))
+            .unwrap();
+        assert_eq!(value, expected);
+        assert!(vm.bytecode_invocations() > 0);
+        if attempt == 0 {
+            assert!(vm.bytecode_compilations() > 0);
+        } else {
+            assert_eq!(vm.bytecode_compilations(), 0);
+        }
+    }
+    let mut changed = source.as_ref().clone();
+    changed.functions[0].signature = signature(Term::Primitive(Primitive::Bool));
+    changed.functions[0].body.ty = Term::Primitive(Primitive::Bool);
+    changed.functions[0].body.kind = K::Literal(nir::program::Literal::Bool(true));
+    let mut vm = Interpreter::for_comptime(&changed, Budget::default()).unwrap();
+    assert_eq!(
+        vm.with_code_session(&mut session, |vm| vm.invoke(id(1), vec![]))
+            .unwrap(),
+        Value::Bool(true)
+    );
+    assert!(vm.bytecode_compilations() > 0);
+    let mut vm = Interpreter::for_comptime(&source, Budget::default()).unwrap();
+    assert_eq!(
+        vm.with_code_session(&mut session, |vm| vm.invoke(id(1), vec![]))
+            .unwrap(),
+        expected
+    );
+    assert_eq!(vm.bytecode_compilations(), 0);
+}
+
+#[test]
+fn code_session_returns_completed_code_when_host_operation_unwinds() {
+    use comptime_interpretor::CodeSession;
+    use std::sync::Arc;
+    let source = Arc::new(package());
+    let mut session = CodeSession::new(source.clone());
+    let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut vm = Interpreter::for_comptime(&source, Budget::default()).unwrap();
+        vm.with_code_session(&mut session, |vm| {
+            vm.invoke(id(1), vec![]).unwrap();
+            panic!("host operation failed after invocation");
+        });
+    }));
+    assert!(failure.is_err());
+    let mut vm = Interpreter::for_comptime(&source, Budget::default()).unwrap();
+    vm.with_code_session(&mut session, |vm| vm.invoke(id(1), vec![]))
+        .unwrap();
+    assert_eq!(vm.bytecode_compilations(), 0);
+}

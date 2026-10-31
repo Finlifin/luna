@@ -741,6 +741,9 @@ macro_rules! value {
     };
 }
 
+mod code_session;
+pub use code_session::CodeSession;
+
 mod invocation_budget;
 mod observations;
 
@@ -2203,6 +2206,11 @@ impl<'a> Interpreter<'a> {
         let binders = self.input_binders(&definition.type_parameters);
         if binders.len() != types.len() {
             return Err(self.failure(ErrorKind::Type, None));
+        }
+        // An empty declaration interface has no specialization to perform.
+        // Keep its stable package identity and the ordinary invocation checks.
+        if binders.is_empty() {
+            return self.invoke_value(Value::Function(function), arguments);
         }
         self.charge_copy_work(None, |fuel| {
             nir::copy_budget::charge_type_substitution(

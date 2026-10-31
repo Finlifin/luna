@@ -833,3 +833,30 @@ fn memoized_keys_use_resource_evidence_in_source_eq_and_hash() {
     );
     assert_eq!(denied.cached_results(), 0);
 }
+
+#[test]
+fn memoization_driver_reuses_code_without_caching_non_type_results() {
+    let package = compile("pure comptime fn invert(flag:bool)->bool {not flag}");
+    let mut invocation = luna::memoization::Invocation::prepare(
+        &package,
+        &intrinsic::LangItems::new(),
+        id(&package, "invert"),
+        vec![],
+        4,
+        Default::default(),
+    )
+    .unwrap();
+    let mut costs = Vec::new();
+    for flag in [true, false, true] {
+        let mut context = comptime_executor::Context::new(100_000);
+        let result = invocation
+            .invoke(vec![Value::Bool(flag)], &mut context)
+            .unwrap();
+        assert_eq!(*result.value, Value::Bool(!flag));
+        assert!(!result.reused);
+        assert_eq!(invocation.cached_results(), 0);
+        costs.push(100_000 - context.remaining());
+    }
+    assert!(costs[1] < costs[0], "cold and warm costs: {costs:?}");
+    assert_eq!(costs[1], costs[2]);
+}

@@ -15,7 +15,8 @@ use nir::{
 };
 
 pub struct Invocation {
-    package: Package,
+    package: std::sync::Arc<Package>,
+    code_session: comptime_interpretor::CodeSession,
     declaration: DeclarationId,
     arguments: Vec<Term>,
     signature: Term,
@@ -229,8 +230,11 @@ impl Invocation {
             };
         let mut package = package.clone();
         package.dispatch_instances = dispatch;
+        let package = std::sync::Arc::new(package);
+        let code_session = comptime_interpretor::CodeSession::new(package.clone());
         Ok(Self {
             package,
+            code_session,
             declaration,
             arguments,
             signature,
@@ -274,6 +278,7 @@ impl Invocation {
             };
             let (value, _) = evaluate(
                 &self.package,
+                &mut self.code_session,
                 &world,
                 self.resources,
                 self.budget,
@@ -349,6 +354,7 @@ impl Invocation {
             );
             execute(
                 &self.package,
+                &mut self.code_session,
                 &world,
                 self.resources,
                 self.budget,
@@ -364,6 +370,7 @@ impl Invocation {
         } else {
             execute(
                 &self.package,
+                &mut self.code_session,
                 &world,
                 self.resources,
                 self.budget,
@@ -506,6 +513,7 @@ impl std::fmt::Display for Invocation {
 
 fn execute(
     package: &Package,
+    code_session: &mut comptime_interpretor::CodeSession,
     world: &World<'_>,
     resources: Option<(DeclarationId, DeclarationId)>,
     budget: ptc::Budget,
@@ -538,6 +546,7 @@ fn execute(
             let values = inputs.iter().map(|input| input.value().clone()).collect();
             evaluate(
                 package,
+                code_session,
                 world,
                 resources,
                 budget,
@@ -554,6 +563,7 @@ fn execute(
 
 fn evaluate(
     package: &Package,
+    code_session: &mut comptime_interpretor::CodeSession,
     world: &World<'_>,
     resources: Option<(DeclarationId, DeclarationId)>,
     budget: ptc::Budget,
@@ -611,7 +621,7 @@ fn evaluate(
         }
     };
     let mut admission_work = 0;
-    let result = (|| {
+    let result = vm.with_code_session(code_session, |vm| {
         let value = vm.invoke_instantiated(entry, type_arguments, values)?;
         let publish = if !cache_result || value.immutable_copy_work().is_none() {
             false
@@ -643,7 +653,7 @@ fn evaluate(
             }
         };
         Ok((value, publish))
-    })();
+    });
     context
         .spend::<String>((steps - vm.remaining_steps() + admission_work) as usize)
         .map_err(|e| e.to_string())?;
