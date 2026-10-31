@@ -423,7 +423,7 @@ impl Display for NFSig<'_> {
 
 impl Display for FnParam<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        form!(f, "fn-param", "id" => Id(self.hir_id), "name" => Name(self.name), "index" => self.index, "type" => self.ty, "span" => Location(self.span))
+        form!(f, "fn-param", "id" => Id(self.hir_id), "name" => Name(self.name), "index" => self.index, "type" => self.ty, "template-annotation" => Maybe(self.template_annotation), "span" => Location(self.span))
     }
 }
 

@@ -986,6 +986,7 @@ fn staged_method<'h>(arena: &'h HirArena, owner: OwnerId, staged: bool) -> Owner
         parameter_type = parameter_type.with_comptime();
     }
     let parameter = hir::common::FnParam {
+        template_annotation: None,
         hir_id: binding,
         name: Ident::new(Symbol::intern("T"), DUMMY_SP),
         index: 0,

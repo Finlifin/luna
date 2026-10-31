@@ -1070,6 +1070,7 @@ fn function_signatures_preserve_parameters_flags_clauses_return_binding_and_body
         .into_iter()
         .enumerate()
         .map(|(i, kind)| FnParam {
+            template_annotation: (i == 1).then_some(&ty),
             hir_id: id(i as u32 + 1),
             name: name(&format!("p{i}")),
             index: i as u32,
@@ -1175,6 +1176,11 @@ fn function_signatures_preserve_parameters_flags_clauses_return_binding_and_body
         "itself",
     ];
     for (i, param) in signature.field("params").list().iter().enumerate() {
+        if i == 1 {
+            assert_eq!(&param.field("template-annotation").list()[1], &parsed(&ty));
+        } else {
+            assert_eq!(param.field("template-annotation").tag(), "none");
+        }
         assert_id(param.field("id"), 7, i as u32 + 1);
         param.field("index").atom(i);
         param.field("name").field("name").text(&format!("p{i}"));

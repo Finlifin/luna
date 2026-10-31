@@ -698,3 +698,31 @@ Validation from `/home/fin/luna`:
 - `python3 -B development/check.py --timeout 900 -- test -p hir -p ast_lowering`: exit 0 (`/tmp/luna-tools-3mj4ajp5/result.json`).
 - After adding IIR execution and missing-trait rejection assertions, `python3 -B development/check.py --timeout 900 -- test -p luna --test test_templates signature_templates_`: 9 passed (`/tmp/luna-tools-qndk08eu/result.json`).
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: exit 0 (`/tmp/luna-tools-lbsebe2n/result.json`).
+
+
+## Explicit positional parameters on signature template instances
+
+Quote function instances can now spell positional parameters explicitly, including
+renaming, `_` domains inherited from the template, ordinary aliases, generic
+clauses and dependent domains referencing an earlier comptime Type input. Empty
+explicit parameter lists also work for empty interfaces.
+
+Expansion preserves the formal interface and carries the instance ascription in
+HIR `FnParam.template_annotation`. Ordinary signature elaboration checks it in the
+instance's lexical environment against the inherited domain. Both directions of
+type compatibility are checked so NoReturn's expression-level bottom admission
+cannot replace an input domain. Phase/parameter markers must agree; inherited
+contracts and opaque normal-form identity remain authoritative. Generated member
+cloning rebinds the extra annotation and HIR dumps expose it as an S-expression.
+
+This stage does not implement explicit named/variadic/dependent-capture protocol
+compatibility, deferred-domain comparison, explicit template clause application,
+shared CMTT template bodies or quoted-arm assembly. These paths remain diagnosed.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- check -p luna`: passed (`/tmp/luna-tools-ead6sp20/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p hir -p ast_lowering -p elaboration --lib --tests`: 405 passed (`/tmp/luna-tools-td4v0u51/result.json`), including S-expression annotation checks.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test test_templates`: 87 passed (`/tmp/luna-tools-wzipvxvu/result.json`). New cases execute IIR, check import/use-site lookup and reject incompatible domains, phase changes, contract violations and opaque-head unfolding.
+- After adding generic annotation cloning assertions, `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib function_templates::member_clone`: 9 passed (`/tmp/luna-tools-gpmqyt_1/result.json`).
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: passed (`/tmp/luna-tools-7ol9z41h/result.json`); `git diff --check` passed.

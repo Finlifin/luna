@@ -98,6 +98,7 @@ fn generated_struct_impl_and_instance_method_publish_atomically_and_execute() {
     .unwrap();
     batch.define(implementation_info, None, None).unwrap();
     let parameters = arena.alloc_fn_param_slice(vec![FnParam {
+        template_annotation: None,
         hir_id: id(method, 1),
         name: ident("self"),
         index: 0,

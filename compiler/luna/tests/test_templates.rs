@@ -2384,3 +2384,65 @@ fn signature_templates_inherit_trait_bounds_and_module_lexical_types() {
         comptime_interpretor::Value::Bool(true)
     );
 }
+
+#[test]
+fn explicit_template_parameters_check_aliases_generics_and_staged_dependencies() {
+    let source = "typealias Type=.Type'builtin;
+        typealias Flag=bool;
+        template fn unary(value:bool)->bool;
+        quote fn renamed(other:Flag) use unary {other}
+        quote fn inferred(other:_) use unary {other}
+        template fn zero()->bool;
+        quote fn empty() use zero {true}
+        template fn generic(value:T)->T where T;
+        quote fn keep(other:T) use generic {other}
+        template fn staged(comptime T:Type,value:T)->T;
+        quote fn staged_keep(comptime U:Type,other:U) use staged {other}
+        fn run()->bool {renamed(true) and inferred(true) and empty() and keep<bool>(true) and staged_keep(bool,true)}";
+    assert_eq!(
+        execution_support::run_iir(source, "run", vec![]),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn explicit_template_parameters_cannot_replace_domains_phases_or_contracts() {
+    for source in [
+        "typealias char=.char'builtin; template fn unary(value:bool)->bool;quote fn wrong(other:char) use unary {true}",
+        "typealias NoReturn=.NoReturn'builtin; template fn unary(value:bool)->bool;quote fn wrong(other:NoReturn) use unary {true}",
+        "typealias Type=.Type'builtin; pure comptime fn Identity<T>->Type {T} typealias Wrapped=Identity<bool>;template fn unary(value:Wrapped)->bool;quote fn wrong(other:bool) use unary {true}",
+        "template fn unary(value:bool)->bool;quote fn wrong(comptime other:bool) use unary {other}",
+        "template fn unary(comptime value:bool)->bool;quote fn wrong(other:bool) use unary {other}",
+        "template fn unary(value:T)->bool where T;quote fn wrong(other:bool) use unary {true}",
+        "template fn unary(value:bool)->result:bool where ensures result == value;quote fn wrong(other:bool) use unary {not other}",
+    ] {
+        assert!(
+            compile(source, Emit::Nir).is_err(),
+            "accepted incompatible template instance: {source}"
+        );
+    }
+}
+
+#[test]
+fn explicit_template_annotations_keep_instance_lexical_lookup() {
+    let Artifact::Nir(package) = compile_with_modules(
+        "use templates.unary;typealias Flag=bool;quote fn renamed(other:Flag) use unary {other} fn run()->bool {renamed(true)}",
+        &[("templates.fl", "typealias Flag=bool;pub template fn unary(value:Flag)->bool;")],
+        Emit::Nir,
+    ).unwrap() else { unreachable!() };
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+    assert!(
+        compile_with_modules(
+            "use templates.unary;typealias Flag=*bool;quote fn wrong(other:Flag) use unary {true}",
+            &[(
+                "templates.fl",
+                "typealias Flag=bool;pub template fn unary(value:Flag)->bool;"
+            )],
+            Emit::Nir,
+        )
+        .is_err()
+    );
+}

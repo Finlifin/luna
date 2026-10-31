@@ -76,6 +76,7 @@ fn generated<'a>(
                 fuel,
             )?;
             let params = arena.alloc_fn_param_slice(vec![FnParam {
+                template_annotation: None,
                 hir_id: parameter,
                 name: name("value"),
                 index: 0,

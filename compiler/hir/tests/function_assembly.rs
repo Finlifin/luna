@@ -50,6 +50,7 @@ fn construct<'a>(
     )?;
     let params = arena.alloc_fn_param_slice(vec![
         FnParam {
+            template_annotation: None,
             hir_id: type_id,
             name: ident("T"),
             index: 0,
@@ -57,6 +58,7 @@ fn construct<'a>(
             span: DUMMY_SP,
         },
         FnParam {
+            template_annotation: None,
             hir_id: value_id,
             name: ident("value"),
             index: if invalid == 1 { 0 } else { 1 },
@@ -248,6 +250,7 @@ fn bodyless_contract_indexes_parameters_without_creating_a_body() {
                 fuel,
             )?;
             let params = arena.alloc_fn_param_slice(vec![FnParam {
+                template_annotation: None,
                 hir_id: parameter,
                 name: ident("value"),
                 index: 0,

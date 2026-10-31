@@ -296,6 +296,9 @@ impl<'hir> TyParam<'hir> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FnParam<'hir> {
+    /// Instance-side ascription checked against the inherited template domain.
+    /// It is not a replacement for that interface or a new assumption.
+    pub template_annotation: Option<&'hir Expr<'hir>>,
     pub hir_id: HirId,
     pub name: Ident,
     pub index: u32,

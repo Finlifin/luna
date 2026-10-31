@@ -5,6 +5,37 @@ use hir::clause::ClauseConstraintKind as C;
 use hir::common::{Arg, TyParam, TyParamKind as T};
 use hir::{Expr, ExprKind as E, HirArena, HirId, ItemKind, OwnerId, Package};
 use std::collections::{BTreeSet, HashMap};
+
+impl super::Checker<'_, '_> {
+    pub(super) fn check_template_parameter_annotation(
+        &mut self,
+        parameter: &hir::common::FnParam<'_>,
+        inherited: &super::open_functions::Annotation,
+    ) -> Result<(), Error> {
+        let Some(annotation) = parameter.template_annotation else {
+            return Ok(());
+        };
+        if matches!(annotation.kind, E::TyPlaceholder) {
+            return Ok(());
+        }
+        let explicit = self.signature_annotation(annotation)?;
+        let (
+            super::open_functions::Annotation::Known(inherited),
+            super::open_functions::Annotation::Known(explicit),
+        ) = (inherited, explicit)
+        else {
+            return Err(error(
+                annotation.span,
+                "deferred function template parameter compatibility is not implemented",
+            ));
+        };
+        // Both directions are required: ordinary expression checking permits
+        // a diverging result at any expected type, but that is not equality of
+        // a template's input domains.
+        self.require(&explicit, inherited, annotation.span)?;
+        self.require(inherited, &explicit, annotation.span)
+    }
+}
 mod generation_attributes;
 mod generation_inputs;
 pub(super) use generation_inputs::{
@@ -58,16 +89,22 @@ pub(super) fn expand<'h>(source: &Package<'h>, arena: &'h HirArena) -> Result<Pa
                 "invalid function template parameter correspondence",
             ));
         }
+        if explicit_parameters.is_some_and(|explicit| {
+            explicit.len() != parameters.len()
+                || explicit
+                    .iter()
+                    .zip(parameters)
+                    .any(|(param, input)| param.hir_id != input.binding)
+        }) {
+            return Err(error(
+                item.span,
+                "invalid explicit function template parameter correspondence",
+            ));
+        }
         if matches!(template.kind, E::NFApplication(..)) {
             return Err(error(
                 item.span,
                 "function template clause substitution is not implemented",
-            ));
-        }
-        if explicit_parameters.is_some() {
-            return Err(error(
-                item.span,
-                "explicit function template parameter compatibility is not implemented",
             ));
         }
         // A separate identity namespace avoids collisions with the already-lowered body.
@@ -110,8 +147,19 @@ pub(super) fn expand<'h>(source: &Package<'h>, arena: &'h HirArena) -> Result<Pa
             .params
             .iter()
             .zip(parameters)
-            .map(|(p, input)| {
+            .enumerate()
+            .map(|(index, (p, input))| {
                 let mut p = p.clone();
+                if let Some(explicit) = explicit_parameters {
+                    let explicit = &explicit[index];
+                    if explicit.ty.flags != p.ty.flags {
+                        return Err(error(explicit.span, "function template instance parameter markers must match the inherited interface"));
+                    }
+                    let (T::Positional(annotation), T::Positional(_)) = (&explicit.ty.kind, &p.ty.kind) else {
+                        return Err(error(explicit.span, "explicit function template parameter protocol compatibility is not implemented"));
+                    };
+                    p.template_annotation = Some(annotation);
+                }
                 p.hir_id = input.binding;
                 p.name = input.name;
                 p.ty = rebind.ty(&p.ty, 0)?;

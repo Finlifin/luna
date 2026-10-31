@@ -122,6 +122,10 @@ pub(in crate::program) fn clone_member_with_inputs<'h>(
             let mut parameter = parameter.clone();
             parameter.hir_id = rebind.id(parameter.hir_id);
             parameter.ty = rebind.ty(&parameter.ty, 0)?;
+            parameter.template_annotation = parameter
+                .template_annotation
+                .map(|expr| rebind.expr(expr, 0))
+                .transpose()?;
             cloned_parameters.push(parameter);
         }
         let parameters = arena.alloc_fn_param_slice(cloned_parameters);

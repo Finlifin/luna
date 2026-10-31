@@ -275,6 +275,7 @@ fn associated_assembly_registers_optional_parameters_and_rejects_bad_indices() {
                     fuel,
                 )?;
                 let parameters = arena.alloc_fn_param_slice(vec![FnParam {
+                    template_annotation: None,
                     hir_id: parameter,
                     name: name("value"),
                     index,

@@ -202,6 +202,7 @@ mod tests {
     }
     fn parameter() -> FnParam<'static> {
         FnParam {
+            template_annotation: None,
             hir_id: id(1),
             name: name(),
             index: 0,

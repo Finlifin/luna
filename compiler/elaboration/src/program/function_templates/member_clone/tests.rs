@@ -8,6 +8,7 @@ fn fixture<'h>(arena: &'h HirArena, capture: bool) -> (Package<'h>, OwnerId) {
     let id = HirId::make_owner(owner);
     let name = Ident::new(Symbol::intern("self"), DUMMY_SP);
     let parameter = hir::common::FnParam {
+        template_annotation: None,
         hir_id: id,
         name,
         index: 0,
@@ -283,6 +284,11 @@ fn generic_fixture<'h>(arena: &'h HirArena) -> (Package<'h>, OwnerId, DefId, Def
             span: DUMMY_SP,
         },
     ]);
+    signature.params = arena.alloc_fn_param_slice(signature.params.iter().map(|parameter| {
+        let mut parameter = parameter.clone();
+        parameter.template_annotation = Some(reference);
+        parameter
+    }));
     signature.return_ty = Some(reference);
     source.insert_owner(
         member,
@@ -316,6 +322,10 @@ fn generic_method_defaults_and_returns_use_fresh_clause_identities() {
         let ItemKind::Fn(signature, _) = &draft.item.kind else {
             panic!()
         };
+        assert!(
+            matches!(signature.params[0].template_annotation.unwrap().kind,
+            E::ResolvedClauseParam(_, id) if id == first_new)
+        );
         assert_eq!(signature.clause_params[0].definition, Some(first_new));
         assert!(
             matches!(signature.return_ty.unwrap().kind, E::ResolvedClauseParam(_, id) if id == first_new)

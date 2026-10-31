@@ -2236,6 +2236,7 @@ impl Checker<'_, '_> {
                     | TyParamKind::PositionalDependencyCatched(_, ty)
                     | TyParamKind::Varadic(_, ty) => self.signature_annotation(ty)?,
                 };
+                self.check_template_parameter_annotation(parameter, &annotation)?;
                 if annotation.is_pending() {
                     // This records staging only. A pending comptime domain is
                     // not yet known to be Type; invocation determines that sort

@@ -44,6 +44,7 @@ fn operation<'a>(
                 });
                 nodes.register(Node::Expr(ty), fuel)?;
                 vec![FnParam {
+                    template_annotation: None,
                     hir_id: parameter,
                     name: name("value"),
                     index: parameter_index,

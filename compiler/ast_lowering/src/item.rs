@@ -2325,6 +2325,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 let ty_ref = self.arena.alloc_expr(ty);
                 let tp = TyParam::new(self.next_hir_id(), TyParamKind::Positional(ty_ref), span);
                 Some(FnParam {
+                    template_annotation: None,
                     hir_id: tp.hir_id,
                     name: ident,
                     index: 0, // You might want to set the correct index here
@@ -2364,6 +2365,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     span,
                 );
                 Some(FnParam {
+                    template_annotation: None,
                     hir_id: tp.hir_id,
                     name: ident,
                     index: 0, // You might want to set the correct index here
@@ -2382,6 +2384,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     span,
                 );
                 Some(FnParam {
+                    template_annotation: None,
                     hir_id: tp.hir_id,
                     name: ident,
                     index: 0, // You might want to set the correct index here
@@ -2397,6 +2400,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     span,
                 );
                 Some(FnParam {
+                    template_annotation: None,
                     hir_id: tp.hir_id,
                     name: ident,
                     index: 0, // You might want to set the correct index here
@@ -2412,6 +2416,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     span,
                 );
                 Some(FnParam {
+                    template_annotation: None,
                     hir_id: tp.hir_id,
                     name: ident,
                     index: 0, // You might want to set the correct index here
@@ -2454,6 +2459,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 let ty_ref = self.arena.alloc_expr(ty_expr);
                 let tp = TyParam::new(self.next_hir_id(), TyParamKind::Positional(ty_ref), span);
                 Some(FnParam {
+                    template_annotation: None,
                     hir_id: tp.hir_id,
                     name: ident,
                     index: 0, // You might want to set the correct index here
