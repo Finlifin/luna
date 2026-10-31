@@ -111,6 +111,7 @@ struct Builder<'a> {
     effect_contracts: Vec<iir::effects::Contract>,
     effect_instances: HashSet<nir::effects::Operation>,
     callable_identities: Vec<iir::CallableIdentity>,
+    callable_type_cores: nir::TypeInterner,
 }
 /// Bounded, transactional: failure returns no partially materialized world.
 pub fn dispatch_instances(
@@ -466,6 +467,7 @@ fn build(
         effect_contracts: vec![],
         effect_instances: HashSet::new(),
         callable_identities: vec![],
+        callable_type_cores: nir::TypeInterner::default(),
     };
     for ty in type_roots {
         let ty = builder.normalized_type(ty)?;
@@ -2262,13 +2264,19 @@ impl Builder<'_> {
                 nir::type_computations::charge_term(&signature, &mut self.fuel)
                     .map_err(|e| e.to_string())?;
                 children.push(signature.clone());
-                self.callable_identities.push(iir::CallableIdentity {
-                    key: iir::InstanceKey {
-                        declaration: *declaration,
-                        arguments: arguments.clone(),
-                    },
-                    signature,
-                });
+                // Only concrete IIR publishes immutable callable evidence.
+                // Annotation and dispatch exploration may still contain binders.
+                if self.instances.is_some() {
+                    self.callable_identities.push(iir::CallableIdentity::intern(
+                        iir::InstanceKey {
+                            declaration: *declaration,
+                            arguments: arguments.clone(),
+                        },
+                        signature,
+                        &mut self.callable_type_cores,
+                        &mut self.fuel,
+                    )?);
+                }
                 if let Some(function) = self.world.function_declaration(*declaration) {
                     let binders = self.input_binders(&function.type_parameters);
                     self.formation_requirements_with_parameters(

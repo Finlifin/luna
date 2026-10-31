@@ -756,17 +756,23 @@ mod retained_signature_tests {
         Term::Integer(comptime_runtime::Integer::from_u128(index as u128))
     }
     fn graph(count: u32) -> iir::Package {
+        let mut interner = nir::TypeInterner::default();
         iir::Package {
             callable_identities: (0..count)
-                .map(|index| iir::CallableIdentity {
-                    key: iir::InstanceKey {
-                        declaration: DeclarationId {
-                            package: 17,
-                            local: 1,
+                .map(|index| {
+                    iir::CallableIdentity::intern(
+                        iir::InstanceKey {
+                            declaration: DeclarationId {
+                                package: 17,
+                                local: 1,
+                            },
+                            arguments: vec![argument(index)],
                         },
-                        arguments: vec![argument(index)],
-                    },
-                    signature: signature(),
+                        signature(),
+                        &mut interner,
+                        &mut 100_000,
+                    )
+                    .unwrap()
                 })
                 .collect(),
             ..Default::default()
@@ -826,7 +832,13 @@ mod retained_signature_tests {
     fn retained_signature_index_is_world_local_and_bounds_query_hash_work() {
         let first = graph(2);
         let mut second = graph(2);
-        second.callable_identities[1].signature = signature().with_unsafe_call_requirement(true);
+        second.callable_identities[1] = iir::CallableIdentity::intern(
+            second.callable_identities[1].key.clone(),
+            signature().with_unsafe_call_requirement(true),
+            &mut nir::TypeInterner::default(),
+            &mut 100_000,
+        )
+        .unwrap();
         let a = Interpreter::from_iir(&first, Budget::default()).unwrap();
         let b = Interpreter::from_iir(&second, Budget::default()).unwrap();
         let declaration = first.callable_identities[1].key.declaration;

@@ -34,7 +34,37 @@ impl fmt::Display for InstanceKey {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CallableIdentity {
     pub key: InstanceKey,
-    pub signature: Term,
+    pub signature: nir::TypeRef,
+}
+impl CallableIdentity {
+    /// Retain completed, environment-free signature evidence in a shared core.
+    /// Declaration identity remains in `key`; sharing a core proves no callable
+    /// identity equality and does not bypass formation or invocation contracts.
+    pub fn intern(
+        key: InstanceKey,
+        signature: Term,
+        interner: &mut nir::TypeInterner,
+        fuel: &mut usize,
+    ) -> Result<Self, String> {
+        nir::copy_budget::charge_type_substitution(&signature, &[], &[], fuel)
+            .map_err(|error| format!("IIR callable signature budget: {error:?}"))?;
+        completed_type(&signature, &BTreeSet::new(), fuel)?;
+        if !matches!(signature.callable_signature(), Term::Function { .. }) {
+            return Err("IIR callable identity has a non-callable signature".into());
+        }
+        let core = interner
+            .intern(vec![], signature)
+            .map_err(|e| e.to_string())?;
+        let signature = nir::TypeRef::bind(core, vec![]).map_err(|e| e.to_string())?;
+        Ok(Self { key, signature })
+    }
+
+    pub fn closed_signature(&self) -> Result<&Term, String> {
+        if !self.signature.core().holes().is_empty() || !self.signature.arguments().is_empty() {
+            return Err("IIR frozen callable signature requires an environment".into());
+        }
+        Ok(self.signature.core().body())
+    }
 }
 impl fmt::Display for CallableIdentity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -169,17 +199,12 @@ impl Package {
     pub fn validate(&self, fuel: &mut usize) -> Result<(), String> {
         self.validate_index()?;
         for identity in &self.callable_identities {
-            if !matches!(
-                identity.signature.callable_signature(),
-                Term::Function { .. }
-            ) {
+            let signature = identity.closed_signature()?;
+            if !matches!(signature.callable_signature(), Term::Function { .. }) {
                 return Err("IIR callable identity has a non-callable signature".into());
             }
-            identity
-                .signature
-                .check_scope(&[])
-                .map_err(|e| e.to_string())?;
-            self.validate_type(&identity.signature, fuel)?;
+            signature.check_scope(&[]).map_err(|e| e.to_string())?;
+            self.validate_type(signature, fuel)?;
             for argument in &identity.key.arguments {
                 self.validate_type(argument, fuel)?;
             }

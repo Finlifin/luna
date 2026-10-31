@@ -129,9 +129,12 @@ impl<'a> Interpreter<'a> {
                 for argument in &identity.key.arguments {
                     nir::type_computations::charge_term(argument, &mut fuel)?;
                 }
+                let signature = identity
+                    .closed_signature()
+                    .expect("validated callable signature");
                 retained_callable_signatures.insert(
                     (identity.key.declaration, identity.key.arguments.as_slice()),
-                    &identity.signature,
+                    signature,
                 );
                 Ok::<_, nir::type_computations::Error>(())
             })();

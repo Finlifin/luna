@@ -9025,3 +9025,43 @@ new VMs, source-world isolation, and stable compilation counters after IIR
 warmup while execution counters continue increasing. No wall-clock speedup is
 claimed. Structural key comparison still has a bounded inspection cost; this
 is not persistent module-level bytecode or the end of NIR specialization.
+
+
+## First production TypeCore/TypeRef consumer: frozen callable signatures
+
+Concrete IIR `CallableIdentity.signature` now stores `nir::TypeRef`. Its
+constructor meters structural work, requires a completed environment-free
+callable signature, then interns an immutable core and binds an empty
+substitution. The materialization builder owns a shared interner, so distinct
+callable identities with identical signatures share that core. Cloning the IIR
+graph clones references, not each retained signature tree. The VM's retained
+signature index borrows the core body after graph validation.
+
+Callable declaration/instance keys remain separate. A core sharing hit does
+not prove callable identity equality, skip formation requirements, or grant
+invocation authority. The IIR validator still checks signature scope, type
+completion and links. Non-IIR annotation/dispatch exploration does not publish
+these completed references: it may still contain declaration binders.
+
+This is the first production integration of the two-layer representation, not
+a whole-compiler migration. Expression annotations, function signatures and
+other type consumers still use Term. Runtime-hole abstraction and
+EnvironmentPlan remain unconnected; this boundary specifically represents
+immutable, environment-free callable evidence carried inside type values.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p iir --test callable_type_cores`:
+  passed; `/tmp/luna-tools-99o7fbkw/result.json`, exit 0. Exhausted budgets and
+  unresolved declaration parameters publish no core; distinct keys share
+  signatures and the dump includes the TypeRef representation.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test scoped_comptime_callables --test comptime_iir_bytecode --test normal_form_domains`:
+  20 passed; `/tmp/luna-tools-7i6_au7h/result.json`, exit 0. Source-to-IIR
+  coverage checks core sharing across distinct functions and graph clones,
+  retained dependencies without executable bodies, and ordinary/comptime/unsafe
+  callable identities inside normal-form inputs.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib retained_signature`:
+  2 passed; `/tmp/luna-tools-kk5wjh16/result.json`, exit 0. Checks source-world
+  isolation and bounded lookup in catalogs up to 2,002 identities. The initial
+  run exposed an old test mutating a Term field; it now constructs replacement
+  immutable signature evidence through the checked constructor.

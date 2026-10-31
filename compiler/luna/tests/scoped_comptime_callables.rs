@@ -255,3 +255,36 @@ comptime fn check_captured(comptime T: Type,
         Value::Bool(true)
     );
 }
+
+#[test]
+fn materialized_callable_signatures_share_cores_without_merging_identities() {
+    let package = support::compile(
+        "typealias Type=.Type'builtin;
+        fn first(value:bool)->bool {value}
+        fn second(value:bool)->bool {not value}
+        pure comptime fn Carrier<action:fn(bool)->bool>->Type {bool}
+        fn dispatch()->bool where T {true}
+        fn run()->bool {dispatch<Carrier<first>>() and dispatch<Carrier<second>>()}",
+    );
+    let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
+    assert_eq!(graph.callable_identities.len(), 2);
+    let [first, second] = graph.callable_identities.as_slice() else {
+        unreachable!()
+    };
+    assert_ne!(first.key, second.key);
+    assert!(std::sync::Arc::ptr_eq(
+        first.signature.core(),
+        second.signature.core()
+    ));
+    assert!(first.signature.arguments().is_empty());
+    let cloned = graph.clone();
+    assert!(std::sync::Arc::ptr_eq(
+        first.signature.core(),
+        cloned.callable_identities[0].signature.core()
+    ));
+    graph.validate(&mut 100_000).unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
