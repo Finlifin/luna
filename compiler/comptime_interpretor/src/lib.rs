@@ -4042,58 +4042,69 @@ impl<'a> Interpreter<'a> {
         expr: &Expr,
         _environment: &mut Environment,
     ) -> Result<Flow, Error> {
-        let result = match &expr.kind {
-            K::ComptimeValue(value) => {
-                let mut fuel = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
-                let before = fuel;
-                let checked =
-                    nir::comptime_values::validate_in(value, &expr.ty, self.target, &mut fuel);
-                self.budget.steps -= (before - fuel) as u64;
-                checked.map_err(|error| {
-                    self.failure(
-                        if error == nir::comptime_values::Error::Budget {
-                            ErrorKind::StepsExhausted
-                        } else {
-                            ErrorKind::Type
-                        },
-                        Some(expr.source),
-                    )
-                })?;
-                self.normal_pattern_value(value, &expr.ty)?
-            }
-            K::TypeValue(ty) => {
-                if expr.ty != Term::Primitive(Primitive::Type) {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                }
-                if let Term::Rigid {
-                    declaration,
-                    sort: nir::Sort::Type,
-                } = ty
-                {
-                    if self.abstract_type_parameters.contains(declaration) {
-                        self.tick(Some(expr.source))?;
-                        return Ok(Flow::Value(Value::TypeParameter(*declaration)));
-                    }
-                }
-                // Structural scope permits transporting residual identities;
-                // their nominal domains still need independent admission.
-                if !self.abstract_value_parameters.is_empty() {
-                    self.admit_type(ty, 0)?;
-                }
-                if let Some(work) = self.type_description_work(ty) {
-                    self.integer_operation(Some(expr.source), |budget| budget.consume(work))?;
-                    return Ok(Flow::Value(Value::Type(ty.clone())));
-                }
-                let ty = self.selected_type_view(ty, Some(expr.source))?;
-                let work = self
-                    .type_description_work(&ty)
-                    .ok_or_else(|| self.failure(ErrorKind::Type, Some(expr.source)))?;
-                self.integer_operation(Some(expr.source), |budget| budget.consume(work))?;
-                Value::Type(ty.clone())
-            }
-            _ => unreachable!("expression dispatcher selected an incompatible evaluator"),
+        let value = match &expr.kind {
+            K::ComptimeValue(value) => self.frozen_constant(value, &expr.ty, expr.source)?,
+            K::TypeValue(value) => self.type_constant(value, &expr.ty, expr.source)?,
+            _ => unreachable!("type value dispatcher selected an incompatible operand"),
         };
-        Ok(Flow::Value(result))
+        Ok(Flow::Value(value))
+    }
+    fn frozen_constant(
+        &mut self,
+        value: &Term,
+        ty: &Term,
+        source: SourceRange,
+    ) -> Result<Value, Error> {
+        let mut fuel = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+        let before = fuel;
+        let checked = nir::comptime_values::validate_in(value, ty, self.target, &mut fuel);
+        self.budget.steps -= (before - fuel) as u64;
+        checked.map_err(|error| {
+            self.failure(
+                if error == nir::comptime_values::Error::Budget {
+                    ErrorKind::StepsExhausted
+                } else {
+                    ErrorKind::Type
+                },
+                Some(source),
+            )
+        })?;
+        self.normal_pattern_value(value, ty)
+    }
+    fn type_constant(
+        &mut self,
+        ty: &Term,
+        output: &Term,
+        source: SourceRange,
+    ) -> Result<Value, Error> {
+        if *output != Term::Primitive(Primitive::Type) {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        }
+        if let Term::Rigid {
+            declaration,
+            sort: nir::Sort::Type,
+        } = ty
+        {
+            if self.abstract_type_parameters.contains(declaration) {
+                self.tick(Some(source))?;
+                return Ok(Value::TypeParameter(*declaration));
+            }
+        }
+        // Structural scope permits transporting residual identities;
+        // their nominal domains still need independent admission.
+        if !self.abstract_value_parameters.is_empty() {
+            self.admit_type(ty, 0)?;
+        }
+        if let Some(work) = self.type_description_work(ty) {
+            self.integer_operation(Some(source), |budget| budget.consume(work))?;
+            return Ok(Value::Type(ty.clone()));
+        }
+        let ty = self.selected_type_view(ty, Some(source))?;
+        let work = self
+            .type_description_work(&ty)
+            .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
+        self.integer_operation(Some(source), |budget| budget.consume(work))?;
+        Ok(Value::Type(ty.clone()))
     }
 
     #[inline(never)]
@@ -4205,92 +4216,85 @@ impl<'a> Interpreter<'a> {
 
     #[inline(never)]
     fn eval_literal(&mut self, expr: &Expr, _environment: &mut Environment) -> Result<Flow, Error> {
-        if let K::Literal(Literal::PendingInteger { spelling, negative }) = &expr.kind {
-            let Term::Primitive(domain) = expr.ty else {
-                return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+        let K::Literal(literal) = &expr.kind else {
+            unreachable!()
+        };
+        self.literal_constant(literal, &expr.ty, expr.source)
+            .map(Flow::Value)
+    }
+    fn literal_constant(
+        &mut self,
+        literal: &Literal,
+        ty: &Term,
+        source: SourceRange,
+    ) -> Result<Value, Error> {
+        if let Literal::PendingInteger { spelling, negative } = literal {
+            let Term::Primitive(domain) = *ty else {
+                return Err(self.failure(ErrorKind::Type, Some(source)));
             };
             let target = self.target;
-            let literal = self.integer_operation(Some(expr.source), |budget| {
+            let literal = self.integer_operation(Some(source), |budget| {
                 nir::integer_formation::form(spelling, *negative, domain, target, budget)
             })?;
-            return self.eval_literal(
-                &Expr {
-                    source: expr.source,
-                    ty: expr.ty.clone(),
-                    kind: K::Literal(literal),
-                },
-                _environment,
-            );
+            return self.literal_constant(&literal, ty, source);
         }
-        if let K::Literal(Literal::PendingFloat { spelling, negative }) = &expr.kind {
+        if let Literal::PendingFloat { spelling, negative } = literal {
             let Term::Primitive(domain @ (Primitive::Float | Primitive::F32 | Primitive::F64)) =
-                expr.ty
+                *ty
             else {
-                return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+                return Err(self.failure(ErrorKind::Type, Some(source)));
             };
-            let literal = self.integer_operation(Some(expr.source), |budget| {
+            let literal = self.integer_operation(Some(source), |budget| {
                 nir::float_formation::FloatFormation::parse(spelling, *negative, budget)?
                     .form(domain, budget)
             })?;
-            return self.eval_literal(
-                &Expr {
-                    source: expr.source,
-                    ty: expr.ty.clone(),
-                    kind: K::Literal(literal),
-                },
-                _environment,
-            );
+            return self.literal_constant(&literal, ty, source);
         }
-        if let K::Literal(literal) = &expr.kind {
-            if !literal.has_primitive_type_in(&expr.ty, self.target) {
-                return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+        if !literal.has_primitive_type_in(ty, self.target) {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        }
+        let result = match literal {
+            Literal::Integer(spelling) => {
+                Value::Integer(self.integer_literal(spelling, Some(source))?)
             }
-        }
-        let result = match &expr.kind {
-            K::Literal(literal) => match literal {
-                Literal::Integer(spelling) => {
-                    Value::Integer(self.integer_literal(spelling, Some(expr.source))?)
+            Literal::BitVec { width, words } => {
+                Value::BitVec(self.bit_operation(source, |budget| {
+                    comptime_runtime::bitvec::BitVec::from_words(*width, words, budget)
+                })?)
+            }
+            Literal::Float(spelling) => {
+                Value::Float(self.integer_operation(Some(source), |budget| {
+                    comptime_runtime::decimal::DecimalValue::parse_literal(spelling, budget)
+                })?)
+            }
+            Literal::Float16(bits) => Value::Float16(*bits),
+            Literal::BFloat16(bits) => Value::BFloat16(*bits),
+            Literal::Float32(bits) => Value::Float32(*bits),
+            Literal::Float64(bits) => Value::Float64(*bits),
+            Literal::SignedInteger(v) => {
+                let value = Value::SignedInteger(*v);
+                value
+            }
+            Literal::UnsignedInteger(v) => {
+                let value = Value::UnsignedInteger(*v);
+                value
+            }
+            Literal::Bool(v) => Value::Bool(*v),
+            Literal::Char(v) => Value::Char(*v),
+            Literal::String(v) | Literal::Symbol(v) => {
+                self.integer_operation(Some(source), |budget| {
+                    budget.consume(v.len().saturating_add(1))
+                })?;
+                let text = Arc::from(v.as_str());
+                if matches!(literal, Literal::String(_)) {
+                    Value::String(text)
+                } else {
+                    Value::Symbol(text)
                 }
-                Literal::BitVec { width, words } => {
-                    Value::BitVec(self.bit_operation(expr.source, |budget| {
-                        comptime_runtime::bitvec::BitVec::from_words(*width, words, budget)
-                    })?)
-                }
-                Literal::Float(spelling) => {
-                    Value::Float(self.integer_operation(Some(expr.source), |budget| {
-                        comptime_runtime::decimal::DecimalValue::parse_literal(spelling, budget)
-                    })?)
-                }
-                Literal::Float16(bits) => Value::Float16(*bits),
-                Literal::BFloat16(bits) => Value::BFloat16(*bits),
-                Literal::Float32(bits) => Value::Float32(*bits),
-                Literal::Float64(bits) => Value::Float64(*bits),
-                Literal::SignedInteger(v) => {
-                    let value = Value::SignedInteger(*v);
-                    value
-                }
-                Literal::UnsignedInteger(v) => {
-                    let value = Value::UnsignedInteger(*v);
-                    value
-                }
-                Literal::Bool(v) => Value::Bool(*v),
-                Literal::Char(v) => Value::Char(*v),
-                Literal::String(v) | Literal::Symbol(v) => {
-                    self.integer_operation(Some(expr.source), |budget| {
-                        budget.consume(v.len().saturating_add(1))
-                    })?;
-                    let text = Arc::from(v.as_str());
-                    if matches!(literal, Literal::String(_)) {
-                        Value::String(text)
-                    } else {
-                        Value::Symbol(text)
-                    }
-                }
-                _ => return Err(self.failure(ErrorKind::Unsupported, Some(expr.source))),
-            },
-            _ => unreachable!("expression dispatcher selected an incompatible evaluator"),
+            }
+            _ => return Err(self.failure(ErrorKind::Unsupported, Some(source))),
         };
-        Ok(Flow::Value(result))
+        Ok(result)
     }
 
     #[inline(never)]

@@ -7996,3 +7996,34 @@ The initial compile exposed unhandled pending numeric literal variants after
 making literal dispatch exhaustive; these now report unresolved contracts.
 An initial source-test command named a nonexistent `meta_list` target and ran
 no tests; the corrected command above supplies the actual list test target.
+
+
+## Typed constant operands (2026-10-31)
+
+`Op::Constant` owns a typed, operand-only descriptor for literals, frozen comptime
+values, Type descriptions and direct function identities. It no longer embeds
+an `Expr` or calls an expression evaluator. The reference engine and bytecode
+share operand-level literal formation, frozen-value admission and Type transport.
+Pending numeric literals form directly against the target domain without
+constructing a temporary expression. Copy limits apply before descriptor ownership;
+loading still charges value formation and validates the declared domain.
+
+`CallableReference` explicitly retains the separate generic-function and trait
+selection path. It is not a frozen constant: selected identities, instance
+requirements and interface contracts must still be checked at the invocation
+boundary. This phase does not eliminate that expression descriptor or complete
+IIR-based VM execution. Constant displays use stable S-expressions and escaped
+literal displays. No measured speedup is claimed.
+
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor --lib --tests`:
+  563 tests passed, exit 0; `/tmp/luna-tools-_2bz63bs/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode --test literals --test type_lists --test builder_invocations`:
+  146 tests passed, exit 0; `/tmp/luna-tools-ejxx0os6/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-5ktleomg/result.json`; `git diff --check` passed.
+
+The source groups cover public definition builders, frozen list/type arguments,
+phase rejection and invocation effects. No full language suite or benchmark was run.

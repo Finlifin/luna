@@ -3,6 +3,7 @@
 pub mod bit_updates;
 pub mod bits;
 pub mod closures;
+pub mod constants;
 pub mod definitions;
 pub mod instances;
 pub mod leaf_inputs;
@@ -430,6 +431,10 @@ pub enum Op {
         inputs: Vec<Register>,
     },
     Constant {
+        destination: Register,
+        value: Arc<constants::Constant>,
+    },
+    CallableReference {
         destination: Register,
         value: Arc<Expr>,
     },
@@ -1130,6 +1135,9 @@ impl fmt::Display for Program {
                 }
                 Op::Constant { destination, value } => {
                     write!(f, "(constant {destination} {value})")?
+                }
+                Op::CallableReference { destination, value } => {
+                    write!(f, "(callable-reference {destination} {value})")?
                 }
                 Op::EnterScope => write!(f, "(enter-scope)")?,
                 Op::LeaveScope => write!(f, "(leave-scope)")?,
@@ -2485,21 +2493,26 @@ fn compile_root<'a>(
                         );
                     }
                     K::Unit => emit(&mut work, Op::Unit(dst)),
-                    K::Literal(_)
-                    | K::TypeValue(_)
-                    | K::ComptimeValue(_)
-                    | K::Function(_)
-                    | K::FunctionInstance { .. }
-                    | K::TraitMethod { .. } => {
-                        nir::copy_budget::charge_substitution(expr, &[], &[], fuel)
-                            .map_err(|error| copy_error(error, source))?;
+                    K::Literal(_) | K::TypeValue(_) | K::ComptimeValue(_) | K::Function(_) => {
+                        let value = constants::Constant::copy(expr, fuel)?;
                         emit(
                             &mut work,
                             Op::Constant {
                                 destination: dst,
+                                value: Arc::new(value),
+                            },
+                        );
+                    }
+                    K::FunctionInstance { .. } | K::TraitMethod { .. } => {
+                        nir::copy_budget::charge_substitution(expr, &[], &[], fuel)
+                            .map_err(|error| copy_error(error, source))?;
+                        emit(
+                            &mut work,
+                            Op::CallableReference {
+                                destination: dst,
                                 value: Arc::new(expr.clone()),
                             },
-                        )
+                        );
                     }
                     K::Local(id) => {
                         let slot = *locals.entry(*id).or_insert_with(&mut fresh);

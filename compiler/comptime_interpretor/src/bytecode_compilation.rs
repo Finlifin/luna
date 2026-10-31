@@ -190,3 +190,68 @@ fn owned_and_declaration_code_share_a_bounded_cache() {
     );
     assert!(vm.bytecode_cache.owned(&sources[0]).is_none());
 }
+
+#[test]
+fn typed_constants_preserve_formation_admission_and_diagnostics() {
+    let package = Package::default();
+    let cases = [
+        (
+            Primitive::U8,
+            K::Literal(Literal::PendingInteger {
+                spelling: "255".into(),
+                negative: false,
+            }),
+        ),
+        (
+            Primitive::U8,
+            K::Literal(Literal::PendingInteger {
+                spelling: "256".into(),
+                negative: false,
+            }),
+        ),
+        (
+            Primitive::F32,
+            K::Literal(Literal::PendingFloat {
+                spelling: "1.25".into(),
+                negative: true,
+            }),
+        ),
+        (
+            Primitive::Bool,
+            K::Literal(Literal::String("wrong domain".into())),
+        ),
+        (Primitive::Str, K::Literal(Literal::String("雪\n\"".into()))),
+        (Primitive::Bool, K::ComptimeValue(Term::Bool(true))),
+        (Primitive::U8, K::ComptimeValue(Term::Bool(true))),
+        (
+            Primitive::Type,
+            K::TypeValue(Term::Primitive(Primitive::U8)),
+        ),
+        (
+            Primitive::Bool,
+            K::TypeValue(Term::Primitive(Primitive::U8)),
+        ),
+    ];
+    for (domain, kind) in cases {
+        let body = Expr {
+            ty: Term::Primitive(domain),
+            kind,
+            ..body()
+        };
+        let code = Arc::new(comptime_compiler::compile(&body, &mut 10_000).unwrap());
+        let mut reference = Interpreter::for_comptime_tree(&package, Budget::default()).unwrap();
+        let mut compiled = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let expected = reference.eval(&body, &mut Environment::new());
+        let actual = compiled.execute_code(&code, &mut Environment::new());
+        match (expected, actual) {
+            (Ok(Flow::Value(expected)), Ok(Flow::Value(actual))) => {
+                assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+            }
+            (Err(expected), Err(actual)) => {
+                assert_eq!(actual.kind, expected.kind);
+                assert_eq!(actual.source, expected.source);
+            }
+            values => panic!("constant execution diverged: {values:?}"),
+        }
+    }
+}

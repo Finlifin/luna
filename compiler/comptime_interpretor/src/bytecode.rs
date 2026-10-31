@@ -2405,16 +2405,32 @@ impl<'a> Interpreter<'a> {
                         Some(self.scalar_math_values(binding, &values, source)?);
                 }
                 Op::Constant { destination, value } => {
+                    use comptime_compiler::constants::Kind;
+                    let result = match &value.kind {
+                        Kind::Literal(literal) => {
+                            self.literal_constant(literal, &value.ty, source)?
+                        }
+                        Kind::Type(ty) => self.type_constant(ty, &value.ty, source)?,
+                        Kind::Frozen(term) => self.frozen_constant(term, &value.ty, source)?,
+                        Kind::Function(id) if self.runtime_function_identities.contains_key(id) => {
+                            Value::FunctionInstance {
+                                declaration: *id,
+                                arguments: vec![],
+                            }
+                        }
+                        Kind::Function(id) => Value::Function(*id),
+                    };
+                    frame.slots[*destination] = Some(result);
+                }
+                Op::CallableReference { destination, value } => {
                     let flow = match value.kind {
                         K::TraitMethod { .. } => {
                             self.eval_trait_method(value, &mut frame.environment, false)?
                         }
-                        K::Function(_) => self.eval_leaf(value, &mut frame.environment)?,
                         K::FunctionInstance { .. } => {
                             self.eval_function_instance(value, &mut frame.environment)?
                         }
-                        K::Literal(_) => self.eval_literal(value, &mut frame.environment)?,
-                        _ => self.eval_type_value(value, &mut frame.environment)?,
+                        _ => return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source))),
                     };
                     let Flow::Value(value) = flow else {
                         return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source)));

@@ -87,7 +87,9 @@ fn compiled_constants_outlive_their_source_and_charge_payload_copying() {
     };
     assert_eq!(
         value.kind,
-        K::Literal(nir::program::Literal::String("x".repeat(4096)))
+        comptime_compiler::constants::Kind::Literal(nir::program::Literal::String(
+            "x".repeat(4096)
+        ))
     );
 }
 
@@ -857,4 +859,39 @@ fn object_slice_borrows_only_when_both_boundaries_are_leaf_inputs() {
             "{dump}"
         );
     }
+}
+
+#[test]
+fn constant_operands_and_callable_selection_have_distinct_instructions() {
+    use comptime_compiler::{Op, constants::Kind};
+    let declaration = nir::DeclarationId {
+        package: 1,
+        local: 2,
+    };
+    for kind in [
+        K::Function(declaration),
+        K::TypeValue(Term::Primitive(Primitive::Bool)),
+        K::ComptimeValue(Term::Bool(true)),
+    ] {
+        let body = expr(kind);
+        let code = compile(&body, &mut 1000).unwrap();
+        let Op::Constant { value, .. } = &code.instructions()[0].op else {
+            panic!("expected immutable operand")
+        };
+        assert!(matches!(
+            value.kind,
+            Kind::Function(_) | Kind::Type(_) | Kind::Frozen(_)
+        ));
+        assert!(code.to_string().contains("(typed-constant (type "));
+    }
+    let body = expr(K::FunctionInstance {
+        declaration,
+        arguments: vec![],
+    });
+    let code = compile(&body, &mut 1000).unwrap();
+    assert!(matches!(
+        code.instructions()[0].op,
+        Op::CallableReference { .. }
+    ));
+    assert!(code.to_string().contains("(callable-reference "));
 }
