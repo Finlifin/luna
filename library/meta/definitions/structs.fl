@@ -40,11 +40,25 @@ impl StructBuilder {
     }
 
     pub comptime fn add_fields_from_object(self, fields: Object) -> bool {
+        let end = self.field_names.length();
+        self.replace_fields_from_object(end, end, fields)
+    }
+
+    {- Parse the complete ordered description before editing either field list.
+       Invalid descriptions or ranges preserve the draft and saved snapshots.
+    -}
+    pub comptime fn insert_fields_from_object(self, index: Integer,
+        fields: Object) -> bool {
+        self.replace_fields_from_object(index, index, fields)
+    }
+
+    pub comptime fn replace_fields_from_object(self, start: Integer, end: Integer,
+        fields: Object) -> bool {
         let description = FieldDescription.from_object(fields) match {
             value? => value,
             null => return false,
         };
-        self.add_fields(description.names, description.types)
+        self.replace_fields(start, end, description.names, description.types)
     }
 
     pub comptime fn add_field(self, name: Symbol, field_type: Type) {

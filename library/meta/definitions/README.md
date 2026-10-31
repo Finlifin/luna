@@ -13,6 +13,32 @@ structs.fl、enums.fl 包含已接通的 builder；结构反射接口及 Type �
 原样。`?Type`、布尔值或包含 Type 的另一个 Object 都不会隐式解包为字段 Type。
 输入仍是普通值快照，已保存的 builder 快照也不受后续追加影响。
 
+同一描述也可用于有序插入和范围替换：
+
+- `draft.insert_fields_from_object(index, fields) -> bool` 在指定位置插入。
+- `draft.replace_fields_from_object(start, end, fields) -> bool` 替换半开区间
+  `[start, end)`；空 Object 可删除该范围，空范围可插入多个字段。
+
+它们先完整解析 Object，再同时准备名字和 Type 列表。负数、逆序、越界范围或
+不合法描述返回 false，保留草稿及已有快照。合法空插入返回 true。字段顺序与
+normal-form Type 身份保持不变；重复名字仍保留给 Build 拒绝，不作静默覆盖。
+
+```flurry
+struct Source { old: bool }
+
+comptime fn Edited() -> Type {
+    let draft = meta.StructBuilder.from_type(Source);
+    let inserted = draft.insert_fields_from_object(1, {active: bool, count: u32});
+    let replaced = draft.replace_fields_from_object(0, 1, {ready: bool});
+    assumes inserted and replaced;
+    draft.Build()
+}
+```
+
+真实 sysroot 验收入口：
+`python3 -B development/library_check.py --stage sysroot-object-struct-builder`。
+它同时检查插入、替换、删除、拒绝后的草稿、快照隔离及生成类型的 runtime 使用。
+
 ```flurry
 comptime fn Record() -> Type {
     let fields: Object = {enabled: bool, count: u32};

@@ -9522,3 +9522,31 @@ Validation in `/home/fin/luna`:
   passed; `/tmp/luna-tools-sc33uonr/result.json`, exit 0.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
   passed; `/tmp/luna-tools-jp_bmnsl/result.json`, exit 0.
+
+
+## Edit StructBuilder ranges from ordered Object descriptions
+
+StructBuilder now accepts Object descriptions for insertion and half-open range
+replacement, including deletion with an empty Object. Append delegates to the
+same path. FieldDescription still parses all entries before either parallel
+field list changes, and the existing edit operation prepares both snapshots
+before assignment. Invalid descriptions or ranges return false without changing
+the draft. Order, exact Type identities and duplicate names are retained; Build
+still performs checked publication and rejects invalid storage or duplicate
+fields. No new builtin or compiler exception was added.
+
+The existing Object struct-builder example now exercises edits, rejection,
+normal-form identity retention and saved drafts. It is registered as the
+`sysroot-object-struct-builder` library-check stage with an expected native test
+count, so missing execution cannot silently count as success. This is a library
+editing feature, not generic/function/trait definition publication. Inspection
+also confirms CheckedDefinitionPublisher already uses incremental admission and
+representation checking rather than the old whole-package clone path described
+in the noon report.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/library_check.py --timeout 900 --stage sysroot-object-struct-builder --stage sysroot-builders`:
+  passed both real-sysroot/native stages (1 and 6 tests);
+  `/tmp/luna-library-xcsjstjf/summary.json`, exit 0.
+- `git diff --check`: passed. No Rust sources changed in this stage.
