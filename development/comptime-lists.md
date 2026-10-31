@@ -471,3 +471,18 @@ Evidence: `/tmp/luna-tools-uymtepgr/result.json` (formatting),
 `/tmp/luna-tools-cqwwqsnm/result.json` (list and memory integration suites).
 The library tests embed the meta sources; they are not a standalone sysroot
 packaging check. `git diff --check` passed.
+
+## Append rollback during unwinding
+
+The append transaction now keeps a scope guard armed until validation succeeds.
+Both a returned error and a panic restore the original prefix. Panics continue
+to propagate; this does not suppress storage-lock poisoning or make an entire
+invocation transactional. The regression observes the combined list during
+validation, unwinds, verifies the original contents and retries successfully.
+
+From `/home/fin/luna`, the new test failed before the fix with the appended
+suffix still present (`/tmp/luna-tools-3bh6cqfl/result.json`, exit 101).
+After the fix, `python3 -B development/check.py --timeout 900 -- test -p
+comptime_interpretor --lib` passed all 333 tests
+(`/tmp/luna-tools-h6zj1ikh/result.json`, exit 0). Workspace formatting and
+`git diff --check` passed. No complexity or throughput improvement is claimed.

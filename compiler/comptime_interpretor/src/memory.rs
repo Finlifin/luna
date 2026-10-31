@@ -1450,13 +1450,29 @@ pub(super) fn append_list_checked(
         }
         _ => return Err(ErrorKind::Type),
     };
-    if let Err(error) = check(target) {
-        match target {
-            Value::List { values, .. } => values.truncate(original),
-            _ => unreachable!(),
-        }
-        return Err(error);
+    // Validation only borrows the combined value. Keep rollback armed until
+    // it returns successfully, including when a host-side check unwinds.
+    struct PendingAppend<'a> {
+        target: &'a mut Value,
+        original: usize,
+        committed: bool,
     }
+    impl Drop for PendingAppend<'_> {
+        fn drop(&mut self) {
+            if !self.committed {
+                if let Value::List { values, .. } = self.target {
+                    values.truncate(self.original);
+                }
+            }
+        }
+    }
+    let mut pending = PendingAppend {
+        target,
+        original,
+        committed: false,
+    };
+    check(pending.target)?;
+    pending.committed = true;
     Ok(())
 }
 
@@ -1491,4 +1507,30 @@ fn type_list_append_restores_values_and_rejects_foreign_identity() {
         panic!()
     };
     assert_eq!(values.len(), 2);
+}
+
+#[test]
+fn list_append_restores_prefix_when_validation_unwinds() {
+    let original = crate::test_type_list(vec![Term::Primitive(nir::Primitive::Bool)]);
+    let suffix = crate::test_type_list(vec![Term::Primitive(nir::Primitive::Char)]);
+    let mut target = original.clone();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = append_list_checked(&mut target, suffix.clone(), |combined| {
+            let Value::List { values, .. } = combined else {
+                panic!("list expected")
+            };
+            assert_eq!(values.len(), 2);
+            panic!("interrupted validation");
+        });
+    }));
+    assert!(result.is_err());
+    assert_eq!(target, original);
+    append_list_checked(&mut target, suffix, |_| Ok(())).unwrap();
+    assert_eq!(
+        target,
+        crate::test_type_list(vec![
+            Term::Primitive(nir::Primitive::Bool),
+            Term::Primitive(nir::Primitive::Char),
+        ])
+    );
 }
