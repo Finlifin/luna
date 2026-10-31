@@ -33,8 +33,6 @@ impl Interpreter<'_> {
         // fits the current invocation depth; otherwise retain the original
         // traversal and its failure ordering. Scoped evidence is never reused.
         let summarized = self.comptime_only
-            && self.abstract_type_parameters.is_empty()
-            && self.abstract_value_parameters.is_empty()
             && match value {
                 Value::List { values, .. } => values.summary().is_some_and(|summary| {
                     summary.height < 128

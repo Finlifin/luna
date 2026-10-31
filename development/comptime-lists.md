@@ -668,3 +668,35 @@ python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor -p
 `/tmp/luna-tools-7zmeq7_c/result.json` (formatting),
 `/tmp/luna-tools-hh461wsf/result.json` (unit tests), and
 `/tmp/luna-tools-n1v9hdd9/result.json` (integration). `git diff --check` passed.
+
+
+## Closed payload summaries in abstract invocation scopes
+
+An invocation containing abstract Type/value parameters no longer disables reuse
+of an existing closed list payload summary. The list's own type is still checked
+in the current scope before consulting its payload summary. Fused append likewise
+uses closed summaries in generic environments while retaining current-depth and
+element-domain admission checks.
+
+Empty payloads and uniform scalar payloads observed inside an abstract scope can
+now create closed summaries: their carriers contain no scoped type dependencies.
+Other payloads first inspected under abstract evidence still cannot publish a
+closed summary. In particular, a list containing `Type(T)` does not gain evidence
+that survives removal of T from scope. All mutable payload access invalidates the
+observation, and actual copying continues to pay for the complete payload. This
+is not a general scoped-evidence cache or a claim of linear list construction.
+
+Tests compare copy/inspection accounting for 4,096-element lists, check mutation
+and caller-scope changes, and verify root-type admission even when a scalar
+payload has a valid summary. Existing append tests now cover both closed and
+abstract environments across tree/bytecode execution, owned/shared storage,
+current-depth failure, budget rollback and changing embedded type contracts.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib list_values`: passed (`/tmp/luna-tools-e9_oxcx7/result.json`).
+- The first full interpreter run exposed the pre-existing nominal-record budget-test bound. It was independently reproduced on HEAD and corrected in `ac5ed97d`; see development/comptime-vm.md.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor`: 589 tests passed (`/tmp/luna-tools-uos2_v4g/result.json`).
+- After extracting shared test helpers, `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`: 369 tests passed (`/tmp/luna-tools-a1sglspn/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test builder_invocations contextual_data_consumer_publishes_structs_through_the_complete_sysroot`: passed (`/tmp/luna-tools-yg130o9y/result.json`).
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: passed (`/tmp/luna-tools-ll674zef/result.json`); `git diff --check` passed.

@@ -476,11 +476,10 @@ impl Value {
             }
 
             let cache = match value {
-                Value::List { values, .. }
-                    if parameters.is_empty() && value_parameters.is_empty() =>
-                {
-                    Some(values)
-                }
+                // Stored summaries describe closed payloads, regardless of the
+                // surrounding invocation's unrelated abstract parameters. The
+                // list's own type has already been checked in the current scope.
+                Value::List { values, .. } => Some(values),
                 _ => None,
             };
             if let Some(summary) = cache.and_then(ListValues::summary) {
@@ -545,7 +544,14 @@ impl Value {
                 }
                 _ => {}
             }
-            if let Some(values) = cache {
+            if let Some(values) = cache.filter(|values| {
+                (parameters.is_empty() && value_parameters.is_empty())
+                    || values.is_empty()
+                    || uniform_scalar.is_some()
+            }) {
+                // Scalar carriers have no embedded scoped type evidence. Other
+                // payloads observed under an abstract scope cannot publish a
+                // closed summary, even when this particular scan succeeded.
                 values.remember(list_values::Summary {
                     work: *work - before_children,
                     height: height - 1,

@@ -204,6 +204,91 @@ mod tests {
     }
 
     #[test]
+    fn closed_payload_summaries_survive_unrelated_abstract_scopes() {
+        let id = nir::DeclarationId {
+            package: 31,
+            local: 4,
+        };
+        let parameters = std::collections::BTreeSet::from([id]);
+        let evidence = std::collections::BTreeMap::from([(id, Term::Primitive(Primitive::Bool))]);
+        let value = test_type_list(vec![Term::Primitive(Primitive::Bool); 4096]);
+        let (copy, cold) = value
+            .scoped_representation_work(&Default::default(), &Default::default())
+            .unwrap();
+        let (scoped_copy, warm) = value
+            .scoped_representation_work(&parameters, &evidence)
+            .unwrap();
+        assert_eq!(scoped_copy, copy);
+        assert!(warm * 100 < cold, "cold={cold}, warm={warm}");
+        // Mutation invalidates the closed observation. Scope admission cannot
+        // be inherited from the value's previous contents or another caller.
+        let mut changed = value.clone();
+        let Value::List { values, .. } = &mut changed else {
+            unreachable!()
+        };
+        values[0] = Value::Type(Term::Rigid {
+            declaration: id,
+            sort: nir::Sort::Type,
+        });
+        assert!(
+            changed
+                .scoped_representation_work(&parameters, &Default::default())
+                .is_some()
+        );
+        assert!(payload(&changed).summary().is_none());
+        assert!(changed.immutable_copy_work().is_none());
+        assert!(payload(&value).summary().is_some());
+    }
+
+    #[test]
+    fn scoped_scalar_lists_warm_only_payload_shape_and_recheck_the_root_type() {
+        let id = nir::DeclarationId {
+            package: 32,
+            local: 1,
+        };
+        let parameters = std::collections::BTreeSet::from([id]);
+        let empty = std::collections::BTreeMap::new();
+        let mut value = Value::List {
+            // Representation observation deliberately does not establish list
+            // domain membership; invocation admission remains responsible.
+            ty: Term::Rigid {
+                declaration: id,
+                sort: nir::Sort::Type,
+            },
+            values: vec![Value::Bool(true); 4096].into(),
+        };
+        let (copy, cold) = value
+            .scoped_representation_work(&parameters, &empty)
+            .unwrap();
+        let (warm_copy, warm) = value
+            .scoped_representation_work(&parameters, &empty)
+            .unwrap();
+        assert_eq!(copy, warm_copy);
+        assert!(warm * 100 < cold);
+        assert!(payload(&value).summary().is_some());
+        assert!(value.immutable_copy_work().is_none());
+        let Value::List { ty, .. } = &mut value else {
+            unreachable!()
+        };
+        *ty = Term::Primitive(Primitive::Bool);
+        assert!(value.immutable_copy_work().is_some());
+        let Value::List { values, .. } = &mut value else {
+            unreachable!()
+        };
+        values[0] = Value::Type(Term::Rigid {
+            declaration: id,
+            sort: nir::Sort::Type,
+        });
+        assert!(
+            value
+                .scoped_representation_work(&parameters, &empty)
+                .is_some()
+        );
+        assert!(payload(&value).summary().is_none());
+        assert!(value.immutable_copy_work().is_none());
+    }
+
+    #[test]
     fn cached_inspection_cost_does_not_discount_owned_copies() {
         let value = test_type_list(vec![Term::Primitive(Primitive::Bool); 512]);
         let inspect = |value: &Value| {

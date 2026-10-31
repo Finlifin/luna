@@ -443,6 +443,12 @@ fn fused_append_preserves_aliases_and_reuses_owned_buffers() {
 
 #[test]
 fn fused_append_rolls_back_budget_failures_and_recovers() {
+    for scoped in [false, true] {
+        check_fused_append_rolls_back_budget_failures_and_recovers(scoped);
+    }
+}
+
+fn check_fused_append_rolls_back_budget_failures_and_recovers(scoped: bool) {
     let package = package();
     let ty = list(Primitive::Bool);
     let original = Value::List {
@@ -463,6 +469,12 @@ fn fused_append_rolls_back_budget_failures_and_recovers() {
                 original.clone()
             };
             let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            if scoped {
+                vm.abstract_type_parameters.insert(id(91));
+                vm.abstract_value_parameters
+                    .insert(id(92), Term::Primitive(Primitive::Bool));
+            }
+
             vm.budget.steps = steps;
             let result = vm.complete_list_append(&mut target, suffix.clone(), &ty, SOURCE);
             vm.budget = Budget::default();
@@ -725,6 +737,12 @@ fn append_rejects_malformed_prefix_before_reading_suffix_for_every_carrier() {
 
 #[test]
 fn warm_append_prefix_still_obeys_current_invocation_depth() {
+    for scoped in [false, true] {
+        check_warm_append_prefix_still_obeys_current_invocation_depth(scoped);
+    }
+}
+
+fn check_warm_append_prefix_still_obeys_current_invocation_depth(scoped: bool) {
     let package = package();
     let ty = list(Primitive::Bool);
     let target = Value::List {
@@ -733,6 +751,12 @@ fn warm_append_prefix_still_obeys_current_invocation_depth() {
     };
     target.immutable_copy_work().unwrap();
     let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    if scoped {
+        vm.abstract_type_parameters.insert(id(91));
+        vm.abstract_value_parameters
+            .insert(id(92), Term::Primitive(Primitive::Bool));
+    }
+
     vm.budget.depth = 2;
     vm.depth = 1;
     assert_eq!(
@@ -756,6 +780,12 @@ fn warm_append_prefix_still_obeys_current_invocation_depth() {
 
 #[test]
 fn warm_append_prefix_rechecks_embedded_type_proofs_and_recovers() {
+    for scoped in [false, true] {
+        check_warm_append_prefix_rechecks_embedded_type_proofs_and_recovers(scoped);
+    }
+}
+
+fn check_warm_append_prefix_rechecks_embedded_type_proofs_and_recovers(scoped: bool) {
     use nir::program::{TraitRequirement, TypePredicate};
     use std::cell::Cell;
     let mut package = package();
@@ -823,6 +853,12 @@ fn warm_append_prefix_rechecks_embedded_type_proofs_and_recovers() {
             let mut vm = Interpreter::for_comptime(&package, Budget::default())
                 .unwrap()
                 .with_type_solver(&solver);
+            if scoped {
+                vm.abstract_type_parameters.insert(id(91));
+                vm.abstract_value_parameters
+                    .insert(id(92), Term::Primitive(Primitive::Bool));
+            }
+
             for outcome in [
                 ContractOutcome::Satisfied,
                 ContractOutcome::Rejected,
