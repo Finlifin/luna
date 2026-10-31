@@ -678,3 +678,23 @@ whitespace checks passed. Receiver value-reference invocation remains explicitly
 unsupported; general ordinary expression scheduling and invocation depth limits
 are unchanged. This stage does not introduce code containers or ordinary VM
 callables for contextual methods, and does not change invocation result caching.
+
+## Generic signature template inheritance
+
+Signature template instances now inherit clause parameters with fresh declaration
+identities per instance. Lowering introduces those names into the instance body;
+elaboration clones dependent domains, defaults, bounds and requirements through
+the same identity mapping. Ordinary, inline and quote instances preserve their
+existing callable categories and contract checks. HIR dumps expose the mapping as
+S-expressions. Imported templates retain declaration lookup, while inherited clause
+names shadow unrelated names in the instance's enclosing module.
+
+Explicit template clause application, explicit instance parameter compatibility
+and shared CMTT template bodies remain outside this implementation.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test test_templates`: 84 passed (`/tmp/luna-tools-8aije0em/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p hir -p ast_lowering`: exit 0 (`/tmp/luna-tools-3mj4ajp5/result.json`).
+- After adding IIR execution and missing-trait rejection assertions, `python3 -B development/check.py --timeout 900 -- test -p luna --test test_templates signature_templates_`: 9 passed (`/tmp/luna-tools-qndk08eu/result.json`).
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: exit 0 (`/tmp/luna-tools-lbsebe2n/result.json`).

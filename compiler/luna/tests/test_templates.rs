@@ -2279,3 +2279,108 @@ fn signature_template_instance_modifiers_preserve_interface_contracts() {
         assert_eq!(function.is_unsafe, unsafe_call);
     }
 }
+
+#[test]
+fn signature_templates_inherit_generic_clauses_with_fresh_identities() {
+    let source = "fn first use identity {let copied:T=value; copied}
+        inline fn second use identity {value}
+        quote fn third use identity {value}
+        template fn identity(value:T)->T where T;
+        fn run()->bool {first<bool>(true) and second<bool>(true) and third<bool>(true)}";
+    let Artifact::Nir(package) = compile(source, Emit::Nir).unwrap() else {
+        unreachable!()
+    };
+    let first = package
+        .functions
+        .iter()
+        .find(|f| f.name == "first")
+        .unwrap();
+    let second = package
+        .functions
+        .iter()
+        .find(|f| f.name == "second")
+        .unwrap();
+    assert_eq!(first.type_parameters.len(), 1);
+    assert_eq!(second.type_parameters.len(), 1);
+    assert_ne!(first.type_parameters, second.type_parameters);
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+    assert_eq!(
+        execution_support::run_iir(source, "run", vec![]),
+        comptime_interpretor::Value::Bool(true)
+    );
+    let Artifact::Hir(dump) = compile(source, Emit::Hir).unwrap() else {
+        unreachable!()
+    };
+    assert_eq!(
+        dump.matches("(function-template-clause ").count(),
+        3,
+        "{dump}"
+    );
+}
+
+#[test]
+fn signature_templates_rebind_value_clauses_defaults_and_requirements() {
+    let source = "template fn choose(value:T)->T where T, fallback:T, requires T == bool;
+        fn first use choose {fallback}
+        fn second use choose {value}
+        template fn flag()->bool where .enabled:bool=true;
+        fn selected use flag {enabled}
+        fn run()->bool {first<bool,true>(false) and not second<bool,true>(false) and selected() and not selected<.enabled=false>()}";
+    let Artifact::Nir(package) = compile(source, Emit::Nir).unwrap() else {
+        unreachable!()
+    };
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+    assert!(compile("typealias char=.char'builtin;template fn choose(value:T)->T where T, requires T == bool;fn first use choose {value} fn bad()->char {first<char>('x')}",Emit::Nir).is_err());
+}
+
+#[test]
+fn signature_templates_inherit_trait_bounds_and_module_lexical_types() {
+    let source = "trait Mark {fn mark()->bool;}
+        impl Mark for bool {fn mark()->bool {true}}
+        template fn tagged(value:T)->bool where T :- Mark;
+        fn first use tagged {T.as(Mark).mark()}
+        fn run()->bool {first<bool>(true)}";
+    let Artifact::Nir(package) = compile(source, Emit::Nir).unwrap() else {
+        unreachable!()
+    };
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+    assert!(
+        compile(
+            "typealias char=.char'builtin;
+         trait Mark {fn mark()->bool;}
+         impl Mark for bool {fn mark()->bool {true}}
+         template fn tagged(value:T)->bool where T :- Mark;
+         fn first use tagged {true}
+         fn bad()->bool {first<char>('x')}",
+            Emit::Nir,
+        )
+        .is_err()
+    );
+    let Artifact::Nir(package) = compile_with_modules(
+        "use templates.identity;typealias T=*bool;
+         fn first use identity {let copied:T=value;copied}
+         fn second use identity {value}
+         fn run()->bool {first<bool>(true) and second<bool>(true)}",
+        &[(
+            "templates.fl",
+            "pub template fn identity(value:T)->T where T;",
+        )],
+        Emit::Nir,
+    )
+    .unwrap() else {
+        unreachable!()
+    };
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}

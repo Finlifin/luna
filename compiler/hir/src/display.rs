@@ -313,13 +313,14 @@ impl Display for ItemKind<'_> {
                 signature,
                 explicit_parameters,
                 parameters,
+                clause_bindings,
                 modifiers,
                 body,
             } => {
                 form!(f, "function-template-instance", "template" => template,
                     "signature" => Maybe(signature.as_ref()),
                     "explicit-parameters" => Maybe(explicit_parameters.map(List)),
-                    "parameters" => List(parameters), "modifiers" => modifiers, "body" => body)
+                    "parameters" => List(parameters), "clause-bindings" => List(clause_bindings), "modifiers" => modifiers, "body" => body)
             }
             Self::TestTemplateInstance {
                 interface,
@@ -1073,5 +1074,11 @@ impl Display for crate::expr::ClosureEnvironmentBinding<'_> {
 impl Display for TestTemplateInterface<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         form!(f, "test-template-interface", "parameter" => Id(self.parameter), "type" => self.ty)
+    }
+}
+
+impl Display for crate::item::FunctionTemplateClause {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        form!(f, "function-template-clause", "formal" => self.formal, "binding" => self.binding)
     }
 }

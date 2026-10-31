@@ -39,6 +39,7 @@ pub enum ItemKind<'hir> {
         signature: Option<FnSig<'hir>>,
         explicit_parameters: Option<&'hir [crate::common::FnParam<'hir>]>,
         parameters: Vec<FunctionTemplateInput>,
+        clause_bindings: Vec<FunctionTemplateClause>,
         modifiers: FnModifiers,
         body: BodyId,
     },
@@ -87,6 +88,12 @@ pub struct TestTemplatePort {
     pub name: Ident,
     pub binding: HirId,
     pub formal: Option<HirId>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FunctionTemplateClause {
+    pub formal: crate::common::DefId,
+    pub binding: crate::common::DefId,
 }
 
 #[derive(Debug, Clone, PartialEq)]

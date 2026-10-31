@@ -265,6 +265,7 @@ mod tests {
             item(ItemKind::FunctionTemplateInstance {
                 template: &template,
                 signature: None,
+                clause_bindings: vec![],
                 explicit_parameters: Some(std::slice::from_ref(&param)),
                 parameters: vec![FunctionTemplateInput {
                     name: name(),

@@ -36,6 +36,7 @@ pub(super) fn expand<'h>(source: &Package<'h>, arena: &'h HirArena) -> Result<Pa
             signature,
             explicit_parameters,
             parameters,
+            clause_bindings,
             modifiers,
             body,
         } = &item.kind
@@ -57,7 +58,7 @@ pub(super) fn expand<'h>(source: &Package<'h>, arena: &'h HirArena) -> Result<Pa
                 "invalid function template parameter correspondence",
             ));
         }
-        if !formal.clause_params.is_empty() || matches!(template.kind, E::NFApplication(..)) {
+        if matches!(template.kind, E::NFApplication(..)) {
             return Err(error(
                 item.span,
                 "function template clause substitution is not implemented",
@@ -82,13 +83,29 @@ pub(super) fn expand<'h>(source: &Package<'h>, arena: &'h HirArena) -> Result<Pa
                 .collect(),
             budget: 100_000,
             bodies: Vec::new(),
-            definitions: HashMap::new(),
+            definitions: clause_bindings
+                .iter()
+                .map(|input| (input.formal, input.binding))
+                .collect(),
             member_owner: None,
             captures: HashMap::new(),
             capture_uses: BTreeSet::new(),
             self_type: None,
         };
+        if clause_bindings.len() != formal.clause_params.len()
+            || formal.clause_params.iter().any(|parameter| {
+                parameter
+                    .definition
+                    .is_none_or(|id| !rebind.definitions.contains_key(&id))
+            })
+        {
+            return Err(error(
+                item.span,
+                "invalid function template clause correspondence",
+            ));
+        }
         let mut sig = formal.clone();
+        sig.clause_params = rebind.clauses(formal.clause_params)?;
         let params = formal
             .params
             .iter()

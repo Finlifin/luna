@@ -61,7 +61,33 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             self.current_owner = previous;
             return self.make_error_item(span);
         };
+        let inherited_clauses = match head.kind {
+            ExprKind::ResolvedDef { def_id, .. } => self
+                .resolver
+                .find_scope_for_def(def_id)
+                .and_then(|scope| self.resolver.scope_tree().get(scope))
+                .map(|scope| scope.items.clauses().to_vec())
+                .unwrap_or_default(),
+            _ => vec![],
+        };
         let rib = self.local_enter(RibKind::FnParam);
+        let mut clause_bindings = Vec::new();
+        for clause in inherited_clauses {
+            if let BindingKind::ClauseParam(formal, site) = clause.binding.kind {
+                let index = self.package.next_definition_index();
+                let Some(next) = index.checked_add(1) else {
+                    self.emit_malformed("function template clause identity exhausted", span);
+                    continue;
+                };
+                self.package.reserve_definition_prefix(next);
+                let binding = hir::common::DefId { index, ..formal };
+                self.define_symbol(
+                    Ident::new(clause.name, span),
+                    BindingKind::ClauseParam(binding, site),
+                );
+                clause_bindings.push(FunctionTemplateClause { formal, binding });
+            }
+        }
         let mut parameters = Vec::new();
         let mut seen = std::collections::HashSet::new();
         let explicit_parameters = if explicit {
@@ -126,6 +152,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 signature: None,
                 explicit_parameters,
                 parameters,
+                clause_bindings,
                 modifiers,
                 body,
             },
