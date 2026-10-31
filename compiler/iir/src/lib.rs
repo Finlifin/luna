@@ -199,7 +199,7 @@ impl Package {
     /// Validate completed annotations and closure of every named callable
     /// reference, including references embedded in defaults and patterns.
     pub fn validate(&self, fuel: &mut usize) -> Result<(), String> {
-        self.validate_index()?;
+        self.validate_index_with_budget(fuel)?;
         let links = TypeLinks::new(self, fuel)?;
         for identity in &self.callable_identities {
             let signature = identity.closed_signature()?;

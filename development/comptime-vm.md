@@ -9309,3 +9309,37 @@ Validation in `/home/fin/luna`:
   40 passed; `/tmp/luna-tools-8euqcpqy/result.json`, exit 0.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
   passed; `/tmp/luna-tools-b22rsg_q/result.json`, exit 0.
+
+
+## Meter IIR structural index admission before recursive key work
+
+Package::validate now passes its budget into validate_index_with_budget before
+building the later type-link indexes. The convenience validate_index entry uses
+a finite 100,000-unit budget. Index admission preflights instance arguments,
+nominal keys, signatures, interface/dispatch keys and compared method inputs
+before hashing, cloning or recursive callable inspection. Entries, parameter
+bindings and enum logical/encoding metadata are charged as well. Template
+identity collection now retains borrowed logical types in a map, eliminating
+the additional template catalog scan when checking dispatch bodies.
+
+New regressions check zero-budget refusal, deep key rejection before hashing,
+duplicate identity rejection and successful retry after failures. This is a
+structural validation budget, not a timing guarantee or a complete compiler-wide
+resource audit. Declaration semantics, target-dependent enum checks and selected
+calling conventions remain independently enforced.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p iir`:
+  106 passed; `/tmp/luna-tools-btfbkxtd/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test target_integers --test closure_environment_parameters --test scoped_comptime_callables --test comptime_iir_bytecode`:
+  the latter three suites passed (40 tests). Target integer fixtures initially
+  had 10 HIR failures due to unbound bool, before reaching IIR;
+  `/tmp/luna-tools-93xdiqu0/result.json`, exit 101.
+- The standalone target fixture entry now uses the existing primitive binding
+  helper; expectations and compiler primitive semantics are unchanged.
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test target_integers`:
+  all 27 passed; `/tmp/luna-tools-ez6hoqcr/result.json`, exit 0.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed after formatting the fixture imports;
+  `/tmp/luna-tools-awsmka8a/result.json`, exit 0.

@@ -1,5 +1,7 @@
 #[path = "support/library.rs"]
 mod library;
+#[path = "support/primitive_bindings.rs"]
+mod primitive_bindings;
 use luna::frontend::{self, Artifact};
 use nir::target::TargetData;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,7 +21,7 @@ fn compile_with_intrinsics(
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::write(&path, source).unwrap();
+    primitive_bindings::write_fixture(&path, source).unwrap();
     let luna::cli::Command::Compile(options) =
         luna::cli::parse([path.clone().into_os_string(), "--emit".into(), "nir".into()]).unwrap()
     else {

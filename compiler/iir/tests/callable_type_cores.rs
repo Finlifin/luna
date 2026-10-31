@@ -71,3 +71,45 @@ fn repeated_type_links_do_not_rescan_the_callable_catalog() {
     assert!(graph.validate(&mut 1).is_err());
     graph.validate(&mut (256 * 64)).unwrap();
 }
+
+#[test]
+fn index_admission_bounds_keys_before_hashing_and_recovers() {
+    let mut graph = iir::Package::default();
+    let mut pool = TypeInterner::default();
+    let identity = CallableIdentity::intern(
+        key(1),
+        signature(Term::Primitive(Primitive::Bool)),
+        &mut pool,
+        &mut 1000,
+    )
+    .unwrap();
+    graph.callable_identities.push(identity.clone());
+    assert!(
+        graph
+            .validate_index_with_budget(&mut 0)
+            .unwrap_err()
+            .contains("budget")
+    );
+    graph.validate_index_with_budget(&mut 1000).unwrap();
+    let mut deep = Term::Primitive(Primitive::Bool);
+    for _ in 0..140 {
+        deep = Term::Pointer(Box::new(deep));
+    }
+    graph.callable_identities[0].key.arguments.push(deep);
+    assert!(
+        graph
+            .validate_index_with_budget(&mut 100_000)
+            .unwrap_err()
+            .contains("budget")
+    );
+    graph.callable_identities[0] = identity.clone();
+    graph.callable_identities.push(identity);
+    assert!(
+        graph
+            .validate_index_with_budget(&mut 1000)
+            .unwrap_err()
+            .contains("duplicate")
+    );
+    graph.callable_identities.pop();
+    graph.validate(&mut 1000).unwrap();
+}
