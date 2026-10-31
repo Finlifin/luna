@@ -616,3 +616,55 @@ append sample is `/tmp/luna-tools-sx6t98_5/result.json`; its 256-Bool time was
 The append benchmark header now distinguishes result caching from enabled
 representation summaries. `git diff --check` passed. No language implementation
 changed in this benchmark commit, so no unrelated full test suite was rerun.
+
+## Avoid duplicate borrowed scans for summarized append prefixes
+
+Fused append may now omit its borrowed-representation traversal when the local
+payload already has a closed structural summary, there are no abstract inputs,
+and its full subtree fits both the structural and current invocation depth
+limits. Otherwise it runs the original traversal. In particular, insufficient
+depth does not use an aggregate shortcut that would reorder the original
+failure path.
+
+Immutable admission still runs before suffix evaluation and checks the actual
+list domain, every element and embedded type formation in the current VM.
+The summary does not authorize these checks. This is specific to the fused
+append path, whose non-calling suffix allows reuse of the receiver allocation;
+ordinary snapshots and general checkpointing retain their existing behavior.
+The removed traversal's VM charges disappear with the work itself; this is an
+intentional reduction in implementation step cost, not a change to nominal
+admission or the representation-size ceiling.
+
+Regressions warm a structurally valid but ill-typed prefix, which must still
+reject before reading a missing suffix, and change the active invocation depth
+after warming. Rejection, recovery and later payload mutation remain covered.
+
+Same-profile diagnostic benchmark comparison, five warmups and three measured
+invocations per shape (unoptimized test builds, not release throughput):
+
+| Owned fused path | Before ns/invocation | After ns/invocation | Before steps | After steps |
+| --- | ---: | ---: | ---: | ---: |
+| Bool, 256 appends | 5432935 | 4045273 | 223779 | 156459 |
+| Bool, 1024 appends | 37253928 | 20907325 | 3254307 | 2198571 |
+| Type, 256 appends | 9216168 | 6460286 | 356387 | 256427 |
+| Type, 1024 appends | 94309608 | 57172852 | 5357603 | 3778091 |
+
+Before: `/tmp/luna-tools-09wdut2q/result.json`; after:
+`/tmp/luna-tools-hedxt4br/result.json`. Both ran
+`LUNA_BENCH_ITERATIONS=3 python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --bench list_append`
+from `/home/fin/luna` and exited 0. These small samples show a local reduction;
+full append still scans element admission and remains superlinear. No general
+release speedup is claimed.
+
+Validation from `/home/fin/luna`, all exit 0:
+
+```sh
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor -p luna --test type_list_inputs --test comptime_list_operations --test comptime_list_type_evidence --test comptime_memory
+```
+
+338 interpreter unit tests and 125 integration tests passed. Reports:
+`/tmp/luna-tools-7zmeq7_c/result.json` (formatting),
+`/tmp/luna-tools-hh461wsf/result.json` (unit tests), and
+`/tmp/luna-tools-n1v9hdd9/result.json` (integration). `git diff --check` passed.

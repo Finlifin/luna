@@ -27,7 +27,27 @@ impl Interpreter<'_> {
             .transpose()
             .map_err(|kind| self.failure(kind, Some(source)))?;
         let value = borrowed.as_ref().map(|v| v.value()).unwrap_or(target);
-        self.check_borrowed_representation(value, source, 0)?;
+        // A closed structural summary already bounds this immutable payload.
+        // Admission below still rechecks its current domain and every embedded
+        // type. Only omit the redundant checkpoint walk when every node also
+        // fits the current invocation depth; otherwise retain the original
+        // traversal and its failure ordering. Scoped evidence is never reused.
+        let summarized = self.comptime_only
+            && self.abstract_type_parameters.is_empty()
+            && self.abstract_value_parameters.is_empty()
+            && match value {
+                Value::List { values, .. } => values.summary().is_some_and(|summary| {
+                    summary.height < 128
+                        && self
+                            .depth
+                            .checked_add(summary.height)
+                            .is_some_and(|depth| depth < self.budget.depth)
+                }),
+                _ => false,
+            };
+        if !summarized {
+            self.check_borrowed_representation(value, source, 0)?;
+        }
         self.list_operand_length(value, ty, source)?;
         Ok(())
     }

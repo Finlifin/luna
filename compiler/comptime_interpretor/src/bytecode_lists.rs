@@ -689,6 +689,9 @@ fn append_rejects_malformed_prefix_before_reading_suffix_for_every_carrier() {
                 ty: ty.clone(),
                 values: vec![Value::Char('x')].into(),
             };
+            // Structural evidence is not element admission: even a warm
+            // malformed payload must be rejected before evaluating the suffix.
+            malformed.immutable_copy_work().unwrap();
             let mut env = Environment::from([(input, wrap(malformed.clone()))]);
             let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
             // The missing suffix binding would produce MissingBinding if read.
@@ -718,4 +721,35 @@ fn append_rejects_malformed_prefix_before_reading_suffix_for_every_carrier() {
             );
         }
     }
+}
+
+#[test]
+fn warm_append_prefix_still_obeys_current_invocation_depth() {
+    let package = package();
+    let ty = list(Primitive::Bool);
+    let target = Value::List {
+        ty: ty.clone(),
+        values: vec![Value::Bool(true)].into(),
+    };
+    target.immutable_copy_work().unwrap();
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    vm.budget.depth = 2;
+    vm.depth = 1;
+    assert_eq!(
+        vm.check_list_append(&target, &ty, SOURCE).unwrap_err().kind,
+        ErrorKind::DepthExhausted
+    );
+    vm.depth = 0;
+    vm.check_list_append(&target, &ty, SOURCE).unwrap();
+    let mut changed = target;
+    let Value::List { values, .. } = &mut changed else {
+        unreachable!()
+    };
+    values[0] = Value::Char('x');
+    assert_eq!(
+        vm.check_list_append(&changed, &ty, SOURCE)
+            .unwrap_err()
+            .kind,
+        ErrorKind::Type
+    );
 }
