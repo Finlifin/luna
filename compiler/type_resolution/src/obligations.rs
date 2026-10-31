@@ -439,6 +439,7 @@ impl Engine {
                 break;
             }
         }
+        candidate.try_model_matching(relations, budget)?;
         candidate.invalidate();
         let ids = relations
             .iter()
@@ -455,19 +456,8 @@ impl Engine {
         right: InferenceTerm,
         budget: Budget,
     ) -> Result<(Self, ObligationId), crate::matching::MatchError> {
-        let mut candidate = self.trial();
-        crate::matching::propose(
-            &mut candidate.inference,
-            &left,
-            &right,
-            &candidate.context,
-            &scope_frames(&candidate.scope),
-            budget,
-        )?;
-        // Assignments made by matching can affect existing region obligations.
-        candidate.invalidate();
-        let obligation = candidate.require(Requirement::Equal(left, right));
-        Ok((candidate, obligation))
+        let (candidate, ids) = self.match_many(&[(left, right)], budget)?;
+        Ok((candidate, ids[0]))
     }
     fn changed(&mut self) {
         self.revision = self

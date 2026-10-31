@@ -165,3 +165,33 @@ implementation-world 求解需要的额度；没有扩大原有预算。
 - `python3 -B development/check.py --timeout 900 -- test -p type_resolution`：exit 0；`/tmp/luna-tools-l97e75xt/result.json`。
 - 覆盖候选隔离、原义务重证、requires 不参与推导且仍阻止错误提交、未授权输入、
   预算恢复、临时身份碰撞、sort 和 stale candidate。格式化与 `git diff --check` 通过。
+
+
+### 普通匹配的模型兜底调度
+
+`Engine::match_many_metered` 在直接结构提案达到固定点后，收集原始匹配关系中仍未解决的
+输入，仅在全部属于 Type sort 时调用模型搜索。`match_types` 复用同一事务入口。
+搜索使用剩余匹配额度的四分之一作为上限，按实际消耗扣除；找不到确定解或搜索预算
+不足时保持原输入未决，不扩大搜索域、不添加 requires 作为假设。
+
+搜索成功后，在另一份 inference trial 中原子导入全部值，再回到原匹配候选。临时
+搜索候选的 parent/revision 和假设不被发布；原始匹配关系仍逐项注册为 obligation。
+如果模型只选择了区域前提的一条可行分支，原区域无法证明最终关系，候选不能提交。
+
+真实正例：区域前提 `*A == **bool`，将 `A` 类型的实参交给参数 `*T`。直接 matcher
+只查看前提的整段形状，无法提出 T；模型搜索提出 `T = bool`，随后原区域的证明器
+独立证明完整匹配。源码测试检查生成 NIR 的 FunctionInstance 实参是 bool，拒绝例
+则使用 `A == ?bool or A == *bool`，不能把仅某个分支成立的匹配用于泛型函数。
+可选参数会触发合法的自动包装，最初的可选源码反例因此被替换为 runtime 指针接口；
+没有改变语言转换规则或拒绝合法调用。
+
+尚未完成符号解提取、所有理论的模型重建或统一持久 CDCL trail；该调度不会把
+Unknown 或多解提升为成功。需要 comptime/value 输入共同求解的关系保持原有路径。
+
+验证（工作目录 `/home/fin/luna`）：
+
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution`：exit 0，319 项；`/tmp/luna-tools-fxz991uy/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution --test type_input_search`：增加 direct-matcher 对照后 exit 0，七项；`/tmp/luna-tools-0r351097/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`：检查 NIR 实参的源码正例及拒绝例均通过；`/tmp/luna-tools-ozxdil5j/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test builder_invocations contextual_data_consumer_publishes_structs_through_the_complete_sysroot`：exit 0；`/tmp/luna-tools-adht8rtm/result.json`。
+- Workspace 格式化与 `git diff --check` 通过。

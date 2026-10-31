@@ -175,3 +175,105 @@ fn wrong_sort_assigned_and_stale_candidates_follow_existing_transaction_rules() 
         Err(Error::Inference(InferenceError::AlreadyAssigned(_)))
     ));
 }
+
+#[test]
+fn ordinary_matching_uses_models_after_structural_proposals_stall() {
+    let alias = Term::Rigid {
+        declaration: DeclarationId {
+            package: 10,
+            local: 1,
+        },
+        sort: Sort::Type,
+    };
+    let optional = |ty| Term::Optional(Box::new(ty));
+    let mut context = Context::default();
+    // Only the outer shapes occur as assumption operands. Their injective
+    // structure fixes Alias, so the original match is valid for this region.
+    context.assume(F::equal(
+        optional(alias.clone()),
+        optional(optional(Term::Primitive(P::Bool))),
+    ));
+    // Establish that the direct matcher itself cannot fill this input.
+    let mut direct = type_resolution::InferenceContext::default();
+    let direct_input = direct.fresh(Sort::Type);
+    let direct_pattern = I::Instantiate {
+        template: optional(Term::Bound {
+            depth: 0,
+            index: 0,
+            sort: Sort::Type,
+        }),
+        arguments: vec![I::Meta(direct_input)],
+    };
+    type_resolution::matching::propose(
+        &mut direct,
+        &direct_pattern,
+        &I::Stable(alias.clone()),
+        &context,
+        &[],
+        Budget::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        direct.resolve(&I::Meta(direct_input)).unwrap(),
+        I::Meta(direct_input)
+    );
+    let mut parent = Engine::with_context(context);
+    let input = parent.fresh(Sort::Type);
+    let pattern = I::Instantiate {
+        template: optional(Term::Bound {
+            depth: 0,
+            index: 0,
+            sort: Sort::Type,
+        }),
+        arguments: vec![I::Meta(input)],
+    };
+    let (mut candidate, obligation) = parent
+        .match_types(pattern, I::Stable(alias), Budget::default())
+        .unwrap();
+    assert_eq!(parent.inspect(&I::Meta(input)).unwrap(), I::Meta(input));
+    assert_eq!(candidate.inspect(&I::Meta(input)).unwrap(), stable(P::Bool));
+    candidate.advance(100, Budget::default());
+    assert!(candidate.state(obligation).unwrap().is_proven());
+    parent.commit(candidate).unwrap();
+    assert_eq!(
+        parent.freeze(&I::Meta(input)).unwrap(),
+        Term::Primitive(P::Bool)
+    );
+}
+
+#[test]
+fn model_matching_cannot_turn_a_conditional_shape_into_a_regional_fact() {
+    let alias = Term::Rigid {
+        declaration: DeclarationId {
+            package: 10,
+            local: 1,
+        },
+        sort: Sort::Type,
+    };
+    let optional = |ty| Term::Optional(Box::new(ty));
+    let mut context = Context::default();
+    context.assume(F::Or(vec![
+        F::equal(alias.clone(), optional(Term::Primitive(P::Bool))),
+        F::equal(
+            alias.clone(),
+            Term::Pointer(Box::new(Term::Primitive(P::U8))),
+        ),
+    ]));
+    let mut parent = Engine::with_context(context);
+    let input = parent.fresh(Sort::Type);
+    let pattern = I::Instantiate {
+        template: optional(Term::Bound {
+            depth: 0,
+            index: 0,
+            sort: Sort::Type,
+        }),
+        arguments: vec![I::Meta(input)],
+    };
+    let (mut candidate, obligation) = parent
+        .match_types(pattern, I::Stable(alias), Budget::default())
+        .unwrap();
+    candidate.advance(100, Budget::default());
+    assert!(!candidate.state(obligation).unwrap().is_proven());
+    assert!(parent.commit(candidate).is_err());
+    assert_eq!(parent.inspect(&I::Meta(input)).unwrap(), I::Meta(input));
+}

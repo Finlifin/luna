@@ -240,3 +240,81 @@ impl fmt::Display for TypeInputSearch {
         }
     }
 }
+
+impl Engine {
+    /// Use only original matching equations, never the candidate's requires.
+    /// Model search is optional work after structural matching reaches a fixed
+    /// point. A bounded share leaves fuel for the caller's remaining checks.
+    pub(super) fn try_model_matching(
+        &mut self,
+        relations: &[(InferenceTerm, InferenceTerm)],
+        budget: &mut Budget,
+    ) -> Result<(), crate::matching::MatchError> {
+        let mut local = Budget {
+            steps: budget.steps / 4,
+            ..*budget
+        };
+        let before = local.steps;
+        let result = (|| -> Result<(), Error> {
+            let mut inputs = BTreeSet::new();
+            for (left, right) in relations {
+                for term in [left, right] {
+                    inputs.extend(self.inference.unresolved_with_limits(
+                        term,
+                        &mut local.steps,
+                        local.max_depth,
+                    )?);
+                }
+            }
+            if inputs.is_empty() {
+                return Ok(());
+            }
+            let mut equations = Vec::new();
+            for (left, right) in relations {
+                let left =
+                    crate::inference_budget::copy_input(left, &mut local.steps, local.max_depth)
+                        .map_err(|_| InferenceError::Budget)?;
+                let right =
+                    crate::inference_budget::copy_input(right, &mut local.steps, local.max_depth)
+                        .map_err(|_| InferenceError::Budget)?;
+                equations.push(Requirement::Equal(left, right));
+            }
+            let problem = Requirement::And(equations);
+            for &input in &inputs {
+                charge(&mut local)?;
+                if self.inference.sort(&InferenceTerm::Meta(input))? != Sort::Type {
+                    return Ok(());
+                }
+            }
+            let inputs: Vec<_> = inputs.into_iter().collect();
+            let TypeInputSearch::Proposed { candidate, .. } =
+                self.search_type_inputs(&inputs, &problem, &mut local)?
+            else {
+                return Ok(());
+            };
+            // Preserve this trial's parent/revision. The search's nested trial
+            // cannot be returned directly to our caller as its own child.
+            let mut proposed = self.inference.trial();
+            for input in inputs {
+                let value =
+                    candidate.inspect_type_metered(&InferenceTerm::Meta(input), &mut local)?;
+                proposed.assign_with_limits(
+                    input,
+                    InferenceTerm::Stable(value),
+                    &mut local.steps,
+                    local.max_depth,
+                )?;
+            }
+            self.inference.commit(proposed)?;
+            Ok(())
+        })();
+        budget.steps -= before - local.steps;
+        match result {
+            Ok(()) | Err(Error::Inference(InferenceError::Budget)) => Ok(()),
+            Err(Error::Inference(error)) => Err(crate::matching::MatchError::Inference(error)),
+            // Other transaction errors cannot authorize any assignment. Keep the
+            // original equations pending just as for an unavailable model.
+            Err(_) => Ok(()),
+        }
+    }
+}
