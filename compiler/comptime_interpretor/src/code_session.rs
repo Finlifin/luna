@@ -6,6 +6,7 @@ use super::*;
 /// retained. A changed world requires a new session, even with identical IDs.
 pub struct CodeSession {
     world: CodeWorld,
+    graph_validated: bool,
     indexes: Option<Arc<declaration_index::SourceIndexes>>,
     bytecode: bytecode::CodeCache,
     inputs: input_bodies::Cache,
@@ -21,6 +22,7 @@ impl CodeSession {
     pub fn new(package: Arc<Package>) -> Self {
         Self {
             world: CodeWorld::Source(package),
+            graph_validated: false,
             indexes: None,
             bytecode: Default::default(),
             inputs: Default::default(),
@@ -30,11 +32,12 @@ impl CodeSession {
         }
     }
 
-    /// Code reuse is bound to this exact validated IIR snapshot, not declaration
-    /// IDs. A fresh VM still validates the graph and owns all invocation state.
+    /// Code reuse and successful validation are bound to this exact immutable
+    /// IIR snapshot, not declaration IDs. Every VM owns fresh invocation state.
     pub fn for_iir(graph: Arc<iir::Package>) -> Self {
         Self {
             world: CodeWorld::Graph(graph),
+            graph_validated: false,
             indexes: None,
             bytecode: Default::default(),
             inputs: Default::default(),
@@ -81,6 +84,29 @@ impl Drop for Scope<'_, '_, '_> {
 }
 
 impl<'program> Interpreter<'program> {
+    /// Reuse structural validation only for the exact graph owned by this session.
+    /// Index construction and execution still consume the current allowance;
+    /// input contracts and phase permissions are checked by each fresh VM.
+    pub fn from_iir_for_comptime_in_session(
+        graph: &'program iir::Package,
+        session: &mut CodeSession,
+        budget: &mut Budget,
+    ) -> Result<Self, Error> {
+        let matches = matches!(&session.world, CodeWorld::Graph(owner)
+            if std::ptr::eq(graph, owner.as_ref()));
+        if !matches {
+            return Self::from_iir_for_comptime_metered(graph, budget);
+        }
+        let mut vm = if session.graph_validated {
+            Self::from_validated_iir_metered(graph, budget)?
+        } else {
+            Self::from_iir_metered(graph, budget)?
+        };
+        session.graph_validated = true;
+        vm.comptime_only = true;
+        Ok(vm)
+    }
+
     /// Construct a fresh execution state using this snapshot's declaration index.
     /// Phase, trait and formation checks still run with the current allowance.
     pub fn for_comptime_in_session(

@@ -468,3 +468,30 @@ Verification (cwd `/home/fin/luna`, exit 0):
 This does not finish VM-world reuse: graph validation still runs each call,
 Type-result source admission still constructs a separate source VM, and
 elaboration suspension remains unimplemented. No wall-clock speedup is claimed.
+
+
+## Retained immutable graph validation
+
+Graph sessions now retain successful structural validation for their exact owned
+`Arc<iir::Package>`. Both PreparedInvocation and input-bound memoization execution
+use the session-aware constructor. The owner keeps the allocation alive; a clone
+with the same declaration identities cannot inherit its validation or code.
+The trusted marker is published only after successful VM construction. Failed
+validation and insufficient preparation fuel do not publish it.
+
+Warm construction still charges a preparation step and callable signature index
+work, creates fresh execution state, and enables comptime phase restrictions.
+Current inputs, contracts and body execution remain per invocation. The ordinary
+non-session constructor still validates every graph. This supersedes the earlier
+notes above that graph validation always runs on repeated session invocations.
+Source result admission still creates another source VM; graph indexes are still
+rebuilt. This change does not implement elaboration suspension or model search.
+
+Verification (cwd `/home/fin/luna`):
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_iir_bytecode --test staged_invocation_reuse --test prepared_invocations`: exit 0, fourteen tests; `/tmp/luna-tools-cfjqerjs/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`: exit 0, 367 tests; `/tmp/luna-tools-rc5ila7v/result.json`.
+- Initial regression fixture omitted `where` before `requires`; parsing rejected
+  it. Corrected the fixture to the documented clause syntax before the passing run.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_iir_bytecode`: exit 0, eight tests after adding repeated invalid-owner rejection; `/tmp/luna-tools-ll_1e7te/result.json`.
+- Workspace formatting and `git diff --check` passed.

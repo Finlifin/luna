@@ -294,7 +294,12 @@ fn execute_prepared(
         depth: 128,
     };
     let interpreter = match graph {
-        Some(graph) => Interpreter::from_iir_for_comptime_metered(graph, &mut budget),
+        Some(graph) => match session.as_deref_mut() {
+            Some(session) => {
+                Interpreter::from_iir_for_comptime_in_session(graph, session, &mut budget)
+            }
+            None => Interpreter::from_iir_for_comptime_metered(graph, &mut budget),
+        },
         None => match session.as_deref_mut() {
             Some(session) => Interpreter::for_comptime_in_session(package, session, &mut budget),
             None => Interpreter::for_comptime(package, budget),

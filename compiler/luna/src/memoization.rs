@@ -613,7 +613,9 @@ fn evaluate(
     let steps = u64::try_from(context.remaining()).unwrap_or(u64::MAX);
     let mut vm_budget = Budget { steps, depth: 128 };
     let prepared_vm = match graph {
-        Some(graph) => Interpreter::from_iir_for_comptime_metered(graph, &mut vm_budget),
+        Some(graph) => {
+            Interpreter::from_iir_for_comptime_in_session(graph, code_session, &mut vm_budget)
+        }
         None => Interpreter::for_comptime_in_session(source, code_session, &mut vm_budget),
     };
     let copy_failure = std::cell::RefCell::new(None::<String>);

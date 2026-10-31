@@ -269,7 +269,12 @@ fn graph_sessions_reuse_code_only_for_the_exact_immutable_graph() {
     ));
     let mut session = CodeSession::for_iir(graph.clone());
     for (index, value) in [true, false, true].into_iter().enumerate() {
-        let mut vm = Interpreter::from_iir_for_comptime(&graph, Budget::default()).unwrap();
+        let mut vm = Interpreter::from_iir_for_comptime_in_session(
+            &graph,
+            &mut session,
+            &mut Budget::default(),
+        )
+        .unwrap();
         assert_eq!(
             vm.with_code_session(&mut session, |vm| vm
                 .invoke_instance(&graph.roots[0], vec![Value::Bool(value)]))
@@ -292,7 +297,12 @@ fn graph_sessions_reuse_code_only_for_the_exact_immutable_graph() {
         ty: Term::Primitive(Primitive::Bool),
         kind: K::Literal(Literal::Bool(true)),
     };
-    let mut vm = Interpreter::from_iir_for_comptime(&changed, Budget::default()).unwrap();
+    let mut vm = Interpreter::from_iir_for_comptime_in_session(
+        &changed,
+        &mut session,
+        &mut Budget::default(),
+    )
+    .unwrap();
     assert_eq!(
         vm.with_code_session(&mut session, |vm| vm
             .invoke_instance(&root, vec![Value::Bool(true)]))
@@ -300,7 +310,9 @@ fn graph_sessions_reuse_code_only_for_the_exact_immutable_graph() {
         Value::Bool(true)
     );
     assert!(vm.bytecode_compilations() > 0);
-    let mut original = Interpreter::from_iir_for_comptime(&graph, Budget::default()).unwrap();
+    let mut original =
+        Interpreter::from_iir_for_comptime_in_session(&graph, &mut session, &mut Budget::default())
+            .unwrap();
     assert_eq!(
         original
             .with_code_session(&mut session, |vm| vm
@@ -309,4 +321,78 @@ fn graph_sessions_reuse_code_only_for_the_exact_immutable_graph() {
         Value::Bool(false)
     );
     assert_eq!(original.bytecode_compilations(), 0);
+}
+
+#[test]
+fn graph_validation_reuse_is_metered_and_cannot_authorize_another_snapshot() {
+    use comptime_interpretor::CodeSession;
+    use std::sync::Arc;
+    let graph = Arc::new(graph(
+        "comptime fn run(value:bool)->bool where requires value {value}",
+        "run",
+    ));
+    let mut session = CodeSession::for_iir(graph.clone());
+    // Insufficient validation fuel must not publish a trusted snapshot.
+    for _ in 0..2 {
+        let mut budget = Budget {
+            steps: 0,
+            ..Budget::default()
+        };
+        assert!(
+            Interpreter::from_iir_for_comptime_in_session(&graph, &mut session, &mut budget)
+                .is_err()
+        );
+        assert_eq!(budget.steps, 0);
+    }
+    let mut cold = Budget::default();
+    let mut vm =
+        Interpreter::from_iir_for_comptime_in_session(&graph, &mut session, &mut cold).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![Value::Bool(true)])
+            .unwrap(),
+        Value::Bool(true)
+    );
+    let mut warm = Budget::default();
+    let mut vm =
+        Interpreter::from_iir_for_comptime_in_session(&graph, &mut session, &mut warm).unwrap();
+    assert!(warm.steps > cold.steps);
+    assert!(warm.steps < Budget::default().steps);
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![Value::Bool(false)])
+            .unwrap_err()
+            .kind,
+        ErrorKind::ProgramContractRejected
+    );
+    let mut empty = Budget {
+        steps: 0,
+        ..Budget::default()
+    };
+    assert!(matches!(Interpreter::from_iir_for_comptime_in_session(
+        &graph, &mut session, &mut empty), Err(error) if error.kind == ErrorKind::StepsExhausted));
+
+    // Identical declaration identities do not authorize a broken root reference.
+    let mut invalid = graph.as_ref().clone();
+    invalid.roots[0].declaration.local = u32::MAX;
+    for _ in 0..2 {
+        assert!(matches!(Interpreter::from_iir_for_comptime_in_session(
+            &invalid, &mut session, &mut Budget::default()),
+            Err(error) if error.kind == ErrorKind::InvalidCallPlan));
+    }
+    let invalid = Arc::new(invalid);
+    let mut invalid_session = CodeSession::for_iir(invalid.clone());
+    for _ in 0..2 {
+        assert!(matches!(Interpreter::from_iir_for_comptime_in_session(
+            &invalid, &mut invalid_session, &mut Budget::default()),
+            Err(error) if error.kind == ErrorKind::InvalidCallPlan));
+    }
+    let mut recovered = Budget::default();
+    let mut vm =
+        Interpreter::from_iir_for_comptime_in_session(&graph, &mut session, &mut recovered)
+            .unwrap();
+    assert_eq!(recovered.steps, warm.steps);
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![Value::Bool(true)])
+            .unwrap(),
+        Value::Bool(true)
+    );
 }

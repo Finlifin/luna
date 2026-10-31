@@ -120,6 +120,19 @@ impl<'a> Interpreter<'a> {
             kind: ErrorKind::InvalidCallPlan,
             source: None,
         })?;
+        Self::from_validated_iir_metered(graph, budget)
+    }
+
+    // Only an exact immutable graph owner may retain the validation prerequisite.
+    pub(super) fn from_validated_iir_metered(
+        graph: &'a iir::Package,
+        budget: &mut Budget,
+    ) -> Result<Self, Error> {
+        budget.steps = budget.steps.checked_sub(1).ok_or(Error {
+            kind: ErrorKind::StepsExhausted,
+            source: None,
+        })?;
+        let mut fuel = usize::try_from(budget.steps).unwrap_or(usize::MAX);
         let mut retained_callable_signatures = HashMap::new();
         for identity in &graph.callable_identities {
             let indexed = (|| {
