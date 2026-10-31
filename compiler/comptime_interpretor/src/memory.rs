@@ -115,6 +115,19 @@ impl Storage {
             value,
         })
     }
+    /// Inspect readable owned contents without cloning them. The ownership and
+    /// payload guards remain live throughout inspection. Recursive acquisition
+    /// fails instead of deadlocking; callers account for their own traversal.
+    pub fn inspect_owned<R>(
+        &self,
+        fuel: &mut u64,
+        max_depth: usize,
+        inspect: impl FnOnce(&Value, &mut u64) -> R,
+    ) -> Result<R, ErrorKind> {
+        let contents = self.contents_for_copy(fuel, max_depth)?;
+        Ok(inspect(contents.value(), fuel))
+    }
+
     pub fn read(&self) -> Result<Value, ErrorKind> {
         Ok(self
             .0
@@ -1540,5 +1553,34 @@ fn list_append_restores_prefix_when_validation_unwinds() {
             Term::Primitive(nir::Primitive::Bool),
             Term::Primitive(nir::Primitive::Char),
         ])
+    );
+}
+
+#[test]
+fn owned_inspection_checks_liveness_budget_and_releases_guards_after_errors() {
+    let storage = Storage::new(Value::Bool(true));
+    let mut exhausted = 0;
+    assert_eq!(
+        storage.inspect_owned(&mut exhausted, 128, |_, _| panic!("unbudgeted access")),
+        Err::<(), _>(ErrorKind::StepsExhausted)
+    );
+    let mut fuel = 100;
+    let result = storage.inspect_owned(&mut fuel, 128, |value, fuel| {
+        assert_eq!(value, &Value::Bool(true));
+        assert_eq!(
+            storage.inspect_owned(fuel, 128, |_, _| ()),
+            Err(ErrorKind::InvalidPointer)
+        );
+        Err::<(), _>(ErrorKind::Type)
+    });
+    assert_eq!(result, Ok(Err(ErrorKind::Type)));
+    assert_eq!(
+        storage.inspect_owned(&mut fuel, 128, |v, _| v == &Value::Bool(true)),
+        Ok(true)
+    );
+    storage.1.lock().unwrap().constructed = false;
+    assert_eq!(
+        storage.inspect_owned(&mut fuel, 128, |_, _| panic!("dead storage")),
+        Err::<(), _>(ErrorKind::InvalidPointer)
     );
 }

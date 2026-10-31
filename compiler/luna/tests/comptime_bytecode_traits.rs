@@ -378,8 +378,21 @@ fn cached_associated_code_creates_independent_stateful_closure_values() {
             var value:bool=initial;
             || {value=not value;value}
         }
+        typealias Pair=%{left:Counter,right:Counter} comptime fn()->bool;
+        comptime fn pair()->Pair {
+            let left=counter(false);
+            let right=left;
+            || {left() and not right()}
+        }
+        struct Packet {left:Counter,right:Counter}
+        comptime fn packet()->Packet {
+            let next=counter(false);
+            Packet {left:next,right:next}
+        }
         pure comptime trait Counters where initial:bool {
             assoc next:Counter=counter(initial);
+            assoc paired:Pair=pair();
+            assoc packed:Packet=packet();
         }
         struct Host {}
         comptime impl Counters<initial> for Host where initial:bool {}
@@ -387,8 +400,11 @@ fn cached_associated_code_creates_independent_stateful_closure_values() {
             let first=Host.as(Counters<false>).next;
             let second=Host.as(Counters<false>).next;
             let opposite=Host.as(Counters<true>).next;
+            let paired=Host.as(Counters<false>).paired;
+            let packed=Host.as(Counters<false>).packed;
             first() and second() and not first() and not opposite()
-                and opposite() and not second()
+                and opposite() and not second() and paired() and paired()
+                and packed.left() and not packed.right()
         }",
     );
     let roots = [iir::InstanceKey {
@@ -401,22 +417,37 @@ fn cached_associated_code_creates_independent_stateful_closure_values() {
         Default::default(),
     )
     .unwrap();
-    // Stateful capture serialization into IIR remains a separate missing path.
-    // Here the prepared source VM must create fresh values from reused code.
-    for compiled in [false, true] {
-        let mut vm = if compiled {
-            Interpreter::for_comptime(&package, Budget::default())
-        } else {
-            Interpreter::for_comptime_tree(&package, Budget::default())
-        }
-        .unwrap();
-        for _ in 0..3 {
-            let calls = vm.bytecode_invocations();
-            assert_eq!(
-                vm.invoke(roots[0].declaration, vec![]).unwrap(),
-                Value::Bool(true)
-            );
-            assert_eq!(vm.bytecode_invocations() > calls, compiled);
+    let graph = elaboration::materialization::instantiate(
+        &package,
+        &roots,
+        Default::default(),
+        Default::default(),
+    )
+    .unwrap();
+    for materialized in [false, true] {
+        for compiled in [false, true] {
+            let mut vm = match (materialized, compiled) {
+                (false, false) => Interpreter::for_comptime_tree(&package, Budget::default()),
+                (false, true) => Interpreter::for_comptime(&package, Budget::default()),
+                (true, false) => Interpreter::from_iir_for_comptime_tree(&graph, Budget::default()),
+                (true, true) => Interpreter::from_iir_for_comptime(&graph, Budget::default()),
+            }
+            .unwrap();
+            for _ in 0..3 {
+                let calls = vm.bytecode_invocations();
+                let result = if materialized {
+                    vm.invoke_instance(&graph.roots[0], vec![])
+                } else {
+                    vm.invoke(roots[0].declaration, vec![])
+                }
+                .unwrap();
+                assert_eq!(
+                    result,
+                    Value::Bool(true),
+                    "materialized={materialized} compiled={compiled}"
+                );
+                assert_eq!(vm.bytecode_invocations() > calls, compiled);
+            }
         }
     }
 }

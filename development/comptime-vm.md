@@ -8369,3 +8369,55 @@ git diff --check
 Reports: `/tmp/luna-tools-pmg45ig7/result.json` (13 existing generic cases),
 `/tmp/luna-tools-2tlg1bno/result.json` (eight bytecode trait tests), and
 `/tmp/luna-tools-n0w8bc7a/result.json` (formatting).
+
+## Materialize staged closure captures and shared closure subgraphs
+
+The captured-value IIR gap recorded above is now fixed for supported acyclic
+value representations. Staged freezing walks borrowed values instead of first
+cloning their owned payloads. A per-freeze graph table retains closure Arcs as
+identity keys, detects active cycles and emits private let bindings before the
+root result. Repeated closure occurrences reference the same binding; distinct
+reads of the frozen root reconstruct independent graphs. Capture initializers
+use existing `Capture::value` nodes, so no producer storage handle or caller
+lexical binding escapes into IIR. Existing S-expression node Displays cover the
+resulting block, lets and closure captures.
+
+`Storage::inspect_owned` holds readable-ownership and payload guards while the
+materializer walks the current capture value. It charges ownership traversal
+before access, avoids eager payload copying, rejects recursive lock acquisition
+and drops guards after returned errors. Body/type copying and capture widths
+are charged before copying or allocating their representations. Freezer state
+is local to one attempted snapshot; failure cannot publish partial bindings.
+
+The previously source-only stateful associated-closure test now also runs through
+materialized IIR, in both tree and bytecode modes. It tests two independent reads,
+repeated whole invocations, a nested closure whose two captures refer to the same
+mutable closure, and a nominal record whose two fields share that closure. These
+cases distinguish preserving shared state from copying each occurrence. The
+storage unit test covers exhausted budget, recursive inspection, error recovery
+and invalid ownership. Existing scalar/generic/dependent-domain tests remain.
+
+Validation from `/home/fin/luna`, final commands exited 0:
+
+```sh
+python3 -B development/check.py --timeout 900 -- check -p materialization
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib
+python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test comptime_iir_bytecode --test comptime_bytecode_traits --test function_type_dependencies
+python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_traits --test nominal_value_parameters
+python3 -B development/check.py --timeout 900 -- test -p materialization
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+git diff --check
+```
+
+Reports: `/tmp/luna-tools-_0vtygkn/result.json` (crate check),
+`/tmp/luna-tools-m6ccud51/result.json` (346 interpreter tests),
+`/tmp/luna-tools-tvqb_n78/result.json` (356 integration tests),
+`/tmp/luna-tools-rnoc3bm8/result.json` (315 integration tests rerun after adding
+Type payload/result wrapper copy charges), `/tmp/luna-tools-fd66p4zp/result.json`
+(materialization tests), and `/tmp/luna-tools-rlr9sapw/result.json` (formatting).
+
+This corrects the staged IIR closure-result rejection; it does not complete
+closure freezing as NF arguments, cyclic value graphs, or unify the separate
+constant-expression and staged materializers. Other previously unsupported
+value representations remain rejected. No language restriction is inferred from
+these remaining implementation boundaries.

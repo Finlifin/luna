@@ -25,6 +25,28 @@ impl Snapshot {
     }
 }
 
+#[derive(Clone)]
+struct ClosureIdentity(std::sync::Arc<comptime_interpretor::Closure>);
+impl PartialEq for ClosureIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for ClosureIdentity {}
+impl std::hash::Hash for ClosureIdentity {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::ptr::hash(std::sync::Arc::as_ptr(&self.0), state);
+    }
+}
+
+#[derive(Default)]
+struct FrozenGraph {
+    // Retaining each Arc makes identity stable until the whole snapshot finishes.
+    // None marks a currently active closure and detects recursive environments.
+    closures: std::collections::HashMap<ClosureIdentity, Option<(n::LocalId, Term)>>,
+    bindings: Vec<n::Expr>,
+}
+
 impl Builder<'_> {
     pub(super) fn invoke_staged_input(&mut self, expression: &n::Expr) -> Result<n::Expr, String> {
         self.tick(0)?;
@@ -181,7 +203,36 @@ impl Builder<'_> {
         source: n::SourceRange,
         depth: usize,
     ) -> Result<n::Expr, String> {
+        let mut graph = FrozenGraph::default();
+        let result = self.freeze_staged_value_in(&value, ty, source, depth, &mut graph)?;
+        if graph.bindings.is_empty() {
+            return Ok(result);
+        }
+        crate::associated::charge_projection_copy(ty, &mut self.fuel)
+            .map_err(|_| "staged snapshot result type copy budget exhausted")?;
+        // All generated bindings are private to this block. Capture initializers
+        // refer only to these bindings; closure bodies use their own environments.
+        Ok(n::Expr {
+            source,
+            ty: ty.clone(),
+            kind: K::Block {
+                statements: graph.bindings,
+                result: Some(Box::new(result)),
+            },
+        })
+    }
+
+    fn freeze_staged_value_in(
+        &mut self,
+        value: &Value,
+        ty: &Term,
+        source: n::SourceRange,
+        depth: usize,
+        graph: &mut FrozenGraph,
+    ) -> Result<n::Expr, String> {
         self.tick(depth)?;
+        crate::associated::charge_projection_copy(ty, &mut self.fuel)
+            .map_err(|_| "staged value type copy budget exhausted")?;
         let kind = match value {
             Value::FunctionInstance {
                 declaration,
@@ -189,14 +240,14 @@ impl Builder<'_> {
             } if !ty.is_comptime_callable()
                 && matches!(ty.callable_signature(), Term::Function { .. }) =>
             {
-                for argument in &arguments {
+                for argument in arguments {
                     nir::type_computations::charge_term(argument, &mut self.fuel)
                         .map_err(|error| error.to_string())?;
                     iir::completed_type(argument, &BTreeSet::new(), &mut self.fuel)?;
                 }
                 K::FunctionInstance {
-                    declaration,
-                    arguments,
+                    declaration: *declaration,
+                    arguments: arguments.clone(),
                 }
             }
             Value::RuntimeTraitMethod(identity)
@@ -208,10 +259,10 @@ impl Builder<'_> {
                     subject,
                     member,
                     method_arguments,
-                } = *identity;
-                for argument in std::iter::once(&subject)
+                } = identity.as_ref();
+                for argument in std::iter::once(subject)
                     .chain(&interface.arguments)
-                    .chain(&method_arguments)
+                    .chain(method_arguments)
                 {
                     nir::type_computations::charge_term(argument, &mut self.fuel)
                         .map_err(|error| error.to_string())?;
@@ -219,16 +270,16 @@ impl Builder<'_> {
                 }
                 K::TraitMethod {
                     interface: interface.declaration,
-                    interface_arguments: interface.arguments,
-                    subject,
-                    member,
-                    method_arguments,
+                    interface_arguments: interface.arguments.clone(),
+                    subject: subject.clone(),
+                    member: *member,
+                    method_arguments: method_arguments.clone(),
                 }
             }
             Value::Function(declaration)
                 if matches!(ty.callable_signature(), Term::Function { .. }) =>
             {
-                K::Function(declaration)
+                K::Function(*declaration)
             }
             Value::Closure(closure)
                 if matches!(ty.callable_signature(), Term::Function { .. })
@@ -249,25 +300,95 @@ impl Builder<'_> {
             }
             Value::Closure(closure)
                 if matches!(ty.callable_signature(), Term::Function { .. })
-                    && ty.is_comptime_callable() == closure.ty().is_comptime_callable()
-                    && closure.captured_values().len() == 0 =>
+                    && ty.is_comptime_callable() == closure.ty().is_comptime_callable() =>
             {
-                // Retain the checked anonymous body; freezing creates a callable
-                // and must not execute it or manufacture a declaration identity.
+                let identity = ClosureIdentity(closure.clone());
+                if let Some(previous) = graph.closures.get(&identity) {
+                    let (binding, previous_type) = previous
+                        .as_ref()
+                        .ok_or("cyclic staged closure environment")?;
+                    if previous_type != ty {
+                        return Err("shared staged closure type mismatch".into());
+                    }
+                    return Ok(n::Expr {
+                        source,
+                        ty: ty.clone(),
+                        kind: K::Local(*binding),
+                    });
+                }
+                let capture_types: &[Term] = match ty {
+                    Term::Closure { environment, .. } => environment,
+                    _ => &[],
+                };
+                if capture_types.len() != closure.captured_values().len() {
+                    return Err("staged closure environment shape mismatch".into());
+                }
+                graph.closures.insert(identity.clone(), None);
                 let mut steps = self.fuel as u64;
                 let checked = nir::copy_budget::charge_type_rewrite(closure.body(), &mut steps);
                 self.fuel = usize::try_from(steps).unwrap_or(usize::MAX);
                 checked.map_err(|error| {
                     format!("staged closure body exceeds copy limits: {error:?}")
                 })?;
-                K::Closure {
-                    parameters: closure.parameters().to_vec(),
-                    captures: Vec::new(),
-                    body: closure.body().clone(),
+                self.fuel = self
+                    .fuel
+                    .checked_sub(capture_types.len() + closure.parameters().len())
+                    .ok_or("staged closure environment budget exhausted")?;
+                let mut captures = Vec::new();
+                for ((binding, value), capture_type) in closure.captured_values().zip(capture_types)
+                {
+                    let captured = if let Value::Storage(cell) = value {
+                        let mut steps = self.fuel as u64;
+                        let result = cell.inspect_owned(&mut steps, 128, |value, steps| {
+                            self.fuel = usize::try_from(*steps).unwrap_or(usize::MAX);
+                            let result = self.freeze_staged_value_in(
+                                value,
+                                capture_type,
+                                source,
+                                depth + 1,
+                                graph,
+                            );
+                            *steps = self.fuel as u64;
+                            result
+                        });
+                        self.fuel = usize::try_from(steps).unwrap_or(usize::MAX);
+                        result.map_err(|e| format!("staged capture storage: {e:?}"))??
+                    } else {
+                        self.freeze_staged_value_in(value, capture_type, source, depth + 1, graph)?
+                    };
+                    captures.push(n::Capture {
+                        binding,
+                        ty: capture_type.clone(),
+                        value: Some(Box::new(captured)),
+                    });
                 }
+                let binding = n::LocalId {
+                    owner: u32::MAX,
+                    index: u32::try_from(graph.bindings.len())
+                        .map_err(|_| "staged closure binding space exhausted")?,
+                };
+                let value = n::Expr {
+                    source,
+                    ty: ty.clone(),
+                    kind: K::Closure {
+                        parameters: closure.parameters().to_vec(),
+                        captures,
+                        body: closure.body().clone(),
+                    },
+                };
+                graph.bindings.push(n::Expr {
+                    source,
+                    ty: Term::Primitive(nir::Primitive::Void),
+                    kind: K::Let {
+                        binding,
+                        value: Box::new(value),
+                    },
+                });
+                graph.closures.insert(identity, Some((binding, ty.clone())));
+                K::Local(binding)
             }
             Value::Optional { ty: actual, value } => {
-                if actual != *ty {
+                if actual != ty {
                     return Err("staged optional identity mismatch".into());
                 }
                 let Term::Optional(payload) = ty else {
@@ -275,11 +396,12 @@ impl Builder<'_> {
                 };
                 match value {
                     None => K::OptionalAbsent,
-                    Some(value) => K::OptionalPresent(Box::new(self.freeze_staged_value(
-                        *value,
+                    Some(value) => K::OptionalPresent(Box::new(self.freeze_staged_value_in(
+                        value,
                         payload,
                         source,
                         depth + 1,
+                        graph,
                     )?)),
                 }
             }
@@ -288,7 +410,7 @@ impl Builder<'_> {
                 error,
                 value,
             } => {
-                if actual != *ty {
+                if actual != ty {
                     return Err("staged error result identity mismatch".into());
                 }
                 let Term::ErrorResult { errors, result } = ty else {
@@ -298,16 +420,24 @@ impl Builder<'_> {
                     None => (nir::error_results::Conversion::Success, result.as_ref()),
                     Some(index) => (
                         nir::error_results::Conversion::Failure,
-                        errors.get(index).ok_or("staged error result tag invalid")?,
+                        errors
+                            .get(*index)
+                            .ok_or("staged error result tag invalid")?,
                     ),
                 };
                 K::ErrorConvert {
                     conversion,
-                    value: Box::new(self.freeze_staged_value(*value, domain, source, depth + 1)?),
+                    value: Box::new(self.freeze_staged_value_in(
+                        value,
+                        domain,
+                        source,
+                        depth + 1,
+                        graph,
+                    )?),
                 }
             }
             Value::Newtype { ty: actual, value } => {
-                if actual != *ty {
+                if actual != ty {
                     return Err("staged newtype identity mismatch".into());
                 }
                 let Term::Nominal {
@@ -330,27 +460,28 @@ impl Builder<'_> {
                 let representation = definition
                     .representation_budgeted(arguments, &[], &mut self.fuel)
                     .map_err(|error| error.to_string())?;
-                K::NewtypeConvert(Box::new(self.freeze_staged_value(
-                    *value,
+                K::NewtypeConvert(Box::new(self.freeze_staged_value_in(
+                    value,
                     &representation,
                     source,
                     depth + 1,
+                    graph,
                 )?))
             }
             Value::Unit => K::Unit,
-            Value::Bool(v) => K::Literal(n::Literal::Bool(v)),
-            Value::Char(v) => K::Literal(n::Literal::Char(v)),
+            Value::Bool(v) => K::Literal(n::Literal::Bool(*v)),
+            Value::Char(v) => K::Literal(n::Literal::Char(*v)),
             Value::Float16(bits) if *ty == Term::Primitive(nir::Primitive::F16) => {
-                K::Literal(n::Literal::Float16(bits))
+                K::Literal(n::Literal::Float16(*bits))
             }
             Value::BFloat16(bits) if *ty == Term::Primitive(nir::Primitive::Bf16) => {
-                K::Literal(n::Literal::BFloat16(bits))
+                K::Literal(n::Literal::BFloat16(*bits))
             }
             Value::Float32(bits) if *ty == Term::Primitive(nir::Primitive::F32) => {
-                K::Literal(n::Literal::Float32(bits))
+                K::Literal(n::Literal::Float32(*bits))
             }
             Value::Float64(bits) if *ty == Term::Primitive(nir::Primitive::F64) => {
-                K::Literal(n::Literal::Float64(bits))
+                K::Literal(n::Literal::Float64(*bits))
             }
             Value::Symbol(v) => {
                 self.fuel = self
@@ -366,11 +497,15 @@ impl Builder<'_> {
                     .ok_or("staged string budget exhausted")?;
                 K::Literal(n::Literal::String(v.to_string()))
             }
-            Value::SignedInteger(v) => K::Literal(n::Literal::SignedInteger(v)),
-            Value::UnsignedInteger(v) => K::Literal(n::Literal::UnsignedInteger(v)),
-            Value::Type(v) => K::TypeValue(v),
+            Value::SignedInteger(v) => K::Literal(n::Literal::SignedInteger(*v)),
+            Value::UnsignedInteger(v) => K::Literal(n::Literal::UnsignedInteger(*v)),
+            Value::Type(v) => {
+                crate::associated::charge_projection_copy(v, &mut self.fuel)
+                    .map_err(|_| "staged Type payload copy budget exhausted")?;
+                K::TypeValue(v.clone())
+            }
             Value::List { ty: actual, values } => {
-                if actual != *ty {
+                if actual != ty {
                     return Err("staged list type identity mismatch".into());
                 }
                 let element = self
@@ -387,7 +522,9 @@ impl Builder<'_> {
                 K::TypeList(
                     values
                         .into_iter()
-                        .map(|value| self.freeze_staged_value(value, &element, source, depth + 1))
+                        .map(|value| {
+                            self.freeze_staged_value_in(value, &element, source, depth + 1, graph)
+                        })
                         .collect::<Result<_, _>>()?,
                 )
             }
@@ -423,10 +560,16 @@ impl Builder<'_> {
                         .fuel
                         .checked_sub(name.len())
                         .ok_or("staged record budget exhausted")?;
-                    if name != *expected_name {
+                    if name != expected_name {
                         return Err("staged record result label mismatch".into());
                     }
-                    fields.push(self.freeze_staged_value(value, ty, source, depth + 1)?);
+                    fields.push(self.freeze_staged_value_in(
+                        value,
+                        ty,
+                        source,
+                        depth + 1,
+                        graph,
+                    )?);
                 }
                 K::AnonymousRecord { fields }
             }
@@ -441,7 +584,7 @@ impl Builder<'_> {
                     values
                         .into_iter()
                         .zip(types)
-                        .map(|(v, t)| self.freeze_staged_value(v, t, source, depth + 1))
+                        .map(|(v, t)| self.freeze_staged_value_in(v, t, source, depth + 1, graph))
                         .collect::<Result<_, _>>()?,
                 )
             }
@@ -451,16 +594,17 @@ impl Builder<'_> {
                 fields,
             } => {
                 let fields = self.freeze_staged_nominal_fields(
-                    declaration,
-                    &arguments,
+                    *declaration,
+                    arguments,
                     fields,
                     None,
                     ty,
                     source,
                     depth,
+                    graph,
                 )?;
                 K::Record {
-                    declaration,
+                    declaration: *declaration,
                     fields,
                 }
             }
@@ -470,20 +614,21 @@ impl Builder<'_> {
                 index,
                 fields,
             } => {
-                let variant = u32::try_from(index)
+                let variant = u32::try_from(*index)
                     .map_err(|_| "staged enum variant index exceeds representation")?;
                 let fields = self.freeze_staged_nominal_fields(
-                    declaration,
-                    &arguments,
+                    *declaration,
+                    arguments,
                     fields,
                     Some(variant),
                     ty,
                     source,
                     depth,
+                    graph,
                 )?;
                 K::Variant {
-                    declaration,
-                    index,
+                    declaration: *declaration,
+                    index: *index,
                     fields,
                 }
             }
@@ -504,11 +649,12 @@ impl Builder<'_> {
         &mut self,
         declaration: Id,
         arguments: &[Term],
-        fields: Vec<Value>,
+        fields: &[Value],
         variant: Option<u32>,
         ty: &Term,
         source: n::SourceRange,
         depth: usize,
+        graph: &mut FrozenGraph,
     ) -> Result<Vec<n::Expr>, String> {
         nir::type_computations::charge_term(ty, &mut self.fuel)
             .map_err(|error| error.to_string())?;
@@ -530,7 +676,7 @@ impl Builder<'_> {
         fields
             .into_iter()
             .zip(types)
-            .map(|(value, ty)| self.freeze_staged_value(value, &ty, source, depth + 1))
+            .map(|(value, ty)| self.freeze_staged_value_in(value, &ty, source, depth + 1, graph))
             .collect()
     }
 }
