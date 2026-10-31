@@ -165,6 +165,30 @@ pub trait Iterator {
         accumulator
     }
 
+    {-
+        Use the first item as the accumulator. Empty and singleton streams do
+        not call f. Success preserves the optional layer distinguishing an
+        empty stream from a present item; the first error stops production and
+        transfers its payload while retiring the pending source normally.
+    -}
+    inline fn try_reduce(self, f: %c fn(Item, Item) -> !E Item) -> !E ?Item
+        where E, c: IterationType.vars.Closure
+    {
+        var accumulator: ?Item = null;
+        self.iterate()# {
+            emit_item<Item>(value) => {
+                accumulator = accumulator match {
+                    previous? => f(previous, value) match {
+                        next! => next,
+                        error failure => {return error failure;},
+                    },
+                    null => value,
+                };
+            },
+        }
+        accumulator
+    }
+
     -- Stop at the first error; empty input succeeds without calling f.
     inline fn try_foreach(self, f: %c fn(Item) -> !E IterationUnit) -> !E IterationUnit
         where E, c: IterationType.vars.Closure

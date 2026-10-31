@@ -208,3 +208,31 @@ Validation in `/home/fin/luna`:
 
 No full language suite was run. General unresolved collection-row inference
 and the multi-label Copy reproducer remain outstanding.
+
+## Fallible reduction without an initial value
+
+`Iterator.try_reduce` completes the reduction API using ordinary inline
+iteration and the error-result ABI. Its callback consumes two owned items and
+returns `!E Item`; the consumer returns `!E ?Item`. Empty input succeeds with
+null, singleton input succeeds with its item, and neither invokes the callback.
+Subsequent items combine in source order. The first error returns immediately,
+retiring the source remainder and transferring the error payload to the caller.
+No Clone or Copy constraint is added. A present optional item remains present
+inside the successful optional reduction result, even when its payload is null.
+
+The public sysroot fixture covers empty/singleton/nested optional results,
+repeated affine accumulator replacement, early error and pending-source cleanup,
+and cleanup of an unused callback capture. The existing Drop assertions detect
+double retirement; assertions before and after result consumption check that
+ownership remains with the returned success/error payload until consumed.
+The implementation adds no compiler intrinsic, type rule or special dispatch.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/library_check.py --stage sysroot-fallible-iteration --timeout 300`:
+  13 native tests passed, exit 0; `/tmp/luna-library-iyd9kf5v/summary.json`.
+  This final run includes three-item successful affine reduction.
+- `python3 -B -m unittest discover -s development -p test_library_check.py`:
+  13 runner tests passed, exit 0.
+- `git diff --check` passed. No Rust code changed and no full language suite
+  was run. The previously recorded multi-label Copy limitation is unchanged.

@@ -139,3 +139,85 @@ test empty_computed_error_row_is_plain_success {
     let success: bool = no_failure();
     assumes success;
 }
+
+fn unexpected_pair(left: bool, right: bool) -> !bool bool {
+    assumes false;
+    left
+}
+
+fn unexpected_optional_pair(left: ?bool, right: ?bool) -> !bool ?bool {
+    assumes false;
+    left
+}
+
+test fallible_reduction_empty_singleton_and_optional_payload {
+    let empty: ?bool = null;
+    let none = empty.as(Iterator).try_reduce(unexpected_pair);
+    let empty_ok = none match {value! => value matches null, error _ => false};
+    let singleton: ?bool = true;
+    let one = singleton.as(Iterator).try_reduce(unexpected_pair);
+    let singleton_ok = one match {value! => value matches true?, error _ => false};
+    let inner: ?bool = null;
+    let nested: ??bool = inner;
+    let result = nested.as(Iterator).try_reduce(unexpected_optional_pair);
+    let nested_ok = result match {
+        value! => value match {payload? => payload matches null, null => false},
+        error _ => false,
+    };
+    assumes empty_ok and singleton_ok and nested_ok;
+}
+
+test fallible_reduction_transfers_successful_affine_accumulator {
+    var first_retired = false;
+    var middle_retired = false;
+    var last_retired = false;
+    {
+        let first: ?Watch = Watch {retired: first_retired.ref, value: false};
+        let middle: ?Watch = Watch {retired: middle_retired.ref, value: false};
+        let last: ?Watch = Watch {retired: last_retired.ref, value: true};
+        let result = first.as(Iterator).chain(middle).as(Iterator).chain(last)
+            .as(Iterator).try_reduce(replace_watch);
+        assumes first_retired and middle_retired and not last_retired;
+        result match {
+            value! => value match {
+                final? => {assumes final.value;},
+                null => {assumes false;},
+            },
+            error _ => {assumes false;},
+        };
+    }
+    assumes last_retired;
+}
+
+test fallible_reduction_error_stops_and_retires_pending_source {
+    var first_retired = false;
+    var error_retired = false;
+    var tail_retired = false;
+    {
+        let first: ?Watch = Watch {retired: first_retired.ref, value: false};
+        let failure: ?Watch = Watch {retired: error_retired.ref, value: true};
+        let tail: ?Watch = Watch {retired: tail_retired.ref, value: false};
+        let result = first.as(Iterator).chain(failure).as(Iterator).chain(tail)
+            .as(Iterator).try_reduce(reject);
+        assumes first_retired and tail_retired and not error_retired;
+        result match {
+            _! => {assumes false;},
+            error value => {assumes value.value;},
+        };
+    }
+    assumes error_retired;
+}
+
+fn unused_pair(left: bool, right: bool, captured: *Watch) -> !bool bool {
+    assumes false;
+    left
+}
+
+test empty_fallible_reduction_retires_unused_capture {
+    var retired = false;
+    let captured = Watch {retired: retired.ref, value: true};
+    let empty: ?bool = null;
+    let result = empty.as(Iterator).try_reduce(|left, right| unused_pair(left, right, captured.ref));
+    let empty_ok = result match {value! => value matches null, error _ => false};
+    assumes empty_ok and retired;
+}
