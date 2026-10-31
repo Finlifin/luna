@@ -1,5 +1,8 @@
 //! Candidate-owned type obligations. Waiting for inference information is
 //! distinct from a stable PTC Unknown; neither is a successful obligation.
+mod type_inputs;
+pub use type_inputs::TypeInputSearch;
+
 use crate::ptc::{self, Budget, Formula, Outcome, TypeKind};
 use crate::{InferenceContext, InferenceError, InferenceTerm, MetaId, fresh_identity};
 use nir::{DeclarationId, Sort, Term};

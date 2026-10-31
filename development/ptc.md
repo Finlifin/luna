@@ -138,3 +138,30 @@ implementation-world 求解需要的额度；没有扩大原有预算。
   矛盾、预算恢复、作用域、环境变量隔离、opaque head 非单射及具体类型碰撞。
 - 首轮广泛回归暴露新增模型计量下 trait 查询的无效重建开销；提前检查模型解释边界后，
   原 `trait_proposition_reuses_budget_after_formation_and_given_checks` 预算保持不变并通过。
+
+
+### 候选事务中的显式 Type 搜索
+
+`obligations::Engine::search_type_inputs` 将明确给定的未赋值 Type metavariable 映射到
+临时 rigid 输入，在独立 inference 快照中冻结调用方给出的约束，再调用 PTC 搜索。
+临时声明身份会检查区域前提、问题、已有赋值和作用域中的 rigid 参数（包括 binder
+内部），不会依赖某个固定 package 编号永远不被源码使用。
+
+唯一结果只生成 Proposed 候选：最终赋值写入另一份正常 Engine trial，而不是写回
+临时编码快照。候选唤醒已有 obligation，并将原始问题重新加入 `require`；`advance`
+必须在真实区域中证明原问题和全部既有 requires，之后 `commit` 才能发布。临时搜索
+假设、生成的 rigid 身份与模型中的环境变量均不进入最终赋值。失败、歧义、不一致、
+未决以及预算中断不修改父状态；已有赋值、错误 sort 和非请求的未解变量不能被覆盖
+或顺便推导。要求过期候选提交时仍由原 revision 检查拒绝。
+
+这提供了类型解析候选引擎的显式搜索入口，尚未自动加入普通调用／impl 的匹配调度。
+调用方应先尝试直接 unification，再明确交付需要搜索的输入和原始匹配约束；不能把
+候选 requires 自动作为输入生成前提。搜索接口目前仍受闭合模型重建片段限制，符号
+解、binder 下模型重建和完整持久 CDCL trail 仍是后续工作。
+
+验证（工作目录 `/home/fin/luna`）：
+
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution --test type_input_search`：exit 0，五项事务用例；`/tmp/luna-tools-72naccff/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution`：exit 0；`/tmp/luna-tools-l97e75xt/result.json`。
+- 覆盖候选隔离、原义务重证、requires 不参与推导且仍阻止错误提交、未授权输入、
+  预算恢复、临时身份碰撞、sort 和 stale candidate。格式化与 `git diff --check` 通过。
