@@ -180,3 +180,31 @@ Validation in `/home/fin/luna`:
   passed, exit 0; `/tmp/luna-tools-r29xklk5/result.json`.
 - Final formatting check exited 0 (`/tmp/luna-tools-iivke1oy/result.json`),
   and `git diff --check` passed. No full language suite was run.
+
+## Retained-head inference regression alignment
+
+The unresolved error-surface assertion above was stale: it rejected ordinary
+candidate inference from retained normal-form inputs. The contract in
+`docs/type/type-patterns.md` permits observing retained heads and arguments;
+`docs/type/type-identity.md` separately forbids body unfolding and unsupported
+inverse equality proofs. The inference implementation already proposes inputs
+locally and retains the original application equality as an obligation (commit
+43690fea); this change does not alter that implementation or the solver.
+
+The error-row regression now accepts a same-head call whose type-producing
+body would not terminate if invoked. It rejects erased labels, a different
+head, conflicting ordinary arguments, and ambiguous unordered row assignments.
+A positive control for the ordinary argument rules out unrelated signature
+failure. PTC coverage independently keeps congruence distinct from injectivity.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test error_surface --test normal_form_inference --no-fail-fast`:
+  119 + 5 passed, exit 0; `/tmp/luna-tools-gthgsgeb/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p ptc --test solver -p type_resolution --test matching`:
+  60 + 21 passed, exit 0; `/tmp/luna-tools-iq9ne_ex/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-gljkeb3a/result.json`; `git diff --check` passed.
+
+No full language suite was run. General unresolved collection-row inference
+and the multi-label Copy reproducer remain outstanding.

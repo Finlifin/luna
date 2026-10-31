@@ -1148,7 +1148,7 @@ fn generic_error_labels_match_nominal_heads_across_row_permutations() {
 }
 
 #[test]
-fn generic_error_labels_do_not_choose_ambiguous_permutations_or_unfold_heads() {
+fn generic_error_labels_do_not_choose_ambiguous_permutations() {
     for row in ["bool,.char'builtin", ".char'builtin,bool"] {
         let source = format!(
             "fn sample()->![{row}] bool {{true}}
@@ -1158,12 +1158,42 @@ fn generic_error_labels_do_not_choose_ambiguous_permutations_or_unfold_heads() {
         let failure = compile(&source, Emit::Nir).err().expect("ambiguous labels");
         assert!(!failure.contains("parsing failed"), "{failure}");
     }
-    let source = "pure comptime fn Wrap<T>->.Type'builtin {T}
-        fn forward(value:!Wrap<T> bool)->!Wrap<T> bool where T {value}
-        fn run(value:!Wrap<bool> bool)->!Wrap<bool> bool {forward(value)}";
-    let failure = compile(source, Emit::Nir)
-        .err()
-        .expect("opaque head cannot infer its argument");
+}
+
+#[test]
+fn generic_error_labels_infer_retained_head_inputs_without_unfolding() {
+    use comptime_interpretor::Value;
+    let prefix = "typealias Type = .Type'builtin;
+        pure comptime fn Wrap<T>->Type {while true {} T}
+        pure comptime fn Other<T>->Type {while true {} T}
+        fn forward(value:!Wrap<T> bool)->!Wrap<T> bool where T {value}";
+    let source = format!(
+        "{prefix}
+        fn sample()->!Wrap<bool> bool {{true}}
+        fn run()->bool {{forward(sample()) match {{_! => true,error _ => false}}}}"
+    );
+    assert_eq!(support::run_iir(&source, "run", vec![]), Value::Bool(true));
+
+    // Candidate substitution cannot erase the retained label, identify another
+    // head by its body, or override a conflicting ordinary argument.
+    for label in ["bool", "Other<bool>"] {
+        let source = format!(
+            "{prefix}
+            fn run(value:!{label} bool)->!{label} bool {{forward(value)}}"
+        );
+        let failure = support::compile_with_protocols(&source, &Default::default()).unwrap_err();
+        assert!(!failure.contains("parsing failed"), "{failure}");
+    }
+    let source = "typealias Type = .Type'builtin;
+        pure comptime fn Wrap<T>->Type {T}
+        fn forward(value:!Wrap<T> bool, seed:T)->!Wrap<T> bool where T {value}
+        fn run(value:!Wrap<bool> bool)->!Wrap<bool> bool {forward(value,'x')}";
+    support::compile_with_protocols(
+        &source.replace("forward(value,'x')", "forward(value,true)"),
+        &Default::default(),
+    )
+    .expect("consistent ordinary argument preserves the head proposal");
+    let failure = support::compile_with_protocols(source, &Default::default()).unwrap_err();
     assert!(!failure.contains("parsing failed"), "{failure}");
 }
 
