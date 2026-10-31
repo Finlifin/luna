@@ -7920,3 +7920,42 @@ Existing tests cover ordinary and nested element domains, forged identities,
 scoped Type inputs, representation/budget failures and recovery, bytecode paths,
 contextual tuple construction and public definition builders. No full language
 suite or performance benchmark was run for this admission-path refactor.
+
+
+## Fallible list terminals and optional success adaptation
+
+`meta.List<T>.try_foreach` and `try_reduce` complete the fallible terminal
+operations alongside map/fold. Traversal reads a fixed input snapshot and
+stops on the first callback error. Empty foreach succeeds without visiting;
+reduction seeds from the first element without calling the callback, returns
+successful absence for empty input, and preserves nested optional presence.
+The methods use ordinary comptime callbacks and value-reference receivers.
+They add no source pointers, compiler intrinsics or special list type rules.
+
+This exposed a general elaboration gap: a synthesized plain value delivered
+to `!E ?T` was checked directly against `?T`, skipping optional injection.
+Elaboration now adapts a plain success payload through the existing optional
+injection rules before wrapping the error success tag. Already error-qualified
+values continue through checked row embedding; incompatible errors and success
+payloads are not silently reinterpreted. Generic returns, ordinary calls and
+nested optional values use the same path. No normal-form head unfolds.
+
+The public sysroot list example exercises empty, singleton, successful and
+failed terminal calls without directly accessing builtin symbols. Isolated
+fixtures supply explicit primitive bindings as before. Captured callback state
+remains private to its closure environment; callback errors do not roll it back.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_list_operations --test error_surface --no-fail-fast`:
+  65 list tests and 120 error-result tests passed, exit 0;
+  `/tmp/luna-tools-0edqb4p4/result.json`.
+- `python3 -B development/library_check.py --stage sysroot-meta --timeout 300`:
+  the public sysroot list test passed through native compilation and execution,
+  exit 0; `/tmp/luna-library-wpj4rk7c/summary.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-14gcjou6/result.json`; `git diff --check` passed.
+
+No full language suite or performance benchmark was run. Existing immutable
+list validation costs and the remaining runtime resource/trait gaps are not
+changed by this delivery.

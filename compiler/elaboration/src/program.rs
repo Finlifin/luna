@@ -9444,10 +9444,19 @@ impl Checker<'_, '_> {
                 if is_never(&value.ty) {
                     return Ok(value);
                 }
-                let conversion = if matches!(value.ty, Term::ErrorResult { .. }) {
-                    nir::error_results::Conversion::Embed
+                let (value, conversion) = if matches!(value.ty, Term::ErrorResult { .. }) {
+                    (value, nir::error_results::Conversion::Embed)
                 } else {
-                    nir::error_results::Conversion::Success
+                    // A synthesized plain value still needs adaptation to the
+                    // success payload. Preserve optional presence layers before
+                    // adding the outer error-result success tag; never treat an
+                    // already-qualified result as a plain payload this way.
+                    let value = if self.optional_payload(result, expr.span).is_ok() {
+                        self.inject_optional_value(value, result, expr.span)?
+                    } else {
+                        value
+                    };
+                    (value, nir::error_results::Conversion::Success)
                 };
                 return self.convert_error_value(value, target, conversion, expr.span);
             }

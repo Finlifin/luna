@@ -58,7 +58,7 @@ comptime fn run() -> bool {
         and unused.length() == 0 and unused_filter.length() == 0
         and reducers_and_searches() and named_metadata() and stable_sorting()
         and exact_integer_division() and value_receivers() and indexed_pairing() and bulk_extension()
-        and prefix_layout() and adjacent_groups() and checked_queries() and fallible_collectors()
+        and prefix_layout() and adjacent_groups() and checked_queries() and fallible_collectors() and fallible_terminals()
 }
 
 comptime fn Bits(width: Integer) -> Type {
@@ -317,4 +317,39 @@ comptime fn fallible_collectors() -> bool {
         and (kept match { value! => value[0] == QueryIdentity<bool> and value[1] == bool, error _ => false })
         and (failed matches error 12) and (trace matches 12!) and visits == 0
         and (rejected matches error 1)
+}
+
+
+comptime fn fallible_terminals() -> bool {
+    let values: meta.List<Integer> = [1, 2, 3, 4];
+    let empty: meta.List<Integer> = [];
+    let singleton: meta.List<?Integer> = [null];
+    let none = empty.try_reduce(checked_sum);
+    let total = values.try_reduce(checked_sum);
+    let present = singleton.try_reduce(|left: ?Integer, right: ?Integer| -> !Integer ?Integer {
+        invalid_callback();
+        left
+    });
+    var visits: Integer = 0;
+    let visitor = |value: Integer| -> !Integer void {
+        if value == 0 { return error visits; }
+        visits = visits * 10 + value;
+        if value == 2 { return error visits; }
+    };
+    let stopped = values.try_foreach(visitor);
+    let trace = visitor(0);
+    let unused = empty.try_foreach(|value: Integer| -> !Integer void {
+        invalid_callback();
+    });
+    let complete = values.try_foreach(|value: Integer| -> !Integer void {});
+    let failed = values.try_reduce(|left: Integer, right: Integer| -> !Integer Integer {
+        if right == 3 { return error left; }
+        left + right
+    });
+    (none match { value! => value matches null, error _ => false })
+        and (total match { value! => value matches 10?, error _ => false })
+        and (present match { value! => value matches null?, error _ => false })
+        and (stopped matches error 12) and (trace matches error 12)
+        and (unused matches _!) and (complete matches _!)
+        and (failed matches error 3) and visits == 0
 }

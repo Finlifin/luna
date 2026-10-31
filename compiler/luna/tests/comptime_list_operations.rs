@@ -1206,6 +1206,7 @@ fn list_transform_collectors_preserve_order_snapshots_and_optional_layers() {
     let source = include_str!("../../../development/examples/sysroot-meta-lists.fl");
     let package = compile(&format!(
         "typealias Integer = .Integer'builtin;
+        typealias void = .void'builtin;
         typealias Type = .Type'builtin;
         typealias u32 = .u32'builtin;
         typealias BitVec<n: Integer> = .BitVec'builtin<n>;
@@ -2009,6 +2010,22 @@ fn fallible_list_callbacks_stop_in_order_and_preserve_capture_effects() {
 fn fallible_lists_check_callback_phase_and_input_domain_even_when_empty() {
     for (call, callback) in [
         (
+            "xs.try_reduce(callback)",
+            "fn callback(a:bool,b:bool)->!bool bool {a}",
+        ),
+        (
+            "xs.try_reduce(callback)",
+            "comptime fn callback(a:Integer,b:Integer)->!bool Integer {a}",
+        ),
+        (
+            "xs.try_foreach(callback)",
+            "fn callback(value:bool)->!bool void {}",
+        ),
+        (
+            "xs.try_foreach(callback)",
+            "comptime fn callback(value:bool)->!bool bool {value}",
+        ),
+        (
             "xs.try_map(callback)",
             "fn callback(value:bool)->!bool bool {value}",
         ),
@@ -2025,7 +2042,9 @@ fn fallible_lists_check_callback_phase_and_input_domain_even_when_empty() {
             "comptime fn callback(acc:Integer,value:bool)->!bool Integer {acc}",
         ),
     ] {
-        let prefix = format!("typealias Integer = .Integer'builtin;{callback}");
+        let prefix = format!(
+            "typealias Integer = .Integer'builtin;typealias void = .void'builtin;{callback}"
+        );
         compile(&prefix).unwrap();
         let error = compile(&format!(
             "{prefix} comptime fn run() {{let xs:meta.List<bool> = [];{call};}}"
@@ -2033,4 +2052,73 @@ fn fallible_lists_check_callback_phase_and_input_domain_even_when_empty() {
         .unwrap_err();
         assert!(!error.contains("parsing failed"), "{error}");
     }
+}
+
+#[test]
+fn fallible_list_reduction_keeps_empty_singleton_and_nested_optional_distinct() {
+    let package = compile(
+        "typealias Integer = .Integer'builtin; typealias Type = .Type'builtin;
+        pure comptime fn Identity<T> -> Type {T}
+        comptime fn forbidden(a:?Integer,b:?Integer)->!Integer ?Integer {
+            let empty:meta.List<Integer> = [];empty[0]
+        }
+        comptime fn run()->bool {
+            let empty:meta.List<?Integer> = [];
+            let singleton:meta.List<?Integer> = [null];
+            let values:meta.List<Integer> = [1,2,3];
+            let types:meta.List<Type> = [Identity<bool>,bool];
+            let absent=empty.try_reduce(forbidden);
+            let present=singleton.try_reduce(forbidden);
+            let total=values.try_reduce(|a:Integer,b:Integer|->!Integer Integer {a + b});
+            let kept=types.try_reduce(|a:Type,b:Type|->!Integer Type {a});
+            (absent match {value! =>value matches null,error _=>false})
+                and (present match {value! =>value matches null?,error _=>false})
+                and (total match {value! =>value matches 6?,error _=>false})
+                and (kept match {value! =>value match {ty? =>ty==Identity<bool>,null=>false},error _=>false})
+        }",
+    ).unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 2_000_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn fallible_list_terminal_callbacks_stop_and_retain_private_capture_state() {
+    let package = compile(
+        "typealias Integer = .Integer'builtin; typealias void = .void'builtin;
+        comptime fn run()->bool {
+            var values:meta.List<Integer> = [1,2,3,4];
+            var visits:Integer=0;
+            let visit=|value:Integer|->!Integer void {
+                if value==0 {return error visits;}
+                visits=visits * 10 + value;
+                values=[];
+                if value==2 {return error visits;}
+            };
+            let walked=values.try_foreach(visit);
+            let walk_trace=visit(0);
+            let combine=|a:Integer,b:Integer|->!Integer Integer {
+                if b==0 {return visits;}
+                visits=visits * 10 + b;
+                values=[];
+                if b==3 {return error visits;}
+                a + b
+            };
+            let reduced=values.try_reduce(combine);
+            let reduce_trace=combine(0,0);
+            let empty:meta.List<Integer> = [];
+            let unused=empty.try_foreach(|value:Integer|->!Integer void {
+                let invalid:meta.List<Integer> = [];let failure=invalid[0];
+            });
+            (walked matches error 12) and (walk_trace matches error 12)
+                and (reduced matches error 23) and (reduce_trace matches 23!)
+                and (unused matches _!) and visits==0 and values.length()==4
+        }",
+    )
+    .unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 2_000_000).unwrap(),
+        Value::Bool(true)
+    );
 }

@@ -1,5 +1,5 @@
 use bindings;
-use builtin.{Integer, Type};
+use builtin.{Integer, Type, void};
 
 use List;
 use integer.div_trunc;
@@ -72,6 +72,19 @@ impl List<T> where T {
         Partial output stays local; callback effects already performed are not
         rolled back. Empty input succeeds without invoking the callback.
     -}
+    pub comptime fn try_foreach(self, visit: %c comptime fn(T) -> !E void) -> !E void
+    where E, c: Type.vars.Closure
+    {
+        let input = self;
+        let count = input.length();
+        inline for index in 0..count {
+            visit(input[index]) match {
+                _! => {},
+                error failure => { return error failure; },
+            };
+        }
+    }
+
     pub comptime fn try_map(self, transform: %c comptime fn(T) -> !E U) -> !E List<U>
     where E, U, c: Type.vars.Closure
     {
@@ -166,6 +179,28 @@ impl List<T> where T {
         var accumulator = input[0];
         inline for index in 1..count {
             accumulator = combine(accumulator, input[index]);
+        }
+        accumulator
+    }
+
+    {-
+        The first element seeds reduction without invoking combine. Empty input
+        returns successful absence; a singleton returns its present element.
+        Later elements stop at the first error, without exposing a partial
+        accumulator as success. Optional elements keep their own presence layer.
+    -}
+    pub comptime fn try_reduce(self, combine: %c comptime fn(T, T) -> !E T) -> !E ?T
+    where E, c: Type.vars.Closure
+    {
+        let input = self;
+        let count = input.length();
+        if count == 0 { return null; }
+        var accumulator = input[0];
+        inline for index in 1..count {
+            accumulator = combine(accumulator, input[index]) match {
+                value! => value,
+                error failure => { return error failure; },
+            };
         }
         accumulator
     }

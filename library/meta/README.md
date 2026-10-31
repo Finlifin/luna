@@ -26,6 +26,14 @@ Object 的查询与编辑定义在固有 `impl Object` 中，可以通过接收�
 `try_map` 的部分输出不会作为成功列表交付。可选元素保留各自的存在层次，
 `Type` 元素保留 normal-form 身份，不展开类型头。
 
+`values.try_foreach(visit) -> !E void` 使用返回 `!E void` 的编译期回调，
+按顺序访问每个元素，首错停止；空列表成功且不调用回调。
+`values.try_reduce(combine) -> !E ?T` 不需要初始值：首元素直接成为累积值，
+从第二个元素开始调用返回 `!E T` 的回调。空列表返回成功的 null，单元素列表
+返回成功的存在值，两者都不调用回调。若元素本身可选，单个 null 元素仍返回
+成功的 `null?`，与空列表不同。错误时不返回部分累积值，也不回滚回调副作用。
+这些方法与其他列表遍历一样读取固定输入快照；空列表仍检查回调类型与阶段。
+
 ```flurry
 comptime fn checked_width(value: Integer) -> !Integer Integer {
     if value < 0 { return error value; }

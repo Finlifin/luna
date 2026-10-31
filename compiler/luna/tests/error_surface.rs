@@ -2527,3 +2527,39 @@ fn void_success_injection_covers_implicit_and_explicit_delivery() {
         }
     }
 }
+
+#[test]
+fn error_success_adapts_plain_values_to_optional_payloads_without_losing_layers() {
+    let source = "
+        fn wrap(value: T)->!bool ?T where T {value}
+        fn nested(value: ?bool)->!bool ??bool {value}
+        fn choose()->bool {true}
+        fn called()->!bool ?bool {choose()}
+        fn run()->bool {
+            let missing:?bool=null;
+            let scalar=wrap(true);
+            let absent=wrap(missing);
+            let doubled=nested(missing);
+            (scalar match {value! =>value matches true?,error _=>false})
+                and (absent match {value! =>value matches null?,error _=>false})
+                and (doubled match {value! =>value matches null?,error _=>false})
+                and (called() match {value! =>value matches true?,error _=>false})
+        }";
+    let Artifact::Nir(package) = compile(source, Emit::Nir).unwrap() else {
+        panic!()
+    };
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000)
+            .unwrap()
+            .to_string(),
+        "(bool true)"
+    );
+    // An existing error result must keep its row and payload representation.
+    // Success injection cannot silently reinterpret either of them.
+    for source in [
+        "enum Fault {bad} fn invalid(value:!Fault bool)->!bool ?bool {value}",
+        "typealias Integer=.Integer'builtin; fn invalid(value:Integer)->!bool ?bool {value}",
+    ] {
+        assert!(compile(source, Emit::Nir).is_err(), "{source}");
+    }
+}
