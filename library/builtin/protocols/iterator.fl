@@ -145,6 +145,39 @@ pub trait Iterator {
     }
 
     {-
+        Each callback consumes the accumulator and the next owned item once.
+        An error exits this consumer, stopping upstream production and retiring
+        the remaining source. Error results retain their ordinary ABI; they
+        are not another effect handled by the iteration handler.
+    -}
+    inline fn try_fold(self, initial: A, f: %c fn(A, Item) -> !E A) -> !E A
+        where A, E, c: IterationType.vars.Closure
+    {
+        var accumulator = initial;
+        self.iterate()# {
+            emit_item<Item>(value) => {
+                accumulator = f(accumulator, value) match {
+                    next! => next,
+                    error failure => {return error failure;},
+                };
+            },
+        }
+        accumulator
+    }
+
+    -- Stop at the first error; empty input succeeds without calling f.
+    inline fn try_foreach(self, f: %c fn(Item) -> !E IterationUnit) -> !E IterationUnit
+        where E, c: IterationType.vars.Closure
+    {
+        self.iterate()# {
+            emit_item<Item>(value) => f(value) match {
+                _! => {},
+                error failure => {return error failure;},
+            },
+        }
+    }
+
+    {-
         Select the zero-based item and stop production immediately. Skipped
         items and the unproduced source remainder are retired normally. A
         missing position returns null; a present null payload stays present.

@@ -212,6 +212,22 @@ impl Walker<'_> {
                     Condition::Bool(true),
                 )
             }
+            Pattern::ErrorResult { label, inner } => {
+                let tag = self.error_pattern_tag(ty, label.as_ref())?;
+                let selected = self.error_condition(value, ty, tag, state)?;
+                let Some(selected) = selected else {
+                    return Ok(None);
+                };
+                if selected == Condition::Bool(false) {
+                    return Ok(Some(selected));
+                }
+                (
+                    std::slice::from_ref(inner.as_ref()),
+                    vec![self.error_payload_type(ty, tag)?.clone()],
+                    AggregateKind::ErrorResult(tag),
+                    selected,
+                )
+            }
             Pattern::OptionalAbsent | Pattern::OptionalPresent(_) => {
                 let Term::Optional(payload) = ty else {
                     return Err(Reason::InvalidSignature);
@@ -373,6 +389,31 @@ impl Walker<'_> {
             return Err(Reason::DepthLimit);
         }
         if let Some(ty) = value.nominal_type.clone() {
+            if let Term::ErrorResult { errors, .. } = ty.as_ref() {
+                self.error_condition(value, &ty, 0, state)?;
+                for tag in 0..=errors.len() {
+                    self.limits.step(1)?;
+                    if value
+                        .aggregate_kind
+                        .is_some_and(|kind| kind != AggregateKind::ErrorResult(tag))
+                    {
+                        continue;
+                    }
+                    let payload = self.error_payload_type(&ty, tag)?.clone();
+                    let mut field = match value.fields.as_ref().and_then(|fields| fields.first()) {
+                        Some(field) => field.snapshot(self.limits, 0)?,
+                        None => self.unknown_value(&payload)?,
+                    };
+                    self.project_component(
+                        state,
+                        &mut field,
+                        value.projection.clone(),
+                        (AggregateKind::ErrorResult(tag), 0),
+                    )?;
+                    self.prime_payload_observations(&mut field, state, ancestors, depth + 1)?;
+                }
+                return Ok(());
+            }
             if let Term::Optional(payload) = ty.as_ref() {
                 self.optional_condition(value, true, state)?;
                 if value.aggregate_kind != Some(AggregateKind::Optional(false)) {
@@ -656,6 +697,24 @@ impl Walker<'_> {
                     state,
                     depth,
                 )
+            }
+            Pattern::ErrorResult { label, inner } => {
+                let tag = self.error_pattern_tag(ty, label.as_ref())?;
+                let condition = self.error_condition(input, ty, tag, &mut state)?;
+                let (yes, no) = self.split_condition(state, condition.as_ref())?;
+                if !yes.facts.is_reachable() {
+                    return Ok((yes, no));
+                }
+                let payload = self.error_payload_type(ty, tag)?.clone();
+                let (yes, failed) = self.fields_pattern(
+                    std::slice::from_ref(inner.as_ref()),
+                    std::slice::from_ref(&payload),
+                    input,
+                    AggregateKind::ErrorResult(tag),
+                    yes,
+                    depth,
+                )?;
+                Ok((yes, no.merge(failed, self.limits)?))
             }
             Pattern::OptionalAbsent | Pattern::OptionalPresent(_) => {
                 let Term::Optional(payload) = ty else {

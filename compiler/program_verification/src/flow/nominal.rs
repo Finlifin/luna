@@ -212,8 +212,15 @@ impl Walker<'_> {
             return Ok(());
         };
         let types = match kind {
-            AggregateKind::EnumTag(_) | AggregateKind::OptionalTag => {
+            AggregateKind::EnumTag(_) | AggregateKind::OptionalTag | AggregateKind::ErrorTag => {
                 return Err(Reason::InvalidSignature);
+            }
+            AggregateKind::ErrorResult(tag) => {
+                let ty = base
+                    .nominal_type
+                    .as_deref()
+                    .ok_or(Reason::InvalidSignature)?;
+                Some(vec![self.error_payload_type(ty, *tag)?.clone()])
             }
             AggregateKind::Optional(present) => {
                 let Term::Optional(payload) = base

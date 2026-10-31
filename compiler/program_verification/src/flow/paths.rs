@@ -182,7 +182,12 @@ impl Walker<'_> {
                 };
                 if matches!(
                     path.fields.last(),
-                    Some((AggregateKind::EnumTag(_) | AggregateKind::OptionalTag, _))
+                    Some((
+                        AggregateKind::EnumTag(_)
+                            | AggregateKind::OptionalTag
+                            | AggregateKind::ErrorTag,
+                        _
+                    ))
                 ) {
                     continue;
                 }
@@ -194,7 +199,9 @@ impl Walker<'_> {
                 for (kind, slot) in &path.fields {
                     if matches!(
                         kind,
-                        AggregateKind::Variant(..) | AggregateKind::Optional(_)
+                        AggregateKind::Variant(..)
+                            | AggregateKind::Optional(_)
+                            | AggregateKind::ErrorResult(_)
                     ) && cursor.and_then(|value| value.aggregate_kind) != Some(*kind)
                     {
                         compatible = false;

@@ -1,0 +1,120 @@
+{-
+    Exercise error short-circuiting through the public sysroot Iterator API.
+    Native joint expansion must preserve callback order and affine cleanup.
+-}
+struct Watch {retired: *bool, value: bool}
+impl Drop for Watch {
+    fn drop(*self) {
+        assumes not self.retired.*.*;
+        self.retired.*.* = true;
+    }
+}
+
+fn combine(previous: bool, item: bool) -> !bool bool { previous or item }
+
+fn reject(previous: Watch, item: Watch) -> !Watch Watch { error item }
+
+fn observe(item: bool, calls: *usize) -> !bool void {
+    assumes calls.* < 3;
+    calls.* += 1;
+    if not item {return error true;}
+}
+
+test fold_empty_and_success {
+    let empty: ?bool = null;
+    let original = empty.as(Iterator).try_fold(true, combine);
+    let first: ?bool = false;
+    let second: ?bool = true;
+    let combined = first.as(Iterator).chain(second).as(Iterator).try_fold(false, combine);
+    let kept = original matches true!;
+    let folded = combined matches true!;
+    assumes kept and folded;
+}
+
+test fold_error_transfers_affine_error_and_retires_remainder {
+    var initial_retired = false;
+    var error_retired = false;
+    var tail_retired = false;
+    {
+        let initial = Watch {retired: initial_retired.ref, value: false};
+        let first: ?Watch = Watch {retired: error_retired.ref, value: true};
+        let tail: ?Watch = Watch {retired: tail_retired.ref, value: false};
+        let result = first.as(Iterator).chain(tail).as(Iterator).try_fold(initial, reject);
+        assumes initial_retired and tail_retired and not error_retired;
+        result match {
+            _! => {assumes false;},
+            error failure => {assumes failure.value;},
+        };
+    }
+    assumes error_retired;
+}
+
+test foreach_stops_at_first_error {
+    var calls: usize = 0;
+    let counter = calls.ref;
+    let first: ?bool = true;
+    let stop: ?bool = false;
+    let tail: ?bool = true;
+    let result = first.as(Iterator).chain(stop).as(Iterator).chain(tail)
+        .as(Iterator).try_foreach(|item| observe(item, counter));
+    let failed = result matches error true;
+    assumes failed and calls == 2;
+}
+
+fn accept_watch(item: Watch) -> !bool void {}
+
+test foreach_success_retires_items {
+    var first_retired = false;
+    var second_retired = false;
+    let first: ?Watch = Watch {retired: first_retired.ref, value: true};
+    let second: ?Watch = Watch {retired: second_retired.ref, value: false};
+    let result = first.as(Iterator).chain(second).as(Iterator).try_foreach(accept_watch);
+    let succeeded = result matches _!;
+    assumes succeeded and first_retired and second_retired;
+}
+
+fn unexpected(item: bool, captured: *Watch) -> !bool void {
+    assumes false;
+}
+
+test empty_foreach_retires_unused_capture {
+    var retired = false;
+    let captured = Watch {retired: retired.ref, value: true};
+    let empty: ?bool = null;
+    let result = empty.as(Iterator).try_foreach(|item| unexpected(item, captured.ref));
+    let succeeded = result matches _!;
+    assumes succeeded and retired;
+}
+
+fn replace_watch(previous: Watch, item: Watch) -> !bool Watch { item }
+
+test successful_fold_transfers_last_affine_accumulator {
+    var initial_retired = false;
+    var first_retired = false;
+    var last_retired = false;
+    {
+        let initial = Watch {retired: initial_retired.ref, value: false};
+        let first: ?Watch = Watch {retired: first_retired.ref, value: false};
+        let last: ?Watch = Watch {retired: last_retired.ref, value: true};
+        let result = first.as(Iterator).chain(last).as(Iterator).try_fold(initial, replace_watch);
+        assumes initial_retired and first_retired and not last_retired;
+        result match {
+            final! => {assumes final.value;},
+            error _ => {assumes false;},
+        };
+    }
+    assumes last_retired;
+}
+
+fn retain_optional(previous: ?bool, item: bool) -> !bool ?bool { previous }
+
+test successful_fold_preserves_optional_accumulator_layer {
+    let absent: ?bool = null;
+    let input: ?bool = true;
+    let result = input.as(Iterator).try_fold(absent, retain_optional);
+    let kept_absence = result match {
+        value! => value matches null,
+        error _ => false,
+    };
+    assumes kept_absence;
+}

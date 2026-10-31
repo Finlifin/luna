@@ -3,6 +3,7 @@
 //! verifier. Unsupported constructs return an explicit analysis limitation.
 mod bit_indices;
 mod copies;
+mod error_results;
 mod finite_domains;
 mod intrinsics;
 mod memory_contracts;
@@ -261,6 +262,8 @@ enum AggregateKind {
     EnumTag(nir::DeclarationId),
     Optional(bool),
     OptionalTag,
+    ErrorResult(usize),
+    ErrorTag,
 }
 impl fmt::Display for AggregateKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -270,6 +273,8 @@ impl fmt::Display for AggregateKind {
             Self::Record(id) => write!(f, "(record {id})"),
             Self::Variant(id, index) => write!(f, "(variant {id} {index})"),
             Self::EnumTag(id) => write!(f, "(enum-tag {id})"),
+            Self::ErrorResult(tag) => write!(f, "(error-result {tag})"),
+            Self::ErrorTag => f.write_str("(error-tag)"),
             Self::Optional(present) => write!(f, "(optional {present})"),
             Self::OptionalTag => f.write_str("(optional-tag)"),
         }
@@ -674,7 +679,8 @@ fn bind_place(
     state.aggregates.remove(&place);
     if matches!(
         ty,
-        Term::Optional(_)
+        Term::ErrorResult { .. }
+            | Term::Optional(_)
             | Term::Nominal { .. }
             | Term::Tuple(_)
             | Term::Primitive(nir::Primitive::Integer)
@@ -5906,6 +5912,9 @@ impl Walker<'_> {
                 // This layer tracks the evaluation, not type-theory equality.
                 // Its Bool result remains unknown without program evidence.
             }
+            K::ErrorConvert { conversion, value } => {
+                result = self.error_conversion(expr, *conversion, value, state, depth)?;
+            }
             K::OptionalAbsent | K::OptionalPresent(_) => {
                 let Term::Optional(payload_type) = &expr.ty else {
                     return Err(Reason::InvalidSignature);
@@ -6228,7 +6237,11 @@ impl Value {
             range: domain(ty, limits)?,
             nominal_type: if matches!(
                 ty,
-                Term::Optional(_) | Term::Nominal { .. } | Term::Record(_) | Term::Tuple(_)
+                Term::ErrorResult { .. }
+                    | Term::Optional(_)
+                    | Term::Nominal { .. }
+                    | Term::Record(_)
+                    | Term::Tuple(_)
             ) {
                 Some(std::sync::Arc::new(ty.clone()))
             } else {
@@ -7533,7 +7546,9 @@ fn invariant_conditional_targets(
                             }
                             AggregateKind::EnumTag(_)
                             | AggregateKind::Optional(_)
-                            | AggregateKind::OptionalTag => return None,
+                            | AggregateKind::OptionalTag
+                            | AggregateKind::ErrorResult(_)
+                            | AggregateKind::ErrorTag => return None,
                         };
                         container.fields.push((owner, *index));
                         guarded = guarded.fields.as_ref()?.get(*index)?;

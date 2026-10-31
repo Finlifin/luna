@@ -758,7 +758,11 @@ impl Walker<'_> {
         if !integer
             && !matches!(
                 ty,
-                Term::Optional(_) | Term::Tuple(_) | Term::Record(_) | Term::Nominal { .. }
+                Term::ErrorResult { .. }
+                    | Term::Optional(_)
+                    | Term::Tuple(_)
+                    | Term::Record(_)
+                    | Term::Nominal { .. }
             )
             && self.tuple_field_types(ty)?.is_none()
         {

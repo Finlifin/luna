@@ -116,6 +116,9 @@ fn qualified_lambda_parameters_leave_the_body_outside_the_type() {
     for (ty, kind) in [
         ("#IO bool", NodeKind::EffectQualifiedType),
         ("!Failure bool", NodeKind::ErrorQualifiedType),
+        ("!Failure ?bool", NodeKind::ErrorQualifiedType),
+        ("#IO ?bool", NodeKind::EffectQualifiedType),
+        ("&Reach ?bool", NodeKind::ReachabilityQualifiedType),
         ("&Reach bool", NodeKind::ReachabilityQualifiedType),
         ("#IO !Failure bool", NodeKind::EffectQualifiedType),
         (
@@ -237,4 +240,31 @@ fn qualified_types_leave_comparisons_and_bounds_outside_their_body() {
     let sides = ast.get_children(root);
     assert_eq!(ast.get_node_kind(sides[0]), Some(NodeKind::BoolEq));
     assert_eq!(ast.get_node_kind(sides[1]), Some(NodeKind::BoolNotEq));
+}
+
+#[test]
+fn optional_results_are_not_consumed_as_row_propagation() {
+    for source in ["!Failure ?T", "#IO ?T", "&Reach ?T"] {
+        let (ast, root, next) = parse(source).unwrap();
+        assert_eq!(next, TokenKind::Eof, "{source}");
+        let children = ast.get_children(root);
+        assert_eq!(
+            ast.get_node_kind(children[0]),
+            Some(NodeKind::Id),
+            "{source}"
+        );
+        assert_eq!(
+            ast.get_node_kind(children[1]),
+            Some(NodeKind::OptionalType),
+            "{source}"
+        );
+    }
+    let (ast, root, next) = parse("!Failure ??T").unwrap();
+    assert_eq!(next, TokenKind::Eof);
+    let optional = ast.get_children(root)[1];
+    assert_eq!(ast.get_node_kind(optional), Some(NodeKind::OptionalType));
+    assert_eq!(
+        ast.get_node_kind(ast.get_children(optional)[0]),
+        Some(NodeKind::OptionalType)
+    );
 }

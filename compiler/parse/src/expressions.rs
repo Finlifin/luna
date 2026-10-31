@@ -93,6 +93,7 @@ impl Parser<'_> {
                         token.kind,
                         TokenKind::Hash
                             | TokenKind::Bang
+                            | TokenKind::Question
                             | TokenKind::Ampersand
                             | TokenKind::Percent
                             | TokenKind::SeparatedPercent
