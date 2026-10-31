@@ -716,104 +716,28 @@ impl Package {
                     }) {
                         return Err("IIR frozen callable has no signature evidence".into());
                     }
-                    pending.extend(arguments);
                 }
-                Term::ErrorResult { errors, result } => {
-                    pending.push(result);
-                    pending.extend(errors);
-                }
-                Term::Computation { effects, result } => {
-                    pending.push(result);
-                    for operation in effects {
-                        pending.extend(&operation.arguments);
-                    }
-                }
-                Term::Nominal { arguments, .. } => {
+                Term::Nominal { .. } => {
                     if !self.nominals.iter().any(|n| &n.ty == ty) {
                         return Err("IIR nominal reference is dangling".into());
                     }
-                    pending.extend(arguments);
                 }
-                Term::NormalForm {
-                    head, arguments, ..
-                } => {
+                Term::NormalForm { head, .. } => {
                     if !self.normal_forms.iter().any(|h| h.declaration == *head) {
                         return Err("IIR normal-form reference is dangling".into());
                     }
-                    pending.extend(arguments);
                 }
-                Term::Tuple(fields)
-                | Term::TupleValue(fields)
-                | Term::ClosureContextValue(fields)
-                | Term::ClosureSnapshot {
-                    arguments: fields, ..
-                } => pending.extend(fields),
-                Term::ContextualClosure { context, signature } => {
-                    pending.push(context);
-                    pending.push(signature);
-                }
-                Term::OptionalValue { ty, value } => {
-                    pending.push(ty);
-                    if let Some(value) = value {
-                        pending.push(value);
-                    }
-                }
-                Term::ErrorValue { ty, label, value } => {
-                    pending.push(ty);
-                    if let Some(label) = label {
-                        pending.push(label);
-                    }
-                    pending.push(value);
-                }
-                Term::ListConcat { ty, parts: fields } | Term::NominalValue { ty, fields, .. } => {
-                    pending.push(ty);
-                    pending.extend(fields);
-                }
-                Term::Record(fields) | Term::RecordValue(fields) => {
-                    pending.extend(fields.iter().map(|(_, ty)| ty))
-                }
-                Term::Optional(inner)
-                | Term::Pointer(inner)
-                | Term::ComptimeFunction(inner)
-                | Term::NormalFormFunction(inner, _)
-                | Term::UnsafeFunction(inner) => pending.push(inner),
-                Term::Function { parameters, result } => {
-                    pending.extend(parameters.iter().map(|p| &p.ty));
-                    pending.push(result);
-                }
-                Term::Closure {
-                    environment,
-                    signature,
-                } => {
-                    pending.extend(environment);
-                    pending.push(signature);
-                }
-                // Completion rejects these before link validation starts.
-                Term::AssociatedType { .. }
-                | Term::Rigid { .. }
-                | Term::Hole { .. }
-                | Term::Value { .. } => {}
-                Term::Primitive(_)
-                | Term::ClosureContextType
-                | Term::Bound { .. }
-                | Term::Runtime(_)
-                | Term::Unit
-                | Term::Bool(_)
-                | Term::Char(_)
-                | Term::BitVec(_)
-                | Term::Float16(_)
-                | Term::BFloat16(_)
-                | Term::Float32(_)
-                | Term::Float64(_)
-                | Term::String(_)
-                | Term::Symbol(_)
-                | Term::Integer(_)
-                | Term::Float(_) => {}
+                _ => {}
             }
+            ty.visit_children(|child| {
+                pending.push(child);
+                Ok::<_, String>(())
+            })?;
         }
         Ok(())
     }
 }
+
 impl fmt::Display for Package {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(iir-package (roots")?;
@@ -907,16 +831,6 @@ pub fn completed_dependencies(
         }
         *fuel -= 1;
         match ty {
-            Term::ErrorResult { errors, result } => {
-                pending.push(result);
-                pending.extend(errors);
-            }
-            Term::Computation { effects, result } => {
-                pending.push(result);
-                for operation in effects {
-                    pending.extend(&operation.arguments);
-                }
-            }
             Term::AssociatedType { .. } => {
                 return Err("IIR type has an unresolved associated type projection".into());
             }
@@ -937,70 +851,12 @@ pub fn completed_dependencies(
                     id.instance, id.local
                 ));
             }
-            Term::Nominal { arguments, .. }
-            | Term::FunctionValue { arguments, .. }
-            | Term::ClosureSnapshot { arguments, .. }
-            | Term::NormalForm { arguments, .. }
-            | Term::Tuple(arguments)
-            | Term::TupleValue(arguments)
-            | Term::ClosureContextValue(arguments) => pending.extend(arguments),
-            Term::ContextualClosure { context, signature } => {
-                pending.push(context);
-                pending.push(signature);
-            }
-            Term::OptionalValue { ty, value } => {
-                pending.push(ty);
-                if let Some(value) = value {
-                    pending.push(value);
-                }
-            }
-            Term::ErrorValue { ty, label, value } => {
-                pending.push(ty);
-                if let Some(label) = label {
-                    pending.push(label);
-                }
-                pending.push(value);
-            }
-            Term::NominalValue { ty, fields, .. } => {
-                pending.push(ty);
-                pending.extend(fields);
-            }
-            Term::Record(fields) | Term::RecordValue(fields) => {
-                pending.extend(fields.iter().map(|(_, ty)| ty))
-            }
-            Term::Optional(inner)
-            | Term::Pointer(inner)
-            | Term::ComptimeFunction(inner)
-            | Term::NormalFormFunction(inner, _)
-            | Term::UnsafeFunction(inner) => pending.push(inner),
-            Term::Function { parameters, result } => {
-                pending.extend(parameters.iter().map(|p| &p.ty));
-                pending.push(result);
-            }
-            Term::Closure {
-                environment,
-                signature,
-            } => {
-                pending.extend(environment);
-                pending.push(signature);
-            }
-            Term::Primitive(_)
-            | Term::ClosureContextType
-            | Term::Bound { .. }
-            | Term::Runtime(_)
-            | Term::Unit
-            | Term::Bool(_)
-            | Term::Char(_)
-            | Term::BitVec(_)
-            | Term::Float16(_)
-            | Term::BFloat16(_)
-            | Term::Float32(_)
-            | Term::Float64(_)
-            | Term::String(_)
-            | Term::Symbol(_)
-            | Term::Integer(_)
-            | Term::Float(_) => {}
+            _ => {}
         }
+        ty.visit_children(|child| {
+            pending.push(child);
+            Ok::<_, String>(())
+        })?;
     }
     Ok(())
 }

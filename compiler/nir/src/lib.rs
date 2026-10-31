@@ -5,6 +5,7 @@
 //! equality here is an interning/cache operation, not a complete type solver.
 
 pub mod target;
+mod type_children;
 pub mod types;
 pub use types::*;
 

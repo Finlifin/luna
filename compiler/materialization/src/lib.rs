@@ -2714,71 +2714,10 @@ impl Builder<'_> {
                 }
                 children.push((**result).clone());
             }
-            Term::Tuple(items)
-            | Term::TupleValue(items)
-            | Term::ClosureContextValue(items)
-            | Term::ClosureSnapshot {
-                arguments: items, ..
-            } => children.extend(items.iter().cloned()),
-            Term::ContextualClosure { context, signature } => {
-                children.push((**context).clone());
-                children.push((**signature).clone());
-            }
-            Term::OptionalValue { ty, value } => {
-                children.push((**ty).clone());
-                if let Some(value) = value {
-                    children.push((**value).clone());
-                }
-            }
-            Term::ErrorValue { ty, label, value } => {
-                children.push((**ty).clone());
-                if let Some(label) = label {
-                    children.push((**label).clone());
-                }
-                children.push((**value).clone());
-            }
-            Term::ListConcat { ty, parts: fields } | Term::NominalValue { ty, fields, .. } => {
-                children.push((**ty).clone());
-                children.extend(fields.iter().cloned());
-            }
-            Term::Record(fields) | Term::RecordValue(fields) => {
-                children.extend(fields.iter().map(|(_, ty)| ty.clone()))
-            }
-            Term::Optional(t)
-            | Term::Pointer(t)
-            | Term::ComptimeFunction(t)
-            | Term::NormalFormFunction(t, _)
-            | Term::UnsafeFunction(t) => children.push((**t).clone()),
-            Term::Function { parameters, result } => {
-                children.extend(parameters.iter().map(|p| p.ty.clone()));
-                children.push((**result).clone());
-            }
-            Term::Closure {
-                environment,
-                signature,
-            } => {
-                children.extend(environment.iter().cloned());
-                children.push((**signature).clone());
-            }
-            Term::Primitive(_)
-            | Term::ClosureContextType
-            | Term::Hole { .. }
-            | Term::Bound { .. }
-            | Term::Rigid { .. }
-            | Term::Runtime(_)
-            | Term::Unit
-            | Term::Bool(_)
-            | Term::Char(_)
-            | Term::BitVec(_)
-            | Term::Float16(_)
-            | Term::BFloat16(_)
-            | Term::Float32(_)
-            | Term::Float64(_)
-            | Term::String(_)
-            | Term::Symbol(_)
-            | Term::Integer(_)
-            | Term::Float(_)
-            | Term::Value { .. } => {}
+            _ => ty.visit_children(|child| {
+                children.push(child.clone());
+                Ok::<_, String>(())
+            })?,
         }
         self.queue.extend(children.into_iter().map(Task::Type));
         Ok(())

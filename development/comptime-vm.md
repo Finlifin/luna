@@ -9243,3 +9243,35 @@ Validation in `/home/fin/luna`:
   40 passed; `/tmp/luna-tools-ns9h70tt/result.json`, exit 0.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
   passed; `/tmp/luna-tools-fe1uaks5/result.json`, exit 0.
+
+
+## Share immediate Term edges across materialization and IIR verification
+
+NIR now exposes Term::visit_children, a borrowing, fallible immediate-child
+visitor. One exhaustive match defines structural edges, including closure
+contexts and snapshots. It allocates no traversal worklist and does not clone
+terms; callers own budgets, depth and binder contexts. The callback can stop
+before later children are visited. Its stable order preserves the existing IIR
+validation worklist order.
+
+IIR completion and link validation now keep only their semantic decisions and
+use the common visitor for children. Materialization uses it for ordinary
+structural nodes while retaining declaration admission, formation requirements,
+effect retention and other specialized handling. This removes duplicated edge
+lists that caused the preceding closure-context omissions. The VM's binder-aware
+admission and other traversals remain separate; this is not a general solver or
+TypeRef migration.
+
+Validation in `/home/fin/luna` (all exit 0):
+
+- `python3 -B development/check.py --timeout 900 -- test -p iir`:
+  104 passed; `/tmp/luna-tools-nv6ji06x/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p nir --test type_children`:
+  borrowing identity, telescope order and callback short-circuit test passed;
+  `/tmp/luna-tools-c_w9c2r0/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p materialization --test expansion_boundary`:
+  4 passed; `/tmp/luna-tools-gfmnwkfy/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test closure_environment_parameters --test scoped_comptime_callables --test function_type_dependencies`:
+  73 passed; `/tmp/luna-tools-9qyxo6j6/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed; `/tmp/luna-tools-wheji6zj/result.json`.
