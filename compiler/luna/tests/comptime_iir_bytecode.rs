@@ -396,3 +396,84 @@ fn graph_validation_reuse_is_metered_and_cannot_authorize_another_snapshot() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn graph_sessions_reuse_callable_and_declaration_indexes_without_caching_admission() {
+    use comptime_interpretor::CodeSession;
+    use std::sync::Arc;
+    let graph = Arc::new(graph(
+        "typealias Type=.Type'builtin;typealias char=.char'builtin;
+         fn identity(value:T)->T where T {value}
+         pure comptime fn Carrier<T,action:fn(T)->T>->Type {bool}
+         trait Probe {comptime fn probe()->bool;}
+         impl Probe for bool {comptime fn probe()->bool {true}}
+         comptime fn dispatch()->bool where T {true}
+         comptime fn run(value:bool)->bool where requires value {
+             dispatch<Carrier<bool,identity<bool>>>() and
+             dispatch<Carrier<char,identity<char>>>() and bool.as(Probe).probe()
+         }",
+        "run",
+    ));
+    assert_eq!(graph.callable_identities.len(), 2);
+    assert!(!graph.normal_forms.is_empty());
+    assert!(!graph.dispatch.is_empty());
+    let mut probe = CodeSession::for_iir(graph.clone());
+    let mut cold = Budget::default();
+    Interpreter::from_iir_for_comptime_in_session(&graph, &mut probe, &mut cold).unwrap();
+    let cold_work = Budget::default().steps - cold.steps;
+    assert!(cold_work > 1);
+
+    let mut session = CodeSession::for_iir(graph.clone());
+    // Exhaustion after validation/index work must not publish partial indexes.
+    let mut insufficient = Budget {
+        steps: cold_work - 1,
+        ..Budget::default()
+    };
+    assert!(matches!(Interpreter::from_iir_for_comptime_in_session(
+        &graph, &mut session, &mut insufficient), Err(error) if error.kind == ErrorKind::StepsExhausted));
+    let mut tiny = Budget {
+        steps: 1,
+        ..Budget::default()
+    };
+    assert!(
+        Interpreter::from_iir_for_comptime_in_session(&graph, &mut session, &mut tiny).is_err()
+    );
+
+    for value in [true, false, true] {
+        let mut budget = Budget::default();
+        let mut vm =
+            Interpreter::from_iir_for_comptime_in_session(&graph, &mut session, &mut budget)
+                .unwrap();
+        if value == false {
+            assert_eq!(Budget::default().steps - budget.steps, 1);
+        }
+        let result = vm.invoke_instance(&graph.roots[0], vec![Value::Bool(value)]);
+        if value {
+            assert_eq!(result.unwrap(), Value::Bool(true));
+        } else {
+            assert_eq!(result.unwrap_err().kind, ErrorKind::ProgramContractRejected);
+        }
+    }
+    // Declaration IDs alone do not authorize positional indexes. This valid
+    // snapshot reverses their backing tables while retaining identical keys.
+    let mut reordered = graph.as_ref().clone();
+    reordered.callable_identities.reverse();
+    reordered.normal_forms.reverse();
+    reordered.validate(&mut 1_000_000).unwrap();
+    let mut budget = Budget::default();
+    let mut vm =
+        Interpreter::from_iir_for_comptime_in_session(&reordered, &mut session, &mut budget)
+            .unwrap();
+    assert!(Budget::default().steps - budget.steps > 1);
+    assert_eq!(
+        vm.invoke_instance(&reordered.roots[0], vec![Value::Bool(true)])
+            .unwrap(),
+        Value::Bool(true)
+    );
+    let mut budget = Budget {
+        steps: 1,
+        ..Budget::default()
+    };
+    Interpreter::from_iir_for_comptime_in_session(&graph, &mut session, &mut budget).unwrap();
+    assert_eq!(budget.steps, 0);
+}

@@ -6,7 +6,7 @@ use super::*;
 /// retained. A changed world requires a new session, even with identical IDs.
 pub struct CodeSession {
     world: CodeWorld,
-    graph_validated: bool,
+    graph_indexes: Option<Arc<iir_execution::GraphIndexes>>,
     indexes: Option<Arc<declaration_index::SourceIndexes>>,
     bytecode: bytecode::CodeCache,
     inputs: input_bodies::Cache,
@@ -22,7 +22,7 @@ impl CodeSession {
     pub fn new(package: Arc<Package>) -> Self {
         Self {
             world: CodeWorld::Source(package),
-            graph_validated: false,
+            graph_indexes: None,
             indexes: None,
             bytecode: Default::default(),
             inputs: Default::default(),
@@ -37,7 +37,7 @@ impl CodeSession {
     pub fn for_iir(graph: Arc<iir::Package>) -> Self {
         Self {
             world: CodeWorld::Graph(graph),
-            graph_validated: false,
+            graph_indexes: None,
             indexes: None,
             bytecode: Default::default(),
             inputs: Default::default(),
@@ -85,7 +85,7 @@ impl Drop for Scope<'_, '_, '_> {
 
 impl<'program> Interpreter<'program> {
     /// Reuse structural validation only for the exact graph owned by this session.
-    /// Index construction and execution still consume the current allowance;
+    /// Initial index construction and execution consume the current allowance;
     /// input contracts and phase permissions are checked by each fresh VM.
     pub fn from_iir_for_comptime_in_session(
         graph: &'program iir::Package,
@@ -97,12 +97,11 @@ impl<'program> Interpreter<'program> {
         if !matches {
             return Self::from_iir_for_comptime_metered(graph, budget);
         }
-        let mut vm = if session.graph_validated {
-            Self::from_validated_iir_metered(graph, budget)?
-        } else {
-            Self::from_iir_metered(graph, budget)?
+        let mut vm = match &session.graph_indexes {
+            Some(indexes) => Self::from_indexed_iir_metered(graph, budget, indexes.clone())?,
+            None => Self::from_iir_metered(graph, budget)?,
         };
-        session.graph_validated = true;
+        session.graph_indexes = vm.graph_indexes.clone();
         vm.comptime_only = true;
         Ok(vm)
     }

@@ -525,3 +525,32 @@ Verification (cwd `/home/fin/luna`):
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test execution memoized_invocation`: exit 0, eleven tests; `/tmp/luna-tools-1yhhe4ey/result.json`.
   Includes zero-capacity Type-result admission and staged Type-key replacement.
 - Workspace formatting and `git diff --check` passed.
+
+
+## Shared immutable IIR lookup indexes
+
+IIR CodeSession preparation now retains its callable-instance positions,
+normal-form declaration positions and implementation relationship index after
+validation and successful preparation. The same exact immutable graph can create
+fresh VMs from those indexes without rebuilding the tables. Callable keys share
+the graph's immutable argument slices; signatures remain borrowed from the graph
+through checked positions. Source VMs retain their existing lookup behavior.
+
+Initial index construction is metered, including dispatch subject/interface
+argument copies that were previously collected without a separate index-work
+charge. A failed preparation publishes no partial indexes. A session presented
+with another graph, even with identical declaration IDs, validates and indexes
+that graph independently and leaves its own snapshot's indexes intact.
+
+Input contracts, callable signature lookup work, phase authority and execution
+remain invocation-local. This does not enable bytecode suspension under effect
+handlers or cleanup schedules: those paths require integration with continuation
+and cleanup semantics, not removal of their current execution guards.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_iir_bytecode --test scoped_comptime_callables`: 20 passed (`/tmp/luna-tools-0sfnitgq/result.json`).
+- The new source-driven graph retains two specializations of one callable, a normal-form head and trait dispatch. Cold preparation is bounded; a one-step-short attempt does not authorize reuse. Warm preparation costs one bookkeeping step. False inputs still reject the current precondition. Reordered tables in a different valid graph execute using their own indexes, then the original session recovers its warm path.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor`: 589 passed (`/tmp/luna-tools-3ajwlqfe/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test execution memoized_`: 13 passed (`/tmp/luna-tools-2t7ka1u6/result.json`).
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: passed (`/tmp/luna-tools-13ko725_/result.json`); `git diff --check` passed.

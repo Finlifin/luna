@@ -29,17 +29,21 @@ impl Interpreter<'_> {
         fuel: &mut usize,
     ) -> Option<std::borrow::Cow<'_, Term>> {
         *fuel = fuel.checked_sub(1)?;
-        if self.graph.is_some() {
+        if let Some(graph) = self.graph {
             // Hash only bounded, complete instance inputs. The immutable graph
             // owns the borrowed keys and signatures for this VM's lifetime.
             for argument in arguments {
                 nir::type_computations::charge_term(argument, fuel).ok()?;
             }
-            let signature = self
-                .retained_callable_signatures
-                .get(&(declaration, arguments))?;
+            let index = self
+                .graph_indexes
+                .as_ref()?
+                .callables
+                .get(&declaration)?
+                .get(arguments)?;
+            let signature = graph.callable_identities[*index].closed_signature().ok()?;
             nir::type_computations::charge_term(signature, fuel).ok()?;
-            return Some(std::borrow::Cow::Borrowed(*signature));
+            return Some(std::borrow::Cow::Borrowed(signature));
         }
         if let Some(head) = self.normal_forms.get(&declaration) {
             if !arguments.is_empty() {

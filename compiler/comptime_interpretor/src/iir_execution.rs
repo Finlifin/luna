@@ -1,5 +1,7 @@
 //! Execution from retained concrete instances; no source templates are consulted.
 use super::*;
+mod indexes;
+pub(super) use indexes::GraphIndexes;
 
 impl<'a> Interpreter<'a> {
     pub(super) fn eval_template_equal(
@@ -128,37 +130,22 @@ impl<'a> Interpreter<'a> {
         graph: &'a iir::Package,
         budget: &mut Budget,
     ) -> Result<Self, Error> {
+        let indexes = Arc::new(GraphIndexes::new(graph, budget)?);
+        Self::from_indexed_iir_metered(graph, budget, indexes)
+    }
+
+    // The caller must own the same immutable, validated graph as these indexes.
+    pub(super) fn from_indexed_iir_metered(
+        graph: &'a iir::Package,
+        budget: &mut Budget,
+        indexes: Arc<GraphIndexes>,
+    ) -> Result<Self, Error> {
         budget.steps = budget.steps.checked_sub(1).ok_or(Error {
             kind: ErrorKind::StepsExhausted,
             source: None,
         })?;
-        let mut fuel = usize::try_from(budget.steps).unwrap_or(usize::MAX);
-        let mut retained_callable_signatures = HashMap::new();
-        for identity in &graph.callable_identities {
-            let indexed = (|| {
-                fuel = fuel
-                    .checked_sub(1)
-                    .ok_or(nir::type_computations::Error::Budget)?;
-                for argument in identity.key.arguments.iter() {
-                    nir::type_computations::charge_term(argument, &mut fuel)?;
-                }
-                let signature = identity
-                    .closed_signature()
-                    .expect("validated callable signature");
-                retained_callable_signatures.insert(
-                    (identity.key.declaration, identity.key.arguments.as_ref()),
-                    signature,
-                );
-                Ok::<_, nir::type_computations::Error>(())
-            })();
-            budget.steps = fuel as u64;
-            indexed.map_err(|_| Error {
-                kind: ErrorKind::StepsExhausted,
-                source: None,
-            })?;
-        }
         Ok(Self {
-            retained_callable_signatures,
+            graph_indexes: Some(indexes.clone()),
             bytecode_invocations: 0,
             bytecode_default_evaluations: 0,
             bytecode_staged_inputs: 0,
@@ -204,31 +191,24 @@ impl<'a> Interpreter<'a> {
             method_contracts: Default::default(),
             method_origins: Default::default(),
             assumed_interfaces: HashSet::new(),
-            implemented_interfaces: graph
-                .dispatch
-                .iter()
-                .map(|d| {
-                    (
-                        (d.interface_instance(), d.subject.clone()),
-                        d.implementation,
-                    )
-                })
-                .collect(),
+            implemented_interfaces: indexes.implementations.clone(),
             method_bodies: HashMap::new(),
             associated_values: HashMap::new(),
             associated_initializers: HashMap::new(),
             active_associated_initializers: HashSet::new(),
             instances: Default::default(),
             functions: Default::default(),
-            normal_forms: declaration_index::NormalForms::new(&graph.normal_forms, None, |head| {
-                head.declaration
-            })?,
+            normal_forms: declaration_index::NormalForms::new(
+                &graph.normal_forms,
+                Some(indexes.normal_forms.clone()),
+                |head| head.declaration,
+            )?,
             structs: Default::default(),
             newtypes: Default::default(),
             alias_contracts: Default::default(),
             enums: Default::default(),
             budget: Budget {
-                steps: fuel as u64,
+                steps: budget.steps,
                 depth: budget.depth.min(256),
             },
             depth: 0,
