@@ -322,6 +322,31 @@ impl<'a> Interpreter<'a> {
         if let Some(callable) = self.instances.lookup(key.declaration, &key.arguments) {
             return Ok(Value::Closure(callable.clone()));
         }
+        let before_key = self.budget.steps;
+        self.charge_copy_work(Some(definition.body.source), |fuel| {
+            for argument in key.arguments.iter() {
+                nir::copy_budget::charge_type_substitution(argument, &[], &[], fuel)?;
+            }
+            Ok(())
+        })?;
+        let key_work = before_key - self.budget.steps;
+        if let Some(callable) = self
+            .prepared_instance_cache
+            .lookup(
+                key.declaration,
+                &key.arguments,
+                key_work,
+                &mut self.budget.steps,
+            )
+            .map_err(|()| self.failure(ErrorKind::StepsExhausted, Some(definition.body.source)))?
+        {
+            self.instances.insert(cache_key, callable.clone());
+            return Ok(Value::Closure(callable));
+        }
+        let before_preparation = self.budget.steps;
+        self.charge_copy_work(Some(definition.body.source), |fuel| {
+            nir::copy_budget::charge_function_substitution(definition, &[], &[], fuel)
+        })?;
         let callable = Arc::new(Closure {
             definition_source: None,
             origin: Some(key.declaration),
@@ -332,6 +357,15 @@ impl<'a> Interpreter<'a> {
             body: Arc::new(definition.body.clone()),
             ty: definition.callable_type(),
         });
+        if self.budget.steps >= key_work {
+            self.budget.steps -= key_work;
+            self.prepared_instance_cache.insert(
+                cache_key.clone(),
+                callable.clone(),
+                key_work,
+                before_preparation - self.budget.steps,
+            );
+        }
         self.instances.insert(cache_key, callable.clone());
         Ok(Value::Closure(callable))
     }

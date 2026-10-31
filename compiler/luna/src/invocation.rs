@@ -4,6 +4,68 @@ use comptime_interpretor::{Budget, Interpreter, Value};
 use nir::program::{FunctionPhase, Package};
 use nir::{DeclarationId, Term};
 
+/// Reusable preparation for one entry in an immutable compilation snapshot.
+/// Code is shared; values, mutable storage and evidence are fresh on each call.
+pub struct PreparedInvocation {
+    package: std::sync::Arc<Package>,
+    graph: Option<std::sync::Arc<iir::Package>>,
+    declaration: DeclarationId,
+    entry: String,
+    code: comptime_interpretor::CodeSession,
+    last_stats: InvocationStats,
+}
+#[derive(Clone, Copy, Debug, Default)]
+pub struct InvocationStats {
+    pub bytecode_compilations: usize,
+    pub bytecode_invocations: usize,
+}
+impl PreparedInvocation {
+    pub fn new(
+        package: std::sync::Arc<Package>,
+        entry: &str,
+        identity: Option<u64>,
+    ) -> Result<Self, String> {
+        let (prepared, graph, declaration) = prepare_invocation(&package, entry, identity)?;
+        let prepared = match prepared {
+            std::borrow::Cow::Borrowed(_) => package.clone(),
+            std::borrow::Cow::Owned(package) => std::sync::Arc::new(package),
+        };
+        let graph = graph.map(std::sync::Arc::new);
+        let code = match &graph {
+            Some(graph) => comptime_interpretor::CodeSession::for_iir(graph.clone()),
+            None => comptime_interpretor::CodeSession::new(prepared.clone()),
+        };
+        Ok(Self {
+            code,
+            package: prepared,
+            graph,
+            declaration,
+            entry: entry.into(),
+            last_stats: InvocationStats::default(),
+        })
+    }
+    pub fn invoke(&mut self, fuel: u64) -> Result<Value, String> {
+        self.last_stats = InvocationStats::default();
+        if fuel == 0 {
+            return Err("invocation fuel must be positive".into());
+        }
+        execute_prepared(
+            &self.package,
+            self.graph.as_deref(),
+            self.declaration,
+            &self.entry,
+            None,
+            fuel,
+            None,
+            Some(&mut self.code),
+            &mut self.last_stats,
+        )
+    }
+    pub fn last_stats(&self) -> InvocationStats {
+        self.last_stats
+    }
+}
+
 pub fn invoke(package: &Package, entry: &str, fuel: u64) -> Result<Value, String> {
     invoke_selected(package, entry, None, None, fuel)
 }
@@ -76,6 +138,32 @@ pub(crate) fn invoke_selected_with_publisher(
     if fuel == 0 {
         return Err("invocation fuel must be positive".into());
     }
+    let (prepared, graph, declaration) = prepare_invocation(package, entry, identity)?;
+    execute_prepared(
+        prepared.as_ref(),
+        graph.as_ref(),
+        declaration,
+        entry,
+        protocols,
+        fuel,
+        publisher,
+        None,
+        &mut InvocationStats::default(),
+    )
+}
+
+fn prepare_invocation<'a>(
+    package: &'a Package,
+    entry: &str,
+    identity: Option<u64>,
+) -> Result<
+    (
+        std::borrow::Cow<'a, Package>,
+        Option<iir::Package>,
+        DeclarationId,
+    ),
+    String,
+> {
     let (mut prepared, declaration) =
         prepare_entry_in_package(package, entry, FunctionPhase::Comptime, identity)?;
     let roots = [iir::InstanceKey {
@@ -130,7 +218,29 @@ pub(crate) fn invoke_selected_with_publisher(
         prepared.to_mut().dispatch_instances = dispatch;
         None
     };
-    let package = prepared.as_ref();
+    Ok((prepared, graph, declaration))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_prepared(
+    package: &Package,
+    graph: Option<&iir::Package>,
+    declaration: DeclarationId,
+    entry: &str,
+    protocols: Option<(
+        crate::resources::Selection<'_>,
+        crate::resources::Selection<'_>,
+    )>,
+    fuel: u64,
+    publisher: Option<&dyn elaboration::definitions::StructBuildService>,
+    mut session: Option<&mut comptime_interpretor::CodeSession>,
+    stats: &mut InvocationStats,
+) -> Result<Value, String> {
+    let preparation_budget = elaboration::ptc::Budget::default();
+    let roots = [iir::InstanceKey {
+        declaration,
+        arguments: vec![].into(),
+    }];
     let context = elaboration::ptc::Context::from_package(package)
         .map_err(|error| format!("cannot prepare invocation type context: {error}"))?;
     let index = crate::implementation_world::index(&package, preparation_budget)
@@ -179,13 +289,16 @@ pub(crate) fn invoke_selected_with_publisher(
     let solver = |predicate: &nir::program::TypePredicate, remaining: &mut u64| {
         crate::implementation_world::solve_metered(&world, predicate, preparation_budget, remaining)
     };
-    let budget = Budget {
+    let mut budget = Budget {
         steps: fuel,
         depth: 128,
     };
-    let interpreter = match &graph {
-        Some(graph) => Interpreter::from_iir_for_comptime(graph, budget),
-        None => Interpreter::for_comptime(package, budget),
+    let interpreter = match graph {
+        Some(graph) => Interpreter::from_iir_for_comptime_metered(graph, &mut budget),
+        None => match session.as_deref_mut() {
+            Some(session) => Interpreter::for_comptime_in_session(package, session, &mut budget),
+            None => Interpreter::for_comptime(package, budget),
+        },
     };
     let mut interpreter = interpreter
         .map_err(|error| format!("cannot prepare comptime invocation: {error}"))?
@@ -206,10 +319,20 @@ pub(crate) fn invoke_selected_with_publisher(
             .with_struct_builder(&builder)
             .with_enum_builder(&enum_builder);
     }
-    let result = if graph.is_some() {
-        interpreter.invoke_instance(&roots[0], vec![])
-    } else {
-        interpreter.invoke(declaration, vec![])
+    let operation = |vm: &mut Interpreter<'_>| {
+        if graph.is_some() {
+            vm.invoke_instance(&roots[0], vec![])
+        } else {
+            vm.invoke(declaration, vec![])
+        }
+    };
+    let result = match session {
+        Some(session) => interpreter.with_code_session(session, operation),
+        None => operation(&mut interpreter),
+    };
+    *stats = InvocationStats {
+        bytecode_compilations: interpreter.bytecode_compilations(),
+        bytecode_invocations: interpreter.bytecode_invocations(),
     };
     result.map_err(|error| {
         let mut message = format!("comptime invocation of '{entry}' failed: {error}");

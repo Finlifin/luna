@@ -1,8 +1,9 @@
 # Comptime code sessions
 
-`comptime_interpretor::CodeSession` owns an `Arc<Package>` and the bounded
-bytecode, input-independent body and default-specialization caches for that
-exact immutable source allocation. `luna::memoization::Invocation` retains one
+`comptime_interpretor::CodeSession` owns an exact immutable source or IIR graph
+allocation and bounded bytecode, input-independent body and default-specialization
+caches. `CodeSession::new` accepts `Arc<nir::program::Package>`;
+`CodeSession::for_iir` accepts `Arc<iir::Package>`. `luna::memoization::Invocation` retains one
 session across evaluations, including calls whose result is not `Type` and
 therefore bypass result memoization entirely.
 
@@ -10,7 +11,7 @@ therefore bypass result memoization entirely.
 Only an identical source world can use them; equality of declaration IDs or
 structural similarity of packages is insufficient. Owning the allocation also
 prevents address reuse and makes `Arc::make_mut` produce a distinct snapshot.
-A different package or an IIR interpreter uses its own local caches. The scope
+A different source or graph allocation uses its own local caches. The scope
 returns completed code on success, error and unwind, but never publishes caches
 from a replacement interpreter belonging to another world.
 
@@ -51,8 +52,9 @@ Trait evidence is still rebuilt; source function, runtime-identity
 and effect declaration indexes are shared.
 This is not yet a
 shared VM world, persistent disk cache, or a suspended elaboration session.
-Input-dependent generated packages and IIR instance graphs need their own
-explicit immutable lifetime and identity before their caches can be retained.
+Input-dependent generated packages still need their own explicit immutable
+lifetime. Graph sessions now retain immutable instance bodies, but memoization's
+per-input graph preparation has not yet been migrated to a retained graph owner.
 A generic body whose parameter telescope depends on ordinary invocation values
 can still require a fresh per-call body after declaration specialization.
 
@@ -365,3 +367,34 @@ removal of a redundant inner condition; integration tests ran on the final code.
 No end-to-end speedup is claimed without measurement. Trait implementation
 selection tables and associated values still reconstruct per VM; this stage
 does not complete the unified VM or interned type representation migration.
+
+## Prepared direct invocations and graph code
+
+`luna::invocation::PreparedInvocation::new(Arc<Package>, entry, identity)` owns
+entry/default/dispatch preparation and its exact source or graph snapshot.
+Repeated `invoke(fuel)` calls reuse code with fresh execution state and contract
+checks. `last_stats()` exposes per-call compilation and execution counts; it is
+not a result-cache counter. The borrowed one-shot APIs remain available, including
+builder publishers and resource protocol selection. Prepared invocations currently
+expose the ordinary entry path without publisher or protocol configuration.
+
+IIR callables now use the bounded noncapturing instance-code cache. Retaining the
+cache alone was insufficient: cloning a graph body into a new closure on each VM
+created a fresh code identity. Reusing immutable, empty-environment graph closures
+keeps body identities live while arguments, locals and contracts remain per call.
+Key and preparation work is metered; graph validation still runs for every VM.
+This does not change the Type-only result memoization policy or finish VM-world
+reuse, graph preparation caching in memoization, or elaboration suspension.
+
+A broader builder regression run found 48 package-resolution failures before
+invocation: its builtin fixture uses `library/builtin/primitives.fl` as the package
+root while current meta text bindings import `builtin.compiler`. The remaining
+31 builder tests passed. This fixture integration issue is separate from the VM
+cache change and remains to be corrected; the full builder group is not green.
+
+Verification for the prepared/graph session stage (cwd `/home/fin/luna`):
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test prepared_invocations --test comptime_iir_bytecode`: passed; `/tmp/luna-tools-6p_971gq/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`: all 367 passed; `/tmp/luna-tools-i95i6eae/result.json`.
+- The earlier builder run had the resolution failures described above: `/tmp/luna-tools-w2o4gv0o/result.json`.
+- Formatting check and diff check passed; `/tmp/luna-tools-gca9gfk9/result.json`.

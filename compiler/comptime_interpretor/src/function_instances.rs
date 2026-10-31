@@ -42,7 +42,7 @@ struct Retained {
 impl Cache {
     // Callers preflight the query's term depth and compute its structural work.
     // Charge hashing/comparison before looking up the borrowed input slice.
-    fn lookup(
+    pub(super) fn lookup(
         &self,
         declaration: DeclarationId,
         arguments: &[Term],
@@ -57,7 +57,7 @@ impl Cache {
         Ok(entries.get(arguments).map(|entry| entry.code.clone()))
     }
 
-    fn insert(
+    pub(super) fn insert(
         &mut self,
         key: (DeclarationId, Arc<[Term]>),
         code: Arc<Closure>,

@@ -1,11 +1,11 @@
-//! Immutable-source code reuse across independently budgeted invocations.
+//! Immutable-world code reuse across independently budgeted invocations.
 use super::*;
 
-/// Owns the exact source snapshot whose compiled code may be reused. This is
+/// Owns the exact source or graph snapshot whose compiled code may be reused. This is
 /// separate from result memoization: no invocation values or proof outcomes are
-/// retained. A changed package requires a new session, even with identical IDs.
+/// retained. A changed world requires a new session, even with identical IDs.
 pub struct CodeSession {
-    package: Arc<Package>,
+    world: CodeWorld,
     indexes: Option<Arc<declaration_index::SourceIndexes>>,
     bytecode: bytecode::CodeCache,
     inputs: input_bodies::Cache,
@@ -13,10 +13,28 @@ pub struct CodeSession {
     contextual: contextual_code::Cache,
     instances: function_instances::Cache,
 }
+enum CodeWorld {
+    Source(Arc<Package>),
+    Graph(Arc<iir::Package>),
+}
 impl CodeSession {
     pub fn new(package: Arc<Package>) -> Self {
         Self {
-            package,
+            world: CodeWorld::Source(package),
+            indexes: None,
+            bytecode: Default::default(),
+            inputs: Default::default(),
+            defaults: Default::default(),
+            contextual: Default::default(),
+            instances: Default::default(),
+        }
+    }
+
+    /// Code reuse is bound to this exact validated IIR snapshot, not declaration
+    /// IDs. A fresh VM still validates the graph and owns all invocation state.
+    pub fn for_iir(graph: Arc<iir::Package>) -> Self {
+        Self {
+            world: CodeWorld::Graph(graph),
             indexes: None,
             bytecode: Default::default(),
             inputs: Default::default(),
@@ -27,10 +45,17 @@ impl CodeSession {
     }
 
     fn matches(&self, vm: &Interpreter<'_>) -> bool {
-        vm.graph.is_none()
-            && vm
-                .declaration_world
-                .is_some_and(|world| std::ptr::eq(world, self.package.as_ref()))
+        match &self.world {
+            CodeWorld::Source(package) => {
+                vm.graph.is_none()
+                    && vm
+                        .declaration_world
+                        .is_some_and(|world| std::ptr::eq(world, package.as_ref()))
+            }
+            CodeWorld::Graph(graph) => vm
+                .graph
+                .is_some_and(|world| std::ptr::eq(world, graph.as_ref())),
+        }
     }
 
     fn exchange(&mut self, vm: &mut Interpreter<'_>) {
@@ -63,7 +88,11 @@ impl<'program> Interpreter<'program> {
         session: &mut CodeSession,
         budget: &mut Budget,
     ) -> Result<Self, Error> {
-        if !std::ptr::eq(package, session.package.as_ref()) {
+        let CodeWorld::Source(source) = &session.world else {
+            return Self::for_comptime_in_budget(package, &[], budget);
+        };
+        let source = source.clone();
+        if !std::ptr::eq(package, source.as_ref()) {
             return Self::for_comptime_in_budget(package, &[], budget);
         }
         let reserved = *budget;
@@ -88,7 +117,7 @@ impl<'program> Interpreter<'program> {
                             (
                                 definition.declaration,
                                 generated_structs::StructDefinition::Source {
-                                    package: session.package.clone(),
+                                    package: source.clone(),
                                     index,
                                 },
                             )
@@ -104,7 +133,7 @@ impl<'program> Interpreter<'program> {
                             (
                                 definition.declaration,
                                 generated_enums::EnumDefinition::Source {
-                                    package: session.package.clone(),
+                                    package: source.clone(),
                                     index,
                                 },
                             )

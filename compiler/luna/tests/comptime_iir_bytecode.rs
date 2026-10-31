@@ -258,3 +258,55 @@ fn graph_deferred_inputs_preserve_effect_order_and_phase_checks() {
     };
     assert_eq!(error.kind, ErrorKind::InvalidCallPlan);
 }
+
+#[test]
+fn graph_sessions_reuse_code_only_for_the_exact_immutable_graph() {
+    use comptime_interpretor::CodeSession;
+    use std::sync::Arc;
+    let graph = Arc::new(graph(
+        "comptime fn run(value:bool)->bool {not value}",
+        "run",
+    ));
+    let mut session = CodeSession::for_iir(graph.clone());
+    for (index, value) in [true, false, true].into_iter().enumerate() {
+        let mut vm = Interpreter::from_iir_for_comptime(&graph, Budget::default()).unwrap();
+        assert_eq!(
+            vm.with_code_session(&mut session, |vm| vm
+                .invoke_instance(&graph.roots[0], vec![Value::Bool(value)]))
+                .unwrap(),
+            Value::Bool(!value)
+        );
+        assert!(vm.bytecode_invocations() > 0);
+        assert_eq!(vm.bytecode_compilations() == 0, index != 0);
+    }
+    let mut changed = graph.as_ref().clone();
+    let root = changed.roots[0].clone();
+    let function = &mut changed
+        .functions
+        .iter_mut()
+        .find(|f| f.key == root)
+        .unwrap()
+        .function;
+    function.body = Expr {
+        source: function.body.source,
+        ty: Term::Primitive(Primitive::Bool),
+        kind: K::Literal(Literal::Bool(true)),
+    };
+    let mut vm = Interpreter::from_iir_for_comptime(&changed, Budget::default()).unwrap();
+    assert_eq!(
+        vm.with_code_session(&mut session, |vm| vm
+            .invoke_instance(&root, vec![Value::Bool(true)]))
+            .unwrap(),
+        Value::Bool(true)
+    );
+    assert!(vm.bytecode_compilations() > 0);
+    let mut original = Interpreter::from_iir_for_comptime(&graph, Budget::default()).unwrap();
+    assert_eq!(
+        original
+            .with_code_session(&mut session, |vm| vm
+                .invoke_instance(&root, vec![Value::Bool(true)]))
+            .unwrap(),
+        Value::Bool(false)
+    );
+    assert_eq!(original.bytecode_compilations(), 0);
+}
