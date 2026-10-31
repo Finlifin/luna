@@ -9092,3 +9092,34 @@ Validation in `/home/fin/luna` (all exit 0):
   20 passed; `/tmp/luna-tools-22upghab/result.json`.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
   passed; `/tmp/luna-tools-kfzkpysw/result.json`.
+
+
+## Shared logical types in IIR template storage
+
+TemplateStorage now retains its completed logical signature as TypeRef, with
+an empty telescope and substitution enforced by private construction. Template
+storage materialization uses one TypeInterner across its tables. Equal logical
+signatures share cores, while selected target identities, table order and tag
+numbering remain independent. Existing logical-type consumers borrow the core
+body without materializing another Term. Display exposes the type-ref.
+
+Declaration input checks, runtime phase restrictions, signature matching and
+completion checks still precede publication. A bounded structural preflight
+covers recursive core validation and hashing. Failed target admission or fuel
+exhaustion publishes no signature core. Tests exercise every fuel boundary up
+to the first successful construction, sharing across reversed tag domains and
+clones, and a source program capturing two distinct templates of the same type.
+
+Validation in `/home/fin/luna` (exit 0):
+
+- `python3 -B development/check.py --timeout 900 -- test -p iir --lib template_storage`:
+  5 passed; final run `/tmp/luna-tools-x4171ea6/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test function_type_dependencies`:
+  38 passed; `/tmp/luna-tools-ulfjx31g/result.json`. This includes source-level
+  template capture, selected method contracts, entry snapshots and recovery.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed; `/tmp/luna-tools-0h4lpy2j/result.json`.
+
+The template-storage pool is local to this materialization phase, separate from
+retained callable evidence. General function/expression annotations still use
+Term; runtime-dependent type environments remain a separate unfinished path.

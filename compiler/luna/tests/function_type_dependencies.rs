@@ -1470,3 +1470,41 @@ fn unsafe_callable_type_values_and_environment_qualification_keep_identity() {
     assert_eq!(environment, &[Term::Primitive(Primitive::Bool)]);
     assert!(signature.is_unsafe_callable());
 }
+
+#[test]
+fn materialized_template_tables_share_logical_cores_without_sharing_targets() {
+    let package = support::compile(
+        "typealias Type=.Type'builtin;
+         typealias Callback=fn(comptime T:Type,value:T)->T;
+         fn first(comptime T:Type,value:T)->T {value}
+         fn second(comptime T:Type,value:T)->T {value}
+         fn run()->bool {
+             let a:Callback=first;
+             let b:Callback=second;
+             let invoke=||a(bool,b(bool,true));
+             invoke()
+         }",
+    );
+    let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
+    let table = |name| {
+        let id = support::id(&package, name);
+        graph
+            .templates
+            .iter()
+            .find(|table| table.targets().iter().any(|key| key.declaration == id))
+            .unwrap()
+    };
+    let first = table("first");
+    let second = table("second");
+    assert_ne!(first.targets(), second.targets());
+    assert!(std::sync::Arc::ptr_eq(
+        first.logical_type_reference().core(),
+        second.logical_type_reference().core()
+    ));
+    assert_ne!(first.decode(0).unwrap(), second.decode(0).unwrap());
+    graph.validate(&mut 100_000).unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}

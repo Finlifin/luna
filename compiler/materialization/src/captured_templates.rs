@@ -29,6 +29,7 @@ pub(super) fn storage(
     fuel: &mut usize,
 ) -> Result<Vec<iir::template_storage::TemplateStorage>, String> {
     let mut tables: Vec<iir::template_storage::TemplateStorage> = Vec::new();
+    let mut type_cores = nir::TypeInterner::default();
     for function in functions {
         iir::visit::expressions(&function.function, fuel, |expr, fuel| {
             if !staged(&expr.ty) {
@@ -110,10 +111,11 @@ pub(super) fn storage(
                     return Ok(());
                 }
             }
-            tables.push(iir::template_storage::TemplateStorage::from_package(
+            tables.push(iir::template_storage::TemplateStorage::from_package_in(
                 expr.ty.clone(),
                 vec![key],
                 package,
+                &mut type_cores,
                 fuel,
             )?);
             Ok(())

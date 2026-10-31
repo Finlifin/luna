@@ -7,7 +7,7 @@ use std::fmt;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TemplateStorage {
-    logical_type: Term,
+    logical_type: nir::TypeRef,
     targets: Vec<InstanceKey>,
 }
 
@@ -19,6 +19,24 @@ impl TemplateStorage {
         logical_type: Term,
         targets: Vec<InstanceKey>,
         package: &nir::program::Package,
+        fuel: &mut usize,
+    ) -> Result<Self, String> {
+        Self::from_package_in(
+            logical_type,
+            targets,
+            package,
+            &mut Default::default(),
+            fuel,
+        )
+    }
+
+    /// Share completed logical signatures across independently numbered tables.
+    /// Interning never substitutes for declaration and target admission.
+    pub fn from_package_in(
+        logical_type: Term,
+        targets: Vec<InstanceKey>,
+        package: &nir::program::Package,
+        interner: &mut nir::TypeInterner,
         fuel: &mut usize,
     ) -> Result<Self, String> {
         let domains = package.declaration_parameter_domains(fuel)?;
@@ -86,7 +104,7 @@ impl TemplateStorage {
                 .map_err(|e| e.to_string())?;
             selected.push((key, signature));
         }
-        Self::new(logical_type, selected, fuel)
+        Self::new_in(logical_type, selected, interner, fuel)
     }
 
     /// Targets must already have selected declaration inputs and matching
@@ -94,9 +112,19 @@ impl TemplateStorage {
     /// Input order fixes tag numbering and is retained by Display and lookup.
     /// This checks representation consistency; the materializer must establish
     /// each target's declaration/signature evidence from its source package.
+    #[cfg(test)]
     fn new(
         logical_type: Term,
         targets: Vec<(InstanceKey, Term)>,
+        fuel: &mut usize,
+    ) -> Result<Self, String> {
+        Self::new_in(logical_type, targets, &mut Default::default(), fuel)
+    }
+
+    fn new_in(
+        logical_type: Term,
+        targets: Vec<(InstanceKey, Term)>,
+        interner: &mut nir::TypeInterner,
         fuel: &mut usize,
     ) -> Result<Self, String> {
         let Term::Function { parameters, .. } = logical_type.callable_signature() else {
@@ -143,6 +171,13 @@ impl TemplateStorage {
             }
             selected.push(key);
         }
+        // Bound recursive core validation and hashing before publishing anything.
+        nir::copy_budget::charge_type_substitution(&logical_type, &[], &[], fuel)
+            .map_err(|error| format!("template signature budget: {error:?}"))?;
+        let core = interner
+            .intern(vec![], logical_type)
+            .map_err(|e| e.to_string())?;
+        let logical_type = nir::TypeRef::bind(core, vec![]).map_err(|e| e.to_string())?;
         Ok(Self {
             logical_type,
             targets: selected,
@@ -150,8 +185,14 @@ impl TemplateStorage {
     }
 
     pub fn logical_type(&self) -> &Term {
+        // Private construction guarantees an empty substitution and telescope.
+        self.logical_type.core().body()
+    }
+
+    pub fn logical_type_reference(&self) -> &nir::TypeRef {
         &self.logical_type
     }
+
     pub fn targets(&self) -> &[InstanceKey] {
         &self.targets
     }
@@ -228,18 +269,31 @@ mod tests {
     #[test]
     fn tags_preserve_target_identity_and_require_translation_between_domains() {
         let ty = signature();
-        let table = TemplateStorage::new(
+        let mut cores = nir::TypeInterner::default();
+        let table = TemplateStorage::new_in(
             ty.clone(),
             vec![(key(1), ty.clone()), (key(2), ty.clone())],
+            &mut cores,
             &mut 10_000,
         )
         .unwrap();
-        let other = TemplateStorage::new(
+        let other = TemplateStorage::new_in(
             ty.clone(),
             vec![(key(2), ty.clone()), (key(1), ty.clone())],
+            &mut cores,
             &mut 10_000,
         )
         .unwrap();
+        assert_eq!(cores.len(), 1);
+        assert!(std::sync::Arc::ptr_eq(
+            table.logical_type_reference().core(),
+            other.logical_type_reference().core()
+        ));
+        let cloned = table.clone();
+        assert!(std::sync::Arc::ptr_eq(
+            table.logical_type_reference().core(),
+            cloned.logical_type_reference().core()
+        ));
         let saved = table.encode(&key(1), &mut 100).unwrap();
         let current = table.encode(&key(2), &mut 100).unwrap();
         assert_eq!(table.decode(saved).unwrap(), &key(1));
@@ -257,7 +311,7 @@ mod tests {
         assert_eq!(table.targets(), &[key(1), key(2)]);
         let dump = table.to_string();
         assert!(
-            dump.starts_with("(template-storage (logical-type (function "),
+            dump.starts_with("(template-storage (logical-type (type-ref "),
             "{dump}"
         );
         assert!(dump.contains("(representation u64)"));
@@ -397,6 +451,39 @@ mod tests {
             TemplateStorage::from_package(signature(), selected.to_vec(), &package, &mut 10000)
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn rejected_targets_and_budgets_do_not_publish_signature_cores() {
+        let mut cores = nir::TypeInterner::default();
+        let ty = signature();
+        assert!(
+            TemplateStorage::new_in(
+                ty.clone(),
+                vec![(key(1), Term::Primitive(Primitive::Bool))],
+                &mut cores,
+                &mut 10_000
+            )
+            .is_err()
+        );
+        assert!(cores.is_empty());
+        // Exercise every budget boundary before the first successful publication.
+        let mut succeeded = false;
+        for mut budget in 0..1000 {
+            let result = TemplateStorage::new_in(
+                ty.clone(),
+                vec![(key(1), ty.clone())],
+                &mut cores,
+                &mut budget,
+            );
+            if result.is_ok() {
+                succeeded = true;
+                assert_eq!(cores.len(), 1);
+                break;
+            }
+            assert!(cores.is_empty());
+        }
+        assert!(succeeded);
     }
 
     #[test]
