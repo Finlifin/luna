@@ -279,6 +279,18 @@ impl Interpreter<'_> {
         }
     }
     #[inline(never)]
+    pub(super) fn prepare_snapshot(
+        &self,
+        input: &Term,
+        output: &Term,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        if input != output {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        }
+        Ok(())
+    }
+
     pub(super) fn eval_snapshot(
         &mut self,
         expr: &Expr,
@@ -286,9 +298,7 @@ impl Interpreter<'_> {
     ) -> Result<Flow, Error> {
         match &expr.kind {
             K::Snapshot(value) => {
-                if value.ty != expr.ty {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                }
+                self.prepare_snapshot(&value.ty, &expr.ty, expr.source)?;
                 self.eval(value, environment)
             }
             _ => unreachable!("expression dispatcher selected an incompatible observation"),

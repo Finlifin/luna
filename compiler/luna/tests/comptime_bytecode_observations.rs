@@ -89,3 +89,40 @@ fn text_and_names_use_bytecode_with_utf8_byte_boundaries() {
     assert_eq!(tree.bytecode_invocations(), 0);
     assert_eq!(tree.bytecode_staged_inputs(), 0);
 }
+
+#[test]
+fn retained_snapshot_wrappers_do_not_force_function_tree_fallback() {
+    let mut package = support::compile(
+        "comptime fn inner(value:bool)->bool {not value}
+         comptime fn run(value:bool)->bool {inner(value)}",
+    );
+    // Exercise the retained NIR wrapper directly, independently of source
+    // normalization deciding whether a snapshot marker can be removed.
+    for function in &mut package.functions {
+        let body = function.body.clone();
+        function.body = nir::program::Expr {
+            source: body.source,
+            ty: body.ty.clone(),
+            kind: nir::program::ExprKind::Snapshot(Box::new(body)),
+        };
+    }
+    for compiled in [false, true] {
+        let mut vm = if compiled {
+            Interpreter::for_comptime(&package, Budget::default()).unwrap()
+        } else {
+            Interpreter::for_comptime_tree(&package, Budget::default()).unwrap()
+        };
+        for value in [true, false] {
+            let before = vm.bytecode_invocations();
+            assert_eq!(
+                vm.invoke(support::id(&package, "run"), vec![Value::Bool(value)])
+                    .unwrap(),
+                Value::Bool(!value)
+            );
+            assert_eq!(
+                vm.bytecode_invocations() - before,
+                if compiled { 2 } else { 0 }
+            );
+        }
+    }
+}

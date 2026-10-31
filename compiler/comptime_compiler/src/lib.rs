@@ -266,6 +266,10 @@ pub enum Op {
         receiver_source: SourceRange,
         selectors: Vec<leaf_inputs::Selector>,
     },
+    PrepareSnapshot {
+        input: Term,
+        output: Term,
+    },
     PrepareBitVecType {
         input: Term,
         output: Term,
@@ -843,6 +847,9 @@ impl fmt::Display for Program {
                 )?,
                 Op::FinishNormalType { destination } => {
                     write!(f, "(finish-normal-type %{destination})")?
+                }
+                Op::PrepareSnapshot { input, output } => {
+                    write!(f, "(prepare-snapshot (input {input}) (output {output}))")?
                 }
                 Op::PrepareBitVecType { input, output } => {
                     write!(f, "(prepare-bitvec-type (input {input}) (output {output}))")?
@@ -1881,6 +1888,16 @@ fn compile_root<'a>(
                         for (field, slot) in fields.iter().zip(slots).rev() {
                             work.push(Work::Expression(field, slot));
                         }
+                    }
+                    K::Snapshot(value) => {
+                        work.push(Work::Expression(value, dst));
+                        emit(
+                            &mut work,
+                            Op::PrepareSnapshot {
+                                input: copy_term(&value.ty, fuel, source)?,
+                                output: copy_term(&expr.ty, fuel, source)?,
+                            },
+                        );
                     }
                     K::Tuple(fields) => {
                         *fuel = fuel

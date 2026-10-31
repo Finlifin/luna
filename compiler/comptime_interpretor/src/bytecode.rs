@@ -1671,6 +1671,9 @@ impl<'a> Interpreter<'a> {
                         source,
                     )?);
                 }
+                Op::PrepareSnapshot { input, output } => {
+                    self.prepare_snapshot(input, output, source)?;
+                }
                 Op::PrepareBitVecType { input, output } => {
                     self.prepare_bitvec_type(input, output, source)?
                 }
@@ -3962,3 +3965,7 @@ mod observation_tests;
 #[cfg(test)]
 #[path = "bytecode_patterns.rs"]
 mod pattern_tests;
+
+#[cfg(test)]
+#[path = "bytecode_snapshots.rs"]
+mod snapshots;

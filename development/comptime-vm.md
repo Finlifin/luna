@@ -8211,3 +8211,36 @@ Validation in `/home/fin/luna`, all exit 0:
   25 tests; `/tmp/luna-tools-6vdgjw_v/result.json`.
 - Formatting via command.py: `/tmp/luna-tools-073pr2bw/result.json`;
   `git diff --check` passed. No full suite or timing benchmark was run.
+
+## Retained snapshot wrappers in bytecode
+
+`Snapshot` now lowers to a typed preflight instruction followed by its operand's
+ordinary instructions in the destination register. The instruction owns bounded
+input/output type descriptions and prints `(prepare-snapshot ...)`; it does not
+carry or evaluate a source expression tree. Tree and bytecode execution share
+the exact-type preflight check before evaluating the operand. Value capture
+continues to use ordinary operand reads; this marker does not add a second copy
+or replace the separate function-entry machinery for old-state contracts.
+
+Tests cover mismatched types before operand side effects, explicit return
+propagation, and snapshots of storage remaining independent of later writes.
+An elaborated two-function package is wrapped in retained NIR Snapshot nodes;
+both calls must enter bytecode and agree with reference execution. This avoids
+depending on source normalization retaining the marker.
+
+Validation from `/home/fin/luna`, all exit 0:
+
+```sh
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+python3 -B development/check.py --timeout 900 -- test -p comptime_compiler
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib
+python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_observations --test comptime_iir_bytecode --test comptime_memory
+```
+
+Reports: `/tmp/luna-tools-n2mvslgr/result.json` (formatting),
+`/tmp/luna-tools-m7n461hf/result.json` (28 compiler tests),
+`/tmp/luna-tools-1hcgeaus/result.json` (341 interpreter tests), and
+`/tmp/luna-tools-yvlg4_xn/result.json` (observation, IIR and memory integration).
+`git diff --check` passed. Other unsupported operations, active effect handlers
+and cleanup scheduling can still require tree execution; this is not full VM
+unification or a new snapshot language rule.
