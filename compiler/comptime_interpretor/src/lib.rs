@@ -813,6 +813,7 @@ macro_rules! value {
 }
 
 mod code_session;
+mod contextual_code;
 mod declaration_index;
 mod layout_catalog;
 mod list_values;
@@ -856,6 +857,7 @@ pub struct Interpreter<'a> {
     borrowed_code_cache: bytecode::BorrowedCodeCache<'a>,
     input_body_cache: input_bodies::Cache,
     default_code_cache: default_code::Cache,
+    contextual_code_cache: contextual_code::Cache,
     prepared_instance_cache: function_instances::Cache,
     enum_builder:
         Option<&'a dyn Fn(&EnumBuildRequest, &mut u64) -> Result<PreparedEnumBuild<'a>, Error>>,
@@ -1804,6 +1806,7 @@ impl<'a> Interpreter<'a> {
             borrowed_code_cache: Default::default(),
             input_body_cache: Default::default(),
             default_code_cache: Default::default(),
+            contextual_code_cache: Default::default(),
             prepared_instance_cache: Default::default(),
             declaration_world: Some(package),
             effect_declarations,

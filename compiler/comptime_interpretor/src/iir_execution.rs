@@ -154,6 +154,7 @@ impl<'a> Interpreter<'a> {
             borrowed_code_cache: Default::default(),
             input_body_cache: Default::default(),
             default_code_cache: Default::default(),
+            contextual_code_cache: Default::default(),
             prepared_instance_cache: Default::default(),
             declaration_world: None,
             // IIR retains occurrence environments, not the source effect world.

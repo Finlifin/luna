@@ -8989,3 +8989,39 @@ Validation in `/home/fin/luna`:
 
 This removes a remaining IIR-specific fallback gate. It does not claim an
 independent IIR bytecode compiler, nor support for active cleanup/effect frames.
+
+
+### Reuse compiled contextual and staged input fragments
+
+Input fragment compilation now uses a bounded cache keyed by the complete
+contextual input description and optional expected domain. Staged compilation
+and known-domain compilation are distinct entries. Source positions are only a
+lookup filter: structural input equality and the domain both participate. Key
+inspection, comparisons, and owned key copies consume the invocation budget;
+failed compilation or cache preparation does not publish an entry. Entries are
+limited to 64 and a combined preparation-work weight of 100,000.
+
+Entries contain only immutable `Program` and shared `Shape` metadata (or a
+completed unsupported-compilation decision). Every execution constructs a fresh
+frame and repeats value/domain admission and operand effects. This is code reuse,
+not invocation result memoization; the Type-output result-cache policy is
+unchanged. `CodeSession` transfers this cache only within its exact immutable
+source snapshot. IIR interpreters also reuse input code within their own VM.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  362 passed before adding the session regression;
+  `/tmp/luna-tools-8w3pehgb/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib contextual_code`:
+  3 passed, including the added cross-VM session test;
+  `/tmp/luna-tools-3ts7uos3/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_iir_bytecode --test comptime_bytecode_types --test nominal_staging --test comptime_clause_inputs`:
+  78 passed; `/tmp/luna-tools-y2wn0o65/result.json`, exit 0.
+
+Checks cover cloned inputs, same-position different contents, changed domains,
+staged versus contextual identity, failed-budget retry, fresh environments in
+new VMs, source-world isolation, and stable compilation counters after IIR
+warmup while execution counters continue increasing. No wall-clock speedup is
+claimed. Structural key comparison still has a bounded inspection cost; this
+is not persistent module-level bytecode or the end of NIR specialization.

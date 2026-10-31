@@ -174,7 +174,16 @@ fn concrete_graph_contextual_inputs_execute_in_bytecode() {
             reference.invoke_instance(&graph.roots[0], inputs).unwrap()
         );
     }
-    assert!(compiled.bytecode_contextual_inputs() > 0);
+    let compilations = compiled.bytecode_compilations();
+    let executions = compiled.bytecode_contextual_inputs();
+    compiled
+        .invoke_instance(
+            &graph.roots[0],
+            vec![Value::Type(Term::Primitive(Primitive::U8))],
+        )
+        .unwrap();
+    assert_eq!(compiled.bytecode_compilations(), compilations);
+    assert!(compiled.bytecode_contextual_inputs() > executions);
     assert_eq!(reference.bytecode_contextual_inputs(), 0);
 }
 

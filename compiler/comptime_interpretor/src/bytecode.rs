@@ -314,7 +314,7 @@ pub(super) enum InputFinish {
         source: SourceRange,
     },
     Staged {
-        shape: comptime_compiler::normal_types::Shape,
+        shape: Arc<comptime_compiler::normal_types::Shape>,
         depth: usize,
         source: SourceRange,
     },
@@ -323,7 +323,7 @@ pub(super) struct InputResult {
     pub flow: Result<Flow, Error>,
     pub environment: Environment,
     pub staged: Option<(
-        comptime_compiler::normal_types::Shape,
+        Arc<comptime_compiler::normal_types::Shape>,
         normal_inputs::StagedNormalInput,
     )>,
 }
@@ -641,7 +641,7 @@ impl<'a> Interpreter<'a> {
         self.compile_bytecode(|fuel| comptime_compiler::compile(body, fuel))
     }
 
-    fn compile_bytecode<T>(
+    pub(super) fn compile_bytecode<T>(
         &mut self,
         compile: impl FnOnce(&mut usize) -> Result<T, comptime_compiler::Error>,
     ) -> Result<Option<T>, Error> {
@@ -757,12 +757,11 @@ impl<'a> Interpreter<'a> {
         if !self.bytecode_invocation_available() || depth != 0 {
             return Ok(None);
         }
-        let Some((program, shape)) =
-            self.compile_bytecode(|fuel| comptime_compiler::compile_staged_input(input, fuel))?
-        else {
+        let Some(compiled) = self.contextual_input_code(input, None)? else {
             return Ok(None);
         };
-        let code = self.start_frame(&Arc::new(program), environment)?;
+        let code = self.start_frame(&compiled.program, environment)?;
+        let shape = compiled.shape.expect("staged input shape");
         self.bytecode_staged_inputs += 1;
         Ok(Some(InputFrame {
             code,
@@ -819,13 +818,10 @@ impl<'a> Interpreter<'a> {
         if !self.bytecode_invocation_available() {
             return Ok(None);
         }
-        let Some(program) = self.compile_bytecode(|fuel| {
-            comptime_compiler::compile_contextual_input(input, expected, fuel)
-        })?
-        else {
+        let Some(compiled) = self.contextual_input_code(input, Some(expected))? else {
             return Ok(None);
         };
-        let code = self.start_frame(&Arc::new(program), environment)?;
+        let code = self.start_frame(&compiled.program, environment)?;
         self.bytecode_contextual_inputs += 1;
         Ok(Some(InputFrame {
             code,

@@ -10,6 +10,7 @@ pub struct CodeSession {
     bytecode: bytecode::CodeCache,
     inputs: input_bodies::Cache,
     defaults: default_code::Cache,
+    contextual: contextual_code::Cache,
     instances: function_instances::Cache,
 }
 impl CodeSession {
@@ -20,6 +21,7 @@ impl CodeSession {
             bytecode: Default::default(),
             inputs: Default::default(),
             defaults: Default::default(),
+            contextual: Default::default(),
             instances: Default::default(),
         }
     }
@@ -35,6 +37,7 @@ impl CodeSession {
         std::mem::swap(&mut self.bytecode, &mut vm.bytecode_cache);
         std::mem::swap(&mut self.inputs, &mut vm.input_body_cache);
         std::mem::swap(&mut self.defaults, &mut vm.default_code_cache);
+        std::mem::swap(&mut self.contextual, &mut vm.contextual_code_cache);
         std::mem::swap(&mut self.instances, &mut vm.prepared_instance_cache);
     }
 }
