@@ -119,7 +119,25 @@ impl Search<'_> {
             return Err(error);
         }
         let checkpoint = state.classes.checkpoint();
-        let result = self.theory_with_classes(assignment, &mut state.classes);
+        // Building roots, dependency vectors and a first dirty frontier costs
+        // at least four linear passes. Small catalogs are cheaper to scan.
+        let count = self.terms.nodes.len();
+        let pair_count = count.saturating_mul(count.saturating_sub(1)) / 2;
+        let baseline = if state.layers.is_empty() || pair_count <= count.saturating_mul(4) {
+            Ok(None)
+        } else if let Some(remaining) = self.steps.checked_sub(self.terms.nodes.len()) {
+            self.steps = remaining;
+            Ok(Some(
+                (0..self.terms.nodes.len())
+                    .map(|id| state.classes.root(id))
+                    .collect(),
+            ))
+        } else {
+            Err(UnknownReason::BudgetExhausted)
+        };
+        let result = baseline.and_then(|baseline| {
+            self.theory_with_classes(assignment, &mut state.classes, baseline)
+        });
         let result = match result {
             Ok(Some(evidence)) => {
                 let cost = assignment
@@ -194,12 +212,15 @@ mod tests {
         };
         let x = rigid(0);
         let y = rigid(1);
+        let nested = |mut term| {
+            for _ in 0..6 {
+                term = Term::Optional(Box::new(term));
+            }
+            term
+        };
         let formula = Formula::And(vec![
             Formula::equal(x.clone(), y.clone()),
-            Formula::equal(
-                Term::Optional(Box::new(x.clone())),
-                Term::Optional(Box::new(y.clone())),
-            ),
+            Formula::equal(nested(x.clone()), nested(y.clone())),
             Formula::equal(y, Term::Primitive(Primitive::Bool)),
             Formula::equal(x, Term::Primitive(Primitive::U8)),
         ]);

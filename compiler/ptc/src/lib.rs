@@ -6,6 +6,7 @@
 //! congruence. Abstract satisfiability is never itself a source witness.
 mod boolean;
 mod conflicts;
+mod congruence;
 use conflicts::Conflict;
 mod effects;
 mod error_results;
@@ -1381,7 +1382,7 @@ impl Search<'_> {
         assignment: &[Option<bool>],
     ) -> Result<Option<TheoryModel>, UnknownReason> {
         let mut classes = Classes::new(self.terms.nodes.len());
-        self.theory_with_classes(assignment, &mut classes)
+        self.theory_with_classes(assignment, &mut classes, None)
             .map(|evidence| {
                 evidence.map(|evidence| TheoryModel {
                     classes,
@@ -1394,7 +1395,22 @@ impl Search<'_> {
         &mut self,
         assignment: &[Option<bool>],
         classes: &mut Classes,
+        baseline: Option<Vec<usize>>,
     ) -> Result<Option<TheoryEvidence>, UnknownReason> {
+        let mut agenda = if let Some(roots) = baseline {
+            let mut has_rows = false;
+            for term in &self.terms.nodes {
+                self.tick().map_err(|()| UnknownReason::BudgetExhausted)?;
+                has_rows |= matches!(term, Term::Computation { .. } | Term::ErrorResult { .. });
+            }
+            if has_rows {
+                None
+            } else {
+                Some(congruence::Agenda::new(self.terms, roots, &mut self.steps)?)
+            }
+        } else {
+            None
+        };
         for (atom, value) in self.atoms.iter().zip(assignment) {
             if let Atom::TypeEqual(atom) = atom {
                 if *value == Some(true) {
@@ -1402,100 +1418,108 @@ impl Search<'_> {
                 }
             }
         }
+        if let Some(agenda) = &mut agenda {
+            agenda.refresh(classes, &mut self.steps)?;
+        }
         loop {
             let mut changed = false;
-            for a in 0..self.terms.nodes.len() {
-                for b in 0..a {
-                    self.tick().map_err(|()| UnknownReason::BudgetExhausted)?;
-                    let (ta, tb) = (&self.terms.nodes[a], &self.terms.nodes[b]);
-                    if classes.root(a) == classes.root(b) {
-                        // A trusted Tuple descriptor grants classification,
-                        // not unfolding, injectivity or arbitrary head disjointness.
-                        if (self.context.is_tuple_type(ta)
-                            && self.context.evaluate_kind(TypeKind::Tuple, tb) == Some(false))
-                            || (self.context.is_tuple_type(tb)
-                                && self.context.evaluate_kind(TypeKind::Tuple, ta) == Some(false))
-                        {
-                            return Ok(None);
-                        }
-                        // The compiler-bound List family is distinct from
-                        // established structural constructors. This says nothing
-                        // about arbitrary opaque normal-form heads or List input
-                        // injectivity, and never unfolds a factory body.
-                        let non_list = |term: &Term| {
-                            constructor(term).is_some()
-                                || self.context.is_tuple_type(term)
-                                || matches!(term, Term::Record(_))
-                        };
-                        if (self.context.is_list_type(ta) && non_list(tb))
-                            || (self.context.is_list_type(tb) && non_list(ta))
-                        {
-                            return Ok(None);
-                        }
-                        if self.error_result_distinct(a, b, &classes, assignment)? {
-                            return Ok(None);
-                        }
-                        if self.computation_distinct(a, b, &classes, assignment)? {
-                            return Ok(None);
-                        }
-                        // A named structural product is distinct from the
-                        // established positional/nominal constructor families.
-                        // Do not decide record permutations or decompose them.
-                        if (matches!(ta, Term::Record(_)) && constructor(tb).is_some())
-                            || (matches!(tb, Term::Record(_)) && constructor(ta).is_some())
-                        {
-                            return Ok(None);
-                        }
-                        if let (Some(ha), Some(hb)) = (constructor(ta), constructor(tb)) {
-                            if ha != hb {
-                                return Ok(None);
-                            }
-                            // Nominal argument injectivity needs its own declaration contract.
-                            if !matches!(ha, Head::Nominal(..))
-                                || matches!(ha, Head::Nominal(head, _) if self.context.is_nominal_constructor(head))
-                            {
-                                // Closed scalar indices are part of a nominal
-                                // type's identity, not program-state predicates.
-                                if let (
-                                    Term::Nominal {
-                                        arguments: left, ..
-                                    },
-                                    Term::Nominal {
-                                        arguments: right, ..
-                                    },
-                                ) = (ta, tb)
-                                {
-                                    if left.iter().zip(right).any(|(left, right)| {
-                                        left.scalar_index_domain().is_some()
-                                            && right.scalar_index_domain().is_some()
-                                            && left != right
-                                    }) {
-                                        return Ok(None);
-                                    }
-                                }
-                                for (&ca, &cb) in
-                                    self.terms.children[a].iter().zip(&self.terms.children[b])
-                                {
-                                    changed |= classes.merge(ca, cb);
-                                }
-                            }
-                        }
-                    } else if same_congruent_head(ta, tb, self.context)
-                        && self.terms.children[a]
-                            .iter()
-                            .zip(&self.terms.children[b])
-                            .all(|(&a, &b)| classes.root(a) == classes.root(b))
+            let pairs = agenda.as_ref().map_or_else(
+                || congruence::Pairs::all(self.terms.nodes.len()),
+                |agenda| agenda.pairs(),
+            );
+            for (a, b) in pairs {
+                self.tick().map_err(|()| UnknownReason::BudgetExhausted)?;
+                let (ta, tb) = (&self.terms.nodes[a], &self.terms.nodes[b]);
+                if classes.root(a) == classes.root(b) {
+                    // A trusted Tuple descriptor grants classification,
+                    // not unfolding, injectivity or arbitrary head disjointness.
+                    if (self.context.is_tuple_type(ta)
+                        && self.context.evaluate_kind(TypeKind::Tuple, tb) == Some(false))
+                        || (self.context.is_tuple_type(tb)
+                            && self.context.evaluate_kind(TypeKind::Tuple, ta) == Some(false))
                     {
-                        changed |= classes.merge(a, b);
-                    } else if self.error_result_congruent(a, b, &classes)? {
-                        changed |= classes.merge(a, b);
-                    } else if self.computation_congruent(a, b, &classes, assignment)? {
-                        changed |= classes.merge(a, b);
+                        return Ok(None);
                     }
+                    // The compiler-bound List family is distinct from
+                    // established structural constructors. This says nothing
+                    // about arbitrary opaque normal-form heads or List input
+                    // injectivity, and never unfolds a factory body.
+                    let non_list = |term: &Term| {
+                        constructor(term).is_some()
+                            || self.context.is_tuple_type(term)
+                            || matches!(term, Term::Record(_))
+                    };
+                    if (self.context.is_list_type(ta) && non_list(tb))
+                        || (self.context.is_list_type(tb) && non_list(ta))
+                    {
+                        return Ok(None);
+                    }
+                    if self.error_result_distinct(a, b, &classes, assignment)? {
+                        return Ok(None);
+                    }
+                    if self.computation_distinct(a, b, &classes, assignment)? {
+                        return Ok(None);
+                    }
+                    // A named structural product is distinct from the
+                    // established positional/nominal constructor families.
+                    // Do not decide record permutations or decompose them.
+                    if (matches!(ta, Term::Record(_)) && constructor(tb).is_some())
+                        || (matches!(tb, Term::Record(_)) && constructor(ta).is_some())
+                    {
+                        return Ok(None);
+                    }
+                    if let (Some(ha), Some(hb)) = (constructor(ta), constructor(tb)) {
+                        if ha != hb {
+                            return Ok(None);
+                        }
+                        // Nominal argument injectivity needs its own declaration contract.
+                        if !matches!(ha, Head::Nominal(..))
+                            || matches!(ha, Head::Nominal(head, _) if self.context.is_nominal_constructor(head))
+                        {
+                            // Closed scalar indices are part of a nominal
+                            // type's identity, not program-state predicates.
+                            if let (
+                                Term::Nominal {
+                                    arguments: left, ..
+                                },
+                                Term::Nominal {
+                                    arguments: right, ..
+                                },
+                            ) = (ta, tb)
+                            {
+                                if left.iter().zip(right).any(|(left, right)| {
+                                    left.scalar_index_domain().is_some()
+                                        && right.scalar_index_domain().is_some()
+                                        && left != right
+                                }) {
+                                    return Ok(None);
+                                }
+                            }
+                            for (&ca, &cb) in
+                                self.terms.children[a].iter().zip(&self.terms.children[b])
+                            {
+                                changed |= classes.merge(ca, cb);
+                            }
+                        }
+                    }
+                } else if same_congruent_head(ta, tb, self.context)
+                    && self.terms.children[a]
+                        .iter()
+                        .zip(&self.terms.children[b])
+                        .all(|(&a, &b)| classes.root(a) == classes.root(b))
+                {
+                    changed |= classes.merge(a, b);
+                } else if self.error_result_congruent(a, b, &classes)? {
+                    changed |= classes.merge(a, b);
+                } else if self.computation_congruent(a, b, &classes, assignment)? {
+                    changed |= classes.merge(a, b);
                 }
             }
             if !changed {
                 break;
+            }
+            if let Some(agenda) = &mut agenda {
+                agenda.refresh(classes, &mut self.steps)?;
             }
         }
         for (atom, value) in self.atoms.iter().zip(assignment) {
