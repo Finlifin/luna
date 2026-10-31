@@ -2,7 +2,7 @@
 //! never theory atoms or source-level inference variables.
 mod explanation;
 mod propagation;
-pub(crate) use propagation::Propagation;
+pub(crate) use propagation::{Propagation, Session};
 
 use super::{Circuit, Node, charge};
 use std::fmt;

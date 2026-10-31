@@ -14,6 +14,7 @@ pub(super) struct Propagation {
 pub(super) struct Circuit {
     nodes: Vec<Node>,
     clauses: Option<cnf::Cnf>,
+    propagation: Option<cnf::Session>,
 }
 enum Node {
     Constant(bool),
@@ -78,6 +79,7 @@ impl Circuit {
         Ok(Self {
             nodes,
             clauses: None,
+            propagation: None,
         })
     }
 
@@ -86,6 +88,26 @@ impl Circuit {
             self.clauses = Some(cnf::Cnf::compile(self, atoms, fuel)?);
         }
         Ok(self.clauses.as_ref().unwrap())
+    }
+
+    pub(crate) fn propagate_clauses(
+        &mut self,
+        assignment: &[Option<bool>],
+        fuel: &mut usize,
+    ) -> Result<cnf::Propagation, ()> {
+        self.clauses(assignment.len(), fuel)?;
+        let cnf = self.clauses.as_ref().unwrap();
+        // Taking ownership makes every interrupted update discard its partial
+        // state. Certificates never depend on retaining this optimization.
+        let mut state = match self.propagation.take() {
+            Some(state) if state.extends(assignment, fuel)? => state,
+            _ => cnf::Session::new(cnf, assignment, fuel)?,
+        };
+        let result = state.propagate(cnf, assignment, fuel)?;
+        if !matches!(result, cnf::Propagation::Conflict(_)) {
+            self.propagation = Some(state);
+        }
+        Ok(result)
     }
 
     /// Return the root truth and forced theory literals. No assignment is

@@ -1,5 +1,5 @@
-//! Two watched literals per root clause. State is local to one propagation
-//! attempt; proof replay deliberately uses the independent full-clause scanner.
+//! Two watched literals per root clause, retained across a monotone propagation
+//! continuation. Proof replay uses the independent full-clause scanner.
 use super::{Cnf, Literal, Status, charge};
 use std::collections::VecDeque;
 

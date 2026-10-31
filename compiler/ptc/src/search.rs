@@ -402,8 +402,7 @@ impl Search<'_> {
                 .boolean
                 .as_mut()
                 .unwrap()
-                .clauses(self.atoms.len(), &mut self.steps)
-                .and_then(|cnf| cnf.propagate(assignment, &mut self.steps));
+                .propagate_clauses(assignment, &mut self.steps);
             use boolean::cnf::Propagation;
             match result {
                 Err(()) => {

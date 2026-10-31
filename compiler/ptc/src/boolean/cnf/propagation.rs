@@ -2,7 +2,9 @@
 //! reconstructs clauses from the source formula, without search-state trust.
 use super::{Cnf, Literal, charge};
 use crate::ProofError;
+mod session;
 mod watches;
+pub(crate) use session::Session;
 use watches::Watches;
 
 pub(crate) enum Propagation {
@@ -70,36 +72,13 @@ impl Cnf {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn propagate(
         &self,
         assignment: &[Option<bool>],
         fuel: &mut usize,
     ) -> Result<Propagation, ()> {
-        let mut values = self.initial(assignment, fuel)?;
-        let mut trace = Vec::new();
-        let mut watches = Watches::new(self, values.len(), fuel)?;
-        while let Some(clause) = watches.next() {
-            match watches.inspect(self, clause, &values, fuel)? {
-                Status::Open => {}
-                Status::Conflict => {
-                    trace.push(clause);
-                    return Ok(Propagation::Conflict(trace));
-                }
-                Status::Unit(literal) => {
-                    trace.push(clause);
-                    if literal.variable < self.atoms {
-                        return Ok(Propagation::Unit {
-                            index: literal.variable,
-                            value: literal.positive,
-                            trace,
-                        });
-                    }
-                    values[literal.variable] = Some(literal.positive);
-                    watches.assigned(literal.variable, fuel)?;
-                }
-            }
-        }
-        Ok(Propagation::None)
+        Session::new(self, assignment, fuel)?.propagate(self, assignment, fuel)
     }
 
     pub(crate) fn replay(
@@ -135,6 +114,143 @@ mod tests {
     use super::*;
     use crate::{Atom, Equality, Formula, boolean::Circuit, evaluate};
     use nir::{Primitive, Term};
+
+    #[test]
+    fn root_continuations_reuse_work_and_replay_without_retained_state() {
+        let atoms: Vec<_> = (0..32)
+            .map(|local| {
+                Atom::TypeEqual(Equality(
+                    Term::Rigid {
+                        declaration: nir::DeclarationId { package: 95, local },
+                        sort: nir::Sort::Type,
+                    },
+                    Term::Primitive(Primitive::Bool),
+                ))
+            })
+            .collect();
+        let formula = Formula::And(
+            atoms
+                .iter()
+                .map(|atom| {
+                    let Atom::TypeEqual(e) = atom else {
+                        unreachable!()
+                    };
+                    Formula::Or(vec![Formula::Equal(e.clone()), Formula::Equal(e.clone())])
+                })
+                .collect(),
+        );
+        let mut circuit = Circuit::compile(&formula, &atoms, &mut 100_000).unwrap();
+        let cnf = Cnf::compile(&circuit, atoms.len(), &mut 100_000).unwrap();
+        // Exclude one-time CNF compilation from the work comparison.
+        circuit.clauses(atoms.len(), &mut 100_000).unwrap();
+        let mut assignment = vec![None; atoms.len()];
+        let mut warm_fuel = 1_000_000;
+        let mut cold_fuel = 1_000_000;
+        for _ in 0..atoms.len() {
+            assert!(matches!(
+                cnf.propagate(&assignment, &mut cold_fuel),
+                Ok(Propagation::Unit { .. })
+            ));
+            let Propagation::Unit {
+                index,
+                value,
+                trace,
+            } = circuit
+                .propagate_clauses(&assignment, &mut warm_fuel)
+                .unwrap()
+            else {
+                panic!("conjunction must determine another atom");
+            };
+            assert!(value);
+            let mut opposite = assignment.clone();
+            opposite[index] = Some(false);
+            cnf.replay(&trace, &opposite, &mut 100_000).unwrap();
+            check_explanation(&cnf, &trace, &opposite);
+            // Repeating a request without accepting its proposal is stable.
+            assert!(
+                matches!(circuit.propagate_clauses(&assignment, &mut 100_000), Ok(Propagation::Unit { index: again, value: true, .. }) if again == index)
+            );
+            assignment[index] = Some(true);
+        }
+        assert!(matches!(
+            circuit.propagate_clauses(&assignment, &mut warm_fuel),
+            Ok(Propagation::None)
+        ));
+        let warm_work = 1_000_000 - warm_fuel;
+        let cold_work = 1_000_000 - cold_fuel;
+        eprintln!("root propagation work: continuation={warm_work}, fresh={cold_work}");
+        assert!(warm_work < cold_work, "warm {warm_work}, cold {cold_work}");
+        // Backtracking, contradiction and interrupted continuation updates must
+        // all permit a later fresh propagation with a replayable certificate.
+        for fuel in 0..128 {
+            assignment.fill(None);
+            let _ = circuit.propagate_clauses(&assignment, &mut { fuel });
+            assignment[0] = Some(false);
+            let Propagation::Conflict(trace) = circuit
+                .propagate_clauses(&assignment, &mut 100_000)
+                .unwrap()
+            else {
+                panic!("contradictory root assignment");
+            };
+            cnf.replay(&trace, &assignment, &mut 100_000).unwrap();
+            // Conflict consumption must not leave an exhausted queue that
+            // reports None on the same inconsistent assignment.
+            assert!(matches!(
+                circuit.propagate_clauses(&assignment, &mut 100_000),
+                Ok(Propagation::Conflict(_))
+            ));
+        }
+        for fuel in 0..256 {
+            assignment.fill(None);
+            let Propagation::Unit { index, value, .. } = circuit
+                .propagate_clauses(&assignment, &mut 100_000)
+                .unwrap()
+            else {
+                panic!("fresh root propagation");
+            };
+            assignment[index] = Some(value);
+            if circuit
+                .propagate_clauses(&assignment, &mut { fuel })
+                .is_err()
+            {
+                assert!(circuit.propagation.is_none());
+            }
+            let Propagation::Unit {
+                index,
+                value,
+                trace,
+            } = circuit
+                .propagate_clauses(&assignment, &mut 100_000)
+                .unwrap()
+            else {
+                panic!("interrupted extension must recover");
+            };
+            let mut opposite = assignment.clone();
+            opposite[index] = Some(!value);
+            cnf.replay(&trace, &opposite, &mut 100_000).unwrap();
+        }
+    }
+
+    #[test]
+    fn continuation_dump_identifies_pending_proposal_without_adopting_it() {
+        let cnf = Cnf {
+            atoms: 1,
+            clauses: vec![vec![Literal {
+                variable: 0,
+                positive: true,
+            }]],
+            definitions: vec![],
+        };
+        let mut state = Session::new(&cnf, &[None], &mut 100).unwrap();
+        assert!(matches!(
+            state.propagate(&cnf, &[None], &mut 100),
+            Ok(Propagation::Unit { .. })
+        ));
+        assert_eq!(
+            state.to_string(),
+            "(root-propagation (theory-atoms 1) (values unknown) (auxiliary-reasons) (yielded (clause 0) (literal 0 true)))"
+        );
+    }
 
     fn check_explanation(cnf: &Cnf, trace: &[usize], assignment: &[Option<bool>]) {
         let (trace, support) = cnf.explain(trace, assignment, &mut 10000).unwrap();
@@ -237,7 +353,7 @@ mod tests {
         let mut units = 0;
         let mut conflicts = 0;
         for formula in formulas {
-            let circuit = Circuit::compile(&formula, &atoms, &mut 10000).unwrap();
+            let mut circuit = Circuit::compile(&formula, &atoms, &mut 10000).unwrap();
             let cnf = Cnf::compile(&circuit, atoms.len(), &mut 10000).unwrap();
             for code in 0..27 {
                 let assignment = [
@@ -245,7 +361,7 @@ mod tests {
                     [None, Some(false), Some(true)][(code / 3) % 3],
                     [None, Some(false), Some(true)][code / 9],
                 ];
-                let result = cnf.propagate(&assignment, &mut 10000).unwrap();
+                let result = circuit.propagate_clauses(&assignment, &mut 10000).unwrap();
                 let completion_is_model = |mask: usize| {
                     let full = [mask & 1 != 0, mask & 2 != 0, mask & 4 != 0];
                     assignment

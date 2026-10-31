@@ -220,3 +220,30 @@ PTC 新增 `mentioned_types_metered`：按稳定遍历顺序列出区域命题�
 - 原有 opaque-head 非单射、binder 隔离、歧义、低预算及候选 requires 拒绝例保持通过。
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test builder_invocations contextual_data_consumer_publishes_structs_through_the_complete_sysroot`：exit 0；`/tmp/luna-tools-_l3awd3c/result.json`。
 - Workspace 格式化与 `git diff --check` 通过。
+
+
+### 根子句传播的查询内延续
+
+根 CNF 传播现在在同一 Boolean circuit 中保存辅助变量赋值、双监视表、待处理队列
+与辅助推导证书。新的 theory atom 赋值若仅扩展旧前提，只唤醒受影响的监视子句；
+不再为每个推出的 atom 重建整套传播状态。撤销或翻转旧前提时重新建立延续；
+预算中断和冲突不保留半完成状态。重复查询尚未接受的 unit 提案仍返回同一义务，
+不会自行把提案写入 theory assignment。
+
+证书只保留辅助推导序列，并在交付时附上本次 unit 或 conflict 子句。此前交付的
+theory unit 不能混入辅助序列，否则下一次重放会把已成立的前提误作新的推导步骤。
+证书构造计费；独立重放仍从原始 CNF 和当前前提重建，完全不读取延续状态。
+新增状态的 Display 使用 S-expression。
+
+这减少同一单调分支内的重复传播，尚未实现跨回跳的辅助 trail 回滚，也没有统一
+根子句、学习子句和 theory 的全部赋值／理由存储。Type 求解的歧义、作用域与原义务
+重证规则不变，不把可满足模型当成确定输入。
+
+验证（工作目录 `/home/fin/luna`）：
+
+- `python3 -B development/check.py --timeout 900 -- test -p ptc -p type_resolution`：439 项通过；`/tmp/luna-tools-n4goz9yh/result.json`。
+- 补充中断恢复与 dump 检查后，`python3 -B development/check.py --timeout 900 -- test -p ptc boolean::cnf::propagation -- --nocapture`：6 项通过；`/tmp/luna-tools-3nh0cobk/result.json`。覆盖三原子所有部分赋值的源模型检查、连续提案、独立证书重放、前提撤销／翻转、重复冲突和 256 种续跑预算。
+- 32 个连续 unit 的对照中，新旧路径分别消耗 4,460 与 27,984 个计费工作单位；不包含一次性 CNF 编译，不是端到端时间基准。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`：通过；`/tmp/luna-tools-4_gzwjm6/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test builder_invocations contextual_data_consumer_publishes_structs_through_the_complete_sysroot`：通过；`/tmp/luna-tools-vz0uaafo/result.json`。
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`：通过；`/tmp/luna-tools-jbh232p5/result.json`。`git diff --check` 通过。
