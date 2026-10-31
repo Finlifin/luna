@@ -21,7 +21,17 @@ pub struct ListValues {
     summary: OnceLock<Summary>,
 }
 impl ListValues {
-    pub(crate) fn append_payload(&mut self, other: Self) {
+    /// Bound slot relocation by the existing capacity. An in-place extension
+    /// moves only the suffix; growth may also relocate every prefix slot.
+    /// Nested payloads are moved with their owners, not recursively copied.
+    pub(crate) fn append_payload(&mut self, other: Self) -> usize {
+        let moved = other.len().saturating_add(
+            if other.len() > self.values.capacity() - self.values.len() {
+                self.values.len()
+            } else {
+                0
+            },
+        );
         let combined = self
             .summary()
             .zip(other.summary())
@@ -36,6 +46,7 @@ impl ListValues {
         if let Some(summary) = combined {
             self.remember(summary);
         }
+        moved
     }
     pub fn into_vec(self) -> Vec<Value> {
         self.values
@@ -171,7 +182,7 @@ mod tests {
         let right = test_type_list(vec![Term::Primitive(Primitive::Char)]);
         left.immutable_copy_work().unwrap();
         right.immutable_copy_work().unwrap();
-        crate::memory::append_list_checked(&mut left, right.clone(), |combined| {
+        crate::memory::append_list_checked(&mut left, right.clone(), |combined, _| {
             assert!(payload(combined).summary().is_some());
             Err(crate::ErrorKind::StepsExhausted)
         })
@@ -179,7 +190,7 @@ mod tests {
         assert_eq!(left, test_type_list(vec![Term::Primitive(Primitive::Bool)]));
         assert!(payload(&left).summary().is_some());
         left.immutable_copy_work().unwrap();
-        crate::memory::append_list_checked(&mut left, right, |_| Ok(())).unwrap();
+        crate::memory::append_list_checked(&mut left, right, |_, _| Ok(())).unwrap();
         assert!(payload(&left).summary().is_some());
         let fresh = test_type_list(vec![
             Term::Primitive(Primitive::Bool),
@@ -244,7 +255,7 @@ mod rollback_tests {
                 let original = list.clone();
                 let suffix = test_type_list(vec![Term::Primitive(Primitive::Char)]);
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    crate::memory::append_list_checked(&mut list, suffix, |combined| {
+                    crate::memory::append_list_checked(&mut list, suffix, |combined, _| {
                         // Even a cold receiver may acquire a combined summary
                         // while validation is in progress. It is not a prefix summary.
                         combined.immutable_copy_work().unwrap();

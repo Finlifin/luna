@@ -904,3 +904,99 @@ fn immutable_list_admission_charges_inspection_and_rechecks_warm_domains() {
     );
     vm.validate_immutable_input(&cold, &ty).unwrap();
 }
+
+#[test]
+fn retained_list_capacity_avoids_prefix_move_charges() {
+    let package = package();
+    let ty = list(Primitive::Bool);
+    for shared in [false, true] {
+        let mut costs = Vec::new();
+        for count in [8, 512] {
+            let mut values = Vec::with_capacity(count + 16);
+            values.resize(count, Value::Bool(false));
+            let prefix = Value::List {
+                ty: ty.clone(),
+                values: values.into(),
+            };
+            prefix.immutable_copy_work().unwrap();
+            let mut target = if shared {
+                Value::Storage(Storage::new(prefix))
+            } else {
+                prefix
+            };
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            let before = vm.budget.steps;
+            vm.complete_list_append(
+                &mut target,
+                Value::List {
+                    ty: ty.clone(),
+                    values: vec![Value::Bool(true)].into(),
+                },
+                &ty,
+                SOURCE,
+            )
+            .unwrap();
+            costs.push(before - vm.budget.steps);
+            let actual = vm.invocation_slot_value(&target, Some(SOURCE)).unwrap();
+            let Value::List { values, .. } = actual else {
+                unreachable!()
+            };
+            assert_eq!(values.len(), count + 1);
+            assert!(
+                values[..count]
+                    .iter()
+                    .all(|value| *value == Value::Bool(false))
+            );
+            assert_eq!(values[count], Value::Bool(true));
+        }
+        assert_eq!(
+            costs[0], costs[1],
+            "spare capacity must not charge a prefix move"
+        );
+    }
+}
+
+#[test]
+fn list_growth_accounts_for_relocation_and_rolls_back_on_budget_failure() {
+    let package = package();
+    let ty = list(Primitive::Bool);
+    let make = |spare: usize| {
+        let mut values = Vec::with_capacity(512 + spare);
+        values.resize(512, Value::Bool(false));
+        if spare == 0 {
+            // A boxed slice converted back to Vec has no spare capacity.
+            values = values.into_boxed_slice().into_vec();
+        }
+        let value = Value::List {
+            ty: ty.clone(),
+            values: values.into(),
+        };
+        value.immutable_copy_work().unwrap();
+        value
+    };
+    let suffix = || Value::List {
+        ty: ty.clone(),
+        values: vec![Value::Bool(true)].into(),
+    };
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let before = vm.budget.steps;
+    vm.complete_list_append(&mut make(16), suffix(), &ty, SOURCE)
+        .unwrap();
+    let in_place_cost = before - vm.budget.steps;
+    let mut growing = make(0);
+    let original = growing.clone();
+    vm.budget.steps = in_place_cost;
+    let error = vm
+        .complete_list_append(&mut growing, suffix(), &ty, SOURCE)
+        .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::StepsExhausted);
+    assert_eq!(growing, original);
+    vm.budget = Budget::default();
+    vm.complete_list_append(&mut growing, suffix(), &ty, SOURCE)
+        .unwrap();
+    let Value::List { values, .. } = growing else {
+        unreachable!()
+    };
+    assert_eq!(values.len(), 513);
+    assert_eq!(values[512], Value::Bool(true));
+}

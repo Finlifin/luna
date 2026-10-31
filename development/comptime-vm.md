@@ -8770,3 +8770,45 @@ only that diagnostic assertion; its isolated rerun exited 0
 passed 13, 3 and 32 tests, exit 0 (`/tmp/luna-tools-85hwdmdm/result.json`).
 Original source report: `/tmp/luna-tools-l1co1iet/result.json`; formatting:
 `/tmp/luna-tools-8hrvbwd_/result.json`, exit 0. `git diff --check` passed.
+
+
+### Capacity-aware fused append work
+
+The owned payload extension now reports a conservative slot-movement cost:
+suffix slots alone when capacity is sufficient, plus prefix slots when growth
+may relocate the buffer. Nested values move as owners rather than being deep
+copied. The transactional append callback carries this cost through both owned
+locals and value-reference projections. This removes the previous unconditional
+combined-length charge from their fused append path.
+
+The rollback guard still restores the logical prefix and its previous summary
+on failure or unwind. Capacity may remain enlarged after a rejected append;
+capacity is an internal allocation detail, not source-visible value state.
+The complete result retains structural size limits and current type admission.
+This does not change ordinary non-fused concatenation or legacy pointer-path
+accounting. Per-element admission remains, so total repeated append is still
+not proven linear.
+
+Regression coverage checks equal append costs for pre-reserved prefixes of 8
+and 512 elements through owned values and storage references. A growth case
+uses the smaller in-place budget, requires failure and unchanged contents, and
+then succeeds after budget recovery. Existing tests retain tree/bytecode
+coverage, snapshot independence, invalid suffix rejection, projection
+permissions, representation limits and rollback during unwinding.
+
+Validation in `/home/fin/luna`, final commands exited 0:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --test type_list_inputs
+python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_lists --test meta_list_pattern_cost
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+Reports: `/tmp/luna-tools-nvsyy6e1/result.json` (354 interpreter unit tests),
+`/tmp/luna-tools-gcer_o7s/result.json` (27 list input tests), and
+`/tmp/luna-tools-00g6vx2l/result.json` (source bytecode-list and pattern-cost
+suites). The initial unit build found an unannotated Rust closure parameter in
+the new test; it was fixed before this final run. No wall-time speedup or
+whole-workspace validation claim.

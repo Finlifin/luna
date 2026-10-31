@@ -68,7 +68,7 @@ impl Interpreter<'_> {
             };
             self.validate_immutable_storage(&suffix, &value.ty, expr.source)?;
             pointer
-                .append_list_checked(suffix, |combined| {
+                .append_list_checked(suffix, |combined, _| {
                     let work = combined
                         .scoped_copy_work_with_evidence(
                             &self.abstract_type_parameters,

@@ -607,7 +607,7 @@ impl PointerValue {
     pub(crate) fn append_list_checked(
         &self,
         suffix: Value,
-        check: impl FnOnce(&Value) -> Result<(), ErrorKind>,
+        check: impl FnOnce(&Value, usize) -> Result<(), ErrorKind>,
     ) -> Result<(), ErrorKind> {
         self.with_target(|target| append_list_checked(target, suffix, check))
     }
@@ -1441,9 +1441,9 @@ mod optional_projection_tests {
 pub(super) fn append_list_checked(
     target: &mut Value,
     suffix: Value,
-    check: impl FnOnce(&Value) -> Result<(), ErrorKind>,
+    check: impl FnOnce(&Value, usize) -> Result<(), ErrorKind>,
 ) -> Result<(), ErrorKind> {
-    let (original, summary) = match (&mut *target, suffix) {
+    let (original, summary, moved) = match (&mut *target, suffix) {
         (
             Value::List {
                 ty: left_ty,
@@ -1459,8 +1459,8 @@ pub(super) fn append_list_checked(
                 return Err(ErrorKind::RepresentationSizeLimit);
             }
             let summary = left.summary();
-            left.append_payload(right);
-            (original, summary)
+            let moved = left.append_payload(right);
+            (original, summary, moved)
         }
         _ => return Err(ErrorKind::Type),
     };
@@ -1492,7 +1492,7 @@ pub(super) fn append_list_checked(
         summary,
         committed: false,
     };
-    check(pending.target)?;
+    check(pending.target, moved)?;
     pending.committed = true;
     Ok(())
 }
@@ -1503,7 +1503,7 @@ fn type_list_append_restores_values_and_rejects_foreign_identity() {
     let original = crate::test_type_list(vec![element]);
     let mut target = original.clone();
     assert_eq!(
-        append_list_checked(&mut target, original.clone(), |_| Err(
+        append_list_checked(&mut target, original.clone(), |_, _| Err(
             ErrorKind::StepsExhausted
         )),
         Err(ErrorKind::StepsExhausted)
@@ -1519,11 +1519,11 @@ fn type_list_append_restores_values_and_rejects_foreign_identity() {
     };
     head.local += 1;
     assert_eq!(
-        append_list_checked(&mut target, foreign, |_| Ok(())),
+        append_list_checked(&mut target, foreign, |_, _| Ok(())),
         Err(ErrorKind::Type)
     );
     assert_eq!(target, original);
-    append_list_checked(&mut target, original, |_| Ok(())).unwrap();
+    append_list_checked(&mut target, original, |_, _| Ok(())).unwrap();
     let Value::List { values, .. } = target else {
         panic!()
     };
@@ -1536,7 +1536,7 @@ fn list_append_restores_prefix_when_validation_unwinds() {
     let suffix = crate::test_type_list(vec![Term::Primitive(nir::Primitive::Char)]);
     let mut target = original.clone();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _ = append_list_checked(&mut target, suffix.clone(), |combined| {
+        let _ = append_list_checked(&mut target, suffix.clone(), |combined, _| {
             let Value::List { values, .. } = combined else {
                 panic!("list expected")
             };
@@ -1546,7 +1546,7 @@ fn list_append_restores_prefix_when_validation_unwinds() {
     }));
     assert!(result.is_err());
     assert_eq!(target, original);
-    append_list_checked(&mut target, suffix, |_| Ok(())).unwrap();
+    append_list_checked(&mut target, suffix, |_, _| Ok(())).unwrap();
     assert_eq!(
         target,
         crate::test_type_list(vec![

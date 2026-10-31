@@ -85,12 +85,14 @@ impl ValueReference {
         &self,
         suffix: Value,
         fuel: &mut u64,
-        check: impl FnOnce(&Value, u64) -> Result<(), ErrorKind>,
+        check: impl FnOnce(&Value, usize, u64) -> Result<(), ErrorKind>,
     ) -> Result<(), ErrorKind> {
         charge(&self.fields, fuel)?;
         let remaining = *fuel;
         self.update_unmetered(|target| {
-            super::memory::append_list_checked(target, suffix, |value| check(value, remaining))
+            super::memory::append_list_checked(target, suffix, |value, moved| {
+                check(value, moved, remaining)
+            })
         })
     }
 
@@ -1020,7 +1022,7 @@ mod append_tests {
         let mut reference = ValueReference::root(storage.clone());
         let suffix = || crate::test_type_list(vec![Term::Primitive(nir::Primitive::Type)]);
         reference
-            .append_list_checked(suffix(), &mut 100, |_, _| Ok(()))
+            .append_list_checked(suffix(), &mut 100, |_, _, _| Ok(()))
             .unwrap();
         let Value::List { values: old, .. } = &snapshot else {
             unreachable!()
@@ -1036,7 +1038,7 @@ mod append_tests {
         }
         let updated = storage.read().unwrap();
         assert_eq!(
-            reference.append_list_checked(suffix(), &mut 100, |_, _| Err(
+            reference.append_list_checked(suffix(), &mut 100, |_, _, _| Err(
                 ErrorKind::RepresentationSizeLimit
             )),
             Err(ErrorKind::RepresentationSizeLimit)
@@ -1044,7 +1046,7 @@ mod append_tests {
         assert_eq!(storage.read().unwrap(), updated);
         reference.prohibit_rebind();
         assert_eq!(
-            reference.append_list_checked(suffix(), &mut 100, |_, _| panic!(
+            reference.append_list_checked(suffix(), &mut 100, |_, _, _| panic!(
                 "readonly receiver must not mutate"
             )),
             Err(ErrorKind::InvalidValueReference)

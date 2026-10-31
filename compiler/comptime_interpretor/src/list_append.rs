@@ -79,18 +79,19 @@ impl Interpreter<'_> {
             // from the value it held before the reference path was walked.
             let mut remaining = self.budget.steps;
             let mut checked = false;
-            let result = reference.append_list_checked(suffix, &mut remaining, |combined, fuel| {
-                checked = true;
-                self.budget.steps = fuel;
-                self.charge_appended_list(combined, source)
-            });
+            let result =
+                reference.append_list_checked(suffix, &mut remaining, |combined, moved, fuel| {
+                    checked = true;
+                    self.budget.steps = fuel;
+                    self.charge_appended_list(combined, moved, source)
+                });
             if !checked {
                 self.budget.steps = remaining;
             }
             result.map_err(|kind| self.failure(kind, Some(source)))
         } else {
-            memory::append_list_checked(target, suffix, |combined| {
-                self.charge_appended_list(combined, source)
+            memory::append_list_checked(target, suffix, |combined, moved| {
+                self.charge_appended_list(combined, moved, source)
             })
             .map_err(|kind| self.failure(kind, Some(source)))
         }
@@ -98,11 +99,9 @@ impl Interpreter<'_> {
     fn charge_appended_list(
         &mut self,
         combined: &Value,
+        moved: usize,
         source: SourceRange,
     ) -> Result<(), ErrorKind> {
-        let count = self
-            .list_value_length(combined, source)
-            .map_err(|error| error.kind)?;
         let (_, work) = combined
             .scoped_representation_work(
                 &self.abstract_type_parameters,
@@ -110,7 +109,7 @@ impl Interpreter<'_> {
             )
             .ok_or(ErrorKind::RepresentationSizeLimit)?;
         self.integer_operation(Some(source), |budget| {
-            budget.consume(count.saturating_add(1))?;
+            budget.consume(moved.saturating_add(1))?;
             budget.consume(work)
         })
         .map_err(|error| error.kind)
