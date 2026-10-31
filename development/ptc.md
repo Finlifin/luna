@@ -1,0 +1,29 @@
+# PTC 与类型求解的实现边界
+
+作者确认：完整 CDCL 的职责包含为 unification 提供 model searching 托底，
+优先让 `Type` sort 的变量能够通过约束求解；语言整体偏向显式，不鼓励扩大隐式推导。
+正式协议见 [PTC 组合、证明与诊断](../docs/type/propositional-constraints/solver-protocol.md)。
+
+## 当前接线
+
+- `type_resolution::obligations::Engine` 拥有候选局部 metavariable、等待义务和提交边界。
+  直接匹配提出赋值，完整原始关系仍作为义务检查。
+- PTC 已接入索引布尔骨架、文字传播、theory 冲突学习和按冲突前提回跳。
+- 已解析的布尔分支证明可形成查询局部学习子句。引理显式保留前提及共享证明；
+  检查器在这些前提下重放证明，不信任学习缓存。缓存清理不影响已交付证明。
+- `Witness` 目前用于验证不蕴含的源语义反例，类型部分通过闭合类型重建取得。
+  它不是可直接写入 inference store 的 substitution。
+
+## 后续解提取接口必须保持的区别
+
+1. 满足约束的模型、可表达的类型 substitution、可提交的候选解是不同产物。
+   搜索找到模型不自动授权任意选择类型。
+2. 类型解可以保留符号关系与未解参数，不能把闭合反例生成器的限制变成语言规则。
+3. 只求解调用方明确交付的变量；显式输入、作用域、sort、occurs check、normal-form
+   头部不展开以及候选事务隔离仍须保持。
+4. 候选解必须回到原环境检查原始关系和义务。不能把待证明的 requires 当成无条件事实，
+   再以此宣布候选成立。
+5. Unknown、未决计算与多种无选择依据的解不能冒充已解，也不能通过增大推导范围消除。
+
+当前尚未实现 Type 解提取及其生产调用接线；也未完成 first-UIP、watched clauses、
+theory 增量回退和跨查询 activation guard。现有查询局部学习不代表完整 CDCL 已交付。

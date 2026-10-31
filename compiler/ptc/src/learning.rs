@@ -1,12 +1,14 @@
-//! Theory nogoods are local to one query and its declaration authorities.
+//! Explained nogoods are local to one query and its declaration authorities.
 //! A clause stores the forbidden conjunction, not unconditional type facts.
 use super::conflicts::Conflict;
 use super::{ProofTree, Search, UnknownReason};
+use std::{collections::BTreeMap, sync::Arc};
 
 #[derive(Default)]
 pub(super) struct Clauses {
     entries: Vec<Vec<(usize, bool)>>,
     literals: usize,
+    proofs: BTreeMap<Vec<(usize, bool)>, Arc<ProofTree>>,
 }
 pub(super) enum Propagation {
     None,
@@ -65,6 +67,7 @@ impl Search<'_> {
             self.steps -= literals.len();
             if self.learned.entries.len() >= 128 || self.learned.literals + literals.len() > 8192 {
                 self.learned.entries.clear();
+                self.learned.proofs.clear();
                 self.learned.literals = 0;
             }
             if !self.learned.entries.contains(&literals) {
@@ -73,6 +76,73 @@ impl Search<'_> {
             }
         }
         proof
+    }
+
+    /// Retain a resolved Boolean/theory proof, not just a theory leaf. The
+    /// stored proof is immutable and older than every lemma that references it.
+    pub(super) fn learn_resolved(
+        &mut self,
+        mut conflict: Conflict,
+        assignment: &[Option<bool>],
+    ) -> Conflict {
+        if conflict.support.is_empty() || conflict.support.len() > 8192 {
+            return conflict;
+        }
+        let literals: Option<Vec<_>> = conflict
+            .support
+            .iter()
+            .map(|i| assignment[*i].map(|b| (*i, b)))
+            .collect();
+        let Some(literals) = literals else {
+            return conflict;
+        };
+        if self.learned.entries.contains(&literals) {
+            return conflict;
+        }
+        // Bound retained proof depth/volume before extending the shared DAG.
+        let allowance = (self.steps / 8).min(1024);
+        let mut work = allowance;
+        let mut pending = vec![(&conflict.tree, 0)];
+        let mut admitted = true;
+        while let Some((tree, depth)) = pending.pop() {
+            if work == 0 || depth >= 32 {
+                admitted = false;
+                break;
+            }
+            work -= 1;
+            match tree {
+                ProofTree::Split {
+                    negative, positive, ..
+                } => {
+                    pending.push((negative, depth + 1));
+                    pending.push((positive, depth + 1));
+                }
+                ProofTree::Lemma { proof, .. } => pending.push((proof, depth + 1)),
+                _ => {}
+            }
+        }
+        self.steps -= allowance - work;
+        if !admitted || self.steps < literals.len() {
+            return conflict;
+        }
+        self.steps -= literals.len();
+        if self.learned.entries.len() >= 128 || self.learned.literals + literals.len() > 8192 {
+            self.learned.entries.clear();
+            self.learned.proofs.clear();
+            self.learned.literals = 0;
+        }
+        let proof = Arc::new(conflict.tree);
+        self.learned.literals += literals.len();
+        self.learned.entries.push(literals.clone());
+        self.learned.proofs.insert(literals.clone(), proof.clone());
+        conflict.tree = ProofTree::Lemma {
+            premises: literals
+                .iter()
+                .map(|(i, b)| (self.atoms[*i].clone(), *b))
+                .collect(),
+            proof,
+        };
+        conflict
     }
 
     pub(super) fn propagate_learned(
@@ -105,7 +175,16 @@ impl Search<'_> {
             if inactive {
                 continue;
             }
-            let reason = self.conflict_proof(clause);
+            let mut reason = self.conflict_proof(clause);
+            if let Some(proof) = self.learned.proofs.get(clause) {
+                let ProofTree::TheoryConflict(premises) = reason.tree else {
+                    unreachable!()
+                };
+                reason.tree = ProofTree::Lemma {
+                    premises,
+                    proof: proof.clone(),
+                };
+            }
             return Ok(match missing {
                 None => Propagation::Conflict(reason),
                 Some((index, value)) => Propagation::Unit {
@@ -253,5 +332,114 @@ mod tests {
             search.check_tree(&proof.tree, &mut [Some(false)], 0),
             Err(ProofError::Invalid)
         );
+    }
+}
+
+#[cfg(test)]
+mod resolved_tests {
+    use super::*;
+    use crate::{Context, Formula, ProofError, SearchResult, Terms, collect};
+    use nir::{DeclarationId, Primitive, Sort, Term};
+
+    #[test]
+    fn resolved_boolean_clause_propagates_with_a_replayed_proof() {
+        let atom = |local| {
+            Formula::equal(
+                Term::Rigid {
+                    declaration: DeclarationId { package: 73, local },
+                    sort: Sort::Type,
+                },
+                Term::Primitive(Primitive::Bool),
+            )
+        };
+        let a = atom(0);
+        let b = atom(1);
+        let c = atom(2);
+        let mut clauses = Vec::new();
+        for left in [b.clone(), b.negate()] {
+            for right in [c.clone(), c.clone().negate()] {
+                clauses.push(Formula::Or(vec![a.clone().negate(), left.clone(), right]));
+            }
+        }
+        let formula = Formula::And(clauses);
+        let context = Context::default();
+        let mut atoms = Vec::new();
+        let mut terms = Terms::default();
+        collect(&formula, &mut atoms, &mut terms, 0, 128, &[]).unwrap();
+        let mut search = Search {
+            boolean: None,
+            learned: Clauses::default(),
+            context: &context,
+            formula: &formula,
+            atoms: &atoms,
+            terms: &terms,
+            steps: 100_000,
+            max_depth: 128,
+        };
+        let mut assignment = vec![Some(true), None, None];
+        let SearchResult::Unsat(conflict) = search.solve(&mut assignment, 0) else {
+            panic!("expected resolved Boolean contradiction")
+        };
+        assert_eq!(assignment, [Some(true), None, None]);
+        assert_eq!(
+            conflict.support.iter().copied().collect::<Vec<_>>(),
+            vec![0]
+        );
+        assert!(search.learned.proofs.contains_key(&vec![(0, true)]));
+        search.steps = 100_000;
+        search
+            .check_tree(&conflict.tree, &mut assignment, 0)
+            .unwrap();
+        assignment[0] = None;
+        let Propagation::Unit {
+            index,
+            value,
+            reason,
+        } = search.propagate_learned(&assignment).unwrap()
+        else {
+            panic!("expected learned Boolean unit")
+        };
+        assert_eq!((index, value), (0, false));
+        assert!(matches!(&reason.tree, ProofTree::Lemma { .. }));
+        assert!(
+            reason
+                .tree
+                .to_string()
+                .starts_with("(lemma (premises (literal true")
+        );
+        assert_eq!(
+            search.check_tree(&reason.tree, &mut assignment, 0),
+            Err(ProofError::Invalid)
+        );
+        assignment[0] = Some(true);
+        search.check_tree(&reason.tree, &mut assignment, 0).unwrap();
+        let ProofTree::Lemma { premises, proof } = reason.tree else {
+            unreachable!()
+        };
+        let forged = ProofTree::Lemma {
+            premises: premises.clone(),
+            proof: Arc::new(ProofTree::BooleanConflict),
+        };
+        assert_eq!(
+            search.check_tree(&forged, &mut assignment, 0),
+            Err(ProofError::Invalid)
+        );
+        let missing = ProofTree::Lemma {
+            premises: vec![],
+            proof: proof.clone(),
+        };
+        assert_eq!(
+            search.check_tree(&missing, &mut assignment, 0),
+            Err(ProofError::Invalid)
+        );
+        // Eviction may remove search state but cannot invalidate an exported
+        // immutable proof or make the next query inherit learned assignments.
+        search.learned = Clauses::default();
+        let retained = ProofTree::Lemma { premises, proof };
+        search.check_tree(&retained, &mut assignment, 0).unwrap();
+        assert!(matches!(
+            search.propagate_learned(&assignment).unwrap(),
+            Propagation::None
+        ));
     }
 }

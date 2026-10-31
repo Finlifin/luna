@@ -144,6 +144,11 @@ pub enum ProofTree {
     BooleanConflict,
     /// An inconsistent subset of literals present on the current branch.
     TheoryConflict(Vec<(Atom, bool)>),
+    /// A previously established contradiction under exactly these premises.
+    Lemma {
+        premises: Vec<(Atom, bool)>,
+        proof: Arc<ProofTree>,
+    },
     Split {
         atom: Atom,
         negative: Box<ProofTree>,
@@ -1297,7 +1302,10 @@ impl Search<'_> {
                     Err(ProofError::Invalid)
                 }
             }
-            ProofTree::TheoryConflict(literals) => {
+            ProofTree::TheoryConflict(literals)
+            | ProofTree::Lemma {
+                premises: literals, ..
+            } => {
                 let mut support = vec![None; assignment.len()];
                 for (atom, value) in literals {
                     self.tick().map_err(|()| ProofError::BudgetExhausted)?;
@@ -1317,6 +1325,9 @@ impl Search<'_> {
                         return Err(ProofError::Invalid);
                     }
                     support[index] = Some(*value);
+                }
+                if let ProofTree::Lemma { proof, .. } = tree {
+                    return self.check_tree(proof, &mut support, depth + 1);
                 }
                 match self.theory(&support) {
                     Ok(None) => Ok(()),
@@ -1496,13 +1507,10 @@ impl Search<'_> {
             }
             match (negative, positive) {
                 (SearchResult::Unsat(negative), SearchResult::Unsat(positive)) => {
-                    SearchResult::Unsat(Conflict::resolve(
-                        index,
-                        &self.atoms[index],
-                        negative,
-                        positive,
-                    ))
+                    let conflict = Conflict::resolve(index, &self.atoms[index], negative, positive);
+                    SearchResult::Unsat(self.learn_resolved(conflict, assignment))
                 }
+
                 (_, model @ SearchResult::Model(_)) => model,
                 (SearchResult::Unknown(reason), _) | (_, SearchResult::Unknown(reason)) => {
                     SearchResult::Unknown(reason)
@@ -2043,6 +2051,13 @@ impl fmt::Display for ProofTree {
                     write!(f, " (literal {value} {atom})")?;
                 }
                 f.write_str(")")
+            }
+            Self::Lemma { premises, proof } => {
+                write!(f, "(lemma (premises")?;
+                for (atom, value) in premises {
+                    write!(f, " (literal {value} {atom})")?;
+                }
+                write!(f, ") (proof {proof}))")
             }
             Self::Split {
                 atom,
