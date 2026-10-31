@@ -573,7 +573,7 @@ fn evaluate(
     let mut vm_budget = Budget { steps, depth: 128 };
     let prepared_vm = match &graph {
         Some(graph) => Interpreter::from_iir_for_comptime_metered(graph, &mut vm_budget),
-        None => Interpreter::for_comptime(prepared.as_ref(), vm_budget),
+        None => Interpreter::for_comptime_in_budget(prepared.as_ref(), &[], &mut vm_budget),
     };
     let copy_failure = std::cell::RefCell::new(None::<String>);
     let pointer_copy = |ty: &Term, remaining: &mut u64| {
@@ -620,16 +620,18 @@ fn evaluate(
                 // IIR intentionally lacks source formation metadata.
                 // Admit the result against the same owned source world.
                 let before = vm.remaining_steps();
-                let mut admission = Interpreter::for_comptime(
+                let mut allowance = Budget {
+                    steps: before,
+                    depth: 128,
+                };
+                let result = admit_source_result(
                     prepared.as_ref(),
-                    Budget {
-                        steps: before,
-                        depth: 128,
-                    },
-                )?
-                .with_budgeted_type_solver(&solver);
-                let result = admission.validate_immutable_input(&value, result_type);
-                admission_work = before - admission.remaining_steps();
+                    &value,
+                    result_type,
+                    &solver,
+                    &mut allowance,
+                );
+                admission_work = before - allowance.steps;
                 result
             } else {
                 vm.validate_immutable_input(&value, result_type)
@@ -651,6 +653,25 @@ fn evaluate(
             None => e.to_string(),
         },
     )
+}
+
+/*
+ * IIR execution and source formation use distinct worlds, but share one
+ * allowance. Synchronize it before propagating either construction or admission
+ * failure, so an unsuccessful cache publication cannot refund the work.
+ */
+fn admit_source_result(
+    package: &Package,
+    value: &Value,
+    ty: &Term,
+    solver: &dyn Fn(&TypePredicate, &mut u64) -> comptime_interpretor::ContractOutcome,
+    budget: &mut Budget,
+) -> Result<(), comptime_interpretor::Error> {
+    let mut admission = Interpreter::for_comptime_in_budget(package, &[], budget)?
+        .with_budgeted_type_solver(solver);
+    let result = admission.validate_immutable_input(value, ty);
+    budget.steps = admission.remaining_steps();
+    result
 }
 
 // Only type predicates enter this transformation; state contracts stay in the VM.
@@ -814,4 +835,65 @@ fn prepare_bound_entry<'a>(
         vec![],
         values,
     ))
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    use comptime_interpretor::{ContractOutcome, ErrorKind};
+    use nir::Primitive;
+
+    #[test]
+    fn result_admission_charges_success_rejection_and_construction_failure() {
+        let package = Package::default();
+        let solver = |_: &TypePredicate, _: &mut u64| ContractOutcome::Unknown;
+        let ty = Term::Primitive(Primitive::Type);
+        let value = Value::Type(Term::Primitive(Primitive::Bool));
+        let mut budget = Budget {
+            steps: 0,
+            depth: 128,
+        };
+        assert_eq!(
+            admit_source_result(&package, &value, &ty, &solver, &mut budget)
+                .unwrap_err()
+                .kind,
+            ErrorKind::StepsExhausted
+        );
+        assert_eq!(budget.steps, 0);
+        let larger_world = Package {
+            tests: vec![DeclarationId {
+                package: 1,
+                local: 1,
+            }],
+            ..Default::default()
+        };
+        budget.steps = 1;
+        assert_eq!(
+            admit_source_result(&larger_world, &value, &ty, &solver, &mut budget)
+                .unwrap_err()
+                .kind,
+            ErrorKind::StepsExhausted
+        );
+        assert_eq!(budget.steps, 0);
+        budget.steps = 1000;
+        admit_source_result(&package, &value, &ty, &solver, &mut budget).unwrap();
+        assert!(budget.steps > 0 && budget.steps < 1000);
+        let before = budget.steps;
+        assert_eq!(
+            admit_source_result(&package, &Value::Bool(true), &ty, &solver, &mut budget)
+                .unwrap_err()
+                .kind,
+            ErrorKind::Type
+        );
+        assert!(budget.steps < before);
+        // Enough for world construction, but not for value admission.
+        budget.steps = 1;
+        assert_eq!(
+            admit_source_result(&package, &value, &ty, &solver, &mut budget)
+                .unwrap_err()
+                .kind,
+            ErrorKind::StepsExhausted
+        );
+        assert_eq!(budget.steps, 0);
+    }
 }
