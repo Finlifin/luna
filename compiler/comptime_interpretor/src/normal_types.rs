@@ -219,10 +219,6 @@ impl Interpreter<'_> {
         let element = self
             .list_element(expected)
             .cloned()
-            .or_else(|| {
-                self.is_type_list_input(expected)
-                    .then_some(Term::Primitive(Primitive::Type))
-            })
             .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
         self.integer_operation(Some(source), |budget| budget.consume(count))?;
         Ok(element)

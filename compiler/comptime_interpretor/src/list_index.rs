@@ -12,10 +12,6 @@ impl Interpreter<'_> {
         let element = self
             .list_element(list)
             .cloned()
-            .or_else(|| {
-                self.is_type_list_input(list)
-                    .then_some(Term::Primitive(Primitive::Type))
-            })
             .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
         let expected = if *index == Term::Primitive(Primitive::Never) {
             index

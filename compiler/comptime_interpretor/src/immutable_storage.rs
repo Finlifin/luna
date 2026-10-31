@@ -50,7 +50,7 @@ impl Interpreter<'_> {
                 if let Some(element) = self.list_element(ty).cloned() {
                     return self.immutable_storage_domain(&element, source, depth + 1);
                 }
-                if self.is_type_list_input(ty) || self.permits_pointer_copy(ty) {
+                if self.permits_pointer_copy(ty) {
                     Ok(())
                 } else {
                     Err(self.failure(ErrorKind::Unsupported, Some(source)))

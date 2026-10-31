@@ -13,10 +13,7 @@ impl Interpreter<'_> {
         let diverging = fields
             .clone()
             .any(|field| *field == Term::Primitive(Primitive::Never));
-        let element_type = self.list_element(ty).cloned().or_else(|| {
-            self.is_type_list_input(ty)
-                .then_some(Term::Primitive(Primitive::Type))
-        });
+        let element_type = self.list_element(ty).cloned();
         if (diverging && *ty != Term::Primitive(Primitive::Never))
             || (!diverging && element_type.is_none())
             || fields.clone().any(|field| {
@@ -57,7 +54,9 @@ impl Interpreter<'_> {
         source: SourceRange,
     ) -> Result<Vec<Term>, Error> {
         match value {
-            Value::List { ty, values } if self.is_type_list_input(&ty) => {
+            Value::List { ty, values }
+                if self.list_element(&ty) == Some(&Term::Primitive(Primitive::Type)) =>
+            {
                 self.integer_operation(Some(source), |budget| budget.consume(values.len()))?;
                 values
                     .into_iter()

@@ -30,7 +30,7 @@ impl Interpreter<'_> {
             || left.ty != value.ty
             || right.ty != value.ty
             || expr.ty != Term::Primitive(Primitive::Void)
-            || (self.list_element(&value.ty).is_none() && !self.is_type_list_input(&value.ty))
+            || self.list_element(&value.ty).is_none()
         {
             return None;
         }
@@ -107,7 +107,7 @@ impl Interpreter<'_> {
             || left.ty != value.ty
             || right.ty != value.ty
             || expr.ty != Term::Primitive(Primitive::Void)
-            || (self.list_element(&value.ty).is_none() && !self.is_type_list_input(&value.ty))
+            || self.list_element(&value.ty).is_none()
         {
             return None;
         }
@@ -191,7 +191,7 @@ impl Interpreter<'_> {
             || left.ty != value.ty
             || right.ty != value.ty
             || expr.ty != Term::Primitive(Primitive::Void)
-            || (self.list_element(&value.ty).is_none() && !self.is_type_list_input(&value.ty))
+            || self.list_element(&value.ty).is_none()
         {
             return None;
         }
@@ -330,9 +330,7 @@ impl Interpreter<'_> {
             &Term::Primitive(Primitive::Integer)
         };
         if *ty != *expected
-            || (*left != never
-                && self.list_element(left).is_none()
-                && !self.is_type_list_input(left))
+            || (*left != never && self.list_element(left).is_none())
             || right.is_some_and(|right| *right != never && *left != never && *right != *left)
         {
             return Err(self.failure(ErrorKind::Type, Some(source)));

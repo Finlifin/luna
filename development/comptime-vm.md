@@ -7884,3 +7884,39 @@ Validation in `/home/fin/luna`:
 No full language suite was run. These methods inherit current immutable list
 construction costs; no linear-time output builder is claimed. General
 heterogeneous error-row inference remains separate unfinished work.
+
+## Unified VM list-domain admission
+
+The interpreter no longer has an `is_type_list_input` admission route. List
+construction, indexing, concatenation, append and immutable storage all query
+the registered list declaration's ordinary element domain. Normal-form list
+inputs use the same path. The removed fallback was redundant with successful
+`list_element` lookup, but obscured this boundary and could scan all registered
+normal-form declarations. Lookup now goes directly through the retained head.
+
+Definition-builder Type lists, contextual tuple element collection and Type
+input normalization still require element Type at their actual interface
+boundary; they express this as the result of ordinary list-element inspection.
+An opaque head with one Type argument does not gain list representation. No new
+NF parameter category, value representation, name-based recognition, or runtime
+Copy permission was introduced. Legacy internal pointer transport remains
+separate work; simplifying its list-domain check does not authorize comptime
+source pointers. No invocation speedup is claimed without measurement.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --no-fail-fast`:
+  533 passed, exit 0; `/tmp/luna-tools-63ku77l1/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_lists --test comptime_bytecode_lists --test comptime_list_type_evidence --no-fail-fast`:
+  32 + 4 + 13 passed, exit 0; `/tmp/luna-tools-50rduao9/result.json`.
+- `python3 -B development/library_check.py --stage sysroot-meta --stage sysroot-builders --timeout 300`:
+  both stages passed, seven native source cases total, exit 0;
+  `/tmp/luna-library-64q612z5/summary.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-bl6o3mnz/result.json`; `git diff --check` passed.
+- Source search confirms no `is_type_list_input` references remain in the VM.
+
+Existing tests cover ordinary and nested element domains, forged identities,
+scoped Type inputs, representation/budget failures and recovery, bytecode paths,
+contextual tuple construction and public definition builders. No full language
+suite or performance benchmark was run for this admission-path refactor.

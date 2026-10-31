@@ -3010,8 +3010,7 @@ impl<'a> Interpreter<'a> {
                 let Value::Pointer(pointer) = value!(self.eval(pointer, environment)) else {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                 };
-                let immutable_list = self.comptime_only
-                    && (self.list_element(&expr.ty).is_some() || self.is_type_list_input(&expr.ty));
+                let immutable_list = self.comptime_only && self.list_element(&expr.ty).is_some();
                 let immutable_object =
                     self.comptime_only && expr.ty == Term::Primitive(Primitive::Object);
                 if pointer.pointee != expr.ty
@@ -3041,9 +3040,8 @@ impl<'a> Interpreter<'a> {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                 };
                 let value = value!(self.eval(value, environment));
-                let immutable_list = self.comptime_only
-                    && (self.list_element(&pointer.pointee).is_some()
-                        || self.is_type_list_input(&pointer.pointee));
+                let immutable_list =
+                    self.comptime_only && self.list_element(&pointer.pointee).is_some();
                 let immutable_object =
                     self.comptime_only && pointer.pointee == Term::Primitive(Primitive::Object);
                 if !immutable_list
@@ -3497,7 +3495,7 @@ impl<'a> Interpreter<'a> {
                 };
                 if metadata.role != nir::normal_forms::Role::Tuple
                     || parameter.kind != nir::normal_forms::Kind::Value
-                    || !self.is_type_list_input(&parameter.ty)
+                    || self.list_element(&parameter.ty) != Some(&Term::Primitive(Primitive::Type))
                 {
                     return Err(self.failure(ErrorKind::Type, Some(source)));
                 }
@@ -3714,7 +3712,7 @@ impl<'a> Interpreter<'a> {
             values.extend(elements);
         } else {
             // Normalize authorized opaque Type inputs before later operands run.
-            let value = if self.is_type_list_input(ty) {
+            let value = if self.list_element(ty) == Some(&Term::Primitive(Primitive::Type)) {
                 Value::Type(self.type_description_term(value, source)?)
             } else {
                 value
@@ -6816,14 +6814,6 @@ impl Interpreter<'_> {
             .map(|(ty, term)| self.normal_pattern_value(term, ty))
             .collect::<Result<Vec<_>, _>>()?;
         self.invoke(function, values)
-    }
-
-    fn is_type_list_input(&self, ty: &Term) -> bool {
-        nir::normal_forms::type_list_input_type(ty)
-            && self
-                .normal_forms
-                .values()
-                .any(|head| head.is_type_list_instance(ty))
     }
 
     fn list_element<'a>(&self, ty: &'a Term) -> Option<&'a Term> {
