@@ -1430,7 +1430,7 @@ pub(super) fn append_list_checked(
     suffix: Value,
     check: impl FnOnce(&Value) -> Result<(), ErrorKind>,
 ) -> Result<(), ErrorKind> {
-    let original = match (&mut *target, suffix) {
+    let (original, summary) = match (&mut *target, suffix) {
         (
             Value::List {
                 ty: left_ty,
@@ -1445,8 +1445,9 @@ pub(super) fn append_list_checked(
             if original.saturating_add(right.len()) > 100_000 {
                 return Err(ErrorKind::RepresentationSizeLimit);
             }
+            let summary = left.summary();
             left.append_payload(right);
-            original
+            (original, summary)
         }
         _ => return Err(ErrorKind::Type),
     };
@@ -1455,6 +1456,7 @@ pub(super) fn append_list_checked(
     struct PendingAppend<'a> {
         target: &'a mut Value,
         original: usize,
+        summary: Option<super::list_values::Summary>,
         committed: bool,
     }
     impl Drop for PendingAppend<'_> {
@@ -1462,6 +1464,11 @@ pub(super) fn append_list_checked(
             if !self.committed {
                 if let Value::List { values, .. } = self.target {
                     values.truncate(self.original);
+                    // The check only borrowed the value; the entire prefix is
+                    // unchanged, so its pre-append summary remains valid.
+                    if let Some(summary) = self.summary {
+                        values.remember(summary);
+                    }
                 }
             }
         }
@@ -1469,6 +1476,7 @@ pub(super) fn append_list_checked(
     let mut pending = PendingAppend {
         target,
         original,
+        summary,
         committed: false,
     };
     check(pending.target)?;

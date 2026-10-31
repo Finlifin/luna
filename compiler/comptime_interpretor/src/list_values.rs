@@ -144,7 +144,7 @@ mod tests {
         assert!(payload(&changed).summary().is_none());
     }
     #[test]
-    fn append_composes_summaries_and_rollback_invalidates_them() {
+    fn append_composes_summaries_and_rollback_restores_the_prefix_summary() {
         let mut left = test_type_list(vec![Term::Primitive(Primitive::Bool)]);
         let right = test_type_list(vec![Term::Primitive(Primitive::Char)]);
         left.immutable_copy_work().unwrap();
@@ -155,7 +155,7 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(left, test_type_list(vec![Term::Primitive(Primitive::Bool)]));
-        assert!(payload(&left).summary().is_none());
+        assert!(payload(&left).summary().is_some());
         left.immutable_copy_work().unwrap();
         crate::memory::append_list_checked(&mut left, right, |_| Ok(())).unwrap();
         assert!(payload(&left).summary().is_some());
@@ -203,5 +203,55 @@ mod tests {
         );
         assert!(payload(&scoped).summary().is_none());
         assert!(scoped.immutable_copy_work().is_none());
+    }
+}
+
+#[cfg(test)]
+mod rollback_tests {
+    use super::*;
+    use crate::{Primitive, Term, test_type_list};
+
+    #[test]
+    fn rollback_restores_only_the_summary_known_before_the_append() {
+        for warm in [false, true] {
+            for unwind in [false, true] {
+                let mut list = test_type_list(vec![Term::Primitive(Primitive::Bool)]);
+                if warm {
+                    list.immutable_copy_work().unwrap();
+                }
+                let original = list.clone();
+                let suffix = test_type_list(vec![Term::Primitive(Primitive::Char)]);
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    crate::memory::append_list_checked(&mut list, suffix, |combined| {
+                        // Even a cold receiver may acquire a combined summary
+                        // while validation is in progress. It is not a prefix summary.
+                        combined.immutable_copy_work().unwrap();
+                        if unwind {
+                            panic!("interrupted validation");
+                        }
+                        Err(crate::ErrorKind::StepsExhausted)
+                    })
+                }));
+                if unwind {
+                    assert!(result.is_err());
+                } else {
+                    assert_eq!(result.unwrap(), Err(crate::ErrorKind::StepsExhausted));
+                }
+                assert_eq!(list, original);
+                let Value::List { values, .. } = &list else {
+                    unreachable!()
+                };
+                assert_eq!(values.summary().is_some(), warm);
+                assert_eq!(list.immutable_copy_work(), original.immutable_copy_work());
+                let Value::List { values, .. } = &mut list else {
+                    unreachable!()
+                };
+                values.truncate(0);
+                assert!(
+                    values.summary().is_none(),
+                    "ordinary truncation has no prefix evidence"
+                );
+            }
+        }
     }
 }

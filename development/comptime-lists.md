@@ -506,7 +506,8 @@ summary for the rejected list.
 
 Append combines the two payload summaries when both are available, preserving
 the existing vector allocation where possible. Validation error or unwind
-truncates through the mutation boundary, invalidating the combined summary.
+truncates through the mutation boundary, discards the combined summary, and
+restores the original prefix summary if one existed before the append.
 The logical work returned to the VM is unchanged; caching avoids the repeated
 structural walk, not its accounting. Nominal/element admission and borrowed
 representation checks still traverse contents, so whole-program append loops
@@ -536,3 +537,19 @@ list operations and repository library protocols. Evidence:
 `/tmp/luna-tools-xxbkvzm5/result.json` (all-target compilation),
 `/tmp/luna-tools-_hhwzu8c/result.json` (integration), and
 `/tmp/luna-tools-umf530a6/result.json` (formatting). `git diff --check` passed.
+
+### Preserving prefix summaries across rejected appends
+
+Append rollback now saves and restores the original optional structural
+summary with the original length. This is safe because validation receives
+only a shared reference and cannot alter the prefix. A summary first computed
+for the combined list during validation is never reused for the shorter prefix.
+Ordinary mutation and truncation still invalidate summaries without restoration.
+
+The regression checks cold/warm receivers, returned errors and panic unwinding,
+including validation that populates the combined summary before failing.
+Contents, prefix work and ordinary truncation invalidation are checked afterward.
+From `/home/fin/luna`, `python3 -B development/check.py --timeout 900 -- test -p
+comptime_interpretor --lib` passed all 337 tests
+(`/tmp/luna-tools-7m3jqdzb/result.json`, exit 0). Formatting
+(`/tmp/luna-tools-uqmgbkac/result.json`) and `git diff --check` passed.
