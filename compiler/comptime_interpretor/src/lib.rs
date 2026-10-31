@@ -6430,7 +6430,11 @@ impl Interpreter<'_> {
             Pattern::OptionalAbsent => matches!(input, Value::Optional { value: None, .. }),
             Pattern::Wild => true,
             Pattern::Unit => matches!(input, Value::Unit),
-            Pattern::Literal(..) => return self.match_literal(pattern, input, environment, undo),
+            Pattern::Literal(literal) => {
+                return self
+                    .match_literal_value(literal, input)
+                    .map(|matched| Flow::Value(Value::Bool(matched)));
+            }
             Pattern::Observe { binding, inner } => {
                 if environment.contains_key(binding) {
                     return Err(self.failure(ErrorKind::InvalidCallPlan, None));
@@ -6462,16 +6466,13 @@ impl Interpreter<'_> {
         Ok(Flow::Value(Value::Bool(matched)))
     }
     #[inline(never)]
-    fn match_literal(
-        &mut self,
-        pattern: &nir::program::Pattern,
-        input: &Value,
-        _environment: &mut Environment,
-        _undo: &mut PatternJournal,
-    ) -> Result<Flow, Error> {
-        use nir::program::Pattern;
-        let matched = match pattern {
-            Pattern::Literal(Literal::Integer(spelling)) => {
+    fn match_literal_value(&mut self, literal: &Literal, input: &Value) -> Result<bool, Error> {
+        let matched = match literal {
+            Literal::PendingInteger { .. } | Literal::PendingFloat { .. } => {
+                return Err(self.failure(ErrorKind::TypeContractUnresolved, None));
+            }
+
+            Literal::Integer(spelling) => {
                 if let Value::Integer(actual) = input {
                     let expected = self.integer_literal(spelling, None)?;
                     self.integer_operation(None, |budget| {
@@ -6488,7 +6489,7 @@ impl Interpreter<'_> {
                     false
                 }
             }
-            Pattern::Literal(Literal::BitVec { width, words }) => {
+            Literal::BitVec { width, words } => {
                 if let Value::BitVec(actual) = input {
                     self.integer_operation(None, |budget| {
                         budget.consume(actual.words().len().min(words.len()).saturating_add(1))
@@ -6498,7 +6499,7 @@ impl Interpreter<'_> {
                     false
                 }
             }
-            Pattern::Literal(Literal::Float(spelling)) => {
+            Literal::Float(spelling) => {
                 if let Value::Float(actual) = input {
                     self.integer_operation(None, |budget| {
                         let expected = comptime_runtime::decimal::DecimalValue::parse_literal(
@@ -6510,35 +6511,34 @@ impl Interpreter<'_> {
                     false
                 }
             }
-            Pattern::Literal(Literal::Float16(expected)) => {
+            Literal::Float16(expected) => {
                 matches!(input, Value::Float16(actual) if comptime_runtime::float16::Float16Format::Binary16.compare(*actual, *expected).is_some_and(|o| o.is_eq()))
             }
-            Pattern::Literal(Literal::BFloat16(expected)) => {
+            Literal::BFloat16(expected) => {
                 matches!(input, Value::BFloat16(actual) if comptime_runtime::float16::Float16Format::BFloat16.compare(*actual, *expected).is_some_and(|o| o.is_eq()))
             }
-            Pattern::Literal(Literal::Float32(expected)) => {
+            Literal::Float32(expected) => {
                 matches!(input, Value::Float32(actual) if f32::from_bits(*actual) == f32::from_bits(*expected))
             }
-            Pattern::Literal(Literal::Float64(expected)) => {
+            Literal::Float64(expected) => {
                 matches!(input, Value::Float64(actual) if f64::from_bits(*actual) == f64::from_bits(*expected))
             }
-            Pattern::Literal(Literal::SignedInteger(expected)) => {
+            Literal::SignedInteger(expected) => {
                 matches!(input, Value::SignedInteger(actual) if actual == expected)
             }
-            Pattern::Literal(Literal::UnsignedInteger(expected)) => {
+            Literal::UnsignedInteger(expected) => {
                 matches!(input, Value::UnsignedInteger(actual) if actual == expected)
             }
-            Pattern::Literal(Literal::Bool(expected)) => {
+            Literal::Bool(expected) => {
                 matches!(input, Value::Bool(actual) if actual == expected)
             }
-            Pattern::Literal(Literal::Char(expected)) => {
+            Literal::Char(expected) => {
                 matches!(input, Value::Char(actual) if actual == expected)
             }
-            Pattern::Literal(Literal::Symbol(expected))
-            | Pattern::Literal(Literal::String(expected)) => {
-                let actual = match (pattern, input) {
-                    (Pattern::Literal(Literal::Symbol(_)), Value::Symbol(actual))
-                    | (Pattern::Literal(Literal::String(_)), Value::String(actual)) => Some(actual),
+            Literal::Symbol(expected) | Literal::String(expected) => {
+                let actual = match (literal, input) {
+                    (Literal::Symbol(_), Value::Symbol(actual))
+                    | (Literal::String(_), Value::String(actual)) => Some(actual),
                     _ => None,
                 };
                 if let Some(actual) = actual {
@@ -6550,9 +6550,8 @@ impl Interpreter<'_> {
                     false
                 }
             }
-            _ => unreachable!("pattern dispatcher selected an incompatible evaluator"),
         };
-        Ok(Flow::Value(Value::Bool(matched)))
+        Ok(matched)
     }
 
     #[inline(never)]

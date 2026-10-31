@@ -6,6 +6,7 @@ pub mod closures;
 pub mod definitions;
 pub mod instances;
 pub mod leaf_inputs;
+pub mod leaf_patterns;
 pub mod lists;
 pub mod metadata;
 pub mod normal_types;
@@ -312,11 +313,10 @@ pub enum Op {
         destination: Register,
         fields: Vec<Register>,
     },
-    MatchPattern {
+    MatchLeaf {
         destination: Register,
         value: Register,
-        pattern: Arc<nir::program::Pattern>,
-        bindings: Vec<(LocalId, Register)>,
+        pattern: Arc<leaf_patterns::Leaf>,
     },
     NonExhaustiveMatch,
     InvalidControlFlow,
@@ -900,20 +900,12 @@ impl fmt::Display for Program {
                     }
                     write!(f, "))")?;
                 }
-                Op::MatchPattern {
+                Op::MatchLeaf {
                     destination,
                     value,
                     pattern,
-                    bindings,
                 } => {
-                    write!(
-                        f,
-                        "(match-pattern {destination} {value} {pattern} (bindings"
-                    )?;
-                    for (id, slot) in bindings {
-                        write!(f, " (binding {id} {slot})")?;
-                    }
-                    write!(f, "))")?;
+                    write!(f, "(match-leaf {destination} {value} {pattern})")?;
                 }
                 Op::NonExhaustiveMatch => write!(f, "(non-exhaustive-match)")?,
                 Op::InvalidControlFlow => write!(f, "(invalid-control-flow)")?,

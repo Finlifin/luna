@@ -7959,3 +7959,40 @@ Validation in `/home/fin/luna`:
 No full language suite or performance benchmark was run. Existing immutable
 list validation costs and the remaining runtime resource/trait gaps are not
 changed by this delivery.
+
+
+## Compiled leaf pattern tests (2026-10-31)
+
+The invocation instruction set no longer carries `Arc<Pattern>` through
+`MatchPattern`. The final leaves of pattern lowering are explicit `MatchLeaf`
+operands: wildcard, unit, optional absence and a literal. Structural traversal,
+bindings, alternatives, guards and remapping retain their existing linear
+instructions and candidate scopes. A leaf neither creates a temporary local
+environment nor invokes the recursive pattern matcher.
+
+Literal comparison is an operand-level operation shared with reference execution.
+It retains variable-size comparison charges, numeric representation semantics,
+and the distinction between Symbol and str. Non-wildcard tests still reject
+unresolved data/type inputs; wildcard tests do not inspect them. Definition-only
+CodeEvidence remains non-executable. Pending numeric literals report an unresolved
+type contract instead of reaching a pattern-dispatch panic.
+
+This removes one tree carrier and callback from production comptime bytecode.
+It does not finish the IIR execution migration or remove other expression-bearing
+instruction descriptors. No throughput improvement is claimed without measurement.
+
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor --lib --tests`:
+  561 tests passed, exit 0; `/tmp/luna-tools-498_0vr6/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_patterns --test comptime_bytecode --test comptime_list_operations`:
+  all three source-level groups passed, exit 0;
+  `/tmp/luna-tools-bc11p2v3/result.json`. Includes public library list operations,
+  dependent patterns, side effects and failed-candidate binding rollback.
+- Formatting and `git diff --check` passed. No full language suite was run.
+
+The initial compile exposed unhandled pending numeric literal variants after
+making literal dispatch exhaustive; these now report unresolved contracts.
+An initial source-test command named a nonexistent `meta_list` target and ran
+no tests; the corrected command above supplies the actual list test target.

@@ -1883,32 +1883,33 @@ impl<'a> Interpreter<'a> {
                         frame.pattern_inputs.insert(*destination, (*value, *index));
                     }
                 }
-                Op::MatchPattern {
+                Op::MatchLeaf {
                     destination,
                     value,
                     pattern,
-                    bindings,
                 } => {
-                    // Only structural patterns are admitted by the compiler.
-                    // Keep candidate bindings private until the complete pattern succeeds.
-                    let mut candidate = Environment::new();
-                    for (id, slot) in bindings {
-                        if let Some(value) = &frame.slots[*slot] {
-                            candidate.insert(*id, self.checkpoint_representation(value, source)?);
-                        }
-                    }
+                    use comptime_compiler::leaf_patterns::Leaf;
+                    self.tick(None)?;
                     let subject = self.bytecode_pattern_input(frame, *value, source)?;
-                    let (matched, exports) =
-                        self.match_pattern_with_bindings(pattern, subject, &mut candidate)?;
-                    let Flow::Value(Value::Bool(matched)) = matched else {
-                        return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source)));
-                    };
-                    if matched {
-                        for (id, slot) in bindings {
-                            let value = candidate.remove(id);
-                            frame.pattern_binding(*slot, value, exports.0.contains_key(id))?;
+                    if !matches!(pattern.as_ref(), Leaf::Wild) {
+                        if matches!(subject, Value::AbstractValue { .. }) {
+                            return Err(self.failure(ErrorKind::AbstractValueUnresolved, None));
+                        }
+                        if matches!(
+                            subject,
+                            Value::TypeParameter(_) | Value::Type(Term::Rigid { .. })
+                        ) {
+                            return Err(self.failure(ErrorKind::TypeContractUnresolved, None));
                         }
                     }
+                    let matched = match pattern.as_ref() {
+                        Leaf::Wild => true,
+                        Leaf::Unit => matches!(subject, Value::Unit),
+                        Leaf::OptionalAbsent => {
+                            matches!(subject, Value::Optional { value: None, .. })
+                        }
+                        Leaf::Literal(literal) => self.match_literal_value(literal, subject)?,
+                    };
                     frame.slots[*destination] = Some(Value::Bool(matched));
                 }
                 Op::CommitScope => frame.commit_scope()?,

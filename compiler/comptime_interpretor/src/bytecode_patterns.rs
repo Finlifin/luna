@@ -417,3 +417,124 @@ fn nominal_type_fields_convert_against_the_completed_telescope() {
         }
     }
 }
+
+#[test]
+fn leaf_tests_preserve_domains_and_unresolved_input_diagnostics() {
+    let package = Package::default();
+    let declaration = DeclarationId {
+        package: 1,
+        local: 99,
+    };
+    let cases = vec![
+        (P::Wild, Value::TypeParameter(declaration), Ok(true)),
+        (P::Unit, Value::Unit, Ok(true)),
+        (P::Unit, Value::Bool(false), Ok(false)),
+        (
+            P::Literal(Literal::Float32(f32::NAN.to_bits())),
+            Value::Float32(f32::NAN.to_bits()),
+            Ok(false),
+        ),
+        (
+            P::Literal(Literal::Float64(0.0f64.to_bits())),
+            Value::Float64((-0.0f64).to_bits()),
+            Ok(true),
+        ),
+        (
+            P::Literal(Literal::Symbol("雪".into())),
+            Value::String("雪".into()),
+            Ok(false),
+        ),
+        (
+            P::Literal(Literal::String("雪\n\"".into())),
+            Value::String("雪\n\"".into()),
+            Ok(true),
+        ),
+        (
+            P::Unit,
+            Value::TypeParameter(declaration),
+            Err(ErrorKind::TypeContractUnresolved),
+        ),
+        (
+            P::OptionalAbsent,
+            Value::AbstractValue {
+                declaration,
+                ty: Term::Primitive(Primitive::Bool),
+            },
+            Err(ErrorKind::AbstractValueUnresolved),
+        ),
+        (
+            P::OptionalAbsent,
+            Value::Optional {
+                ty: Term::Optional(Box::new(Term::Primitive(Primitive::Bool))),
+                value: None,
+            },
+            Ok(true),
+        ),
+        (
+            P::OptionalAbsent,
+            Value::Optional {
+                ty: Term::Optional(Box::new(Term::Primitive(Primitive::Bool))),
+                value: Some(Box::new(Value::Bool(false))),
+            },
+            Ok(false),
+        ),
+    ];
+    for (pattern, input, expected) in cases {
+        let body = expr(K::Match {
+            value: Box::new(expr(K::Local(X))),
+            arms: vec![
+                MatchArm {
+                    pattern,
+                    guard: None,
+                    body: boolean(true),
+                },
+                MatchArm {
+                    pattern: P::Wild,
+                    guard: None,
+                    body: boolean(false),
+                },
+            ],
+        });
+        for compiled in [false, true] {
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            let mut env = Environment::from([(X, input.clone())]);
+            let actual = match execute(&mut vm, &body, &mut env, compiled) {
+                Ok(Flow::Value(Value::Bool(value))) => Ok(value),
+                Err(error) => Err(error.kind),
+                _ => panic!("leaf match must return bool"),
+            };
+            assert_eq!(actual, expected, "compiled={compiled}, input={input:?}");
+        }
+    }
+}
+
+#[test]
+fn compiled_text_leaf_tests_charge_comparison_work() {
+    let package = Package::default();
+    let text = "雪".repeat(200);
+    let body = expr(K::Match {
+        value: Box::new(expr(K::Local(X))),
+        arms: vec![MatchArm {
+            pattern: P::Literal(Literal::String(text.clone())),
+            guard: None,
+            body: boolean(true),
+        }],
+    });
+    for compiled in [false, true] {
+        let mut vm = Interpreter::for_comptime(
+            &package,
+            Budget {
+                steps: 32,
+                depth: 128,
+            },
+        )
+        .unwrap();
+        let mut env = Environment::from([(X, Value::String(text.clone().into()))]);
+        assert_eq!(
+            execute(&mut vm, &body, &mut env, compiled)
+                .unwrap_err()
+                .kind,
+            ErrorKind::StepsExhausted
+        );
+    }
+}

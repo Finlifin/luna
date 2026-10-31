@@ -293,7 +293,7 @@ fn match_dump_keeps_pattern_bindings_guards_and_exhaustion_explicit() {
         }],
     });
     let dump = compile(&body, &mut 1000).unwrap().to_string();
-    assert!(dump.contains("(match-pattern "));
+    assert!(dump.contains("(match-leaf "));
     assert!(dump.contains("(pattern-bind "));
     assert!(dump.contains("(non-exhaustive-match)"));
     assert_eq!(dump.matches("(branch ").count(), 2);
