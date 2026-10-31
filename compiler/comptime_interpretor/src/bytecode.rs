@@ -509,6 +509,46 @@ pub(super) struct CodeCache {
     weight: usize,
 }
 
+// Borrowed fragments belong to this VM's immutable source lifetime. Unlike the
+// session cache, this table never outlives or moves between source worlds.
+#[derive(Default)]
+pub(super) struct BorrowedCodeCache<'a> {
+    entries: HashMap<BorrowedBody<'a>, Option<Arc<Program>>>,
+    weight: usize,
+}
+
+#[derive(Clone, Copy)]
+struct BorrowedBody<'a>(&'a Expr);
+impl PartialEq for BorrowedBody<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self.0, other.0)
+    }
+}
+impl Eq for BorrowedBody<'_> {}
+impl std::hash::Hash for BorrowedBody<'_> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::ptr::hash(self.0, state);
+    }
+}
+
+impl<'a> BorrowedCodeCache<'a> {
+    fn insert(&mut self, body: &'a Expr, program: Option<Arc<Program>>) {
+        const LIMIT: usize = 100_000;
+        let weight = CodeCache::program_weight(&program);
+        if weight > LIMIT {
+            return;
+        }
+        if self.weight + weight > LIMIT {
+            self.entries.clear();
+            self.weight = 0;
+        }
+        if let Some(previous) = self.entries.insert(BorrowedBody(body), program) {
+            self.weight -= CodeCache::program_weight(&previous);
+        }
+        self.weight += weight;
+    }
+}
+
 struct OwnedCode {
     body: std::sync::Weak<Expr>,
     program: Option<Arc<Program>>,
@@ -657,6 +697,23 @@ impl<'a> Interpreter<'a> {
         } else {
             Ok(self.compile_body(body)?.map(Arc::new))
         }
+    }
+
+    pub(super) fn borrowed_invocation_code(
+        &mut self,
+        body: &'a Expr,
+    ) -> Result<Option<Arc<Program>>, Error> {
+        if !self.bytecode_invocation_available() {
+            return Ok(None);
+        }
+        if let Some(program) = self.borrowed_code_cache.entries.get(&BorrowedBody(body)) {
+            return Ok(program.clone());
+        }
+        // Budget and malformed-control errors are not cached. Only completed
+        // compilation or a stable unsupported-lowering decision can be reused.
+        let program = self.compile_body(body)?.map(Arc::new);
+        self.borrowed_code_cache.insert(body, program.clone());
+        Ok(program)
     }
 
     pub(super) fn owned_invocation_code(

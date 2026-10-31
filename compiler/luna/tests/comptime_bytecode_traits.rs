@@ -278,7 +278,8 @@ fn associated_values_are_selected_without_forcing_function_tree_fallback() {
                 (false, false) => Interpreter::for_comptime_tree(&package, Budget::default()),
             }
             .unwrap();
-            for _ in 0..2 {
+            for iteration in 0..2 {
+                let compilations = vm.bytecode_compilations();
                 let before = vm.bytecode_invocations();
                 assert_eq!(
                     if materialized {
@@ -290,6 +291,9 @@ fn associated_values_are_selected_without_forcing_function_tree_fallback() {
                     Value::Bool(true)
                 );
                 assert_eq!(vm.bytecode_invocations() - before, usize::from(compiled));
+                if iteration == 1 {
+                    assert_eq!(vm.bytecode_compilations(), compilations);
+                }
             }
         }
     }

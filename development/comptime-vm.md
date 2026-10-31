@@ -8283,3 +8283,44 @@ Selected initializer expressions still compile on demand without their own code
 cache. Unsupported initializer operations may still use reference evaluation;
 active effects and cleanup scheduling remain outside this bytecode path. This
 change does not claim full VM unification or host-panic transaction recovery.
+
+## Reuse borrowed initializer code within a VM
+
+Associated initializer execution now uses a bounded cache of compiled immutable
+borrowed fragments. Keys retain the actual expression reference for the VM's
+source lifetime and use reference identity, not source coordinates, member IDs,
+structural type equality or a naked integer address. Distinct expressions with
+identical locations and result types cannot share code accidentally. This cache
+is interpreter-local and is deliberately excluded from CodeSession exchange;
+no borrowed source may escape into another package world.
+
+Entries contain only compiled programs or a completed unsupported-lowering
+decision. Compilation budget failures and malformed control are not inserted.
+The cache is bounded to 100,000 weighted code units using the existing program
+storage accounting; oversized entries are not retained and capacity pressure
+clears the local table. This is code reuse, not invocation result memoization.
+Each read still selects dispatch evidence, checks result types and cycles, runs
+the initializer with a fresh lexical environment, and consumes execution fuel.
+
+Tests check repeated selection, replacing the selected body while preserving
+member/location/type, revisiting an earlier body, current cycle/missing-evidence
+rejection after warming, compilation-budget recovery and disabled-bytecode
+routing. The existing prepared-source and IIR differential test now requires no
+new compilation during its second invocation. This closes the earlier
+initializer recompilation limitation within a VM; cross-VM initializer code
+reuse and unsupported-operation migration remain open.
+
+Validation from `/home/fin/luna`, final commands exited 0:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib
+python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_traits --test comptime_iir_bytecode --test associated_purity --test associated_signatures
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+git diff --check
+```
+
+Reports: `/tmp/luna-tools-fphzzm7t/result.json` (345 interpreter tests),
+`/tmp/luna-tools-i73jtnqp/result.json` (22 integration tests), and
+`/tmp/luna-tools-ns44rlp8/result.json` (formatting). An initial compile check
+caught the missing new field in the IIR constructor; both constructors now
+initialize independent local caches. No timing speedup or full-suite claim.

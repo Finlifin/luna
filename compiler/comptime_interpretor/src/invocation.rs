@@ -230,10 +230,14 @@ impl<'a> Interpreter<'a> {
                     | Execution::Contract { expression, .. } => Some(expression.clone()),
                     _ => None,
                 };
-                let (expression, identity, _) = active.parts();
-                let code = match owned {
-                    Some(body) => self.owned_invocation_code(&body),
-                    None => self.invocation_code(expression, identity),
+                let code = if let Execution::Associated { expression, .. } = &active {
+                    self.borrowed_invocation_code(expression)
+                } else {
+                    let (expression, identity, _) = active.parts();
+                    match owned {
+                        Some(body) => self.owned_invocation_code(&body),
+                        None => self.invocation_code(expression, identity),
+                    }
                 };
                 result = match code {
                     Ok(Some(code)) => {

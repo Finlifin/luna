@@ -111,3 +111,60 @@ fn associated_chains_use_the_explicit_stack_and_clean_up_budget_failure() {
         Flow::Value(Value::Bool(true))
     ));
 }
+
+#[test]
+fn associated_code_reuse_does_not_cache_selection_results_or_execution() {
+    let package = Package::default();
+    let yes = expr(K::Literal(Literal::Bool(true)));
+    // Deliberately use identical source coordinates and result types: those are
+    // not code identity, nor is the associated member's declaration alone.
+    let no = expr(K::Literal(Literal::Bool(false)));
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let mut env = Environment::default();
+    for (initializer, expected, compilations) in [
+        (&yes, true, 1),
+        (&yes, true, 1),
+        (&no, false, 2),
+        (&yes, true, 2),
+    ] {
+        vm.associated_initializers.insert(key(2), initializer);
+        let before = vm.remaining_steps();
+        assert!(matches!(run(&mut vm, &read(2), &mut env, true).unwrap(),
+            Flow::Value(Value::Bool(value)) if value == expected));
+        assert_eq!(vm.bytecode_compilations(), compilations);
+        assert!(vm.remaining_steps() < before);
+        assert!(vm.active_associated_initializers.is_empty());
+    }
+    // A warmed body cannot bypass the current cycle guard or missing evidence.
+    vm.active_associated_initializers.insert(key(2));
+    assert_eq!(
+        run(&mut vm, &read(2), &mut env, true).unwrap_err().kind,
+        ErrorKind::InvalidControlFlow
+    );
+    vm.active_associated_initializers.clear();
+    vm.associated_initializers.clear();
+    assert_eq!(
+        run(&mut vm, &read(2), &mut env, true).unwrap_err().kind,
+        ErrorKind::UnmaterializedDispatch
+    );
+}
+
+#[test]
+fn borrowed_code_cache_does_not_poison_retries_after_compilation_budget_failure() {
+    let package = Package::default();
+    let body = expr(K::Literal(Literal::Bool(true)));
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    vm.budget.steps = 0;
+    assert_eq!(
+        vm.borrowed_invocation_code(&body).unwrap_err().kind,
+        ErrorKind::StepsExhausted
+    );
+    vm.budget.steps = Budget::default().steps;
+    let program = vm.borrowed_invocation_code(&body).unwrap().unwrap();
+    let count = vm.bytecode_compilations();
+    let reused = vm.borrowed_invocation_code(&body).unwrap().unwrap();
+    assert!(Arc::ptr_eq(&program, &reused));
+    assert_eq!(vm.bytecode_compilations(), count);
+    vm.bytecode_enabled = false;
+    assert!(vm.borrowed_invocation_code(&body).unwrap().is_none());
+}
