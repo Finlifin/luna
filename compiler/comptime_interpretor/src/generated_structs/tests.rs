@@ -428,3 +428,48 @@ fn owned_publication_releases_rejected_batches_and_keeps_previous_types() {
     .unwrap();
     assert!(vm.reflect_struct(&ty(20)).is_ok());
 }
+
+#[test]
+fn source_session_shares_layouts_but_isolates_generated_struct_publication() {
+    let package = Arc::new(package());
+    let mut session = CodeSession::new(package.clone());
+    let mut first =
+        Interpreter::for_comptime_in_session(&package, &mut session, &mut Budget::default())
+            .unwrap();
+    let base = first.structs.base.clone();
+    assert!(std::ptr::eq(
+        &**first.structs.get(&id(10)).unwrap(),
+        &package.structs[0]
+    ));
+    first
+        .install_owned_generated_structs_with(
+            vec![structure(20, vec![("flag", boolean())])].into(),
+            || Ok::<_, ()>(()),
+        )
+        .unwrap();
+    assert!(first.reflect_struct(&ty(20)).is_ok());
+    let mut next =
+        Interpreter::for_comptime_in_session(&package, &mut session, &mut Budget::default())
+            .unwrap();
+    assert!(Arc::ptr_eq(&base, &next.structs.base));
+    assert!(next.reflect_struct(&ty(20)).is_err());
+    assert!(
+        next.install_owned_generated_structs_with(vec![structure(21, vec![])].into(), || Err::<
+            (),
+            _,
+        >(
+            "publisher rejected"
+        ),)
+            .is_err()
+    );
+    assert!(!next.structs.contains_key(&id(21)));
+    assert_eq!(next.reflect_struct(&ty(10)).unwrap().fields.len(), 1);
+    assert!(
+        next.install_owned_generated_structs_with(
+            vec![structure(10, vec![])].into(),
+            || Ok::<_, ()>(()),
+        )
+        .is_err()
+    );
+    assert_eq!(next.reflect_struct(&ty(10)).unwrap().fields.len(), 1);
+}

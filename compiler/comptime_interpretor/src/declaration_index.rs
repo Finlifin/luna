@@ -55,6 +55,8 @@ pub(super) type RuntimeIdentities<'a> = Declarations<'a, nir::program::RuntimeFu
 pub(super) type Effects<'a> = Declarations<'a, nir::effects::Declaration>;
 
 pub(super) struct SourceIndexes {
+    pub(super) structs: Arc<BTreeMap<DeclarationId, generated_structs::StructDefinition<'static>>>,
+    pub(super) enums: Arc<BTreeMap<DeclarationId, generated_enums::EnumDefinition<'static>>>,
     pub(super) method_parameters: Arc<HashMap<(DeclarationId, DeclarationId), Vec<LocalId>>>,
     pub(super) method_origins: Arc<HashMap<DeclarationId, Option<DeclarationId>>>,
     pub(super) parameter_domains: Arc<BTreeMap<DeclarationId, Term>>,

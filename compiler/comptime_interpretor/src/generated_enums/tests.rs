@@ -307,3 +307,39 @@ fn every_insufficient_enum_admission_budget_rolls_back_and_can_retry() {
         assert!(vm.reflect_enum(&ty(21)).is_ok());
     }
 }
+
+#[test]
+fn source_session_shares_layouts_but_isolates_generated_enum_publication() {
+    let package = Arc::new(package());
+    let mut session = CodeSession::new(package.clone());
+    let mut first =
+        Interpreter::for_comptime_in_session(&package, &mut session, &mut Budget::default())
+            .unwrap();
+    let base = first.enums.base.clone();
+    assert!(std::ptr::eq(
+        &**first.enums.get(&id(10)).unwrap(),
+        &package.enums[0]
+    ));
+    first
+        .install_owned_generated_enums_with(vec![enumeration(20)].into(), || Ok::<_, ()>(()))
+        .unwrap();
+    assert!(first.reflect_enum(&ty(20)).is_ok());
+    let mut next =
+        Interpreter::for_comptime_in_session(&package, &mut session, &mut Budget::default())
+            .unwrap();
+    assert!(Arc::ptr_eq(&base, &next.enums.base));
+    assert!(next.reflect_enum(&ty(20)).is_err());
+    assert!(
+        next.install_owned_generated_enums_with(vec![enumeration(21)].into(), || Err::<(), _>(
+            "publisher rejected"
+        ),)
+            .is_err()
+    );
+    assert!(!next.enums.contains_key(&id(21)));
+    assert_eq!(next.reflect_enum(&ty(10)).unwrap().variants.len(), 2);
+    assert!(
+        next.install_owned_generated_enums_with(vec![enumeration(10)].into(), || Ok::<_, ()>(()))
+            .is_err()
+    );
+    assert_eq!(next.reflect_enum(&ty(10)).unwrap().variants.len(), 2);
+}

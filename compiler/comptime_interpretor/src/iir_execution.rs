@@ -207,10 +207,10 @@ impl<'a> Interpreter<'a> {
                 .iter()
                 .map(|h| (h.declaration, h))
                 .collect(),
-            structs: BTreeMap::new(),
+            structs: Default::default(),
             newtypes: BTreeMap::new(),
             alias_contracts: BTreeMap::new(),
-            enums: BTreeMap::new(),
+            enums: Default::default(),
             budget: Budget {
                 steps: fuel as u64,
                 depth: budget.depth.min(256),

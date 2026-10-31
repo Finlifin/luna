@@ -743,6 +743,7 @@ macro_rules! value {
 
 mod code_session;
 mod declaration_index;
+mod layout_catalog;
 pub use code_session::CodeSession;
 
 mod invocation_budget;
@@ -833,10 +834,10 @@ pub struct Interpreter<'a> {
     runtime_function_identities: declaration_index::RuntimeIdentities<'a>,
     retained_callable_signatures: HashMap<(DeclarationId, &'a [Term]), &'a Term>,
     normal_forms: BTreeMap<DeclarationId, &'a nir::normal_forms::Head>,
-    structs: BTreeMap<DeclarationId, generated_structs::StructDefinition<'a>>,
+    structs: layout_catalog::Catalog<generated_structs::StructDefinition<'a>>,
     newtypes: BTreeMap<DeclarationId, &'a nir::newtypes::Newtype>,
     alias_contracts: BTreeMap<DeclarationId, &'a nir::type_aliases::Contract>,
-    enums: BTreeMap<DeclarationId, generated_enums::EnumDefinition<'a>>,
+    enums: layout_catalog::Catalog<generated_enums::EnumDefinition<'a>>,
     budget: Budget,
     depth: usize,
     invocation_depth: usize,
@@ -924,8 +925,14 @@ impl<'a> Interpreter<'a> {
                 });
             }
         }
-        let mut structs = BTreeMap::new();
-        let mut enums = BTreeMap::new();
+        let mut structs = positions
+            .as_ref()
+            .map(|index| layout_catalog::Catalog::from_base(index.structs.clone()))
+            .unwrap_or_default();
+        let mut enums = positions
+            .as_ref()
+            .map(|index| layout_catalog::Catalog::from_base(index.enums.clone()))
+            .unwrap_or_default();
         for definition in &package.enums {
             if definition.validate_encoding_in(package.target).is_err() {
                 return Err(Error {
@@ -933,12 +940,13 @@ impl<'a> Interpreter<'a> {
                     source: None,
                 });
             }
-            if enums
-                .insert(
-                    definition.declaration,
-                    generated_enums::EnumDefinition::Borrowed(definition),
-                )
-                .is_some()
+            if positions.is_none()
+                && enums
+                    .insert(
+                        definition.declaration,
+                        generated_enums::EnumDefinition::Borrowed(definition),
+                    )
+                    .is_some()
             {
                 return Err(Error {
                     kind: ErrorKind::InvalidCallPlan,
@@ -947,12 +955,13 @@ impl<'a> Interpreter<'a> {
             }
         }
         for definition in &package.structs {
-            if structs
-                .insert(
-                    definition.declaration,
-                    generated_structs::StructDefinition::Borrowed(definition),
-                )
-                .is_some()
+            if positions.is_none()
+                && structs
+                    .insert(
+                        definition.declaration,
+                        generated_structs::StructDefinition::Borrowed(definition),
+                    )
+                    .is_some()
             {
                 return Err(Error {
                     kind: ErrorKind::InvalidCallPlan,

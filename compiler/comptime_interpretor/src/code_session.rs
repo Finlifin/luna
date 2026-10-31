@@ -65,10 +65,45 @@ impl<'program> Interpreter<'program> {
         }
         let reserved = *budget;
         budget.steps = 0;
-        let vm = Self::for_comptime_with_index(package, &[], reserved, session.indexes.clone())?;
-        budget.steps = vm.remaining_steps();
-        session.indexes.get_or_insert_with(|| {
+        let mut vm =
+            Self::for_comptime_with_index(package, &[], reserved, session.indexes.clone())?;
+        if session.indexes.is_none() {
+            vm.charge_preparation(package.structs.len().saturating_add(package.enums.len()))?;
+        }
+        let indexes = session.indexes.get_or_insert_with(|| {
             Arc::new(declaration_index::SourceIndexes {
+                structs: Arc::new(
+                    package
+                        .structs
+                        .iter()
+                        .enumerate()
+                        .map(|(index, definition)| {
+                            (
+                                definition.declaration,
+                                generated_structs::StructDefinition::Source {
+                                    package: session.package.clone(),
+                                    index,
+                                },
+                            )
+                        })
+                        .collect(),
+                ),
+                enums: Arc::new(
+                    package
+                        .enums
+                        .iter()
+                        .enumerate()
+                        .map(|(index, definition)| {
+                            (
+                                definition.declaration,
+                                generated_enums::EnumDefinition::Source {
+                                    package: session.package.clone(),
+                                    index,
+                                },
+                            )
+                        })
+                        .collect(),
+                ),
                 method_parameters: vm.method_parameters.clone(),
                 method_origins: vm.method_origins.clone(),
                 parameter_domains: vm.declaration_parameter_domains.clone(),
@@ -78,6 +113,9 @@ impl<'program> Interpreter<'program> {
                 effects: vm.effect_declarations.positions.clone(),
             })
         });
+        vm.structs = layout_catalog::Catalog::from_base(indexes.structs.clone());
+        vm.enums = layout_catalog::Catalog::from_base(indexes.enums.clone());
+        budget.steps = vm.remaining_steps();
         Ok(vm)
     }
 
@@ -213,5 +251,39 @@ mod tests {
             &index,
             &session.indexes.as_ref().unwrap().functions
         ));
+    }
+    #[test]
+    fn layout_catalog_publication_exhaustion_leaves_session_unpublished() {
+        let source = Arc::new(Package {
+            structs: vec![nir::program::Struct {
+                declaration: DeclarationId {
+                    package: 1,
+                    local: 1,
+                },
+                name: "Record".into(),
+                type_parameters: vec![],
+                parameter_types: vec![],
+                fields: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+            }],
+            ..Default::default()
+        });
+        let ordinary = Interpreter::for_comptime(&source, Budget::default()).unwrap();
+        let construction = Budget::default().steps - ordinary.remaining_steps();
+        let mut session = CodeSession::new(source.clone());
+        let mut budget = Budget {
+            steps: construction,
+            depth: 128,
+        };
+        let error = Interpreter::for_comptime_in_session(&source, &mut session, &mut budget)
+            .err()
+            .expect("catalog ownership also consumes work");
+        assert_eq!(error.kind, ErrorKind::StepsExhausted);
+        assert_eq!(budget.steps, 0);
+        assert!(session.indexes.is_none());
+        Interpreter::for_comptime_in_session(&source, &mut session, &mut Budget::default())
+            .unwrap();
+        assert!(session.indexes.is_some());
     }
 }

@@ -43,6 +43,10 @@ impl std::ops::Deref for EnumBatch<'_> {
 }
 #[derive(Clone)]
 pub(super) enum EnumDefinition<'a> {
+    Source {
+        package: Arc<Package>,
+        index: usize,
+    },
     Borrowed(&'a nir::program::Enum),
     Shared {
         batch: Arc<[nir::program::Enum]>,
@@ -54,6 +58,7 @@ impl std::ops::Deref for EnumDefinition<'_> {
     fn deref(&self) -> &Self::Target {
         match self {
             Self::Borrowed(definition) => definition,
+            Self::Source { package, index } => &package.enums[*index],
             Self::Shared { batch, index } => &batch[*index],
         }
     }

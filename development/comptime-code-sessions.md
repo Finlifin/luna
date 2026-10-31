@@ -47,7 +47,7 @@ The checks passed: 38 runtime identity tests and 18 driver memory tests
 
 ## Remaining work
 
-Trait evidence and layout tables are still rebuilt; source function, runtime-identity
+Trait evidence is still rebuilt; source function, runtime-identity
 and effect declaration indexes are shared.
 This is not yet a
 shared VM world, persistent disk cache, or a suspended elaboration session.
@@ -148,7 +148,7 @@ invocation driver uses this constructor for its unchanged source snapshot.
 Phase, formation and trait checks still run per construction, and their existing
 world-work reservation remains in force. This stage removes repeated function
 index allocation/building; it does not claim to eliminate declaration-world
-construction. Trait and layout tables are still local. Runtime-identity and effect indexes
+construction. Trait evidence is still local. Runtime-identity and effect indexes
 now use the shared typed declaration index described below.
 IIR instance lookup retains its separate graph authority.
 
@@ -233,3 +233,50 @@ default parameters, named overrides, stored methods and generic trait calls
 across fresh VMs in a shared session. Evidence:
 `/tmp/luna-tools-4int1nsu/result.json`, `/tmp/luna-tools-2_19jpbf/result.json`,
 and `/tmp/luna-tools-wtabqcrk/result.json`. Formatting and diff checks passed.
+
+## Shared layouts and local generated definitions
+
+Struct and enum catalogs now have an immutable source base and a VM-local map
+for generated definitions. A source session owns the base through `Arc`. Source
+layout handles retain the Package allocation and an index into its original
+struct/enum vectors; field trees are not cloned into a second owned world.
+Fresh session VMs share the base maps but start with an empty generated map.
+
+Builder publication, collision checks and rollback see both parts of the
+catalog. Publication inserts only into the local map; rollback removes only
+those local entries. Source definitions cannot be replaced by generated entries.
+Existing borrowed and owned generated batches retain their lifetimes as before.
+The standalone constructor also uses the catalog abstraction, while IIR retains
+its separate graph authority.
+
+The initial source-base construction consumes fuel before allocation and before
+publishing session metadata. Failure leaves the session unpublished and retains
+the construction budget reservation. Successful later construction reuses the
+base maps; existing phase and enum encoding checks still run.
+
+Verification commands:
+
+```sh
+python3 -B development/check.py --timeout 900 -- check -p comptime_interpretor
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib generated_
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib
+python3 -B development/check.py --timeout 900 -- test -p luna --test builder_invocations --test encoded_enums --test comptime_memory --test comptime_iir_bytecode
+```
+
+The source-session struct and enum tests verify original declaration references,
+shared map allocations, successful local publication, rejection of source
+identity collisions, publisher-failure rollback, and absence of generated
+entries in the next VM. A constructor test exhausts fuel specifically between
+ordinary VM creation and session catalog publication, then retries successfully.
+
+Remaining world construction includes NF/newtype/alias catalogs and instantiated
+trait evidence/contracts. No active builder transaction or proof outcome is
+published as shared metadata.
+
+The layout stage passed the interpreter check, 331 interpreter unit tests and
+117 driver integration tests (79 builder, 14 encoded-enum, 20 memory, 4 IIR).
+Evidence: `/tmp/luna-tools-xgwqvme7/result.json`,
+`/tmp/luna-tools-76ebnu9z/result.json`, and
+`/tmp/luna-tools-6n9bh7c8/result.json`. The initial generated-definition subset
+also passed (`/tmp/luna-tools-k3xrfzmp/result.json`). Formatting and diff checks
+passed; no whole-workspace test run or wall-clock performance claim is made.
