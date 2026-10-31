@@ -1822,10 +1822,17 @@ mod tuple_layout_tests {
                 .0
             };
         let context = Context::default();
-        for ty in [
-            &ty,
-            &tuple(Term::TypeListValue(vec![Term::Primitive(P::Bool)])),
-        ] {
+        assert_ne!(
+            check(
+                &tuple(Term::TypeListValue(vec![Term::Primitive(P::Bool)])),
+                &[&yes, &no],
+                Some(&head),
+                &context,
+                100_000
+            ),
+            Coverage::Exhaustive
+        );
+        for ty in [&ty] {
             assert_eq!(
                 check(ty, &[&yes, &no], Some(&head), &context, 100_000),
                 Coverage::Exhaustive

@@ -239,7 +239,11 @@ fn bound_tuple_preparation_uses_only_the_declared_layout_role() {
     let pair = Term::NormalForm {
         head: id,
         sort: Sort::Type,
-        arguments: vec![Term::TypeListValue(vec![boolean(), boolean()])],
+        arguments: vec![Term::NominalValue {
+            ty: Box::new(head.parameters[0].ty.clone()),
+            variant: None,
+            fields: vec![boolean(), boolean()],
+        }],
     };
     let unpack = expr(
         K::LetPattern {

@@ -7693,3 +7693,50 @@ builder acceptance from the preceding representation migration.
 
 Final formatting: `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`
 exited 0; `/tmp/luna-tools-82gt_z2g/result.json`. `git diff --check` passed.
+
+### Require declared collection domains throughout admission and tuple views
+
+Normal-form input checking and the shared frozen-list payload view no longer
+admit `Term::TypeListValue`. A registered list head cannot supply the missing
+value domain, including for an empty payload or a list nested inside another
+input. Ordinary `NominalValue` inputs still use the same recursive admission
+for Type elements, Boolean elements, dependent domains and nested collections.
+
+`Head::tuple_elements` now requires the owning parameter metadata and an exact
+payload-domain match. Missing parameters no longer gain layout authority from
+the legacy encoding. Tuple input hints in call inference retain a mandatory
+list domain; they do not reconstruct one from domainless fields. This does not
+unfold a normal-form head or establish equality between distinct declarations.
+
+The obsolete boolean-head transport adapter was removed. Error product
+transport and completed-value validation take borrowed fields supplied by
+owning declaration metadata. The VM decoder no longer routes legacy values
+into list reconstruction. Coverage, known-pattern inspection, callable cleanup,
+staging, representation-cycle checking and inference fixtures now exercise the
+ordinary domain-carrying representation. Negative tests cover missing metadata,
+foreign domains, domainless empty/nonempty lists and failed-budget recovery.
+
+The legacy Term variant and remaining generic visitors/test fixtures are not
+removed in this stage. Its final retirement remains work; this stage closes
+admission and layout compatibility paths, rather than declaring that migration
+complete. No language syntax, NF identity or public library interface changed.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p type_resolution -p ptc -p comptime_interpretor -p elaboration -p iir --no-fail-fast`:
+  final run 1,822 passed, exit 0; `/tmp/luna-tools-hfkea3j0/result.json`.
+  The initial run (`/tmp/luna-tools-22eec9c3/result.json`) had 1,811 passes and
+  ten failures in fixtures still accepting the legacy domainless encoding.
+  Those positive fixtures now provide declaration-owned domains, and explicit
+  rejection cases protect the stricter boundary.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_lists --test extended_calls --test contextual_spreads --test comptime_list_type_evidence --test comptime_bytecode_lists --test builder_invocations --test generated_definitions --test cmtt_type_inputs --test tuple_type_syntax --no-fail-fast`:
+  211 passed, exit 0; `/tmp/luna-tools-xt5166dh/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-m54loifs/result.json`; `git diff --check` passed.
+- `python3 -B development/library_check.py --stage sysroot-meta --stage sysroot-builders --timeout 300`:
+  both real-sysroot native stages passed (seven source tests), exit 0;
+  `/tmp/luna-library-un2xmmde/summary.json`. This exercises shipped list
+  methods and builder-generated structs, including selected list/Tuple layouts.
+
+No full language suite was run. The pre-existing unrelated working-tree
+changes were left outside this change.

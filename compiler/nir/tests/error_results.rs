@@ -27,6 +27,41 @@ fn row(labels: Vec<Term>) -> Row {
     Row::new(labels, &mut 10000, &mut identity).unwrap()
 }
 
+fn tuple_layout(head: nir::DeclarationId) -> nir::normal_forms::Head {
+    nir::normal_forms::Head {
+        declaration: head,
+        role: nir::normal_forms::Role::Tuple,
+        collector: Some(0),
+        parameters: vec![nir::normal_forms::Parameter {
+            declaration: nir::DeclarationId {
+                package: head.package,
+                local: head.local + 1,
+            },
+            binding: nir::program::LocalId {
+                owner: head.local,
+                index: 0,
+            },
+            kind: nir::normal_forms::Kind::Value,
+            ty: Term::NormalForm {
+                head: nir::DeclarationId {
+                    package: head.package,
+                    local: head.local + 2,
+                },
+                sort: nir::Sort::Type,
+                arguments: vec![Term::Primitive(nir::Primitive::Type)],
+            },
+        }],
+        requirements: vec![],
+    }
+}
+fn tuple_input(metadata: &nir::normal_forms::Head, fields: Vec<Term>) -> Term {
+    Term::NominalValue {
+        ty: Box::new(metadata.parameters[0].ty.clone()),
+        variant: None,
+        fields,
+    }
+}
+
 #[test]
 fn complete_type_instances_are_labels_and_duplicates_keep_first_position() {
     let a = label(1, false);
@@ -563,7 +598,7 @@ fn executable_conversions_require_payload_identity_and_positive_membership() {
 
 #[test]
 fn product_transport_maps_symbolic_paths_and_physical_guards() {
-    use nir::error_results::transport_plan;
+    use nir::error_results::transport_plan_with_layouts;
     let boolean = Term::Primitive(nir::Primitive::Bool);
     let character = Term::Primitive(nir::Primitive::Char);
     let input = Term::Tuple(vec![
@@ -574,13 +609,13 @@ fn product_transport_maps_symbolic_paths_and_physical_guards() {
         physical_result(vec![character, boolean.clone()], boolean.clone()),
         boolean,
     ]);
-    let plan = transport_plan(
+    let plan = transport_plan_with_layouts(
         &input,
         &output,
         true,
         &mut 10000,
         &mut |a, b| a == b,
-        &|_| false,
+        &|_| None,
     )
     .unwrap();
     let mut path = vec![0, usize::MAX, 1, 0];
@@ -591,28 +626,26 @@ fn product_transport_maps_symbolic_paths_and_physical_guards() {
     assert_eq!(path, vec![0, usize::MAX, 1, 0]);
     assert!(plan.to_string().starts_with("(tuple-layout (error-layout"));
     assert!(
-        transport_plan(&input, &output, true, &mut 0, &mut |a, b| a == b, &|_| {
-            false
-        })
-        .is_err()
+        transport_plan_with_layouts(&input, &output, true, &mut 0, &mut |a, b| a == b, &|_| None)
+            .is_err()
     );
 }
 
 #[test]
 fn product_transport_rejects_row_widening_and_unregistered_tuple_heads() {
-    use nir::error_results::transport_plan;
+    use nir::error_results::transport_plan_with_layouts;
     let boolean = Term::Primitive(nir::Primitive::Bool);
     let character = Term::Primitive(nir::Primitive::Char);
     let a = physical_result(vec![boolean.clone()], boolean.clone());
     let b = physical_result(vec![boolean.clone(), character.clone()], boolean.clone());
     assert!(
-        transport_plan(
+        transport_plan_with_layouts(
             &Term::Tuple(vec![a]),
             &Term::Tuple(vec![b]),
             true,
             &mut 10000,
             &mut |a, b| a == b,
-            &|_| false
+            &|_| None
         )
         .is_err()
     );
@@ -620,10 +653,11 @@ fn product_transport_rejects_row_widening_and_unregistered_tuple_heads() {
         package: 9,
         local: 81,
     };
+    let metadata = tuple_layout(head);
     let tuple = |row| Term::NormalForm {
         head,
         sort: nir::Sort::Type,
-        arguments: vec![Term::TypeListValue(vec![row])],
+        arguments: vec![tuple_input(&metadata, vec![row])],
     };
     let input = tuple(physical_result(
         vec![boolean.clone(), character.clone()],
@@ -631,24 +665,24 @@ fn product_transport_rejects_row_widening_and_unregistered_tuple_heads() {
     ));
     let output = tuple(physical_result(vec![character, boolean.clone()], boolean));
     assert!(
-        transport_plan(
+        transport_plan_with_layouts(
             &input,
             &output,
             true,
             &mut 10000,
             &mut |a, b| a == b,
-            &|_| false
+            &|_| None
         )
         .is_err()
     );
     assert!(
-        transport_plan(
+        transport_plan_with_layouts(
             &input,
             &output,
             true,
             &mut 10000,
             &mut |a, b| a == b,
-            &|id| id == head
+            &|ty| metadata.tuple_elements(ty)
         )
         .is_ok()
     );
@@ -790,13 +824,13 @@ fn frozen_product_transport_preserves_fields_and_rejects_wrong_source_domain() {
     };
     let from = Term::Tuple(vec![record(a.clone())]);
     let to = Term::Tuple(vec![record(b.clone())]);
-    let plan = nir::error_results::transport_plan(
+    let plan = nir::error_results::transport_plan_with_layouts(
         &from,
         &to,
         true,
         &mut 10000,
         &mut |a, b| a == b,
-        &|_| false,
+        &|_| None,
     )
     .unwrap();
     let value = |ty| {

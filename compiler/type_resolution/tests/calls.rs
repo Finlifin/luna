@@ -1303,7 +1303,18 @@ fn bound_tuple_inference_proposes_fields_and_preserves_context_identity() {
     let tuple = |fields| Term::NormalForm {
         head,
         sort: Sort::Type,
-        arguments: vec![Term::TypeListValue(fields)],
+        arguments: vec![Term::NominalValue {
+            ty: Box::new(Term::NormalForm {
+                head: DeclarationId {
+                    package: 55,
+                    local: 3,
+                },
+                sort: Sort::Type,
+                arguments: vec![primitive(P::Type)],
+            }),
+            variant: None,
+            fields,
+        }],
     };
     let mut package = nir::program::Package {
         normal_forms: vec![
@@ -1362,12 +1373,34 @@ fn bound_tuple_inference_proposes_fields_and_preserves_context_identity() {
     let C::NormalTuple {
         head: actual,
         fields,
-        ..
+        list_domain,
     } = pending.parameter_input_context(0).unwrap()
     else {
         panic!("normal tuple context");
     };
     assert_eq!(actual, head);
+    assert_eq!(
+        list_domain,
+        Some(package.normal_forms[0].parameters[0].ty.clone())
+    );
+    // A domainless legacy input cannot supply field checking hints, even
+    // when the outer head is registered and all its elements are Types.
+    let invalid_definition = scheme(
+        vec![Term::NormalForm {
+            head,
+            sort: Sort::Type,
+            arguments: vec![Term::TypeListValue(vec![primitive(P::Bool)])],
+        }],
+        primitive(P::Bool),
+        0,
+    );
+    let unchecked = invalid_definition
+        .infer_partial_types_in_context(&[None], None, &context, Budget::default())
+        .unwrap();
+    assert!(!matches!(
+        unchecked.parameter_input_context(0).unwrap(),
+        C::NormalTuple { .. }
+    ));
     assert!(matches!(&fields[0], C::Unknown));
     assert!(matches!(&fields[1], C::Known(ty) if *ty == primitive(P::U8)));
     let actual = tuple(vec![primitive(P::Bool), primitive(P::U8)]);

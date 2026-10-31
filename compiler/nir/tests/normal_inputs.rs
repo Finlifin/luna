@@ -8,6 +8,17 @@ fn id(local: u32) -> DeclarationId {
 fn primitive(p: P) -> Term {
     Term::Primitive(p)
 }
+fn type_list(fields: Vec<Term>) -> Term {
+    Term::NominalValue {
+        ty: Box::new(Term::NormalForm {
+            head: id(90),
+            sort: Sort::Type,
+            arguments: vec![primitive(P::Type)],
+        }),
+        variant: None,
+        fields,
+    }
+}
 fn parameter(index: u32, kind: Kind, ty: Term) -> Parameter {
     Parameter {
         declaration: id(index),
@@ -113,10 +124,7 @@ fn dependent_list_parameters_use_the_same_value_contract_for_types_and_bools() {
             None,
         )
     };
-    let types = vec![
-        primitive(P::Type),
-        Term::TypeListValue(vec![primitive(P::Bool)]),
-    ];
+    let types = vec![primitive(P::Type), type_list(vec![primitive(P::Bool)])];
     let bools = vec![
         primitive(P::Bool),
         Term::NominalValue {
@@ -135,10 +143,7 @@ fn dependent_list_parameters_use_the_same_value_contract_for_types_and_bools() {
     assert!(check(&[primitive(P::Type), bools[1].clone()], true, &mut 10_000).is_err());
     assert!(
         check(
-            &[
-                primitive(P::Type),
-                Term::TypeListValue(vec![Term::Bool(true)])
-            ],
+            &[primitive(P::Type), type_list(vec![Term::Bool(true)])],
             true,
             &mut 10_000
         )
@@ -244,13 +249,7 @@ fn dependent_collection_domains_validate_ordinary_type_list_payloads() {
             None,
         )
     };
-    assert!(
-        check(
-            primitive(P::Type),
-            Term::TypeListValue(vec![primitive(P::Bool)])
-        )
-        .is_ok()
-    );
+    assert!(check(primitive(P::Type), type_list(vec![primitive(P::Bool)])).is_ok());
     assert!(
         check(
             primitive(P::Bool),
@@ -262,13 +261,7 @@ fn dependent_collection_domains_validate_ordinary_type_list_payloads() {
         )
         .is_ok()
     );
-    assert!(
-        check(
-            primitive(P::Bool),
-            Term::TypeListValue(vec![primitive(P::Bool)])
-        )
-        .is_err()
-    );
+    assert!(check(primitive(P::Bool), type_list(vec![primitive(P::Bool)])).is_err());
     assert!(
         check(
             primitive(P::Type),
@@ -520,17 +513,44 @@ fn duplicate_and_oversized_record_labels_are_rejected_before_comparison() {
 
 #[test]
 fn bound_tuple_value_domains_require_identity_and_check_nested_elements() {
-    use nir::normal_forms::supported_input_type_with_tuple_heads;
+    let supported = |ty: &Term, prior: &[DeclarationId], trusted| {
+        nir::normal_forms::supported_input_type_with_collections_in(
+            ty,
+            &prior
+                .iter()
+                .map(|declaration| nir::DeclarationParameter {
+                    declaration: *declaration,
+                    sort: Sort::Type,
+                })
+                .collect::<Vec<_>>(),
+            trusted,
+            |head| head == id(90),
+            |_| false,
+            None,
+        )
+    };
     let tuple = |fields| Term::NormalForm {
         head: id(9),
         sort: Sort::Type,
-        arguments: vec![Term::TypeListValue(fields)],
+        arguments: vec![type_list(fields)],
     };
     let shape = tuple(vec![primitive(P::Bool), tuple(vec![primitive(P::U8)])]);
     let trusted = |head| head == id(9);
     assert!(!supported_input_type(&shape, &[]));
-    assert!(supported_input_type_with_tuple_heads(&shape, &[], trusted));
+    assert!(supported(&shape, &[], trusted));
     let descriptor = head(shape.clone());
+    let check = |values: &[Term]| {
+        descriptor.check_arguments_in_scope_with_collections_budgeted_in(
+            values,
+            trusted,
+            |head| head == id(90),
+            |_, _, _| None,
+            |_, _| false,
+            &[],
+            &mut 100_000,
+            None,
+        )
+    };
     let valid = Term::TupleValue(vec![
         Term::Bool(true),
         Term::TupleValue(vec![Term::Integer(comptime_runtime::Integer::from_u128(
@@ -538,11 +558,7 @@ fn bound_tuple_value_domains_require_identity_and_check_nested_elements() {
         ))]),
     ]);
     assert!(descriptor.check_closed_arguments(&[valid.clone()]).is_err());
-    assert!(
-        descriptor
-            .check_closed_arguments_with_tuple_heads(&[valid.clone()], trusted)
-            .is_ok()
-    );
+    assert!(check(&[valid.clone()]).is_ok());
     for bad in [
         Term::TupleValue(vec![]),
         Term::TupleValue(vec![
@@ -556,36 +572,16 @@ fn bound_tuple_value_domains_require_identity_and_check_nested_elements() {
             Term::TupleValue(vec![Term::Bool(false)]),
         ]),
     ] {
-        assert!(
-            descriptor
-                .check_closed_arguments_with_tuple_heads(&[bad], trusted)
-                .is_err()
-        );
-        assert!(
-            descriptor
-                .check_closed_arguments_with_tuple_heads(&[valid.clone()], trusted)
-                .is_ok()
-        );
+        assert!(check(&[bad]).is_err());
+        assert!(check(&[valid.clone()]).is_ok());
     }
     let dependent = tuple(vec![Term::Rigid {
         declaration: id(7),
         sort: Sort::Type,
     }]);
-    assert!(!supported_input_type_with_tuple_heads(
-        &dependent,
-        &[],
-        trusted
-    ));
-    assert!(supported_input_type_with_tuple_heads(
-        &dependent,
-        &[id(7)],
-        trusted
-    ));
-    assert!(!supported_input_type_with_tuple_heads(
-        &tuple(vec![Term::Bool(true)]),
-        &[],
-        trusted
-    ));
+    assert!(!supported(&dependent, &[], trusted));
+    assert!(supported(&dependent, &[id(7)], trusted));
+    assert!(!supported(&tuple(vec![Term::Bool(true)]), &[], trusted));
 }
 
 #[test]
@@ -1112,9 +1108,27 @@ fn registered_layout_views_read_typed_list_payloads_without_unfolding_heads() {
         tuple.tuple_elements(&application(payload.clone())),
         Some(fields.as_slice())
     );
-    assert_eq!(
-        tuple.tuple_elements(&application(Term::TypeListValue(fields.clone()))),
-        Some(fields.as_slice())
+    assert!(
+        tuple
+            .tuple_elements(&application(Term::TypeListValue(fields.clone())))
+            .is_none()
+    );
+    for fields in [vec![], fields.clone()] {
+        let legacy = Term::TypeListValue(fields);
+        assert!(list.list_value_elements(&domain, &legacy).is_none());
+        assert!(tuple.tuple_elements(&application(legacy)).is_none());
+    }
+    let mut missing = tuple.clone();
+    missing.parameters.clear();
+    assert!(
+        missing
+            .tuple_elements(&application(payload.clone()))
+            .is_none()
+    );
+    assert!(
+        missing
+            .tuple_elements(&application(Term::TypeListValue(vec![])))
+            .is_none()
     );
     for wrong in [
         Term::NominalValue {
@@ -1146,7 +1160,7 @@ fn registered_layout_views_read_typed_list_payloads_without_unfolding_heads() {
     }
     assert!(
         tuple
-            .tuple_elements(&application(Term::TypeListValue(vec![Term::Bool(true)])))
+            .tuple_elements(&application(type_list(vec![Term::Bool(true)])))
             .is_none()
     );
     assert!(
@@ -1158,4 +1172,50 @@ fn registered_layout_views_read_typed_list_payloads_without_unfolding_heads() {
             })
             .is_none()
     );
+}
+
+#[test]
+fn collection_admission_never_supplies_a_missing_value_domain() {
+    let domain = Term::NormalForm {
+        head: id(90),
+        sort: Sort::Type,
+        arguments: vec![primitive(P::Type)],
+    };
+    for fields in [vec![], vec![primitive(P::Bool)]] {
+        for nested in [false, true] {
+            let descriptor = head(if nested {
+                record("items", domain.clone())
+            } else {
+                domain.clone()
+            });
+            let wrap = |input| if nested { value("items", input) } else { input };
+            let check = |input, fuel: &mut usize| {
+                descriptor.check_arguments_in_scope_with_collections_budgeted_in(
+                    &[wrap(input)],
+                    |_| false,
+                    |declaration| declaration == id(90),
+                    |_, _, _| None,
+                    |_, _| false,
+                    &[],
+                    fuel,
+                    None,
+                )
+            };
+            let valid = type_list(fields.clone());
+            assert!(check(valid.clone(), &mut 10000).is_ok());
+            assert!(check(Term::TypeListValue(fields.clone()), &mut 10000).is_err());
+            let foreign = Term::NominalValue {
+                ty: Box::new(Term::NormalForm {
+                    head: id(91),
+                    sort: Sort::Type,
+                    arguments: vec![primitive(P::Type)],
+                }),
+                variant: None,
+                fields: fields.clone(),
+            };
+            assert!(check(foreign, &mut 10000).is_err());
+            assert!(check(valid.clone(), &mut 0).is_err());
+            assert!(check(valid, &mut 10000).is_ok());
+        }
+    }
 }

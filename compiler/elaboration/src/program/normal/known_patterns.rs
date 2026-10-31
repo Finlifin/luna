@@ -572,7 +572,7 @@ mod tests {
             arguments: vec![value],
         };
         let ordinary = tuple(Term::NominalValue {
-            ty: Box::new(domain),
+            ty: Box::new(domain.clone()),
             variant: None,
             fields: vec![p(P::Bool)],
         });
@@ -598,7 +598,7 @@ mod tests {
                 }
                 .inspect(pattern, value, 0, budget, bindings)
             };
-        for value in [&ordinary, &tuple(Term::TypeListValue(vec![p(P::Bool)]))] {
+        for value in [&ordinary] {
             let mut bindings = BTreeMap::new();
             assert_eq!(
                 inspect(
@@ -630,6 +630,10 @@ mod tests {
         });
         for (value, head) in [
             (&ordinary, None),
+            (
+                &tuple(Term::TypeListValue(vec![p(P::Bool)])),
+                Some(metadata.clone()),
+            ),
             (&foreign, Some(metadata.clone())),
             (
                 &ordinary,
@@ -652,7 +656,11 @@ mod tests {
             );
             assert!(!bindings.contains_key(&id(9)));
         }
-        let empty = tuple(Term::TypeListValue(vec![]));
+        let empty = tuple(Term::NominalValue {
+            ty: Box::new(domain),
+            variant: None,
+            fields: vec![],
+        });
         assert_eq!(
             inspect(
                 &pattern,

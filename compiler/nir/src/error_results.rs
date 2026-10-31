@@ -4,7 +4,7 @@
 //! must never prove that two symbolic error labels are distinct.
 pub mod specialize;
 mod transport;
-pub use transport::{RepresentationTransport, transport_plan, transport_plan_with_layouts};
+pub use transport::{RepresentationTransport, transport_plan_with_layouts};
 
 use crate::{Sort, Term};
 use std::fmt;
@@ -544,7 +544,7 @@ pub fn validate_conversion(
     fuel: &mut usize,
     equal: &mut impl FnMut(&Term, &Term) -> bool,
 ) -> Result<(), Error> {
-    validate_conversion_with_tuple(conversion, input, output, fuel, equal, &|_| false)
+    validate_conversion_with_tuple(conversion, input, output, fuel, equal, &|_| None)
 }
 
 /// Validate conversions with declaration-owned product fields. Scalar error
@@ -565,16 +565,16 @@ pub fn validate_conversion_with_layouts(
     }
 }
 
-pub fn validate_conversion_with_tuple(
+fn validate_conversion_with_tuple(
     conversion: Conversion,
     input: &Term,
     output: &Term,
     fuel: &mut usize,
     equal: &mut impl FnMut(&Term, &Term) -> bool,
-    is_tuple: &impl Fn(crate::DeclarationId) -> bool,
+    tuple_fields: &impl for<'t> Fn(&'t Term) -> Option<&'t [Term]>,
 ) -> Result<(), Error> {
     if conversion == Conversion::Product {
-        transport_plan(input, output, true, fuel, equal, is_tuple)?;
+        transport_plan_with_layouts(input, output, true, fuel, equal, tuple_fields)?;
         return Ok(());
     }
     type_input(input, fuel)?;

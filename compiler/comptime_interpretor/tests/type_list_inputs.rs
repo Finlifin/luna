@@ -244,7 +244,14 @@ fn collected_type_list_crosses_invocation_and_preserves_tuple_head() {
         let thawed = vm
             .invoke_with_normal_arguments(
                 id(3),
-                vec![(list_type(), Term::TypeListValue(elements.clone()))],
+                vec![(
+                    list_type(),
+                    Term::NominalValue {
+                        ty: Box::new(list_type()),
+                        variant: None,
+                        fields: elements.clone(),
+                    },
+                )],
             )
             .unwrap();
         assert_eq!(thawed, Value::Type(tuple_type(elements)));

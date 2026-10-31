@@ -70,6 +70,41 @@ fn validate(value: &Expr) -> Result<(), &'static str> {
     nir::completed_values::validate(value, &mut 10000)
 }
 
+fn tuple_layout(head: nir::DeclarationId) -> nir::normal_forms::Head {
+    nir::normal_forms::Head {
+        declaration: head,
+        role: nir::normal_forms::Role::Tuple,
+        collector: Some(0),
+        parameters: vec![nir::normal_forms::Parameter {
+            declaration: nir::DeclarationId {
+                package: head.package,
+                local: head.local + 1,
+            },
+            binding: nir::program::LocalId {
+                owner: head.local,
+                index: 0,
+            },
+            kind: nir::normal_forms::Kind::Value,
+            ty: Term::NormalForm {
+                head: nir::DeclarationId {
+                    package: head.package,
+                    local: head.local + 2,
+                },
+                sort: nir::Sort::Type,
+                arguments: vec![Term::Primitive(nir::Primitive::Type)],
+            },
+        }],
+        requirements: vec![],
+    }
+}
+fn tuple_input(metadata: &nir::normal_forms::Head, fields: Vec<Term>) -> Term {
+    Term::NominalValue {
+        ty: Box::new(metadata.parameters[0].ty.clone()),
+        variant: None,
+        fields,
+    }
+}
+
 #[test]
 fn target_ranges_reach_nested_values_and_closure_captures() {
     use nir::target::TargetData;
@@ -524,6 +559,7 @@ fn completed_product_transport_uses_registered_tuple_layouts() {
         package: 11,
         local: 1,
     };
+    let metadata = tuple_layout(head);
     let source = Term::ErrorResult {
         errors: vec![boolean(), Term::Primitive(Primitive::Char)],
         result: Box::new(boolean()),
@@ -544,7 +580,7 @@ fn completed_product_transport_uses_registered_tuple_layouts() {
             if nominal {
                 Term::NormalForm {
                     head,
-                    arguments: vec![Term::TypeListValue(vec![field])],
+                    arguments: vec![tuple_input(&metadata, vec![field])],
                     sort: nir::Sort::Type,
                 }
             } else {
@@ -562,7 +598,7 @@ fn completed_product_transport_uses_registered_tuple_layouts() {
             nir::completed_values::validate_with_layouts(
                 value,
                 std::iter::empty(),
-                &|id| id == head,
+                &|ty| metadata.tuple_elements(ty),
                 fuel,
             )
         };
@@ -758,17 +794,18 @@ fn completed_structural_products_require_exact_layouts() {
         package: 12,
         local: 1,
     };
+    let metadata = tuple_layout(head);
     let ty = Term::NormalForm {
         head,
         sort: nir::Sort::Type,
-        arguments: vec![Term::TypeListValue(vec![boolean()])],
+        arguments: vec![tuple_input(&metadata, vec![boolean()])],
     };
     let formal = expr(ty, K::Tuple(vec![flag]));
     assert!(validate(&formal).is_err());
     nir::completed_values::validate_with_layouts(
         &formal,
         std::iter::empty(),
-        &|id| id == head,
+        &|ty| metadata.tuple_elements(ty),
         &mut 10000,
     )
     .unwrap();
@@ -776,7 +813,7 @@ fn completed_structural_products_require_exact_layouts() {
         nir::completed_values::validate_with_layouts(
             &formal,
             std::iter::empty(),
-            &|_| false,
+            &|_| None,
             &mut 10000
         )
         .is_err()
@@ -839,7 +876,7 @@ fn nominal_completed_values_check_instantiated_layouts_and_constructor_identity(
         nir::completed_values::validate_with_declarations(
             value,
             std::iter::empty(),
-            &|_| false,
+            &|_| None,
             &lookup,
             fuel,
         )

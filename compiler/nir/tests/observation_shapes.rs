@@ -41,10 +41,22 @@ fn normal_tuple_observations_require_registered_layout_and_scalar_fields() {
         package: 91,
         local: 1,
     };
+    let domain = Term::NormalForm {
+        head: DeclarationId {
+            package: 91,
+            local: 2,
+        },
+        sort: Sort::Type,
+        arguments: vec![Term::Primitive(Primitive::Type)],
+    };
     let tuple = |fields| Term::NormalForm {
         head,
         sort: Sort::Type,
-        arguments: vec![Term::TypeListValue(fields)],
+        arguments: vec![Term::NominalValue {
+            ty: Box::new(domain.clone()),
+            variant: None,
+            fields,
+        }],
     };
     let scalar = Term::Primitive(Primitive::Bool);
     let nested = tuple(vec![tuple(vec![scalar.clone()]), scalar.clone()]);
@@ -65,6 +77,21 @@ fn normal_tuple_observations_require_registered_layout_and_scalar_fields() {
         &nested
     ));
     package.normal_forms[0].role = Role::Tuple;
+    assert!(!scalar_observation_shape_in_package(
+        Some(&package),
+        &nested
+    ));
+    package.normal_forms[0]
+        .parameters
+        .push(nir::normal_forms::Parameter {
+            declaration: DeclarationId {
+                package: 91,
+                local: 3,
+            },
+            binding: nir::program::LocalId { owner: 1, index: 0 },
+            kind: nir::normal_forms::Kind::Value,
+            ty: domain.clone(),
+        });
     assert!(scalar_observation_shape_in_package(Some(&package), &nested));
     assert!(!scalar_observation_shape(&nested));
     for forbidden in [

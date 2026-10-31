@@ -57,7 +57,7 @@ impl Interpreter<'_> {
                     .saturating_add(value.exponent().bit_len().div_ceil(32)),
                 Term::String(value) | Term::Symbol(value) => value.len(),
                 Term::BitVec(value) => value.words().len(),
-                Term::TupleValue(values) | Term::TypeListValue(values) => values.len(),
+                Term::TupleValue(values) => values.len(),
                 Term::OptionalValue { ty, value } => self
                     .type_description_work(ty)
                     .ok_or_else(|| self.failure(ErrorKind::Type, None))?
@@ -91,9 +91,6 @@ impl Interpreter<'_> {
                 }
                 Term::ErrorValue { .. } => {
                     self.decode_error_normal_value(term, ty, depth, reconstruct_callables)?
-                }
-                Term::TypeListValue(_) => {
-                    self.decode_list_normal_value(term, ty, depth, reconstruct_callables)?
                 }
                 Term::NominalValue { .. } => match ty {
                     Term::Primitive(Primitive::Object) => {

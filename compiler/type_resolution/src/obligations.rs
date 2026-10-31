@@ -296,7 +296,7 @@ impl Engine {
 
     /// Read the payload of an already stage-authorized signature. This is a
     /// checking hint, not declaration formation or a new proof of layout.
-    pub(crate) fn tuple_input<'a>(&self, ty: &'a Term) -> Option<(Option<&'a Term>, &'a [Term])> {
+    pub(crate) fn tuple_input<'a>(&self, ty: &'a Term) -> Option<(&'a Term, &'a [Term])> {
         let Term::NormalForm {
             head,
             sort: Sort::Type,
@@ -312,12 +312,11 @@ impl Engine {
             return None;
         };
         let (domain, fields) = match input {
-            Term::TypeListValue(fields) => (None, fields.as_slice()),
             Term::NominalValue {
                 ty,
                 variant: None,
                 fields,
-            } if self.is_type_list_domain(ty) => (Some(ty.as_ref()), fields.as_slice()),
+            } if self.is_type_list_domain(ty) => (ty.as_ref(), fields.as_slice()),
             _ => return None,
         };
         fields

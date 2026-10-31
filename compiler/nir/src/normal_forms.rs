@@ -338,7 +338,6 @@ fn type_list_fields_with_layouts<'a>(
 ) -> Option<&'a [Term]> {
     let [value] = arguments else { return None };
     match value {
-        Term::TypeListValue(fields) => Some(fields),
         Term::NominalValue {
             ty,
             variant: None,
@@ -362,8 +361,6 @@ pub(crate) fn list_value_payload<'a>(ty: &Term, value: &'a Term) -> Option<&'a [
             variant: None,
             fields,
         } if actual.as_ref() == ty => Some(fields),
-        // Read the old encoding until all producers are migrated together.
-        Term::TypeListValue(fields) if type_list_input_type(ty) => Some(fields),
         _ => None,
     }
 }
@@ -668,20 +665,13 @@ impl Head {
         let [value] = arguments.as_slice() else {
             return None;
         };
-        let elements = if let Term::TypeListValue(elements) = value {
-            // Legacy layout metadata can omit a collector domain because the
-            // old payload already fixes its element sort. Typed payloads need
-            // the actual declaration domain; never guess their list identity.
-            elements.as_slice()
-        } else {
-            let [parameter] = self.parameters.as_slice() else {
-                return None;
-            };
-            if parameter.kind != Kind::Value || !type_list_input_type(&parameter.ty) {
-                return None;
-            }
-            list_value_payload(&parameter.ty, value)?
+        let [parameter] = self.parameters.as_slice() else {
+            return None;
         };
+        if parameter.kind != Kind::Value || !type_list_input_type(&parameter.ty) {
+            return None;
+        }
+        let elements = list_value_payload(&parameter.ty, value)?;
         elements
             .iter()
             .all(|element| element.sort() == Sort::Type)
@@ -996,26 +986,6 @@ impl Head {
                             )
                             .map_err(|_| ApplicationError::InputType { index })?;
                             work.push((payload.clone(), value.as_ref(), depth + 1));
-                            true
-                        }
-                        (
-                            Term::NormalForm {
-                                head,
-                                sort: Sort::Type,
-                                arguments,
-                            },
-                            Term::TypeListValue(fields),
-                        ) if is_list(*head)
-                            && arguments.as_slice() == [Term::Primitive(Primitive::Type)] =>
-                        {
-                            if fields.len() > remaining {
-                                return Err(ApplicationError::InputType { index });
-                            }
-                            work.extend(
-                                fields.iter().map(|value| {
-                                    (Term::Primitive(Primitive::Type), value, depth + 1)
-                                }),
-                            );
                             true
                         }
                         (

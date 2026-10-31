@@ -787,7 +787,7 @@ impl CallCandidate {
                         .and_then(|ty| engine.tuple_input(ty));
                     let domain = list_domain
                         .as_ref()
-                        .or_else(|| settled_input.and_then(|(domain, _)| domain));
+                        .or_else(|| settled_input.map(|(domain, _)| domain));
                     let domain = domain.ok_or_else(|| {
                         Error::TypeView(
                             "tuple context requires a declared collection domain".into(),
@@ -1256,9 +1256,7 @@ impl CallCandidate {
             *fuel = fuel
                 .checked_sub(fields.len())
                 .ok_or_else(|| Error::TypeView("input checking context budget exhausted".into()))?;
-            if let Some(domain) = domain {
-                crate::associated::charge_projection_copy(domain, fuel).map_err(Error::TypeView)?;
-            }
+            crate::associated::charge_projection_copy(domain, fuel).map_err(Error::TypeView)?;
         }
         let mut field_context = |field: Term| -> Result<InputContext, Error> {
             let sort = field.sort();
@@ -1333,7 +1331,7 @@ impl CallCandidate {
                 };
                 Ok(InputContext::NormalTuple {
                     head,
-                    list_domain: domain.cloned(),
+                    list_domain: Some(domain.clone()),
                     fields: fields
                         .iter()
                         .cloned()

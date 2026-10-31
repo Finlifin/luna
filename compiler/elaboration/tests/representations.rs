@@ -222,7 +222,19 @@ fn check(
         declaration,
         role: nir::normal_forms::Role::Tuple,
         collector: Some(0),
-        parameters: vec![],
+        parameters: vec![nir::normal_forms::Parameter {
+            declaration: id(7),
+            binding: nir::program::LocalId {
+                owner: declaration.local,
+                index: 0,
+            },
+            kind: nir::normal_forms::Kind::Value,
+            ty: Term::NormalForm {
+                head: id(6),
+                sort: Sort::Type,
+                arguments: vec![Term::Primitive(Primitive::Type)],
+            },
+        }],
         requirements: vec![],
     });
     Checker::new(
@@ -458,7 +470,15 @@ fn only_bound_tuple_head_exposes_its_type_list_storage() {
     let field = Term::NormalForm {
         head: id(5),
         sort: Sort::Type,
-        arguments: vec![Term::TypeListValue(vec![nominal(0)])],
+        arguments: vec![Term::NominalValue {
+            ty: Box::new(Term::NormalForm {
+                head: id(6),
+                sort: Sort::Type,
+                arguments: vec![Term::Primitive(Primitive::Type)],
+            }),
+            variant: None,
+            fields: vec![nominal(0)],
+        }],
     };
     check(field.clone(), None).unwrap();
     assert!(

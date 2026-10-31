@@ -1958,10 +1958,7 @@ mod captured_head_domains {
         let records = Term::Record(vec![("values".into(), types.clone())]);
         let optional = Term::Optional(Box::new(bools.clone()));
         let cases = [
-            (
-                types.clone(),
-                Term::TypeListValue(vec![Term::Primitive(P::U8)]),
-            ),
+            (types.clone(), value(&types, vec![])),
             (types.clone(), value(&types, vec![Term::Primitive(P::U8)])),
             (bools.clone(), value(&bools, vec![])),
             (

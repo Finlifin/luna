@@ -3315,13 +3315,16 @@ mod tests {
                 }],
             },
         ];
+        let domain = heads[0].parameters[0].ty.clone();
         let tuple = |values: Vec<Expr>| Expr {
             ty: Term::NormalForm {
                 head: id,
                 sort: Sort::Type,
-                arguments: vec![Term::TypeListValue(
-                    values.iter().map(|v| v.ty.clone()).collect(),
-                )],
+                arguments: vec![Term::NominalValue {
+                    ty: Box::new(domain.clone()),
+                    variant: None,
+                    fields: values.iter().map(|v| v.ty.clone()).collect(),
+                }],
             },
             kind: K::Tuple(values),
             source: SourceRange { start: 0, end: 0 },

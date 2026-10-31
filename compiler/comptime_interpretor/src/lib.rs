@@ -7699,7 +7699,11 @@ mod normal_input_data_tests {
             vm.validate_function_inputs_in_scope(&[parameter], &[input], frames, fuel)
         };
         for fields in [vec![], vec![Term::Primitive(Primitive::Bool)]] {
-            for input in [Term::TypeListValue(fields.clone()), nominal(fields)] {
+            assert_eq!(
+                check(Term::TypeListValue(fields.clone()), &[], &mut 10000),
+                Err(ErrorKind::Type)
+            );
+            for input in [nominal(fields)] {
                 assert!(check(input.clone(), &[], &mut 10000).is_ok());
                 assert_eq!(
                     check(input.clone(), &[], &mut 0),
@@ -7713,10 +7717,7 @@ mod normal_input_data_tests {
             index: 0,
             sort: nir::Sort::Type,
         };
-        for input in [
-            Term::TypeListValue(vec![bound.clone()]),
-            nominal(vec![bound]),
-        ] {
+        for input in [nominal(vec![bound])] {
             assert_eq!(check(input.clone(), &[], &mut 10000), Err(ErrorKind::Type));
             assert!(check(input.clone(), &[vec![nir::Sort::Type]], &mut 10000).is_ok());
             assert_eq!(

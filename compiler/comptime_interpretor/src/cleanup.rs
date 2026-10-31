@@ -1858,10 +1858,15 @@ mod tuple_context_tests {
             ],
             ..Default::default()
         };
+        let domain = package.normal_forms[0].parameters[0].ty.clone();
         let tuple = |fields| Term::NormalForm {
             head: id(1),
             sort: Sort::Type,
-            arguments: vec![Term::TypeListValue(fields)],
+            arguments: vec![Term::NominalValue {
+                ty: Box::new(domain.clone()),
+                variant: None,
+                fields,
+            }],
         };
         let code = Term::Function {
             parameters: vec![],

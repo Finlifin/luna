@@ -14,33 +14,6 @@ pub enum RepresentationTransport {
     Record(Vec<(String, RepresentationTransport)>),
 }
 
-pub fn transport_plan(
-    input: &Term,
-    output: &Term,
-    exact_rows: bool,
-    fuel: &mut usize,
-    equal: &mut impl FnMut(&Term, &Term) -> bool,
-    is_tuple: &impl Fn(crate::DeclarationId) -> bool,
-) -> Result<RepresentationTransport, Error> {
-    transport_plan_with_layouts(input, output, exact_rows, fuel, equal, &|ty| {
-        let Term::NormalForm {
-            head,
-            sort: Sort::Type,
-            arguments,
-        } = ty
-        else {
-            return None;
-        };
-        if !is_tuple(*head) {
-            return None;
-        }
-        let [Term::TypeListValue(fields)] = arguments.as_slice() else {
-            return None;
-        };
-        Some(fields.as_slice())
-    })
-}
-
 /// Borrow declaration-authorized tuple fields without prescribing their input
 /// encoding. Layout evidence never establishes equality between opaque heads.
 pub fn transport_plan_with_layouts(

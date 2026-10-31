@@ -114,12 +114,17 @@ fn callable_list_inputs_require_unique_representation_evidence_and_recover() {
         normal_forms: vec![head.clone()],
         ..Default::default()
     };
-    let valid = Term::TypeListValue(vec![Term::Primitive(Primitive::Bool)]);
+    let frozen = |fields| Term::NominalValue {
+        ty: Box::new(domain.clone()),
+        variant: None,
+        fields,
+    };
+    let valid = frozen(vec![Term::Primitive(Primitive::Bool)]);
     let check = |package: &Package, value: Term, fuel: &mut usize| {
         validate_arguments(package, &[id(1)], &[domain.clone()], &[value], fuel)
     };
     assert!(check(&package, valid.clone(), &mut 1000).is_ok());
-    assert!(check(&package, Term::TypeListValue(vec![]), &mut 1000).is_ok());
+    assert!(check(&package, frozen(vec![]), &mut 1000).is_ok());
     for heads in [
         vec![],
         vec![Head {
@@ -142,8 +147,10 @@ fn callable_list_inputs_require_unique_representation_evidence_and_recover() {
         );
     }
     for value in [
-        Term::TypeListValue(vec![Term::Bool(true)]),
-        Term::TypeListValue(vec![Term::Bound {
+        Term::TypeListValue(vec![]),
+        Term::TypeListValue(vec![Term::Primitive(Primitive::Bool)]),
+        frozen(vec![Term::Bool(true)]),
+        frozen(vec![Term::Bound {
             depth: 0,
             index: 0,
             sort: Sort::Type,

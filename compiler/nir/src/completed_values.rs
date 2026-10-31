@@ -188,7 +188,7 @@ pub fn validate_in(
     validate_with_declarations_in(
         value,
         std::iter::empty(),
-        &|_| false,
+        &|_| None,
         &|_, _| None,
         Some(target),
         fuel,
@@ -202,17 +202,17 @@ pub fn validate_with_newtypes<'d>(
     definitions: impl Iterator<Item = &'d crate::newtypes::Newtype> + Clone,
     fuel: &mut usize,
 ) -> Result<(), &'static str> {
-    validate_with_layouts(value, definitions, &|_| false, fuel)
+    validate_with_layouts(value, definitions, &|_| None, fuel)
 }
 
 /// Tuple views must come from the registered protocol, never a head's shape.
 pub fn validate_with_layouts<'d>(
     value: &Expr,
     definitions: impl Iterator<Item = &'d crate::newtypes::Newtype> + Clone,
-    is_tuple: &impl Fn(crate::DeclarationId) -> bool,
+    tuple_fields: &impl for<'t> Fn(&'t Term) -> Option<&'t [Term]>,
     fuel: &mut usize,
 ) -> Result<(), &'static str> {
-    validate_with_declarations(value, definitions, is_tuple, &|_, _| None, fuel)
+    validate_with_declarations(value, definitions, tuple_fields, &|_, _| None, fuel)
 }
 
 pub fn lookup_nominal<'a>(
@@ -247,11 +247,11 @@ pub fn lookup_nominal<'a>(
 pub fn validate_with_declarations<'d>(
     value: &Expr,
     definitions: impl Iterator<Item = &'d crate::newtypes::Newtype> + Clone,
-    is_tuple: &impl Fn(crate::DeclarationId) -> bool,
+    tuple_fields: &impl for<'t> Fn(&'t Term) -> Option<&'t [Term]>,
     lookup: &impl Fn(crate::DeclarationId, &mut usize) -> Option<NominalValueDeclaration<'d>>,
     fuel: &mut usize,
 ) -> Result<(), &'static str> {
-    validate_with_declarations_in(value, definitions, is_tuple, lookup, None, fuel)
+    validate_with_declarations_in(value, definitions, tuple_fields, lookup, None, fuel)
 }
 
 /// Target facts apply to every reconstructed child, including closure captures.
@@ -259,35 +259,12 @@ pub fn validate_with_declarations<'d>(
 pub fn validate_with_declarations_in<'d>(
     value: &Expr,
     definitions: impl Iterator<Item = &'d crate::newtypes::Newtype> + Clone,
-    is_tuple: &impl Fn(crate::DeclarationId) -> bool,
+    tuple_fields: &impl for<'t> Fn(&'t Term) -> Option<&'t [Term]>,
     lookup: &impl Fn(crate::DeclarationId, &mut usize) -> Option<NominalValueDeclaration<'d>>,
     target: Option<crate::target::TargetData>,
     fuel: &mut usize,
 ) -> Result<(), &'static str> {
-    validate_with_layout_evidence_in(
-        value,
-        definitions,
-        &|ty| {
-            let Term::NormalForm {
-                head,
-                sort: crate::Sort::Type,
-                arguments,
-            } = ty
-            else {
-                return None;
-            };
-            if !is_tuple(*head) {
-                return None;
-            }
-            let [Term::TypeListValue(fields)] = arguments.as_slice() else {
-                return None;
-            };
-            Some(fields.as_slice())
-        },
-        lookup,
-        target,
-        fuel,
-    )
+    validate_with_layout_evidence_in(value, definitions, tuple_fields, lookup, target, fuel)
 }
 
 /// Reconstruct using borrowed declaration-owned tuple layouts. Callers supply

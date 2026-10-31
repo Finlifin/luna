@@ -959,13 +959,13 @@ fn explicit_physical_error_rows_freeze_and_use_checked_input_transport() {
         unreachable!()
     };
     parameters[0].ty = canonical.clone();
-    let transport = nir::error_results::transport_plan(
+    let transport = nir::error_results::transport_plan_with_layouts(
         &ty,
         &canonical,
         false,
         &mut 10000,
         &mut |a, b| a == b,
-        &|_| false,
+        &|_| None,
     )
     .unwrap();
     for (error, payload) in [

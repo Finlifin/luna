@@ -934,10 +934,15 @@ mod tuple_tests {
             }],
             ..Default::default()
         };
+        let domain = package.normal_forms[0].parameters[0].ty.clone();
         let tuple = |field| Term::NormalForm {
             head: id,
             sort: Sort::Type,
-            arguments: vec![Term::TypeListValue(vec![field])],
+            arguments: vec![Term::NominalValue {
+                ty: Box::new(domain.clone()),
+                variant: None,
+                fields: vec![field],
+            }],
         };
         let scalar = Term::Primitive(Primitive::Bool);
         let computation = Term::Computation {
