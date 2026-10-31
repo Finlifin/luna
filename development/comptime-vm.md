@@ -9444,3 +9444,44 @@ Validation in `/home/fin/luna`:
   passed; `/tmp/luna-tools-zslqyjpe/result.json`, exit 0.
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test function_type_dependencies --test closure_environment_parameters`:
   passed; `/tmp/luna-tools-3_ocr6ao/result.json`, exit 0.
+
+
+## Complete the shared projection and memory type preflight
+
+Inspection of TypeRef consumers exposed a separate production preflight gap:
+`nir::type_budget::charge_structure`, used by associated projection copying and
+memory summary admission, omitted ClosureContextValue, ContextualClosure,
+ClosureSnapshot and FunctionValue children. Its wildcard treated these compound
+terms as leaves. Payloads such as record names were not charged by memory
+admission; projection copying maintained a second incomplete payload traversal.
+
+The shared entry now delegates to the complete bounded term walk while retaining
+its 64-level depth policy. The complete walk itself uses Term::visit_children,
+whose exhaustive structural match prevents new compound variants from silently
+becoming leaves. Payload charging and bounded worklist growth remain in that
+walk. Projection copy admission no longer repeats a separate payload traversal;
+its existing diagnostic remains stable. This is structural resource admission,
+not normalization, type equality, environment validity or PTC reasoning.
+
+The baseline regression demonstrated incorrectly accepted deep closure context
+input. Coverage now includes all four previously omitted compound variants,
+large retained payloads, the depth boundary, insufficient fuel followed by retry,
+and direct projection/memory consumer entrypoints. TypeRef replacement and
+runtime environment acquisition remain separate unfinished work.
+
+Validation in `/home/fin/luna`:
+
+- Before the fix, `test -p nir --lib type_budget` failed the new regression;
+  `/tmp/luna-tools-5ce3gf6y/result.json`, exit 101.
+- `python3 -B development/check.py --timeout 900 -- test -p nir --lib`:
+  passed; `/tmp/luna-tools-5a4rt1ur/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p nir --test type_computations --test type_children --test type_core_budget`:
+  passed; `/tmp/luna-tools-lfnesc0p/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution --test associated --test projection_copy_budget`:
+  passed; `/tmp/luna-tools-69u6l3vx/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p program_verification --test memory_type_budget --test associated_resources`:
+  passed; `/tmp/luna-tools-_5egtnm2/result.json`, exit 0.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed; `/tmp/luna-tools-y4zruvei/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test associated_signatures --test associated_purity`:
+  passed; `/tmp/luna-tools-oafktyi6/result.json`, exit 0.

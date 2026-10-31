@@ -856,8 +856,8 @@ impl fmt::Display for AssociatedTypeNormalization {
     }
 }
 
-// Cache hits must pay for payload copying too, not only the node count. The
-// preliminary shape walk bounds recursive clone depth before visiting payloads.
+// Cache hits must pay for payload copying too, not only the node count.
+// Shared preflight bounds recursive depth and the complete substituted payload.
 fn charge_projection_substitution(
     term: &Term,
     parameters: &[nir::DeclarationParameter],
@@ -870,105 +870,7 @@ fn charge_projection_substitution(
 
 pub fn charge_projection_copy(term: &Term, fuel: &mut usize) -> Result<(), String> {
     nir::type_budget::charge_structure(term, fuel)
-        .map_err(|_| "memory summary type budget exhausted".to_string())?;
-    let mut pending = vec![term];
-    while let Some(term) = pending.pop() {
-        let cost = match term {
-            Term::ErrorResult { errors, result } => {
-                pending.push(result);
-                pending.extend(errors);
-                0
-            }
-            Term::Computation { effects, result } => {
-                pending.push(result);
-                for operation in effects {
-                    pending.extend(&operation.arguments);
-                }
-                effects.len()
-            }
-            Term::AssociatedType {
-                arguments, subject, ..
-            } => {
-                pending.extend(arguments);
-                pending.push(subject);
-                0
-            }
-            Term::Tuple(items)
-            | Term::TupleValue(items)
-            | Term::Nominal {
-                arguments: items, ..
-            }
-            | Term::NormalForm {
-                arguments: items, ..
-            } => {
-                pending.extend(items);
-                0
-            }
-            Term::OptionalValue { ty, value } => {
-                pending.push(ty);
-                if let Some(value) = value {
-                    pending.push(value);
-                }
-                0
-            }
-            Term::ErrorValue { ty, label, value } => {
-                pending.push(ty);
-                if let Some(label) = label {
-                    pending.push(label);
-                }
-                pending.push(value);
-                0
-            }
-            Term::ListConcat { ty, parts: fields } | Term::NominalValue { ty, fields, .. } => {
-                pending.push(ty);
-                pending.extend(fields);
-                0
-            }
-            Term::Record(fields) | Term::RecordValue(fields) => {
-                let mut cost = 0usize;
-                for (name, ty) in fields {
-                    cost = cost
-                        .checked_add(name.len())
-                        .ok_or("associated copy budget exhausted")?;
-                    pending.push(ty);
-                }
-                cost
-            }
-            Term::Optional(inner)
-            | Term::Pointer(inner)
-            | Term::ComptimeFunction(inner)
-            | Term::NormalFormFunction(inner, _)
-            | Term::UnsafeFunction(inner) => {
-                pending.push(inner);
-                0
-            }
-            Term::Function { parameters, result } => {
-                pending.extend(parameters.iter().map(|p| &p.ty));
-                pending.push(result);
-                0
-            }
-            Term::Closure {
-                environment,
-                signature,
-            } => {
-                pending.extend(environment);
-                pending.push(signature);
-                0
-            }
-            Term::Integer(value) => value.bit_len().div_ceil(32),
-            Term::Float(value) => value
-                .digits()
-                .len()
-                .saturating_add(value.exponent().bit_len().div_ceil(32)),
-            Term::BitVec(value) => value.words().len(),
-            Term::String(value) | Term::Symbol(value) => value.len(),
-            _ => 0,
-        };
-        *fuel = fuel
-            .checked_sub(cost)
-            .ok_or("associated copy budget exhausted")?;
-    }
-    Ok(())
+        .map_err(|_| "memory summary type budget exhausted".to_string())
 }
 
 #[cfg(test)]
