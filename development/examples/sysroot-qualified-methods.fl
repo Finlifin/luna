@@ -21,4 +21,22 @@ fn run() -> bool {
         and recovered.as(ErrorResultOps<bool, bool>).unwrap_or_else(|failure: bool| false)
 }
 
-test { let passed = run(); assumes passed; }
+pure comptime fn text_at_comptime() -> bool {
+    let value = "a🦀";
+    value.byte_length() == 5
+        and (value.byte(1) matches 240?)
+        and (value.byte(5) matches null)
+        and ("".byte(18446744073709551615) matches null)
+}
+
+const checked_text = text_at_comptime();
+
+
+test {
+    inline if checked_text {
+        let passed = run();
+        assumes passed;
+    } else {
+        assumes false;
+    };
+}

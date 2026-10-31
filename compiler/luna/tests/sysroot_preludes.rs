@@ -188,7 +188,7 @@ fn shipped_text_module_exposes_checked_utf8_byte_reads() {
     let input = Inputs::new();
     input.write(
         "library/builtin/lib.fl",
-        "pub use primitives.*; pub mod text {pub use text_bytes.*;} pub mod prelude {pub use primitives.*;}",
+        "pub use primitives.*; pub mod text {pub use text_bytes.*;} pub mod prelude {pub use primitives.*;pub use text_bytes.TextBytes;}",
     );
     input.write(
         "library/builtin/primitives.fl",
@@ -201,7 +201,7 @@ fn shipped_text_module_exposes_checked_utf8_byte_reads() {
     for package in ["meta", "build", "attrs", "verification", "std"] {
         input.write(&format!("library/{package}/lib.fl"), "pub mod prelude {}");
     }
-    assert_true(input.run("use builtin.text; fn run()->bool {let length=text.byte_length(\"é\");let byte=text.byte(\"é\",1);let valid=byte match {value?=>value == 169,null=>false};length == 2 and valid}"));
+    assert_true(input.run("fn run()->bool {let length=\"é\".byte_length();let byte=\"é\".byte(1);let valid=byte match {value?=>value == 169,null=>false};length == 2 and valid}"));
 }
 
 #[test]

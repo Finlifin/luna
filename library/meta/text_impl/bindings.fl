@@ -1,0 +1,3 @@
+-- Shared compiler bindings for comptime UTF-8 byte observations.
+pub const byte_length = .str_byte_length'builtin;
+pub const byte = .str_byte'builtin;

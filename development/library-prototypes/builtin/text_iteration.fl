@@ -6,7 +6,7 @@
     before resource-checked execution can establish that lifetime requirement.
 -}
 use iterator.{Iterator, emit_item};
-use text_bytes.{byte, byte_length};
+use text_bytes.TextBytes;
 
 pub struct Bytes {
     value: str,
@@ -17,13 +17,13 @@ pub fn bytes(value: str) -> Bytes {
 }
 
 impl Iterator for Bytes {
-    assoc Item: (.Type'builtin) = u8;
+    assoc Item: Type = u8;
 
     inline fn iterate(self) -> #emit_item<u8> void {
-        let length = byte_length(self.value);
+        let length = self.value.byte_length();
         var index: u64 = 0;
         while index < length {
-            let next = byte(self.value, index);
+            let next = self.value.byte(index);
             index = index + 1;
             next match {
                 value? => emit_item<u8>(value)#,

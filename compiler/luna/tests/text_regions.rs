@@ -112,12 +112,12 @@ fn aggregate_and_optional_results_keep_region_paths_and_absence() {
 #[test]
 fn byte_reads_export_region_obligations_through_discarded_results() {
     let package = support::compile(&format!(
-        "{} mod text {{ {} }}
-        fn reads(a:str,b:str)->?u8 {{let ignored=text.byte(a,0);text.byte(b,0)}}
-        fn overwritten(a:str,b:str)->str {{var slot=a;let old=text.byte(slot,0);slot=b;slot}}
-        fn static_read()->?u8 {{text.byte(\"x\",0)}}
+        "mod primitives {{ {} }} use primitives.*; mod text {{ {} }} use text.TextBytes;
+        fn reads(a:str,b:str)->?u8 {{let ignored=a.byte(0);b.byte(0)}}
+        fn overwritten(a:str,b:str)->str {{var slot=a;let old=slot.byte(0);slot=b;slot}}
+        fn static_read()->?u8 {{\"x\".byte(0)}}
         fn equal(a:str,b:str)->bool {{a == b}}
-        fn length(value:str)->u64 {{text.byte_length(value)}}",
+        fn length(value:str)->u64 {{value.byte_length()}}",
         include_str!("../../../library/builtin/primitives.fl"),
         include_str!("../../../library/builtin/text_impl/bytes.fl")
     ));
@@ -885,11 +885,11 @@ fn optional_and_error_propagation_keep_separate_exit_dependencies() {
 #[test]
 fn scalar_index_operations_preserve_text_scan_dependencies() {
     let package = support::compile(&format!(
-        "{} mod text {{ {} }}
+        "mod primitives {{ {} }} use primitives.*; mod text {{ {} }} use text.TextBytes;
         fn contains(value:str,needle:u8)->bool {{
-            let length=text.byte_length(value);var index:u64=0;
+            let length=value.byte_length();var index:u64=0;
             while index < length {{
-                let byte?=text.byte(value,index) else {{return false;}};
+                let byte?=value.byte(index) else {{return false;}};
                 if byte'bitvec.as(u64) == needle'bitvec.as(u64) {{return true;}}
                 index = index + 1;
             }}
@@ -2554,4 +2554,32 @@ fn type_valued_dependent_inputs_preserve_text_backing_regions() {
     assert_eq!(package, before);
     assert!(infer(&package, "run", 0).is_err());
     assert_eq!(infer(&package, "run", 100_000).unwrap(), summary);
+}
+
+#[test]
+fn trait_method_text_summaries_keep_selected_subject_and_argument_origins() {
+    let package = support::compile(
+        "typealias str=.str'builtin;typealias u8=.u8'builtin;
+        trait View {fn view(self, text:str)->str;}
+        impl View for bool {fn view(self,text:str)->str {text}}
+        impl View for u8 {fn view(self,text:str)->str {\"static\"}}
+        fn boolean(flag:bool,text:str)->str {flag.view(text)}
+        fn byte(flag:u8,text:str)->str {flag.view(text)}
+        fn alias(flag:bool,text:str)->str {let selected=bool.view;selected(flag,text)}",
+    );
+    for name in ["boolean", "alias"] {
+        let summary = infer(&package, name, 100_000).unwrap();
+        assert_eq!(
+            summary.returned.unwrap()[&vec![]],
+            BTreeSet::from([parameter(1, &[])])
+        );
+        assert!(summary.reads.is_empty());
+    }
+    let summary = infer(&package, "byte", 100_000).unwrap();
+    assert_eq!(
+        summary.returned.unwrap()[&vec![]],
+        BTreeSet::from([Origin::Static])
+    );
+    assert!(infer(&package, "alias", 1).is_err());
+    assert!(infer(&package, "alias", 100_000).is_ok());
 }

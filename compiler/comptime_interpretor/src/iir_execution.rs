@@ -161,6 +161,7 @@ impl<'a> Interpreter<'a> {
             pattern_binding_orders: BTreeMap::new(),
             cleanup_context: vec![],
             comptime_only: false,
+            bytecode_enabled: true,
             abstract_type_parameters: BTreeSet::new(),
             abstract_value_parameters: BTreeMap::new(),
             struct_builder: None,

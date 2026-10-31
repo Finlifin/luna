@@ -6,7 +6,7 @@ use comptime_interpretor::Value;
 
 fn compile(body: &str) -> nir::program::Package {
     let source = format!(
-        "{}\n{}\nmod iterator {{ {} }}\nmod text_bytes {{ {} }}\nmod text_iteration {{ {} }}\n{}",
+        "{}\n{}\nmod iterator {{ {} }}\nmod text_bytes {{ {} }}\nuse text_bytes.TextBytes;\nmod text_iteration {{ {} }}\n{}",
         include_str!("../../../library/builtin/primitives.fl"),
         include!("support/resources_source.rs"),
         &include!("support/iterator_source.rs"),
@@ -62,7 +62,7 @@ fn bytes_preserve_utf8_order_nuls_and_empty_input() {
             let alias=text;
             var count:u64=0;
             for value in text_iteration.bytes(alias) {
-                let expected=text_bytes.byte(text,count);
+                let expected=text.byte(count);
                 let equal=expected match {byte?=>byte == value,null=>false};
                 let known:u8=count match {
                     0=>65,1=>195,2=>169,3=>228,4=>184,5=>173,
@@ -72,7 +72,7 @@ fn bytes_preserve_utf8_order_nuls_and_empty_input() {
                 count = count + 1;
             }
             for value in text_iteration.bytes("") {return false;}
-            count == 11 and text_bytes.byte_length(text) == 11
+            count == 11 and text.byte_length() == 11
         }
         fn verify() {let passed=run();assumes passed;}
     "#,

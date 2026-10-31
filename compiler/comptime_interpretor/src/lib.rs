@@ -796,6 +796,7 @@ pub struct Interpreter<'a> {
     pattern_binding_orders: BTreeMap<(u32, u32), Vec<LocalId>>,
     cleanup_context: Vec<iir::cleanup::ContextKey>,
     comptime_only: bool,
+    bytecode_enabled: bool,
     abstract_type_parameters: BTreeSet<DeclarationId>,
     abstract_value_parameters: BTreeMap<DeclarationId, Term>,
     type_solver: Option<TypeSolver<'a>>,
@@ -1688,6 +1689,7 @@ impl<'a> Interpreter<'a> {
             pattern_binding_orders: BTreeMap::new(),
             cleanup_context: vec![],
             comptime_only: false,
+            bytecode_enabled: true,
             abstract_type_parameters: BTreeSet::new(),
             abstract_value_parameters: BTreeMap::new(),
             struct_builder: None,
@@ -1743,6 +1745,15 @@ impl<'a> Interpreter<'a> {
     /// Resource/effect verification remains the caller's separate obligation.
     pub fn for_comptime(package: &'a Package, budget: Budget) -> Result<Self, Error> {
         Self::for_comptime_with_assumptions(package, &[], budget)
+    }
+
+    /// Phase-checked reference execution with bytecode routing disabled.
+    /// Keeps comptime value-reference semantics and admission checks intact,
+    /// allowing differential checks without substituting the runtime universe.
+    pub fn for_comptime_tree(package: &'a Package, budget: Budget) -> Result<Self, Error> {
+        let mut interpreter = Self::for_comptime(package, budget)?;
+        interpreter.bytecode_enabled = false;
+        Ok(interpreter)
     }
     /// Evaluate under caller-established trait premises. Premises discharge
     /// obligations only; they provide neither method bodies nor associated values.

@@ -11,6 +11,7 @@ use numeric.{comparison, math_intrinsics};
 pub use primitives.*;
 pub use tuple.Tuple;
 pub use option.OptionalOps;
+pub use text_impl.bytes.TextBytes;
 pub use result.ErrorResultOps;
 pub use traits.*;
 pub use patterns.ListPatternView;
@@ -31,6 +32,7 @@ pub mod prelude {
     pub use primitives.*;
     pub use tuple.Tuple;
     pub use option.OptionalOps;
+    pub use text_impl.bytes.TextBytes;
     pub use result.ErrorResultOps;
     pub use traits.*;
     pub use patterns.ListPatternView;

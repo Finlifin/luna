@@ -562,6 +562,7 @@ pub fn infer_text_regions(
         exits: vec![],
         cache: HashMap::new(),
         metadata: Round::default(),
+        methods: MethodCallees::default(),
     }
     .solve(declaration, arguments)
     .map(|summary| TextRegionSummary {
@@ -590,6 +591,7 @@ struct Query<'a, 'f> {
     exits: Vec<Option<ExitRegions>>,
     cache: HashMap<SummaryKey, Summary>,
     metadata: Round<'static>,
+    methods: MethodCallees,
 }
 impl Query<'_, '_> {
     fn record_exit(&mut self, locals: &Locals) -> Result<(), String> {
@@ -900,7 +902,10 @@ impl Query<'_, '_> {
     ) -> Result<Option<CodeValue>, String> {
         let value = match &value.kind {
             K::Local(binding) => self.known_local_callee(*binding)?,
-            K::Function(_) | K::FunctionInstance { .. } | K::Closure { .. } => {
+            K::Function(_)
+            | K::FunctionInstance { .. }
+            | K::Closure { .. }
+            | K::TraitMethod { .. } => {
                 nir::visit::expression(value, self.fuel, |_, _| Ok(()))?;
                 Some(CodeValue::new(value.clone()))
             }
@@ -915,6 +920,12 @@ impl Query<'_, '_> {
             return Err("text callback environment depth exhausted".into());
         }
         charge(self.fuel, 1)?;
+        if matches!(value.expression.kind, K::TraitMethod { .. }) {
+            value.expression = self
+                .methods
+                .select(self.package, &value.expression, self.fuel)?
+                .into();
+        }
         if value.closure.is_some() {
             return Ok(value);
         }
@@ -2054,6 +2065,10 @@ impl Query<'_, '_> {
                     })),
                 );
                 Ok(empty)
+            }
+            K::TraitMethod { .. } => {
+                let selected = self.methods.select(self.package, expr, self.fuel)?;
+                self.expr(&selected, locals, returned, next)
             }
             K::FunctionInstance {
                 declaration,

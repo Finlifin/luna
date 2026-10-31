@@ -11,7 +11,7 @@ inline fn produce(value: str) -> #deliver void {
 fn observed(value: str) -> str {
     produce(value)# {
         deliver(text) => {
-            let first = builtin.text.byte(text, 0);
+            let first = text.byte(0);
             return text;
         },
     };

@@ -627,6 +627,7 @@ impl<'a> Interpreter<'a> {
 
     pub(super) fn bytecode_invocation_available(&self) -> bool {
         self.comptime_only
+            && self.bytecode_enabled
             && self.cleanup_schedule.is_none()
             && self.graph.is_none()
             && self.effect_state.environment.is_empty()
@@ -689,6 +690,7 @@ impl<'a> Interpreter<'a> {
 
     fn contextual_code_available(&self) -> bool {
         self.comptime_only
+            && self.bytecode_enabled
             && self.cleanup_schedule.is_none()
             && self.graph.is_none()
             && self.effect_state.environment.is_empty()

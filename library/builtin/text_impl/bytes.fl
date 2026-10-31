@@ -1,3 +1,5 @@
+use primitives.{str, u64, u8};
+
 const text_str_byte_length = .str_byte_length'builtin;
 const text_str_byte = .str_byte'builtin;
 
@@ -6,18 +8,17 @@ const text_str_byte = .str_byte'builtin;
     Lengths and indices use u64 independently of the compilation target.
     Byte reads outside the string return null, including index == length.
 -}
-pub pure fn byte_length(value: str) -> u64 {
-    text_str_byte_length(value)
+pub trait TextBytes {
+    pure fn byte_length(self) -> u64;
+    pure fn byte(self, index: u64) -> ?u8;
 }
 
-pub pure fn byte(value: str, index: u64) -> ?u8 {
-    text_str_byte(value, index)
-}
+impl TextBytes for str {
+    pure fn byte_length(self) -> u64 {
+        text_str_byte_length(self)
+    }
 
-pub pure comptime fn comptime_byte_length(value: str) -> u64 {
-    text_str_byte_length(value)
-}
-
-pub pure comptime fn comptime_byte(value: str, index: u64) -> ?u8 {
-    text_str_byte(value, index)
+    pure fn byte(self, index: u64) -> ?u8 {
+        text_str_byte(self, index)
+    }
 }

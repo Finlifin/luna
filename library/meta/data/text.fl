@@ -1,0 +1,22 @@
+use builtin.{str, u64, u8};
+use text_impl.bindings;
+
+{-
+    Comptime byte observations use the same names and UTF-8 byte indexing as
+    builtin.TextBytes. The pure comptime trait takes precedence in comptime
+    contexts; its self parameter follows comptime value-reference semantics.
+-}
+pub pure comptime trait ComptimeTextBytes {
+    pure comptime fn byte_length(self) -> u64;
+    pure comptime fn byte(self, index: u64) -> ?u8;
+}
+
+comptime impl ComptimeTextBytes for str {
+    pure comptime fn byte_length(self) -> u64 {
+        bindings.byte_length(self)
+    }
+
+    pure comptime fn byte(self, index: u64) -> ?u8 {
+        bindings.byte(self, index)
+    }
+}

@@ -5,29 +5,23 @@ mod support;
 use comptime_interpretor::Value;
 
 fn source(body: &str) -> String {
-    format!(
-        "typealias str=.str'builtin;typealias u64=.u64'builtin;typealias u8=.u8'builtin;mod text {{{}}}{body}",
-        include_str!("../../../library/builtin/text_impl/bytes.fl")
-    )
+    format!("{}{body}", include!("support/text_source.rs"))
 }
 
 #[test]
 fn utf8_bytes_and_boundaries_agree_in_both_phases() {
     let body = r#"
         fn run()->bool {
-            let size=text.byte_length("a🦀");
-            let empty=text.byte_length("");
-            let first=text.byte("a🦀",1) match {value?=>value == 240,null=>false};
-            let last=text.byte("a🦀",4) match {value?=>value == 128,null=>false};
-            let past=text.byte("a🦀",5) match {value?=>false,null=>true};
-            let far=text.byte("",18446744073709551615) match {value?=>false,null=>true};
+            let size="a🦀".byte_length();
+            let empty="".byte_length();
+            let first="a🦀".byte(1) match {value?=>value == 240,null=>false};
+            let last="a🦀".byte(4) match {value?=>value == 128,null=>false};
+            let past="a🦀".byte(5) match {value?=>false,null=>true};
+            let far="".byte(18446744073709551615) match {value?=>false,null=>true};
             size == 5 and empty == 0 and first and last and past and far
         }
     "#;
-    let staged = body
-        .replace("fn run", "comptime fn staged")
-        .replace("text.byte_length", "text.comptime_byte_length")
-        .replace("text.byte(", "text.comptime_byte(");
+    let staged = body.replace("fn run", "comptime fn staged");
     let package = support::compile(&source(&format!("{body}{staged}")));
     assert!(format!("{package}").contains("(text-query byte-length"));
     assert_eq!(
@@ -63,7 +57,7 @@ fn byte_operands_execute_once_left_to_right() {
         fn position(state:*u64)->u64 {let index=state.*;assumes index == 1;state.* = 2;index}
         fn run()->bool {
             let state:u64=0;
-            let byte=text.byte(observe(state.ref),position(state.ref));
+            let byte=observe(state.ref).byte(position(state.ref));
             byte match {value?=>value == 122 and state == 2,null=>false}
         }
     "#,
@@ -77,7 +71,7 @@ fn byte_operands_execute_once_left_to_right() {
 #[test]
 fn text_queries_preserve_early_exit_and_reject_wrong_input_domains() {
     let package = support::compile(&source(
-        "fn run()->bool {text.byte(do {return true;},0);false} comptime fn staged()->bool {text.comptime_byte(do {return true;},0);false}",
+        "fn run()->bool {str.byte(do {return true;},0);false} comptime fn staged()->bool {str.byte(do {return true;},0);false}",
     ));
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -88,9 +82,9 @@ fn text_queries_preserve_early_exit_and_reject_wrong_input_domains() {
         Value::Bool(true)
     );
     for body in [
-        "text.byte_length(true)",
-        "text.byte(\"a\",false)",
-        "text.byte(\"a\",-1)",
+        "str.byte_length(true)",
+        "str.byte(\"a\",false)",
+        "str.byte(\"a\",-1)",
     ] {
         assert!(
             support::compile_with_protocols(
@@ -211,4 +205,18 @@ fn symbol_byte_queries_keep_distinct_domains_and_checked_indices() {
             "{expression}"
         );
     }
+}
+
+#[test]
+fn explicit_runtime_text_trait_does_not_bypass_comptime_phase_checks() {
+    let error = support::compile_with_protocols(
+        &source("comptime fn invalid()->u64 {\"abc\".as(text.TextBytes).byte_length()}"),
+        &Default::default(),
+    )
+    .unwrap_err();
+    assert!(!error.contains("parsing failed"), "{error}");
+    assert!(
+        error.contains("runtime") || error.contains("phase"),
+        "{error}"
+    );
 }

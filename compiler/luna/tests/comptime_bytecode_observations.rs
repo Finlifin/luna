@@ -6,19 +6,21 @@ use comptime_interpretor::{Budget, Interpreter, Value};
 
 #[test]
 fn text_and_names_use_bytecode_with_utf8_byte_boundaries() {
-    let source=format!("typealias str=.str'builtin;typealias u64=.u64'builtin;typealias u8=.u8'builtin;typealias Symbol=.Symbol'builtin;
+    let source = format!(
+        "{}
         const symbol_byte=.symbol_byte'builtin;
-        mod text {{{}}}
         enum Event {{ready,stopped}}
-        comptime fn length(value:str)->u64 {{text.comptime_byte_length(value)}}
-        comptime fn read_byte(value:str,index:u64)->?u8 {{text.comptime_byte(value,index)}}
+        comptime fn length(value:str)->u64 {{value.byte_length()}}
+        comptime fn read_byte(value:str,index:u64)->?u8 {{value.byte(index)}}
         comptime fn symbol(value:Symbol)->str {{value'tag_name}}
         comptime fn symbol_at(value:Symbol,index:u64)->?u8 {{symbol_byte(value,index)}}
         comptime fn early()->bool {{symbol_byte(do {{return true;}},0);false}}
-        comptime fn event()->str {{Event.ready'tag_name}}",include_str!("../../../library/builtin/text_impl/bytes.fl"));
+        comptime fn event()->str {{Event.ready'tag_name}}",
+        include!("support/text_source.rs")
+    );
     let package = support::compile(&source);
     let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
-    let mut tree = Interpreter::new(&package, Budget::default()).unwrap();
+    let mut tree = Interpreter::for_comptime_tree(&package, Budget::default()).unwrap();
     for (name, args, expected, count) in [
         (
             "length",
@@ -83,4 +85,6 @@ fn text_and_names_use_bytecode_with_utf8_byte_boundaries() {
             );
         }
     }
+    assert_eq!(tree.bytecode_invocations(), 0);
+    assert_eq!(tree.bytecode_staged_inputs(), 0);
 }

@@ -9,6 +9,11 @@ Object 的查询与编辑定义在固有 `impl Object` 中，可以通过接收�
 [`meta.math`](math.md) 提供 `builtin.math` 的编译期对应接口，由 VM 执行；
 普通 `math` 名称仍指向 runtime 数学库。
 
+`ComptimeTextBytes` 为 str 提供 `byte_length()` 与 `byte(index)`，使用
+与 builtin.TextBytes 相同的方法名，索引与长度均为 u64 字节数；越界返回 null。
+该 pure comptime trait 经 meta.prelude 默认导入，在 comptime 上下文优先选择。
+实现位于 `data/text.fl`，编译器操作集中绑定在 `text_impl/bindings.fl`。
+
 包入口只保留 `List` 类型工厂和公开导出；保持 `meta.List` 的 normal-form
 声明身份。列表算法位于 `data/list.fl` 的 `impl List<T> where T`，Object 操作、
 整数运算、struct builder 与 enum builder 分别位于 `data/object.fl`、`data/integer.fl`、
