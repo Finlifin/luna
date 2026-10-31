@@ -197,3 +197,48 @@ The reproduction returned the opaque Identity head applied to bool. Source
 checks also cover two dynamically selected heads, callable parameters, computed
 callees in type positions, once-only source ordering, and a selected head's
 formation-contract rejection followed by a successful independent invocation.
+
+## Open and opaque parameter domains
+
+Signature-domain admission no longer rejects a user-defined opaque NF solely
+because its head lacks a builtin List/Tuple role. The domain must be scoped over
+prior declaration inputs: foreign rigid identities, wrong rigid sorts, holes,
+and runtime references remain invalid. No body is unfolded to inspect a domain.
+
+A registered collection whose layout still depends on earlier inputs can defer
+layout inspection until those inputs are supplied. In particular,
+`<Es: meta.List<Type>, value: Tuple<.Es = Es>>` is now accepted. Completed
+arguments still undergo the existing exact domain, element, arity and layout
+admission checks; a malformed closed tuple layout is not treated as deferred.
+
+These are separate obligations. Being allowed to declare `value: Identity<T>`
+does not authorize interpreting `Identity<T>` as T, accepting a bool in its place,
+or inventing fields for an opaque value. Tests explicitly reject forged frozen
+NominalValue payloads without representation authority. General user-NF value
+construction/freezing, closure/code freezing, dynamic callable keyword metadata,
+and replacing the contextual input carrier remain unfinished.
+
+The source regression checks empty/nonempty dependent tuples, wrong element and
+packet shapes, preserved Key head identity, and bytecode/reference agreement.
+`development/examples/sysroot-normal-domains.fl` exercises the real builtin
+Tuple and meta.List plus forwarding through an ordinary comptime function.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p luna --test normal_inputs --test normal_form_domains --test normal_callable_inputs --test type_lists`:
+  64 tests passed, exit 0; `/tmp/luna-tools-0isjne3h/result.json`.
+- After adding explicit opaque-domain scope and forged-value rejection coverage,
+  `python3 -B development/check.py --timeout 900 -- test -p nir --test normal_inputs`:
+  24 tests passed, exit 0; `/tmp/luna-tools-cqykjpig/result.json`.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- comptime development/examples/sysroot-normal-domains.fl --sysroot library --build-target x86_64 linux 64 --entry verify`:
+  exit 0 with `(bool true)`; `/tmp/luna-tools-70h5pxj3/result.json`.
+  The `Result` entry also returned the preserved Key application with its frozen
+  list and tuple inputs (`/tmp/luna-tools-mde4adxi/result.json`).
+- Formatting passed via command.py (`/tmp/luna-tools-fitj1r15/result.json`),
+  and `git diff --check` passed. No full language suite was run.
+
+The first sysroot attempt omitted the required target context and was rejected.
+A subsequent draft incorrectly asserted unequal inputs imply unequal opaque
+results; the solver returned TypeContractUnresolved as required. The final
+example tests congruence only, following docs/type/type-identity.md and the
+propositional-constraints theory rules, without changing equality semantics.

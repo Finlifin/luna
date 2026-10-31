@@ -295,12 +295,41 @@ pub fn supported_input_type_with_collections_in(
                 arguments,
             } if is_tuple(*head) => {
                 let Some(fields) = type_list_fields_with_layouts(arguments, &is_list) else {
-                    return false;
+                    // An open domain need not expose a completed value layout.
+                    // Formation has checked the head application; argument
+                    // admission checks its instantiated representation later.
+                    if !nominal_domain_scope(ty, prior, &mut remaining) {
+                        return false;
+                    }
+                    let mut open = false;
+                    for parameter in prior {
+                        if crate::type_computations::charge_term(ty, &mut remaining).is_err() {
+                            return false;
+                        }
+                        if ty.mentions_rigid(parameter.declaration) {
+                            open = true;
+                            break;
+                        }
+                    }
+                    if !open {
+                        return false;
+                    }
+                    continue;
                 };
                 if fields.len() > remaining {
                     return false;
                 }
                 work.extend(fields.iter().map(|field| (field, depth + 1)));
+            }
+            Term::NormalForm {
+                sort: Sort::Type, ..
+            } => {
+                // Opaque user heads are ordinary parameter domains. Do not
+                // unfold them or require a builtin collection role merely to
+                // declare an input; values still need completed admission.
+                if !nominal_domain_scope(ty, prior, &mut remaining) {
+                    return false;
+                }
             }
             Term::Tuple(fields) => {
                 if fields.len() > remaining {

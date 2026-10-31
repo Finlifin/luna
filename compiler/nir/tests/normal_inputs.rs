@@ -536,7 +536,9 @@ fn bound_tuple_value_domains_require_identity_and_check_nested_elements() {
     };
     let shape = tuple(vec![primitive(P::Bool), tuple(vec![primitive(P::U8)])]);
     let trusted = |head| head == id(9);
-    assert!(!supported_input_type(&shape, &[]));
+    // Domain declaration does not grant permission to interpret an opaque
+    // head as a tuple. The value checks below still require layout authority.
+    assert!(supported_input_type(&shape, &[]));
     assert!(supported(&shape, &[], trusted));
     let descriptor = head(shape.clone());
     let check = |values: &[Term]| {
@@ -1217,5 +1219,58 @@ fn collection_admission_never_supplies_a_missing_value_domain() {
             assert!(check(valid.clone(), &mut 0).is_err());
             assert!(check(valid, &mut 10000).is_ok());
         }
+    }
+}
+
+#[test]
+fn opaque_normal_domains_preserve_scope_without_granting_value_layouts() {
+    use nir::{DeclarationParameter, normal_forms::supported_input_type_with_collections_in};
+    let prior = [DeclarationParameter {
+        declaration: id(41),
+        sort: Sort::ComptimeValue,
+    }];
+    let domain = |input| Term::NormalForm {
+        head: id(77),
+        sort: Sort::Type,
+        arguments: vec![input],
+    };
+    let supported = |ty: &Term| {
+        supported_input_type_with_collections_in(ty, &prior, |_| false, |_| false, |_| false, None)
+    };
+    assert!(supported(&domain(Term::Rigid {
+        declaration: id(41),
+        sort: Sort::ComptimeValue
+    })));
+    assert!(supported(&domain(Term::Bool(true))));
+    for input in [
+        Term::Rigid {
+            declaration: id(42),
+            sort: Sort::ComptimeValue,
+        },
+        Term::Rigid {
+            declaration: id(41),
+            sort: Sort::Type,
+        },
+        Term::Hole {
+            index: 0,
+            sort: Sort::Type,
+        },
+    ] {
+        assert!(!supported(&domain(input)));
+    }
+    let declared = domain(Term::Bool(true));
+    // Signature admission is not a structural representation view. A raw
+    // tuple or bool cannot masquerade as a value of an opaque NF domain.
+    let descriptor = head(declared.clone());
+    for value in [
+        Term::Bool(true),
+        Term::TupleValue(vec![]),
+        Term::NominalValue {
+            ty: Box::new(declared),
+            variant: None,
+            fields: vec![Term::Bool(true)],
+        },
+    ] {
+        assert!(descriptor.check_closed_arguments(&[value]).is_err());
     }
 }
