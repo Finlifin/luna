@@ -891,7 +891,10 @@ fn immutable_list_admission_charges_inspection_and_rechecks_warm_domains() {
     vm.validate_immutable_input(&cold, &ty).unwrap();
     let warm_cost = before - vm.budget.steps;
     assert!(cold_cost >= warm_cost + 512);
-    assert!(warm_cost >= 512, "element domain admission must still run");
+    assert!(
+        warm_cost > 0 && warm_cost < 512,
+        "scalar structure is reusable, domain admission is not free"
+    );
 
     let wrong = Value::List {
         ty: ty.clone(),
@@ -999,4 +1002,81 @@ fn list_growth_accounts_for_relocation_and_rolls_back_on_budget_failure() {
     };
     assert_eq!(values.len(), 513);
     assert_eq!(values[512], Value::Bool(true));
+}
+
+#[test]
+fn scalar_summaries_recheck_head_contracts_and_reject_mixed_or_narrow_payloads() {
+    use nir::program::{TraitRequirement, TypePredicate};
+    use std::cell::Cell;
+    let mut package = package();
+    let obligation = TypePredicate::Trait(TraitRequirement {
+        interface: id(90),
+        interface_arguments: vec![],
+        subject: Term::Primitive(Primitive::Bool),
+    });
+    package.normal_forms[0]
+        .requirements
+        .push(obligation.clone());
+    let ty = list(Primitive::Bool);
+    let value = Value::List {
+        ty: ty.clone(),
+        values: vec![Value::Bool(true); 512].into(),
+    };
+    value.immutable_copy_work().unwrap();
+    let state = Cell::new(ContractOutcome::Satisfied);
+    let calls = Cell::new(0);
+    let solver = |predicate: &TypePredicate| {
+        assert_eq!(predicate, &obligation);
+        calls.set(calls.get() + 1);
+        state.get()
+    };
+    let mut vm = Interpreter::for_comptime(&package, Budget::default())
+        .unwrap()
+        .with_type_solver(&solver);
+    for outcome in [
+        ContractOutcome::Satisfied,
+        ContractOutcome::Rejected,
+        ContractOutcome::Unknown,
+        ContractOutcome::Satisfied,
+    ] {
+        state.set(outcome);
+        calls.set(0);
+        let result = vm.validate_immutable_input(&value, &ty);
+        assert!(calls.get() > 0);
+        match outcome {
+            ContractOutcome::Satisfied => result.unwrap(),
+            ContractOutcome::Rejected => {
+                assert_eq!(result.unwrap_err().kind, ErrorKind::TypeContractRejected)
+            }
+            ContractOutcome::Unknown => {
+                assert_eq!(result.unwrap_err().kind, ErrorKind::TypeContractUnresolved)
+            }
+        }
+    }
+    for (primitive, values) in [
+        (Primitive::Bool, vec![Value::Bool(true), Value::Char('x')]),
+        (
+            Primitive::U8,
+            vec![Value::UnsignedInteger(1), Value::UnsignedInteger(256)],
+        ),
+        (
+            Primitive::I8,
+            vec![Value::SignedInteger(1), Value::SignedInteger(128)],
+        ),
+    ] {
+        let ty = list(primitive);
+        let malformed = Value::List {
+            ty: ty.clone(),
+            values: values.into(),
+        };
+        malformed.immutable_copy_work().unwrap();
+        assert_eq!(
+            vm.validate_immutable_input(&malformed, &ty)
+                .unwrap_err()
+                .kind,
+            ErrorKind::Type
+        );
+    }
+    vm.validate_immutable_input(&value, &list(Primitive::Bool))
+        .unwrap();
 }

@@ -2125,3 +2125,55 @@ fn fallible_list_terminal_callbacks_stop_and_retain_private_capture_state() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn repository_scalar_append_loop_has_linear_vm_work() {
+    use comptime_interpretor::{Budget, Interpreter};
+    let package = compile(
+        "typealias Integer = .Integer'builtin;
+        comptime fn build(count: Integer) -> meta.List<Integer> {
+            var values: meta.List<Integer> = [];
+            var index = 0;
+            while index < count { values.append(index); index += 1; }
+            values
+        }",
+    )
+    .unwrap();
+    for compiled in [false, true] {
+        let mut costs = Vec::new();
+        for count in [64, 256] {
+            let budget = Budget {
+                steps: 10_000_000,
+                ..Budget::default()
+            };
+            let mut vm = if compiled {
+                Interpreter::for_comptime(&package, budget).unwrap()
+            } else {
+                Interpreter::for_comptime_tree(&package, budget).unwrap()
+            };
+            let before = vm.remaining_steps();
+            let result = vm
+                .invoke(
+                    support::id(&package, "build"),
+                    vec![Value::Integer(comptime_runtime::Integer::from_u128(count))],
+                )
+                .unwrap();
+            costs.push(before - vm.remaining_steps());
+            let Value::List { values, .. } = result else {
+                panic!("list expected")
+            };
+            assert_eq!(values.len(), count as usize);
+            for (index, value) in values.iter().enumerate() {
+                assert_eq!(
+                    *value,
+                    Value::Integer(comptime_runtime::Integer::from_u128(index as u128))
+                );
+            }
+            if compiled {
+                assert!(vm.bytecode_invocations() > 0);
+            }
+        }
+        eprintln!("repository append compiled={compiled}: {costs:?}");
+        assert!(costs[1] <= costs[0] * 6, "compiled={compiled}: {costs:?}");
+    }
+}

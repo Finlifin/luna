@@ -8812,3 +8812,69 @@ Reports: `/tmp/luna-tools-nvsyy6e1/result.json` (354 interpreter unit tests),
 suites). The initial unit build found an unannotated Rust closure parameter in
 the new test; it was fixed before this final run. No wall-time speedup or
 whole-workspace validation claim.
+
+
+### Uniform scalar structure at list admission and call boundaries
+
+Closed list representation summaries now retain an optional uniform scalar
+value discriminant. It is computed while inspecting the payload, composed on
+append (with empty payloads as the identity), and invalidated before mutable
+access. It records neither an expected domain nor the success of a type query.
+Only carriers with content-independent type membership participate: Integer,
+Float, fixed floating-point carriers, bool, char, void, str and Symbol. Machine
+integer carriers, BitVec, Type, live storage, code and aggregates retain their
+ordinary per-value checks.
+
+List membership still checks the current declaration identity and resolves the
+current element domain. A uniform scalar payload can use its first element as
+a representative for this check. Embedded-type admission still checks the list
+head, but these leaves contain no embedded type descriptions to inspect. The
+borrowed call-boundary representation check uses the same fact while rechecking
+current nesting and invocation depth. Actual copies, entry snapshots, and
+representation-size limits retain their full costs and checks.
+
+Tests cover mismatched declared domains, mixed carriers, out-of-range narrow
+machine integers, mutable invalidation, clone independence and empty/nonempty
+append composition. A warm scalar list is checked under a solver that changes
+from Satisfied to Rejected to Unknown and back to Satisfied; every admission
+must consult the current solver and recovery must succeed.
+
+Source-level loops test both engines at 64 and 256 elements. Besides direct
+concatenation, the repository meta source fixture calls the shipped generic
+List.append method with Integer elements and checks every returned value.
+The latter originally exposed a remaining full borrowed checkpoint scan in
+method argument binding; that scan was removed for the same uniform scalar
+case, not bypassed in the test. Final recorded VM steps:
+
+| Elements | Tree | Bytecode |
+| --- | ---: | ---: |
+| 64 | 11,693 | 13,258 |
+| 256 | 46,445 | 52,042 |
+
+Measurement command: `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_list_operations repository_scalar_append_loop -- --nocapture`.
+Report: `/tmp/luna-tools-hht7kc6r/result.json`, exit 0. This measures VM work,
+not elapsed-time performance. It covers scalar payloads with bounded element
+size; Type lists, nested aggregates, machine-integer range checks and explicit
+snapshot-heavy algorithms can still perform repeated linear traversals.
+The source fixture uses shipped meta code but does not by itself establish a
+new full-sysroot API or whole-compiler performance result.
+
+
+Final validation from `/home/fin/luna`, all exited 0:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --test type_list_inputs
+python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_list_operations --test comptime_bytecode_lists --test meta_list_pattern_cost --test comptime_receivers --test comptime_list_type_evidence
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+Reports: `/tmp/luna-tools-x0l23dib/result.json` (356 unit tests),
+`/tmp/luna-tools-i07oe_6n/result.json` (27 list input tests),
+`/tmp/luna-tools-8t96usp2/result.json` (97 source tests),
+`/tmp/luna-tools-dpoem79q/result.json` (format check).
+Initial source fixtures had ambiguous tightly spaced `<`/`>` syntax; corrected
+spacing before evaluating their behavior. The intermediate library cost failure
+is preserved in `/tmp/luna-tools-s5qpz43r/result.json`; its cost threshold was
+not relaxed. No tests were excluded in the final commands.

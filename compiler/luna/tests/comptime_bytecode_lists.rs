@@ -235,3 +235,49 @@ fn comptime_list_inputs_reuse_code_without_reusing_results() {
     assert_eq!(vm.bytecode_compilations() - compilations, 1);
     assert_eq!(vm.bytecode_invocations() - invocations, 3);
 }
+
+#[test]
+fn scalar_append_loop_has_linear_vm_work_in_both_engines() {
+    let package = support::compile_with_tuple(
+        "typealias Integer = .Integer'builtin;
+        typealias List<T> = TupleElements<T>;
+        const concat = .list_concat'builtin;
+        comptime fn build(count: Integer) -> List<bool> {
+            var values: List<bool> = [];
+            var index = 0;
+            while index < count { values = concat(values, [true]); index += 1; }
+            values
+        }",
+    );
+    for compiled in [false, true] {
+        let mut costs = Vec::new();
+        for count in [64, 256] {
+            let budget = Budget {
+                steps: 10_000_000,
+                ..Budget::default()
+            };
+            let mut vm = if compiled {
+                Interpreter::for_comptime(&package, budget).unwrap()
+            } else {
+                Interpreter::for_comptime_tree(&package, budget).unwrap()
+            };
+            let before = vm.remaining_steps();
+            let value = vm
+                .invoke(
+                    support::id(&package, "build"),
+                    vec![Value::Integer(comptime_runtime::Integer::from_u128(count))],
+                )
+                .unwrap();
+            costs.push(before - vm.remaining_steps());
+            let Value::List { values, .. } = value else {
+                panic!("list expected")
+            };
+            assert_eq!(values.len(), count as usize);
+            assert!(values.iter().all(|value| *value == Value::Bool(true)));
+            if compiled {
+                assert!(vm.bytecode_invocations() > 0);
+            }
+        }
+        assert!(costs[1] <= costs[0] * 6, "compiled={compiled}: {costs:?}");
+    }
+}

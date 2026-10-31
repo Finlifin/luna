@@ -154,6 +154,14 @@ impl Interpreter<'_> {
         match value {
             Value::List { ty, values } => {
                 self.admit_type(ty, depth + 1)?;
+                // Uniform primitive leaves contain no embedded type descriptions.
+                // The list's own formation was still checked in the current world.
+                if values
+                    .summary()
+                    .is_some_and(|summary| summary.uniform_scalar.is_some())
+                {
+                    return Ok(());
+                }
                 for value in values {
                     self.admit_value_types(value, depth + 1)?;
                 }

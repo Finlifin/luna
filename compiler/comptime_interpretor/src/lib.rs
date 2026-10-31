@@ -507,6 +507,7 @@ impl Value {
                 height = height.max(child_height + 1);
                 Some(())
             };
+            let mut uniform_scalar = None;
             match value {
                 Value::Optional { value, .. } => {
                     if let Some(value) = value {
@@ -515,8 +516,12 @@ impl Value {
                 }
                 Value::ErrorResult { value, .. } | Value::Newtype { value, .. } => child(value)?,
                 Value::List { values: fields, .. } => {
+                    uniform_scalar = fields.first().and_then(list_values::scalar_tag);
                     for value in fields.iter().rev() {
                         child(value)?;
+                        if uniform_scalar != list_values::scalar_tag(value) {
+                            uniform_scalar = None;
+                        }
                     }
                 }
                 Value::Record { fields, .. }
@@ -542,6 +547,7 @@ impl Value {
                 values.remember(list_values::Summary {
                     work: *work - before_children,
                     height: height - 1,
+                    uniform_scalar,
                 });
             }
             Some(height)
@@ -2825,8 +2831,16 @@ impl<'a> Interpreter<'a> {
             }
             (Value::List { ty: actual, values }, ty) => {
                 self.comptime_only && actual == ty && values.len() <= 100_000
-                    && self.list_element(ty).is_some_and(|element|
-                        values.iter().all(|value| self.has_type_at(value, element, depth + 1)))
+                    && self.list_element(ty).is_some_and(|element| {
+                        // The summary stores only identical scalar discriminants.
+                        // Resolve and check the current element domain normally;
+                        // no equality, head formation or target decision is cached.
+                        if values.summary().is_some_and(|summary| summary.uniform_scalar.is_some()) {
+                            values.first().is_some_and(|value| self.has_type_at(value, element, depth + 1))
+                        } else {
+                            values.iter().all(|value| self.has_type_at(value, element, depth + 1))
+                        }
+                    })
             }
             (Value::TypeParameter(id), Term::Primitive(Primitive::Type)) => {
                 self.abstract_type_parameters.contains(id)

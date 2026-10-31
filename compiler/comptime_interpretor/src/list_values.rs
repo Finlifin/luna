@@ -11,10 +11,34 @@ pub(super) struct Summary {
     pub work: usize,
     /// Maximum element subtree height; zero for an empty payload.
     pub height: usize,
+    /// A uniform, content-independent scalar carrier. This records value
+    /// discriminants only, not an expected type or a successful admission.
+    pub uniform_scalar: Option<std::mem::Discriminant<Value>>,
 }
 
-/// List payload storage. The cached summary describes closed representation
-/// work only, never nominal admission, caller assumptions or type equality.
+/// Only these leaf carriers have type membership independent of their payload.
+/// Machine integers, BitVec, Type values and aggregates require their ordinary
+/// value-specific checks and cannot use a representative scalar observation.
+pub(super) fn scalar_tag(value: &Value) -> Option<std::mem::Discriminant<Value>> {
+    matches!(
+        value,
+        Value::Float(_)
+            | Value::Integer(_)
+            | Value::Float16(_)
+            | Value::BFloat16(_)
+            | Value::Float32(_)
+            | Value::Float64(_)
+            | Value::Unit
+            | Value::Bool(_)
+            | Value::Char(_)
+            | Value::String(_)
+            | Value::Symbol(_)
+    )
+    .then(|| std::mem::discriminant(value))
+}
+
+/// List payload storage. The summary describes closed representation work and
+/// scalar discriminants, never nominal admission, assumptions or type equality.
 #[derive(Clone, Default)]
 pub struct ListValues {
     values: Vec<Value>,
@@ -39,6 +63,13 @@ impl ListValues {
                 Some(Summary {
                     work: left.work.checked_add(right.work)?,
                     height: left.height.max(right.height),
+                    uniform_scalar: if self.is_empty() {
+                        right.uniform_scalar
+                    } else if other.is_empty() || left.uniform_scalar == right.uniform_scalar {
+                        left.uniform_scalar
+                    } else {
+                        None
+                    },
                 })
             });
         self.summary.take();
@@ -131,6 +162,47 @@ mod tests {
         };
         values
     }
+    #[test]
+    fn scalar_observations_compose_and_invalidate_without_type_verdicts() {
+        let make = |values: Vec<Value>| {
+            let mut value = test_type_list(vec![]);
+            let Value::List { values: stored, .. } = &mut value else {
+                unreachable!()
+            };
+            *stored = values.into();
+            // The intentionally mismatched declared Type domain must not
+            // influence a purely structural observation of Bool carriers.
+            value.immutable_copy_work().unwrap();
+            value
+        };
+        let mut value = make(vec![]);
+        let suffix = make(vec![Value::Bool(true), Value::Bool(false)]);
+        crate::memory::append_list_checked(&mut value, suffix, |_, _| Ok(())).unwrap();
+        assert_eq!(
+            payload(&value).summary().unwrap().uniform_scalar,
+            scalar_tag(&Value::Bool(false))
+        );
+        crate::memory::append_list_checked(&mut value, make(vec![]), |_, _| Ok(())).unwrap();
+        assert!(payload(&value).summary().unwrap().uniform_scalar.is_some());
+        let saved = value.clone();
+        crate::memory::append_list_checked(&mut value, make(vec![Value::Char('x')]), |_, _| Ok(()))
+            .unwrap();
+        assert!(payload(&value).summary().unwrap().uniform_scalar.is_none());
+        assert!(payload(&saved).summary().unwrap().uniform_scalar.is_some());
+        let Value::List { values, .. } = &mut value else {
+            unreachable!()
+        };
+        values[0] = Value::UnsignedInteger(256);
+        assert!(values.summary().is_none());
+        for value in [
+            Value::UnsignedInteger(1),
+            Value::SignedInteger(1),
+            Value::Type(Term::Primitive(Primitive::Bool)),
+        ] {
+            assert!(scalar_tag(&value).is_none());
+        }
+    }
+
     #[test]
     fn cached_inspection_cost_does_not_discount_owned_copies() {
         let value = test_type_list(vec![Term::Primitive(Primitive::Bool); 512]);
