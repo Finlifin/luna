@@ -9180,3 +9180,35 @@ Validation in `/home/fin/luna`:
   56 passed; `/tmp/luna-tools-xw2fhl6k/result.json`, exit 0.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
   passed; `/tmp/luna-tools-1b16d2mn/result.json`, exit 0.
+
+
+## Materialize dependencies carried by ordinary closure-context inputs
+
+Dependency discovery now visits ClosureContextValue capture types,
+ContextualClosure components and ClosureSnapshot arguments. The type-task
+match is exhaustive, matching the IIR validation boundary instead of silently
+ignoring new composite terms. Context values remain ordinary comptime inputs;
+no name-based Carrier or closure-specific nominal admission rule was added.
+
+A materialization regression passes a closure context as an ordinary nominal
+parameter, with a capture layout reachable only through that context. Before
+the fix the producer omitted the layout and final validation rejected its own
+output as a dangling nominal. The repaired producer retains the layout. A
+source regression also infers a callback's context, passes it to a nominal
+constructor, validates the graph and executes the callback.
+
+Validation in `/home/fin/luna`:
+
+- Baseline regression: `/tmp/luna-tools-0nlg02ga/result.json`, exit 101,
+  `IIR nominal reference is dangling`.
+- `python3 -B development/check.py --timeout 900 -- test -p materialization --test expansion_boundary`:
+  4 passed; `/tmp/luna-tools-3qqstto9/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test closure_environment_parameters --test scoped_comptime_callables --test function_type_dependencies`:
+  73 passed; `/tmp/luna-tools-p4fcr72y/result.json`, exit 0. The initial source
+  fixture incorrectly used named routing for a positional clause; it now uses
+  its declared positional input. No routing semantics were changed.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed; `/tmp/luna-tools-vij4nwab/result.json`, exit 0.
+
+This closes a producer/validator dependency mismatch. It does not complete
+TypeRef migration or runtime environment access and lifetime planning.

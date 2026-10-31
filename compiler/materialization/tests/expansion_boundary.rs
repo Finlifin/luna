@@ -205,3 +205,46 @@ fn dispatch_roots_do_not_visit_unrelated_function_bodies() {
         );
     }
 }
+
+#[test]
+fn closure_context_inputs_retain_capture_layouts() {
+    let (mut package, root) = fixture();
+    let nominal = Term::Nominal {
+        declaration: id(50),
+        arguments: vec![],
+    };
+    package.structs.push(n::Struct {
+        declaration: id(50),
+        name: "Capture".into(),
+        parameter_types: vec![],
+        type_parameters: vec![],
+        capabilities: vec![],
+        requirements: vec![],
+        fields: vec![("value".into(), Term::Primitive(Primitive::Bool))],
+    });
+    package.structs.push(n::Struct {
+        declaration: id(51),
+        name: "Carrier".into(),
+        parameter_types: vec![Term::ClosureContextType],
+        type_parameters: vec![id(52)],
+        capabilities: vec![],
+        requirements: vec![],
+        fields: vec![],
+    });
+    let context = Term::ClosureContextValue(vec![nominal.clone()]);
+    let carrier = Term::Nominal {
+        declaration: id(51),
+        arguments: vec![context],
+    };
+    let graph = materialization::instantiate_with_types(
+        &package,
+        &[root],
+        &[carrier],
+        BTreeSet::new(),
+        Budget::default(),
+        &Provider::default(),
+    )
+    .unwrap();
+    assert!(graph.nominals.iter().any(|instance| instance.ty == nominal));
+    graph.validate(&mut 100_000).unwrap();
+}

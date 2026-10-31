@@ -556,3 +556,38 @@ fn explicit_prefixes_do_not_override_mismatches_or_publish_unsolved_contexts() {
         assert!(result.is_err(), "{body}");
     }
 }
+
+#[test]
+fn nominal_inputs_preserve_inferred_closure_context_dependencies() {
+    let package = support::compile(
+        "typealias Type=.Type'builtin;
+         struct Payload {value:bool}
+         struct Carrier where c:Type.vars.Closure {}
+         fn witness()->bool where T {true}
+         fn invoke(callback:%c fn()->bool)->bool where c:Type.vars.Closure {
+             witness<Carrier<c>>() and callback()
+         }
+         fn run()->bool {
+             let payload=Payload {value:true};
+             invoke(||payload.value)
+         }",
+    );
+    let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
+    let carrier = package
+        .structs
+        .iter()
+        .find(|definition| definition.name == "Carrier")
+        .unwrap()
+        .declaration;
+    assert!(graph.nominals.iter().any(|instance| matches!(
+        &instance.ty,
+        nir::Term::Nominal { declaration, arguments }
+            if *declaration == carrier
+            && matches!(arguments.as_slice(), [nir::Term::ClosureContextValue(fields)] if !fields.is_empty())
+    )));
+    graph.validate(&mut 100_000).unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}

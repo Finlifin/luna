@@ -2714,7 +2714,16 @@ impl Builder<'_> {
                 }
                 children.push((**result).clone());
             }
-            Term::Tuple(items) | Term::TupleValue(items) => children.extend(items.iter().cloned()),
+            Term::Tuple(items)
+            | Term::TupleValue(items)
+            | Term::ClosureContextValue(items)
+            | Term::ClosureSnapshot {
+                arguments: items, ..
+            } => children.extend(items.iter().cloned()),
+            Term::ContextualClosure { context, signature } => {
+                children.push((**context).clone());
+                children.push((**signature).clone());
+            }
             Term::OptionalValue { ty, value } => {
                 children.push((**ty).clone());
                 if let Some(value) = value {
@@ -2751,7 +2760,25 @@ impl Builder<'_> {
                 children.extend(environment.iter().cloned());
                 children.push((**signature).clone());
             }
-            _ => {}
+            Term::Primitive(_)
+            | Term::ClosureContextType
+            | Term::Hole { .. }
+            | Term::Bound { .. }
+            | Term::Rigid { .. }
+            | Term::Runtime(_)
+            | Term::Unit
+            | Term::Bool(_)
+            | Term::Char(_)
+            | Term::BitVec(_)
+            | Term::Float16(_)
+            | Term::BFloat16(_)
+            | Term::Float32(_)
+            | Term::Float64(_)
+            | Term::String(_)
+            | Term::Symbol(_)
+            | Term::Integer(_)
+            | Term::Float(_)
+            | Term::Value { .. } => {}
         }
         self.queue.extend(children.into_iter().map(Task::Type));
         Ok(())
