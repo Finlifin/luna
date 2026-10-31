@@ -1,5 +1,6 @@
 //! Inference proposals, validated by an obligation on the original types.
 //! Structural decomposition never treats an opaque function as injective.
+mod aliases;
 mod effects;
 mod error_rows;
 use crate::ptc::Budget;
@@ -86,6 +87,7 @@ pub(crate) fn propose_metered(
                         arguments,
                     },
                 ) => {
+                    let previous = work.len();
                     decompose(
                         template,
                         actual,
@@ -99,6 +101,23 @@ pub(crate) fn propose_metered(
                         scope,
                         &mut work,
                     )?;
+                    if work.len() == previous
+                        && arguments
+                            .iter()
+                            .any(|argument| !matches!(argument, I::Stable(_)))
+                    {
+                        aliases::propose(
+                            template,
+                            actual,
+                            arguments,
+                            depth + 1,
+                            &mut fuel,
+                            budget.max_depth,
+                            context,
+                            scope,
+                            &mut work,
+                        )?;
+                    }
                 }
                 (
                     I::Instantiate {

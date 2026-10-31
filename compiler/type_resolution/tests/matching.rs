@@ -846,3 +846,166 @@ fn normal_form_proposals_are_multi_input_head_sensitive_and_conflict_checked() {
     assert!(root.freeze(&I::Meta(a)).is_err());
     root.assign(a, stable(P::U32)).unwrap();
 }
+
+#[test]
+fn propositional_alias_evidence_supplies_a_structural_type_input() {
+    use type_resolution::ptc::{Context, Formula as F};
+    let alias = Term::Rigid {
+        declaration: nir::DeclarationId {
+            package: 95,
+            local: 0,
+        },
+        sort: Sort::Type,
+    };
+    let wrap = |ty| Term::Optional(Box::new(ty));
+    let boolean = wrap(Term::Primitive(P::Bool));
+    let byte = wrap(Term::Primitive(P::U8));
+    let mut context = Context::default();
+    context.assume(F::Or(vec![
+        F::equal(alias.clone(), boolean.clone()),
+        F::equal(alias.clone(), byte.clone()),
+    ]));
+    let mut ambiguous = Engine::with_context(context.clone());
+    let unknown = ambiguous.fresh(Sort::Type);
+    let pattern = I::Instantiate {
+        template: wrap(slot(0)),
+        arguments: vec![I::Meta(unknown)],
+    };
+    let (mut waiting, id) = ambiguous
+        .match_types(pattern, I::Stable(alias.clone()), Budget::default())
+        .unwrap();
+    finish(&mut waiting);
+    assert!(matches!(waiting.state(id), Some(State::Waiting(_))));
+    assert!(waiting.freeze(&I::Meta(unknown)).is_err());
+
+    context.assume(F::equal(alias.clone(), byte).negate());
+    let mut engine = Engine::with_context(context);
+    let unknown = engine.fresh(Sort::Type);
+    let pattern = I::Instantiate {
+        template: wrap(slot(0)),
+        arguments: vec![I::Meta(unknown)],
+    };
+    let (mut candidate, id) = engine
+        .match_types(pattern.clone(), I::Stable(alias.clone()), Budget::default())
+        .unwrap();
+    finish(&mut candidate);
+    assert!(candidate.state(id).unwrap().is_proven());
+    assert_eq!(
+        candidate.freeze(&I::Meta(unknown)).unwrap(),
+        Term::Primitive(P::Bool)
+    );
+    assert!(engine.freeze(&I::Meta(unknown)).is_err());
+    for steps in 0..128 {
+        if let Ok((mut trial, id)) = engine.match_types(
+            pattern.clone(),
+            I::Stable(alias.clone()),
+            Budget {
+                steps,
+                max_depth: 128,
+            },
+        ) {
+            finish(&mut trial);
+            if trial.state(id).unwrap().is_proven() {
+                assert_eq!(
+                    trial.freeze(&I::Meta(unknown)).unwrap(),
+                    Term::Primitive(P::Bool)
+                );
+            } else {
+                assert!(trial.freeze(&I::Meta(unknown)).is_err());
+            }
+        }
+        assert_eq!(engine.inspect(&I::Meta(unknown)).unwrap(), I::Meta(unknown));
+    }
+    engine.commit(candidate).unwrap();
+    assert_eq!(
+        engine.freeze(&I::Meta(unknown)).unwrap(),
+        Term::Primitive(P::Bool)
+    );
+}
+
+#[test]
+fn alias_fallback_preserves_symbolic_types_and_does_not_invert_heads() {
+    use type_resolution::ptc::{Context, Formula as F};
+    let rigid = |local| Term::Rigid {
+        declaration: nir::DeclarationId { package: 96, local },
+        sort: Sort::Type,
+    };
+    let alias = rigid(0);
+    let symbolic = rigid(1);
+    let mut context = Context::default();
+    context.assume(F::equal(
+        alias.clone(),
+        Term::Optional(Box::new(symbolic.clone())),
+    ));
+    let mut engine = Engine::with_context(context);
+    let unknown = engine.fresh(Sort::Type);
+    let pattern = I::Instantiate {
+        template: Term::Optional(Box::new(slot(0))),
+        arguments: vec![I::Meta(unknown)],
+    };
+    let (mut candidate, id) = engine
+        .match_types(pattern, I::Stable(alias), Budget::default())
+        .unwrap();
+    finish(&mut candidate);
+    assert!(candidate.state(id).unwrap().is_proven());
+    assert_eq!(candidate.freeze(&I::Meta(unknown)).unwrap(), symbolic);
+
+    let head = nir::DeclarationId {
+        package: 96,
+        local: 3,
+    };
+    let opaque = |input| Term::NormalForm {
+        head,
+        sort: Sort::Type,
+        arguments: vec![input],
+    };
+    let mut context = Context::default();
+    context.admit_congruence(head);
+    context.assume(F::equal(
+        opaque(rigid(0)),
+        opaque(Term::Optional(Box::new(Term::Primitive(P::Bool)))),
+    ));
+    let mut engine = Engine::with_context(context);
+    let unknown = engine.fresh(Sort::Type);
+    let pattern = I::Instantiate {
+        template: Term::Optional(Box::new(slot(0))),
+        arguments: vec![I::Meta(unknown)],
+    };
+    let (mut candidate, id) = engine
+        .match_types(pattern, I::Stable(rigid(0)), Budget::default())
+        .unwrap();
+    finish(&mut candidate);
+    assert!(matches!(candidate.state(id), Some(State::Waiting(_))));
+}
+
+#[test]
+fn candidate_requirements_cannot_supply_alias_evidence() {
+    use type_resolution::{obligations::Requirement, ptc::Formula};
+    let alias = Term::Rigid {
+        declaration: nir::DeclarationId {
+            package: 97,
+            local: 0,
+        },
+        sort: Sort::Type,
+    };
+    let mut engine = Engine::default();
+    engine.require(Requirement::Stable(Formula::equal(
+        alias.clone(),
+        Term::Optional(Box::new(Term::Primitive(P::Bool))),
+    )));
+    let unknown = engine.fresh(Sort::Type);
+    let pattern = I::Instantiate {
+        template: Term::Optional(Box::new(slot(0))),
+        arguments: vec![I::Meta(unknown)],
+    };
+    let (mut candidate, id) = engine
+        .match_types(pattern, I::Stable(alias), Budget::default())
+        .unwrap();
+    finish(&mut candidate);
+    assert_eq!(
+        candidate.inspect(&I::Meta(unknown)).unwrap(),
+        I::Meta(unknown)
+    );
+    assert!(matches!(candidate.state(id), Some(State::Waiting(_))));
+    assert!(engine.commit(candidate).is_err());
+}

@@ -139,3 +139,26 @@ fn contextual_collection_spreads_execute_once_before_later_type_inputs() {
         comptime_interpretor::Value::Bool(true)
     );
 }
+
+#[test]
+fn established_type_equality_supplies_generic_call_shape() {
+    let source = "
+        typealias u8 = .u8'builtin;
+        fn accept(value: ?T) -> bool where T { true }
+        fn forward(value: S) -> bool
+        where S, requires S == ?bool
+        { accept(value) }
+        fn run() -> bool { forward<?bool>(null) }
+    ";
+    support::compile_with_protocols(source, &Default::default()).unwrap();
+    let disambiguated = source.replace("S == ?bool", "(S == ?bool or S == ?u8) and not (S == ?u8)");
+    support::compile_with_protocols(&disambiguated, &Default::default()).unwrap();
+    let explicit_choice = source.replace("S == ?bool", "S == ?bool or S == ?u8");
+    let package = support::compile_with_protocols(&explicit_choice, &Default::default()).unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+    let rejected = source.replace("forward<?bool>", "forward<?u8>");
+    assert!(support::compile_with_protocols(&rejected, &Default::default()).is_err());
+}
