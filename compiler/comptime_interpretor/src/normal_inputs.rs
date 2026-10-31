@@ -1,20 +1,56 @@
 //! Invocation-local evaluation of contextual inputs before their Type arrives.
-//! Literal keys point into boxed immutable arguments owned by that invocation.
+//! Structural input paths survive cloning; bytecode registers are rekeyed
+//! explicitly before completed operands meet prepared domains.
 //! Explicit continuations retain logical depth while avoiding host recursion
 //! through contextual containers. Expression and guard evaluation stay shared.
 use super::*;
 use nir::program::NormalFormArgument as A;
 use std::ops::ControlFlow;
 
+/// Identity within one contextual input, never a host allocation identity.
+/// Child indices follow source order (then/else, fields, arms, block result).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum InputKey {
+    Node(Vec<usize>),
+    Register(usize),
+}
+impl InputKey {
+    pub(super) fn root() -> Self {
+        Self::Node(vec![])
+    }
+    pub(super) fn child(&self, index: usize) -> Self {
+        let Self::Node(path) = self else {
+            unreachable!("child of input node")
+        };
+        let mut path = path.clone();
+        path.push(index);
+        Self::Node(path)
+    }
+}
+impl fmt::Display for InputKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Register(slot) => write!(f, "(register {slot})"),
+            Self::Node(path) => {
+                write!(f, "(input-path")?;
+                for index in path {
+                    write!(f, " {index}")?;
+                }
+                write!(f, ")")
+            }
+        }
+    }
+}
+
 pub(super) enum StagedNormalInput {
     Value(Value),
     List {
-        key: usize,
+        key: InputKey,
         items: Vec<(bool, Self)>,
     },
-    Literal(usize),
+    Literal(InputKey),
     Tuple {
-        key: usize,
+        key: InputKey,
         items: Vec<Self>,
     },
 }
@@ -48,24 +84,24 @@ impl Interpreter<'_> {
         depth: usize,
     ) -> Result<ControlFlow<Flow, StagedNormalInput>, Error> {
         enum Work<'a> {
-            Enter(&'a A, usize),
+            Enter(&'a A, usize, InputKey),
             Exit(&'a A),
-            List(&'a A, &'a [A], usize),
-            Tuple(&'a A, usize),
+            List(InputKey, &'a [A], usize),
+            Tuple(InputKey, usize),
             LeaveScope,
-            Next(&'a [A], usize),
+            Next(&'a [A], usize, InputKey, usize),
         }
         let original_depth = self.depth;
         let mut scopes: Vec<BTreeSet<LocalId>> = Vec::new();
         let result = (|| {
-            let mut work = vec![Work::Enter(input, depth)];
+            let mut work = vec![Work::Enter(input, depth, InputKey::root())];
             let mut values = Vec::new();
             while let Some(next) = work.pop() {
                 match next {
-                    Work::Next(items, depth) => {
+                    Work::Next(items, depth, key, index) => {
                         if let Some((item, rest)) = items.split_first() {
-                            work.push(Work::Next(rest, depth));
-                            work.push(Work::Enter(item, depth));
+                            work.push(Work::Next(rest, depth, key.clone(), index + 1));
+                            work.push(Work::Enter(item, depth, key.child(index)));
                         }
                     }
                     Work::Exit(input) => {
@@ -78,10 +114,10 @@ impl Interpreter<'_> {
                         let existing = scopes.pop().unwrap();
                         environment.retain(|id, _| existing.contains(id));
                     }
-                    Work::List(input, items, start) => {
+                    Work::List(key, items, start) => {
                         let children = values.split_off(start);
                         values.push(StagedNormalInput::List {
-                            key: input as *const A as usize,
+                            key,
                             items: items
                                 .iter()
                                 .zip(children)
@@ -89,14 +125,11 @@ impl Interpreter<'_> {
                                 .collect(),
                         });
                     }
-                    Work::Tuple(input, start) => {
+                    Work::Tuple(key, start) => {
                         let items = values.split_off(start);
-                        values.push(StagedNormalInput::Tuple {
-                            key: input as *const A as usize,
-                            items,
-                        });
+                        values.push(StagedNormalInput::Tuple { key, items });
                     }
-                    Work::Enter(input, depth) => {
+                    Work::Enter(input, depth, key) => {
                         if depth >= 128 {
                             return Err(
                                 self.failure(ErrorKind::DepthExhausted, Some(input.source()))
@@ -112,15 +145,15 @@ impl Interpreter<'_> {
                                 )));
                             }
                             A::Integer { .. } | A::Unit { .. } => {
-                                values.push(StagedNormalInput::Literal(input as *const A as usize))
+                                values.push(StagedNormalInput::Literal(key))
                             }
                             A::List { items, .. } | A::Tuple { items, .. } => {
                                 work.push(if matches!(input, A::List { .. }) {
-                                    Work::List(input, items, values.len())
+                                    Work::List(key.clone(), items, values.len())
                                 } else {
-                                    Work::Tuple(input, values.len())
+                                    Work::Tuple(key.clone(), values.len())
                                 });
-                                work.push(Work::Next(items, depth + 1));
+                                work.push(Work::Next(items, depth + 1, key, 0));
                             }
                             A::If {
                                 condition,
@@ -138,6 +171,7 @@ impl Interpreter<'_> {
                                 work.push(Work::Enter(
                                     if flag { then_input } else { else_input },
                                     depth + 1,
+                                    key.child(usize::from(!flag)),
                                 ));
                             }
                             A::Block {
@@ -149,7 +183,9 @@ impl Interpreter<'_> {
                                     staged_value!(self.eval(statement, environment));
                                 }
                                 match result {
-                                    Some(result) => work.push(Work::Enter(result, depth + 1)),
+                                    Some(result) => {
+                                        work.push(Work::Enter(result, depth + 1, key.child(0)))
+                                    }
                                     None => values.push(StagedNormalInput::Value(Value::Unit)),
                                 }
                             }
@@ -161,7 +197,7 @@ impl Interpreter<'_> {
                                 let value = staged_value!(self.eval(value, environment));
                                 scopes.push(environment.keys().copied().collect());
                                 let mut selected = None;
-                                for arm in arms {
+                                for (index, arm) in arms.iter().enumerate() {
                                     self.tick(Some(*source))?;
                                     match self.match_arm_guard(
                                         &arm.pattern,
@@ -172,17 +208,17 @@ impl Interpreter<'_> {
                                         Flow::Value(Value::Bool(false)) => environment
                                             .retain(|id, _| scopes.last().unwrap().contains(id)),
                                         Flow::Value(Value::Bool(true)) => {
-                                            selected = Some(&arm.body);
+                                            selected = Some((index, &arm.body));
                                             break;
                                         }
                                         flow => return Ok(ControlFlow::Break(flow)),
                                     }
                                 }
-                                let selected = selected.ok_or_else(|| {
+                                let (index, selected) = selected.ok_or_else(|| {
                                     self.failure(ErrorKind::NonExhaustiveMatch, Some(*source))
                                 })?;
                                 work.push(Work::LeaveScope);
-                                work.push(Work::Enter(selected, depth + 1));
+                                work.push(Work::Enter(selected, depth + 1, key.child(index)));
                             }
                         }
                     }
@@ -202,7 +238,7 @@ impl Interpreter<'_> {
     pub(super) fn finish_staged_normal_argument(
         &mut self,
         staged: StagedNormalInput,
-        literals: &mut BTreeMap<usize, PreparedNormalInput>,
+        literals: &mut BTreeMap<InputKey, PreparedNormalInput>,
         source: SourceRange,
         depth: usize,
     ) -> Result<Value, Error> {
@@ -216,7 +252,7 @@ impl Interpreter<'_> {
                 pending: Option<bool>,
             },
             Tuple {
-                key: usize,
+                key: InputKey,
                 items: std::vec::IntoIter<StagedNormalInput>,
                 values: Vec<Value>,
                 depth: usize,

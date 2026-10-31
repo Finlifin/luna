@@ -37,6 +37,7 @@ mod memory;
 mod nominal_inputs;
 mod nominal_plan;
 mod normal_inputs;
+use normal_inputs::InputKey;
 mod normal_plan;
 mod normal_terms;
 mod normal_types;
@@ -3901,14 +3902,23 @@ impl<'a> Interpreter<'a> {
         Ok(value)
     }
 
-    // The addresses are invocation-local cache identities only, never
-    // dereferenced. Nodes are borrowed from immutable NIR throughout execution.
     fn prepare_normal_argument(
         &mut self,
         input: &nir::program::NormalFormArgument,
         expected: &Term,
-        literals: &mut BTreeMap<usize, PreparedNormalInput>,
+        literals: &mut BTreeMap<InputKey, PreparedNormalInput>,
         depth: usize,
+    ) -> Result<(), Error> {
+        self.prepare_normal_argument_at(input, expected, literals, depth, &InputKey::root())
+    }
+
+    fn prepare_normal_argument_at(
+        &mut self,
+        input: &nir::program::NormalFormArgument,
+        expected: &Term,
+        literals: &mut BTreeMap<InputKey, PreparedNormalInput>,
+        depth: usize,
+        key: &InputKey,
     ) -> Result<(), Error> {
         use nir::program::NormalFormArgument as A;
         if depth >= 128 {
@@ -3918,10 +3928,7 @@ impl<'a> Interpreter<'a> {
         match input {
             A::Unit { source } => {
                 let value = self.normal_unit_value(expected, *source)?;
-                literals.insert(
-                    input as *const A as usize,
-                    PreparedNormalInput::Value(value),
-                );
+                literals.insert(key.clone(), PreparedNormalInput::Value(value));
             }
             A::ListSpread(value) | A::Value(value) => {
                 self.prepare_normal_value_type(&value.ty, expected, value.source)?;
@@ -3932,10 +3939,7 @@ impl<'a> Interpreter<'a> {
                 negative,
             } => {
                 let value = self.normal_integer_value(expected, spelling, *negative, *source)?;
-                literals.insert(
-                    input as *const A as usize,
-                    PreparedNormalInput::Value(value),
-                );
+                literals.insert(key.clone(), PreparedNormalInput::Value(value));
             }
             A::If {
                 condition,
@@ -3949,22 +3953,37 @@ impl<'a> Interpreter<'a> {
                 ) {
                     return Err(self.failure(ErrorKind::Type, Some(condition.source)));
                 }
-                self.prepare_normal_argument(then_input, expected, literals, depth + 1)?;
-                self.prepare_normal_argument(else_input, expected, literals, depth + 1)?;
+                self.prepare_normal_argument_at(
+                    then_input,
+                    expected,
+                    literals,
+                    depth + 1,
+                    &key.child(0),
+                )?;
+                self.prepare_normal_argument_at(
+                    else_input,
+                    expected,
+                    literals,
+                    depth + 1,
+                    &key.child(1),
+                )?;
             }
             A::List { source, items } => {
                 let element = self.normal_list_domain(expected, items.len(), *source)?;
-                literals.insert(
-                    input as *const A as usize,
-                    PreparedNormalInput::ListType(expected.clone()),
-                );
-                for item in items {
+                literals.insert(key.clone(), PreparedNormalInput::ListType(expected.clone()));
+                for (index, item) in items.iter().enumerate() {
                     let element_type = if matches!(item, A::ListSpread(_)) {
                         expected
                     } else {
                         &element
                     };
-                    self.prepare_normal_argument(item, element_type, literals, depth + 1)?;
+                    self.prepare_normal_argument_at(
+                        item,
+                        element_type,
+                        literals,
+                        depth + 1,
+                        &key.child(index),
+                    )?;
                 }
             }
             A::Tuple {
@@ -3973,8 +3992,14 @@ impl<'a> Interpreter<'a> {
                 items,
             } => {
                 if *expected == Term::Primitive(Primitive::Type) {
-                    for item in items {
-                        self.prepare_normal_argument(item, expected, literals, depth + 1)?;
+                    for (index, item) in items.iter().enumerate() {
+                        self.prepare_normal_argument_at(
+                            item,
+                            expected,
+                            literals,
+                            depth + 1,
+                            &key.child(index),
+                        )?;
                     }
                     if let Some(head) = type_head {
                         if !self
@@ -3985,10 +4010,7 @@ impl<'a> Interpreter<'a> {
                             return Err(self.failure(ErrorKind::Type, Some(*source)));
                         }
                     }
-                    literals.insert(
-                        input as *const A as usize,
-                        PreparedNormalInput::TypeTuple(*type_head),
-                    );
+                    literals.insert(key.clone(), PreparedNormalInput::TypeTuple(*type_head));
                     return Ok(());
                 }
                 let Some(types) = self.tuple_input_elements(expected) else {
@@ -3997,12 +4019,18 @@ impl<'a> Interpreter<'a> {
                 if types.len() != items.len() {
                     return Err(self.failure(ErrorKind::Arity, Some(*source)));
                 }
-                for (item, ty) in items.iter().zip(types) {
-                    self.prepare_normal_argument(item, ty, literals, depth + 1)?;
+                for (index, (item, ty)) in items.iter().zip(types).enumerate() {
+                    self.prepare_normal_argument_at(
+                        item,
+                        ty,
+                        literals,
+                        depth + 1,
+                        &key.child(index),
+                    )?;
                 }
             }
             A::Match { arms, .. } => {
-                for arm in arms {
+                for (index, arm) in arms.iter().enumerate() {
                     if let Some(guard) = &arm.guard {
                         if !matches!(
                             guard.ty,
@@ -4011,12 +4039,24 @@ impl<'a> Interpreter<'a> {
                             return Err(self.failure(ErrorKind::Type, Some(guard.source)));
                         }
                     }
-                    self.prepare_normal_argument(&arm.body, expected, literals, depth + 1)?;
+                    self.prepare_normal_argument_at(
+                        &arm.body,
+                        expected,
+                        literals,
+                        depth + 1,
+                        &key.child(index),
+                    )?;
                 }
             }
             A::Block { result, .. } => {
                 if let Some(result) = result {
-                    self.prepare_normal_argument(result, expected, literals, depth + 1)?;
+                    self.prepare_normal_argument_at(
+                        result,
+                        expected,
+                        literals,
+                        depth + 1,
+                        &key.child(0),
+                    )?;
                 } else if !input.is_diverging() {
                     self.check_type_contract(
                         &nir::program::TypePredicate::Equal(
@@ -4031,12 +4071,22 @@ impl<'a> Interpreter<'a> {
         Ok(())
     }
 
-    #[inline(never)]
     fn eval_normal_argument(
         &mut self,
         input: &nir::program::NormalFormArgument,
-        literals: &mut BTreeMap<usize, PreparedNormalInput>,
+        literals: &mut BTreeMap<InputKey, PreparedNormalInput>,
         environment: &mut Environment,
+    ) -> Result<Flow, Error> {
+        self.eval_normal_argument_at(input, literals, environment, &InputKey::root())
+    }
+
+    #[inline(never)]
+    fn eval_normal_argument_at(
+        &mut self,
+        input: &nir::program::NormalFormArgument,
+        literals: &mut BTreeMap<InputKey, PreparedNormalInput>,
+        environment: &mut Environment,
+        key: &InputKey,
     ) -> Result<Flow, Error> {
         use nir::program::NormalFormArgument as A;
         self.tick(Some(input.source()))?;
@@ -4044,7 +4094,7 @@ impl<'a> Interpreter<'a> {
         let result = (|| match input {
             A::ListSpread(value) | A::Value(value) => self.eval(value, environment),
             A::Integer { .. } | A::Unit { .. } => literals
-                .remove(&(input as *const A as usize))
+                .remove(key)
                 .and_then(|prepared| match prepared {
                     PreparedNormalInput::Value(value) => Some(Flow::Value(value)),
                     PreparedNormalInput::TypeTuple(_) | PreparedNormalInput::ListType(_) => None,
@@ -4063,21 +4113,25 @@ impl<'a> Interpreter<'a> {
                 else {
                     return Err(self.failure(ErrorKind::Type, Some(condition.source)));
                 };
-                self.eval_normal_argument(
+                self.eval_normal_argument_at(
                     if condition { then_input } else { else_input },
                     literals,
                     environment,
+                    &key.child(usize::from(!condition)),
                 )
             }
             A::List { items, .. } => {
-                let Some(PreparedNormalInput::ListType(ty)) =
-                    literals.remove(&(input as *const A as usize))
-                else {
+                let Some(PreparedNormalInput::ListType(ty)) = literals.remove(key) else {
                     return Err(self.failure(ErrorKind::Type, Some(input.source())));
                 };
                 let mut values = Vec::new();
-                for item in items {
-                    let value = value!(self.eval_normal_argument(item, literals, environment));
+                for (index, item) in items.iter().enumerate() {
+                    let value = value!(self.eval_normal_argument_at(
+                        item,
+                        literals,
+                        environment,
+                        &key.child(index)
+                    ));
                     self.append_normal_list_item(
                         &ty,
                         &mut values,
@@ -4090,14 +4144,15 @@ impl<'a> Interpreter<'a> {
             }
             A::Tuple { items, .. } => {
                 let mut values = Vec::new();
-                for item in items {
-                    values.push(value!(self.eval_normal_argument(
+                for (index, item) in items.iter().enumerate() {
+                    values.push(value!(self.eval_normal_argument_at(
                         item,
                         literals,
-                        environment
+                        environment,
+                        &key.child(index)
                     )));
                 }
-                let head = match literals.remove(&(input as *const A as usize)) {
+                let head = match literals.remove(key) {
                     Some(PreparedNormalInput::TypeTuple(head)) => Some(head),
                     _ => None,
                 };
@@ -4111,7 +4166,7 @@ impl<'a> Interpreter<'a> {
             } => {
                 let value = value!(self.eval(value, environment));
                 let existing = environment.snapshot();
-                for arm in arms {
+                for (index, arm) in arms.iter().enumerate() {
                     let flow = (|| {
                         self.tick(Some(*source))?;
                         match self.match_arm_guard(
@@ -4124,8 +4179,13 @@ impl<'a> Interpreter<'a> {
                             Flow::Value(Value::Bool(true)) => {}
                             flow => return Ok(Some(flow)),
                         }
-                        self.eval_normal_argument(&arm.body, literals, environment)
-                            .map(Some)
+                        self.eval_normal_argument_at(
+                            &arm.body,
+                            literals,
+                            environment,
+                            &key.child(index),
+                        )
+                        .map(Some)
                     })();
                     environment.retain(|id, _| existing.contains(id));
                     if let Some(flow) = flow? {
@@ -4143,7 +4203,7 @@ impl<'a> Interpreter<'a> {
                         value!(self.eval(statement, environment));
                     }
                     if let Some(result) = result {
-                        self.eval_normal_argument(result, literals, environment)
+                        self.eval_normal_argument_at(result, literals, environment, &key.child(0))
                     } else {
                         Ok(Flow::Value(Value::Unit))
                     }

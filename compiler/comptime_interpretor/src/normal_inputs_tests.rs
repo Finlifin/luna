@@ -171,7 +171,7 @@ fn staged_scopes_cleanup_on_errors_transfers_and_budget_exhaustion() {
 }
 
 #[test]
-fn staged_bytecode_preserves_selected_shapes_and_delayed_preflight() {
+fn staged_inputs_survive_cloning_with_selected_shapes_and_delayed_preflight() {
     use nir::program::{NormalMatchArm, Pattern};
     let package = Package::default();
     let trace = LocalId { owner: 7, index: 0 };
@@ -243,7 +243,11 @@ fn staged_bytecode_preserves_selected_shapes_and_delayed_preflight() {
             };
             assert_eq!(env.get(&trace), Some(&Value::Bool(true)));
             let mut prepared = BTreeMap::new();
-            let result = vm.prepare_normal_argument(&input, &expected, &mut prepared, 0);
+            // All nodes deliberately share SOURCE. A cloned tree has different
+            // addresses but the same structural identities, including rejected
+            // branches and candidate-local block results.
+            let prepared_input = input.clone();
+            let result = vm.prepare_normal_argument(&prepared_input, &expected, &mut prepared, 0);
             if invalid {
                 assert_eq!(result.unwrap_err().kind, ErrorKind::Type);
             } else {
@@ -341,4 +345,44 @@ fn staged_patterns_compile_or_fall_back_before_operand_effects() {
         assert_eq!(env.get(&trace), Some(&Value::Bool(true)));
         assert_eq!(vm.bytecode_staged_inputs(), usize::from(case != 2));
     }
+}
+
+#[test]
+fn prepared_contextual_inputs_survive_cloning_without_source_range_keys() {
+    let package = Package::default();
+    let literal = |spelling: &str| A::Integer {
+        source: SOURCE,
+        spelling: spelling.into(),
+        negative: false,
+    };
+    let input = A::Tuple {
+        source: SOURCE,
+        type_head: None,
+        items: vec![
+            literal("7"),
+            A::If {
+                source: SOURCE,
+                condition: boolean(false),
+                then_input: Box::new(literal("11")),
+                else_input: Box::new(A::Block {
+                    source: SOURCE,
+                    statements: vec![],
+                    result: Some(Box::new(literal("13"))),
+                }),
+            },
+        ],
+    };
+    let expected = Term::Tuple(vec![Term::Primitive(Primitive::U8); 2]);
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let mut prepared = BTreeMap::new();
+    vm.prepare_normal_argument(&input, &expected, &mut prepared, 0)
+        .unwrap();
+    let relocated = input.clone();
+    assert!(
+        matches!(vm.eval_normal_argument(&relocated, &mut prepared, &mut Environment::new()).unwrap(),
+        Flow::Value(Value::Tuple(values)) if values == vec![Value::UnsignedInteger(7), Value::UnsignedInteger(13)])
+    );
+    // The unselected literal remains prepared and distinct from selected peers.
+    assert_eq!(prepared.len(), 1);
+    assert!(prepared.contains_key(&InputKey::root().child(1).child(0)));
 }

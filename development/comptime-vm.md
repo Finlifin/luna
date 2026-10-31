@@ -8878,3 +8878,37 @@ Initial source fixtures had ambiguous tightly spaced `<`/`>` syntax; corrected
 spacing before evaluating their behavior. The intermediate library cost failure
 is preserved in `/tmp/luna-tools-s5qpz43r/result.json`; its cost threshold was
 not relaxed. No tests were excluded in the final commands.
+
+
+## Structural identities for contextual input preparation
+
+The noon audit's eleven `NormalFormArgument` address keys have been removed
+from preparation, reference execution, staged traversal, and bytecode rekeying.
+`InputKey::Node` identifies a node by its child-index path within one input.
+Fields and match arms use source order, choices use then/else indices, and a
+block's contextual result uses child zero. Bytecode slots remain explicitly
+`InputKey::Register` until rekeying connects them to those paths. Both variants
+have deterministic S-expression displays.
+
+This identity is local to an input tree and survives an exact clone. It is not
+a global declaration identity, an incremental fingerprint, or permission to
+reuse prepared values after changing the input program. No runtime state,
+candidate transaction, or inferred type is cached by this key. The existing
+bounded traversal, preparation of unselected contextual literals, selected
+operand execution, and scope rollback remain in place. This removes the
+allocation-identity dependency without claiming that the remaining parallel
+`NormalFormArgument` representation or the full IIR VM migration is complete.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --test immutable_normal_inputs`
+  passed: 357 unit tests and 9 immutable-input tests;
+  `/tmp/luna-tools-futcjkbf/result.json` exited 0.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test normal_form_domains --test nominal_value_parameters --test nominal_staging --test comptime_clause_inputs`
+  passed: 367 source tests;
+  `/tmp/luna-tools-4_owapys/result.json` exited 0.
+- The cloned-tree regressions use identical source ranges at every node, so
+  neither allocation addresses nor source positions can supply the identity.
+  Both staged engines preserve selected branches across cloning, still reject
+  an invalid literal in an unselected branch at domain preparation, and the
+  reference evaluator consumes only the selected prepared literals.

@@ -96,7 +96,8 @@ impl State {
                 self.values.insert(*slot, Input::Value(Value::Unit));
             }
             Op::Literal(slot) => {
-                self.values.insert(*slot, Input::Literal(*slot));
+                self.values
+                    .insert(*slot, Input::Literal(InputKey::Register(*slot)));
             }
             Op::Transfer {
                 destination, value, ..
@@ -119,10 +120,13 @@ impl State {
             Op::Container { value, list, .. } => {
                 let items = self.containers.remove(value).unwrap_or_default();
                 let input = if *list {
-                    Input::List { key: *value, items }
+                    Input::List {
+                        key: InputKey::Register(*value),
+                        items,
+                    }
                 } else {
                     Input::Tuple {
-                        key: *value,
+                        key: InputKey::Register(*value),
                         items: items.into_iter().map(|(_, item)| item).collect(),
                     }
                 };
@@ -139,7 +143,7 @@ impl State {
 
 impl Interpreter<'_> {
     /// Register keys belong to immutable bytecode. Only after execution do we
-    /// connect them to the invocation-owned NIR used by the migration finisher.
+    /// connect them to structural input paths used by the domain finisher.
     pub(super) fn rekey_staged_input(
         &mut self,
         root: &nir::program::NormalFormArgument,
@@ -148,25 +152,35 @@ impl Interpreter<'_> {
     ) -> Result<(), Error> {
         use comptime_compiler::normal_types::{Shape, ShapeKind as K};
         use nir::program::NormalFormArgument as A;
-        let mut pairs: Vec<(&A, &Shape)> = vec![(root, shape)];
+        let mut pairs: Vec<(&A, &Shape, InputKey)> = vec![(root, shape, InputKey::root())];
         let mut keys = BTreeMap::new();
-        while let Some((input, shape)) = pairs.pop() {
+        while let Some((input, shape, key)) = pairs.pop() {
             self.tick(Some(input.source()))?;
-            keys.insert(shape.slot, input as *const A as usize);
+            keys.insert(shape.slot, key.clone());
             match (input, &shape.kind) {
                 (
                     A::Integer { .. } | A::Unit { .. } | A::Value(_) | A::ListSpread(_),
                     K::Scalar(_),
                 ) => {}
-                (A::List { items, .. }, K::List(children)) => {
-                    pairs.extend(items.iter().zip(children.iter().map(|(_, child)| child)))
-                }
+                (A::List { items, .. }, K::List(children)) => pairs.extend(
+                    items
+                        .iter()
+                        .zip(children.iter().map(|(_, child)| child))
+                        .enumerate()
+                        .map(|(index, (a, b))| (a, b, key.child(index))),
+                ),
                 (
                     A::Tuple { items, .. },
                     K::Tuple {
                         items: children, ..
                     },
-                ) => pairs.extend(items.iter().zip(children)),
+                ) => pairs.extend(
+                    items
+                        .iter()
+                        .zip(children)
+                        .enumerate()
+                        .map(|(index, (a, b))| (a, b, key.child(index))),
+                ),
                 (
                     A::If {
                         then_input,
@@ -179,18 +193,21 @@ impl Interpreter<'_> {
                         ..
                     },
                 ) => {
-                    pairs.push((then_input, yes));
-                    pairs.push((else_input, no));
+                    pairs.push((then_input, yes, key.child(0)));
+                    pairs.push((else_input, no, key.child(1)));
                 }
                 (A::Block { result, .. }, K::Block { result: child }) => pairs.extend(
                     result
                         .iter()
                         .zip(child)
-                        .map(|(a, b)| (a.as_ref(), b.as_ref())),
+                        .map(|(a, b)| (a.as_ref(), b.as_ref(), key.child(0))),
                 ),
-                (A::Match { arms, .. }, K::Match(children)) => {
-                    pairs.extend(arms.iter().zip(children).map(|(a, b)| (&a.body, &b.body)))
-                }
+                (A::Match { arms, .. }, K::Match(children)) => pairs.extend(
+                    arms.iter()
+                        .zip(children)
+                        .enumerate()
+                        .map(|(index, (a, b))| (&a.body, &b.body, key.child(index))),
+                ),
                 _ => return Err(self.failure(ErrorKind::Type, Some(input.source()))),
             }
         }
@@ -209,9 +226,13 @@ impl Interpreter<'_> {
                     key
                 }
             };
-            *key = *keys
-                .get(key)
-                .ok_or_else(|| self.failure(ErrorKind::Type, Some(root.source())))?;
+            let InputKey::Register(slot) = key else {
+                return Err(self.failure(ErrorKind::InvalidControlFlow, Some(root.source())));
+            };
+            *key = keys
+                .get(slot)
+                .ok_or_else(|| self.failure(ErrorKind::Type, Some(root.source())))?
+                .clone();
         }
         Ok(())
     }
