@@ -8933,3 +8933,30 @@ Validation in `/home/fin/luna`:
   retry, missing register, duplicate slots, and exact S-expression output.
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_clause_inputs --test nominal_staging --test nominal_value_parameters`:
   364 passed; `/tmp/luna-tools-_uonopxz/result.json`, exit 0.
+
+
+### Shared contextual input domain preparation
+
+`input_domains` supplies a borrowed view of NIR input descriptions and compiled
+shape metadata. One preparation algorithm now checks scalar domains, contextual
+integer/unit literals, conditions and guards, absent block results, list spread
+domains, and tuple layouts. The two callers only adapt prepared results to
+structural-path or register-indexed storage. Preparation executes no operand
+expressions and does not clone source trees or unfold normal-form heads.
+
+This removes duplicated semantic traversal from `prepare_normal_argument` and
+`prepare_normal_shape`. It does not remove NIR specialization from delayed-domain
+frames, nor migrate the whole VM to IIR. Preparation failure remains terminal
+for those frames; partially prepared internal maps are not published as values.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --test immutable_normal_inputs`:
+  360 unit and 9 immutable-input tests passed;
+  `/tmp/luna-tools-k_ip558k/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_clause_inputs --test nominal_staging --test nominal_value_parameters --test normal_form_domains`:
+  367 source tests passed; `/tmp/luna-tools-j38m20n8/result.json`, exit 0.
+- A differential test compiles source input shapes and compares preparation
+  diagnostics, source positions, and remaining work across five budgets for
+  valid/overflowing literals, invalid unselected branches, wrong condition
+  types, absent block results, and tuple domain mismatches.

@@ -28,6 +28,7 @@ mod function_instances;
 mod iir_execution;
 mod immutable_storage;
 mod input_bodies;
+mod input_domains;
 mod invocation;
 mod invocation_contracts;
 mod list_append;
@@ -3909,166 +3910,23 @@ impl<'a> Interpreter<'a> {
         literals: &mut BTreeMap<InputKey, PreparedNormalInput>,
         depth: usize,
     ) -> Result<(), Error> {
-        self.prepare_normal_argument_at(input, expected, literals, depth, &InputKey::root())
-    }
-
-    fn prepare_normal_argument_at(
-        &mut self,
-        input: &nir::program::NormalFormArgument,
-        expected: &Term,
-        literals: &mut BTreeMap<InputKey, PreparedNormalInput>,
-        depth: usize,
-        key: &InputKey,
-    ) -> Result<(), Error> {
-        use nir::program::NormalFormArgument as A;
-        if depth >= 128 {
-            return Err(self.failure(ErrorKind::DepthExhausted, Some(input.source())));
-        }
-        self.tick(Some(input.source()))?;
-        match input {
-            A::Unit { source } => {
-                let value = self.normal_unit_value(expected, *source)?;
-                literals.insert(key.clone(), PreparedNormalInput::Value(value));
-            }
-            A::ListSpread(value) | A::Value(value) => {
-                self.prepare_normal_value_type(&value.ty, expected, value.source)?;
-            }
-            A::Integer {
-                source,
-                spelling,
-                negative,
-            } => {
-                let value = self.normal_integer_value(expected, spelling, *negative, *source)?;
-                literals.insert(key.clone(), PreparedNormalInput::Value(value));
-            }
-            A::If {
-                condition,
-                then_input,
-                else_input,
-                ..
-            } => {
-                if !matches!(
-                    condition.ty,
-                    Term::Primitive(Primitive::Bool | Primitive::Never)
-                ) {
-                    return Err(self.failure(ErrorKind::Type, Some(condition.source)));
-                }
-                self.prepare_normal_argument_at(
-                    then_input,
-                    expected,
-                    literals,
-                    depth + 1,
-                    &key.child(0),
-                )?;
-                self.prepare_normal_argument_at(
-                    else_input,
-                    expected,
-                    literals,
-                    depth + 1,
-                    &key.child(1),
-                )?;
-            }
-            A::List { source, items } => {
-                let element = self.normal_list_domain(expected, items.len(), *source)?;
-                literals.insert(key.clone(), PreparedNormalInput::ListType(expected.clone()));
-                for (index, item) in items.iter().enumerate() {
-                    let element_type = if matches!(item, A::ListSpread(_)) {
-                        expected
-                    } else {
-                        &element
-                    };
-                    self.prepare_normal_argument_at(
-                        item,
-                        element_type,
-                        literals,
-                        depth + 1,
-                        &key.child(index),
-                    )?;
-                }
-            }
-            A::Tuple {
-                source,
-                type_head,
-                items,
-            } => {
-                if *expected == Term::Primitive(Primitive::Type) {
-                    for (index, item) in items.iter().enumerate() {
-                        self.prepare_normal_argument_at(
-                            item,
-                            expected,
-                            literals,
-                            depth + 1,
-                            &key.child(index),
-                        )?;
-                    }
-                    if let Some(head) = type_head {
-                        if !self
-                            .normal_forms
-                            .get(head)
-                            .is_some_and(|metadata| metadata.role == nir::normal_forms::Role::Tuple)
-                        {
-                            return Err(self.failure(ErrorKind::Type, Some(*source)));
-                        }
-                    }
-                    literals.insert(key.clone(), PreparedNormalInput::TypeTuple(*type_head));
-                    return Ok(());
-                }
-                let Some(types) = self.tuple_input_elements(expected) else {
-                    return Err(self.failure(ErrorKind::Type, Some(*source)));
+        self.prepare_input_domain(
+            input_domains::Node::Source(input),
+            expected,
+            InputKey::root(),
+            depth,
+            &mut |key, prepared| {
+                let value = match prepared {
+                    normal_types::Prepared::Literal(value) => PreparedNormalInput::Value(value),
+                    normal_types::Prepared::List { ty, .. } => PreparedNormalInput::ListType(ty),
+                    normal_types::Prepared::Tuple {
+                        head: Some(head), ..
+                    } => PreparedNormalInput::TypeTuple(head),
+                    normal_types::Prepared::Tuple { head: None, .. } => return,
                 };
-                if types.len() != items.len() {
-                    return Err(self.failure(ErrorKind::Arity, Some(*source)));
-                }
-                for (index, (item, ty)) in items.iter().zip(types).enumerate() {
-                    self.prepare_normal_argument_at(
-                        item,
-                        ty,
-                        literals,
-                        depth + 1,
-                        &key.child(index),
-                    )?;
-                }
-            }
-            A::Match { arms, .. } => {
-                for (index, arm) in arms.iter().enumerate() {
-                    if let Some(guard) = &arm.guard {
-                        if !matches!(
-                            guard.ty,
-                            Term::Primitive(Primitive::Bool | Primitive::Never)
-                        ) {
-                            return Err(self.failure(ErrorKind::Type, Some(guard.source)));
-                        }
-                    }
-                    self.prepare_normal_argument_at(
-                        &arm.body,
-                        expected,
-                        literals,
-                        depth + 1,
-                        &key.child(index),
-                    )?;
-                }
-            }
-            A::Block { result, .. } => {
-                if let Some(result) = result {
-                    self.prepare_normal_argument_at(
-                        result,
-                        expected,
-                        literals,
-                        depth + 1,
-                        &key.child(0),
-                    )?;
-                } else if !input.is_diverging() {
-                    self.check_type_contract(
-                        &nir::program::TypePredicate::Equal(
-                            Term::Primitive(Primitive::Void),
-                            expected.clone(),
-                        ),
-                        input.source(),
-                    )?;
-                }
-            }
-        }
-        Ok(())
+                literals.insert(key, value);
+            },
+        )
     }
 
     fn eval_normal_argument(

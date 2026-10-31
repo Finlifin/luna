@@ -386,3 +386,56 @@ fn prepared_contextual_inputs_survive_cloning_without_source_range_keys() {
     assert_eq!(prepared.len(), 1);
     assert!(prepared.contains_key(&InputKey::root().child(1).child(0)));
 }
+
+#[test]
+fn source_and_compiled_domain_preparation_share_diagnostics_and_work() {
+    let package = Package::default();
+    let literal = |spelling: &str| A::Integer {
+        source: SOURCE,
+        spelling: spelling.into(),
+        negative: false,
+    };
+    let cases = [
+        literal("7"),
+        literal("256"),
+        A::If {
+            source: SOURCE,
+            condition: boolean(true),
+            then_input: Box::new(literal("7")),
+            else_input: Box::new(literal("256")),
+        },
+        A::If {
+            source: SOURCE,
+            condition: expr(Primitive::U8, K::Literal(Literal::UnsignedInteger(0))),
+            then_input: Box::new(literal("7")),
+            else_input: Box::new(literal("8")),
+        },
+        A::Block {
+            source: SOURCE,
+            statements: vec![],
+            result: None,
+        },
+        A::Tuple {
+            source: SOURCE,
+            type_head: None,
+            items: vec![literal("7")],
+        },
+    ];
+    for input in cases {
+        let (_, shape) = comptime_compiler::compile_staged_input(&input, &mut 100_000).unwrap();
+        for steps in [0, 1, 2, 10, 1000] {
+            let mut tree = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            let mut code = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            tree.budget.steps = steps;
+            code.budget.steps = steps;
+            let expected = Term::Primitive(Primitive::U8);
+            let a = tree.prepare_normal_argument(&input, &expected, &mut BTreeMap::new(), 0);
+            let b = code.prepare_normal_shape(&shape, &expected, &mut BTreeMap::new(), 0);
+            assert_eq!(
+                a.as_ref().err().map(|e| (&e.kind, e.source)),
+                b.as_ref().err().map(|e| (&e.kind, e.source))
+            );
+            assert_eq!(tree.budget.steps, code.budget.steps);
+        }
+    }
+}

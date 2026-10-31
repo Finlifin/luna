@@ -230,112 +230,18 @@ impl Interpreter<'_> {
         prepared: &mut BTreeMap<usize, Prepared>,
         depth: usize,
     ) -> Result<(), Error> {
-        use comptime_compiler::normal_types::{Input, ShapeKind};
-        let source = shape.source;
-        if depth >= 128 {
-            return Err(self.failure(ErrorKind::DepthExhausted, Some(source)));
-        }
-        self.tick(Some(source))?;
-        let value =
-            match &shape.kind {
-                ShapeKind::Match(arms) => {
-                    for arm in arms {
-                        if let Some((ty, guard_source)) = &arm.guard {
-                            if !matches!(ty, Term::Primitive(Primitive::Bool | Primitive::Never)) {
-                                return Err(self.failure(ErrorKind::Type, Some(*guard_source)));
-                            }
-                        }
-                        self.prepare_normal_shape(&arm.body, expected, prepared, depth + 1)?;
-                    }
-                    return Ok(());
-                }
-                ShapeKind::Choice {
-                    condition,
-                    condition_source,
-                    then_input,
-                    else_input,
-                } => {
-                    if !matches!(
-                        condition,
-                        Term::Primitive(Primitive::Bool | Primitive::Never)
-                    ) {
-                        return Err(self.failure(ErrorKind::Type, Some(*condition_source)));
-                    }
-                    self.prepare_normal_shape(then_input, expected, prepared, depth + 1)?;
-                    self.prepare_normal_shape(else_input, expected, prepared, depth + 1)?;
-                    return Ok(());
-                }
-                ShapeKind::Block { result } => {
-                    if let Some(result) = result {
-                        self.prepare_normal_shape(result, expected, prepared, depth + 1)?;
-                    } else if !shape.diverges {
-                        self.check_type_contract(
-                            &nir::program::TypePredicate::Equal(
-                                Term::Primitive(Primitive::Void),
-                                expected.clone(),
-                            ),
-                            source,
-                        )?;
-                    }
-                    return Ok(());
-                }
-                ShapeKind::Scalar(Input::Value(ty)) => {
-                    self.prepare_normal_value_type(ty, expected, source)?;
-                    return Ok(());
-                }
-                ShapeKind::Scalar(Input::Unit) => {
-                    Prepared::Literal(self.normal_unit_value(expected, source)?)
-                }
-                ShapeKind::Scalar(Input::Integer { spelling, negative }) => Prepared::Literal(
-                    self.normal_integer_value(expected, spelling, *negative, source)?,
-                ),
-                ShapeKind::List(items) => {
-                    let element = self.normal_list_domain(expected, items.len(), source)?;
-                    for (spread, child) in items {
-                        self.prepare_normal_shape(
-                            child,
-                            if *spread { expected } else { &element },
-                            prepared,
-                            depth + 1,
-                        )?;
-                    }
-                    Prepared::List {
-                        ty: expected.clone(),
-                        values: vec![],
-                    }
-                }
-                ShapeKind::Tuple { head, items } => {
-                    let type_tuple = *expected == Term::Primitive(Primitive::Type);
-                    if type_tuple {
-                        for child in items {
-                            self.prepare_normal_shape(child, expected, prepared, depth + 1)?;
-                        }
-                        if let Some(head) = head {
-                            if !self.normal_forms.get(head).is_some_and(|metadata| {
-                                metadata.role == nir::normal_forms::Role::Tuple
-                            }) {
-                                return Err(self.failure(ErrorKind::Type, Some(source)));
-                            }
-                        }
-                    } else {
-                        let types = self
-                            .tuple_input_elements(expected)
-                            .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
-                        if types.len() != items.len() {
-                            return Err(self.failure(ErrorKind::Arity, Some(source)));
-                        }
-                        for (child, ty) in items.iter().zip(types) {
-                            self.prepare_normal_shape(child, ty, prepared, depth + 1)?;
-                        }
-                    }
-                    Prepared::Tuple {
-                        head: type_tuple.then_some(*head),
-                        values: vec![],
-                    }
-                }
-            };
-        prepared.insert(shape.slot, value);
-        Ok(())
+        self.prepare_input_domain(
+            input_domains::Node::Compiled(shape),
+            expected,
+            InputKey::Register(shape.slot),
+            depth,
+            &mut |key, value| {
+                let InputKey::Register(slot) = key else {
+                    unreachable!("compiled input identity")
+                };
+                prepared.insert(slot, value);
+            },
+        )
     }
     pub(super) fn append_compiled_normal_container(
         &mut self,
