@@ -79,7 +79,7 @@ impl Interpreter<'_> {
             }))
         {
             work = work.checked_add(1)?;
-            for argument in &key.arguments {
+            for argument in key.arguments.iter() {
                 work = work.checked_add(self.closed_term_description_work(argument)?)?;
             }
         }
@@ -796,7 +796,7 @@ mod resource_context_tests {
     fn key(local: u32) -> iir::InstanceKey {
         iir::InstanceKey {
             declaration: DeclarationId { package: 0, local },
-            arguments: vec![],
+            arguments: vec![].into(),
         }
     }
     fn activation() -> Activation {

@@ -8856,7 +8856,7 @@ fn memory_callable_factory_results_preserve_concrete_generic_instances() {
         let summary =
             memory::infer_in_package(&package, make.declaration, &types, &mut 100000).unwrap();
         assert!(
-            matches!(&summary.callable_result,CallableResult::Known(key) if key.arguments==types),
+            matches!(&summary.callable_result,CallableResult::Known(key) if key.arguments.as_ref()==types),
             "{summary}"
         );
         let summary =
@@ -8980,7 +8980,7 @@ fn memory_candidate_sets_are_canonical_and_preserve_generic_instances() {
                     .unwrap();
             assert_eq!(summary, again);
             assert!(
-                matches!(&summary.callable_result,CallableResult::Candidates(keys) if keys.len()==2 && keys.iter().all(|key|key.arguments==types)),
+                matches!(&summary.callable_result,CallableResult::Candidates(keys) if keys.len()==2 && keys.iter().all(|key|key.arguments.as_ref()==types)),
                 "{summary}"
             );
             identities.push(summary.callable_result);
@@ -10324,7 +10324,7 @@ fn captured_callee_memory_premises_validate_identity_shape_and_all_candidates() 
             .find(|f| f.name == name)
             .unwrap()
             .declaration,
-        arguments: vec![],
+        arguments: vec![].into(),
     };
     let input = BTreeMap::from([(
         binding,
@@ -10431,7 +10431,7 @@ fn captured_memory_callable_paths_validate_layout_and_preserve_unknowns() {
             .find(|f| f.name == "set")
             .unwrap()
             .declaration,
-        arguments: vec![],
+        arguments: vec![].into(),
     });
     let input = BTreeMap::from([(place.clone(), key.clone())]);
     let infer = |input: &BTreeMap<_, _>, fuel| {
@@ -10595,7 +10595,7 @@ fn contextual_memory_worklists_separate_callable_inputs_and_validate_premises() 
     };
     let key = |name: &str| iir::InstanceKey {
         declaration: id(name),
-        arguments: vec![],
+        arguments: vec![].into(),
     };
     let input = CallableInput {
         parameter: 0,
@@ -12717,7 +12717,7 @@ fn memory_prepared_capture_evidence_validates_paths_and_environment_identity() {
         place,
         memory::CallableResult::Known(iir::InstanceKey {
             declaration: named.declaration,
-            arguments: vec![],
+            arguments: vec![].into(),
         }),
     )]);
     assert!(
@@ -14874,7 +14874,7 @@ fn enum_callable_memory_contracts_preserve_variant_paths_accesses_and_pointer_re
     let key = |name: &str| {
         CallableResult::Known(iir::InstanceKey {
             declaration: function(name).declaration,
-            arguments: vec![],
+            arguments: vec![].into(),
         })
     };
     let inputs = BTreeMap::from([

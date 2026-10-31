@@ -249,7 +249,7 @@ fn instance_obligations_fail_without_poisoning_other_requests() {
         .declaration;
     let request = |argument| iir::InstanceKey {
         declaration: constrained,
-        arguments: vec![argument],
+        arguments: (vec![argument]).into(),
     };
     let rejected = elaboration::materialization::instantiate(
         &source,
@@ -281,10 +281,11 @@ fn instance_obligations_fail_without_poisoning_other_requests() {
         .declaration;
     let malformed = iir::InstanceKey {
         declaration: identity,
-        arguments: vec![nir::Term::Nominal {
+        arguments: (vec![nir::Term::Nominal {
             declaration: checked,
             arguments: vec![nir::Term::Primitive(nir::Primitive::U8)],
-        }],
+        }])
+        .into(),
     };
     let error = elaboration::materialization::instantiate(
         &source,
@@ -325,7 +326,7 @@ fn instances_preserve_normal_form_heads_without_invoking_their_bodies() {
             &source,
             &[iir::InstanceKey {
                 declaration: head,
-                arguments: vec![]
+                arguments: vec![].into()
             }],
             Default::default(),
             Default::default()
@@ -2156,12 +2157,13 @@ fn instance_copy_budget_counts_expanded_parameter_occurrences_and_recovers() {
         .declaration;
     let key = iir::InstanceKey {
         declaration,
-        arguments: vec![nir::Term::Tuple(vec![
+        arguments: (vec![nir::Term::Tuple(vec![
             nir::Term::Primitive(
                 nir::Primitive::Bool
             );
             128
-        ])],
+        ])])
+        .into(),
     };
     let attempt = |steps| {
         elaboration::materialization::instantiate(
@@ -2186,7 +2188,7 @@ fn instance_copy_budget_counts_expanded_parameter_occurrences_and_recovers() {
             .find(|f| f.name == "phantom")
             .unwrap()
             .declaration,
-        arguments: key.arguments.clone(),
+        arguments: key.arguments.clone().into(),
     };
     elaboration::materialization::instantiate(
         &source,

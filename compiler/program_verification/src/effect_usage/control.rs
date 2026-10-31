@@ -440,7 +440,7 @@ impl Analyzer<'_, '_, '_, '_> {
                         expr.source.start, expr.source.end, handler.operation
                     ));
                 }
-                for argument in &self.instance.arguments {
+                for argument in self.instance.arguments.iter() {
                     super::super::memory::bound_type(argument, fuel)?;
                 }
                 report.installations.push(Installation {

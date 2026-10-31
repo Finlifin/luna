@@ -80,7 +80,7 @@ pub(crate) fn invoke_selected_with_publisher(
         prepare_entry_in_package(package, entry, FunctionPhase::Comptime, identity)?;
     let roots = [iir::InstanceKey {
         declaration,
-        arguments: vec![],
+        arguments: vec![].into(),
     }];
     let preparation_budget = elaboration::ptc::Budget::default();
     let mut reachability_fuel = preparation_budget.steps;

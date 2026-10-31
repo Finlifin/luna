@@ -180,14 +180,14 @@ impl CodeValue {
         match &self.expression.kind {
             K::Function(declaration) => Some(CallbackKey::Named(iir::InstanceKey {
                 declaration: *declaration,
-                arguments: vec![],
+                arguments: vec![].into(),
             })),
             K::FunctionInstance {
                 declaration,
                 arguments,
             } => Some(CallbackKey::Named(iir::InstanceKey {
                 declaration: *declaration,
-                arguments: arguments.clone(),
+                arguments: arguments.clone().into(),
             })),
             _ => None,
         }
@@ -362,7 +362,7 @@ fn charge_callback(code: &CallbackKey, fuel: &mut usize) -> Result<(), String> {
     };
     for key in keys {
         charge(fuel, 1)?;
-        for argument in &key.arguments {
+        for argument in key.arguments.iter() {
             bound_type(argument, fuel)?;
         }
     }
@@ -440,7 +440,7 @@ fn merge_known(
                     // Bound each structural comparison before deduplication.
                     for existing in &left {
                         charge(fuel, 1)?;
-                        for argument in &existing.arguments {
+                        for argument in existing.arguments.iter() {
                             bound_type(argument, fuel)?;
                         }
                     }
@@ -1007,7 +1007,7 @@ impl Query<'_, '_> {
                 } else {
                     K::FunctionInstance {
                         declaration: instance.declaration,
-                        arguments: instance.arguments.clone(),
+                        arguments: instance.arguments.to_vec(),
                     }
                 },
             })),
@@ -1185,7 +1185,7 @@ impl Query<'_, '_> {
         let key = SummaryKey {
             instance: iir::InstanceKey {
                 declaration,
-                arguments: arguments.to_vec(),
+                arguments: arguments.to_vec().into(),
             },
             callbacks: callbacks.to_vec(),
         };
@@ -1220,7 +1220,7 @@ impl Query<'_, '_> {
 
     fn analyze(&mut self, key: &SummaryKey) -> Result<Summary, String> {
         let declaration = key.instance.declaration;
-        let arguments = key.instance.arguments.as_slice();
+        let arguments = key.instance.arguments.as_ref();
         let (body, arguments) = self.package.runtime_body_checked(declaration, arguments)?;
         if body.phase != FunctionPhase::Runtime || body.type_parameters.len() != arguments.len() {
             return Err("text region inference requires a concrete runtime body".into());
@@ -1257,7 +1257,7 @@ impl Query<'_, '_> {
                         } else {
                             K::FunctionInstance {
                                 declaration: callback.declaration,
-                                arguments: callback.arguments.clone(),
+                                arguments: callback.arguments.to_vec(),
                             }
                         };
                         CodeValue::new(Expr {
@@ -1377,7 +1377,7 @@ impl Query<'_, '_> {
         }
         let summary = Summary {
             declaration,
-            arguments: key.instance.arguments.clone(),
+            arguments: key.instance.arguments.to_vec(),
             reads,
             returned,
         };

@@ -4375,7 +4375,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         super::memory::bound_type(ty, &mut self.fuel).map_err(|e| error(source, e))?;
         match code {
             PreparedCode::Named(key) => {
-                for argument in &key.arguments {
+                for argument in key.arguments.iter() {
                     super::memory::bound_type(argument, &mut self.fuel)
                         .map_err(|e| error(source, e))?;
                 }
@@ -4387,7 +4387,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     } else {
                         K::FunctionInstance {
                             declaration: key.declaration,
-                            arguments: key.arguments.clone(),
+                            arguments: key.arguments.to_vec(),
                         }
                     },
                 };
@@ -4537,7 +4537,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                                                 "returned capture candidates budget exhausted",
                                             )
                                         })?;
-                                        for argument in &key.arguments {
+                                        for argument in key.arguments.iter() {
                                             super::memory::bound_type(argument, &mut self.fuel)
                                                 .map_err(|e| error(source, e))?;
                                         }
@@ -5147,7 +5147,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                                 } else {
                                     K::FunctionInstance {
                                         declaration: key.declaration,
-                                        arguments: key.arguments,
+                                        arguments: key.arguments.to_vec(),
                                     }
                                 },
                             };
@@ -10188,7 +10188,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             for key in definitions {
                 super::memory::bound_type(&expr.ty, &mut self.fuel)
                     .map_err(|e| error(expr.source, e))?;
-                for ty in &key.arguments {
+                for ty in key.arguments.iter() {
                     super::memory::bound_type(ty, &mut self.fuel)
                         .map_err(|e| error(expr.source, e))?;
                 }
@@ -10200,7 +10200,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     } else {
                         K::FunctionInstance {
                             declaration: key.declaration,
-                            arguments: key.arguments.clone(),
+                            arguments: key.arguments.to_vec(),
                         }
                     },
                 };
@@ -16549,7 +16549,7 @@ fn memory_code_definitions_at<'a>(
             let value = match &definition.kind {
                 K::Function(declaration) => CodeDefinition::Named(iir::InstanceKey {
                     declaration: *declaration,
-                    arguments: vec![],
+                    arguments: vec![].into(),
                 }),
                 K::FunctionInstance {
                     declaration,
@@ -16561,7 +16561,7 @@ fn memory_code_definitions_at<'a>(
                     }
                     CodeDefinition::Named(iir::InstanceKey {
                         declaration: *declaration,
-                        arguments: arguments.clone(),
+                        arguments: arguments.clone().into(),
                     })
                 }
                 K::Closure { captures, .. } => {
@@ -16974,7 +16974,7 @@ fn named_memory_definitions(
         let key = match &definition.kind {
             K::Function(declaration) => iir::InstanceKey {
                 declaration: *declaration,
-                arguments: vec![],
+                arguments: vec![].into(),
             },
             K::FunctionInstance {
                 declaration,
@@ -16985,7 +16985,7 @@ fn named_memory_definitions(
                 }
                 iir::InstanceKey {
                     declaration: *declaration,
-                    arguments: arguments.clone(),
+                    arguments: arguments.clone().into(),
                 }
             }
             _ => return Ok(None),

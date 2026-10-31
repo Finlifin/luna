@@ -524,7 +524,7 @@ fn cleanup_events(source: &str, inline: bool) -> Vec<String> {
         &items,
         iir::InstanceKey {
             declaration: id(&package, "run"),
-            arguments: vec![],
+            arguments: vec![].into(),
         },
         &mut 100_000,
         Default::default(),

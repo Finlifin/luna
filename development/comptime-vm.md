@@ -9550,3 +9550,45 @@ Validation in `/home/fin/luna`:
   passed both real-sysroot/native stages (1 and 6 tests);
   `/tmp/luna-library-xcsjstjf/summary.json`, exit 0.
 - `git diff --check`: passed. No Rust sources changed in this stage.
+
+
+## Share frozen IIR instance input frames
+
+InstanceKey now retains its ordinary comptime inputs in Arc<[Term]> rather than
+Vec<Term>. Cloning an instance identity, template target or graph snapshot shares
+the frozen input frame instead of recursively copying each term. Equality and
+hashing still compare declaration identity and input contents; independently
+allocated equal inputs remain equal, and different inputs remain distinct.
+This applies uniformly to ordinary immutable values, with no List<Type>, Tuple
+or normal-form-head special case.
+
+Materialization, staging, VM execution, verification and host consumers use slice
+views for observation. Boundaries that reconstruct NIR or populate existing
+mutable Vec-based call data explicitly materialize an owned vector. Existing
+semantic admission and payload/depth guards remain active; sharing does not
+prove type equality, runtime availability or contracts. Display remains the same
+S-expression. This does not migrate all type annotations to TypeRef, implement
+runtime environment acquisition, or establish a wall-clock speedup.
+
+The new regression verifies shared allocation across identity and package
+clones, content equality/hash lookup across independent allocations, and
+copy-on-write isolation. The source template test also checks sharing across
+materialized function and template-target graph snapshots.
+
+Validation in `/home/fin/luna`:
+
+- Intermediate compile checks identified Vec/slice boundary and test-fixture
+  migration errors; these were corrected before behavioral validation.
+- `python3 -B development/check.py --timeout 900 -- check --tests --keep-going -p luna -p iir -p materialization -p comptime_interpretor -p program_verification -p elaboration`:
+  passed all affected crates' test targets;
+  `/tmp/luna-tools-k5i_9o84/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p iir -p materialization -p comptime_interpretor --lib`:
+  passed; `/tmp/luna-tools-pi9z92t6/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p iir`:
+  107 passed; `/tmp/luna-tools-6mlxwks3/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test function_type_dependencies --test scoped_comptime_callables --test comptime_iir_bytecode`:
+  56 passed; `/tmp/luna-tools-0iz8203t/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p program_verification --lib`:
+  passed; `/tmp/luna-tools-fd0n4cm4/result.json`, exit 0.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed; `/tmp/luna-tools-h2babd5h/result.json`, exit 0.

@@ -254,7 +254,7 @@ fn associated_values_are_selected_without_forcing_function_tree_fallback() {
     assert!(run.body.to_string().contains("(associated-value "));
     let roots = [iir::InstanceKey {
         declaration: support::id(&package, "run"),
-        arguments: vec![],
+        arguments: vec![].into(),
     }];
     package.dispatch_instances = elaboration::materialization::dispatch_instances_for_invocation(
         &package,
@@ -327,7 +327,7 @@ fn associated_code_keeps_generic_interfaces_subjects_and_dependent_domains_disti
     );
     let roots = [iir::InstanceKey {
         declaration: support::id(&package, "run"),
-        arguments: vec![],
+        arguments: vec![].into(),
     }];
     package.dispatch_instances = elaboration::materialization::dispatch_instances_for_invocation(
         &package,
@@ -409,7 +409,7 @@ fn cached_associated_code_creates_independent_stateful_closure_values() {
     );
     let roots = [iir::InstanceKey {
         declaration: support::id(&package, "run"),
-        arguments: vec![],
+        arguments: vec![].into(),
     }];
     package.dispatch_instances = elaboration::materialization::dispatch_instances_for_invocation(
         &package,

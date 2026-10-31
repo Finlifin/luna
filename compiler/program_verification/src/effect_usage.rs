@@ -132,7 +132,7 @@ pub fn check(graph: &Package, plan: &Plan<'_>, fuel: &mut usize) -> Result<Repor
     let mut summaries = Vec::new();
     let mut aliases = Vec::new();
     for (index, function) in graph.functions.iter().enumerate() {
-        for argument in &function.key.arguments {
+        for argument in function.key.arguments.iter() {
             super::memory::bound_type(argument, fuel)?;
         }
         step(fuel, 1)?;
@@ -373,7 +373,7 @@ impl Analyzer<'_, '_, '_, '_> {
             }
             K::Function(declaration) => Some(iir::InstanceKey {
                 declaration: *declaration,
-                arguments: vec![],
+                arguments: vec![].into(),
             }),
             K::FunctionInstance {
                 declaration,
@@ -384,7 +384,7 @@ impl Analyzer<'_, '_, '_, '_> {
                 }
                 Some(iir::InstanceKey {
                     declaration: *declaration,
-                    arguments: arguments.clone(),
+                    arguments: arguments.clone().into(),
                 })
             }
             K::Closure { body, .. } => return self.expr(body, width(&callee.ty), fuel, depth + 1),

@@ -3797,7 +3797,7 @@ fn stored_functions_retain_transitive_type_staging() {
             &package,
             &[iir::InstanceKey {
                 declaration: id(&package, "selected"),
-                arguments: vec![]
+                arguments: vec![].into()
             }],
             elaboration::ptc::Budget::default(),
         )
@@ -5888,7 +5888,7 @@ fn direct_passing_usage_factory_dependencies_converge_in_both_orders() {
         ));
         let key = iir::InstanceKey {
             declaration: id(&package, "entry"),
-            arguments: vec![],
+            arguments: vec![].into(),
         };
         let mut graph = elaboration::materialization::instantiate(
             &package,
@@ -6118,7 +6118,7 @@ fn direct_passing_usage_upper_bounds_reference_execution_across_compositions() {
                     let hit = id(&package, "hit");
                     let key = iir::InstanceKey {
                         declaration: id(&package, "entry"),
-                        arguments: vec![],
+                        arguments: vec![].into(),
                     };
                     let graph = elaboration::materialization::instantiate(
                         &package,
@@ -6517,7 +6517,7 @@ fn direct_passing_usage_worklist_revisits_recursive_and_late_handler_dependencie
         ));
         let key = iir::InstanceKey {
             declaration: id(&package, "entry"),
-            arguments: vec![],
+            arguments: vec![].into(),
         };
         let mut graph = elaboration::materialization::instantiate(
             &package,
@@ -6560,7 +6560,7 @@ fn direct_passing_usage_worklist_scales_with_reverse_ordered_call_chain() {
         let package = compile(&source);
         let key = iir::InstanceKey {
             declaration: id(&package, "entry"),
-            arguments: vec![],
+            arguments: vec![].into(),
         };
         let mut graph = elaboration::materialization::instantiate(
             &package,
@@ -6614,7 +6614,7 @@ fn direct_passing_usage_instance_index_keeps_generic_summaries_distinct() {
     );
     let key = iir::InstanceKey {
         declaration: id(&package, "entry"),
-        arguments: vec![],
+        arguments: vec![].into(),
     };
     let mut graph = elaboration::materialization::instantiate(
         &package,
@@ -6637,7 +6637,7 @@ fn direct_passing_usage_instance_index_keeps_generic_summaries_distinct() {
         .iter_mut()
         .find(|f| {
             f.function.name == "generic"
-                && f.key.arguments == vec![nir::Term::Primitive(nir::Primitive::Char)]
+                && f.key.arguments.to_vec() == vec![nir::Term::Primitive(nir::Primitive::Char)]
         })
         .unwrap()
         .function;
@@ -6687,7 +6687,7 @@ fn direct_passing_usage_instance_lookup_scales_with_call_graph() {
         let package = compile(&source);
         let key = iir::InstanceKey {
             declaration: id(&package, "entry"),
-            arguments: vec![],
+            arguments: vec![].into(),
         };
         let graph = elaboration::materialization::instantiate(
             &package,
@@ -6831,7 +6831,7 @@ fn direct_passing_usage_alias_preparation_scales_with_function_size() {
         ));
         let key = iir::InstanceKey {
             declaration: id(&package, "entry"),
-            arguments: vec![],
+            arguments: vec![].into(),
         };
         let graph = elaboration::materialization::instantiate(
             &package,
@@ -6866,7 +6866,7 @@ fn direct_passing_usage_tracks_constructed_anonymous_callable_fields() {
         ));
         let key = iir::InstanceKey {
             declaration: id(&package, "entry"),
-            arguments: vec![],
+            arguments: vec![].into(),
         };
         let mut graph = elaboration::materialization::instantiate(
             &package,
@@ -6963,7 +6963,7 @@ fn direct_passing_usage_alias_does_not_cross_pattern_rebinding() {
     );
     let key = iir::InstanceKey {
         declaration: id(&package, "entry"),
-        arguments: vec![],
+        arguments: vec![].into(),
     };
     let mut graph = elaboration::materialization::instantiate(
         &package,
@@ -7277,7 +7277,7 @@ fn direct_passing_usage_product_mismatch_keeps_earlier_guard_consumption() {
     );
     let key = iir::InstanceKey {
         declaration: id(&package, "entry"),
-        arguments: vec![],
+        arguments: vec![].into(),
     };
     let original = elaboration::materialization::instantiate(
         &package,
@@ -7439,7 +7439,7 @@ fn direct_passing_usage_checks_installations_in_contract_roots() {
     );
     let key = iir::InstanceKey {
         declaration: id(&package, "entry"),
-        arguments: vec![],
+        arguments: vec![].into(),
     };
     let original = elaboration::materialization::instantiate(
         &package,
@@ -7666,7 +7666,7 @@ fn direct_passing_copy_plan_is_bound_to_one_immutable_graph() {
     );
     let key = iir::InstanceKey {
         declaration: id(&package, "entry"),
-        arguments: vec![],
+        arguments: vec![].into(),
     };
     let graph = elaboration::materialization::instantiate(
         &package,
@@ -24142,7 +24142,7 @@ fn generic_trait_dispatch_validation_rejects_duplicate_or_missing_specialization
     let mut missing = graph.clone();
     let key = iir::InstanceKey {
         declaration: missing.dispatch[dispatch].methods[1].body,
-        arguments: missing.dispatch[dispatch].methods[1].arguments.clone(),
+        arguments: (missing.dispatch[dispatch].methods[1].arguments.clone()).into(),
     };
     missing.functions.retain(|f| f.key != key);
     assert!(
@@ -25036,7 +25036,7 @@ fn associated_function_annotations_normalize_together_before_iir_execution() {
         .into_iter()
         .map(|p| iir::InstanceKey {
             declaration: function.declaration,
-            arguments: vec![nir::Term::Primitive(p)],
+            arguments: (vec![nir::Term::Primitive(p)]).into(),
         })
         .collect();
     let output = elaboration::materialization::instantiate(
@@ -25109,7 +25109,7 @@ fn associated_type_predicates_are_normalized_then_proved_at_instantiation() {
     for primitive in [nir::Primitive::Bool, nir::Primitive::Char] {
         let root = iir::InstanceKey {
             declaration,
-            arguments: vec![nir::Term::Primitive(primitive)],
+            arguments: (vec![nir::Term::Primitive(primitive)]).into(),
         };
         let result = elaboration::materialization::instantiate(
             &package,
@@ -25151,7 +25151,7 @@ fn associated_type_predicates_are_normalized_then_proved_at_instantiation() {
     for primitive in [nir::Primitive::Bool, nir::Primitive::Char] {
         let root = iir::InstanceKey {
             declaration,
-            arguments: vec![nir::Term::Primitive(primitive)],
+            arguments: (vec![nir::Term::Primitive(primitive)]).into(),
         };
         let result = elaboration::materialization::instantiate(
             &package,
@@ -25286,7 +25286,7 @@ fn retained_interface_method_signatures_resolve_associated_projections() {
         );
         let root = iir::InstanceKey {
             declaration: id(&package, "run"),
-            arguments: vec![],
+            arguments: vec![].into(),
         };
         let output = elaboration::materialization::instantiate(
             &package,
@@ -25372,7 +25372,7 @@ fn source_abstract_default_method_instantiates_with_selected_overrides() {
         .iter()
         .map(|name| iir::InstanceKey {
             declaration: body,
-            arguments: vec![nir::Term::Nominal {
+            arguments: (vec![nir::Term::Nominal {
                 declaration: package
                     .structs
                     .iter()
@@ -25380,7 +25380,8 @@ fn source_abstract_default_method_instantiates_with_selected_overrides() {
                     .unwrap()
                     .declaration,
                 arguments: vec![],
-            }],
+            }])
+            .into(),
         })
         .collect();
     let output = elaboration::materialization::instantiate(
@@ -25701,7 +25702,7 @@ fn associated_spreads_evaluate_each_packet_and_named_input_once_in_source_order(
     );
     let root = iir::InstanceKey {
         declaration: id(&package, "run"),
-        arguments: vec![],
+        arguments: vec![].into(),
     };
     let output = elaboration::materialization::instantiate(
         &package,
@@ -25748,7 +25749,7 @@ fn joint_spread_inputs_check_later_owners_without_reordering_runtime_evaluation(
     );
     let root = iir::InstanceKey {
         declaration: id(&package, "run"),
-        arguments: vec![],
+        arguments: vec![].into(),
     };
     let output = elaboration::materialization::instantiate(
         &package,
@@ -26840,7 +26841,7 @@ fn partial_dispatch_cannot_fall_back_to_an_undemanded_concrete_method() {
     );
     let root = iir::InstanceKey {
         declaration: id(&package, "entry"),
-        arguments: vec![],
+        arguments: vec![].into(),
     };
     package.dispatch_instances = elaboration::materialization::dispatch_instances_for_roots(
         &package,
@@ -27009,7 +27010,7 @@ fn associated_closure_dispatch_missing_payload_is_rejected_and_recoverable() {
     ));
     let root = iir::InstanceKey {
         declaration: id(&package, "shared"),
-        arguments: vec![],
+        arguments: vec![].into(),
     };
     package.dispatch_instances = elaboration::materialization::dispatch_instances_for_roots(
         &package,
@@ -28204,7 +28205,7 @@ fn direct_effect_iir_rejects_corrupted_request_handler_and_resume_evidence() {
         &package,
         &[iir::InstanceKey {
             declaration: id(&package, "run"),
-            arguments: vec![],
+            arguments: vec![].into(),
         }],
         Default::default(),
         elaboration::ptc::Budget::default(),
@@ -28328,7 +28329,7 @@ fn direct_effect_iir_maps_computation_results_through_control_carriers() {
     );
     let key = iir::InstanceKey {
         declaration: id(&package, "run"),
-        arguments: vec![],
+        arguments: vec![].into(),
     };
     let graph = elaboration::materialization::instantiate(
         &package,
@@ -28401,7 +28402,7 @@ fn direct_effect_iir_resets_resume_at_closure_boundaries() {
         &package,
         &[iir::InstanceKey {
             declaration: id(&package, "run"),
-            arguments: vec![],
+            arguments: vec![].into(),
         }],
         Default::default(),
         elaboration::ptc::Budget::default(),
@@ -29384,7 +29385,7 @@ fn staged_calls_keep_distinct_instances_and_runtime_evaluation_order() {
         .functions
         .iter()
         .filter(|f| f.key.declaration == template.declaration)
-        .map(|f| f.key.arguments.clone())
+        .map(|f| f.key.arguments.to_vec())
         .collect::<Vec<_>>();
     assert_eq!(keys.len(), 2);
     assert!(keys.contains(&vec![Term::Bool(true)]));
@@ -29430,7 +29431,7 @@ fn staged_direct_call_graph(package: &Package) -> (iir::Package, iir::InstanceKe
     parameters[0].sort = Sort::ComptimeValue;
     let root = iir::InstanceKey {
         declaration: id(package, "run"),
-        arguments: vec![],
+        arguments: vec![].into(),
     };
     let mut graph = iir::Package {
         roots: vec![root.clone()],
@@ -29476,7 +29477,7 @@ fn staged_direct_call_graph(package: &Package) -> (iir::Package, iir::InstanceKe
         graph.functions.push(iir::FunctionInstance {
             key: iir::InstanceKey {
                 declaration: function.declaration,
-                arguments: vec![],
+                arguments: vec![].into(),
             },
             function,
         });
@@ -29585,7 +29586,7 @@ fn staged_calls_reject_malformed_plans_without_changing_templates() {
     assert!(iir::staging::bind_call(&template, &[Term::Bool(true)], &call, &mut 10_000).is_err());
     assert!(iir::staging::bind_call(&template, &[], &call, &mut 0).is_err());
     let (instance, _) = iir::staging::bind_call(&template, &[], &call, &mut 10_000).unwrap();
-    assert_eq!(instance.key.arguments, vec![Term::Bool(true)]);
+    assert_eq!(instance.key.arguments.to_vec(), vec![Term::Bool(true)]);
     assert_eq!(template, original);
 }
 
@@ -29623,7 +29624,7 @@ fn staged_calls_retain_generic_identity_and_allow_empty_runtime_signatures() {
             assert!(
                 instances
                     .iter()
-                    .any(|instance| instance.key.arguments == key)
+                    .any(|instance| instance.key.arguments.to_vec() == key)
             );
         }
         graph.validate(&mut 100_000).unwrap();
@@ -30241,7 +30242,7 @@ fn staged_call_preparation_evaluates_each_producer_once() {
     assert_eq!(evaluations, 3);
     assert_eq!(invocations, 1);
     assert_eq!(
-        instance.key.arguments,
+        instance.key.arguments.to_vec(),
         vec![Term::Bool(true), Term::Bool(true), Term::Bool(false)]
     );
 }
@@ -32034,7 +32035,7 @@ fn associated_input_domains_refine_type_values_and_keep_instance_keys_distinct()
         .functions
         .iter()
         .filter(|function| function.key.declaration == inspect)
-        .map(|function| function.key.arguments.clone())
+        .map(|function| function.key.arguments.to_vec())
         .collect::<Vec<_>>();
     let boolean = nir::Term::Primitive(nir::Primitive::Bool);
     let character = nir::Term::Primitive(nir::Primitive::Char);
@@ -35246,7 +35247,7 @@ fn bound_tuple_staging_retains_identity_through_defaults_and_nested_forwarding()
     assert_eq!(instances.len(), 2);
     for instance in instances {
         assert!(
-            matches!(instance.key.arguments.as_slice(),[nir::Term::TupleValue(fields)] if fields.len()==2)
+            matches!(instance.key.arguments.as_ref(),[nir::Term::TupleValue(fields)] if fields.len()==2)
         );
         let nir::Term::Function { result, .. } = &instance.function.signature else {
             panic!("callable instance")
@@ -35310,7 +35311,7 @@ fn type_list_constants_reconstruct_and_specialize_without_tuple_coercion() {
         .collect::<Vec<_>>();
     assert_eq!(selected.len(), 2);
     assert!(selected.iter().all(|instance| matches!(
-        instance.key.arguments.as_slice(),
+        instance.key.arguments.as_ref(),
         [nir::Term::NominalValue { variant: None, .. }]
     )));
     assert_eq!(
@@ -35892,7 +35893,7 @@ fn partial_nominal_result_context_constrains_nested_generic_producers() {
         .find(|function| function.function.name == "build")
         .unwrap();
     assert_eq!(
-        build.key.arguments,
+        build.key.arguments.to_vec(),
         vec![
             nir::Term::Primitive(nir::Primitive::Bool),
             nir::Term::Primitive(nir::Primitive::U8)
@@ -35931,7 +35932,7 @@ fn partial_callable_results_constrain_nested_nominal_producers() {
             .find(|function| function.function.name == "build")
             .unwrap();
         assert_eq!(
-            build.key.arguments,
+            build.key.arguments.to_vec(),
             vec![
                 nir::Term::Primitive(nir::Primitive::Bool),
                 nir::Term::Primitive(nir::Primitive::U8)
@@ -40628,7 +40629,7 @@ fn deferred_comptime_body_values_keep_checks_and_invocation_order() {
         .find(|function| function.function.name == "tag")
         .unwrap();
     assert_eq!(
-        tag.key.arguments,
+        tag.key.arguments.to_vec(),
         vec![nir::Term::Integer(comptime_runtime::Integer::from_u128(6))]
     );
     let mut runtime = Interpreter::from_iir(&graph, Budget::default()).unwrap();
@@ -43204,7 +43205,7 @@ fn index_protocol_diverging_key_cleans_receiver_before_caller_without_dispatch()
             &items,
             iir::InstanceKey {
                 declaration: id(&package, "run"),
-                arguments: vec![],
+                arguments: vec![].into(),
             },
             &mut 100000,
             budget,
@@ -46615,7 +46616,7 @@ fn quote_callable_adapters_keep_affine_receiver_and_caller_cleanup_order() {
                 &items,
                 iir::InstanceKey {
                     declaration: id(&package, "run"),
-                    arguments: vec![],
+                    arguments: vec![].into(),
                 },
                 &mut 100_000,
                 budget,
@@ -47304,7 +47305,7 @@ fn concrete_runtime_entry_signatures_recheck_comptime_storage_after_substitution
                 &package,
                 &[iir::InstanceKey {
                     declaration: id(&package, entry),
-                    arguments: vec![nir::Term::Primitive(primitive)],
+                    arguments: (vec![nir::Term::Primitive(primitive)]).into(),
                 }],
                 Default::default(),
                 Default::default(),
@@ -47332,7 +47333,7 @@ fn independent_iir_validation_uses_concrete_nominal_storage_not_phantom_argument
             &package,
             &[iir::InstanceKey {
                 declaration: id(&package, entry),
-                arguments: vec![argument],
+                arguments: (vec![argument]).into(),
             }],
             Default::default(),
             Default::default(),

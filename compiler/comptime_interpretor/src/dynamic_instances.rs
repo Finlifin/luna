@@ -777,7 +777,7 @@ mod retained_signature_tests {
                                 package: 17,
                                 local: 1,
                             },
-                            arguments: vec![argument(index)],
+                            arguments: (vec![argument(index)]).into(),
                         },
                         signature(),
                         &mut interner,

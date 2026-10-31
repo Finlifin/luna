@@ -669,7 +669,7 @@ fn unknown_target_behavior_cannot_be_published_or_proved_from_its_output() {
     package.functions[0].body.kind = K::UnsafeScope(Box::new(inner));
     let key = iir::InstanceKey {
         declaration: package.functions[0].declaration,
-        arguments: vec![],
+        arguments: vec![].into(),
     };
     let graph = iir::Package {
         roots: vec![key.clone()],

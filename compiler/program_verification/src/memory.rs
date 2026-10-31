@@ -270,7 +270,7 @@ impl CallableResult {
             *fuel = fuel
                 .checked_sub(1)
                 .ok_or("callable candidate budget exhausted")?;
-            for ty in &key.arguments {
+            for ty in key.arguments.iter() {
                 bound_type(ty, fuel)?;
             }
         }
@@ -1788,7 +1788,7 @@ fn charge_prepared_codes(
             .ok_or("prepared code budget exhausted")?;
         match code {
             PreparedCode::Named(key) => {
-                for ty in &key.arguments {
+                for ty in key.arguments.iter() {
                     bound_type(ty, fuel)?;
                 }
             }
@@ -1874,7 +1874,7 @@ impl CodeDefinition<'_> {
             .ok_or("code argument evidence budget exhausted")?;
         match self {
             Self::Named(key) => {
-                for argument in &key.arguments {
+                for argument in key.arguments.iter() {
                     bound_type(argument, fuel)?;
                 }
             }
@@ -3699,22 +3699,23 @@ impl<'a> Infer<'a, '_> {
                 };
                 Ok(CallableResult::Known(iir::InstanceKey {
                     declaration,
-                    arguments,
+                    arguments: arguments.into(),
                 }))
             }
             K::Function(declaration) => Ok(CallableResult::Known(iir::InstanceKey {
                 declaration: *declaration,
-                arguments: vec![],
+                arguments: vec![].into(),
             })),
             K::FunctionInstance {
                 declaration,
                 arguments,
             } => Ok(CallableResult::Known(iir::InstanceKey {
                 declaration: *declaration,
-                arguments: arguments
+                arguments: (arguments
                     .iter()
                     .map(|ty| self.ty(ty))
-                    .collect::<Result<_, _>>()?,
+                    .collect::<Result<Vec<_>, _>>()?)
+                .into(),
             })),
             K::Local(_) | K::Field { .. } | K::AnonymousField { .. } => {
                 let Some(place) = self.callable_place(expr)? else {
@@ -6709,7 +6710,7 @@ impl<'a> Infer<'a, '_> {
                         )),
                         LocalCode::Named(key) => {
                             post_candidates.insert(id);
-                            for argument in &key.arguments {
+                            for argument in key.arguments.iter() {
                                 bound_type(argument, self.fuel)?;
                             }
                             named.push(key.clone());
@@ -8246,7 +8247,7 @@ fn derive_with_borrowed(
         effects: effects::copy_inputs(&round.effects, fuel)?,
         instance: iir::InstanceKey {
             declaration,
-            arguments: arguments.to_vec(),
+            arguments: arguments.to_vec().into(),
         },
         inputs: inputs.clone(),
         prepared: prepared_ids,

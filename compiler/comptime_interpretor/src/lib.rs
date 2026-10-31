@@ -2293,7 +2293,7 @@ impl<'a> Interpreter<'a> {
             return self.invoke_instance(
                 &iir::InstanceKey {
                     declaration: function,
-                    arguments: vec![],
+                    arguments: vec![].into(),
                 },
                 arguments,
             );
@@ -2313,7 +2313,7 @@ impl<'a> Interpreter<'a> {
             return self.invoke_instance(
                 &iir::InstanceKey {
                     declaration: function,
-                    arguments: types,
+                    arguments: (types).into(),
                 },
                 arguments,
             );
@@ -2619,10 +2619,10 @@ impl<'a> Interpreter<'a> {
         {
             return graph.templates.iter().any(|table| {
                 table.logical_type() == ty
-                    && table
-                        .targets()
-                        .iter()
-                        .any(|key| key.declaration == *declaration && &key.arguments == arguments)
+                    && table.targets().iter().any(|key| {
+                        key.declaration == *declaration
+                            && key.arguments.as_ref() == arguments.as_slice()
+                    })
             });
         }
         if let Value::AbstractValue {

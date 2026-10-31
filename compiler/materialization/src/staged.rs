@@ -136,7 +136,7 @@ impl Builder<'_> {
         let entry = root.declaration;
         let roots = [iir::InstanceKey {
             declaration: entry,
-            arguments: vec![],
+            arguments: vec![].into(),
         }];
         let prepared = build(
             snapshot,

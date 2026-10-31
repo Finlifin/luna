@@ -25,7 +25,7 @@ fn signature_only_runtime_identity_is_not_an_executable_iir_root() {
         &package,
         &[iir::InstanceKey {
             declaration,
-            arguments: vec![],
+            arguments: vec![].into(),
         }],
         BTreeSet::new(),
         Budget::default(),

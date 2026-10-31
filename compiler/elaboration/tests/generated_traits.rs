@@ -594,7 +594,7 @@ fn check_associated_publication(comptime: bool) {
                         package: 73,
                         local: caller.def_id.raw(),
                     },
-                    arguments: vec![],
+                    arguments: vec![].into(),
                 }],
                 Default::default(),
             )

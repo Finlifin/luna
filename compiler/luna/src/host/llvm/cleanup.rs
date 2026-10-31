@@ -1656,7 +1656,7 @@ mod tests {
                 package: 17,
                 local: 99,
             },
-            arguments: vec![],
+            arguments: vec![].into(),
         };
         // Inner and Outer have identical machine layouts. Only the logical
         // subject at the selected representation edge may be retired there.
@@ -1693,7 +1693,7 @@ mod tests {
                 package: 0,
                 local: 1,
             },
-            arguments: vec![],
+            arguments: vec![].into(),
         };
         let source = nir::program::SourceRange { start: 0, end: 1 };
         let scope = FunctionSchedule {
@@ -1779,14 +1779,14 @@ mod tests {
                 package: 0,
                 local: 1,
             },
-            arguments: vec![],
+            arguments: vec![].into(),
         };
         let nested_key = iir::InstanceKey {
             declaration: nir::DeclarationId {
                 package: 0,
                 local: 2,
             },
-            arguments: vec![],
+            arguments: vec![].into(),
         };
         let source = nir::program::SourceRange { start: 1, end: 2 };
         let root = FunctionSchedule {
@@ -1855,7 +1855,7 @@ mod tests {
                 package: 0,
                 local: 1,
             },
-            arguments: vec![],
+            arguments: vec![].into(),
         };
         let source = nir::program::SourceRange { start: 0, end: 1 };
         let scope = FunctionSchedule {
@@ -1966,7 +1966,7 @@ mod tests {
                 package: 0,
                 local: 1,
             },
-            arguments: vec![],
+            arguments: vec![].into(),
         };
         let source = nir::program::SourceRange { start: 10, end: 20 };
         let root = FunctionSchedule {
@@ -2112,7 +2112,7 @@ mod tests {
         };
         let key = iir::InstanceKey {
             declaration,
-            arguments: vec![],
+            arguments: vec![].into(),
         };
         let unit = Expr {
             source: source(1),

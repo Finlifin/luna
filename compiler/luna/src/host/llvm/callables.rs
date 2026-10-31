@@ -63,14 +63,14 @@ impl Emitter<'_> {
         let key = match &expr.kind {
             K::Function(declaration) => iir::InstanceKey {
                 declaration: *declaration,
-                arguments: vec![],
+                arguments: vec![].into(),
             },
             K::FunctionInstance {
                 declaration,
                 arguments,
             } => iir::InstanceKey {
                 declaration: *declaration,
-                arguments: arguments.clone(),
+                arguments: arguments.clone().into(),
             },
             K::TraitMethod {
                 interface,
@@ -96,7 +96,7 @@ impl Emitter<'_> {
                     .ok_or("host trait callable has no selected method")?;
                 iir::InstanceKey {
                     declaration: method.body,
-                    arguments: method.arguments.clone(),
+                    arguments: method.arguments.clone().into(),
                 }
             }
             _ => {

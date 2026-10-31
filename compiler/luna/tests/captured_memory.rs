@@ -45,7 +45,7 @@ fn formal_code_exit_summary_tracks_assignment_return_and_unknown_paths() {
             .find(|f| f.name == name)
             .unwrap()
             .declaration,
-        arguments: vec![],
+        arguments: vec![].into(),
     };
     let slot = |parameter| CallableInput {
         parameter,

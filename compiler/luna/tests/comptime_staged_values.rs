@@ -8,7 +8,7 @@ fn compare_paths(source: &str) {
     let mut package = support::compile(source);
     let roots = [iir::InstanceKey {
         declaration: support::id(&package, "run"),
-        arguments: vec![],
+        arguments: vec![].into(),
     }];
     package.dispatch_instances = elaboration::materialization::dispatch_instances_for_invocation(
         &package,

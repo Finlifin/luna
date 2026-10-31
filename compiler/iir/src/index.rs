@@ -186,7 +186,7 @@ impl Package {
                     .ok_or("IIR dispatch member is absent from its interface")?;
                 let key = InstanceKey {
                     declaration: method.body,
-                    arguments: method.arguments.clone(),
+                    arguments: method.arguments.clone().into(),
                 };
                 if let Some(&ty) = template_targets.get(&key) {
                     if declared.signature.ordinary().map_err(|e| e.to_string())? != ty

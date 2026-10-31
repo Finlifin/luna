@@ -112,7 +112,7 @@ fn lower(
             CleanupStep::Invoke { selected, access } => {
                 let method = iir::InstanceKey {
                     declaration: selected.method.body,
-                    arguments: selected.method.arguments.clone(),
+                    arguments: selected.method.arguments.clone().into(),
                 };
                 if !roots.contains(&method) {
                     roots.push(method.clone());
@@ -333,7 +333,7 @@ fn prepare_source_impl(
         for instance in &graph.functions {
             nir::type_computations::charge_term(&instance.function.signature, fuel)
                 .map_err(|e| e.to_string())?;
-            for argument in &instance.key.arguments {
+            for argument in instance.key.arguments.iter() {
                 nir::type_computations::charge_term(argument, fuel).map_err(|e| e.to_string())?;
             }
             nir::visit::expressions(&instance.function, fuel, |expr, fuel| {
@@ -362,7 +362,7 @@ fn prepare_source_impl(
             .iter()
             .map(|instance| nir::program::RuntimeInstance {
                 declaration: instance.key.declaration,
-                arguments: instance.key.arguments.clone(),
+                arguments: instance.key.arguments.to_vec(),
                 function: instance.function.clone(),
                 cleanup_accesses: cleanup_accesses
                     .iter()
@@ -818,14 +818,14 @@ fn prepare_source_impl(
                     let key = match &call.callee.kind {
                         K::Function(declaration) => iir::InstanceKey {
                             declaration: *declaration,
-                            arguments: vec![],
+                            arguments: vec![].into(),
                         },
                         K::FunctionInstance {
                             declaration,
                             arguments,
                         } => iir::InstanceKey {
                             declaration: *declaration,
-                            arguments: arguments.clone(),
+                            arguments: arguments.clone().into(),
                         },
                         _ => return Err("named callable context lacks a static instance".into()),
                     };

@@ -3805,7 +3805,7 @@ impl<'a> Analysis<'a> {
                     .map(|value| {
                         Some(match value {
                             PreparedCode::Named(key) => {
-                                for ty in &key.arguments {
+                                for ty in key.arguments.iter() {
                                     crate::associated::charge_projection_copy(ty, &mut self.fuel)
                                         .ok()?;
                                 }
@@ -3897,14 +3897,14 @@ impl<'a> Analysis<'a> {
         match &code.kind {
             K::Function(declaration) => Some(PreparedCode::Named(iir::InstanceKey {
                 declaration: *declaration,
-                arguments: vec![],
+                arguments: vec![].into(),
             })),
             K::FunctionInstance {
                 declaration,
                 arguments,
             } => Some(PreparedCode::Named(iir::InstanceKey {
                 declaration: *declaration,
-                arguments: arguments.clone(),
+                arguments: arguments.clone().into(),
             })),
             K::Closure { captures, .. } => {
                 let mut prepared = BTreeMap::new();
@@ -3953,11 +3953,11 @@ impl<'a> Analysis<'a> {
         self.fuel -= 1;
         match code {
             PreparedCode::Named(key) => {
-                for ty in &key.arguments {
+                for ty in key.arguments.iter() {
                     crate::associated::charge_projection_copy(ty, &mut self.fuel).ok()?;
                 }
                 self.code_value(
-                    &CodeKey::Named(key.declaration, key.arguments.clone()),
+                    &CodeKey::Named(key.declaration, key.arguments.to_vec()),
                     ty,
                     source,
                 )
@@ -4003,10 +4003,10 @@ impl<'a> Analysis<'a> {
                     };
                     let mut captured = vec![];
                     for key in keys {
-                        for ty in &key.arguments {
+                        for ty in key.arguments.iter() {
                             crate::associated::charge_projection_copy(ty, &mut self.fuel).ok()?;
                         }
-                        let key = CodeKey::Named(key.declaration, key.arguments.clone());
+                        let key = CodeKey::Named(key.declaration, key.arguments.to_vec());
                         let named = self.code_value(&key, &ty, source)?;
                         captured.push(self.code_key(&named)?);
                     }

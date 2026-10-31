@@ -58,7 +58,7 @@ mod tests {
         };
         let key = iir::InstanceKey {
             declaration,
-            arguments: vec![],
+            arguments: vec![].into(),
         };
         let byte = Term::Primitive(P::U8);
         let destructor = Function {

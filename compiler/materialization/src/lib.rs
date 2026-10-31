@@ -353,16 +353,16 @@ pub fn instantiate_with_types(
     // methods. Publish executable links only for demanded concrete bodies.
     let demanded: HashSet<_> = functions
         .iter()
-        .map(|f| (&f.key.declaration, &f.key.arguments))
+        .map(|f| (&f.key.declaration, f.key.arguments.as_ref()))
         .collect();
     for interface in &mut dispatch {
         interface.methods.retain(|m| {
-            demanded.contains(&(&m.body, &m.arguments))
+            demanded.contains(&(&m.body, m.arguments.as_slice()))
                 || templates.iter().any(|table| {
-                    table
-                        .targets()
-                        .iter()
-                        .any(|key| key.declaration == m.body && key.arguments == m.arguments)
+                    table.targets().iter().any(|key| {
+                        key.declaration == m.body
+                            && key.arguments.as_ref() == m.arguments.as_slice()
+                    })
                 })
         });
     }
@@ -496,13 +496,13 @@ fn build(
     } else if let Roots::Dispatch(roots) | Roots::Invocation(roots) | Roots::Iir(roots) = roots {
         for root in roots {
             builder.tick(0)?;
-            for argument in &root.arguments {
+            for argument in root.arguments.iter() {
                 crate::associated::charge_projection_copy(argument, &mut builder.fuel)
                     .map_err(|_| "dispatch root argument type budget exhausted".to_owned())?;
             }
             builder
                 .queue
-                .push_back(Task::Function(root.declaration, root.arguments.clone()));
+                .push_back(Task::Function(root.declaration, root.arguments.to_vec()));
         }
     } else if let Roots::Method(callee, selected) | Roots::QuoteMethod(callee, selected) = roots {
         let K::TraitMethod {
@@ -870,7 +870,7 @@ impl Builder<'_> {
             instances.push(iir::FunctionInstance {
                 key: iir::InstanceKey {
                     declaration: id,
-                    arguments,
+                    arguments: arguments.into(),
                 },
                 function,
             });
@@ -2049,7 +2049,7 @@ impl Builder<'_> {
             return Ok(false);
         } else {
             self.staged_functions
-                .entry((instance.key.declaration, instance.key.arguments))
+                .entry((instance.key.declaration, instance.key.arguments.to_vec()))
                 .or_insert(instance.function);
         }
         Ok(true)
@@ -2280,7 +2280,7 @@ impl Builder<'_> {
                     self.callable_identities.push(iir::CallableIdentity::intern(
                         iir::InstanceKey {
                             declaration: *declaration,
-                            arguments: arguments.clone(),
+                            arguments: arguments.clone().into(),
                         },
                         signature,
                         &mut self.type_cores,

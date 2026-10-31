@@ -43,7 +43,7 @@ fn instantiate_selected(
         package,
         &[iir::InstanceKey {
             declaration: function.declaration,
-            arguments: vec![],
+            arguments: vec![].into(),
         }],
         Default::default(),
         elaboration::ptc::Budget {

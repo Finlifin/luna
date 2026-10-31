@@ -47,7 +47,7 @@ pub fn interpret_effects_with_protocols(
     let world = protocols.world(&package);
     let key = iir::InstanceKey {
         declaration,
-        arguments: vec![],
+        arguments: vec![].into(),
     };
     let graph = elaboration::materialization::instantiate(
         &package,
@@ -158,7 +158,7 @@ impl<'a> ReferenceSession<'a> {
         let package = self.package.as_ref();
         let key = iir::InstanceKey {
             declaration,
-            arguments: vec![],
+            arguments: vec![].into(),
         };
         let graph = elaboration::materialization::instantiate(
             package,
@@ -343,7 +343,7 @@ impl<'a> CheckedSession<'a> {
             &protocols.items,
             iir::InstanceKey {
                 declaration,
-                arguments: vec![],
+                arguments: vec![].into(),
             },
             &mut steps,
             budget,

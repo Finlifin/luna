@@ -426,7 +426,7 @@ fn generated_interface_schedule_unwinds_result_and_caller_once() {
             &context.items,
             iir::InstanceKey {
                 declaration: run.declaration,
-                arguments: vec![],
+                arguments: vec![].into(),
             },
             &mut 100000,
             Default::default(),
@@ -594,7 +594,7 @@ fn closure_failure_unwinds_persistent_capture_state_once() {
                         &context.items,
                         iir::InstanceKey {
                             declaration: run.declaration,
-                            arguments: vec![],
+                            arguments: vec![].into(),
                         },
                         &mut 100000,
                         Default::default(),
@@ -1116,7 +1116,7 @@ fn interface_invocation_resource_report_keeps_entry_and_result_owners_separate()
     };
     let root = iir::InstanceKey {
         declaration: run.declaration,
-        arguments: vec![],
+        arguments: vec![].into(),
     };
     let mut roots = vec![root.clone()];
     roots.extend(mapped.roots.iter().cloned());
@@ -1252,7 +1252,7 @@ fn interface_invocation_resource_report_keeps_entry_and_result_owners_separate()
     };
     assert!(
         matches!(&callee.kind,K::FunctionInstance {declaration,arguments}
-        if *declaration == invocation.implementation.declaration && *arguments == invocation.implementation.arguments)
+        if *declaration == invocation.implementation.declaration && arguments.as_slice() == invocation.implementation.arguments.as_ref())
     );
 }
 
@@ -1277,7 +1277,7 @@ fn closure_cleanup_definitions_require_unique_concrete_evidence() {
         &context.items,
         iir::InstanceKey {
             declaration: run.declaration,
-            arguments: vec![],
+            arguments: vec![].into(),
         },
         &mut 100000,
         Default::default(),
@@ -1482,7 +1482,7 @@ fn specialized_call_failures_preserve_prepared_and_callee_cleanup_order() {
                     &context.items,
                     iir::InstanceKey {
                         declaration: run.declaration,
-                        arguments: vec![],
+                        arguments: vec![].into(),
                     },
                     &mut 1000000,
                     Default::default(),

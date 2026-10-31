@@ -15,7 +15,7 @@ fn handler_arm_cleanup_restores_suspended_storage_on_value_and_resume() {
     };
     let key = iir::InstanceKey {
         declaration,
-        arguments: vec![],
+        arguments: vec![].into(),
     };
     let byte = Term::Primitive(P::U8);
     let destructor = Function {

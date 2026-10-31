@@ -84,7 +84,7 @@ fn execute(source: &str) -> Vec<String> {
         &items,
         iir::InstanceKey {
             declaration: id(&package, "run"),
-            arguments: vec![],
+            arguments: vec![].into(),
         },
         &mut 1_000_000,
         Default::default(),

@@ -142,7 +142,7 @@ fn unused_generic_rows_retain_concrete_declared_contracts_without_occurrences() 
     );
     let roots = [nir::Primitive::Bool, nir::Primitive::U128].map(|primitive| iir::InstanceKey {
         declaration: support::id(&source, "advertised"),
-        arguments: vec![nir::Term::Primitive(primitive)],
+        arguments: (vec![nir::Term::Primitive(primitive)]).into(),
     });
     let graph = elaboration::materialization::instantiate(
         &source,

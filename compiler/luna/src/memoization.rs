@@ -223,7 +223,7 @@ impl Invocation {
                     package,
                     &[iir::InstanceKey {
                         declaration,
-                        arguments: arguments.clone(),
+                        arguments: arguments.clone().into(),
                     }],
                     budget,
                 )?
@@ -834,7 +834,7 @@ fn prepare_bound_entry<'a>(
         &prepared,
         &[iir::InstanceKey {
             declaration: entry,
-            arguments: vec![],
+            arguments: vec![].into(),
         }],
         std::collections::BTreeSet::new(),
         dispatch_budget,

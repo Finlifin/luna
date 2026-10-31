@@ -431,7 +431,7 @@ fn root_dispatch_preserves_generic_parents_of_concrete_implementations() {
             .find(|f| f.name == "run")
             .unwrap()
             .declaration,
-        arguments: vec![],
+        arguments: vec![].into(),
     };
     for invocation in [false, true] {
         let materialize = if invocation {

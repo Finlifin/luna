@@ -598,7 +598,7 @@ impl<'a> Interpreter<'a> {
             if let Some((declaration, arguments)) = named_instance {
                 for key in &self.cleanup_schedule.unwrap().borrowed_callable_functions {
                     self.tick(None)?;
-                    if key.declaration == declaration && key.arguments == arguments {
+                    if key.declaration == declaration && key.arguments.as_ref() == arguments {
                         return Err(self.failure(ErrorKind::InvalidCallPlan, None));
                     }
                 }
@@ -651,12 +651,13 @@ impl<'a> Interpreter<'a> {
         self.cleanup_frame = if self.cleanup_schedule.is_some() {
             origin.map(|declaration| iir::InstanceKey {
                 declaration,
-                arguments: match &function {
+                arguments: (match &function {
                     Value::Closure(closure) => {
                         closure.instance_arguments.clone().unwrap_or_default()
                     }
                     _ => vec![],
-                },
+                })
+                .into(),
             })
         } else {
             None
@@ -1051,7 +1052,7 @@ mod tests {
         };
         let key = iir::InstanceKey {
             declaration: id,
-            arguments: vec![],
+            arguments: vec![].into(),
         };
         let local = LocalId { owner: 1, index: 0 };
         vm.depth = 1;

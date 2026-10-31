@@ -16,7 +16,9 @@ use std::{collections::BTreeSet, fmt};
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct InstanceKey {
     pub declaration: DeclarationId,
-    pub arguments: Vec<Term>,
+    /// Frozen input frame, shared by identity and graph clones. Equality and
+    /// hashing remain structural; pointer identity is not semantic evidence.
+    pub arguments: std::sync::Arc<[Term]>,
 }
 impl fmt::Display for InstanceKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -25,7 +27,7 @@ impl fmt::Display for InstanceKey {
             "(instance-key (declaration {}) (arguments",
             self.declaration
         )?;
-        for argument in &self.arguments {
+        for argument in self.arguments.iter() {
             write!(f, " {argument}")?;
         }
         f.write_str("))")
@@ -178,10 +180,10 @@ impl Package {
         self.templates
             .iter()
             .find(|table| {
-                table
-                    .targets()
-                    .iter()
-                    .any(|key| key.declaration == method.body && key.arguments == method.arguments)
+                table.targets().iter().any(|key| {
+                    key.declaration == method.body
+                        && key.arguments.as_ref() == method.arguments.as_slice()
+                })
             })
             .map(|table| table.logical_type())
     }
@@ -205,14 +207,14 @@ impl Package {
                 return Err("IIR callable identity has a non-callable signature".into());
             }
             self.validate_type(&links, signature, fuel)?;
-            for argument in &identity.key.arguments {
+            for argument in identity.key.arguments.iter() {
                 self.validate_type(&links, argument, fuel)?;
             }
         }
         for table in &self.templates {
             self.validate_type(&links, table.logical_type(), fuel)?;
             for target in table.targets() {
-                for argument in &target.arguments {
+                for argument in target.arguments.iter() {
                     self.validate_type(&links, argument, fuel)?;
                 }
             }
@@ -326,7 +328,7 @@ impl Package {
                 &resolve_storage,
                 fuel,
             )?;
-            for argument in &instance.key.arguments {
+            for argument in instance.key.arguments.iter() {
                 self.validate_type(&links, argument, fuel)?;
             }
             visit::expressions(&instance.function, fuel, |expr, fuel| {
@@ -385,14 +387,14 @@ impl Package {
                 let target = match &expr.kind {
                     K::Function(id) => Some(InstanceKey {
                         declaration: *id,
-                        arguments: vec![],
+                        arguments: vec![].into(),
                     }),
                     K::FunctionInstance {
                         declaration,
                         arguments,
                     } => Some(InstanceKey {
                         declaration: *declaration,
-                        arguments: arguments.clone(),
+                        arguments: arguments.clone().into(),
                     }),
                     K::TraitMethod {
                         method_arguments,
@@ -433,7 +435,7 @@ impl Package {
                             .ok_or("IIR trait reference has no selected method")?;
                         Some(InstanceKey {
                             declaration: method.body,
-                            arguments: method.arguments.clone(),
+                            arguments: method.arguments.clone().into(),
                         })
                     }
 

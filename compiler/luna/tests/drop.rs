@@ -5843,7 +5843,7 @@ fn source_executable(
                 .find(|f| f.name == entry)
                 .unwrap()
                 .declaration,
-            arguments: vec![],
+            arguments: vec![].into(),
         };
         luna::cleanup::prepare_source(
             package,
@@ -29959,7 +29959,7 @@ fn value_indexed_memory_summaries_specialize_dependent_closures_and_callbacks() 
             },
             CallableResult::Known(iir::InstanceKey {
                 declaration: id("same"),
-                arguments: arguments.clone(),
+                arguments: arguments.clone().into(),
             }),
         )]);
         for method in ["call", "closure"] {
@@ -29987,10 +29987,11 @@ fn value_indexed_memory_summaries_specialize_dependent_closures_and_callbacks() 
         },
         CallableResult::Known(iir::InstanceKey {
             declaration: id("same"),
-            arguments: vec![
+            arguments: (vec![
                 Term::Primitive(Primitive::U8),
                 Term::Integer(comptime_runtime::Integer::from_i128(7)),
-            ],
+            ])
+            .into(),
         }),
     )]);
     assert!(
@@ -34740,7 +34741,7 @@ fn borrowed_callable_memory_premises_validate_paths_and_track_invocations() {
     let known = |name| {
         CallableResult::Known(iir::InstanceKey {
             declaration: id(name),
-            arguments: vec![],
+            arguments: vec![].into(),
         })
     };
     for (name, input_path, code_path) in [
@@ -34907,7 +34908,7 @@ fn borrowed_callable_memory_contexts_do_not_share_code_or_hide_cleanup() {
     };
     let key = |name: &str| iir::InstanceKey {
         declaration: id(name),
-        arguments: vec![],
+        arguments: vec![].into(),
     };
     let input = |parameter, names: &[&str]| {
         (
@@ -35543,7 +35544,7 @@ fn borrowed_callable_memory_keeps_nominal_scalar_cleanup() {
                 vec![],
                 CallableResult::Known(iir::InstanceKey {
                     declaration: id("cleanup"),
-                    arguments: vec![],
+                    arguments: vec![].into(),
                 })
                 .into(),
             )]),
@@ -35717,7 +35718,7 @@ fn borrowed_callable_cleanup_proofs_are_scoped_to_the_selected_protocol() {
             vec![],
             CallableResult::Known(iir::InstanceKey {
                 declaration: id("read"),
-                arguments: vec![],
+                arguments: vec![].into(),
             })
             .into(),
         )]),

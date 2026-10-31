@@ -133,7 +133,7 @@ fn prepare_declaration_with_protocols(
         &context.items,
         iir::InstanceKey {
             declaration,
-            arguments: vec![],
+            arguments: vec![].into(),
         },
         &mut steps,
         budget,
@@ -198,7 +198,7 @@ pub(crate) fn llvm_ir_declaration(
         &package,
         &[iir::InstanceKey {
             declaration,
-            arguments: vec![],
+            arguments: vec![].into(),
         }],
         Default::default(),
         elaboration::ptc::Budget {

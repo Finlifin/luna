@@ -41,7 +41,7 @@ fn fixture() -> (n::Package, iir::InstanceKey) {
         },
         iir::InstanceKey {
             declaration: id(1),
-            arguments: vec![],
+            arguments: vec![].into(),
         },
     )
 }
@@ -197,7 +197,7 @@ fn dispatch_roots_do_not_visit_unrelated_function_bodies() {
                 &package,
                 &[iir::InstanceKey {
                     declaration: id(2),
-                    arguments: vec![],
+                    arguments: vec![].into(),
                 }],
                 Budget::default()
             )

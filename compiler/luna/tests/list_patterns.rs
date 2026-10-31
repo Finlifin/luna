@@ -341,7 +341,7 @@ fn pure_list_patterns_accept_independently_pure_extractors() {
         vm.invoke_instance(
             &iir::InstanceKey {
                 declaration: id(&package, "entry"),
-                arguments: vec![]
+                arguments: vec![].into()
             },
             vec![]
         )
@@ -401,7 +401,7 @@ fn list_view_patterns_check_length_and_extract_in_order() {
         vm.invoke_instance(
             &iir::InstanceKey {
                 declaration: id(&package, "run"),
-                arguments: vec![]
+                arguments: vec![].into()
             },
             vec![Value::UnsignedInteger(2)]
         )
@@ -434,7 +434,7 @@ fn list_view_patterns_skip_unreachable_extractors_and_retry_candidates() {
         vm.invoke_instance(
             &iir::InstanceKey {
                 declaration: id(&package, "run"),
-                arguments: vec![]
+                arguments: vec![].into()
             },
             vec![Value::UnsignedInteger(2)]
         )
@@ -971,7 +971,7 @@ fn long_flat_list_patterns_execute_with_bounded_ordered_observation() {
             .invoke_instance(
                 &iir::InstanceKey {
                     declaration: id(&package, "inspect"),
-                    arguments: vec![],
+                    arguments: vec![].into(),
                 },
                 vec![Value::Record {
                     declaration: repeated,
@@ -1041,7 +1041,7 @@ fn long_list_alternatives_preserve_cross_group_bindings_and_retry_order() {
             vm.invoke_instance(
                 &iir::InstanceKey {
                     declaration: id(&package, "inspect"),
-                    arguments: vec![],
+                    arguments: vec![].into(),
                 },
                 vec![Value::Record {
                     declaration: repeated,

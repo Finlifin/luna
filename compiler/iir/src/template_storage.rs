@@ -159,7 +159,7 @@ impl TemplateStorage {
             *fuel = fuel
                 .checked_sub(key.arguments.len().saturating_add(1))
                 .ok_or("template storage budget exhausted")?;
-            for argument in &key.arguments {
+            for argument in key.arguments.iter() {
                 crate::completed_type(argument, &Default::default(), fuel)?;
             }
             for previous in &selected {
@@ -219,7 +219,7 @@ fn charge_key(key: &InstanceKey, fuel: &mut usize) -> Result<(), String> {
     *fuel = fuel
         .checked_sub(key.arguments.len().saturating_add(1))
         .ok_or("template storage budget exhausted")?;
-    for argument in &key.arguments {
+    for argument in key.arguments.iter() {
         nir::type_computations::charge_term(argument, fuel).map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -260,7 +260,7 @@ mod tests {
     fn key(local: u32) -> InstanceKey {
         InstanceKey {
             declaration: DeclarationId { package: 3, local },
-            arguments: vec![Term::Primitive(Primitive::Bool)],
+            arguments: (vec![Term::Primitive(Primitive::Bool)]).into(),
         }
     }
     #[test]
@@ -344,10 +344,11 @@ mod tests {
         };
         let selected = InstanceKey {
             declaration: target,
-            arguments: vec![
+            arguments: (vec![
                 Term::Primitive(Primitive::Type),
                 Term::Primitive(Primitive::Bool),
-            ],
+            ])
+            .into(),
         };
         assert!(
             TemplateStorage::from_package(signature(), vec![selected.clone()], &package, &mut 0)
@@ -363,10 +364,11 @@ mod tests {
         assert_eq!(table.decode(0).unwrap(), &selected);
         let invalid = InstanceKey {
             declaration: target,
-            arguments: vec![
+            arguments: (vec![
                 Term::Primitive(Primitive::Bool),
                 Term::Primitive(Primitive::Bool),
-            ],
+            ])
+            .into(),
         };
         assert!(
             TemplateStorage::from_package(signature(), vec![invalid], &package, &mut 10000)
@@ -423,11 +425,12 @@ mod tests {
         };
         let selected = [true, false].map(|flag| InstanceKey {
             declaration: target,
-            arguments: vec![Term::NominalValue {
+            arguments: (vec![Term::NominalValue {
                 ty: Box::new(domain.clone()),
                 variant: None,
                 fields: vec![Term::Bool(flag)],
-            }],
+            }])
+            .into(),
         });
         let table =
             TemplateStorage::from_package(signature(), selected.to_vec(), &package, &mut 10000)

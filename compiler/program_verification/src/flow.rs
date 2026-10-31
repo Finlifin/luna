@@ -1915,7 +1915,7 @@ impl Walker<'_> {
             }
             let key = iir::InstanceKey {
                 declaration,
-                arguments: arguments.to_vec(),
+                arguments: arguments.to_vec().into(),
             };
             let summary = if let Some(cached) = self.memory_summaries.get(&key) {
                 cached.clone()

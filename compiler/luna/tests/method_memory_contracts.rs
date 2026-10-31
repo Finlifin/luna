@@ -203,7 +203,7 @@ fn higher_order_method_keeps_interface_reads_and_callback_specific_writes() {
             .find(|f| f.name == name)
             .unwrap()
             .declaration,
-        arguments: vec![],
+        arguments: vec![].into(),
     };
     let slot = CallableInput {
         parameter: 1,

@@ -22,7 +22,7 @@ fn key(domain: Primitive) -> InstanceKey {
             package: 1,
             local: 2,
         },
-        arguments: vec![Term::Primitive(domain)],
+        arguments: (vec![Term::Primitive(domain)]).into(),
     }
 }
 fn handler(arm: usize) -> ContextKey {

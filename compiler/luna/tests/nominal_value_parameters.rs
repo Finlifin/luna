@@ -3849,12 +3849,12 @@ fn staged_inherent_function_values_preserve_dependent_instance_inputs() {
             .functions
             .iter()
             .filter(|f| f.function.name == "read")
-            .map(|f| &f.key.arguments)
+            .map(|f| f.key.arguments.to_vec())
             .collect();
         if entry == "run" {
             assert_eq!(read_keys.len(), 2);
             for flag in [true, false] {
-                assert!(read_keys.contains(&&vec![
+                assert!(read_keys.contains(&vec![
                     nir::Term::Primitive(nir::Primitive::Bool),
                     nir::Term::Bool(flag)
                 ]));
@@ -3862,7 +3862,7 @@ fn staged_inherent_function_values_preserve_dependent_instance_inputs() {
         } else {
             assert_eq!(
                 read_keys,
-                [&vec![
+                [vec![
                     nir::Term::Primitive(nir::Primitive::Char),
                     nir::Term::Char('x')
                 ]]
@@ -5180,7 +5180,7 @@ fn higher_order_value_clauses_infer_from_callback_signatures() {
         assert!(
             instances
                 .iter()
-                .any(|instance| instance.key.arguments == vec![nir::Term::Bool(flag)])
+                .any(|instance| instance.key.arguments.to_vec() == vec![nir::Term::Bool(flag)])
         );
     }
     let wrong = source.replace(
@@ -5961,7 +5961,7 @@ fn generic_required_type_calls_materialize_distinct_runtime_instances() {
                 .functions
                 .iter()
                 .any(|instance| instance.key.declaration == keep
-                    && instance.key.arguments == vec![nir::Term::Bool(flag)])
+                    && instance.key.arguments.to_vec() == vec![nir::Term::Bool(flag)])
         );
     }
     let invalid = source.replace("keep<false>(Token<false>", "keep<false>(Token<true>");

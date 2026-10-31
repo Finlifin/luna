@@ -278,7 +278,7 @@ fn type_list_constants_validate_embedded_types_and_domain_authority() {
     };
     let key = iir::InstanceKey {
         declaration: id(3),
-        arguments: vec![],
+        arguments: vec![].into(),
     };
     let mut package = iir::Package {
         roots: vec![key.clone()],
@@ -488,7 +488,7 @@ fn type_list_constants_validate_embedded_types_and_domain_authority() {
     contract_package.functions.push(iir::FunctionInstance {
         key: iir::InstanceKey {
             declaration: id(6),
-            arguments: vec![],
+            arguments: vec![].into(),
         },
         function: method,
     });
@@ -703,7 +703,7 @@ fn captured_comptime_values_must_materialize_before_iir_validation() {
     };
     let key = iir::InstanceKey {
         declaration: id,
-        arguments: vec![],
+        arguments: vec![].into(),
     };
     let boolean = Term::Primitive(Primitive::Bool);
     let mut package = iir::Package {
@@ -814,7 +814,7 @@ fn closure_contexts_and_snapshots_cannot_hide_dangling_iir_links() {
                     package: 92,
                     local: 3,
                 },
-                arguments: vec![argument],
+                arguments: (vec![argument]).into(),
             },
             Term::Function {
                 parameters: vec![],

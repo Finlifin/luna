@@ -119,7 +119,7 @@ impl Protocol {
         }
         let roots = [&eq, &hash].map(|m| iir::InstanceKey {
             declaration: m.method.body,
-            arguments: m.method.arguments.clone(),
+            arguments: m.method.arguments.clone().into(),
         });
         let dispatch =
             elaboration::materialization::dispatch_instances_for_roots(package, &roots, budget)?;

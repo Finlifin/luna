@@ -28,7 +28,7 @@ fn template_identity_metadata_admits_tags_but_not_execution() {
     };
     let key = InstanceKey {
         declaration: id,
-        arguments: vec![],
+        arguments: vec![].into(),
     };
     let storage =
         TemplateStorage::from_package(logical.clone(), vec![key.clone()], &package, &mut 1000)
@@ -63,9 +63,9 @@ fn template_storage_checks_source_declarations_and_recovers_after_rejection() {
          fn wrong(comptime T:Type,value:bool)->bool {value}
          comptime fn staged(comptime T:Type,value:T)->T {value}",
     );
-    let key = |name: &str, arguments| InstanceKey {
+    let key = |name: &str, arguments: Vec<Term>| InstanceKey {
         declaration: support::id(&package, name),
-        arguments,
+        arguments: arguments.into(),
     };
     let keep = key("keep", vec![]);
     let logical = package
@@ -377,7 +377,7 @@ fn runtime_closures_capture_dependent_callable_templates() {
     let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
     let target = iir::InstanceKey {
         declaration: support::id(&package, "keep"),
-        arguments: vec![],
+        arguments: vec![].into(),
     };
     assert!(
         graph.function(&target).is_none(),
@@ -1154,7 +1154,7 @@ fn residual_callable_contracts_are_checked_against_exact_instance_keys() {
             .iter()
             .map(|instance| nir::program::RuntimeInstance {
                 declaration: instance.key.declaration,
-                arguments: instance.key.arguments.clone(),
+                arguments: instance.key.arguments.to_vec(),
                 function: instance.function.clone(),
                 cleanup_accesses: vec![],
             })
@@ -1312,7 +1312,7 @@ fn residual_contract_diagnostics_recover_expanded_source_locations() {
         .iter()
         .map(|instance| nir::program::RuntimeInstance {
             declaration: instance.key.declaration,
-            arguments: instance.key.arguments.clone(),
+            arguments: instance.key.arguments.to_vec(),
             function: instance.function.clone(),
             cleanup_accesses: vec![],
         })
@@ -1502,6 +1502,18 @@ fn materialized_template_tables_share_logical_cores_without_sharing_targets() {
         second.logical_type_reference().core()
     ));
     assert_ne!(first.decode(0).unwrap(), second.decode(0).unwrap());
+    let snapshot = graph.clone();
+    for (original, copied) in graph.functions.iter().zip(&snapshot.functions) {
+        assert!(std::sync::Arc::ptr_eq(
+            &original.key.arguments,
+            &copied.key.arguments
+        ));
+    }
+    for (original, copied) in graph.templates.iter().zip(&snapshot.templates) {
+        for (left, right) in original.targets().iter().zip(copied.targets()) {
+            assert!(std::sync::Arc::ptr_eq(&left.arguments, &right.arguments));
+        }
+    }
     graph.validate(&mut 100_000).unwrap();
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),

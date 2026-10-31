@@ -67,7 +67,7 @@ fn generic_optional_injection_preserves_scope_instances_and_call_count() {
     assert!(
         instances
             .iter()
-            .any(|function| function.key.arguments
+            .any(|function| function.key.arguments.to_vec()
                 == vec![nir::Term::Primitive(nir::Primitive::Bool)])
     );
     assert!(instances.iter().any(
@@ -222,7 +222,7 @@ fn partial_optional_branches_preserve_types_bindings_and_execution_order() {
                 .find(|function| function.function.name == "keep")
                 .unwrap();
             assert_eq!(
-                keep.key.arguments,
+                keep.key.arguments.to_vec(),
                 vec![nir::Term::Primitive(nir::Primitive::U8)]
             );
         }
@@ -296,7 +296,7 @@ fn optional_propagation_context_preserves_nested_payloads_and_loop_exits() {
     assert!(
         empty
             .iter()
-            .any(|f| f.key.arguments == vec![nir::Term::Primitive(nir::Primitive::Bool)])
+            .any(|f| f.key.arguments.to_vec() == vec![nir::Term::Primitive(nir::Primitive::Bool)])
     );
     assert!(empty.iter().any(
         |f| matches!(&f.key.arguments[..],[nir::Term::Optional(payload)]
@@ -351,7 +351,7 @@ fn inferred_callback_return_evidence_retry_preserves_captures_and_calls() {
         .find(|function| function.function.name == "apply")
         .unwrap();
     assert_eq!(
-        apply.key.arguments,
+        apply.key.arguments.to_vec(),
         vec![nir::Term::Primitive(nir::Primitive::U8)]
     );
     let comptime_source = source

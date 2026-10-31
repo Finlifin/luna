@@ -12,14 +12,14 @@ fn key(callee: &n::Expr) -> Option<iir::InstanceKey> {
     match &callee.kind {
         K::Function(declaration) => Some(iir::InstanceKey {
             declaration: *declaration,
-            arguments: vec![],
+            arguments: vec![].into(),
         }),
         K::FunctionInstance {
             declaration,
             arguments,
         } => Some(iir::InstanceKey {
             declaration: *declaration,
-            arguments: arguments.clone(),
+            arguments: arguments.clone().into(),
         }),
         _ => None,
     }

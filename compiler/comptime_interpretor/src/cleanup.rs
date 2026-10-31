@@ -995,11 +995,11 @@ impl<'a> Interpreter<'a> {
         let named = match function {
             Value::Function(declaration) => Some(iir::InstanceKey {
                 declaration: *declaration,
-                arguments: vec![],
+                arguments: vec![].into(),
             }),
             Value::Closure(closure) => closure.origin.map(|declaration| iir::InstanceKey {
                 declaration,
-                arguments: closure.instance_arguments.clone().unwrap_or_default(),
+                arguments: (closure.instance_arguments.clone().unwrap_or_default()).into(),
             }),
             _ => None,
         };
@@ -1595,7 +1595,7 @@ impl<'a> Interpreter<'a> {
         let mut sites: HashMap<_, Vec<_>> = HashMap::new();
         for function in &schedule.functions {
             self.tick(None)?;
-            for argument in &function.instance.arguments {
+            for argument in function.instance.arguments.iter() {
                 let work = self
                     .closed_term_description_work(argument)
                     .ok_or_else(|| self.failure(ErrorKind::StepsExhausted, None))?;

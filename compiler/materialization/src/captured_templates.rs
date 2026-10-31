@@ -38,7 +38,7 @@ pub(super) fn storage(
             let key = match &expr.kind {
                 K::Function(declaration) => iir::InstanceKey {
                     declaration: *declaration,
-                    arguments: vec![],
+                    arguments: vec![].into(),
                 },
                 K::FunctionInstance {
                     declaration,
@@ -52,7 +52,7 @@ pub(super) fn storage(
                     }
                     iir::InstanceKey {
                         declaration: *declaration,
-                        arguments: arguments.clone(),
+                        arguments: arguments.clone().into(),
                     }
                 }
                 K::TraitMethod {
@@ -89,7 +89,7 @@ pub(super) fn storage(
                     }
                     iir::InstanceKey {
                         declaration: method.body,
-                        arguments: method.arguments.clone(),
+                        arguments: method.arguments.clone().into(),
                     }
                 }
                 _ => return Ok(()),
@@ -99,7 +99,7 @@ pub(super) fn storage(
                     .checked_sub(table.targets().len().saturating_add(1))
                     .ok_or("captured template lookup budget exhausted")?;
                 for target in table.targets() {
-                    for argument in &target.arguments {
+                    for argument in target.arguments.iter() {
                         nir::type_computations::charge_term(argument, fuel)
                             .map_err(|e| e.to_string())?;
                     }

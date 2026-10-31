@@ -28,7 +28,7 @@ impl<'a> TypeLinks<'a> {
         };
         for identity in &package.callable_identities {
             tick(fuel)?;
-            for argument in &identity.key.arguments {
+            for argument in identity.key.arguments.iter() {
                 charge(argument, fuel)?;
             }
             result

@@ -126,14 +126,14 @@ impl<'a> Interpreter<'a> {
                 fuel = fuel
                     .checked_sub(1)
                     .ok_or(nir::type_computations::Error::Budget)?;
-                for argument in &identity.key.arguments {
+                for argument in identity.key.arguments.iter() {
                     nir::type_computations::charge_term(argument, &mut fuel)?;
                 }
                 let signature = identity
                     .closed_signature()
                     .expect("validated callable signature");
                 retained_callable_signatures.insert(
-                    (identity.key.declaration, identity.key.arguments.as_slice()),
+                    (identity.key.declaration, identity.key.arguments.as_ref()),
                     signature,
                 );
                 Ok::<_, nir::type_computations::Error>(())
@@ -274,7 +274,7 @@ impl<'a> Interpreter<'a> {
             graph
                 .function(&iir::InstanceKey {
                     declaration: id,
-                    arguments,
+                    arguments: arguments.into(),
                 })
                 .map(|f| &f.function)
         } else {
@@ -318,14 +318,14 @@ impl<'a> Interpreter<'a> {
             .function(key)
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?
             .function;
-        let cache_key = (key.declaration, key.arguments.clone());
+        let cache_key = (key.declaration, key.arguments.to_vec());
         if let Some(callable) = self.instances.get(&cache_key) {
             return Ok(Value::Closure(callable.clone()));
         }
         let callable = Arc::new(Closure {
             definition_source: None,
             origin: Some(key.declaration),
-            instance_arguments: Some(key.arguments.clone()),
+            instance_arguments: Some(key.arguments.to_vec()),
             parameters: definition.parameters.clone(),
             environment: Environment::new(),
             capture_order: vec![],
@@ -369,7 +369,7 @@ impl<'a> Interpreter<'a> {
         self.iir_named_value(
             iir::InstanceKey {
                 declaration,
-                arguments: arguments.to_vec(),
+                arguments: arguments.to_vec().into(),
             },
             None,
             output,
@@ -416,7 +416,7 @@ impl<'a> Interpreter<'a> {
         self.iir_named_value(
             iir::InstanceKey {
                 declaration: selected.body,
-                arguments: selected.arguments.clone(),
+                arguments: selected.arguments.clone().into(),
             },
             Some(method),
             method.output,
@@ -448,7 +448,7 @@ impl<'a> Interpreter<'a> {
             } else {
                 Value::FunctionInstance {
                     declaration: key.declaration,
-                    arguments: key.arguments,
+                    arguments: key.arguments.to_vec(),
                 }
             }
         } else {

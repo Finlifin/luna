@@ -12,7 +12,7 @@ fn graph(source: &str, entry: &str) -> iir::Package {
         &package,
         &[iir::InstanceKey {
             declaration: support::id(&package, entry),
-            arguments: vec![],
+            arguments: vec![].into(),
         }],
         Default::default(),
         elaboration::ptc::Budget {

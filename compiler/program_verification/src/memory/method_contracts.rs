@@ -277,7 +277,7 @@ pub fn prepare_method_invocation(
         callee: callee.clone(),
         implementation: iir::InstanceKey {
             declaration: *declaration,
-            arguments: arguments.clone(),
+            arguments: arguments.clone().into(),
         },
         function: composed,
     })

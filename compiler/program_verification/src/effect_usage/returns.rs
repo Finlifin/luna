@@ -57,7 +57,7 @@ impl Analyzer<'_, '_, '_, '_> {
         let key = match &factory.kind {
             K::Function(declaration) => iir::InstanceKey {
                 declaration: *declaration,
-                arguments: vec![],
+                arguments: vec![].into(),
             },
             K::FunctionInstance {
                 declaration,
@@ -68,7 +68,7 @@ impl Analyzer<'_, '_, '_, '_> {
                 }
                 iir::InstanceKey {
                     declaration: *declaration,
-                    arguments: arguments.clone(),
+                    arguments: arguments.clone().into(),
                 }
             }
             _ => {

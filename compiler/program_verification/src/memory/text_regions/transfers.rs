@@ -19,7 +19,7 @@ impl Query<'_, '_> {
             vec![],
             Some(CallbackKey::Named(iir::InstanceKey {
                 declaration: *declaration,
-                arguments: vec![],
+                arguments: vec![].into(),
             })),
         );
         Ok(empty)
@@ -60,7 +60,7 @@ impl Query<'_, '_> {
             vec![],
             Some(CallbackKey::Named(iir::InstanceKey {
                 declaration: *declaration,
-                arguments: arguments.clone(),
+                arguments: arguments.clone().into(),
             })),
         );
         Ok(empty)
@@ -791,7 +791,7 @@ impl Query<'_, '_> {
         self.named_call(
             &[iir::InstanceKey {
                 declaration,
-                arguments: types.to_vec(),
+                arguments: types.to_vec().into(),
             }],
             arguments,
             parameter_bindings,

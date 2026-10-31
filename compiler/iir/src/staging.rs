@@ -1613,7 +1613,7 @@ pub fn bind_call_with_layouts_and_type_views<'layout, C>(
     }
     let key = crate::InstanceKey {
         declaration: template.declaration,
-        arguments: key_arguments,
+        arguments: (key_arguments).into(),
     };
     let mut slots = Vec::new();
     let mut next = 0;
@@ -1703,7 +1703,7 @@ pub fn bind_call_with_layouts_and_type_views<'layout, C>(
                 source: callee.source,
                 kind: K::FunctionInstance {
                     declaration: key.declaration,
-                    arguments: key.arguments.clone(),
+                    arguments: key.arguments.to_vec(),
                 },
             }),
             arguments: runtime_arguments,
