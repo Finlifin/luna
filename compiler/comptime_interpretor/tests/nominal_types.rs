@@ -422,9 +422,16 @@ fn nominal_record_index_budget_boundaries_do_not_report_type_errors() {
         functions: vec![function(0, nominal(argument))],
         ..Default::default()
     };
+    // Measure this invocation's actual work before testing every interruption
+    // boundary. A fixed upper bound silently stops testing successful recovery
+    // when legitimate preparation or admission accounting changes.
+    let mut probe = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let before = probe.remaining_steps();
+    assert!(matches!(probe.invoke(id(0), vec![]), Ok(Value::Type(_))));
+    let work = before - probe.remaining_steps();
     let mut failed = false;
     let mut succeeded = false;
-    for steps in 1..512 {
+    for steps in 1..=work + 1 {
         let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         vm.charge_preparation((vm.remaining_steps() - steps) as usize)
             .unwrap();

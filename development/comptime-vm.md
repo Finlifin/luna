@@ -9656,3 +9656,20 @@ Validation in `/home/fin/luna`:
   19 passed; `/tmp/luna-tools-rq2eicv1/result.json`, exit 0.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
   passed; `/tmp/luna-tools-sd2vyjvv/result.json`, exit 0.
+
+
+### Nominal record input budget boundary test
+
+The nominal-record value-index test assumed an invocation would succeed below
+512 steps. The assumption no longer holds on the committed implementation: an
+isolated run with `lib.rs` and `list_append.rs` restored temporarily to HEAD
+failed at `failed && succeeded`, with no list optimization present. The test now
+first measures a successful invocation, then checks each allowance from one
+through that measured work plus one. It still requires both exhausted and
+successful outcomes and rejects any non-budget error. No VM budget or admission
+rule changed. Task-owned implementation files were restored after both probes.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --test nominal_types nominal_record_index_budget_boundaries_do_not_report_type_errors`: old test failed on HEAD (`/tmp/luna-tools-w5wh2_yh/result.json`); updated test passed with the same HEAD implementation (`/tmp/luna-tools-pw5xmzyr/result.json`).
+- Workspace formatting passed (`/tmp/luna-tools-ll674zef/result.json`); `git diff --check` passed.
