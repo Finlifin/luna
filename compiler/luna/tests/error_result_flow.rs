@@ -360,3 +360,88 @@ fn nested_guard_with_prior_field_binding_keeps_ordinary_match_valid() {
         }",
     );
 }
+
+#[test]
+fn cross_field_pattern_guards_export_ordered_payload_relations() {
+    for (ty, pattern, destructure) in [
+        (
+            "Tuple<Byte,Byte>",
+            "(first, (second if first < second))",
+            "let (first,second) = input;",
+        ),
+        (
+            "Pair",
+            "Pair.pair(first, (second if first < second))",
+            "let Pair.pair(first,second) = input;",
+        ),
+        (
+            "Tuple<Byte,Byte>",
+            "((first, (second if first < second)) or (second, (first if second < first)))",
+            "let (first,second) = input;",
+        ),
+        (
+            "Tuple<Byte,Tuple<Byte>>",
+            "(first, ((second if first < second),))",
+            "let (first,(second,)) = input;",
+        ),
+        (
+            "!Pair bool",
+            "error Pair.pair(first, (second if first < second))",
+            "let error Pair.pair(first,second) = input else {return 0;};",
+        ),
+    ] {
+        let source = format!(
+            "typealias Byte = .u8'builtin;
+            enum Pair {{pair(Byte,Byte)}}
+            fn run(input:{ty})->Byte {{
+                assumes input matches {pattern};
+                {destructure}
+                first + 1
+            }}"
+        );
+        support::compile_with_tuple_protocols(&source, &Default::default()).unwrap();
+        let error = support::compile_with_tuple_protocols(
+            &source.replace("first < second", "first <= second"),
+            &Default::default(),
+        )
+        .unwrap_err();
+        assert!(error.contains("range"), "{error}");
+    }
+}
+
+#[test]
+fn cross_field_guard_relations_do_not_survive_alternatives_or_reassignment() {
+    for (predicate, update) in [
+        ("(first, (second if first < second)) or (second, first)", ""),
+        (
+            "(first, (second if first < second))",
+            "let maximum:Byte = 255; input = (maximum,maximum);",
+        ),
+    ] {
+        let source = format!(
+            "typealias Byte = .u8'builtin;
+            fn run(original:Tuple<Byte,Byte>)->Byte {{
+                var input = original;
+                assumes input matches ({predicate});
+                {update}
+                let (first,second) = input;
+                first + 1
+            }}"
+        );
+        let error =
+            support::compile_with_tuple_protocols(&source, &Default::default()).unwrap_err();
+        assert!(error.contains("range"), "{error}");
+    }
+}
+
+#[test]
+fn cross_field_equality_does_not_justify_its_own_substitution() {
+    let source = "typealias Byte = .u8'builtin;
+        fn run(input:Tuple<Byte,Byte>)->Byte {
+            assumes not (input matches (first, (second if first == second)));
+            let (first,second) = input;
+            first + 1
+        }";
+    let error = support::compile_with_tuple_protocols(source, &Default::default()).unwrap_err();
+    assert!(error.contains("range"), "{error}");
+}

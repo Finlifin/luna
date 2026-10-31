@@ -304,21 +304,39 @@ impl Walker<'_> {
         {
             return Err(Reason::InvalidSignature);
         }
+        let existing = state.domains.keys().copied().collect();
+        let mut candidate = state.fork(self.limits)?;
+        candidate.facts.assume(&selected, true, self.limits)?;
         for (slot, (pattern, ty)) in patterns.iter().zip(&types).enumerate() {
+            if !candidate.facts.is_reachable() {
+                return Ok(Some(Condition::Bool(false)));
+            }
             let mut field = match value.fields.as_ref().and_then(|fields| fields.get(slot)) {
                 Some(field) => field.snapshot(self.limits, 0)?,
                 None => self.unknown_value(ty)?,
             };
-            self.project_component(state, &mut field, value.projection.clone(), (kind, slot))?;
+            self.project_component(
+                &mut candidate,
+                &mut field,
+                value.projection.clone(),
+                (kind, slot),
+            )?;
             let Some(condition) =
-                self.pattern_selection_condition(pattern, &field, ty, state, depth + 1)?
+                self.pattern_selection_condition(pattern, &field, ty, &mut candidate, depth + 1)?
             else {
                 return Ok(None);
             };
+            // Export before assuming this field's guard: its own equalities
+            // must not justify rewriting the predicate we are constructing.
+            let condition = self.scoped_condition(&condition, &candidate, &existing)?;
             selected = conjunction(selected, condition);
+            // Later fields see earlier bindings only along this successful
+            // candidate. Keep the selection formula separate from those facts.
+            (candidate, _) = self.pattern(pattern, &field, ty, candidate, depth + 1)?;
         }
         Ok(Some(selected))
     }
+
     fn optional_condition(
         &mut self,
         input: &Value,
@@ -1048,9 +1066,7 @@ impl Walker<'_> {
                 .flatten()
                 .all(|guard| nir::program::checkable_predicate(guard));
             if let Pattern::Variant {
-                declaration,
-                index,
-                fields,
+                declaration, index, ..
             } = pattern
             {
                 let mut tag = self.variant_condition(&input, *declaration, *index, state)?;
@@ -1073,18 +1089,11 @@ impl Walker<'_> {
                         // Publish owned nested payload fields before branching,
                         // so later pattern bindings can copy their relations.
                         self.prime_payload_observations(&mut field, state, &mut Vec::new(), 0)?;
-                        if compose_tags {
-                            let pattern = fields.get(slot).ok_or(Reason::InvalidSignature)?;
-                            if let (Some(selected), Some(condition)) = (
-                                tag.take(),
-                                self.pattern_selection_condition(pattern, &field, ty, state, 0)?,
-                            ) {
-                                tag = Some(conjunction(selected, condition));
-                            } else {
-                                compose_tags = false;
-                            }
-                        }
                     }
+                }
+                if compose_tags {
+                    tag = self.pattern_selection_condition(pattern, &input, &value.ty, state, 0)?;
+                    compose_tags &= tag.is_some();
                 }
                 tag_conditions.push(tag);
             } else if matches!(pattern, Pattern::Wild) {

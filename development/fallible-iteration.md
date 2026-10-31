@@ -273,3 +273,46 @@ Validation in `/home/fin/luna`:
 No full language suite was run. The prior-field-binding test checks that ordinary
 matching remains valid; it does not claim complete relational predicate export
 for arbitrary cross-field guards. Multi-label Copy inference is unaffected.
+
+## Ordered cross-field guard relations
+
+Structural predicate selection now carries a private successful candidate
+through fields in declaration order. A later field guard can use earlier
+bindings, including those outside a nested tuple. Each field's condition is
+translated back to original observations before that field is assumed true;
+its own equalities cannot justify rewriting the predicate being exported.
+The candidate state is discarded after construction. Ordinary variant matching
+now uses the same complete structural selection after priming payload paths,
+rather than analyzing each field with a separate binding environment.
+
+Regression coverage includes tuples, enum payloads, nested tuples, error
+payloads, and or-pattern alternatives that swap binding names. For Byte fields,
+`first < second` proves `first + 1` safe; `first <= second` does not. Unbounded
+alternatives, reassignment and negated equality continue rejecting unsafe
+arithmetic. The initial cross-field regression failed with the missing range
+proof (`/tmp/luna-tools-2wxkyp5a/result.json`) before this change.
+
+This extends the previous nested-guard implementation; unsupported pattern
+computations still retain the conservative path. No PTC rule or language
+semantics changed, and this does not claim complete program verification.
+
+Validation in `/home/fin/luna`:
+
+- Final command: `python3 -B development/check.py --timeout 900 -- test -p luna --test error_result_flow --test snapshot_contracts --test normal_patterns --test integer_contracts -p program_verification --lib --no-fail-fast`.
+  The selected source suites passed (18 + 2 + 42 + 18), as did all 99 program
+  verification unit tests. Overall exit was 101 because `--lib` also selected
+  luna's library tests: 70 passed, 12 existing host method-contract fixtures
+  failed during HIR lowering due to missing bool bindings. This is not a green
+  aggregate command; evidence: `/tmp/luna-tools-ml9wrkoj/result.json`.
+- Earlier `test -p program_verification --no-fail-fast` passed all 105 tests;
+  `/tmp/luna-tools-ssz94i69/result.json`. This precedes removal of the redundant
+  final condition remap; the final unit tests above cover that final change.
+- `python3 -B development/library_check.py --stage sysroot-fallible-iteration --timeout 300`:
+  13 native tests passed, exit 0; `/tmp/luna-library-2hx1_9x3/summary.json`.
+  This run also precedes removal of the redundant final remap; no final-version
+  native rerun is claimed.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-hcvz90pl/result.json`; `git diff --check` passed.
+
+No full language suite was run. The unrelated host-fixture failures and
+multi-label Copy inference remain outstanding.
