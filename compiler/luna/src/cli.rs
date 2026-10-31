@@ -21,6 +21,7 @@ pub struct Options {
     pub build_modes: crate::build_context::ModeOptions,
     pub build_targets: crate::build_context::TargetOptions,
     pub list_pattern_protocol: Option<String>,
+    pub comptime_list_pattern_protocol: Option<String>,
     pub iterator_protocol: Option<String>,
     pub into_iterator_protocol: Option<String>,
     pub index_protocol: Option<String>,
@@ -173,6 +174,7 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
     let mut splice_protocol = None;
     let mut meta_list_type = None;
     let mut list_pattern_protocol = None;
+    let mut comptime_list_pattern_protocol = None;
     let mut iterator_protocol = None;
     let mut into_iterator_protocol = None;
     let mut index_protocol = None;
@@ -566,6 +568,21 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
                     );
                     continue;
                 }
+                Some("--comptime-list-pattern-protocol") => {
+                    if comptime_list_pattern_protocol.is_some() {
+                        return Err(
+                            "--comptime-list-pattern-protocol may only be specified once".into(),
+                        );
+                    }
+                    comptime_list_pattern_protocol = Some(
+                        option_value(&mut args, "--comptime-list-pattern-protocol")?
+                            .into_string()
+                            .map_err(
+                                |_| "ComptimeListPatternView protocol selector must be valid UTF-8",
+                            )?,
+                    );
+                    continue;
+                }
                 Some("--iterator-protocol") => {
                     if iterator_protocol.is_some() {
                         return Err("--iterator-protocol may only be specified once".into());
@@ -867,6 +884,7 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
         tuple_type,
         arithmetic_protocols,
         list_pattern_protocol,
+        comptime_list_pattern_protocol,
         iterator_protocol,
         into_iterator_protocol,
         index_protocol,
@@ -977,6 +995,37 @@ mod tests {
     }
 
     #[test]
+    fn comptime_list_protocol_selector_is_forwarded_and_checked() {
+        let Command::Check(options) = arguments(&[
+            "check",
+            "input.fl",
+            "--comptime-list-pattern-protocol",
+            "meta.Views",
+        ])
+        .unwrap() else {
+            panic!("expected check command")
+        };
+        assert_eq!(
+            options.comptime_list_pattern_protocol.as_deref(),
+            Some("meta.Views")
+        );
+        assert!(options.list_pattern_protocol.is_none());
+        for args in [
+            vec!["check", "input.fl", "--comptime-list-pattern-protocol"],
+            vec![
+                "check",
+                "input.fl",
+                "--comptime-list-pattern-protocol",
+                "meta.One",
+                "--comptime-list-pattern-protocol",
+                "meta.Two",
+            ],
+        ] {
+            assert!(arguments(&args).is_err());
+        }
+    }
+
+    #[test]
     fn defaults_to_hir_and_stdout() {
         assert_eq!(
             arguments(&["source 文 件.fl"]).unwrap(),
@@ -995,6 +1044,7 @@ mod tests {
                 ord_protocol: None,
                 eq_protocol: None,
                 list_pattern_protocol: None,
+                comptime_list_pattern_protocol: None,
                 iterator_protocol: None,
                 into_iterator_protocol: None,
                 literal_into_protocol: None,
@@ -1032,6 +1082,7 @@ mod tests {
                 ord_protocol: None,
                 eq_protocol: None,
                 list_pattern_protocol: None,
+                comptime_list_pattern_protocol: None,
                 iterator_protocol: None,
                 into_iterator_protocol: None,
                 literal_into_protocol: None,
@@ -1072,7 +1123,7 @@ mod tests {
     #[test]
     fn delimiter_allows_input_names_starting_with_dash() {
         let Command::Compile(options) = arguments(&["--", "--source.fl"]).unwrap() else {
-            panic!("expected compile command");
+            panic!("expected check command");
         };
         assert_eq!(options.input, PathBuf::from("--source.fl"));
     }
@@ -1083,7 +1134,7 @@ mod tests {
         use std::os::unix::ffi::OsStringExt;
         let input = OsString::from_vec(b"source-\xff.fl".to_vec());
         let Command::Compile(options) = parse([input.clone()]).unwrap() else {
-            panic!("expected compile command");
+            panic!("expected check command");
         };
         assert_eq!(options.input.as_os_str(), input.as_os_str());
     }

@@ -89,9 +89,11 @@ comptime fn signed_division() -> bool {
 它们不为 Integer 的 `/` 或 `%` 安装默认协议，也不引入 runtime Integer 表示。
 需要其他舍入方式时不能把这两个函数当作对应操作。
 
-完整 sysroot 已为 `List<T>` 提供 `ListPatternView` 的 comptime contribution。
+完整 sysroot 已为 `List<T>` 提供 `pure comptime trait ComptimeListPatternView` 的实现。
 `[a, b]`、`[a, ..._]` 与 `[]` 可直接用于编译期列表，提取的元素保持 T 的身份；
 列表自身仍没有 runtime 表示或 runtime 迭代承诺。
+模式展开通过 `comptime-list-pattern-protocol` 选择 meta 协议；runtime 使用独立的
+`list-pattern-protocol`。两者的方法同名，阶段由协议身份区分。
 长度和索引经上述接口转换，使用主机 pipeline 时目标依据由驱动提供。
 例子见 [sysroot-meta-list-patterns.fl](../../development/examples/sysroot-meta-list-patterns.fl)，
 通过 `python3 -B development/library_check.py --release --stage sysroot-meta-patterns` 检查。
@@ -101,13 +103,13 @@ comptime fn signed_division() -> bool {
 ```flurry
 comptime fn first() -> Integer {
     let values: meta.List<Integer> = [10, 20];
-    values.as(ListPatternView).list_pattern_view_get_element_comptime(0)
+    values.as(ComptimeListPatternView).list_pattern_view_get_element(0)
 }
 ```
 
 这里的索引是目标平台的 usize。空列表或越界索引使 invocation 失败；普通方法
 调用不会先匹配长度。仅导入 trait 不等于在当前命题上下文中声明该能力，因此
-不能把省略 `.as(ListPatternView)` 的拼写当作自动搜索所有 trait 的承诺。
+不能把省略 `.as(ComptimeListPatternView)` 的拼写当作自动搜索所有 trait 的承诺。
 方法查找保留 List 的 normal-form 头，不要求将其展开成底层结构；实现适用性、
 参数及结果域检查仍然执行，接收者生成表达式仍只求值一次。
 comptime 模式协议方法使用 `self` 值引用，不使用 `*self` 或源码指针。

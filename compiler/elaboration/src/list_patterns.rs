@@ -138,7 +138,7 @@ fn phase_protocol(traits: &[Trait], id: DeclarationId, staged: bool) -> Result<P
             vec![
                 receiver,
                 Parameter {
-                    sort: if staged {
+                    sort: if staged || interface.comptime_only {
                         Sort::Runtime
                     } else {
                         Sort::ComptimeValue

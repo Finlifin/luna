@@ -618,6 +618,7 @@ fn compile_with_constructors(
         ord_protocol: None,
         eq_protocol: None,
         list_pattern_protocol: None,
+        comptime_list_pattern_protocol: None,
         iterator_protocol: None,
         into_iterator_protocol: None,
         literal_into_protocol: None,

@@ -8617,3 +8617,56 @@ Reports: `/tmp/luna-tools-ouomeggp/result.json` (formatting),
 `/tmp/luna-tools-s1u944cj/result.json` (18 decimal tests),
 `/tmp/luna-tools-ib7fnbm2/result.json` (631 runtime/interpreter tests), and
 `/tmp/luna-tools-73ju3z1a/result.json` (54 source integration tests).
+
+## Split shipped list pattern protocols by execution phase
+
+The default library no longer packs comptime list observation into the runtime
+ListPatternView through ElementComptime and suffixed methods. Meta now owns
+`pure comptime trait ComptimeListPatternView` and its `comptime impl` for List.
+Both phase protocols expose Element, list_pattern_view_get_len and
+list_pattern_view_get_element. Comptime self remains a value reference, with an
+ordinary index; runtime self remains a pointer with a comptime index. The trait
+and methods use the existing pure-comptime-trait contract rather than a new
+phase marker. Source methods continue to perform checked usize conversions.
+
+A separate driver identity (`comptime_list_pattern`) and source selector flow
+through standalone/package CLI, sysroot configuration and elaboration. The
+selected phase controls the protocol identity before ordinary method selection.
+Quoted runtime bodies keep runtime selection. Explicit comptime bindings reject
+runtime methods before any pattern is used. Drivers with only the old selector
+can still bind their own previously supported single/mixed-phase protocol;
+this does not reintroduce legacy members into the shipped library.
+
+Repository consumers, complete sysroot examples, isolated module fixtures and
+API documentation migrate together. The regression with a single subject and
+same-named methods deliberately returns different elements in each phase. Other
+checks retain candidate retry, owned-resource cleanup, target width, local-index
+copy costs and failed-invocation recovery. This does not remove all legacy
+comptime pointer nodes from the compiler or implement TuplePatternView.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- check -p luna --tests
+python3 -B development/check.py --timeout 900 -- test -p luna --lib
+python3 -B development/check.py --timeout 900 -- test -p luna --test list_patterns --test meta_list_pattern_cost
+python3 -B development/check.py --timeout 900 -- test -p luna --test library_meta_objects --test meta_list_pattern_cost --test library_protocols
+python3 -B development/check.py --timeout 900 -- test -p luna --test meta_list_pattern_cost
+python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-list-patterns.fl --sysroot library
+python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-meta-list-patterns.fl --sysroot library
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+The initial all-test-target compilation exited 0 (`/tmp/luna-tools-kmnmx07k`).
+Final behavioral evidence: 85 luna unit tests (`/tmp/luna-tools-70gdmd4a`),
+42 list-pattern tests (`/tmp/luna-tools-cvqhuxv6`), 34 Object and 27 library
+protocol tests (`/tmp/luna-tools-_mc3ntlt`), and 3 index-cost/recovery tests
+(`/tmp/luna-tools-xo42k3lo`). The combined Object/library/cost run exited 101
+because the isolated cost fixture imported primitive aliases into its defining
+scope twice; moving that contribution into its own module fixed the fixture,
+and its separate final run exited 0. Earlier migration errors in old fixture
+modules/impls and the CLI test's command-variant expectation were also corrected.
+Both complete sysroot runs exited 0: `/tmp/luna-tools-x1lb16iw` (runtime, 3 tests)
+and `/tmp/luna-tools-lcm40qvb` (final comptime, 3 tests). Report directories contain
+result.json, stdout.log and stderr.log. No whole-workspace test claim.

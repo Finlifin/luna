@@ -94,6 +94,7 @@ pub(crate) fn compile_explicit_source_with_bindings(
             ord_protocol: selectors.ordering.map(str::to_owned),
             eq_protocol: selectors.equality.map(str::to_owned),
             list_pattern_protocol: selectors.list_pattern.map(str::to_owned),
+            comptime_list_pattern_protocol: selectors.comptime_list_pattern.map(str::to_owned),
             iterator_protocol: selectors.iterator.map(str::to_owned),
             into_iterator_protocol: selectors.into_iterator.map(str::to_owned),
             literal_into_protocol: selectors.literal_into.map(str::to_owned),

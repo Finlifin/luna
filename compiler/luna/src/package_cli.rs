@@ -223,6 +223,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Request, String
                 | "--meta-list-type"
                 | "--tuple-type"
                 | "--list-pattern-protocol"
+                | "--comptime-list-pattern-protocol"
                 | "--index-protocol"
                 | "--ord-protocol"
                 | "--eq-protocol"
@@ -736,6 +737,7 @@ impl Request {
                 meta_list: options.meta_list_type.as_deref(),
                 tuple: options.tuple_type.as_deref(),
                 list_pattern: options.list_pattern_protocol.as_deref(),
+                comptime_list_pattern: options.comptime_list_pattern_protocol.as_deref(),
                 iterator: options.iterator_protocol.as_deref(),
                 into_iterator: options.into_iterator_protocol.as_deref(),
                 index: options.index_protocol.as_deref(),

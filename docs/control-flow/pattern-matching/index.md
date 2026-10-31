@@ -853,21 +853,22 @@ fn same_pair(value: Repeated) -> bool {
 以及带 Drop 的仿射主体只清理一次。协议不自动授予主体或提取结果 Copy，
 也不代表尚未实现的 TuplePatternView、映射或字符串模式协议已经可用。
 
-默认协议还提供独立的 comptime 相：`ElementComptime` 与
-`list_pattern_view_get_len_comptime(self)`、
-`list_pattern_view_get_element_comptime(self, index: usize)` 都标有
-`comptime_phase` 属性。两个方法是 comptime fn，接收值主语；索引是普通值参数，
-不再额外标记 comptime。运行时相仍借用主语，索引使用显式 comptime 参数。
-模式所处阶段决定选择哪组方法和元素类型；quoted runtime code 使用运行时相。
+编译期列表模式使用独立的 `meta.ComptimeListPatternView`，它是
+`pure comptime trait`，通过 meta.prelude 默认导入。驱动使用
+`Protocols.comptime_list_pattern`／`Selectors.comptime_list_pattern`，sysroot
+配置键与 CLI 选项分别是 `comptime-list-pattern-protocol` 和
+`--comptime-list-pattern-protocol`。两阶段协议的方法同名，关联类型均为
+`Element`；阶段与结果域由所选 trait 身份决定，不靠方法名后缀区分。
+comptime 方法的 `self` 遵循值引用语义，索引是普通值参数；runtime 方法仍用
+指针观察主语，并显式接收 comptime 索引。quoted runtime code 选择 runtime 协议。
 
 ```flurry
 struct PairView { value: bool }
 
-comptime impl ListPatternView for PairView {
-    assoc Element: Type = bool;
-    assoc ElementComptime: Type = Integer;
-    comptime fn list_pattern_view_get_len_comptime(self) -> usize { 2 }
-    comptime fn list_pattern_view_get_element_comptime(self, index: usize) -> Integer {
+comptime impl ComptimeListPatternView for PairView {
+    assoc Element: Type = Integer;
+    comptime fn list_pattern_view_get_len(self) -> usize { 2 }
+    comptime fn list_pattern_view_get_element(self, index: usize) -> Integer {
         if self.value { 11 } else { 22 }
     }
 }
@@ -877,13 +878,13 @@ comptime fn inspect(value: PairView) -> bool {
 }
 ```
 
-这里 `Element` 是共同关联声明，comptime contribution 仍提供它；实际编译期提取
-返回的是 `ElementComptime`。只实现运行时相的类型不必提供 comptime 相成员，
-运行时 IIR 也不会为未提供的编译期成员物化签名。两相的实现分别选择，不能仅凭
-方法名带有 `_comptime` 就取得对应的 phase。
+同一个类型可分别实现两个协议并返回不同的元素类型。只实现一方不授予另一阶段
+的能力；显式绑定的 comptime 协议在模式使用前就会验证方法签名。没有单独绑定
+comptime 协议的驱动仍可使用已支持的单相或混合协议绑定；完整 sysroot 已使用
+两个独立身份，不再提供 `ElementComptime` 或 `_comptime` 后缀方法。
 
-显式绑定的单相协议仍使用前述方法名与已声明的阶段。完整 sysroot 为
-`meta.List<T>` 提供 comptime contribution，元素类型为 T，长度和索引通过
+完整 sysroot 在 meta 包内为 `meta.List<T>` 提供该协议的 comptime impl，
+元素类型为 T，长度和索引通过
 `meta.to_usize`／`meta.from_usize` 精确转换。负数或超出目标 usize 范围的
 转换会失败，不发生截断；没有目标依据时不能猜测 usize 宽度。该实现不会
 赋予 comptime 列表 runtime 表示，也不将两个整数类型视为同一类型。

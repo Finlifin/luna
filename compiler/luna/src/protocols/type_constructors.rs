@@ -17,6 +17,7 @@ pub struct Selectors<'a> {
     pub ordering: Option<&'a str>,
     pub equality: Option<&'a str>,
     pub list_pattern: Option<&'a str>,
+    pub comptime_list_pattern: Option<&'a str>,
     pub literal_into: Option<&'a str>,
     pub arithmetic: [Option<&'a str>; 7],
     pub splice: Option<&'a str>,
@@ -49,6 +50,7 @@ impl Selectors<'_> {
                 self.ordering,
                 self.equality,
                 self.list_pattern,
+                self.comptime_list_pattern,
                 self.literal_into,
                 self.splice,
                 self.meta_list,
@@ -223,6 +225,11 @@ pub(crate) fn resolve_source(
                 "ListPatternView".into(),
                 selectors.list_pattern,
                 &mut result.list_pattern,
+            ),
+            (
+                "ComptimeListPatternView".into(),
+                selectors.comptime_list_pattern,
+                &mut result.comptime_list_pattern,
             ),
             (
                 "LiteralInto".into(),
@@ -459,6 +466,7 @@ pub(crate) struct SysrootBindings {
     ordering: Option<String>,
     equality: Option<String>,
     list_pattern: Option<String>,
+    comptime_list_pattern: Option<String>,
     iterator: Option<String>,
     into_iterator: Option<String>,
     literal_into: Option<String>,
@@ -546,6 +554,7 @@ impl SysrootBindings {
                 "ord-protocol" => &mut result.ordering,
                 "eq-protocol" => &mut result.equality,
                 "list-pattern-protocol" => &mut result.list_pattern,
+                "comptime-list-pattern-protocol" => &mut result.comptime_list_pattern,
                 "iterator-protocol" => &mut result.iterator,
                 "into-iterator-protocol" => &mut result.into_iterator,
                 "literal-into-protocol" => &mut result.literal_into,
@@ -689,6 +698,13 @@ impl SysrootBindings {
                     .then_some(self.list_pattern.as_deref())
                     .flatten()
             }),
+            comptime_list_pattern: explicit.comptime_list_pattern.or_else(|| {
+                identities
+                    .comptime_list_pattern
+                    .is_none()
+                    .then_some(self.comptime_list_pattern.as_deref())
+                    .flatten()
+            }),
             iterator: explicit.iterator.or_else(|| {
                 identities
                     .iterator
@@ -777,6 +793,42 @@ mod literal_binding_tests {
             None
         );
         assert!(SysrootBindings::parse("version = 1\nlist-pattern-protocol = input.One\nlist-pattern-protocol = input.Two\n").is_err());
+    }
+    #[test]
+    fn comptime_list_pattern_binding_configuration_preserves_driver_authority() {
+        let config =
+            SysrootBindings::parse("version = 1\ncomptime-list-pattern-protocol = meta.ListView\n")
+                .unwrap();
+        assert_eq!(
+            config
+                .apply(Selectors::default(), &Protocols::default())
+                .comptime_list_pattern,
+            Some("meta.ListView")
+        );
+        let explicit = Selectors {
+            comptime_list_pattern: Some("input.View"),
+            ..Default::default()
+        };
+        assert_eq!(
+            config
+                .apply(explicit, &Protocols::default())
+                .comptime_list_pattern,
+            explicit.comptime_list_pattern
+        );
+        let bound = Protocols {
+            comptime_list_pattern: Some(nir::DeclarationId {
+                package: 1,
+                local: 7,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            config
+                .apply(Selectors::default(), &bound)
+                .comptime_list_pattern,
+            None
+        );
+        assert!(SysrootBindings::parse("version = 1\ncomptime-list-pattern-protocol = input.One\ncomptime-list-pattern-protocol = input.Two\n").is_err());
     }
     #[test]
     fn iterator_binding_configuration_preserves_driver_authority() {
@@ -1007,6 +1059,7 @@ mod stage_tests {
             ord_protocol: None,
             eq_protocol: None,
             list_pattern_protocol: None,
+            comptime_list_pattern_protocol: None,
             iterator_protocol: None,
             into_iterator_protocol: None,
             literal_into_protocol: None,

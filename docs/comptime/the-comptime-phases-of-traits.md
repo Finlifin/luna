@@ -214,7 +214,9 @@ test {
 
 输出 `7 42`。`read_code` 属于默认的 runtime phase，由 `impl ReadCode for DeviceTag` 提供；`static_code` 带有 `^comptime_phase` 属性，属于 comptime phase，由 `comptime impl ReadCode for DeviceTag` 提供。两份互补实现共享关联类型 `Code = u32`。若移除 `comptime impl ReadCode for DeviceTag`，编译时调用 `tag.static_code()` 会因缺少 comptime phase 实现而被拒绝，不会拿 runtime phase 顶替。
 
-需要为两相分别声明不同关联类型时，也可以在关联项上标注 `^comptime_phase`：
+需要为两相分别声明不同关联类型时，也可以在关联项上标注 `^comptime_phase`。
+下面是自定义混合协议示例；内置列表模式协议已分别采用 runtime trait 和
+`pure comptime trait ComptimeListPatternView`，两者使用同名方法与 `Element`：
 
 ~~~flurry
 use attrs.comptime_phase;

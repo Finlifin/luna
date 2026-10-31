@@ -8,10 +8,4 @@ pub trait ListPatternView {
     fn list_pattern_view_get_len(*self) -> usize;
     fn list_pattern_view_get_element(*self, comptime index: usize) -> Element;
 
-    ^attrs.comptime_phase
-    assoc ElementComptime: Type;
-    ^attrs.comptime_phase
-    comptime fn list_pattern_view_get_len_comptime(self) -> usize;
-    ^attrs.comptime_phase
-    comptime fn list_pattern_view_get_element_comptime(self, index: usize) -> ElementComptime;
 }

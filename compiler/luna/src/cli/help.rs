@@ -37,6 +37,7 @@ const BINDINGS: &str = "Compiler binding overrides:
   --copy-protocol <trait>, --drop-protocol <trait>
   --splice-protocol, --meta-list-type, --tuple-type, --index-protocol,
   --ord-protocol, --eq-protocol, --list-pattern-protocol,
+  --comptime-list-pattern-protocol,
   --literal-into-protocol, --iterator-protocol, --into-iterator-protocol,
   --add-protocol, --sub-protocol, --mul-protocol, --div-protocol,
   --rem-protocol, --neg-protocol, --not-protocol <source-selector>

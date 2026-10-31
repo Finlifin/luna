@@ -527,6 +527,7 @@ pub(crate) fn source_protocols(
         comptime_intrinsics: &options.comptime_intrinsics,
         host_intrinsics: &[],
         list_pattern: options.list_pattern_protocol.as_deref(),
+        comptime_list_pattern: options.comptime_list_pattern_protocol.as_deref(),
         iterator: options.iterator_protocol.as_deref(),
         into_iterator: options.into_iterator_protocol.as_deref(),
         copy: None,

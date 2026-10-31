@@ -8,6 +8,7 @@ concat!(
     "mod bindings {\n", include_str!("../../../../library/meta/bindings.fl"), "\n}\n",
     "mod text_impl {mod bindings {\n", include_str!("../../../../library/meta/text_impl/bindings.fl"), "\n}}\n",
     "mod data {\n",
+    "mod patterns {\n", include_str!("../../../../library/meta/data/patterns.fl"), "\n}\n",
     "mod integer {\n", include_str!("../../../../library/meta/data/integer.fl"), "\n}\n",
     "mod object {\n", include_str!("../../../../library/meta/data/object.fl"), "\n}\n",
     "mod list {\n", include_str!("../../../../library/meta/data/list.fl"), "\n}\n",

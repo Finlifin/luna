@@ -24,9 +24,17 @@ fn dual_phase_list_protocol_rejects_malformed_staged_contracts() {
     let source = format!(
         "{} {}",
         include_str!("../../../library/builtin/primitives.fl"),
-        support::with_attrs(include_str!(
-            "../../../library/builtin/protocols/patterns.fl"
-        ))
+        support::with_attrs("trait ListPatternView {
+            assoc Element: Type;
+            fn list_pattern_view_get_len(*self) -> usize;
+            fn list_pattern_view_get_element(*self, comptime index: usize) -> Element;
+            ^attrs.comptime_phase
+            assoc ElementComptime: Type;
+            ^attrs.comptime_phase
+            comptime fn list_pattern_view_get_len_comptime(self) -> usize;
+            ^attrs.comptime_phase
+            comptime fn list_pattern_view_get_element_comptime(self, index: usize) -> ElementComptime;
+        }")
     );
 
     for (from, to) in [
@@ -1627,6 +1635,55 @@ fn list_view_normal_form_tuple_composes_with_nominal_elements() {
     let error = run(&source.replace("impl Duplicate for Tuple<Item,bool> {}", "")).unwrap_err();
     assert!(
         error.contains("computed pattern value needs independent resource"),
+        "{error}"
+    );
+}
+
+#[test]
+fn separately_bound_list_views_select_the_current_execution_phase() {
+    let source = format!(
+        "{PROTOCOL}
+        pure comptime trait CompileView {{
+            assoc Element: Type;
+            comptime fn list_pattern_view_get_len(self)->Size;
+            comptime fn list_pattern_view_get_element(self,index:Size)->Element;
+        }}
+        comptime impl CompileView for Repeated {{
+            assoc Element:Type=bool;
+            comptime fn list_pattern_view_get_len(self)->Size {{self.length}}
+            comptime fn list_pattern_view_get_element(self,index:Size)->bool {{not self.value}}
+        }}
+        comptime fn staged()->bool {{
+            let xs=Repeated {{length:1,value:true}};
+            xs match {{[false]=>true,_=>false}}
+        }}
+        const checked=staged();
+        fn runtime()->bool {{
+            let xs=Repeated {{length:1,value:true}};
+            xs match {{[true]=>true,_=>false}}
+        }}"
+    );
+    let selectors = luna::protocols::type_constructors::Selectors {
+        list_pattern: Some("input.ListView"),
+        comptime_list_pattern: Some("input.CompileView"),
+        ..Default::default()
+    };
+    let package = compile_with_source_bindings(&source, &Default::default(), selectors).unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "staged", 200_000).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        luna::execution::interpret(&package, "runtime", 200_000).unwrap(),
+        Value::Bool(true)
+    );
+    let bad = luna::protocols::type_constructors::Selectors {
+        comptime_list_pattern: Some("input.ListView"),
+        ..selectors
+    };
+    let error = compile_with_source_bindings(PROTOCOL, &Default::default(), bad).unwrap_err();
+    assert!(
+        error.contains("comptime list pattern protocol requires comptime methods"),
         "{error}"
     );
 }

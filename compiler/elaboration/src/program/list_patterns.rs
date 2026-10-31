@@ -16,13 +16,20 @@ impl Checker<'_, '_> {
                 "list rest patterns require a slicing protocol",
             ));
         }
-        let protocol = self.protocols.list_pattern.ok_or_else(|| {
+        let comptime = !self.runtime_value_context() && !self.in_code_body;
+        let selected = if comptime {
+            self.protocols
+                .comptime_list_pattern
+                .or(self.protocols.list_pattern)
+        } else {
+            self.protocols.list_pattern
+        };
+        let protocol = selected.ok_or_else(|| {
             error(
                 pattern.span,
                 "list patterns require a bound ListPatternView protocol",
             )
         })?;
-        let comptime = !self.runtime_value_context() && !self.in_code_body;
         let contract = crate::list_patterns::for_phase(&self.checked_traits, protocol, comptime)
             .map_err(|message| error(pattern.span, message))?;
         if contract.comptime != comptime {

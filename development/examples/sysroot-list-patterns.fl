@@ -10,11 +10,10 @@ impl ListPatternView for Repeated {
 }
 
 {- The same subject exposes Integer elements only in its comptime phase. -}
-comptime impl ListPatternView for Repeated {
-    assoc Element: Type = bool;
-    assoc ElementComptime: Type = Integer;
-    comptime fn list_pattern_view_get_len_comptime(self) -> usize { self.length }
-    comptime fn list_pattern_view_get_element_comptime(self, index: usize) -> Integer {
+comptime impl ComptimeListPatternView for Repeated {
+    assoc Element: Type = Integer;
+    comptime fn list_pattern_view_get_len(self) -> usize { self.length }
+    comptime fn list_pattern_view_get_element(self, index: usize) -> Integer {
         if self.value { 11 } else { 22 }
     }
 }

@@ -247,6 +247,7 @@ pub struct Protocols {
     pub ordering: Option<DeclarationId>,
     pub equality: Option<DeclarationId>,
     pub list_pattern: Option<DeclarationId>,
+    pub comptime_list_pattern: Option<DeclarationId>,
     pub literal_into: Option<DeclarationId>,
     pub arithmetic: [Option<DeclarationId>; 7],
     pub splice: Option<DeclarationId>,
@@ -927,6 +928,16 @@ fn elaborate_candidate<'a, 'h>(
     if let Some(id) = checker.protocols.list_pattern {
         crate::list_patterns::protocol(&checker.checked_traits, id)
             .map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
+    }
+    if let Some(id) = checker.protocols.comptime_list_pattern {
+        let contract = crate::list_patterns::protocol(&checker.checked_traits, id)
+            .map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
+        if !contract.comptime {
+            return Err(error(
+                rustc_span::DUMMY_SP,
+                "comptime list pattern protocol requires comptime methods",
+            ));
+        }
     }
     if let Some(id) = checker.protocols.literal_into {
         crate::literal_conversion::protocol(&checker.checked_traits, id)

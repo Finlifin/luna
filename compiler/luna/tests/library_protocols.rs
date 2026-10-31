@@ -20,13 +20,17 @@ fn repository_list_pattern_protocol_retains_observation_write_checks() {
         "        self.value.* = true; self.value.*",
     );
     let source = format!(
-        "{PRIMITIVES} mod resources {{ {RESOURCES} }} use resources.*;
-        mod patterns {{ {} }} use patterns.*;
+        "{PRIMITIVES} mod builtin {{ {PRIMITIVES} }} mod resources {{ {RESOURCES} }} use resources.*;
+        mod patterns {{ {} {} }} use patterns.*;
         {fixture}
         fn run()->bool {{exact(Repeated {{length:2,value:false}})}}",
         support::with_attrs(include_str!(
             "../../../library/builtin/protocols/patterns.fl"
         )),
+        include_str!("../../../library/meta/data/patterns.fl")
+            .split("comptime impl ComptimeListPatternView")
+            .next()
+            .unwrap(),
     );
     let target = luna::host::Toolchain::default()
         .target_layout()
@@ -40,6 +44,7 @@ fn repository_list_pattern_protocol_retains_observation_write_checks() {
             copy: Some("input.resources.Copy"),
             drop: Some("input.resources.Drop"),
             list_pattern: Some("input.patterns.ListPatternView"),
+            comptime_list_pattern: Some("input.patterns.ComptimeListPatternView"),
             ..Default::default()
         },
         Some(target),
