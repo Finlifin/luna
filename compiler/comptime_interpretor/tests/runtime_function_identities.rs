@@ -1581,7 +1581,9 @@ fn code_session_reuses_code_but_not_values_or_world_authority() {
         arguments: vec![Term::Primitive(Primitive::Bool)],
     };
     for attempt in 0..3 {
-        let mut vm = Interpreter::for_comptime(&source, Budget::default()).unwrap();
+        let mut vm =
+            Interpreter::for_comptime_in_session(&source, &mut session, &mut Budget::default())
+                .unwrap();
         let value = vm
             .with_code_session(&mut session, |vm| vm.invoke(id(1), vec![]))
             .unwrap();
@@ -1604,7 +1606,9 @@ fn code_session_reuses_code_but_not_values_or_world_authority() {
         Value::Bool(true)
     );
     assert!(vm.bytecode_compilations() > 0);
-    let mut vm = Interpreter::for_comptime(&source, Budget::default()).unwrap();
+    let mut vm =
+        Interpreter::for_comptime_in_session(&source, &mut session, &mut Budget::default())
+            .unwrap();
     assert_eq!(
         vm.with_code_session(&mut session, |vm| vm.invoke(id(1), vec![]))
             .unwrap(),
@@ -1631,4 +1635,26 @@ fn code_session_returns_completed_code_when_host_operation_unwinds() {
     vm.with_code_session(&mut session, |vm| vm.invoke(id(1), vec![]))
         .unwrap();
     assert_eq!(vm.bytecode_compilations(), 0);
+}
+
+#[test]
+fn source_session_constructor_rejects_duplicate_ids_in_another_snapshot() {
+    use comptime_interpretor::CodeSession;
+    use std::sync::Arc;
+    let source = Arc::new(package());
+    let mut session = CodeSession::new(source.clone());
+    Interpreter::for_comptime_in_session(&source, &mut session, &mut Budget::default()).unwrap();
+    let mut invalid = source.as_ref().clone();
+    invalid.functions.push(invalid.functions[0].clone());
+    let mut budget = Budget::default();
+    let error = Interpreter::for_comptime_in_session(&invalid, &mut session, &mut budget)
+        .err()
+        .expect("duplicate declarations must not reuse a prior index");
+    // Phase validation rejects duplicate declarations before index construction.
+    assert_eq!(error.kind, ErrorKind::PhaseMismatch);
+    assert_eq!(budget.steps, 0);
+    let mut vm =
+        Interpreter::for_comptime_in_session(&source, &mut session, &mut Budget::default())
+            .unwrap();
+    assert!(vm.invoke(id(1), vec![]).is_ok());
 }

@@ -742,6 +742,7 @@ macro_rules! value {
 }
 
 mod code_session;
+mod declaration_index;
 pub use code_session::CodeSession;
 
 mod invocation_budget;
@@ -828,7 +829,7 @@ pub struct Interpreter<'a> {
     associated_initializers: HashMap<(InterfaceInstance, Term, DeclarationId), &'a Expr>,
     active_associated_initializers: HashSet<(InterfaceInstance, Term, DeclarationId)>,
     instances: HashMap<(DeclarationId, Vec<Term>), Arc<Closure>>,
-    functions: BTreeMap<DeclarationId, &'a nir::program::Function>,
+    functions: declaration_index::Functions<'a>,
     runtime_function_identities: BTreeMap<DeclarationId, &'a nir::program::RuntimeFunctionIdentity>,
     retained_callable_signatures: HashMap<(DeclarationId, &'a [Term]), &'a Term>,
     normal_forms: BTreeMap<DeclarationId, &'a nir::normal_forms::Head>,
@@ -873,20 +874,19 @@ impl<'a> Interpreter<'a> {
     fn with_assumptions(
         package: &'a Package,
         assumptions: &[nir::program::TraitRequirement],
+        budget: Budget,
+    ) -> Result<Self, Error> {
+        Self::with_assumptions_and_index(package, assumptions, budget, None)
+    }
+
+    fn with_assumptions_and_index(
+        package: &'a Package,
+        assumptions: &[nir::program::TraitRequirement],
         mut budget: Budget,
+        positions: Option<Arc<BTreeMap<DeclarationId, usize>>>,
     ) -> Result<Self, Error> {
         invocation_budget::charge_world_tables(package, &mut budget)?;
-        // Build this once before checking body-free runtime identities. Looking
-        // through the source Vec for each identity makes world setup quadratic.
-        let mut functions = BTreeMap::new();
-        for function in &package.functions {
-            if functions.insert(function.declaration, function).is_some() {
-                return Err(Error {
-                    kind: ErrorKind::InvalidCallPlan,
-                    source: None,
-                });
-            }
-        }
+        let functions = declaration_index::Functions::new(&package.functions, positions)?;
         let mut runtime_function_identities = BTreeMap::new();
         for identity in &package.runtime_function_identities {
             if !matches!(
@@ -1773,6 +1773,15 @@ impl<'a> Interpreter<'a> {
         assumptions: &[nir::program::TraitRequirement],
         budget: Budget,
     ) -> Result<Self, Error> {
+        Self::for_comptime_with_index(package, assumptions, budget, None)
+    }
+
+    fn for_comptime_with_index(
+        package: &'a Package,
+        assumptions: &[nir::program::TraitRequirement],
+        budget: Budget,
+        positions: Option<Arc<BTreeMap<DeclarationId, usize>>>,
+    ) -> Result<Self, Error> {
         // Reject an undersized world allowance before phase validation walks
         // declarations. Actual charging occurs once in with_assumptions.
         let mut phase_allowance = budget;
@@ -1781,7 +1790,8 @@ impl<'a> Interpreter<'a> {
             kind: ErrorKind::PhaseMismatch,
             source: Some(error.source),
         })?;
-        let mut interpreter = Self::with_assumptions(package, assumptions, budget)?;
+        let mut interpreter =
+            Self::with_assumptions_and_index(package, assumptions, budget, positions)?;
         interpreter.comptime_only = true;
         Ok(interpreter)
     }
@@ -2201,7 +2211,7 @@ impl<'a> Interpreter<'a> {
                 .ok_or_else(|| self.failure(ErrorKind::StepsExhausted, None))?;
         }
 
-        let definition = *self
+        let definition = self
             .functions
             .get(&function)
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;

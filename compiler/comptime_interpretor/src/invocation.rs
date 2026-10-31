@@ -467,7 +467,6 @@ impl<'a> Interpreter<'a> {
         let definition = self
             .functions
             .get(&declaration)
-            .copied()
             .filter(|definition| definition.phase == nir::program::FunctionPhase::Comptime)
             .ok_or_else(|| self.failure(ErrorKind::PhaseMismatch, None))?;
         let mut fuel = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
@@ -652,7 +651,7 @@ impl<'a> Interpreter<'a> {
     ) -> Result<InvocationFrame<'a>, Error> {
         let (parameters, mut environment, body, signature) = match &function {
             Value::Function(id) => {
-                let definition = *self
+                let definition = self
                     .functions
                     .get(id)
                     .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;
@@ -803,7 +802,9 @@ impl<'a> Interpreter<'a> {
             Body::Owned(body)
         } else {
             match &function {
-                Value::Function(id) => Body::Package(&self.functions[id].body),
+                Value::Function(id) => {
+                    Body::Package(&self.functions.get(id).expect("admitted function").body)
+                }
                 Value::Closure(closure) => Body::Owned(closure.body.clone()),
                 _ => unreachable!("callable admitted before binding"),
             }

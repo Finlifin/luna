@@ -47,7 +47,8 @@ The checks passed: 38 runtime identity tests and 18 driver memory tests
 
 ## Remaining work
 
-Declaration tables are still rebuilt for each interpreter. This is not yet a
+Most declaration tables are still rebuilt; the source function index is shared.
+This is not yet a
 shared VM world, persistent disk cache, or a suspended elaboration session.
 Input-dependent generated packages and IIR instance graphs need their own
 explicit immutable lifetime and identity before their caches can be retained.
@@ -128,3 +129,40 @@ driver memory (20), scoped callables (10), and declaration clause-input tests.
 Evidence: `/tmp/luna-tools-g_87w65z/result.json`,
 `/tmp/luna-tools-grpz6w2a/result.json`, and
 `/tmp/luna-tools-v9f_3oxd/result.json`. Formatting and diff checks passed.
+
+## Shared source declaration index
+
+`Interpreter::for_comptime_in_session` reuses the source snapshot's function
+index while constructing fresh VM state. The index owns declaration IDs and
+positions only. Each VM binds those positions to its own immutable Package
+slice and returns references with that slice's lifetime. No self-referential
+VM/package allocation or unsafe lifetime extension is needed.
+
+The session holds the Package allocation alive and shares the position map
+through `Arc`. Only the exact source allocation can reuse it. Different source
+snapshots use the ordinary constructor and recheck duplicate declarations;
+constructor failure never replaces the session's existing index. The luna
+invocation driver uses this constructor for its unchanged source snapshot.
+
+Phase, formation and trait checks still run per construction, and their existing
+world-work reservation remains in force. This stage removes repeated function
+index allocation/building; it does not claim to eliminate declaration-world
+construction. Trait, layout, effect and runtime-identity tables are still local.
+IIR instance lookup retains its separate graph authority.
+
+Validation commands:
+
+```sh
+python3 -B development/check.py --timeout 900 -- check -p luna
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib code_session
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor -p luna --test runtime_function_identities --test instance_budget --test comptime_memory --test comptime_iir_bytecode
+```
+
+The tests inspect actual index allocation sharing and fresh event state, retain
+the index after exhaustion, reject duplicate IDs in another snapshot, and run
+both source and concrete IIR invocation paths.
+
+The source-index stage passed `check -p luna`, the code-session unit check and
+all four listed integration groups. Evidence:
+`/tmp/luna-tools-eqs77556/result.json`, `/tmp/luna-tools-ukcivhz2/result.json`,
+and `/tmp/luna-tools-5pk4hmgb/result.json`. Formatting and diff checks passed.

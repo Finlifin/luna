@@ -17,7 +17,6 @@ impl Interpreter<'_> {
                 let function = self
                     .functions
                     .get(factory)
-                    .copied()
                     .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
                 if function.phase != nir::program::FunctionPhase::Comptime {
                     return Err(self.failure(ErrorKind::Type, None));
@@ -106,7 +105,6 @@ impl Interpreter<'_> {
                         let function = self
                             .functions
                             .get(declaration)
-                            .copied()
                             .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
                         if function.phase == nir::program::FunctionPhase::NormalForm
                             || (function.phase == nir::program::FunctionPhase::Comptime)

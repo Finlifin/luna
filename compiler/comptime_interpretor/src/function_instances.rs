@@ -80,7 +80,7 @@ impl Interpreter<'_> {
                 arguments: arguments.to_vec(),
             });
         }
-        let definition = *self
+        let definition = self
             .functions
             .get(&declaration)
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source)))?;
@@ -118,7 +118,7 @@ impl Interpreter<'_> {
             })?;
         }
         if self.comptime_only {
-            let definition = *self
+            let definition = self
                 .functions
                 .get(&declaration)
                 .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source)))?;
@@ -158,7 +158,7 @@ impl Interpreter<'_> {
         let instance = if let Some(instance) = self.instances.get(&key).cloned().or(shared) {
             instance
         } else {
-            let definition = *self
+            let definition = self
                 .functions
                 .get(&declaration)
                 .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source)))?;

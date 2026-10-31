@@ -90,7 +90,6 @@ impl Interpreter<'_> {
         let definition = self
             .functions
             .get(&declaration)
-            .copied()
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source)))?;
         self.admit_function_inputs(&definition.type_parameters, arguments, source)?;
         for requirement in &definition.requirements {
@@ -240,7 +239,6 @@ impl Interpreter<'_> {
         let definition = self
             .functions
             .get(&declaration)
-            .copied()
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(construction)))?;
         let binders = self.input_binders(&definition.type_parameters);
         self.charge_copy_work(Some(expression.source), |fuel| {

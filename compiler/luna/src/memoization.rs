@@ -583,7 +583,9 @@ fn evaluate(
     let mut vm_budget = Budget { steps, depth: 128 };
     let prepared_vm = match &graph {
         Some(graph) => Interpreter::from_iir_for_comptime_metered(graph, &mut vm_budget),
-        None => Interpreter::for_comptime_in_budget(prepared.as_ref(), &[], &mut vm_budget),
+        None => {
+            Interpreter::for_comptime_in_session(prepared.as_ref(), code_session, &mut vm_budget)
+        }
     };
     let copy_failure = std::cell::RefCell::new(None::<String>);
     let pointer_copy = |ty: &Term, remaining: &mut u64| {

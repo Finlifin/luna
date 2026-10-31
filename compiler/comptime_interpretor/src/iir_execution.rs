@@ -201,7 +201,7 @@ impl<'a> Interpreter<'a> {
             associated_initializers: HashMap::new(),
             active_associated_initializers: HashSet::new(),
             instances: HashMap::new(),
-            functions: BTreeMap::new(),
+            functions: Default::default(),
             normal_forms: graph
                 .normal_forms
                 .iter()
@@ -275,7 +275,7 @@ impl<'a> Interpreter<'a> {
                 })
                 .map(|f| &f.function)
         } else {
-            self.functions.get(&id).copied()
+            self.functions.get(&id)
         }
     }
 
