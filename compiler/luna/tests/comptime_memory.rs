@@ -860,3 +860,28 @@ fn memoization_driver_reuses_code_without_caching_non_type_results() {
     assert!(costs[1] < costs[0], "cold and warm costs: {costs:?}");
     assert_eq!(costs[1], costs[2]);
 }
+
+#[test]
+fn memoization_driver_retains_generic_preparation_without_result_memoization() {
+    let package = compile("pure comptime fn inspect() -> bool where T {true}");
+    let mut invocation = luna::memoization::Invocation::prepare(
+        &package,
+        &intrinsic::LangItems::new(),
+        id(&package, "inspect"),
+        vec![nir::Term::Primitive(nir::Primitive::Bool)],
+        4,
+        Default::default(),
+    )
+    .unwrap();
+    let mut costs = Vec::new();
+    for _ in 0..3 {
+        let mut context = comptime_executor::Context::new(100_000);
+        let result = invocation.invoke(vec![], &mut context).unwrap();
+        assert_eq!(*result.value, Value::Bool(true));
+        assert!(!result.reused);
+        assert_eq!(invocation.cached_results(), 0);
+        costs.push(100_000 - context.remaining());
+    }
+    assert!(costs[1] < costs[0], "generic preparation costs: {costs:?}");
+    assert_eq!(costs[1], costs[2]);
+}

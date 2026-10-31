@@ -362,3 +362,111 @@ fn zero_budget_cannot_create_even_an_empty_scoped_world() {
     assert_eq!(budget.steps, 0);
     assert_eq!(budget.depth, 42);
 }
+
+#[test]
+fn code_sessions_retain_generic_code_and_recheck_current_contracts() {
+    use comptime_interpretor::{CodeSession, ContractOutcome};
+    use nir::program::{TraitRequirement, TypePredicate};
+    use std::sync::Arc;
+    let mut source = package(expression(
+        Term::Primitive(P::Type),
+        K::TypeValue(Term::Rigid {
+            declaration: id(2),
+            sort: Sort::Type,
+        }),
+    ));
+    source.functions[0].signature = Term::Function {
+        parameters: vec![],
+        result: Box::new(Term::Primitive(P::Type)),
+    };
+    source.functions[0]
+        .requirements
+        .push(TypePredicate::Trait(TraitRequirement {
+            interface: id(90),
+            interface_arguments: vec![],
+            subject: Term::Primitive(P::Bool),
+        }));
+    let source = Arc::new(source);
+    let mut session = CodeSession::new(source.clone());
+    let allow = |_: &TypePredicate| ContractOutcome::Satisfied;
+    for (input, fresh) in [
+        (P::Bool, true),
+        (P::Bool, false),
+        (P::U8, true),
+        (P::Bool, false),
+    ] {
+        let mut vm = Interpreter::for_comptime(&source, Budget::default())
+            .unwrap()
+            .with_type_solver(&allow);
+        let result = vm
+            .with_code_session(&mut session, |vm| {
+                vm.invoke_instantiated(id(1), vec![Term::Primitive(input)], vec![])
+            })
+            .unwrap();
+        assert_eq!(result, Value::Type(Term::Primitive(input)));
+        assert_eq!(vm.bytecode_compilations() > 0, fresh);
+        assert_eq!(
+            vm.events()
+                .iter()
+                .any(|event| matches!(event, Event::InstantiateFunction { .. })),
+            fresh
+        );
+    }
+    for (outcome, expected) in [
+        (ContractOutcome::Rejected, ErrorKind::TypeContractRejected),
+        (ContractOutcome::Unknown, ErrorKind::TypeContractUnresolved),
+    ] {
+        let deny = |_: &TypePredicate| outcome;
+        let mut vm = Interpreter::for_comptime(&source, Budget::default())
+            .unwrap()
+            .with_type_solver(&deny);
+        let error = vm
+            .with_code_session(&mut session, |vm| {
+                vm.invoke_instantiated(id(1), vec![Term::Primitive(P::Bool)], vec![])
+            })
+            .unwrap_err();
+        assert_eq!(error.kind, expected);
+        assert_eq!(vm.bytecode_invocations(), 0);
+    }
+    let mut vm = Interpreter::for_comptime(&source, Budget::default())
+        .unwrap()
+        .with_type_solver(&allow);
+    vm.with_code_session(&mut session, |vm| {
+        vm.invoke_instantiated(id(1), vec![Term::Primitive(P::Bool)], vec![])
+    })
+    .unwrap();
+    assert_eq!(vm.bytecode_compilations(), 0);
+}
+
+#[test]
+fn generic_code_session_eviction_recompiles_without_changing_results() {
+    use comptime_interpretor::CodeSession;
+    use std::sync::Arc;
+    let source = Arc::new(package(expression(
+        Term::Primitive(P::Bool),
+        K::Literal(Literal::Bool(true)),
+    )));
+    let mut session = CodeSession::new(source.clone());
+    for count in 0..70 {
+        let mut vm = Interpreter::for_comptime(&source, Budget::default()).unwrap();
+        let input = Term::Tuple(vec![Term::Primitive(P::Bool); count]);
+        assert_eq!(
+            vm.with_code_session(&mut session, |vm| {
+                vm.invoke_instantiated(id(1), vec![input], vec![])
+            })
+            .unwrap(),
+            Value::Bool(true)
+        );
+    }
+    for fresh in [true, false] {
+        let mut vm = Interpreter::for_comptime(&source, Budget::default()).unwrap();
+        assert_eq!(
+            vm.with_code_session(&mut session, |vm| {
+                vm.invoke_instantiated(id(1), vec![Term::Tuple(vec![])], vec![])
+            })
+            .unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(vm.bytecode_compilations() > 0, fresh);
+    }
+}
