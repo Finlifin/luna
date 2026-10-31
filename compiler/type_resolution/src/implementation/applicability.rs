@@ -722,9 +722,16 @@ impl ImplementationHead {
         if allowance == 0 {
             return Err(TypeAssessment::Pending("candidate budget exhausted".into()));
         }
-        let mut budget = Budget {
+        let budget = Budget {
             steps: allowance,
             max_depth: budget.max_depth,
+        };
+        // Eligibility, refutation and inference share the existing head slots.
+        // Spending an eligibility slot must not erase the slots reserved for
+        // matching by multiplying its leftover (possibly zero) allowance.
+        let mut head_budget = Budget {
+            steps: allowance.saturating_mul(self.interface_arguments.len().saturating_add(6)),
+            ..budget
         };
         // Known outer structure can refute a candidate before all of its
         // parameters are inferred: Tuple versus a known non-tuple constructor, or an explicit error
@@ -763,7 +770,7 @@ impl ImplementationHead {
         {
             if let Outcome::Entailed(proof) = context.prove_metered(
                 Formula::equal(self.subject.clone(), subject.clone()).negate(),
-                &mut budget,
+                &mut head_budget,
             ) {
                 return Err(TypeAssessment::Excluded(proof));
             }
@@ -773,14 +780,18 @@ impl ImplementationHead {
                 (subject.clone(), None)
             }
             Term::Rigid { .. } | Term::NormalForm { .. } | Term::AssociatedType { .. } => {
-                match context
-                    .structural_view_with_heads_metered(subject, budget, |head| {
+                let view_budget = Budget {
+                    steps: budget.steps.min(head_budget.steps),
+                    ..budget
+                };
+                let (view, spent) =
+                    context.structural_view_with_heads_metered(subject, view_budget, |head| {
                         context.is_tuple_head(head) || context.is_list_inference_head(head)
-                    })
-                    .0
-                {
+                    });
+                head_budget.steps -= spent;
+                match view {
                     Ok(Some((shape, proof))) => (shape, Some(proof)),
-                    _ => match prove_eligible_alternatives(context, subject, &mut budget) {
+                    _ => match prove_eligible_alternatives(context, subject, &mut head_budget) {
                         Some(proof) => (subject.clone(), Some(proof)),
                         None => {
                             return Err(TypeAssessment::Pending(
@@ -813,7 +824,7 @@ impl ImplementationHead {
         {
             if let Outcome::Entailed(proof) = context.prove_metered(
                 Formula::equal(self.subject.clone(), subject.clone()).negate(),
-                &mut budget,
+                &mut head_budget,
             ) {
                 return Err(TypeAssessment::Excluded(proof));
             }
@@ -1125,16 +1136,9 @@ impl ImplementationHead {
             };
             relations.push((template, I::Stable(actual.clone())));
         }
-        // Pool input observation, alias resolution, matching, dependency scanning
-        // and freezing with one proof slot per relation. These slots remain
-        // within the existing head partition and do not enlarge its total.
-        let mut inference_budget = Budget {
-            steps: budget
-                .steps
-                .saturating_mul(relations.len().saturating_add(5))
-                .min(remaining),
-            ..budget
-        };
+        // Earlier head queries spent only this partition. Carry its actual
+        // remainder into inference; requirement and domain slots stay reserved.
+        let mut inference_budget = head_budget;
         let (mut candidate, ids) = match root.match_many_metered(&relations, &mut inference_budget)
         {
             Ok(candidate) => candidate,

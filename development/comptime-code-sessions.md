@@ -426,3 +426,12 @@ Validation (cwd `/home/fin/luna`):
 - `python3 -B development/check.py --timeout 900 -- test -p program_verification --lib`: 101 passed; `/tmp/luna-tools-jc692kcc/result.json`.
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test builder_invocations public_struct_builder_copies_reflected_fields_through_mutating_methods`: passed; `/tmp/luna-tools-7f62ou_f/result.json`.
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test builder_invocations`: 78 passed, one failed; `/tmp/luna-tools-d6q9gdc2/result.json`. The remaining complete-sysroot case fails during parent-interface establishment with `head inference: BudgetExhausted` (package 1, declarations 480/490), before builder invocation. It is not a successful full-sysroot validation.
+
+The subsequent candidate-budget repair resolves the remaining complete-sysroot
+case without raising its budget. Eligibility/refutation and matching now share
+an explicitly metered head partition; spending an early slot no longer zeroes
+all later reserved slots. The complete-sysroot contextual-data builder test
+passed in `/tmp/luna-tools-hwaapn8f/result.json`; see `development/ptc.md` for
+commands and the independent candidate proof regressions. The entire builder
+group was not rerun after this repair; its other 78 cases passed in the preceding
+run, not in this latest targeted check.

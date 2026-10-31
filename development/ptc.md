@@ -67,3 +67,15 @@ first-UIP 子句；传播得到的汇合点不会等到归约为原决策文字�
 的筛选关闭递归别名搜索，以免别名环重复展开。进入新的局部 binder 后暂不使用区域
 别名事实，避免把同索引的局部变量误认作外层绑定。这仍不是完整的 existential Type
 模型解提取；binder 下的上下文重定位和嵌套未决计算还需要后续求解接口。
+
+实现候选的 eligibility、结构排除和输入合一现在共享原有 head 预算分区，
+按实际消耗将余额传给后续阶段。此前先消耗单个查询额度，再乘以关系数分配
+合一预算，可能把本已预留的额度全部变成零。结构视图搜索也显式扣除返回的
+实际消耗，不能丢弃计量结果。候选总上限、域检查与 requires 的预留分区不变。
+`f16 | bf16` 符号主体排除错误结果候选的回归使用 4600 steps；证明需在原上下文
+独立回放，去掉前提则拒绝。低预算失败不污染后续候选查询。
+
+本阶段验证（工作目录 `/home/fin/luna`）：
+
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution`：全部通过，`/tmp/luna-tools-8olfmz64/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test builder_invocations contextual_data_consumer_publishes_structs_through_the_complete_sysroot`：通过，`/tmp/luna-tools-hwaapn8f/result.json`。完整库用例约 42 秒，尚未进行端到端性能优化。

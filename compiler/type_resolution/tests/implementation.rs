@@ -3652,3 +3652,45 @@ fn aggregate_candidate_keys_preserve_unknown_type_relations_and_prune_values() {
         );
     }
 }
+
+#[test]
+fn symbolic_scalar_union_excludes_error_heads_within_the_candidate_budget() {
+    use type_resolution::{
+        implementation::TypeAssessment,
+        ptc::{Context, Formula},
+    };
+    let subject = var(3);
+    let mut context = Context::default();
+    context.assume(Formula::Or(vec![
+        Formula::equal(subject.clone(), ty(P::F16)),
+        Formula::equal(subject.clone(), ty(P::Bf16)),
+    ]));
+    let mut candidate = generic(
+        200,
+        Term::error_result(vec![var(1)], var(2)),
+        vec![id(1), id(2)],
+    );
+    candidate.requirements = vec![nir::program::TypePredicate::Bool(true); 2];
+    let budget = Budget {
+        steps: 4600,
+        ..Budget::default()
+    };
+    let outcome = candidate.assess_types(&subject, &[], &context, budget);
+    let TypeAssessment::Excluded(proof) = outcome else {
+        panic!("expected exclusion: {outcome:?}")
+    };
+    context.verify_proof(&proof, Budget::default()).unwrap();
+    assert!(
+        Context::default()
+            .verify_proof(&proof, Budget::default())
+            .is_err()
+    );
+    assert!(matches!(
+        candidate.assess_types(&subject, &[], &context, Budget { steps: 1, ..budget }),
+        TypeAssessment::Pending(_)
+    ));
+    assert!(matches!(
+        candidate.assess_types(&subject, &[], &context, budget),
+        TypeAssessment::Excluded(_)
+    ));
+}
