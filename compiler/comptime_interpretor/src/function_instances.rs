@@ -9,6 +9,9 @@ impl Interpreter<'_> {
         output: &Term,
         source: SourceRange,
     ) -> Result<Value, Error> {
+        if self.graph.is_some() {
+            return self.iir_function_value(declaration, arguments, output, source);
+        }
         if let Some(identity) = self.runtime_function_identities.get(&declaration).copied() {
             self.admit_function_inputs(&identity.type_parameters, arguments, source)?;
             let binders = self.input_binders(&identity.type_parameters);

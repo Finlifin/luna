@@ -84,6 +84,16 @@ impl<'a> Interpreter<'a> {
         Self::from_iir_for_comptime_metered(graph, &mut budget)
     }
 
+    /// Reference execution for differential checks of concrete comptime graphs.
+    pub fn from_iir_for_comptime_tree(
+        graph: &'a iir::Package,
+        budget: Budget,
+    ) -> Result<Self, Error> {
+        let mut interpreter = Self::from_iir_for_comptime(graph, budget)?;
+        interpreter.bytecode_enabled = false;
+        Ok(interpreter)
+    }
+
     /// Return preparation work even if graph validation rejects the input.
     pub fn from_iir_for_comptime_metered(
         graph: &'a iir::Package,
@@ -323,108 +333,126 @@ impl<'a> Interpreter<'a> {
     }
 
     pub(super) fn eval_iir_callable(&mut self, expr: &Expr) -> Result<Flow, Error> {
-        self.charge_copy_work(Some(expr.source), |fuel| {
-            match &expr.kind {
-                K::FunctionInstance { arguments, .. } => {
-                    for term in arguments {
-                        nir::copy_budget::charge_type_substitution(term, &[], &[], fuel)?;
-                    }
-                }
-                K::TraitMethod {
-                    subject,
-                    interface_arguments,
-                    method_arguments,
-                    ..
-                } => {
-                    for term in std::iter::once(subject)
-                        .chain(interface_arguments)
-                        .chain(method_arguments)
-                    {
-                        nir::copy_budget::charge_type_substitution(term, &[], &[], fuel)?;
-                    }
-                }
-                _ => {}
+        let value = match &expr.kind {
+            K::Function(declaration) => {
+                self.iir_function_value(*declaration, &[], &expr.ty, expr.source)?
             }
-            Ok(())
-        })?;
-        let key = match &expr.kind {
-            K::Function(declaration) => iir::InstanceKey {
-                declaration: *declaration,
-                arguments: vec![],
-            },
             K::FunctionInstance {
                 declaration,
                 arguments,
-            } => iir::InstanceKey {
-                declaration: *declaration,
-                arguments: arguments.clone(),
-            },
-            K::TraitMethod {
-                method_arguments,
-                interface,
-                interface_arguments,
-                member,
-                subject,
-            } => {
-                let method = self
-                    .graph
-                    .unwrap()
-                    .dispatch
-                    .iter()
-                    .find(|d| {
-                        d.interface == *interface
-                            && d.interface_arguments == *interface_arguments
-                            && d.subject == *subject
-                    })
-                    .and_then(|d| {
-                        d.methods.iter().find(|m| {
-                            m.member == *member && m.method_arguments == *method_arguments
-                        })
-                    })
-                    .ok_or_else(|| {
-                        self.failure(ErrorKind::UnmaterializedDispatch, Some(expr.source))
-                    })?;
-                self.charge_copy_work(Some(expr.source), |fuel| {
-                    for term in &method.arguments {
-                        nir::copy_budget::charge_type_substitution(term, &[], &[], fuel)?;
-                    }
-                    Ok(())
-                })?;
-                iir::InstanceKey {
-                    declaration: method.body,
-                    arguments: method.arguments.clone(),
-                }
+            } => self.iir_function_value(*declaration, arguments, &expr.ty, expr.source)?,
+            K::TraitMethod { .. } => {
+                self.iir_method_value(comptime_compiler::methods::View::expression(expr).unwrap())?
             }
             _ => return Err(self.failure(ErrorKind::InvalidCallPlan, Some(expr.source))),
         };
-        let value = if self.graph.unwrap().template_type(&key).is_some() {
-            match &expr.kind {
-                K::TraitMethod {
-                    interface,
-                    interface_arguments,
-                    subject,
-                    member,
-                    method_arguments,
-                } => Value::RuntimeTraitMethod(Box::new(TraitMethodIdentity {
+        Ok(Flow::Value(value))
+    }
+
+    pub(super) fn iir_function_value(
+        &mut self,
+        declaration: DeclarationId,
+        arguments: &[Term],
+        output: &Term,
+        source: SourceRange,
+    ) -> Result<Value, Error> {
+        self.charge_copy_work(Some(source), |fuel| {
+            for term in arguments {
+                nir::copy_budget::charge_type_substitution(term, &[], &[], fuel)?;
+            }
+            Ok(())
+        })?;
+        self.iir_named_value(
+            iir::InstanceKey {
+                declaration,
+                arguments: arguments.to_vec(),
+            },
+            None,
+            output,
+            source,
+        )
+    }
+
+    pub(super) fn iir_method_value(
+        &mut self,
+        method: comptime_compiler::methods::View<'_>,
+    ) -> Result<Value, Error> {
+        self.charge_copy_work(Some(method.source), |fuel| {
+            for term in std::iter::once(method.subject)
+                .chain(method.interface_arguments)
+                .chain(method.method_arguments)
+            {
+                nir::copy_budget::charge_type_substitution(term, &[], &[], fuel)?;
+            }
+            Ok(())
+        })?;
+        let graph = self
+            .graph
+            .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(method.source)))?;
+        let selected = graph
+            .dispatch
+            .iter()
+            .find(|d| {
+                d.interface == method.interface
+                    && d.interface_arguments == method.interface_arguments
+                    && d.subject == *method.subject
+            })
+            .and_then(|d| {
+                d.methods.iter().find(|m| {
+                    m.member == method.member && m.method_arguments == method.method_arguments
+                })
+            })
+            .ok_or_else(|| self.failure(ErrorKind::UnmaterializedDispatch, Some(method.source)))?;
+        self.charge_copy_work(Some(method.source), |fuel| {
+            for term in &selected.arguments {
+                nir::copy_budget::charge_type_substitution(term, &[], &[], fuel)?;
+            }
+            Ok(())
+        })?;
+        self.iir_named_value(
+            iir::InstanceKey {
+                declaration: selected.body,
+                arguments: selected.arguments.clone(),
+            },
+            Some(method),
+            method.output,
+            method.source,
+        )
+    }
+
+    fn iir_named_value(
+        &mut self,
+        key: iir::InstanceKey,
+        method: Option<comptime_compiler::methods::View<'_>>,
+        output: &Term,
+        source: SourceRange,
+    ) -> Result<Value, Error> {
+        let graph = self
+            .graph
+            .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(source)))?;
+        let value = if graph.template_type(&key).is_some() {
+            if let Some(method) = method {
+                Value::RuntimeTraitMethod(Box::new(TraitMethodIdentity {
                     interface: InterfaceInstance {
-                        declaration: *interface,
-                        arguments: interface_arguments.clone(),
+                        declaration: method.interface,
+                        arguments: method.interface_arguments.to_vec(),
                     },
-                    subject: subject.clone(),
-                    member: *member,
-                    method_arguments: method_arguments.clone(),
-                })),
-                _ => Value::FunctionInstance {
+                    subject: method.subject.clone(),
+                    member: method.member,
+                    method_arguments: method.method_arguments.to_vec(),
+                }))
+            } else {
+                Value::FunctionInstance {
                     declaration: key.declaration,
                     arguments: key.arguments,
-                },
+                }
             }
         } else {
             self.iir_callable(&key)?
         };
-        if !self.has_type(&value, &expr.ty) {
-            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+        if !self.has_type(&value, output) {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
         }
-        Ok(Flow::Value(value))
+        Ok(value)
     }
 }

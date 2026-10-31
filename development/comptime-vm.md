@@ -8137,3 +8137,44 @@ Validation in `/home/fin/luna`:
   exit 0; `/tmp/luna-tools-mm23m5i8/result.json`; `git diff --check` passed.
 
 No full language suite was run for this cache change.
+
+
+## Bytecode execution of concrete IIR comptime bodies (2026-10-31)
+
+A validated IIR graph no longer disables bytecode by itself. Concrete comptime
+instances can use the existing linear compiler and invocation stack without a
+source declaration world. Function operands resolve against graph instance keys;
+trait method operands resolve against the graph's concrete dispatch evidence.
+Reference and bytecode execution share these operand-level graph lookups and
+signature checks. Retained runtime templates remain identities, not authority to
+execute during comptime. Invocation admission continues checking actual graph
+function phases, including nested calls.
+
+Interface pre/postconditions still come from the graph's public method contract.
+Defaults, captured closures and structural data use the existing frame and value
+operations. Different specializations retain separate body identities in the code
+cache. `from_iir_for_comptime_tree` provides a phase-checked reference path for
+differential validation; ordinary `from_iir` runtime execution is unchanged.
+
+This connects concrete IIR bodies to bytecode execution, not a completed
+replacement of all VM carriers. The bytecode compiler still lowers the high-level
+body representation retained by IIR. Unsupported operations retain their existing
+fallback, and scheduled cleanup or active effect contexts still exclude bytecode.
+No performance ratio is claimed.
+
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_iir_bytecode`:
+  four tests passed, exit 0; `/tmp/luna-tools-nhrxjz8o/result.json`.
+  Tests assert actual bytecode invocation counts and warmed code reuse; compare
+  defaults, distinct generic instances, closures and structural values against
+  the reference graph engine; reject forged contracts and runtime callees.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test execution memoized_invocation`:
+  11 tests passed, exit 0; `/tmp/luna-tools-yv0_owxm/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --test runtime_function_identities`:
+  36 tests passed, exit 0; `/tmp/luna-tools-94ob6lai/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test execution iir`:
+  10 tests passed, exit 0; `/tmp/luna-tools-h2itngfc/result.json`.
+- Formatting check exited 0 (`/tmp/luna-tools-qdprbmfb/result.json`) and
+  `git diff --check` passed. No full language suite was run.

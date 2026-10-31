@@ -147,6 +147,9 @@ impl Interpreter<'_> {
         method: View<'_>,
         direct_callee: bool,
     ) -> Result<Value, Error> {
+        if self.graph.is_some() {
+            return self.iir_method_value(method);
+        }
         match self.select_trait_method(method, direct_callee)? {
             Selection::Value(value) => Ok(value),
             Selection::Function {

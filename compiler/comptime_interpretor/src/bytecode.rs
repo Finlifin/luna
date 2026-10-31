@@ -629,7 +629,6 @@ impl<'a> Interpreter<'a> {
         self.comptime_only
             && self.bytecode_enabled
             && self.cleanup_schedule.is_none()
-            && self.graph.is_none()
             && self.effect_state.environment.is_empty()
     }
 
@@ -2408,6 +2407,9 @@ impl<'a> Interpreter<'a> {
                         }
                         Kind::Type(ty) => self.type_constant(ty, &value.ty, source)?,
                         Kind::Frozen(term) => self.frozen_constant(term, &value.ty, source)?,
+                        Kind::Function(id) if self.graph.is_some() => {
+                            self.iir_function_value(*id, &[], &value.ty, source)?
+                        }
                         Kind::Function(id) if self.runtime_function_identities.contains_key(id) => {
                             Value::FunctionInstance {
                                 declaration: *id,
