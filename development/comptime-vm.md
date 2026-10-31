@@ -8244,3 +8244,42 @@ Reports: `/tmp/luna-tools-n2mvslgr/result.json` (formatting),
 `git diff --check` passed. Other unsupported operations, active effect handlers
 and cleanup scheduling can still require tree execution; this is not full VM
 unification or a new snapshot language rule.
+
+## Associated values on the explicit execution stack
+
+Associated member reads now compile to a typed `read-associated` instruction.
+Its descriptor retains interface arguments, subject, member identity and result
+type, with bounded copying and S-expression Display; it contains no initializer
+AST. The VM resolves the prepared dispatch evidence, schedules the selected
+initializer on its existing explicit execution stack, and delivers the checked
+value back to the suspended destination register. The initializer receives an
+empty lexical environment, not the caller's bindings.
+
+Tree and bytecode paths share selection, type admission and cycle detection.
+Normal errors, invalid non-value exits and exhausted budgets clear active
+initializer keys before unwinding, allowing the same VM to recover. A 65-member
+chain executes with native evaluation depth limited to eight. Source integration
+covers default and overridden associated members through both prepared NIR and
+materialized IIR, comparing reference results and actual bytecode invocation
+counts. An initial integration harness incorrectly omitted dispatch preparation;
+it was corrected to use the production materialization APIs, without weakening
+interpreter admission.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler`:
+  28 passed, `/tmp/luna-tools-xr0w2ocy/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  343 passed, `/tmp/luna-tools-lvmfi87r/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_traits --test comptime_iir_bytecode --test dynamic_trait_clauses`:
+  20 passed, `/tmp/luna-tools-8x_jtq21/result.json`.
+- Associated purity (3) and signature (9) tests passed in
+  `/tmp/luna-tools-jl6vi5ui/result.json`; that combined command subsequently
+  failed in the earlier, unprepared integration harness described above.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-c3sbv75c/result.json`.
+
+Selected initializer expressions still compile on demand without their own code
+cache. Unsupported initializer operations may still use reference evaluation;
+active effects and cleanup scheduling remain outside this bytecode path. This
+change does not claim full VM unification or host-panic transaction recovery.

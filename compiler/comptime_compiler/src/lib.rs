@@ -1,5 +1,6 @@
 //! Linear invocation code. Unsupported operations are detected before execution.
 //! Constants and default templates own bounded typed NIR copies; opcodes never evaluate trees.
+pub mod associated;
 pub mod bit_updates;
 pub mod bits;
 pub mod closures;
@@ -45,6 +46,10 @@ impl fmt::Display for ErrorConversion {
 
 #[derive(Debug)]
 pub enum Op {
+    AssociatedValue {
+        destination: Register,
+        access: Arc<associated::Access>,
+    },
     BeginTypePattern {
         identity: Register,
         destination: Register,
@@ -848,6 +853,10 @@ impl fmt::Display for Program {
                 Op::FinishNormalType { destination } => {
                     write!(f, "(finish-normal-type %{destination})")?
                 }
+                Op::AssociatedValue {
+                    destination,
+                    access,
+                } => write!(f, "(read-associated %{destination} {access})")?,
                 Op::PrepareSnapshot { input, output } => {
                     write!(f, "(prepare-snapshot (input {input}) (output {output}))")?
                 }
@@ -1888,6 +1897,35 @@ fn compile_root<'a>(
                         for (field, slot) in fields.iter().zip(slots).rev() {
                             work.push(Work::Expression(field, slot));
                         }
+                    }
+                    K::AssociatedValue {
+                        interface,
+                        subject,
+                        member,
+                    } => {
+                        *fuel = fuel
+                            .checked_sub(interface.arguments.len().saturating_add(1))
+                            .ok_or(Error::Budget(source))?;
+                        let mut arguments = Vec::with_capacity(interface.arguments.len());
+                        for argument in &interface.arguments {
+                            arguments.push(copy_term(argument, fuel, source)?);
+                        }
+                        let access = Arc::new(associated::Access {
+                            interface: nir::program::InterfaceInstance {
+                                declaration: interface.declaration,
+                                arguments,
+                            },
+                            subject: copy_term(subject, fuel, source)?,
+                            member: *member,
+                            ty: copy_term(&expr.ty, fuel, source)?,
+                        });
+                        emit(
+                            &mut work,
+                            Op::AssociatedValue {
+                                destination: dst,
+                                access,
+                            },
+                        );
                     }
                     K::Snapshot(value) => {
                         work.push(Work::Expression(value, dst));

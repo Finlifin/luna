@@ -236,3 +236,61 @@ fn dynamic_ordinary_instances_freeze_inputs_and_specialize_defaults_in_bytecode(
         assert_eq!(vm.bytecode_invocations() - before, count, "{name}");
     }
 }
+
+#[test]
+fn associated_values_are_selected_without_forcing_function_tree_fallback() {
+    let mut package = support::compile(
+        "typealias Char=.char'builtin;
+        pure comptime trait Flag {assoc enabled:bool=true;}
+        comptime impl Flag for bool {}
+        comptime impl Flag for Char {assoc enabled:bool=false;}
+        comptime fn run()->bool {bool.as(Flag).enabled and not Char.as(Flag).enabled}",
+    );
+    let run = package
+        .functions
+        .iter()
+        .find(|function| function.name == "run")
+        .unwrap();
+    assert!(run.body.to_string().contains("(associated-value "));
+    let roots = [iir::InstanceKey {
+        declaration: support::id(&package, "run"),
+        arguments: vec![],
+    }];
+    package.dispatch_instances = elaboration::materialization::dispatch_instances_for_invocation(
+        &package,
+        &roots,
+        Default::default(),
+    )
+    .unwrap();
+    let graph = elaboration::materialization::instantiate(
+        &package,
+        &roots,
+        Default::default(),
+        Default::default(),
+    )
+    .unwrap();
+    for materialized in [false, true] {
+        for compiled in [false, true] {
+            let mut vm = match (materialized, compiled) {
+                (true, true) => Interpreter::from_iir_for_comptime(&graph, Budget::default()),
+                (true, false) => Interpreter::from_iir_for_comptime_tree(&graph, Budget::default()),
+                (false, true) => Interpreter::for_comptime(&package, Budget::default()),
+                (false, false) => Interpreter::for_comptime_tree(&package, Budget::default()),
+            }
+            .unwrap();
+            for _ in 0..2 {
+                let before = vm.bytecode_invocations();
+                assert_eq!(
+                    if materialized {
+                        vm.invoke_instance(&graph.roots[0], vec![])
+                    } else {
+                        vm.invoke(roots[0].declaration, vec![])
+                    }
+                    .unwrap(),
+                    Value::Bool(true)
+                );
+                assert_eq!(vm.bytecode_invocations() - before, usize::from(compiled));
+            }
+        }
+    }
+}

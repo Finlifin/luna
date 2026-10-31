@@ -143,6 +143,10 @@ impl std::fmt::Display for PreparedArgument {
 
 #[derive(Debug)]
 pub(super) enum Progress {
+    Associated {
+        access: Arc<comptime_compiler::associated::Access>,
+        source: SourceRange,
+    },
     Contract {
         expression: Arc<Expr>,
         environment: Environment,
@@ -1670,6 +1674,16 @@ impl<'a> Interpreter<'a> {
                         input.bindings.finish().ok_or_else(missing)?,
                         source,
                     )?);
+                }
+                Op::AssociatedValue {
+                    destination,
+                    access,
+                } => {
+                    frame.waiting = Some(Waiting::Call(*destination));
+                    return Ok(Progress::Associated {
+                        access: access.clone(),
+                        source,
+                    });
                 }
                 Op::PrepareSnapshot { input, output } => {
                     self.prepare_snapshot(input, output, source)?;
@@ -3896,7 +3910,8 @@ mod tests {
                     | Progress::Call { .. }
                     | Progress::Default { .. }
                     | Progress::TypeInputPlan { .. }
-                    | Progress::Contract { .. },
+                    | Progress::Contract { .. }
+                    | Progress::Associated { .. },
                 ) => {
                     panic!("malformed operation completed")
                 }
@@ -3969,3 +3984,7 @@ mod pattern_tests;
 #[cfg(test)]
 #[path = "bytecode_snapshots.rs"]
 mod snapshots;
+
+#[cfg(test)]
+#[path = "bytecode_associated.rs"]
+mod associated;

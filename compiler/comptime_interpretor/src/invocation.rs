@@ -45,6 +45,13 @@ struct Activation<'a> {
 }
 
 enum Execution<'a> {
+    Associated {
+        expression: &'a Expr,
+        access: Arc<comptime_compiler::associated::Access>,
+        key: Option<(InterfaceInstance, Term, DeclarationId)>,
+        source: SourceRange,
+        environment: Environment,
+    },
     Contract {
         expression: Arc<Expr>,
         environment: Environment,
@@ -59,6 +66,11 @@ enum Execution<'a> {
 impl Execution<'_> {
     fn parts(&mut self) -> (&Expr, Option<DeclarationId>, &mut Environment) {
         match self {
+            Self::Associated {
+                expression,
+                environment,
+                ..
+            } => (expression, None, environment),
             Self::Invocation(activation) => {
                 let frame = &mut activation.frame;
                 (
@@ -238,7 +250,7 @@ impl<'a> Interpreter<'a> {
                                     Execution::Default { .. } => {
                                         self.bytecode_default_evaluations += 1
                                     }
-                                    Execution::Contract { .. } => {}
+                                    Execution::Contract { .. } | Execution::Associated { .. } => {}
                                 }
                                 stack.push(StackEntry::Code(
                                     StackContext::Execution(active),
@@ -354,6 +366,31 @@ impl<'a> Interpreter<'a> {
                         })
                     }
                 },
+                Ok(bytecode::Progress::Associated { access, source }) => {
+                    match self.prepare_associated_value(
+                        &access.interface,
+                        &access.subject,
+                        access.member,
+                        &access.ty,
+                        source,
+                    ) {
+                        Ok((expression, key)) => {
+                            execution = Some(Execution::Associated {
+                                expression,
+                                access,
+                                key,
+                                source,
+                                environment: Environment::default(),
+                            })
+                        }
+                        Err(error) => {
+                            result = Some(Completion::Ordinary {
+                                flow: Err(error),
+                                defaults: None,
+                            })
+                        }
+                    }
+                }
                 Ok(bytecode::Progress::Contract {
                     expression,
                     environment,
@@ -421,6 +458,15 @@ impl<'a> Interpreter<'a> {
         flow: Result<Flow, Error>,
     ) -> Completion {
         match execution {
+            Execution::Associated {
+                access,
+                key,
+                source,
+                ..
+            } => Completion::Ordinary {
+                flow: self.complete_associated_value(key, &access.ty, source, flow),
+                defaults: None,
+            },
             Execution::Invocation(activation) => Completion::Ordinary {
                 flow: self.complete_invocation(activation, flow).map(Flow::Value),
                 defaults: None,

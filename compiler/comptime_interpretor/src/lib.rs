@@ -4478,17 +4478,32 @@ impl<'a> Interpreter<'a> {
         else {
             unreachable!()
         };
-        let selected_subject = self.selected_type_view(subject, Some(expr.source))?;
+        let (selected, key) =
+            self.prepare_associated_value(interface, subject, *member, &expr.ty, expr.source)?;
+        // Initializers cannot read the caller's lexical environment.
+        let result = self.eval(selected, &mut Environment::default());
+        self.complete_associated_value(key, &expr.ty, expr.source, result)
+    }
+
+    fn prepare_associated_value(
+        &mut self,
+        interface: &InterfaceInstance,
+        subject: &Term,
+        member: DeclarationId,
+        ty: &Term,
+        source: SourceRange,
+    ) -> Result<(&'a Expr, Option<(InterfaceInstance, Term, DeclarationId)>), Error> {
+        let selected_subject = self.selected_type_view(subject, Some(source))?;
         let selected_arguments = interface
             .arguments
             .iter()
-            .map(|argument| self.selected_type_view(argument, Some(expr.source)))
+            .map(|argument| self.selected_type_view(argument, Some(source)))
             .collect::<Result<Vec<_>, _>>()?;
         let selected_interface = InterfaceInstance {
             declaration: interface.declaration,
             arguments: selected_arguments,
         };
-        let key = (selected_interface, selected_subject, *member);
+        let key = (selected_interface, selected_subject, member);
         let selected = *self
             .associated_values
             .get(&key)
@@ -4497,25 +4512,33 @@ impl<'a> Interpreter<'a> {
                     .then(|| self.associated_initializers.get(&key))
                     .flatten()
             })
-            .ok_or_else(|| self.failure(ErrorKind::UnmaterializedDispatch, Some(expr.source)))?;
-        if !selected_types::same(&selected.ty, &expr.ty, &self.associated_values) {
-            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+            .ok_or_else(|| self.failure(ErrorKind::UnmaterializedDispatch, Some(source)))?;
+        if !selected_types::same(&selected.ty, ty, &self.associated_values) {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
         }
-        // Associated values cannot read a caller's lexical environment.
         let initializing = self.associated_initializers.contains_key(&key);
         if initializing && !self.active_associated_initializers.insert(key.clone()) {
-            return Err(self.failure(ErrorKind::InvalidControlFlow, Some(expr.source)));
+            return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source)));
         }
-        let result = self.eval(selected, &mut Environment::default());
-        if initializing {
+        Ok((selected, initializing.then_some(key)))
+    }
+
+    fn complete_associated_value(
+        &mut self,
+        key: Option<(InterfaceInstance, Term, DeclarationId)>,
+        ty: &Term,
+        source: SourceRange,
+        result: Result<Flow, Error>,
+    ) -> Result<Flow, Error> {
+        if let Some(key) = key {
             self.active_associated_initializers.remove(&key);
         }
         let result = result?;
         let Flow::Value(value) = result else {
-            return Err(self.failure(ErrorKind::InvalidControlFlow, Some(expr.source)));
+            return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source)));
         };
-        if !self.has_type(&value, &expr.ty) {
-            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+        if !self.has_type(&value, ty) {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
         }
         Ok(Flow::Value(value))
     }
