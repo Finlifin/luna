@@ -16,7 +16,7 @@ pub(super) fn computations(
     depth: usize,
     fuel: &mut usize,
     limit: usize,
-    context: &crate::ptc::Context,
+    context: &MatchContext<'_>,
     scope: &[Vec<Sort>],
     work: &mut Vec<(I, I, usize)>,
 ) -> Result<(), MatchError> {

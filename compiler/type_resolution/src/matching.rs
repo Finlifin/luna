@@ -7,6 +7,17 @@ use crate::ptc::Budget;
 use crate::{InferenceContext, InferenceError, InferenceTerm as I};
 use nir::{Sort, Term};
 
+struct MatchContext<'a> {
+    theory: &'a crate::ptc::Context,
+    alias_views: bool,
+}
+impl std::ops::Deref for MatchContext<'_> {
+    type Target = crate::ptc::Context;
+    fn deref(&self) -> &Self::Target {
+        self.theory
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum MatchError {
     Inference(InferenceError),
@@ -40,6 +51,10 @@ pub(crate) fn propose_metered(
     budget: &mut Budget,
 ) -> Result<(), MatchError> {
     let mut fuel = budget.steps;
+    let context = &MatchContext {
+        theory: context,
+        alias_views: true,
+    };
     let result = (|| {
         for term in [left, right] {
             let actual = inference.sort(term)?;
@@ -87,7 +102,6 @@ pub(crate) fn propose_metered(
                         arguments,
                     },
                 ) => {
-                    let previous = work.len();
                     decompose(
                         template,
                         actual,
@@ -101,23 +115,6 @@ pub(crate) fn propose_metered(
                         scope,
                         &mut work,
                     )?;
-                    if work.len() == previous
-                        && arguments
-                            .iter()
-                            .any(|argument| !matches!(argument, I::Stable(_)))
-                    {
-                        aliases::propose(
-                            template,
-                            actual,
-                            arguments,
-                            depth + 1,
-                            &mut fuel,
-                            budget.max_depth,
-                            context,
-                            scope,
-                            &mut work,
-                        )?;
-                    }
                 }
                 (
                     I::Instantiate {
@@ -197,11 +194,12 @@ fn decompose(
     depth: usize,
     fuel: &mut usize,
     limit: usize,
-    context: &crate::ptc::Context,
+    context: &MatchContext<'_>,
     scope: &[Vec<Sort>],
     work: &mut Vec<(I, I, usize)>,
 ) -> Result<(), MatchError> {
     tick(fuel, depth, limit)?;
+    let previous = work.len();
     match (template, actual) {
         (
             Term::Bound {
@@ -740,6 +738,27 @@ fn decompose(
         // Unregistered nominal and normal-form arguments have no injectivity rule.
         // Shape mismatch is checked using the original obligation, not guessed.
         _ => {}
+    }
+    if work.len() == previous
+        && context.alias_views
+        && actual_arguments.is_none()
+        && nesting == 0
+        && actual.sort() == Sort::Type
+        && arguments
+            .iter()
+            .any(|argument| !matches!(argument, I::Stable(_)))
+    {
+        aliases::propose(
+            template,
+            actual,
+            arguments,
+            depth + 1,
+            fuel,
+            limit,
+            context,
+            scope,
+            work,
+        )?;
     }
     Ok(())
 }

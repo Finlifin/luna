@@ -12,7 +12,7 @@ pub(super) fn propose(
     depth: usize,
     fuel: &mut usize,
     limit: usize,
-    context: &crate::ptc::Context,
+    context: &MatchContext<'_>,
     scope: &[Vec<Sort>],
     work: &mut Vec<(I, I, usize)>,
 ) -> Result<(), MatchError> {
@@ -42,6 +42,12 @@ pub(super) fn propose(
                         continue;
                     }
                     let mut proposals = Vec::new();
+                    // Screening a shape must not recursively search regional
+                    // aliases. This bounds alias cycles without dropping facts.
+                    let direct = MatchContext {
+                        theory: context.theory,
+                        alias_views: false,
+                    };
                     match decompose(
                         template,
                         shape,
@@ -51,7 +57,7 @@ pub(super) fn propose(
                         depth,
                         fuel,
                         limit,
-                        context,
+                        &direct,
                         scope,
                         &mut proposals,
                     ) {

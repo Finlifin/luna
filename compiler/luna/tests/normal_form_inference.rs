@@ -159,6 +159,14 @@ fn established_type_equality_supplies_generic_call_shape() {
         luna::execution::interpret(&package, "run", 100000).unwrap(),
         comptime_interpretor::Value::Bool(true)
     );
+    let nested = source
+        .replace("value: ?T", "value: ??T")
+        .replace("value: S", "value: ?S");
+    let package = support::compile_with_protocols(&nested, &Default::default()).unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
     let rejected = source.replace("forward<?bool>", "forward<?u8>");
     assert!(support::compile_with_protocols(&rejected, &Default::default()).is_err());
 }

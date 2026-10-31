@@ -1009,3 +1009,97 @@ fn candidate_requirements_cannot_supply_alias_evidence() {
     assert!(matches!(candidate.state(id), Some(State::Waiting(_))));
     assert!(engine.commit(candidate).is_err());
 }
+
+#[test]
+fn nested_alias_views_complete_partially_matched_structures() {
+    use type_resolution::ptc::{Context, Formula as F};
+    let rigid = |local| Term::Rigid {
+        declaration: nir::DeclarationId { package: 98, local },
+        sort: Sort::Type,
+    };
+    let alias = rigid(0);
+    let other = rigid(1);
+    let optional = |ty| Term::Optional(Box::new(ty));
+    let mut context = Context::default();
+    context.assume(F::equal(alias.clone(), other.clone()));
+    context.assume(F::equal(other, alias.clone()));
+    context.assume(F::equal(alias.clone(), optional(Term::Primitive(P::U8))));
+    let mut engine = Engine::with_context(context);
+    let first = engine.fresh(Sort::Type);
+    let second = engine.fresh(Sort::Type);
+    let pattern = I::Instantiate {
+        template: Term::Record(vec![
+            ("first".into(), slot(0)),
+            ("second".into(), optional(optional(slot(1)))),
+        ]),
+        arguments: vec![I::Meta(first), I::Meta(second)],
+    };
+    let actual = I::Stable(Term::Record(vec![
+        ("first".into(), Term::Primitive(P::Bool)),
+        ("second".into(), optional(alias)),
+    ]));
+    let (mut candidate, id) = engine
+        .match_types(pattern.clone(), actual.clone(), Budget::default())
+        .unwrap();
+    finish(&mut candidate);
+    assert!(candidate.state(id).unwrap().is_proven());
+    assert_eq!(
+        candidate.freeze(&I::Meta(first)).unwrap(),
+        Term::Primitive(P::Bool)
+    );
+    assert_eq!(
+        candidate.freeze(&I::Meta(second)).unwrap(),
+        Term::Primitive(P::U8)
+    );
+    for steps in 0..128 {
+        let _ = engine.match_types(
+            pattern.clone(),
+            actual.clone(),
+            Budget {
+                steps,
+                max_depth: 128,
+            },
+        );
+        assert_eq!(engine.inspect(&I::Meta(first)).unwrap(), I::Meta(first));
+        assert_eq!(engine.inspect(&I::Meta(second)).unwrap(), I::Meta(second));
+    }
+    engine.commit(candidate).unwrap();
+}
+
+#[test]
+fn nested_alias_views_do_not_use_outer_facts_for_local_binders() {
+    use type_resolution::ptc::{Context, Formula as F};
+    let mut context = Context::with_scope(vec![vec![Sort::Type]]);
+    context.assume(F::equal(
+        slot(0),
+        Term::Optional(Box::new(Term::Primitive(P::Bool))),
+    ));
+    let mut engine = Engine::with_context(context);
+    let unknown = engine.fresh(Sort::Type);
+    let parameter = nir::Parameter {
+        sort: Sort::Type,
+        ty: Term::Primitive(P::Type),
+    };
+    let pattern = I::Instantiate {
+        template: Term::Function {
+            parameters: vec![parameter.clone()],
+            result: Box::new(Term::Optional(Box::new(Term::Bound {
+                depth: 1,
+                index: 0,
+                sort: Sort::Type,
+            }))),
+        },
+        arguments: vec![I::Meta(unknown)],
+    };
+    let actual = I::Stable(Term::Function {
+        parameters: vec![parameter],
+        result: Box::new(slot(0)),
+    });
+    let (candidate, _) = engine
+        .match_types(pattern, actual, Budget::default())
+        .unwrap();
+    assert_eq!(
+        candidate.inspect(&I::Meta(unknown)).unwrap(),
+        I::Meta(unknown)
+    );
+}
