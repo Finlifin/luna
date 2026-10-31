@@ -9212,3 +9212,34 @@ Validation in `/home/fin/luna`:
 
 This closes a producer/validator dependency mismatch. It does not complete
 TypeRef migration or runtime environment access and lifetime planning.
+
+
+## Check contextual closure contents during immutable VM admission
+
+The shared scoped-term admission walker now enters ContextualClosure's context
+and signature. Previously its default branch treated the entire composite as
+completed, allowing unresolved context parameters and runtime identities hidden
+in its signature to pass snapshot representation checks. Both children now
+retain the surrounding binder frame and depth/work accounting. Child-count
+preflight also includes ContextualClosure and UnsafeFunction. The semantic
+traversal matches Term exhaustively to prevent silent acceptance of new nodes.
+
+The public snapshot validator regression rejects unresolved contexts and hidden
+runtime dependencies while admitting concrete contexts and a context parameter
+bound by the enclosing function telescope. This is representation admission,
+not declaration domain checking or runtime environment/lifetime proof.
+
+Validation in `/home/fin/luna`:
+
+- The new rejection test failed on the old implementation:
+  `/tmp/luna-tools-gszvyt48/result.json`, exit 101 (pending context accepted).
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --test immutable_normal_inputs`:
+  364 unit and 10 immutable-input tests passed;
+  `/tmp/luna-tools-3sviwp7q/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --test immutable_normal_inputs`:
+  10 passed after adding the bound-context acceptance case;
+  `/tmp/luna-tools-clquxdj2/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test closure_environment_parameters --test scoped_comptime_callables --test comptime_iir_bytecode`:
+  40 passed; `/tmp/luna-tools-ns9h70tt/result.json`, exit 0.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed; `/tmp/luna-tools-fe1uaks5/result.json`, exit 0.

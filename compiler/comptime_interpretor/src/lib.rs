@@ -6875,11 +6875,13 @@ fn scoped_term_value_work_with_callables_in<'signature>(
                     .try_fold(1usize, |sum, op| sum.checked_add(op.arguments.len()))?
             }
             Term::Closure { environment, .. } => environment.len().saturating_add(1),
+            Term::ContextualClosure { .. } => 2,
             Term::Function { parameters, .. } => parameters.len().saturating_add(1),
             Term::Optional(_)
             | Term::Pointer(_)
             | Term::ComptimeFunction(_)
-            | Term::NormalFormFunction(..) => 1,
+            | Term::NormalFormFunction(..)
+            | Term::UnsafeFunction(_) => 1,
             _ => 0,
         };
         if work.saturating_add(pending.len()).saturating_add(children) > 100_000 {
@@ -7030,6 +7032,10 @@ fn scoped_term_value_work_with_callables_in<'signature>(
                 pending.extend(environment.iter().map(|t| (t, depth + 1, frames.clone())));
                 pending.push((signature, depth + 1, frames.clone()));
             }
+            Term::ContextualClosure { context, signature } => {
+                pending.push((context, depth + 1, frames.clone()));
+                pending.push((signature, depth + 1, frames.clone()));
+            }
             Term::Optional(inner)
             | Term::Pointer(inner)
             | Term::ComptimeFunction(inner)
@@ -7050,7 +7056,21 @@ fn scoped_term_value_work_with_callables_in<'signature>(
                 );
                 pending.push((result, depth + 1, frames.clone()));
             }
-            _ => {}
+            Term::Primitive(_)
+            | Term::ClosureContextType
+            | Term::Bound { .. }
+            | Term::Unit
+            | Term::Bool(_)
+            | Term::Char(_)
+            | Term::BitVec(_)
+            | Term::Float16(_)
+            | Term::BFloat16(_)
+            | Term::Float32(_)
+            | Term::Float64(_)
+            | Term::String(_)
+            | Term::Symbol(_)
+            | Term::Integer(_)
+            | Term::Float(_) => {}
         }
     }
     ty.check_scope(&[]).ok()?;

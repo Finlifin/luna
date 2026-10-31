@@ -529,3 +529,73 @@ fn named_comptime_identity_resolves_in_receiving_vm_and_rechecks_contracts() {
             .any(|event| matches!(event, Event::EnterFunction(d) if *d == id(3)))
     );
 }
+
+#[test]
+fn contextual_closure_snapshots_check_context_and_signature_dependencies() {
+    use std::collections::BTreeSet;
+    let signature = Term::Function {
+        parameters: vec![],
+        result: Box::new(Term::Primitive(nir::Primitive::Bool)),
+    };
+    let pending = Term::ContextualClosure {
+        context: Box::new(Term::Rigid {
+            declaration: nir::DeclarationId {
+                package: 99,
+                local: 1,
+            },
+            sort: nir::Sort::ComptimeValue,
+        }),
+        signature: Box::new(signature.clone()),
+    };
+    let check = |term: &Term| {
+        comptime_interpretor::validate_snapshot_term(
+            term,
+            &mut comptime_runtime::Budget::default(),
+            &BTreeSet::new(),
+        )
+    };
+    assert!(check(&pending).is_err());
+    let unavailable = Term::ContextualClosure {
+        context: Box::new(Term::ClosureContextValue(vec![])),
+        signature: Box::new(Term::Function {
+            parameters: vec![],
+            result: Box::new(Term::NormalForm {
+                head: nir::DeclarationId {
+                    package: 99,
+                    local: 2,
+                },
+                sort: nir::Sort::Type,
+                arguments: vec![Term::Runtime(nir::RuntimeId {
+                    instance: 99,
+                    local: 3,
+                })],
+            }),
+        }),
+    };
+    assert!(check(&unavailable).is_err());
+    let complete = Term::ContextualClosure {
+        context: Box::new(Term::ClosureContextValue(vec![Term::Primitive(
+            nir::Primitive::Bool,
+        )])),
+        signature: Box::new(signature),
+    };
+    check(&complete).unwrap();
+    let quantified = Term::Function {
+        parameters: vec![nir::Parameter {
+            sort: nir::Sort::ComptimeValue,
+            ty: Term::ClosureContextType,
+        }],
+        result: Box::new(Term::ContextualClosure {
+            context: Box::new(Term::Bound {
+                depth: 0,
+                index: 0,
+                sort: nir::Sort::ComptimeValue,
+            }),
+            signature: Box::new(Term::Function {
+                parameters: vec![],
+                result: Box::new(Term::Primitive(nir::Primitive::Bool)),
+            }),
+        }),
+    };
+    check(&quantified).unwrap();
+}
