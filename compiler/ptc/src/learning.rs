@@ -1,5 +1,6 @@
 //! Theory nogoods are local to one query and its declaration authorities.
 //! A clause stores the forbidden conjunction, not unconditional type facts.
+use super::conflicts::Conflict;
 use super::{ProofTree, Search, UnknownReason};
 
 #[derive(Default)]
@@ -9,27 +10,30 @@ pub(super) struct Clauses {
 }
 pub(super) enum Propagation {
     None,
-    Conflict(ProofTree),
+    Conflict(Conflict),
     Unit {
         index: usize,
         value: bool,
-        reason: ProofTree,
+        reason: Conflict,
     },
 }
 impl Search<'_> {
-    fn conflict_proof(&self, literals: &[(usize, bool)]) -> ProofTree {
-        ProofTree::TheoryConflict(
-            literals
-                .iter()
-                .map(|(i, b)| (self.atoms[*i].clone(), *b))
-                .collect(),
-        )
+    fn conflict_proof(&self, literals: &[(usize, bool)]) -> Conflict {
+        Conflict {
+            tree: ProofTree::TheoryConflict(
+                literals
+                    .iter()
+                    .map(|(i, b)| (self.atoms[*i].clone(), *b))
+                    .collect(),
+            ),
+            support: literals.iter().map(|(i, _)| *i).collect(),
+        }
     }
 
     /// Deletion checks use a bounded fraction of remaining query fuel. Only
     /// independently established conflicts may replace the original support;
     /// an inconclusive trial never becomes a learned fact.
-    pub(super) fn learn_conflict(&mut self, assignment: &[Option<bool>]) -> ProofTree {
+    pub(super) fn learn_conflict(&mut self, assignment: &[Option<bool>]) -> Conflict {
         let mut support = assignment.to_vec();
         let available = self.steps;
         let allowance = (available / 8).min(1024);
@@ -152,7 +156,7 @@ mod tests {
         assert_eq!(search.learned.entries, vec![vec![(1, true), (2, true)]]);
         // The unrelated first atom may change in a sibling branch.
         let mut sibling = [Some(false), Some(true), Some(true)];
-        search.check_tree(&proof, &mut sibling, 0).unwrap();
+        search.check_tree(&proof.tree, &mut sibling, 0).unwrap();
         assert!(matches!(
             search.propagate_learned(&sibling).unwrap(),
             Propagation::Conflict(_)
@@ -169,17 +173,17 @@ mod tests {
         assert_eq!((index, value), (2, false));
         // The explanation proves the opposing branch, not the propagated one.
         assert_eq!(
-            search.check_tree(&reason, &mut sibling, 0),
+            search.check_tree(&reason.tree, &mut sibling, 0),
             Err(ProofError::Invalid)
         );
         sibling[2] = Some(true);
-        search.check_tree(&reason, &mut sibling, 0).unwrap();
+        search.check_tree(&reason.tree, &mut sibling, 0).unwrap();
         sibling[2] = Some(false);
         assert!(matches!(
             search.propagate_learned(&sibling).unwrap(),
             Propagation::None
         ));
-        let ProofTree::TheoryConflict(mut support) = reason else {
+        let ProofTree::TheoryConflict(mut support) = reason.tree else {
             unreachable!()
         };
         support.pop();
@@ -191,8 +195,8 @@ mod tests {
         search.steps = 0;
         assert!(search.propagate_learned(&sibling).is_err());
         search.steps = 100_000;
-        search.check_tree(&proof, &mut sibling, 0).unwrap();
-        let ProofTree::TheoryConflict(mut duplicate) = proof.clone() else {
+        search.check_tree(&proof.tree, &mut sibling, 0).unwrap();
+        let ProofTree::TheoryConflict(mut duplicate) = proof.tree.clone() else {
             unreachable!()
         };
         duplicate.push(duplicate[0].clone());
@@ -203,10 +207,12 @@ mod tests {
         // An interrupted deletion trial must restore its removed premise.
         search.steps = 8;
         let interrupted = search.learn_conflict(&assignment);
-        assert!(matches!(&interrupted, ProofTree::TheoryConflict(support) if support.len() == 3));
+        assert!(
+            matches!(&interrupted.tree, ProofTree::TheoryConflict(support) if support.len() == 3)
+        );
         search.steps = 100_000;
         search
-            .check_tree(&interrupted, &mut assignment.clone(), 0)
+            .check_tree(&interrupted.tree, &mut assignment.clone(), 0)
             .unwrap();
         // A fresh query has no learned support, even with the same atom catalog.
         search.learned = Clauses::default();
@@ -238,11 +244,13 @@ mod tests {
         };
         let proof = search.learn_conflict(&[Some(true)]);
         assert!(search.learned.entries.is_empty());
-        assert!(matches!(&proof, ProofTree::TheoryConflict(support) if support.len() == 1));
+        assert!(matches!(&proof.tree, ProofTree::TheoryConflict(support) if support.len() == 1));
         search.steps = 1000;
-        search.check_tree(&proof, &mut [Some(true)], 0).unwrap();
+        search
+            .check_tree(&proof.tree, &mut [Some(true)], 0)
+            .unwrap();
         assert_eq!(
-            search.check_tree(&proof, &mut [Some(false)], 0),
+            search.check_tree(&proof.tree, &mut [Some(false)], 0),
             Err(ProofError::Invalid)
         );
     }

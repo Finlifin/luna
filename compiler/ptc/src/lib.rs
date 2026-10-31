@@ -5,6 +5,8 @@
 //! closed structural constructors and explicitly admitted normal-form
 //! congruence. Abstract satisfiability is never itself a source witness.
 mod boolean;
+mod conflicts;
+use conflicts::Conflict;
 mod effects;
 mod error_results;
 mod learning;
@@ -581,14 +583,14 @@ impl Context {
         };
         let mut assignment = vec![None; atoms.len()];
         let outcome = match search.solve(&mut assignment, 0) {
-            SearchResult::Unsat(tree) => Outcome::Entailed(Proof {
+            SearchResult::Unsat(conflict) => Outcome::Entailed(Proof {
                 scope: (*self.scope).clone(),
                 assumptions: (*self.assumptions).clone(),
                 goal,
                 congruence_heads: (*self.congruence_heads).clone(),
                 nominal_constructors: (*self.nominal_constructors).clone(),
                 tuple_heads: (*self.tuple_heads).clone(),
-                tree,
+                tree: conflict.tree,
             }),
             SearchResult::Model(model) => Outcome::NotEntailed(Witness {
                 tuple_heads: (*self.tuple_heads).clone(),
@@ -1270,7 +1272,7 @@ struct TheoryModel {
     integers: BTreeMap<DeclarationId, i128>,
 }
 enum SearchResult {
-    Unsat(ProofTree),
+    Unsat(Conflict),
     Model(Model),
     Unknown(UnknownReason),
 }
@@ -1353,6 +1355,27 @@ impl Search<'_> {
             Ok(())
         }
     }
+    fn boolean_reason(&mut self, assignment: &[Option<bool>]) -> Conflict {
+        let mut reason = Conflict::boolean(assignment);
+        if reason.support.len() <= 1 {
+            return reason;
+        }
+        // Explaining a propagation is optional search work. Failure retains
+        // every current premise, never an incomplete dependency set.
+        let allowance = (self.steps / 8).min(2048);
+        let mut work = allowance;
+        if let Some(circuit) = &self.boolean {
+            if let Ok(propagation) = circuit.propagate(assignment, &mut work) {
+                if propagation.truth == Some(false) {
+                    if let Some(support) = propagation.conflict_support {
+                        reason.support = support;
+                    }
+                }
+            }
+        }
+        self.steps -= allowance - work;
+        reason
+    }
     fn solve(&mut self, assignment: &mut [Option<bool>], depth: usize) -> SearchResult {
         if depth >= self.max_depth || self.tick().is_err() {
             return SearchResult::Unknown(UnknownReason::BudgetExhausted);
@@ -1363,7 +1386,7 @@ impl Search<'_> {
                 Err(()) => return SearchResult::Unknown(UnknownReason::BudgetExhausted),
             }
         }
-        let (truth, forced) = match self
+        let propagation = match self
             .boolean
             .as_ref()
             .unwrap()
@@ -1372,9 +1395,14 @@ impl Search<'_> {
             Ok(result) => result,
             Err(()) => return SearchResult::Unknown(UnknownReason::BudgetExhausted),
         };
-        if truth == Some(false) {
-            return SearchResult::Unsat(ProofTree::BooleanConflict);
+        if propagation.truth == Some(false) {
+            let mut conflict = Conflict::boolean(assignment);
+            if let Some(support) = propagation.conflict_support {
+                conflict.support = support;
+            }
+            return SearchResult::Unsat(conflict);
         }
+        let forced = propagation.literals;
         match self.propagate_learned(assignment) {
             Err(reason) => return SearchResult::Unknown(reason),
             Ok(learning::Propagation::Conflict(proof)) => return SearchResult::Unsat(proof),
@@ -1393,11 +1421,12 @@ impl Search<'_> {
                         } else {
                             (proof, reason)
                         };
-                        SearchResult::Unsat(ProofTree::Split {
-                            atom: self.atoms[index].clone(),
-                            negative: Box::new(negative),
-                            positive: Box::new(positive),
-                        })
+                        SearchResult::Unsat(Conflict::resolve(
+                            index,
+                            &self.atoms[index],
+                            negative,
+                            positive,
+                        ))
                     }
                     other => other,
                 };
@@ -1427,18 +1456,24 @@ impl Search<'_> {
             for (index, value) in trail.into_iter().rev() {
                 assignment[index] = None;
                 if let SearchResult::Unsat(proof) = result {
-                    let conflict = Box::new(ProofTree::BooleanConflict);
-                    let proof = Box::new(proof);
+                    if !proof.support.contains(&index) {
+                        result = SearchResult::Unsat(proof);
+                        continue;
+                    }
+                    assignment[index] = Some(!value);
+                    let reason = self.boolean_reason(assignment);
+                    assignment[index] = None;
                     let (negative, positive) = if value {
-                        (conflict, proof)
+                        (reason, proof)
                     } else {
-                        (proof, conflict)
+                        (proof, reason)
                     };
-                    result = SearchResult::Unsat(ProofTree::Split {
-                        atom: self.atoms[index].clone(),
+                    result = SearchResult::Unsat(Conflict::resolve(
+                        index,
+                        &self.atoms[index],
                         negative,
                         positive,
-                    });
+                    ));
                 }
             }
             return result;
@@ -1447,19 +1482,26 @@ impl Search<'_> {
             assignment[index] = Some(false);
             let negative = self.solve(assignment, depth + 1);
             assignment[index] = None;
-            if matches!(negative, SearchResult::Model(_)) {
+            if matches!(negative, SearchResult::Model(_))
+                || matches!(&negative, SearchResult::Unsat(conflict) if !conflict.support.contains(&index))
+            {
                 return negative;
             }
             assignment[index] = Some(true);
             let positive = self.solve(assignment, depth + 1);
             assignment[index] = None;
+            if matches!(&positive, SearchResult::Unsat(conflict) if !conflict.support.contains(&index))
+            {
+                return positive;
+            }
             match (negative, positive) {
                 (SearchResult::Unsat(negative), SearchResult::Unsat(positive)) => {
-                    SearchResult::Unsat(ProofTree::Split {
-                        atom: self.atoms[index].clone(),
-                        negative: Box::new(negative),
-                        positive: Box::new(positive),
-                    })
+                    SearchResult::Unsat(Conflict::resolve(
+                        index,
+                        &self.atoms[index],
+                        negative,
+                        positive,
+                    ))
                 }
                 (_, model @ SearchResult::Model(_)) => model,
                 (SearchResult::Unknown(reason), _) | (_, SearchResult::Unknown(reason)) => {

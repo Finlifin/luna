@@ -1,6 +1,13 @@
 //! Query-local Boolean skeleton. Atom identities are borrowed from the theory
 //! catalog; evaluation and propagation never copy type terms.
 use super::{Atom, Formula};
+use std::collections::BTreeSet;
+
+pub(super) struct Propagation {
+    pub truth: Option<bool>,
+    pub literals: Vec<(usize, bool)>,
+    pub conflict_support: Option<BTreeSet<usize>>,
+}
 
 pub(super) struct Circuit {
     nodes: Vec<Node>,
@@ -74,7 +81,7 @@ impl Circuit {
         &self,
         assignment: &[Option<bool>],
         fuel: &mut usize,
-    ) -> Result<(Option<bool>, Vec<(usize, bool)>), ()> {
+    ) -> Result<Propagation, ()> {
         let mut values: Vec<Option<bool>> = Vec::new();
         for node in &self.nodes {
             charge(fuel)?;
@@ -102,7 +109,18 @@ impl Circuit {
         }
         let root = self.nodes.len() - 1;
         if values[root].is_some() {
-            return Ok((values[root], Vec::new()));
+            let mut support = None;
+            if values[root] == Some(false) {
+                let allowance = *fuel / 8;
+                let mut work = allowance;
+                support = self.explain_conflict(&values, &mut work).ok();
+                *fuel -= allowance - work;
+            }
+            return Ok(Propagation {
+                truth: values[root],
+                literals: Vec::new(),
+                conflict_support: support,
+            });
         }
         let mut forced = Vec::new();
         let mut pending = vec![(root, true)];
@@ -140,7 +158,47 @@ impl Circuit {
                 Node::Constant(_) => {}
             }
         }
-        Ok((None, forced))
+        Ok(Propagation {
+            truth: None,
+            literals: forced,
+            conflict_support: None,
+        })
+    }
+    fn explain_conflict(
+        &self,
+        values: &[Option<bool>],
+        fuel: &mut usize,
+    ) -> Result<BTreeSet<usize>, ()> {
+        let mut support = BTreeSet::new();
+        let mut pending = vec![self.nodes.len() - 1];
+        while let Some(id) = pending.pop() {
+            charge(fuel)?;
+            let truth = values[id].ok_or(())?;
+            match &self.nodes[id] {
+                Node::Constant(_) => {}
+                Node::Atom(index) => {
+                    support.insert(*index);
+                }
+                Node::Not(input) => pending.push(*input),
+                node @ (Node::And(inputs) | Node::Or(inputs)) => {
+                    if matches!(node, Node::And(_)) == truth {
+                        *fuel = fuel.checked_sub(inputs.len()).ok_or(())?;
+                        pending.extend(inputs.iter().copied());
+                    } else {
+                        let mut selected = None;
+                        for input in inputs {
+                            charge(fuel)?;
+                            if values[*input] == Some(truth) {
+                                selected = Some(*input);
+                                break;
+                            }
+                        }
+                        pending.push(selected.ok_or(())?);
+                    }
+                }
+            }
+        }
+        Ok(support)
     }
 }
 
@@ -231,9 +289,22 @@ mod tests {
                     .collect();
                 let lookup = |a: &Atom| assignment[atoms.iter().position(|b| a == b).unwrap()];
                 let expected = evaluate(&formula, &lookup);
-                let (actual, forced) = circuit.propagate(&assignment, &mut 100_000).unwrap();
-                assert_eq!(actual, expected);
-                for (i, truth) in forced {
+                let result = circuit.propagate(&assignment, &mut 100_000).unwrap();
+                assert_eq!(result.truth, expected);
+                assert_eq!(result.conflict_support.is_some(), expected == Some(false));
+                if let Some(support) = &result.conflict_support {
+                    let reduced: Vec<_> = assignment
+                        .iter()
+                        .enumerate()
+                        .map(|(i, b)| if support.contains(&i) { *b } else { None })
+                        .collect();
+                    assert_eq!(
+                        evaluate(&formula, &|a| reduced
+                            [atoms.iter().position(|b| a == b).unwrap()]),
+                        Some(false)
+                    );
+                }
+                for (i, truth) in result.literals {
                     let previous = assignment[i];
                     assert!(previous.is_none());
                     assignment[i] = Some(!truth);
@@ -266,15 +337,24 @@ mod tests {
         );
         assert!(circuit.propagate(&[None], &mut 1).is_err());
         assert_eq!(
-            circuit.propagate(&[None], &mut 1000).unwrap(),
+            {
+                let result = circuit.propagate(&[None], &mut 1000).unwrap();
+                (result.truth, result.literals)
+            },
             (None, vec![(0, false)])
         );
         assert_eq!(
-            circuit.propagate(&[Some(true)], &mut 1000).unwrap(),
+            {
+                let result = circuit.propagate(&[Some(true)], &mut 1000).unwrap();
+                (result.truth, result.literals)
+            },
             (Some(false), vec![])
         );
         assert_eq!(
-            circuit.propagate(&[None], &mut 1000).unwrap(),
+            {
+                let result = circuit.propagate(&[None], &mut 1000).unwrap();
+                (result.truth, result.literals)
+            },
             (None, vec![(0, false)])
         );
     }
