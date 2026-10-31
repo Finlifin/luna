@@ -39,6 +39,21 @@ fn dependent_tuple_domains_accept_completed_values_without_unfolding_heads() {
         tree.invoke(support::id(&package, "Build"), vec![]).unwrap(),
         result
     );
+    drop(vm);
+    drop(tree);
+    let package = std::sync::Arc::new(package);
+    let mut session = comptime_interpretor::CodeSession::new(package.clone());
+    for _ in 0..3 {
+        let mut vm =
+            Interpreter::for_comptime_in_session(&package, &mut session, &mut Budget::default())
+                .unwrap();
+        let actual = vm
+            .with_code_session(&mut session, |vm| {
+                vm.invoke(support::id(&package, "Build"), vec![])
+            })
+            .unwrap();
+        assert_eq!(actual, result);
+    }
 }
 
 #[test]

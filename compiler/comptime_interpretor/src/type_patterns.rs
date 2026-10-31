@@ -111,7 +111,6 @@ impl<'a> Interpreter<'a> {
                 let metadata = self
                     .normal_forms
                     .get(&head)
-                    .copied()
                     .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
                 if fields != metadata.parameters.len() {
                     return Err(self.failure(ErrorKind::Type, None));
@@ -243,7 +242,6 @@ impl<'a> Interpreter<'a> {
                 let metadata = self
                     .normal_forms
                     .get(&head)
-                    .copied()
                     .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
                 let Value::Type(Term::NormalForm { arguments, .. }) = input else {
                     return Err(self.failure(ErrorKind::Type, None));

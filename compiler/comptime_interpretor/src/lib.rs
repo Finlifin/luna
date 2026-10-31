@@ -833,7 +833,7 @@ pub struct Interpreter<'a> {
     functions: declaration_index::Functions<'a>,
     runtime_function_identities: declaration_index::RuntimeIdentities<'a>,
     retained_callable_signatures: HashMap<(DeclarationId, &'a [Term]), &'a Term>,
-    normal_forms: BTreeMap<DeclarationId, &'a nir::normal_forms::Head>,
+    normal_forms: declaration_index::NormalForms<'a>,
     structs: layout_catalog::Catalog<generated_structs::StructDefinition<'a>>,
     newtypes: declaration_index::Newtypes<'a>,
     alias_contracts: declaration_index::Aliases<'a>,
@@ -1763,11 +1763,11 @@ impl<'a> Interpreter<'a> {
             functions,
             runtime_function_identities,
             retained_callable_signatures: HashMap::new(),
-            normal_forms: package
-                .normal_forms
-                .iter()
-                .map(|head| (head.declaration, head))
-                .collect(),
+            normal_forms: declaration_index::NormalForms::new(
+                &package.normal_forms,
+                positions.as_ref().map(|index| index.normal_forms.clone()),
+                |head| head.declaration,
+            )?,
             structs,
             alias_contracts: declaration_index::Aliases::new(
                 &package.alias_contracts,
@@ -3524,7 +3524,7 @@ impl<'a> Interpreter<'a> {
         else {
             unreachable!()
         };
-        let metadata = *self
+        let metadata = self
             .normal_forms
             .get(head)
             .ok_or_else(|| self.failure(ErrorKind::Type, Some(expr.source)))?;
@@ -3564,7 +3564,7 @@ impl<'a> Interpreter<'a> {
     ) -> Result<Value, Error> {
         match head {
             Some(head) => {
-                let metadata = *self
+                let metadata = self
                     .normal_forms
                     .get(&head)
                     .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
@@ -3607,7 +3607,7 @@ impl<'a> Interpreter<'a> {
         arguments: Vec<Term>,
         source: SourceRange,
     ) -> Result<Value, Error> {
-        let metadata = *self
+        let metadata = self
             .normal_forms
             .get(&head)
             .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
@@ -5919,7 +5919,7 @@ impl<'a> Interpreter<'a> {
             let Value::Function(head) = selected else {
                 return Err(self.failure(ErrorKind::Type, Some(callee.source)));
             };
-            let metadata = self.normal_forms[&head];
+            let metadata = self.normal_forms.get(&head).expect("admitted normal head");
             if arguments.len() != metadata.parameters.len() {
                 return Err(self.failure(ErrorKind::InvalidCallPlan, Some(expr.source)));
             }
@@ -6636,24 +6636,21 @@ impl Interpreter<'_> {
 /// function type are legitimate; free runtime environments/value-store handles
 /// and active rigid inputs require elaboration support outside this interpreter.
 #[cfg(test)]
-fn type_value_work(
-    ty: &Term,
-    heads: &BTreeMap<DeclarationId, &nir::normal_forms::Head>,
-) -> Option<usize> {
+fn type_value_work(ty: &Term, heads: &impl declaration_index::HeadLookup) -> Option<usize> {
     scoped_type_value_work(ty, heads, &BTreeSet::new())
 }
 
 // Rigid Type inputs are descriptions, never permission to inspect their layout.
 fn scoped_type_value_work(
     ty: &Term,
-    heads: &BTreeMap<DeclarationId, &nir::normal_forms::Head>,
+    heads: &impl declaration_index::HeadLookup,
     parameters: &BTreeSet<DeclarationId>,
 ) -> Option<usize> {
     scoped_type_value_work_with_layouts(ty, heads, parameters, |_, _, _| None)
 }
 fn scoped_type_value_work_with_layouts(
     ty: &Term,
-    heads: &BTreeMap<DeclarationId, &nir::normal_forms::Head>,
+    heads: &impl declaration_index::HeadLookup,
     parameters: &BTreeSet<DeclarationId>,
     nominal_fields: impl Fn(&Term, Option<u32>, &mut usize) -> Option<Vec<Term>>,
 ) -> Option<usize> {
@@ -6662,7 +6659,7 @@ fn scoped_type_value_work_with_layouts(
 
 fn scoped_type_value_work_with_evidence(
     ty: &Term,
-    heads: &BTreeMap<DeclarationId, &nir::normal_forms::Head>,
+    heads: &impl declaration_index::HeadLookup,
     parameters: &BTreeSet<DeclarationId>,
     value_parameters: &BTreeMap<DeclarationId, Term>,
     nominal_fields: impl Fn(&Term, Option<u32>, &mut usize) -> Option<Vec<Term>>,
@@ -6679,7 +6676,7 @@ fn scoped_type_value_work_with_evidence(
 
 fn scoped_type_value_work_with_evidence_in(
     ty: &Term,
-    heads: &BTreeMap<DeclarationId, &nir::normal_forms::Head>,
+    heads: &impl declaration_index::HeadLookup,
     parameters: &BTreeSet<DeclarationId>,
     value_parameters: &BTreeMap<DeclarationId, Term>,
     nominal_fields: impl Fn(&Term, Option<u32>, &mut usize) -> Option<Vec<Term>>,
@@ -6703,14 +6700,14 @@ fn scoped_type_value_work_with_evidence_in(
 #[cfg(test)]
 fn instance_argument_work(
     argument: &Term,
-    heads: &BTreeMap<DeclarationId, &nir::normal_forms::Head>,
+    heads: &impl declaration_index::HeadLookup,
 ) -> Option<usize> {
     scoped_term_value_work_with_layouts(argument, heads, &BTreeSet::new(), |_, _, _| None)
 }
 
 fn scoped_term_value_work_with_layouts(
     ty: &Term,
-    heads: &BTreeMap<DeclarationId, &nir::normal_forms::Head>,
+    heads: &impl declaration_index::HeadLookup,
     parameters: &BTreeSet<DeclarationId>,
     nominal_fields: impl Fn(&Term, Option<u32>, &mut usize) -> Option<Vec<Term>>,
 ) -> Option<usize> {
@@ -6719,7 +6716,7 @@ fn scoped_term_value_work_with_layouts(
 
 fn scoped_term_value_work_with_evidence(
     ty: &Term,
-    heads: &BTreeMap<DeclarationId, &nir::normal_forms::Head>,
+    heads: &impl declaration_index::HeadLookup,
     parameters: &BTreeSet<DeclarationId>,
     value_parameters: &BTreeMap<DeclarationId, Term>,
     nominal_fields: impl Fn(&Term, Option<u32>, &mut usize) -> Option<Vec<Term>>,
@@ -6736,7 +6733,7 @@ fn scoped_term_value_work_with_evidence(
 
 fn scoped_term_value_work_with_evidence_in(
     ty: &Term,
-    heads: &BTreeMap<DeclarationId, &nir::normal_forms::Head>,
+    heads: &impl declaration_index::HeadLookup,
     parameters: &BTreeSet<DeclarationId>,
     value_parameters: &BTreeMap<DeclarationId, Term>,
     nominal_fields: impl Fn(&Term, Option<u32>, &mut usize) -> Option<Vec<Term>>,
@@ -6755,7 +6752,7 @@ fn scoped_term_value_work_with_evidence_in(
 
 fn scoped_term_value_work_with_callables_in(
     ty: &Term,
-    heads: &BTreeMap<DeclarationId, &nir::normal_forms::Head>,
+    heads: &impl declaration_index::HeadLookup,
     parameters: &BTreeSet<DeclarationId>,
     value_parameters: &BTreeMap<DeclarationId, Term>,
     nominal_fields: impl Fn(&Term, Option<u32>, &mut usize) -> Option<Vec<Term>>,
@@ -6843,7 +6840,7 @@ fn scoped_term_value_work_with_callables_in(
             arguments,
         } = ty
         {
-            if let Some(metadata) = heads.get(head) {
+            if let Some(metadata) = heads.head(head) {
                 if *sort != nir::Sort::Type {
                     return None;
                 }
@@ -6870,12 +6867,12 @@ fn scoped_term_value_work_with_callables_in(
                         arguments,
                         |head| {
                             heads
-                                .get(&head)
+                                .head(&head)
                                 .is_some_and(|head| head.role == nir::normal_forms::Role::Tuple)
                         },
                         |head| {
                             heads
-                                .get(&head)
+                                .head(&head)
                                 .is_some_and(|head| head.role == nir::normal_forms::Role::TypeList)
                         },
                         &nominal_fields,

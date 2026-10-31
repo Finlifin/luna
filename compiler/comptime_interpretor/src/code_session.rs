@@ -72,6 +72,7 @@ impl<'program> Interpreter<'program> {
         }
         let indexes = session.indexes.get_or_insert_with(|| {
             Arc::new(declaration_index::SourceIndexes {
+                normal_forms: vm.normal_forms.positions.clone(),
                 newtypes: vm.newtypes.positions.clone(),
                 aliases: vm.alias_contracts.positions.clone(),
                 structs: Arc::new(
@@ -166,6 +167,16 @@ mod tests {
                 type_parameters: vec![parameter],
                 signature: signature.clone(),
             }],
+            normal_forms: vec![nir::normal_forms::Head {
+                declaration: DeclarationId {
+                    package: 1,
+                    local: 7,
+                },
+                collector: None,
+                role: Default::default(),
+                requirements: vec![],
+                parameters: vec![],
+            }],
             newtypes: vec![nir::newtypes::Newtype {
                 declaration: DeclarationId {
                     package: 1,
@@ -215,6 +226,7 @@ mod tests {
         let index = first.functions.positions.clone();
         let identities = first.runtime_function_identities.positions.clone();
         let effects = first.effect_declarations.positions.clone();
+        let heads = first.normal_forms.positions.clone();
         let newtypes = first.newtypes.positions.clone();
         let aliases = first.alias_contracts.positions.clone();
         let domains = first.declaration_parameter_domains.clone();
@@ -234,6 +246,13 @@ mod tests {
         assert!(Arc::ptr_eq(&effects, &next.effect_declarations.positions));
         assert!(Arc::ptr_eq(&domains, &next.declaration_parameter_domains));
         assert!(Arc::ptr_eq(&sorts, &next.declaration_parameter_sorts));
+        assert!(Arc::ptr_eq(&heads, &next.normal_forms.positions));
+        assert!(std::ptr::eq(
+            next.normal_forms
+                .get(&source.normal_forms[0].declaration)
+                .unwrap(),
+            &source.normal_forms[0]
+        ));
         assert!(Arc::ptr_eq(&newtypes, &next.newtypes.positions));
         assert!(Arc::ptr_eq(&aliases, &next.alias_contracts.positions));
         assert!(std::ptr::eq(

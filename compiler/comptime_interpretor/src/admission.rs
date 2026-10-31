@@ -340,7 +340,7 @@ impl Interpreter<'_> {
             Term::NormalForm {
                 head, arguments, ..
             } => {
-                let metadata = *self
+                let metadata = self
                     .normal_forms
                     .get(head)
                     .ok_or_else(|| self.failure(ErrorKind::Type, None))?;

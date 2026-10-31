@@ -269,8 +269,8 @@ identity collisions, publisher-failure rollback, and absence of generated
 entries in the next VM. A constructor test exhausts fuel specifically between
 ordinary VM creation and session catalog publication, then retries successfully.
 
-Remaining world construction includes NF catalogs and instantiated
-trait evidence/contracts. Newtype and alias indexes now use the shared source
+Remaining world construction includes instantiated trait evidence/contracts.
+NF declaration lookup now uses shared source positions as described below. Newtype and alias indexes now use the shared source
 index mechanism described below. No active builder transaction or proof outcome is
 published as shared metadata.
 
@@ -307,3 +307,31 @@ nominal types, 212 source newtype cases, 20 driver memory cases). Nonempty sourc
 session catalogs are checked for allocation sharing and original declaration
 references. Evidence: `/tmp/luna-tools-0gxn642o/result.json` and
 `/tmp/luna-tools-kfl8hbks/result.json`. Formatting and diff checks passed.
+
+## NF declaration lookup
+
+NF heads now use the same immutable source-position index as other declaration
+catalogs. Value-shape inspection depends on a read-only `HeadLookup` interface,
+so its admission rules work with both source indexes and isolated metadata maps.
+This separates declaration ownership from validation without adding another
+value representation or unfolding any head.
+
+Source session VMs share the NF index and refer to the original Head objects.
+IIR interpreters construct their index from the validated graph's own NF catalog;
+a source-session index cannot grant graph execution or layout authority.
+Normal input formation, frozen value checks and type equality proofs keep their
+existing paths and budgets.
+
+Verification commands:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor -p luna --test type_equality --test immutable_normal_inputs --test normal_values --test normal_form_domains --test comptime_iir_bytecode --test comptime_memory
+```
+
+All checks passed: 331 interpreter unit tests and 58 integration tests.
+The source regression repeatedly forms a head with dependent Tuple value inputs
+in a shared session and compares its complete value with reference execution.
+Nonempty NF catalogs are checked for shared index allocation and original Head
+references. Evidence: `/tmp/luna-tools-ps6f2h47/result.json` and
+`/tmp/luna-tools-plogkqwp/result.json`. Formatting and diff checks passed.

@@ -202,11 +202,9 @@ impl<'a> Interpreter<'a> {
             active_associated_initializers: HashSet::new(),
             instances: HashMap::new(),
             functions: Default::default(),
-            normal_forms: graph
-                .normal_forms
-                .iter()
-                .map(|h| (h.declaration, h))
-                .collect(),
+            normal_forms: declaration_index::NormalForms::new(&graph.normal_forms, None, |head| {
+                head.declaration
+            })?,
             structs: Default::default(),
             newtypes: Default::default(),
             alias_contracts: Default::default(),

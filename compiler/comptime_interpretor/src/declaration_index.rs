@@ -63,7 +63,10 @@ pub(super) type Effects<'a> = Declarations<'a, nir::effects::Declaration>;
 pub(super) type Newtypes<'a> = Declarations<'a, nir::newtypes::Newtype>;
 pub(super) type Aliases<'a> = Declarations<'a, nir::type_aliases::Contract>;
 
+pub(super) type NormalForms<'a> = Declarations<'a, nir::normal_forms::Head>;
+
 pub(super) struct SourceIndexes {
+    pub(super) normal_forms: Arc<BTreeMap<DeclarationId, usize>>,
     pub(super) newtypes: Arc<BTreeMap<DeclarationId, usize>>,
     pub(super) aliases: Arc<BTreeMap<DeclarationId, usize>>,
     pub(super) structs: Arc<BTreeMap<DeclarationId, generated_structs::StructDefinition<'static>>>,
@@ -75,4 +78,19 @@ pub(super) struct SourceIndexes {
     pub(super) functions: Arc<BTreeMap<DeclarationId, usize>>,
     pub(super) runtime_identities: Arc<BTreeMap<DeclarationId, usize>>,
     pub(super) effects: Arc<BTreeMap<DeclarationId, usize>>,
+}
+
+/// Shape admission needs declaration lookup, not ownership of a particular map.
+pub(super) trait HeadLookup {
+    fn head(&self, id: &DeclarationId) -> Option<&nir::normal_forms::Head>;
+}
+impl HeadLookup for NormalForms<'_> {
+    fn head(&self, id: &DeclarationId) -> Option<&nir::normal_forms::Head> {
+        self.get(id)
+    }
+}
+impl HeadLookup for BTreeMap<DeclarationId, &nir::normal_forms::Head> {
+    fn head(&self, id: &DeclarationId) -> Option<&nir::normal_forms::Head> {
+        self.get(id).copied()
+    }
 }

@@ -322,7 +322,10 @@ impl<'a> Frame<'a> {
     }
 
     fn domain(&self, vm: &mut Interpreter<'_>, slot: usize) -> Result<(Term, bool), Error> {
-        let metadata = vm.normal_forms[&self.head];
+        let metadata = vm
+            .normal_forms
+            .get(&self.head)
+            .expect("admitted normal head");
         let expected = self
             .bindings
             .instantiate(vm, &metadata.parameters[slot].ty, self.source)?;

@@ -186,7 +186,7 @@ impl Interpreter<'_> {
             .normal
             .as_ref()
             .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
-        let metadata = *self
+        let metadata = self
             .normal_forms
             .get(&normal.head)
             .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
