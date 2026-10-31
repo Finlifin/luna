@@ -90,12 +90,12 @@ fn list_identity_checks_precede_concat_suffix_and_length_reads() {
             let original = if valid {
                 Value::List {
                     ty: list(Primitive::Bool),
-                    values: vec![Value::Bool(false)],
+                    values: vec![Value::Bool(false)].into(),
                 }
             } else {
                 Value::List {
                     ty: list(Primitive::Char),
-                    values: vec![Value::Char('x')],
+                    values: vec![Value::Char('x')].into(),
                 }
             };
             let mut env = Environment::new();
@@ -194,12 +194,12 @@ fn list_indices_read_sibling_references_after_releasing_receiver_locks() {
         let value = if element == Primitive::Type {
             Value::List {
                 ty: list(Primitive::Type),
-                values: vec![Value::Type(Term::Primitive(Primitive::Bool))],
+                values: vec![Value::Type(Term::Primitive(Primitive::Bool))].into(),
             }
         } else {
             Value::List {
                 ty: list(element),
-                values: vec![Value::Bool(true)],
+                values: vec![Value::Bool(true)].into(),
             }
         };
         let storage = Storage::new(Value::AnonymousRecord(vec![
@@ -284,7 +284,7 @@ fn indexed_list_domains_are_checked_before_computed_index_effects() {
             input,
             Value::List {
                 ty: list(Primitive::Char),
-                values: vec![Value::Char('x')],
+                values: vec![Value::Char('x')].into(),
             },
         );
         env.insert(trace, Value::Bool(false));
@@ -297,7 +297,7 @@ fn indexed_list_domains_are_checked_before_computed_index_effects() {
             input,
             Value::List {
                 ty: list(Primitive::Bool),
-                values: vec![Value::Bool(true)],
+                values: vec![Value::Bool(true)].into(),
             },
         );
         assert!(matches!(
@@ -376,7 +376,7 @@ fn fused_append_preserves_aliases_and_reuses_owned_buffers() {
                     values.push(item.clone());
                     let original = Value::List {
                         ty: ty.clone(),
-                        values,
+                        values: values.into(),
                     };
                     let buffer = match &original {
                         Value::List { values, .. } => values.as_ptr() as usize,
@@ -447,11 +447,11 @@ fn fused_append_rolls_back_budget_failures_and_recovers() {
     let ty = list(Primitive::Bool);
     let original = Value::List {
         ty: ty.clone(),
-        values: vec![Value::Bool(false)],
+        values: vec![Value::Bool(false)].into(),
     };
     let suffix = Value::List {
         ty: ty.clone(),
-        values: vec![Value::Bool(true)],
+        values: vec![Value::Bool(true)].into(),
     };
     let mut failed = 0;
     let mut succeeded = 0;
@@ -480,7 +480,7 @@ fn fused_append_rolls_back_budget_failures_and_recovers() {
                 vm.invocation_slot_value(&target, Some(SOURCE)).unwrap(),
                 Value::List {
                     ty: ty.clone(),
-                    values: vec![Value::Bool(false), Value::Bool(true)],
+                    values: vec![Value::Bool(false), Value::Bool(true)].into(),
                 }
             );
         }
@@ -496,7 +496,7 @@ fn fused_append_rejects_invalid_suffix_without_replacing_receiver() {
     let ty = list(Primitive::Bool);
     let original = Value::List {
         ty: ty.clone(),
-        values: vec![Value::Bool(false)],
+        values: vec![Value::Bool(false)].into(),
     };
     let body = expr(
         Term::Primitive(Primitive::Void),
@@ -518,11 +518,11 @@ fn fused_append_rejects_invalid_suffix_without_replacing_receiver() {
         for malformed in [
             Value::List {
                 ty: list(Primitive::Char),
-                values: vec![Value::Char('x')],
+                values: vec![Value::Char('x')].into(),
             },
             Value::List {
                 ty: ty.clone(),
-                values: vec![Value::Char('x')],
+                values: vec![Value::Char('x')].into(),
             },
         ] {
             let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
@@ -538,7 +538,7 @@ fn fused_append_rejects_invalid_suffix_without_replacing_receiver() {
                 env[&input],
                 Value::List {
                     ty: ty.clone(),
-                    values: vec![Value::Bool(false); 2]
+                    values: vec![Value::Bool(false); 2].into()
                 }
             );
         }
@@ -552,7 +552,7 @@ fn frozen_append_checks_suffix_before_mutation_and_recovers_at_every_budget_boun
     let input = LocalId { owner: 1, index: 0 };
     let original = Value::List {
         ty: ty.clone(),
-        values: vec![Value::Bool(false)],
+        values: vec![Value::Bool(false)].into(),
     };
     let body = |fields| {
         expr(
@@ -616,7 +616,7 @@ fn frozen_append_checks_suffix_before_mutation_and_recovers_at_every_budget_boun
                             .unwrap();
                         let completed = Value::List {
                             ty: ty.clone(),
-                            values: vec![Value::Bool(false), Value::Bool(true)],
+                            values: vec![Value::Bool(false), Value::Bool(true)].into(),
                         };
                         // Bytecode can exhaust its budget after committing the
                         // append, while producing the enclosing Unit result.
@@ -640,7 +640,7 @@ fn frozen_append_checks_suffix_before_mutation_and_recovers_at_every_budget_boun
                         .unwrap(),
                     Value::List {
                         ty: ty.clone(),
-                        values: vec![Value::Bool(false), Value::Bool(true)]
+                        values: vec![Value::Bool(false), Value::Bool(true)].into()
                     }
                 );
             }
@@ -687,7 +687,7 @@ fn append_rejects_malformed_prefix_before_reading_suffix_for_every_carrier() {
             };
             let malformed = Value::List {
                 ty: ty.clone(),
-                values: vec![Value::Char('x')],
+                values: vec![Value::Char('x')].into(),
             };
             let mut env = Environment::from([(input, wrap(malformed.clone()))]);
             let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
@@ -703,7 +703,7 @@ fn append_rejects_malformed_prefix_before_reading_suffix_for_every_carrier() {
             );
             let valid = Value::List {
                 ty: ty.clone(),
-                values: vec![Value::Bool(true)],
+                values: vec![Value::Bool(true)].into(),
             };
             env.insert(input, wrap(valid.clone()));
             env.insert(suffix, valid);
@@ -713,7 +713,7 @@ fn append_rejects_malformed_prefix_before_reading_suffix_for_every_carrier() {
                     .unwrap(),
                 Value::List {
                     ty: ty.clone(),
-                    values: vec![Value::Bool(true); 2]
+                    values: vec![Value::Bool(true); 2].into()
                 }
             );
         }

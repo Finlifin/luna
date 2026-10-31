@@ -165,7 +165,7 @@ fn main() {
                             sort: Sort::Type,
                             arguments: vec![primitive(Primitive::Type)],
                         },
-                        values: vec![Value::Type(primitive(Primitive::Bool)); length],
+                        values: vec![Value::Type(primitive(Primitive::Bool)); length].into(),
                     }];
                     if mode == "local" {
                         args.push(Value::Integer(comptime_runtime::Integer::from_u128(

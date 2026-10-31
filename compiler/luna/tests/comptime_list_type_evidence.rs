@@ -474,7 +474,7 @@ fn ordinary_type_lists_support_methods_spreads_and_canonical_normal_inputs() {
                 support::id(&package, "identity"),
                 vec![Value::List {
                     ty: ty.clone(),
-                    values: vec![bad],
+                    values: vec![bad].into(),
                 }],
             )
             .unwrap_err();

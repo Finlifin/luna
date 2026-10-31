@@ -1445,7 +1445,7 @@ pub(super) fn append_list_checked(
             if original.saturating_add(right.len()) > 100_000 {
                 return Err(ErrorKind::RepresentationSizeLimit);
             }
-            left.extend(right);
+            left.append_payload(right);
             original
         }
         _ => return Err(ErrorKind::Type),

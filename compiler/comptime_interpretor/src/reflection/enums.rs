@@ -269,7 +269,7 @@ impl Interpreter<'_> {
         }
         let value = Value::List {
             ty: output.clone(),
-            values,
+            values: values.into(),
         };
         self.validate_immutable_input(&value, output)?;
         Ok(value)

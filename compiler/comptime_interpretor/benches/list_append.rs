@@ -253,7 +253,7 @@ fn main() {
                         let invoke = |vm: &mut Interpreter<'_>| {
                             let original = Value::List {
                                 ty: list.clone(),
-                                values: vec![],
+                                values: vec![].into(),
                             };
                             let result = vm
                                 .invoke_with_typed_values(id(1), vec![(list.clone(), original)])

@@ -149,7 +149,7 @@ pub enum Value {
     /// Immutable homogeneous comptime data with its original list type identity.
     List {
         ty: Term,
-        values: Vec<Value>,
+        values: ListValues,
     },
     Integer(comptime_runtime::Integer),
     BitVec(comptime_runtime::bitvec::BitVec),
@@ -286,8 +286,12 @@ impl Value {
                         visit(child, fuel, depth + 1, closures, storage, visitor)?;
                     }
                 }
-                Value::List { values: fields, .. }
-                | Value::Tuple(fields)
+                Value::List { values: fields, .. } => {
+                    for child in fields {
+                        visit(child, fuel, depth + 1, closures, storage, visitor)?;
+                    }
+                }
+                Value::Tuple(fields)
                 | Value::Record { fields, .. }
                 | Value::Variant { fields, .. } => {
                     for child in fields {
@@ -358,7 +362,7 @@ impl Value {
             pending: &mut usize,
             parameters: &BTreeSet<DeclarationId>,
             value_parameters: &BTreeMap<DeclarationId, Term>,
-        ) -> Option<()> {
+        ) -> Option<usize> {
             *pending = pending.checked_sub(1)?;
             if depth >= 128 {
                 return None;
@@ -438,8 +442,8 @@ impl Value {
             };
             *work = work.checked_add(extra)?;
             let children = match value {
-                Value::List { values: fields, .. }
-                | Value::Record { fields, .. }
+                Value::List { values: fields, .. } => fields.len(),
+                Value::Record { fields, .. }
                 | Value::Variant { fields, .. }
                 | Value::Tuple(fields) => fields.len(),
                 Value::AnonymousRecord(fields) => fields.len(),
@@ -452,16 +456,38 @@ impl Value {
                 return None;
             }
 
+            let cache = match value {
+                Value::List { values, .. }
+                    if parameters.is_empty() && value_parameters.is_empty() =>
+                {
+                    Some(values)
+                }
+                _ => None,
+            };
+            if let Some(summary) = cache.and_then(ListValues::summary) {
+                if depth.checked_add(summary.height)? >= 128 {
+                    return None;
+                }
+                *work = work.checked_add(summary.work)?;
+                if work.checked_add(*pending)? > 100_000 {
+                    return None;
+                }
+                return Some(summary.height + 1);
+            }
+            let before_children = *work;
+            let mut height = 1usize;
             *pending = pending.checked_add(children)?;
             let mut child = |value: &Value| {
-                visit(
+                let child_height = visit(
                     value,
                     depth + 1,
                     work,
                     pending,
                     parameters,
                     value_parameters,
-                )
+                )?;
+                height = height.max(child_height + 1);
+                Some(())
             };
             match value {
                 Value::Optional { value, .. } => {
@@ -470,8 +496,12 @@ impl Value {
                     }
                 }
                 Value::ErrorResult { value, .. } | Value::Newtype { value, .. } => child(value)?,
-                Value::List { values: fields, .. }
-                | Value::Record { fields, .. }
+                Value::List { values: fields, .. } => {
+                    for value in fields.iter().rev() {
+                        child(value)?;
+                    }
+                }
+                Value::Record { fields, .. }
                 | Value::Variant { fields, .. }
                 | Value::Tuple(fields) => {
                     for value in fields.iter().rev() {
@@ -490,7 +520,13 @@ impl Value {
                 }
                 _ => {}
             }
-            Some(())
+            if let Some(values) = cache {
+                values.remember(list_values::Summary {
+                    work: *work - before_children,
+                    height: height - 1,
+                });
+            }
+            Some(height)
         }
         let mut work = 0;
         visit(self, 0, &mut work, &mut 1, parameters, value_parameters)?;
@@ -744,6 +780,8 @@ macro_rules! value {
 mod code_session;
 mod declaration_index;
 mod layout_catalog;
+mod list_values;
+pub use list_values::ListValues;
 mod method_catalog;
 pub use code_session::CodeSession;
 
@@ -3685,8 +3723,8 @@ impl<'a> Interpreter<'a> {
                 return Err(self.failure(ErrorKind::DepthExhausted, Some(source)));
             }
             let width = match value {
-                Value::List { values, .. }
-                | Value::Tuple(values)
+                Value::List { values, .. } => values.len(),
+                Value::Tuple(values)
                 | Value::Record { fields: values, .. }
                 | Value::Variant { fields: values, .. } => values.len(),
                 Value::Newtype { .. } => 1,
@@ -3718,8 +3756,10 @@ impl<'a> Interpreter<'a> {
             // payload sizes, labels and completed embedded types separately.
             self.integer_operation(Some(source), |budget| budget.consume(width))?;
             match value {
-                Value::List { values, .. }
-                | Value::Tuple(values)
+                Value::List { values, .. } => {
+                    pending.extend(values.iter().rev().map(|value| (value, depth + 1)))
+                }
+                Value::Tuple(values)
                 | Value::Record { fields: values, .. }
                 | Value::Variant { fields: values, .. } => {
                     pending.extend(values.iter().rev().map(|value| (value, depth + 1)))
@@ -3812,7 +3852,7 @@ impl<'a> Interpreter<'a> {
     fn finish_normal_list(&mut self, ty: Term, values: Vec<Value>) -> Result<Value, Error> {
         let value = Value::List {
             ty: ty.clone(),
-            values,
+            values: values.into(),
         };
         self.validate_immutable_input(&value, &ty)?;
         Ok(value)

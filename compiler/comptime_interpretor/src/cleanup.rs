@@ -875,7 +875,7 @@ impl<'a> Interpreter<'a> {
                     .collect::<Result<Vec<_>, _>>()?;
                 Value::List {
                     ty: ty.clone(),
-                    values,
+                    values: values.into(),
                 }
             }
             Value::FunctionInstance {
@@ -2486,7 +2486,7 @@ mod borrowed_checkpoint_tests {
         for (payload, valid) in [(Value::Bool(true), true), (Value::Char('x'), false)] {
             let original = Value::List {
                 ty: ty.clone(),
-                values: vec![payload],
+                values: vec![payload].into(),
             };
             let storage = Storage::new(original.clone());
             for by_reference in [false, true] {
@@ -2621,9 +2621,9 @@ mod borrowed_checkpoint_tests {
     fn borrowed_containers_preserve_checkpoint_failures_depth_and_work() {
         let source = SourceRange { start: 3, end: 7 };
         let package = Package::default();
-        let list = |values| Value::List {
+        let list = |values: Vec<Value>| Value::List {
             ty: Term::Primitive(Primitive::Bool),
-            values,
+            values: values.into(),
         };
         // Checkpointing checks representation work, not the list's declared
         // element domain. Invocation admission separately rejects bad domains.

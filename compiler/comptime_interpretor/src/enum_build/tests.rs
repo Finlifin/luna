@@ -48,11 +48,11 @@ fn input(shape: &str) -> Value {
         symbols(&[shape]),
         Value::List {
             ty: list(list(p(Primitive::Symbol))),
-            values: vec![symbols(&["flag"])],
+            values: vec![symbols(&["flag"])].into(),
         },
         Value::List {
             ty: list(list(p(Primitive::Type))),
-            values: vec![ordinary_type_list(vec![p(Primitive::Bool)])],
+            values: vec![ordinary_type_list(vec![p(Primitive::Bool)])].into(),
         },
     ])
 }
@@ -259,7 +259,7 @@ fn segmented_paths_reject_empty_and_embedded_separator_segments_before_host_call
             };
             values[2] = Value::List {
                 ty: list(list(p(Primitive::Symbol))),
-                values: vec![symbols(&segments)],
+                values: vec![symbols(&segments)].into(),
             };
             assert_eq!(
                 execute(
@@ -279,11 +279,11 @@ fn segmented_paths_reject_empty_and_embedded_separator_segments_before_host_call
         };
         values[1] = Value::List {
             ty: list(list(p(Primitive::Symbol))),
-            values: vec![symbols(&["Group"])],
+            values: vec![symbols(&["Group"])].into(),
         };
         values[2] = Value::List {
             ty: list(list(p(Primitive::Symbol))),
-            values: vec![symbols(&["Group", "Data"])],
+            values: vec![symbols(&["Group", "Data"])].into(),
         };
         execute(
             &mut vm,
@@ -313,14 +313,15 @@ fn duplicate_payload_diagnostic_does_not_publish_or_poison_recovery() {
         };
         values[4] = Value::List {
             ty: list(list(p(Primitive::Symbol))),
-            values: vec![symbols(&["flag", "flag"])],
+            values: vec![symbols(&["flag", "flag"])].into(),
         };
         values[5] = Value::List {
             ty: list(list(p(Primitive::Type))),
             values: vec![ordinary_type_list(vec![
                 p(Primitive::Bool),
                 p(Primitive::Bool),
-            ])],
+            ])]
+            .into(),
         };
         let error = execute(
             &mut vm,
@@ -378,11 +379,11 @@ fn ordinary_enum_builder_rejects_host_added_symbol_encoding_before_commit() {
         };
         values[4] = Value::List {
             ty: list(list(p(Primitive::Symbol))),
-            values: vec![symbols(&[])],
+            values: vec![symbols(&[])].into(),
         };
         values[5] = Value::List {
             ty: list(list(p(Primitive::Type))),
-            values: vec![ordinary_type_list(vec![])],
+            values: vec![ordinary_type_list(vec![])].into(),
         };
         let input = Value::Tuple(values);
         let mut vm = Interpreter::for_comptime(&world, Budget::default())
@@ -540,11 +541,11 @@ fn symbol_input(codes: &[&str]) -> Value {
     };
     values[4] = Value::List {
         ty: list(list(p(Primitive::Symbol))),
-        values: vec![symbols(&[])],
+        values: vec![symbols(&[])].into(),
     };
     values[5] = Value::List {
         ty: list(list(p(Primitive::Type))),
-        values: vec![ordinary_type_list(vec![])],
+        values: vec![ordinary_type_list(vec![])].into(),
     };
     values.push(symbols(codes));
     Value::Tuple(values)
@@ -685,7 +686,7 @@ fn fixed_input(width: u128, base: Option<Primitive>) -> Value {
         integers(&[42]),
         Value::List {
             ty: list(list(p(Primitive::Integer))),
-            values: vec![integers(&[])],
+            values: vec![integers(&[])].into(),
         },
     ]);
     Value::Tuple(values)
@@ -835,8 +836,10 @@ fn enum_builder_accepts_ordinary_type_lists_without_erasing_element_checks() {
                         Value::Bool(true)
                     } else {
                         Value::Type(p(Primitive::Bool))
-                    }],
-                }],
+                    }]
+                    .into(),
+                }]
+                .into(),
             };
             let result = execute(
                 &mut vm,

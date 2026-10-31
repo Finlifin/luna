@@ -129,16 +129,16 @@ fn homogeneous_value_lists_require_the_bound_head_and_validate_every_element() {
     let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     let good = Value::List {
         ty: list.clone(),
-        values: vec![Value::Bool(true), Value::Bool(false)],
+        values: vec![Value::Bool(true), Value::Bool(false)].into(),
     };
     for bad in [
         Value::List {
             ty: list.clone(),
-            values: vec![Value::Bool(true), Value::Type(ty(P::Bool))],
+            values: vec![Value::Bool(true), Value::Type(ty(P::Bool))].into(),
         },
         Value::List {
             ty: list_type(),
-            values: vec![Value::Bool(true)],
+            values: vec![Value::Bool(true)].into(),
         },
         Value::Tuple(vec![Value::Bool(true)]),
         ordinary_type_list(vec![ty(P::Bool)]),
@@ -152,7 +152,7 @@ fn homogeneous_value_lists_require_the_bound_head_and_validate_every_element() {
     assert!(vm.invoke(id(3), vec![good.clone()]).is_err());
     let wide = Value::List {
         ty: list.clone(),
-        values: vec![Value::Bool(true); 100_001],
+        values: vec![Value::Bool(true); 100_001].into(),
     };
     assert!(wide.immutable_copy_work().is_none());
     assert!(good.immutable_copy_work().is_some());
@@ -214,7 +214,7 @@ fn homogeneous_value_lists_require_the_bound_head_and_validate_every_element() {
     );
     let empty = Value::List {
         ty: list.clone(),
-        values: vec![],
+        values: vec![].into(),
     };
     let empty_term = empty
         .clone()
@@ -381,9 +381,15 @@ fn list_domain_uses_ordinary_value_metadata_and_registered_layout() {
     assert!(nir::normal_forms::validate(&package).is_ok());
     assert_eq!(package.normal_forms[1].parameters[0].kind, Kind::Value);
     assert!(package.normal_forms[1].to_string().contains("(kind value)"));
-    // A parameter cannot grant a made-up declaration the list representation.
+    // Opaque heads are legal parameter domains, but the signature does not
+    // grant their values a list representation without declaration evidence.
     package.normal_forms[0].role = nir::normal_forms::Role::Opaque;
-    assert!(nir::normal_forms::validate(&package).is_err());
+    assert!(nir::normal_forms::validate(&package).is_ok());
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    assert!(
+        vm.validate_immutable_input(&ordinary_type_list(vec![ty(P::Bool)]), &list_type(),)
+            .is_err()
+    );
     package.normal_forms[0].role = nir::normal_forms::Role::TypeList;
     assert!(nir::normal_forms::validate(&package).is_ok());
     package.normal_forms[1].parameters[0].kind = Kind::Type;
@@ -660,7 +666,7 @@ fn check_list_read_cost(local_index: bool) {
             } else {
                 Value::List {
                     ty: list,
-                    values: vec![Value::Bool(true); 512],
+                    values: vec![Value::Bool(true); 512].into(),
                 }
             };
             let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
@@ -763,7 +769,7 @@ fn fixed_list_index_rejects_bounds_and_recovers_without_mutating_the_list() {
                 } else {
                     Value::List {
                         ty: list,
-                        values: vec![Value::Bool(true)],
+                        values: vec![Value::Bool(true)].into(),
                     }
                 };
                 let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
@@ -861,7 +867,7 @@ fn immutable_list_operations_preserve_types_and_enforce_combined_size_limit() {
             } else {
                 Value::List {
                     ty: list.clone(),
-                    values: vec![Value::Bool(true); count],
+                    values: vec![Value::Bool(true); count].into(),
                 }
             }
         };
@@ -906,7 +912,7 @@ fn list_operations_reject_forged_output_domains_and_honor_vm_budget() {
         let (mut package, list) = list_operation_package(P::Bool, concat);
         let argument = Value::List {
             ty: list,
-            values: vec![Value::Bool(true); 32],
+            values: vec![Value::Bool(true); 32].into(),
         };
         let mut vm = Interpreter::for_comptime(
             &package,
@@ -991,7 +997,7 @@ fn repeated_list_lengths_charge_the_observation_not_every_element() {
                 } else {
                     Value::List {
                         ty: list,
-                        values: vec![Value::Bool(true); length],
+                        values: vec![Value::Bool(true); length].into(),
                     }
                 };
                 let mut vm = Interpreter::for_comptime(
@@ -1063,7 +1069,7 @@ fn list_length_does_not_accept_a_local_with_a_different_element_domain() {
             } else {
                 Value::List {
                     ty: list,
-                    values: vec![Value::Bool(true)],
+                    values: vec![Value::Bool(true)].into(),
                 }
             };
             let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
@@ -1146,7 +1152,7 @@ fn list_length_observes_replacement_and_runs_general_operand_effects() {
                 } else {
                     Value::List {
                         ty: list,
-                        values: vec![Value::Bool(true)],
+                        values: vec![Value::Bool(true)].into(),
                     }
                 };
                 let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
@@ -1200,7 +1206,7 @@ fn local_list_length_still_charges_large_element_type_descriptions() {
                 id(3),
                 vec![Value::List {
                     ty: list,
-                    values: vec![]
+                    values: vec![].into()
                 }]
             )
             .unwrap(),
@@ -1288,7 +1294,7 @@ fn comptime_list_pointer_writes_are_atomic_under_budget_exhaustion() {
             } else {
                 Value::List {
                     ty: list.clone(),
-                    values: vec![Value::Bool(true); count],
+                    values: vec![Value::Bool(true); count].into(),
                 }
             }
         };
@@ -1352,7 +1358,7 @@ fn list_pointer_access_does_not_grant_runtime_copy_permission() {
         } else {
             Value::List {
                 ty: list.clone(),
-                values: vec![],
+                values: vec![].into(),
             }
         };
         let owner = Storage::new(original.clone());
@@ -1395,7 +1401,7 @@ fn list_pointer_rejects_wrong_element_and_identity_without_modifying_storage() {
     let (package, list, pointer_ty) = list_pointer_package(P::Bool);
     let original = Value::List {
         ty: list.clone(),
-        values: vec![Value::Bool(true)],
+        values: vec![Value::Bool(true)].into(),
     };
     let owner = Storage::new(original.clone());
     let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
@@ -1406,15 +1412,15 @@ fn list_pointer_rejects_wrong_element_and_identity_without_modifying_storage() {
         ordinary_type_list(vec![ty(P::Bool)]),
         Value::List {
             ty: list.clone(),
-            values: vec![Value::Type(ty(P::Bool))],
+            values: vec![Value::Type(ty(P::Bool))].into(),
         },
         Value::List {
             ty: list_type(),
-            values: vec![Value::Bool(false)],
+            values: vec![Value::Bool(false)].into(),
         },
         Value::List {
             ty: list.clone(),
-            values: vec![pointer.clone()],
+            values: vec![pointer.clone()].into(),
         },
     ] {
         assert_eq!(
@@ -1490,7 +1496,7 @@ fn list_append_failure_rolls_back_and_success_preserves_snapshots() {
             } else {
                 Value::List {
                     ty: list.clone(),
-                    values: vec![Value::Bool(true); 4],
+                    values: vec![Value::Bool(true); 4].into(),
                 }
             };
             let item = if element == P::Type {
@@ -1515,7 +1521,8 @@ fn list_append_failure_rolls_back_and_success_preserves_snapshots() {
                         Value::Bool(true),
                         Value::Bool(true),
                         Value::Bool(false),
-                    ],
+                    ]
+                    .into(),
                 }
             };
             let mut successes = 0;
@@ -1744,6 +1751,7 @@ fn nested_typed_type_lists_reconstruct_as_ordinary_list_values() {
                 ordinary_type_list(vec![ty(P::Bool)]),
                 ordinary_type_list(vec![])
             ]
+            .into()
         }
     );
 }

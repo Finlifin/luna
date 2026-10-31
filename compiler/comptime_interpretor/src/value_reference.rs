@@ -924,7 +924,10 @@ mod append_tests {
         let Value::List { ty, .. } = crate::test_type_list(vec![]) else {
             unreachable!()
         };
-        let storage = Storage::new(Value::List { ty, values });
+        let storage = Storage::new(Value::List {
+            ty,
+            values: values.into(),
+        });
         let snapshot = storage.read().unwrap();
         let mut reference = ValueReference::root(storage.clone());
         let suffix = || crate::test_type_list(vec![Term::Primitive(nir::Primitive::Type)]);

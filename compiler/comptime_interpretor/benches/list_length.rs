@@ -152,7 +152,8 @@ fn main() {
                                     Value::Bool(true)
                                 };
                                 length
-                            ],
+                            ]
+                            .into(),
                         }]
                     };
                     let expected =

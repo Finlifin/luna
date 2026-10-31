@@ -237,7 +237,7 @@ impl Restore<'_> {
             },
             Value::List { ty, values } => Value::List {
                 ty: self.ty(ty)?,
-                values: self.values(values, depth)?,
+                values: self.values(values, depth)?.into(),
             },
             Value::Tuple(values) => Value::Tuple(self.values(values, depth)?),
             Value::AnonymousRecord(fields) => {

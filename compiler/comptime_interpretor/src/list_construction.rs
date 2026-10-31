@@ -41,7 +41,7 @@ impl Interpreter<'_> {
         }
         let value = Value::List {
             ty: ty.clone(),
-            values,
+            values: values.into(),
         };
         self.validate_immutable_input(&value, ty)?;
         Ok(value)

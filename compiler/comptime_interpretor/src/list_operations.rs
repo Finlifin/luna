@@ -314,7 +314,7 @@ impl Interpreter<'_> {
         })?;
         let value = match (value, other) {
             (Value::List { ty, mut values }, Value::List { values: right, .. }) => {
-                values.extend(right);
+                values.append_payload(right);
                 Value::List { ty, values }
             }
             _ => return Err(self.failure(ErrorKind::Type, Some(source))),

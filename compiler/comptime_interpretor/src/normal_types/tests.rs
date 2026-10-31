@@ -658,7 +658,7 @@ fn contextual_container_checks_do_not_reorder_operand_effects() {
                     if valid {
                         Value::List {
                             ty: list_ty.clone(),
-                            values: vec![Value::Type(Term::Primitive(Primitive::Char))],
+                            values: vec![Value::Type(Term::Primitive(Primitive::Char))].into(),
                         }
                     } else {
                         Value::Bool(false)
@@ -1368,12 +1368,12 @@ fn staged_list_spreads_finish_after_all_operand_effects() {
             if invalid {
                 Value::List {
                     ty: container_list(Term::Primitive(Primitive::Bool)),
-                    values: vec![Value::Bool(true)],
+                    values: vec![Value::Bool(true)].into(),
                 }
             } else {
                 Value::List {
                     ty: ty.clone(),
-                    values: vec![Value::UnsignedInteger(17), Value::UnsignedInteger(23)],
+                    values: vec![Value::UnsignedInteger(17), Value::UnsignedInteger(23)].into(),
                 }
             },
         );
@@ -1400,6 +1400,7 @@ fn staged_list_spreads_finish_after_all_operand_effects() {
                         Value::UnsignedInteger(23),
                         Value::UnsignedInteger(29)
                     ]
+                    .into()
                 }
             );
         }

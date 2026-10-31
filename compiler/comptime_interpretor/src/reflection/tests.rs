@@ -401,6 +401,7 @@ fn source_struct_field_nodes_validate_domains_meter_work_and_recover() {
                         Value::Symbol("first\n\"".into()),
                         Value::Symbol("next".into()),
                     ]
+                    .into()
                 }
             );
         } else {
@@ -412,6 +413,7 @@ fn source_struct_field_nodes_validate_domains_meter_work_and_recover() {
                         Value::Type(p(Primitive::Bool)),
                         Value::Type(Term::Pointer(Box::new(nominal(vec![p(Primitive::Bool)]))))
                     ]
+                    .into()
                 }
             );
         }

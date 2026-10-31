@@ -450,11 +450,10 @@ for owned, root-storage and projected-reference carriers. Replacing the prefix
 and supplying the suffix must recover in the same VM. Existing tests cover
 allocation reuse, aliasing, invalid suffixes and budget-boundary rollback.
 
-This does **not** make repeated append linear. `Value::List` still exposes a
-mutable `Vec<Value>` and each operation must validate its existing contents.
-A reusable admission summary needs an owned immutable representation (or a
-mutation revision) and scope-specific proof dependencies, invalidated by every
-mutation. Buffer address or declaration identity alone cannot establish that
+This consolidation did **not** make repeated append linear. At that stage,
+`Value::List` exposed a mutable `Vec<Value>` and each operation validated its
+existing contents. A reusable admission summary needs an owned representation
+with mutation invalidation and scope-specific proof dependencies. Buffer address or declaration identity alone cannot establish that
 previously checked contents or proof assumptions are still valid. No end-to-end
 performance claim is made for this consolidation.
 
@@ -486,3 +485,54 @@ After the fix, `python3 -B development/check.py --timeout 900 -- test -p
 comptime_interpretor --lib` passed all 333 tests
 (`/tmp/luna-tools-h6zj1ikh/result.json`, exit 0). Workspace formatting and
 `git diff --check` passed. No complexity or throughput improvement is claimed.
+
+## Mutation-aware list representation summaries
+
+`Value::List` now owns its elements through `ListValues`. Reading does not
+invalidate metadata; mutable access clears its cached summary before exposing
+the vector, including indexed updates and mutable iteration. Moving elements
+out discards metadata. Cloning copies both owned contents and the matching
+summary; subsequent mutations invalidate only the changed clone. Debug and
+value equality deliberately ignore this internal metadata.
+
+A successful closed representation traversal records element work and maximum
+subtree height. Repeated structural checks can reuse these values. The enclosing
+List type is checked separately on every traversal, and cached work is added to
+the current aggregate budget with its pending siblings. Cached subtree height
+is checked at its current nesting depth. Summaries never authorize nominal
+formation, type equality or a caller assumption; nonempty abstract type/value
+scopes continue through the uncached traversal, and failed scans publish no
+summary for the rejected list.
+
+Append combines the two payload summaries when both are available, preserving
+the existing vector allocation where possible. Validation error or unwind
+truncates through the mutation boundary, invalidating the combined summary.
+The logical work returned to the VM is unchanged; caching avoids the repeated
+structural walk, not its accounting. Nominal/element admission and borrowed
+representation checks still traverse contents, so whole-program append loops
+are **not yet linear**. End-to-end speedup has not been measured.
+
+One pre-existing integration assertion expected an opaque NF parameter domain
+to fail declaration validation. That conflicts with the generic domain support
+introduced by `af06c555`. The test now accepts the signature and checks that a
+concrete list payload is still rejected without registered layout evidence.
+The original failure occurred before VM execution, in unchanged NIR validation
+(`/tmp/luna-tools-tt6cxzzy/result.json`).
+
+Validation from `/home/fin/luna` (final runs all exit 0):
+
+```sh
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib
+python3 -B development/check.py --timeout 900 -- check -p luna -p comptime_interpretor --all-targets
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor -p luna --test type_list_inputs --test normal_values --test comptime_list_operations --test comptime_list_type_evidence --test comptime_memory --test library_protocols
+```
+
+336 interpreter unit tests and 170 integration tests passed. Coverage includes
+mutation invalidation, independent clones, append composition/rollback,
+contextual depth and aggregate-size rejection, scoped values, normal inputs,
+list operations and repository library protocols. Evidence:
+`/tmp/luna-tools-5j1pa93f/result.json` (unit tests),
+`/tmp/luna-tools-xxbkvzm5/result.json` (all-target compilation),
+`/tmp/luna-tools-_hhwzu8c/result.json` (integration), and
+`/tmp/luna-tools-umf530a6/result.json` (formatting). `git diff --check` passed.

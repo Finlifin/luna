@@ -95,7 +95,7 @@ fn repository_meta_lists_carry_homogeneous_comptime_values() {
     let Value::List { ty, values } = &result else {
         panic!("{result}")
     };
-    assert_eq!(values, &[Value::Bool(true), Value::Bool(false)]);
+    assert_eq!(values.as_slice(), &[Value::Bool(true), Value::Bool(false)]);
     assert!(matches!(ty, nir::Term::NormalForm { .. }));
     assert!(
         result

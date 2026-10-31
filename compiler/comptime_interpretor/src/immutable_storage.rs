@@ -77,8 +77,12 @@ impl Interpreter<'_> {
                     self.immutable_storage_contents(&entry.value, source, depth + 1)?;
                 }
             }
-            Value::List { values, .. }
-            | Value::Tuple(values)
+            Value::List { values, .. } => {
+                for value in values {
+                    self.immutable_storage_contents(value, source, depth + 1)?;
+                }
+            }
+            Value::Tuple(values)
             | Value::Record { fields: values, .. }
             | Value::Variant { fields: values, .. } => {
                 for value in values {
@@ -284,11 +288,11 @@ mod tests {
         };
         let original = Value::List {
             ty: ty.clone(),
-            values: vec![Value::Bool(false)],
+            values: vec![Value::Bool(false)].into(),
         };
         let expected = Value::List {
             ty: ty.clone(),
-            values: vec![Value::Bool(false), Value::Bool(true)],
+            values: vec![Value::Bool(false), Value::Bool(true)].into(),
         };
         let K::WritePointer { value, .. } = &expr.kind else {
             unreachable!()
@@ -337,7 +341,7 @@ mod tests {
             let expected = wrap(if matches!(mode, 4 | 7) {
                 Value::List {
                     ty: ty.clone(),
-                    values: vec![Value::Bool(false); 2],
+                    values: vec![Value::Bool(false); 2].into(),
                 }
             } else {
                 expected.clone()
@@ -369,7 +373,7 @@ mod tests {
                     LocalId { owner: 1, index: 1 },
                     Value::List {
                         ty: ty.clone(),
-                        values: vec![Value::Bool(true)],
+                        values: vec![Value::Bool(true)].into(),
                     },
                 );
                 let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();

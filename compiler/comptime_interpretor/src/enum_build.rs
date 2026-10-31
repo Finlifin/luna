@@ -209,7 +209,7 @@ impl<'a> Interpreter<'a> {
             {
                 return Err(fail());
             }
-            Ok(values)
+            Ok(values.into_vec())
         };
         let field_names = nested(field_names, Primitive::Symbol)?;
         let field_types = nested(field_types, Primitive::Type)?;
