@@ -469,36 +469,44 @@ impl Builder<'_> {
                 )?))
             }
             Value::Unit => K::Unit,
-            Value::Bool(v) => K::Literal(n::Literal::Bool(*v)),
-            Value::Char(v) => K::Literal(n::Literal::Char(*v)),
-            Value::Float16(bits) if *ty == Term::Primitive(nir::Primitive::F16) => {
-                K::Literal(n::Literal::Float16(*bits))
+            scalar @ (Value::Bool(_)
+            | Value::Char(_)
+            | Value::Symbol(_)
+            | Value::String(_)
+            | Value::SignedInteger(_)
+            | Value::UnsignedInteger(_)
+            | Value::Float16(_)
+            | Value::BFloat16(_)
+            | Value::Float32(_)
+            | Value::Float64(_)
+            | Value::Float(_)
+            | Value::Integer(_)
+            | Value::BitVec(_)) => {
+                // Preserve the existing exact floating-domain checks. This
+                // serialization helper does not confer type admission.
+                let expected = match scalar {
+                    Value::Float(_) => Some(nir::Primitive::Float),
+                    Value::Float16(_) => Some(nir::Primitive::F16),
+                    Value::BFloat16(_) => Some(nir::Primitive::Bf16),
+                    Value::Float32(_) => Some(nir::Primitive::F32),
+                    Value::Float64(_) => Some(nir::Primitive::F64),
+                    _ => None,
+                };
+                if expected.is_some_and(|domain| *ty != Term::Primitive(domain)) {
+                    return Err("staged floating value identity mismatch".into());
+                }
+                let mut budget = comptime_runtime::Budget {
+                    steps: self.fuel,
+                    max_limbs: 4096,
+                };
+                let literal = scalar.freeze_literal(&mut budget);
+                self.fuel = budget.steps;
+                K::Literal(
+                    literal
+                        .map_err(|e| e.to_string())?
+                        .expect("scalar value representation"),
+                )
             }
-            Value::BFloat16(bits) if *ty == Term::Primitive(nir::Primitive::Bf16) => {
-                K::Literal(n::Literal::BFloat16(*bits))
-            }
-            Value::Float32(bits) if *ty == Term::Primitive(nir::Primitive::F32) => {
-                K::Literal(n::Literal::Float32(*bits))
-            }
-            Value::Float64(bits) if *ty == Term::Primitive(nir::Primitive::F64) => {
-                K::Literal(n::Literal::Float64(*bits))
-            }
-            Value::Symbol(v) => {
-                self.fuel = self
-                    .fuel
-                    .checked_sub(v.len())
-                    .ok_or("staged string budget exhausted")?;
-                K::Literal(n::Literal::Symbol(v.to_string()))
-            }
-            Value::String(v) => {
-                self.fuel = self
-                    .fuel
-                    .checked_sub(v.len())
-                    .ok_or("staged string budget exhausted")?;
-                K::Literal(n::Literal::String(v.to_string()))
-            }
-            Value::SignedInteger(v) => K::Literal(n::Literal::SignedInteger(*v)),
-            Value::UnsignedInteger(v) => K::Literal(n::Literal::UnsignedInteger(*v)),
             Value::Type(v) => {
                 crate::associated::charge_projection_copy(v, &mut self.fuel)
                     .map_err(|_| "staged Type payload copy budget exhausted")?;
@@ -527,37 +535,6 @@ impl Builder<'_> {
                         })
                         .collect::<Result<_, _>>()?,
                 )
-            }
-            Value::BitVec(v) => {
-                self.fuel = self
-                    .fuel
-                    .checked_sub(v.words().len())
-                    .ok_or("staged bit-vector budget exhausted")?;
-                K::Literal(n::Literal::BitVec {
-                    width: v.width(),
-                    words: v.words().to_vec(),
-                })
-            }
-            Value::Float(value) => {
-                if *ty != Term::Primitive(nir::Primitive::Float) {
-                    return Err("staged exact Float identity mismatch".into());
-                }
-                let mut budget = comptime_runtime::Budget {
-                    steps: self.fuel,
-                    max_limbs: 4096,
-                };
-                let spelling = value.to_literal(&mut budget);
-                self.fuel = budget.steps;
-                K::Literal(n::Literal::Float(spelling.map_err(|e| e.to_string())?))
-            }
-            Value::Integer(v) => {
-                let mut budget = comptime_runtime::Budget {
-                    steps: self.fuel,
-                    max_limbs: 4096,
-                };
-                let spelling = v.to_hex_literal(&mut budget);
-                self.fuel = budget.steps;
-                K::Literal(n::Literal::Integer(spelling.map_err(|e| e.to_string())?))
             }
             Value::Object(object) => {
                 if *ty != Term::Primitive(nir::Primitive::Object) {

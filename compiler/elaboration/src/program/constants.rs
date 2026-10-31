@@ -3495,30 +3495,20 @@ impl Checker<'_, '_> {
             }
             Value::Type(value) => K::TypeValue(value),
             Value::Unit => K::Unit,
-            Value::Bool(value) => K::Literal(n::Literal::Bool(value)),
-            Value::Char(value) => K::Literal(n::Literal::Char(value)),
-            Value::Symbol(value) => {
-                self.required_steps = self
-                    .required_steps
-                    .checked_sub(value.len() as u64)
-                    .ok_or_else(|| error(span, "constant materialization budget exhausted"))?;
-                K::Literal(n::Literal::Symbol(value.to_string()))
-            }
-            Value::String(value) => {
-                self.required_steps = self
-                    .required_steps
-                    .checked_sub(value.len() as u64)
-                    .ok_or_else(|| error(span, "constant materialization budget exhausted"))?;
-                K::Literal(n::Literal::String(value.to_string()))
-            }
-            Value::SignedInteger(value) => K::Literal(n::Literal::SignedInteger(value)),
-            Value::UnsignedInteger(value) => K::Literal(n::Literal::UnsignedInteger(value)),
-            Value::Float16(value) => K::Literal(n::Literal::Float16(value)),
-            Value::BFloat16(value) => K::Literal(n::Literal::BFloat16(value)),
-            Value::Float32(value) => K::Literal(n::Literal::Float32(value)),
-            Value::Float64(value) => K::Literal(n::Literal::Float64(value)),
-            Value::Float(value) => {
-                if ty != p(P::Float) {
+            scalar @ (Value::Bool(_)
+            | Value::Char(_)
+            | Value::Symbol(_)
+            | Value::String(_)
+            | Value::SignedInteger(_)
+            | Value::UnsignedInteger(_)
+            | Value::Float16(_)
+            | Value::BFloat16(_)
+            | Value::Float32(_)
+            | Value::Float64(_)
+            | Value::Float(_)
+            | Value::Integer(_)
+            | Value::BitVec(_)) => {
+                if matches!(scalar, Value::Float(_)) && ty != p(P::Float) {
                     return Err(error(
                         span,
                         "exact Float constant requires the Float domain",
@@ -3528,29 +3518,15 @@ impl Checker<'_, '_> {
                     steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
                     max_limbs: 4096,
                 };
-                let start = budget.steps;
-                let spelling = value.to_literal(&mut budget);
-                self.required_steps -= (start - budget.steps) as u64;
-                K::Literal(n::Literal::Float(
-                    spelling.map_err(|e| error(span, e.to_string()))?,
-                ))
+                let before = budget.steps;
+                let literal = scalar.freeze_literal(&mut budget);
+                self.required_steps -= (before - budget.steps) as u64;
+                K::Literal(
+                    literal
+                        .map_err(|e| error(span, e.to_string()))?
+                        .expect("scalar value representation"),
+                )
             }
-            Value::Integer(value) => {
-                let mut budget = comptime_runtime::Budget {
-                    steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
-                    max_limbs: 4096,
-                };
-                let start = budget.steps;
-                let spelling = value.to_hex_literal(&mut budget);
-                self.required_steps -= (start - budget.steps) as u64;
-                K::Literal(n::Literal::Integer(
-                    spelling.map_err(|e| error(span, e.to_string()))?,
-                ))
-            }
-            Value::BitVec(value) => K::Literal(n::Literal::BitVec {
-                width: value.width(),
-                words: value.words().to_vec(),
-            }),
             Value::Tuple(values) => {
                 let shape = self.structural_type(&ty, span)?;
                 let Term::Tuple(types) = &shape else {

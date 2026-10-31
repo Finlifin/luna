@@ -8469,3 +8469,44 @@ Reports: `/tmp/luna-tools-g_yog1x0/result.json` (17 completed-value tests),
 accidentally spelled a negative branch as a block-comment opener; whitespace
 was corrected before the successful runs. Runtime Object admission, NF capture
 graph freezing and full materializer unification are not added by this change.
+
+## Share metered scalar literal materialization
+
+Constant-expression and staged-expression materialization now use
+`Value::freeze_literal` for Boolean/character/text/symbol values, fixed-width
+integer and floating bit payloads, exact Integer/Float, and BitVec. The shared
+serializer borrows its input, accounts for inspection and variable payload
+copying before allocation, and returns no representation for non-scalars.
+It preserves exact decimal/integer spelling and machine floating bit patterns;
+it neither executes code nor admits a declared type. Each materializer retains
+its existing phase, domain and structural checks and propagates consumed fuel
+on failure.
+
+This removes duplicated scalar conversion arms and closes a concrete budget
+difference: constant-expression BitVec materialization previously copied words
+without charging the copy there. Both consumers now charge word copying and
+respect the supplied magnitude-buffer limit. Failed attempts leave inputs
+unchanged and can retry with a larger allowance. Result memoization is unchanged.
+
+Unit checks round-trip every supported scalar representation through the VM,
+including Unicode/NUL/escaping, i128/u128 extremes, IEEE NaN payloads and negative
+zero, a long exact decimal, and a 65-bit vector with nontrivial limb values.
+Separate cases check exhausted copy fuel, BitVec size limits, recovery, and
+non-scalar fallback. Source regressions exercise both materializers.
+
+Validation from `/home/fin/luna`, all commands exited 0:
+
+```sh
+python3 -B development/check.py --timeout 900 -- check -p elaboration -p materialization
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib
+python3 -B development/check.py --timeout 900 -- test -p luna --test exact_floats --test pure_bitvec --test literals --test comptime_staged_values --test comptime_bytecode_traits
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+git diff --check
+```
+
+Reports: `/tmp/luna-tools-yhvjdy23/result.json` (crate checks),
+`/tmp/luna-tools-gofgoqa4/result.json` (348 interpreter tests),
+`/tmp/luna-tools-f9ivzk3x/result.json` (91 integration tests), and
+`/tmp/luna-tools-rnydyf8u/result.json` (formatting). Aggregate/closure graph
+construction and NF term encoding remain separate consumers and are not unified
+by this scalar extraction. No whole-language completion or timing claim.
