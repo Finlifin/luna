@@ -2177,3 +2177,46 @@ fn model_clause_validation_respects_budget_and_retries() {
     assert_eq!(exact.steps, 0);
     context.verify_witness(&witness, Budget::default()).unwrap();
 }
+
+#[test]
+fn root_clause_propagation_exports_replayable_theory_reasons() {
+    let impossible = eq(ty(P::Bool), ty(P::U8));
+    let mut context = Context::default();
+    context.assume(F::Or(vec![impossible.clone(), impossible]));
+    let Outcome::Entailed(proof) = context.prove(F::False, Budget::default()) else {
+        panic!("repeated Boolean literals must propagate to the type theory");
+    };
+    assert!(proof.to_string().contains("clause-conflict"));
+    context.verify_proof(&proof, Budget::default()).unwrap();
+    assert!(
+        Context::default()
+            .verify_proof(&proof, Budget::default())
+            .is_err()
+    );
+    for steps in 0..256 {
+        let outcome = context.prove(
+            F::False,
+            Budget {
+                steps,
+                max_depth: 128,
+            },
+        );
+        match outcome {
+            Outcome::Entailed(proof) => context.verify_proof(&proof, Budget::default()).unwrap(),
+            Outcome::Unknown { .. } => {}
+            Outcome::NotEntailed(_) => panic!("interruption must not admit an impossible model"),
+            Outcome::IllFormed(reason) => panic!("well-formed source rejected: {reason}"),
+        }
+    }
+    let mut forged = proof.clone();
+    forged.tree = ptc::ProofTree::ClauseConflict(vec![usize::MAX]);
+    assert_eq!(
+        context.verify_proof(&forged, Budget::default()),
+        Err(ptc::ProofError::Invalid)
+    );
+    forged.tree = ptc::ProofTree::ClauseConflict(vec![]);
+    assert_eq!(
+        context.verify_proof(&forged, Budget::default()),
+        Err(ptc::ProofError::Invalid)
+    );
+}

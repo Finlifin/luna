@@ -13,6 +13,7 @@ pub(super) struct Propagation {
 
 pub(super) struct Circuit {
     nodes: Vec<Node>,
+    clauses: Option<cnf::Cnf>,
 }
 enum Node {
     Constant(bool),
@@ -74,7 +75,17 @@ impl Circuit {
         }
         let mut nodes = Vec::new();
         visit(formula, atoms, &mut nodes, fuel)?;
-        Ok(Self { nodes })
+        Ok(Self {
+            nodes,
+            clauses: None,
+        })
+    }
+
+    pub(crate) fn clauses(&mut self, atoms: usize, fuel: &mut usize) -> Result<&cnf::Cnf, ()> {
+        if self.clauses.is_none() {
+            self.clauses = Some(cnf::Cnf::compile(self, atoms, fuel)?);
+        }
+        Ok(self.clauses.as_ref().unwrap())
     }
 
     /// Return the root truth and forced theory literals. No assignment is

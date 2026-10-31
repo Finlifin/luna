@@ -143,6 +143,8 @@ pub struct Proof {
 #[derive(Clone, Debug)]
 pub enum ProofTree {
     BooleanConflict,
+    /// Unit root clauses followed by a falsified clause, independently replayed.
+    ClauseConflict(Vec<usize>),
     /// An inconsistent subset of literals present on the current branch.
     TheoryConflict(Vec<(Atom, bool)>),
     /// A previously established contradiction under exactly these premises.
@@ -1303,6 +1305,13 @@ impl Search<'_> {
                     Err(ProofError::Invalid)
                 }
             }
+            ProofTree::ClauseConflict(trace) => {
+                let circuit = boolean::Circuit::compile(self.formula, self.atoms, &mut self.steps)
+                    .map_err(|()| ProofError::BudgetExhausted)?;
+                let cnf = boolean::cnf::Cnf::compile(&circuit, self.atoms.len(), &mut self.steps)
+                    .map_err(|()| ProofError::BudgetExhausted)?;
+                cnf.replay(trace, assignment, &mut self.steps)
+            }
             ProofTree::TheoryConflict(literals)
             | ProofTree::Lemma {
                 premises: literals, ..
@@ -1635,9 +1644,11 @@ impl Search<'_> {
                 &self.context.tuple_heads,
             )?);
         }
-        let cnf =
-            boolean::cnf::Cnf::compile(self.boolean.as_ref()?, self.atoms.len(), &mut self.steps)
-                .ok()?;
+        let cnf = self
+            .boolean
+            .as_mut()?
+            .clauses(self.atoms.len(), &mut self.steps)
+            .ok()?;
         cnf.accepts(&atom_values, &mut self.steps)
             .ok()?
             .then_some(Model {
@@ -1910,6 +1921,13 @@ impl fmt::Display for ProofTree {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::BooleanConflict => f.write_str("(boolean-conflict)"),
+            Self::ClauseConflict(trace) => {
+                f.write_str("(clause-conflict")?;
+                for clause in trace {
+                    write!(f, " {clause}")?;
+                }
+                f.write_str(")")
+            }
             Self::TheoryConflict(literals) => {
                 f.write_str("(theory-conflict")?;
                 for (atom, value) in literals {

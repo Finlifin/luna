@@ -374,6 +374,44 @@ impl Search<'_> {
             }
             Ok(learning::Propagation::None) => {}
         }
+        if forced.is_empty() && propagation.truth.is_none() {
+            let result = self
+                .boolean
+                .as_mut()
+                .unwrap()
+                .clauses(self.atoms.len(), &mut self.steps)
+                .and_then(|cnf| cnf.propagate(assignment, &mut self.steps));
+            use boolean::cnf::Propagation;
+            match result {
+                Err(()) => {
+                    return Step::Return(SearchResult::Unknown(UnknownReason::BudgetExhausted));
+                }
+                Ok(Propagation::Conflict(trace)) => {
+                    let mut conflict = Conflict::boolean(assignment);
+                    conflict.tree = super::ProofTree::ClauseConflict(trace);
+                    return Step::Return(SearchResult::Unsat(conflict));
+                }
+                Ok(Propagation::Unit {
+                    index,
+                    value,
+                    trace,
+                }) => {
+                    let mut reason = Conflict::boolean(assignment);
+                    reason.support.insert(index);
+                    reason.tree = super::ProofTree::ClauseConflict(trace);
+                    assignment[index] = Some(value);
+                    return Step::Descend(
+                        Frame::Learned {
+                            index,
+                            value,
+                            reason,
+                        },
+                        depth + 1,
+                    );
+                }
+                Ok(Propagation::None) => {}
+            }
+        }
         let classes = match self.theory(assignment) {
             Ok(Some(classes)) => classes,
             Ok(None) => return Step::Return(SearchResult::Unsat(self.learn_conflict(assignment))),
