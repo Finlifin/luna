@@ -897,6 +897,40 @@ impl Head {
         fuel: &mut usize,
         target: Option<crate::target::TargetData>,
     ) -> Result<(), ApplicationError> {
+        self.check_arguments_in_scope_with_callable_views_budgeted_in(
+            arguments,
+            is_tuple,
+            is_list,
+            nominal_fields,
+            declared,
+            |id, args, frames, fuel| {
+                callable_signature(id, args, frames, fuel).map(std::borrow::Cow::Owned)
+            },
+            frames,
+            fuel,
+            target,
+        )
+    }
+
+    /// Accept borrowed immutable signature evidence without materializing a new
+    /// type tree. Scope, domain and contract responsibilities are unchanged.
+    pub fn check_arguments_in_scope_with_callable_views_budgeted_in<'signature>(
+        &self,
+        arguments: &[Term],
+        is_tuple: impl Fn(DeclarationId) -> bool,
+        is_list: impl Fn(DeclarationId) -> bool,
+        nominal_fields: impl Fn(&Term, Option<u32>, &mut usize) -> Option<Vec<Term>>,
+        declared: impl Fn(&Term, &Term) -> bool,
+        callable_signature: impl Fn(
+            DeclarationId,
+            &[Term],
+            &[Vec<Sort>],
+            &mut usize,
+        ) -> Option<std::borrow::Cow<'signature, Term>>,
+        frames: &[Vec<Sort>],
+        fuel: &mut usize,
+        target: Option<crate::target::TargetData>,
+    ) -> Result<(), ApplicationError> {
         let mut remaining = *fuel;
         let result = (|| {
             if arguments.len() != self.parameters.len() {
@@ -997,7 +1031,7 @@ impl Head {
                                     .ok_or(ApplicationError::InputType { index })?;
                             crate::type_computations::charge_term(&signature, &mut remaining)
                                 .map_err(|_| ApplicationError::InputType { index })?;
-                            signature.check_scope(frames).is_ok() && signature == expected
+                            signature.check_scope(frames).is_ok() && signature.as_ref() == &expected
                         }
                         (Term::Optional(payload), Term::OptionalValue { ty, value })
                             if ty.as_ref() == &expected =>

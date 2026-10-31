@@ -2093,7 +2093,7 @@ impl<'a> Interpreter<'a> {
             &self.abstract_type_parameters,
             &self.abstract_value_parameters,
             |ty, variant, fuel| self.normal_value_fields(ty, variant, fuel),
-            |id, args, frames, fuel| self.normal_callable_signature(id, args, frames, fuel),
+            |id, args, frames, fuel| self.normal_callable_signature_view(id, args, frames, fuel),
             self.target,
         )
     }
@@ -2110,7 +2110,7 @@ impl<'a> Interpreter<'a> {
             &BTreeSet::new(),
             &BTreeMap::new(),
             |ty, variant, fuel| self.normal_value_fields(ty, variant, fuel),
-            |id, args, frames, fuel| self.normal_callable_signature(id, args, frames, fuel),
+            |id, args, frames, fuel| self.normal_callable_signature_view(id, args, frames, fuel),
             self.target,
         )
     }
@@ -2326,7 +2326,9 @@ impl<'a> Interpreter<'a> {
                 &self.abstract_type_parameters,
                 &self.abstract_value_parameters,
                 |ty, variant, fuel| self.normal_value_fields(ty, variant, fuel),
-                |id, args, frames, fuel| self.normal_callable_signature(id, args, frames, fuel),
+                |id, args, frames, fuel| {
+                    self.normal_callable_signature_view(id, args, frames, fuel)
+                },
                 self.target,
             )
             .ok_or_else(|| self.failure(ErrorKind::Type, None))? as u64;
@@ -2985,7 +2987,7 @@ impl<'a> Interpreter<'a> {
                 },
                 ty,
             ) => self
-                .normal_callable_signature(*declaration, arguments, &[], &mut 100_000)
+                .normal_callable_signature_view(*declaration, arguments, &[], &mut 100_000)
                 .is_some_and(|signature| {
                     selected_types::same(&signature, ty, &self.associated_values)
                 }),
@@ -4613,14 +4615,14 @@ impl<'a> Interpreter<'a> {
                         ty: domain.clone(),
                     }],
                 };
-                contract.check_arguments_in_scope_with_callables_budgeted_in(
+                contract.check_arguments_in_scope_with_callable_views_budgeted_in(
                     std::slice::from_ref(argument),
                     |id| self.normal_forms.get(&id).is_some_and(|head| head.role == nir::normal_forms::Role::Tuple),
                     |id| self.normal_forms.get(&id).is_some_and(|head| head.role == nir::normal_forms::Role::TypeList),
                     |ty, variant, fuel| self.normal_value_fields(ty, variant, fuel),
                     |value, domain| matches!(value, Term::Rigid { declaration, sort: nir::Sort::ComptimeValue }
                         if self.abstract_value_parameters.get(declaration) == Some(domain)),
-                    |id, args, frames, fuel| self.normal_callable_signature(id, args, frames, fuel),
+                    |id, args, frames, fuel| self.normal_callable_signature_view(id, args, frames, fuel),
                     frames, fuel, self.target,
                 ).map_err(|_| if *fuel == 0 { ErrorKind::StepsExhausted } else { ErrorKind::Type })?;
                 continue;
@@ -6794,13 +6796,18 @@ fn scoped_term_value_work_with_evidence_in(
     )
 }
 
-fn scoped_term_value_work_with_callables_in(
+fn scoped_term_value_work_with_callables_in<'signature>(
     ty: &Term,
     heads: &impl declaration_index::HeadLookup,
     parameters: &BTreeSet<DeclarationId>,
     value_parameters: &BTreeMap<DeclarationId, Term>,
     nominal_fields: impl Fn(&Term, Option<u32>, &mut usize) -> Option<Vec<Term>>,
-    callable_signature: impl Fn(DeclarationId, &[Term], &[Vec<nir::Sort>], &mut usize) -> Option<Term>,
+    callable_signature: impl Fn(
+        DeclarationId,
+        &[Term],
+        &[Vec<nir::Sort>],
+        &mut usize,
+    ) -> Option<std::borrow::Cow<'signature, Term>>,
     target: Option<nir::target::TargetData>,
 ) -> Option<usize> {
     // A leaf needs neither a heap traversal stack nor an empty shared frame.
@@ -6907,7 +6914,7 @@ fn scoped_term_value_work_with_callables_in(
                     }
                 }
                 metadata
-                    .check_arguments_in_scope_with_callables_budgeted_in(
+                    .check_arguments_in_scope_with_callable_views_budgeted_in(
                         arguments,
                         |head| {
                             heads

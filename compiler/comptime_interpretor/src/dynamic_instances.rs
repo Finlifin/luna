@@ -17,6 +17,17 @@ impl Interpreter<'_> {
         frames: &[Vec<nir::Sort>],
         fuel: &mut usize,
     ) -> Option<Term> {
+        self.normal_callable_signature_view(declaration, arguments, frames, fuel)
+            .map(std::borrow::Cow::into_owned)
+    }
+
+    pub(super) fn normal_callable_signature_view(
+        &self,
+        declaration: DeclarationId,
+        arguments: &[Term],
+        frames: &[Vec<nir::Sort>],
+        fuel: &mut usize,
+    ) -> Option<std::borrow::Cow<'_, Term>> {
         *fuel = fuel.checked_sub(1)?;
         if self.graph.is_some() {
             // Hash only bounded, complete instance inputs. The immutable graph
@@ -28,7 +39,7 @@ impl Interpreter<'_> {
                 .retained_callable_signatures
                 .get(&(declaration, arguments))?;
             nir::type_computations::charge_term(signature, fuel).ok()?;
-            return Some((*signature).clone());
+            return Some(std::borrow::Cow::Borrowed(*signature));
         }
         if let Some(head) = self.normal_forms.get(&declaration) {
             if !arguments.is_empty() {
@@ -38,7 +49,7 @@ impl Interpreter<'_> {
             for parameter in &head.parameters {
                 nir::type_computations::charge_term(&parameter.ty, fuel).ok()?;
             }
-            return head.callable_type().ok();
+            return head.callable_type().ok().map(std::borrow::Cow::Owned);
         }
         let (parameters, signature, qualifiers) =
             if let Some(identity) = self.runtime_function_identities.get(&declaration) {
@@ -61,12 +72,12 @@ impl Interpreter<'_> {
             .ok()?
             .instantiate_bounded(signature, fuel)
             .ok()?;
-        Some(match qualifiers {
+        Some(std::borrow::Cow::Owned(match qualifiers {
             Some((comptime, is_unsafe)) => signature
                 .with_comptime_phase(comptime)
                 .with_unsafe_call_requirement(is_unsafe),
             None => signature,
-        })
+        }))
     }
 
     pub(super) fn admit_callable_identity(
@@ -777,6 +788,44 @@ mod retained_signature_tests {
                 .collect(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn retained_signature_views_borrow_the_interned_core() {
+        let graph = graph(2);
+        let vm = Interpreter::from_iir(&graph, Budget::default()).unwrap();
+        let identity = &graph.callable_identities[1];
+        let view = vm
+            .normal_callable_signature_view(
+                identity.key.declaration,
+                &identity.key.arguments,
+                &[],
+                &mut 100,
+            )
+            .unwrap();
+        assert!(matches!(view, std::borrow::Cow::Borrowed(_)));
+        assert!(std::ptr::eq(
+            view.as_ref(),
+            identity.signature.core().body()
+        ));
+        assert!(
+            vm.normal_callable_signature_view(
+                identity.key.declaration,
+                &identity.key.arguments,
+                &[],
+                &mut 1,
+            )
+            .is_none()
+        );
+        assert!(
+            vm.normal_callable_signature_view(
+                identity.key.declaration,
+                &identity.key.arguments,
+                &[],
+                &mut 100,
+            )
+            .is_some()
+        );
     }
 
     #[test]

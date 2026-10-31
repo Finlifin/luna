@@ -356,7 +356,7 @@ impl Interpreter<'_> {
                     .unwrap_or(usize::MAX)
                     .min(100_000);
                 let before = fuel;
-                let checked = metadata.check_arguments_in_scope_with_callables_budgeted_in(
+                let checked = metadata.check_arguments_in_scope_with_callable_views_budgeted_in(
                     arguments,
                     |head| {
                         self.normal_forms
@@ -367,7 +367,7 @@ impl Interpreter<'_> {
                         .is_some_and(|head| head.role == nir::normal_forms::Role::TypeList),
                     |ty, variant, fuel| self.normal_value_fields(ty, variant, fuel),
                     |value, domain| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)),
-                    |id, args, frames, fuel| self.normal_callable_signature(id, args, frames, fuel),
+                    |id, args, frames, fuel| self.normal_callable_signature_view(id, args, frames, fuel),
                     &[], &mut fuel, self.target);
                 self.budget.steps -= (before - fuel) as u64;
                 checked.map_err(|_| {

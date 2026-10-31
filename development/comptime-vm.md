@@ -9065,3 +9065,30 @@ Validation in `/home/fin/luna`:
   isolation and bounded lookup in catalogs up to 2,002 identities. The initial
   run exposed an old test mutating a Term field; it now constructs replacement
   immutable signature evidence through the checked constructor.
+
+
+## Borrow retained signature cores through type admission
+
+The VM now exposes a borrowed-or-owned callable signature view. Retained IIR
+signatures borrow their interned core through NF argument checks, scoped type
+admission and function-value type checks. Source signature specialization still
+produces an owned value; callers constructing expressions retain an explicit
+owned adapter. The NIR checker shares one implementation for both APIs.
+
+This removes the retained-signature tree clone at the query boundary without
+changing scope checks, contract checks or structural work accounting. A regression
+checks that the view points at the interned core and that insufficient fuel still
+rejects the query, followed by a successful retry. No wall-clock speedup is claimed.
+This does not complete TypeRef propagation or runtime-hole environment handling.
+
+Validation in `/home/fin/luna` (all exit 0):
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --test immutable_normal_inputs`:
+  364 unit and 9 immutable-input tests passed;
+  `/tmp/luna-tools-s0qyg34b/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p nir --test normal_inputs`:
+  24 passed; `/tmp/luna-tools-hfvkthku/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test scoped_comptime_callables --test comptime_iir_bytecode --test normal_form_domains`:
+  20 passed; `/tmp/luna-tools-22upghab/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed; `/tmp/luna-tools-kfzkpysw/result.json`.
