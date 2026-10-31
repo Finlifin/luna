@@ -116,6 +116,28 @@ fn interface_preconditions_and_postconditions_survive_weaker_implementations() {
         ErrorKind::ProgramContractRejected
     );
     assert_eq!(vm.bytecode_invocations(), 2);
+
+    // Each fresh VM reuses declaration metadata, but must check the current
+    // arguments and returned value even after a previous successful call.
+    for (source, accepts_true) in [(package, true), (forged, false)] {
+        let source = std::sync::Arc::new(source);
+        let mut session = comptime_interpretor::CodeSession::new(source.clone());
+        for value in [true, false, true, false] {
+            let mut vm =
+                Interpreter::for_comptime_in_session(&source, &mut session, &mut Budget::default())
+                    .unwrap();
+            let result =
+                vm.with_code_session(&mut session, |vm| vm.invoke(id, vec![Value::Bool(value)]));
+            if value && accepts_true {
+                assert_eq!(result.unwrap(), Value::Bool(true));
+            } else {
+                assert_eq!(result.unwrap_err().kind, ErrorKind::ProgramContractRejected);
+            }
+            // A denied precondition must not enter the implementation; a
+            // denied postcondition is observed only after its body executes.
+            assert_eq!(vm.bytecode_invocations(), if value { 2 } else { 1 });
+        }
+    }
 }
 
 #[test]

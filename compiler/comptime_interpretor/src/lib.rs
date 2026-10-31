@@ -744,6 +744,7 @@ macro_rules! value {
 mod code_session;
 mod declaration_index;
 mod layout_catalog;
+mod method_catalog;
 pub use code_session::CodeSession;
 
 mod invocation_budget;
@@ -816,13 +817,7 @@ pub struct Interpreter<'a> {
     method_parameters: Arc<HashMap<(DeclarationId, DeclarationId), Vec<LocalId>>>,
     // None records an ambiguous member identity across different interfaces.
     method_origins: Arc<HashMap<DeclarationId, Option<DeclarationId>>>,
-    method_contracts: HashMap<
-        (DeclarationId, DeclarationId),
-        (
-            Vec<nir::DeclarationParameter>,
-            &'a nir::program::MethodContract,
-        ),
-    >,
+    method_contracts: method_catalog::Contracts<'a>,
     implemented_interfaces: HashMap<(InterfaceInstance, Term), DeclarationId>,
     assumed_interfaces: HashSet<(InterfaceInstance, Term)>,
     method_bodies: HashMap<(InterfaceInstance, Term, DeclarationId), (DeclarationId, Vec<Term>)>,
@@ -1683,29 +1678,40 @@ impl<'a> Interpreter<'a> {
         };
         let mut method_contracts = HashMap::new();
         let mut method_origins = HashMap::new();
-        for contract in &package.traits {
-            let parameters = contract
-                .binders_with_self(&mut trait_parameter_fuel)
-                .map_err(|_| invalid())?;
-            for member in &contract.methods {
-                if positions.is_none() {
+        if positions.is_none() {
+            for (interface_index, contract) in package.traits.iter().enumerate() {
+                let parameters = contract
+                    .binders_with_self(&mut trait_parameter_fuel)
+                    .map_err(|_| invalid())?;
+                for (member_index, member) in contract.methods.iter().enumerate() {
                     method_origins
                         .entry(member.declaration)
                         .and_modify(|origin| *origin = None)
                         .or_insert(Some(contract.declaration));
+                    let mut binders = parameters.clone();
+                    binders.extend(input_binders(&member.type_parameters));
+                    method_contracts.insert(
+                        (contract.declaration, member.declaration),
+                        method_catalog::Entry {
+                            binders,
+                            interface: interface_index,
+                            member: member_index,
+                        },
+                    );
                 }
-                let mut binders = parameters.clone();
-                binders.extend(input_binders(&member.type_parameters));
-                method_contracts.insert(
-                    (contract.declaration, member.declaration),
-                    (binders, member),
-                );
             }
         }
         let method_origins = positions
             .as_ref()
             .map(|index| index.method_origins.clone())
             .unwrap_or_else(|| Arc::new(method_origins));
+        let method_contracts = method_catalog::Contracts {
+            traits: &package.traits,
+            entries: positions
+                .as_ref()
+                .map(|index| index.method_contracts.clone())
+                .unwrap_or_else(|| Arc::new(method_contracts)),
+        };
         let remaining_steps = premise_fuel
             .checked_sub(budget.steps.saturating_sub(trait_parameter_fuel as u64))
             .ok_or(Error {
@@ -5635,7 +5641,6 @@ impl<'a> Interpreter<'a> {
                     .steps
                     .checked_sub(parameters.len() as u64)
                     .ok_or_else(|| self.failure(ErrorKind::StepsExhausted, Some(source)))?;
-                let contract = *contract;
                 let parameters = parameters.clone();
                 let arguments: Vec<_> = std::iter::once(subject.clone())
                     .chain(interface_arguments.iter().cloned())

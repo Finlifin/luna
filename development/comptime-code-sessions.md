@@ -335,3 +335,33 @@ in a shared session and compares its complete value with reference execution.
 Nonempty NF catalogs are checked for shared index allocation and original Head
 references. Evidence: `/tmp/luna-tools-ps6f2h47/result.json` and
 `/tmp/luna-tools-plogkqwp/result.json`. Formatting and diff checks passed.
+
+## Shared trait method binder catalogs
+
+Source sessions now retain immutable method binder arrays and source positions
+for their interface contracts. Fresh VMs resolve the contract in the original
+Package slice instead of cloning all declaration binders during construction.
+The catalog is scoped to the exact immutable Package allocation; graph execution
+continues to obtain method authority from its IIR graph.
+
+This does not retain method selection, caller substitutions, assumptions or
+proof results. Preconditions, postconditions and capability checks still execute
+on each call. The source regression exercises both successful and rejected calls
+across fresh VMs in a warm session, including an implementation that violates
+its interface postcondition; failed preconditions must not enter its body.
+
+Verification (working directory `/home/fin/luna`, all exit 0):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib
+python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_traits --test dynamic_trait_clauses --test trait_phases --test comptime_memory --test comptime_iir_bytecode
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+```
+
+Evidence: `/tmp/luna-tools-_c0qakun/result.json` (interpreter units),
+`/tmp/luna-tools-vm8xhj_v/result.json` (trait, memory and IIR regressions),
+and `/tmp/luna-tools-rkb4j1sg/result.json` (formatting). The unit run preceded
+removal of a redundant inner condition; integration tests ran on the final code.
+No end-to-end speedup is claimed without measurement. Trait implementation
+selection tables and associated values still reconstruct per VM; this stage
+does not complete the unified VM or interned type representation migration.

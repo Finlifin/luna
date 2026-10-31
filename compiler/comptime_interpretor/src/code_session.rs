@@ -72,6 +72,7 @@ impl<'program> Interpreter<'program> {
         }
         let indexes = session.indexes.get_or_insert_with(|| {
             Arc::new(declaration_index::SourceIndexes {
+                method_contracts: vm.method_contracts.entries.clone(),
                 normal_forms: vm.normal_forms.positions.clone(),
                 newtypes: vm.newtypes.positions.clone(),
                 aliases: vm.alias_contracts.positions.clone(),

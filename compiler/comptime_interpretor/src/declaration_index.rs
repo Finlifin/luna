@@ -66,6 +66,7 @@ pub(super) type Aliases<'a> = Declarations<'a, nir::type_aliases::Contract>;
 pub(super) type NormalForms<'a> = Declarations<'a, nir::normal_forms::Head>;
 
 pub(super) struct SourceIndexes {
+    pub(super) method_contracts: Arc<method_catalog::Entries>,
     pub(super) normal_forms: Arc<BTreeMap<DeclarationId, usize>>,
     pub(super) newtypes: Arc<BTreeMap<DeclarationId, usize>>,
     pub(super) aliases: Arc<BTreeMap<DeclarationId, usize>>,

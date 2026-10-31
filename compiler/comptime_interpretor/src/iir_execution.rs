@@ -183,7 +183,7 @@ impl<'a> Interpreter<'a> {
             declaration_parameter_sorts: Default::default(),
             declaration_parameter_domains: Default::default(),
             method_parameters: Default::default(),
-            method_contracts: HashMap::new(),
+            method_contracts: Default::default(),
             method_origins: Default::default(),
             assumed_interfaces: HashSet::new(),
             implemented_interfaces: graph

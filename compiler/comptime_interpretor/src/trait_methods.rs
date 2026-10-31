@@ -31,7 +31,6 @@ impl Interpreter<'_> {
             .get(&(interface, member))
             .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(source)))?;
         let parameters = parameters.clone();
-        let contract = *contract;
         // Raw NIR can check an immediate interface call, but cannot
         // erase its program domain into an implementation function
         // value. IIR transports the identity and specializes the call.
