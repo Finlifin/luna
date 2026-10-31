@@ -512,11 +512,13 @@ fn complete_shipped_sysroot_reuses_text_bindings_for_comptime_and_hashing() {
         comptime fn checked() -> bool {
             "é🦀".byte_length() == 6 and "é🦀".contains("🦀")
                 and ("é".byte(1) matches 169?)
-                and "é".comptime_hash() == "é".comptime_hash()
+                and "é".hash() == "é".hash()
+                and "é".eq("é") and "é".ne("é")
         }
         fn run() -> bool {
             const staged = checked();
-            staged
+            let value: u8 = 255;
+            staged and value.hash() == 255 and value.eq(value) and value.ne(0)
         }
     "#,
     );

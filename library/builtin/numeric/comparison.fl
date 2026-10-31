@@ -7,11 +7,6 @@ use primitives.*;
 pub trait Eq {
     fn eq(self, other: Self) -> bool;
     fn ne(self, other: Self) -> bool = not self.eq(other);
-
-    ^attrs.comptime_phase
-    comptime fn comptime_eq(self, other: Self) -> bool;
-    ^attrs.comptime_phase
-    comptime fn comptime_ne(self, other: Self) -> bool = not self.comptime_eq(other);
 }
 
 -- ── Order ───────────────────────────────────────────────────────────────
@@ -176,62 +171,9 @@ impl Ord for isize {
 }
 
 {-
-    Comptime equality shares each primitive implementation relationship with
-    runtime equality, while supplying its independently checked phase.
--}
-comptime impl Eq for u8 {
-    comptime fn comptime_eq(self, other: Self) -> bool { self == other }
-}
-comptime impl Eq for u16 {
-    comptime fn comptime_eq(self, other: Self) -> bool { self == other }
-}
-comptime impl Eq for u32 {
-    comptime fn comptime_eq(self, other: Self) -> bool { self == other }
-}
-comptime impl Eq for u64 {
-    comptime fn comptime_eq(self, other: Self) -> bool { self == other }
-}
-comptime impl Eq for u128 {
-    comptime fn comptime_eq(self, other: Self) -> bool { self == other }
-}
-comptime impl Eq for i8 {
-    comptime fn comptime_eq(self, other: Self) -> bool { self == other }
-}
-comptime impl Eq for i16 {
-    comptime fn comptime_eq(self, other: Self) -> bool { self == other }
-}
-comptime impl Eq for i32 {
-    comptime fn comptime_eq(self, other: Self) -> bool { self == other }
-}
-comptime impl Eq for i64 {
-    comptime fn comptime_eq(self, other: Self) -> bool { self == other }
-}
-comptime impl Eq for i128 {
-    comptime fn comptime_eq(self, other: Self) -> bool { self == other }
-}
-comptime impl Eq for bool {
-    comptime fn comptime_eq(self, other: Self) -> bool { self == other }
-}
-comptime impl Eq for char {
-    comptime fn comptime_eq(self, other: Self) -> bool { self == other }
-}
-comptime impl Eq for Symbol {
-    comptime fn comptime_eq(self, other: Self) -> bool { self == other }
-}
-comptime impl Eq for usize {
-    comptime fn comptime_eq(self, other: Self) -> bool { self == other }
-}
-comptime impl Eq for isize {
-    comptime fn comptime_eq(self, other: Self) -> bool { self == other }
-}
-
-{-
     Text equality observes the complete UTF-8 contents, including embedded
     zero bytes. It neither compares storage identities nor normalizes Unicode.
 -}
 impl Eq for str {
     fn eq(self, other: Self) -> bool { self == other }
-}
-comptime impl Eq for str {
-    comptime fn comptime_eq(self, other: Self) -> bool { self == other }
 }

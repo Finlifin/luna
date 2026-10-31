@@ -19,7 +19,7 @@ fn source() -> String {
             comptime fn comptime_hash(self)->.u8'builtin {{if self {{1}} else {{0}}}}
         }}
         comptime fn compare()->bool {{
-            true.as(Eq).comptime_eq(true) and true.as(Eq).comptime_ne(false)
+            true.as(ComptimeEq).eq(true) and true.as(ComptimeEq).ne(false)
         }}
         fn compare_runtime()->bool {{true.as(Eq).eq(true) and true.as(Eq).ne(false)}}
         "#,
@@ -30,7 +30,7 @@ fn source() -> String {
 fn prepare(package: &nir::program::Package) -> Result<luna::comptime_keys::Protocol, String> {
     let mut items = intrinsic::LangItems::new();
     let bindings = [
-        (intrinsic::LangItem::Eq, "Eq"),
+        (intrinsic::LangItem::Eq, "ComptimeEq"),
         (intrinsic::LangItem::Hash, "Hash"),
     ]
     .map(|(item, name)| {
@@ -88,7 +88,7 @@ fn library_comptime_equality_covers_fixed_and_target_integer_widths() {
         "u8", "u16", "u32", "u64", "u128", "i8", "i16", "i32", "i64", "i128", "usize", "isize",
     ] {
         let text = format!(
-            "{} comptime fn check()->bool {{let left:.{ty}'builtin=1;let right:.{ty}'builtin=2;left.as(Eq).comptime_eq(left) and left.as(Eq).comptime_ne(right)}}",
+            "{} comptime fn check()->bool {{let left:.{ty}'builtin=1;let right:.{ty}'builtin=2;left.as(ComptimeEq).eq(left) and left.as(ComptimeEq).ne(right)}}",
             source()
         );
         for width in [32, 64] {
@@ -111,13 +111,13 @@ fn library_comptime_equality_covers_fixed_and_target_integer_widths() {
 #[test]
 fn explicit_comptime_key_member_cannot_fall_back_after_phase_failure() {
     let mut package = support::compile(&source());
-    for name in ["Eq", "Hash"] {
+    for name in ["ComptimeEq", "Hash"] {
         let mut invalid = package.clone();
         let interface = invalid.traits.iter_mut().find(|t| t.name == name).unwrap();
         interface
             .methods
             .iter_mut()
-            .find(|m| m.name.starts_with("comptime_"))
+            .find(|m| m.name == "eq" || m.name == "comptime_hash")
             .unwrap()
             .phase = nir::program::TraitPhase::Runtime;
         assert!(
@@ -127,11 +127,15 @@ fn explicit_comptime_key_member_cannot_fall_back_after_phase_failure() {
                 .contains("comptime trait membership")
         );
     }
-    let interface = package.traits.iter_mut().find(|t| t.name == "Eq").unwrap();
+    let interface = package
+        .traits
+        .iter_mut()
+        .find(|t| t.name == "ComptimeEq")
+        .unwrap();
     let member = interface
         .methods
         .iter()
-        .find(|m| m.name == "comptime_eq")
+        .find(|m| m.name == "eq")
         .unwrap()
         .clone();
     interface.methods.push(member);

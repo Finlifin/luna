@@ -6,7 +6,7 @@ use comptime_interpretor::Value;
 
 fn source(body: &str) -> String {
     format!(
-        "mod primitives {{ {} }} use primitives.*;\nmod bindings {{ {} }}\nmod comparison {{ {} }}\nmod resources {{ {} }}\nmod conversion {{ {} }}\nmod traits {{ {} }}\npub use traits.*;\n{body}",
+        "mod primitives {{ {} }} use primitives.*;\nmod bindings {{ {} }}\nmod comparison {{ {} }}\nmod resources {{ {} }}\nmod conversion {{ {} }}\nmod traits {{ {} }}\nmod builtin {{pub use primitives.*;pub mod compiler {{pub use bindings.*;}}}}\nmod comptime_comparison {{ {} }}\nmod comptime_hashing {{ {} }}\npub use comptime_comparison.ComptimeEq;pub use comptime_hashing.ComptimeHash;pub use traits.*;\n{body}",
         include_str!("../../../library/builtin/primitives.fl"),
         include_str!("../../../library/builtin/bindings.fl"),
         support::with_attrs(include_str!(
@@ -15,6 +15,8 @@ fn source(body: &str) -> String {
         include!("support/resources_source.rs"),
         include_str!("../../../library/builtin/protocols/conversion.fl"),
         support::with_attrs(include_str!("../../../library/builtin/protocols/traits.fl")),
+        include_str!("../../../library/meta/numeric/equality.fl"),
+        include_str!("../../../library/meta/data/hashing.fl"),
     )
 }
 
@@ -46,7 +48,7 @@ fn scalar_hashes_agree_across_execution_phases_and_integer_boundaries() {
         ("i128", "-1", 0),
     ] {
         let package = support::compile(&source(&format!(
-            "fn run()->u64 {{let value:{ty}={literal};value.as(Hash).hash()}}\ncomptime fn staged()->u64 {{let value:{ty}={literal};value.as(Hash).comptime_hash()}}"
+            "fn run()->u64 {{let value:{ty}={literal};value.as(Hash).hash()}}\ncomptime fn staged()->u64 {{let value:{ty}={literal};value.as(ComptimeHash).hash()}}"
         )));
         let expected = Value::UnsignedInteger(expected.into());
         assert_eq!(
@@ -68,8 +70,8 @@ fn wide_hash_collisions_still_require_equality() {
     let package = support::compile(&source(""));
     let mut items = intrinsic::LangItems::new();
     let bindings = [
-        (intrinsic::LangItem::Eq, "Eq"),
-        (intrinsic::LangItem::Hash, "Hash"),
+        (intrinsic::LangItem::Eq, "ComptimeEq"),
+        (intrinsic::LangItem::Hash, "ComptimeHash"),
     ]
     .map(|(item, name)| {
         (
@@ -169,7 +171,7 @@ fn symbol_hashes_follow_utf8_content_in_both_phases_and_native_code() {
         ("é", 0x0ac21707b7181e01u64),
     ] {
         let package = support::compile(&source(&format!(
-            "fn hash(value:Symbol)->u64 {{value.as(Hash).hash()}} fn run()->u64 {{hash(.{name})}} comptime fn staged()->u64 {{let value:Symbol=.{name};value.as(Hash).comptime_hash()}} fn verify() {{let value=run();assumes value == {expected};}}"
+            "fn hash(value:Symbol)->u64 {{value.as(Hash).hash()}} fn run()->u64 {{hash(.{name})}} comptime fn staged()->u64 {{let value:Symbol=.{name};value.as(ComptimeHash).hash()}} fn verify() {{let value=run();assumes value == {expected};}}"
         )));
         assert_eq!(
             luna::invocation::invoke(&package, "staged", 1_000_000).unwrap(),
@@ -217,8 +219,8 @@ fn text_and_symbol_cache_keys_compare_content_and_recover_after_budget_exhaustio
     let package = support::compile(&source(""));
     let mut items = intrinsic::LangItems::new();
     let bindings = [
-        (intrinsic::LangItem::Eq, "Eq"),
-        (intrinsic::LangItem::Hash, "Hash"),
+        (intrinsic::LangItem::Eq, "ComptimeEq"),
+        (intrinsic::LangItem::Hash, "ComptimeHash"),
     ]
     .map(|(item, name)| {
         (
@@ -281,7 +283,7 @@ fn target_sized_hashes_use_the_selected_target_width() {
             ("isize", "0".to_owned(), 0),
         ] {
             let text = source(&format!(
-                "fn run()->u64 {{let value:{ty}={literal};value.as(Hash).hash()}} comptime fn staged()->u64 {{let value:{ty}={literal};value.as(Hash).comptime_hash()}}"
+                "fn run()->u64 {{let value:{ty}={literal};value.as(Hash).hash()}} comptime fn staged()->u64 {{let value:{ty}={literal};value.as(ComptimeHash).hash()}}"
             ));
             let package = support::compile_with_source_bindings_for_target(
                 &text,
@@ -345,7 +347,7 @@ fn text_hashes_and_equality_observe_complete_utf8_contents() {
         ("\"a\\0b\"", 0xe5d29919042666b2u64),
     ] {
         let package = support::compile(&source(&format!(
-            "fn run()->u64 {{{literal}.as(Hash).hash()}} comptime fn staged()->u64 {{{literal}.as(Hash).comptime_hash()}} fn verify() {{let value=run();assumes value == {expected};}}"
+            "fn run()->u64 {{{literal}.as(Hash).hash()}} comptime fn staged()->u64 {{{literal}.as(ComptimeHash).hash()}} fn verify() {{let value=run();assumes value == {expected};}}"
         )));
         assert_eq!(
             luna::execution::interpret(&package, "run", 1_000_000).unwrap(),
@@ -374,8 +376,7 @@ fn text_hashes_and_equality_observe_complete_utf8_contents() {
     }"#;
     let staged = body
         .replace("fn run", "comptime fn staged")
-        .replace(".eq(", ".comptime_eq(")
-        .replace(".ne(", ".comptime_ne(");
+        .replace(".as(Eq)", ".as(ComptimeEq)");
     let package = support::compile(&source(&format!(
         "{body}{staged} fn verify() {{let valid=run();assumes valid;}}"
     )));
@@ -485,7 +486,7 @@ fn root_dispatch_preserves_generic_parents_of_concrete_implementations() {
 fn shipped_text_hash_runs_its_loop_in_bytecode() {
     use comptime_interpretor::{Budget, Interpreter};
     let package = support::compile(&source(
-        "comptime fn staged()->u64 {\"é\".as(Hash).comptime_hash()}",
+        "comptime fn staged()->u64 {\"é\".as(ComptimeHash).hash()}",
     ));
     let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     let result = vm.invoke(support::id(&package, "staged"), vec![]).unwrap();
@@ -520,5 +521,49 @@ fn shipped_text_hash_body_uses_bytecode_for_all_bytes() {
             Value::UnsignedInteger(expected)
         );
         assert_eq!(vm.bytecode_invocations() - before, 1);
+    }
+}
+
+#[test]
+fn same_named_methods_select_the_execution_phase_without_source_prefixes() {
+    let package = support::compile(&source(
+        "fn run()->bool {let value:u64=9;value.hash() == 9 and value.eq(value) and value.ne(8)}
+         comptime fn staged()->bool {let value:u64=9;value.hash() == 9 and value.eq(value) and value.ne(8)}",
+    ));
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 1_000_000).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        luna::invocation::invoke(&package, "staged", 1_000_000).unwrap(),
+        Value::Bool(true)
+    );
+    for (eq, hash) in [("Eq", "ComptimeHash"), ("ComptimeEq", "Hash")] {
+        let mut items = intrinsic::LangItems::new();
+        let bindings = [
+            (intrinsic::LangItem::Eq, eq),
+            (intrinsic::LangItem::Hash, hash),
+        ]
+        .map(|(item, name)| {
+            (
+                item,
+                package
+                    .traits
+                    .iter()
+                    .find(|t| t.name == name)
+                    .unwrap()
+                    .declaration,
+            )
+        });
+        items.bind_source_traits(&package, &bindings).unwrap();
+        let failure = luna::comptime_keys::Protocol::prepare(
+            &package,
+            &items,
+            &nir::Term::Primitive(nir::Primitive::U64),
+            Default::default(),
+        )
+        .err()
+        .unwrap();
+        assert!(failure.contains("comptime trait membership"), "{failure}");
     }
 }

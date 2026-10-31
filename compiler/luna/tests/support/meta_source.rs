@@ -8,7 +8,9 @@ concat!(
     "\nmod bindings {\n", include_str!("../../../../library/builtin/bindings.fl"), "\n} pub mod compiler {pub use bindings.*;} }\n",
     "mod bindings {\n", include_str!("../../../../library/meta/bindings.fl"), "\n}\n",
     "mod text_impl {mod bindings {\n", include_str!("../../../../library/meta/text_impl/bindings.fl"), "\n}}\n",
+    "mod numeric {mod equality {\n", include_str!("../../../../library/meta/numeric/equality.fl"), "\n}}\n",
     "mod data {\n",
+    "mod hashing {\n", include_str!("../../../../library/meta/data/hashing.fl"), "\n}\n",
     "mod patterns {\n", include_str!("../../../../library/meta/data/patterns.fl"), "\n}\n",
     "mod integer {\n", include_str!("../../../../library/meta/data/integer.fl"), "\n}\n",
     "mod object {\n", include_str!("../../../../library/meta/data/object.fl"), "\n}\n",
@@ -24,4 +26,4 @@ concat!(
     "mod enums {\n", include_str!("../../../../library/meta/definitions/enums.fl"), "\n}\n",
     "}\n",
     include_str!("../../../../library/meta/lib.fl"),
-).replace("use numeric.scalar_math;\n", "").replace("pub mod math {\n    pub use scalar_math.*;\n}\n\n", "")
+).replace("use numeric.{scalar_math, equality};\n", "use numeric.equality;\n").replace("pub mod math {\n    pub use scalar_math.*;\n}\n\n", "")

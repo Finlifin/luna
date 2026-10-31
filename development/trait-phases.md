@@ -696,3 +696,34 @@ python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
 
 This supplies immutable str protocols, not owned String, collection storage or
 aggregate Hash derivation. Hashes remain non-cryptographic implementation details.
+
+## Separate comptime Eq and Hash interfaces
+
+The shipped library now exposes runtime `builtin.Eq` / `builtin.Hash` and
+independent `pure comptime trait` interfaces `meta.ComptimeEq` /
+`meta.ComptimeHash`. Both use `eq`, `ne` and `hash` without method-name prefixes.
+Meta exports the new interfaces from its root and default prelude. Primitive
+comptime implementations moved into dedicated equality and hashing modules;
+runtime implementations and their identities stay in builtin.
+
+Comptime cache adapters explicitly bind the new trait identities. Hash collisions
+still execute source equality; runtime-only bindings fail phase validation rather
+than redirecting to another trait. The compiler's existing support for explicitly
+named members of user-defined mixed traits remains available. This library
+migration does not equate the separate interfaces or change Type-only invocation
+memoization admission.
+
+Existing scalar representations, target-sized integer layouts, UTF-8/Symbol byte
+hashing and equality behavior remain covered. Runtime str hashing still requires
+its memory-provenance contract; this change does not bypass that known boundary
+or add aggregate derivation, owned String, or collection storage.
+
+Validation in `/home/fin/luna` (all commands exited 0):
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test library_hash --test library_comptime_comparison`: 17 tests passed; `/tmp/luna-tools-w5rq_49m/result.json`. Includes same-named discovery in both phases, wrong-phase cache bindings, collisions, budget recovery, target widths, and native O0/O3 checks.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes complete_shipped_sysroot_reuses_text_bindings_for_comptime_and_hashing`: passed; `/tmp/luna-tools-6goxofyc/result.json`. Real default preludes supply both phase interfaces; the entry performs comptime text comparison/hashing and runtime scalar comparison/hashing.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comparison_resources --test library_meta_integers`: passed; `/tmp/luna-tools-9ne6qiy0/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test builder_invocations isolated_library_cli_executes_builders_and_preserves_source_output_protection`: passed; `/tmp/luna-tools-9z3c1489/result.json`.
+
+Migration: explicit comptime calls select `ComptimeEq` / `ComptimeHash` and use
+ordinary method names. Unqualified method syntax uses normal phase-aware discovery.

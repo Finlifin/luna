@@ -4,12 +4,12 @@
 -}
 comptime fn wide_digest() -> u64 {
     let value: u128 = 18446744073709551616;
-    value.as(Hash).comptime_hash()
+    value.as(ComptimeHash).hash()
 }
 
 comptime fn symbol_digest() -> u64 {
     let value: Symbol = .foobar;
-    value.as(Hash).comptime_hash()
+    value.as(ComptimeHash).hash()
 }
 
 test scalar_representations {

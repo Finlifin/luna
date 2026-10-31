@@ -121,10 +121,11 @@ Trait 的 runtime phase 与 comptime phase 共享同一个实现世界、结构�
 `pure comptime trait` 中，例如两份独立接口都声明 `eq` 或 `hash`。
 这不使两个接口等同，也不改变缓存所需的 Eq/Hash 契约。
 
-当前实现仍有混合接口中的 `comptime_eq`、`comptime_ne`、`comptime_hash`
-入口及其绑定选择器。这是待迁移的库与编译器状态，不是新设计要求方法带前缀。
-迁移前仍检查所绑定成员的 comptime phase、函数阶段和实现条件，不能用另一成员
-掩盖错误绑定。新声明语法和来源优先级尚未因本文更新而视为已经实现。
+内置库分别由 `builtin.Eq` / `builtin.Hash` 提供 runtime 接口，由
+`meta.ComptimeEq` / `meta.ComptimeHash` 提供独立的 `pure comptime trait` 接口。
+两阶段的方法名均为 `eq`、`ne`、`hash`，meta 的 prelude 导出编译时接口。
+缓存消费者显式绑定编译时接口的声明身份；绑定到 runtime 接口不会自动替换为
+另一接口。所绑定成员的 comptime phase、函数阶段和实现条件仍须检查。
 
 ## 常见示例
 

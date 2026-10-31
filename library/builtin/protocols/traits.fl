@@ -18,8 +18,6 @@ pub use resources.{Once, Clone, Copy, Drop};
 
 pub trait Hash {
     fn hash(self) -> u64;
-    ^attrs.comptime_phase
-    comptime fn comptime_hash(self) -> u64;
 }
 
 {-
@@ -88,76 +86,9 @@ impl Hash for i128 {
         ((low and not high) or (not low and high)).as(u64)
     }
 }
-comptime impl Hash for bool {
-    comptime fn comptime_hash(self) -> u64 {
-        if self { 1 } else { 0 }
-    }
-}
-comptime impl Hash for u8 {
-    comptime fn comptime_hash(self) -> u64 {
-        self'bitvec.as(u64)
-    }
-}
-comptime impl Hash for u16 {
-    comptime fn comptime_hash(self) -> u64 {
-        self'bitvec.as(u64)
-    }
-}
-comptime impl Hash for u32 {
-    comptime fn comptime_hash(self) -> u64 {
-        self'bitvec.as(u64)
-    }
-}
-comptime impl Hash for u64 {
-    comptime fn comptime_hash(self) -> u64 {
-        self'bitvec.as(u64)
-    }
-}
-comptime impl Hash for i8 {
-    comptime fn comptime_hash(self) -> u64 {
-        self'bitvec.as(u64)
-    }
-}
-comptime impl Hash for i16 {
-    comptime fn comptime_hash(self) -> u64 {
-        self'bitvec.as(u64)
-    }
-}
-comptime impl Hash for i32 {
-    comptime fn comptime_hash(self) -> u64 {
-        self'bitvec.as(u64)
-    }
-}
-comptime impl Hash for i64 {
-    comptime fn comptime_hash(self) -> u64 {
-        self'bitvec.as(u64)
-    }
-}
-comptime impl Hash for u128 {
-    comptime fn comptime_hash(self) -> u64 {
-        let bits = self'bitvec;
-        let low = bits[0..64];
-        let high = bits[64..128];
-        ((low and not high) or (not low and high)).as(u64)
-    }
-}
-comptime impl Hash for i128 {
-    comptime fn comptime_hash(self) -> u64 {
-        let bits = self'bitvec;
-        let low = bits[0..64];
-        let high = bits[64..128];
-        ((low and not high) or (not low and high)).as(u64)
-    }
-}
 
 impl Hash for char {
     fn hash(self) -> u64 {
-        self'bitvec.as(u64)
-    }
-}
-
-comptime impl Hash for char {
-    comptime fn comptime_hash(self) -> u64 {
         self'bitvec.as(u64)
     }
 }
@@ -170,30 +101,6 @@ comptime impl Hash for char {
 -}
 impl Hash for str {
     fn hash(self) -> u64 {
-        let name = self;
-        let length = hash_str_byte_length(name);
-        var index: u64 = 0;
-        var state: u64 = 14695981039346656037;
-        while index < length {
-            let byte = hash_str_byte(name, index) match {
-                value? => value,
-                null => return state,
-            };
-            let bits = state'bitvec;
-            let widened = byte'bitvec.as(u64);
-            let input = widened'bitvec;
-            let mixed = ((bits and not input) or (not bits and input)).as(u128);
-            assumes mixed <= 18446744073709551615;
-            let product = mixed * 1099511628211;
-            state = product'bitvec[0..64].as(u64);
-            index = index + 1;
-        }
-        state
-    }
-}
-
-comptime impl Hash for str {
-    comptime fn comptime_hash(self) -> u64 {
         let name = self;
         let length = hash_str_byte_length(name);
         var index: u64 = 0;
@@ -244,30 +151,6 @@ impl Hash for Symbol {
     }
 }
 
-comptime impl Hash for Symbol {
-    comptime fn comptime_hash(self) -> u64 {
-        let name = self;
-        let length = hash_symbol_byte_length(name);
-        var index: u64 = 0;
-        var state: u64 = 14695981039346656037;
-        while index < length {
-            let byte = hash_symbol_byte(name, index) match {
-                value? => value,
-                null => return state,
-            };
-            let bits = state'bitvec;
-            let widened = byte'bitvec.as(u64);
-            let input = widened'bitvec;
-            let mixed = ((bits and not input) or (not bits and input)).as(u128);
-            assumes mixed <= 18446744073709551615;
-            let product = mixed * 1099511628211;
-            state = product'bitvec[0..64].as(u64);
-            index = index + 1;
-        }
-        state
-    }
-}
-
 {-
     Target-sized integers retain their target representation width. Widening
     to u128 zero-extends those bits; folding handles every supported width,
@@ -283,28 +166,8 @@ impl Hash for usize {
     }
 }
 
-comptime impl Hash for usize {
-    comptime fn comptime_hash(self) -> u64 {
-        let widened = hash_integer_representation(self);
-        let bits = widened'bitvec;
-        let low = bits[0..64];
-        let high = bits[64..128];
-        ((low and not high) or (not low and high)).as(u64)
-    }
-}
-
 impl Hash for isize {
     fn hash(self) -> u64 {
-        let widened = hash_integer_representation(self);
-        let bits = widened'bitvec;
-        let low = bits[0..64];
-        let high = bits[64..128];
-        ((low and not high) or (not low and high)).as(u64)
-    }
-}
-
-comptime impl Hash for isize {
-    comptime fn comptime_hash(self) -> u64 {
         let widened = hash_integer_representation(self);
         let bits = widened'bitvec;
         let low = bits[0..64];

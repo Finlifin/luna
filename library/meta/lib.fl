@@ -4,9 +4,9 @@ use builtin.{Type, bool};
 pub const List: pure comptime fn<T: Type> -> Type = .List'builtin;
 
 {- Comptime data, arithmetic, reflection, and checked definition builders. -}
-use data.{object, integer, list, optional, errors, text, patterns};
+use data.{object, integer, list, optional, errors, text, patterns, hashing};
 use definitions.{structs, enums};
-use numeric.scalar_math;
+use numeric.{scalar_math, equality};
 use reflection.structure;
 
 pub use object.*;
@@ -14,6 +14,8 @@ pub use optional.ComptimeOptionalOps;
 pub use errors.ComptimeErrorResultOps;
 pub use text.ComptimeTextBytes;
 pub use patterns.ComptimeListPatternView;
+pub use equality.ComptimeEq;
+pub use hashing.ComptimeHash;
 pub use integer.*;
 pub use structure.*;
 pub use structs.*;
@@ -29,5 +31,7 @@ pub mod prelude {
     pub use errors.ComptimeErrorResultOps;
     pub use text.ComptimeTextBytes;
     pub use patterns.ComptimeListPatternView;
+    pub use equality.ComptimeEq;
+    pub use hashing.ComptimeHash;
     pub use .Object;
 }
