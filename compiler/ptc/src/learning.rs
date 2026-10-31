@@ -1,5 +1,6 @@
 //! Explained nogoods are local to one query and its declaration authorities.
 //! A clause stores the forbidden conjunction, not unconditional type facts.
+mod watches;
 use super::conflicts::Conflict;
 use super::{ProofTree, Search, UnknownReason};
 use std::{collections::BTreeMap, sync::Arc};
@@ -7,6 +8,7 @@ use std::{collections::BTreeMap, sync::Arc};
 #[derive(Default)]
 pub(super) struct Clauses {
     entries: Vec<Vec<(usize, bool)>>,
+    watches: watches::Watches,
     literals: usize,
     proofs: BTreeMap<Vec<(usize, bool)>, Arc<ProofTree>>,
 }
@@ -66,13 +68,10 @@ impl Search<'_> {
         if literals.len() <= 8192 && self.steps >= literals.len() {
             self.steps -= literals.len();
             if self.learned.entries.len() >= 128 || self.learned.literals + literals.len() > 8192 {
-                self.learned.entries.clear();
-                self.learned.proofs.clear();
-                self.learned.literals = 0;
+                self.learned = Clauses::default();
             }
             if !self.learned.entries.contains(&literals) {
-                self.learned.literals += literals.len();
-                self.learned.entries.push(literals);
+                self.learned.push(literals);
             }
         }
         proof
@@ -127,13 +126,10 @@ impl Search<'_> {
         }
         self.steps -= literals.len();
         if self.learned.entries.len() >= 128 || self.learned.literals + literals.len() > 8192 {
-            self.learned.entries.clear();
-            self.learned.proofs.clear();
-            self.learned.literals = 0;
+            self.learned = Clauses::default();
         }
         let proof = Arc::new(conflict.tree);
-        self.learned.literals += literals.len();
-        self.learned.entries.push(literals.clone());
+        self.learned.push(literals.clone());
         self.learned.proofs.insert(literals.clone(), proof.clone());
         conflict.tree = ProofTree::Lemma {
             premises: literals
@@ -149,32 +145,8 @@ impl Search<'_> {
         &mut self,
         assignment: &[Option<bool>],
     ) -> Result<Propagation, UnknownReason> {
-        for clause in &self.learned.entries {
-            let mut missing = None;
-            let mut inactive = false;
-            for (index, value) in clause {
-                self.steps = self
-                    .steps
-                    .checked_sub(1)
-                    .ok_or(UnknownReason::BudgetExhausted)?;
-                match assignment[*index] {
-                    Some(actual) if actual != *value => {
-                        inactive = true;
-                        break;
-                    }
-                    None => {
-                        if missing.is_some() {
-                            inactive = true;
-                            break;
-                        }
-                        missing = Some((*index, !*value));
-                    }
-                    _ => {}
-                }
-            }
-            if inactive {
-                continue;
-            }
+        if let Some((id, missing)) = self.learned.propagate(assignment, &mut self.steps)? {
+            let clause = &self.learned.entries[id];
             let mut reason = self.conflict_proof(clause);
             if let Some(proof) = self.learned.proofs.get(clause) {
                 let ProofTree::TheoryConflict(premises) = reason.tree else {
