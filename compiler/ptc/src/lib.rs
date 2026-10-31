@@ -1624,26 +1624,26 @@ impl Search<'_> {
         }
         // A Boolean short circuit must not conceal an uninterpreted atom in
         // a purported concrete model (opaque calls still require evidence).
+        let mut atom_values = Vec::new();
         for atom in self.atoms {
-            model_atom(
+            self.steps = self.steps.checked_sub(1)?;
+            atom_values.push(model_atom(
                 atom,
                 &types,
                 &theory.integers,
                 &self.context.nominal_constructors,
                 &self.context.tuple_heads,
-            )?;
+            )?);
         }
-        (evaluate_model(
-            self.formula,
-            &types,
-            &theory.integers,
-            &self.context.nominal_constructors,
-            &self.context.tuple_heads,
-        ) == Some(true))
-        .then_some(Model {
-            types,
-            integers: theory.integers.clone(),
-        })
+        let cnf =
+            boolean::cnf::Cnf::compile(self.boolean.as_ref()?, self.atoms.len(), &mut self.steps)
+                .ok()?;
+        cnf.accepts(&atom_values, &mut self.steps)
+            .ok()?
+            .then_some(Model {
+                types,
+                integers: theory.integers.clone(),
+            })
     }
 }
 fn evaluate_kind_with_heads(

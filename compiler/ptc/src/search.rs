@@ -407,7 +407,13 @@ impl Search<'_> {
             Step::Return(
                 self.witness(&classes)
                     .map(SearchResult::Model)
-                    .unwrap_or(SearchResult::Unknown(UnknownReason::UnvalidatedModel)),
+                    .unwrap_or_else(|| {
+                        SearchResult::Unknown(if self.steps == 0 {
+                            UnknownReason::BudgetExhausted
+                        } else {
+                            UnknownReason::UnvalidatedModel
+                        })
+                    }),
             )
         }
     }

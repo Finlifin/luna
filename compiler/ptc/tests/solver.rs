@@ -2145,3 +2145,35 @@ fn boolean_implication_propagation_has_replayable_branch_local_proofs() {
     ));
     proved(&positive, atoms[11].clone());
 }
+
+#[test]
+fn model_clause_validation_respects_budget_and_retries() {
+    let context = Context::default();
+    let goal = eq(ty(P::Bool), ty(P::U8));
+    let mut budget = Budget::default();
+    let Outcome::NotEntailed(witness) = context.prove_metered(goal.clone(), &mut budget) else {
+        panic!("closed unequal primitives must have a checked counterexample");
+    };
+    context.verify_witness(&witness, Budget::default()).unwrap();
+    let used = Budget::default().steps - budget.steps;
+    let mut short = Budget {
+        steps: used - 1,
+        max_depth: 128,
+    };
+    assert!(matches!(
+        context.prove_metered(goal.clone(), &mut short),
+        Outcome::Unknown {
+            reason: UnknownReason::BudgetExhausted,
+            ..
+        }
+    ));
+    let mut exact = Budget {
+        steps: used,
+        max_depth: 128,
+    };
+    let Outcome::NotEntailed(witness) = context.prove_metered(goal, &mut exact) else {
+        panic!("budget exhaustion must not poison the next query");
+    };
+    assert_eq!(exact.steps, 0);
+    context.verify_witness(&witness, Budget::default()).unwrap();
+}

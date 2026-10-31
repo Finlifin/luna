@@ -1,5 +1,7 @@
 //! Query-local Boolean skeleton. Atom identities are borrowed from the theory
 //! catalog; evaluation and propagation never copy type terms.
+pub(crate) mod cnf;
+
 use super::{Atom, Formula};
 use std::collections::BTreeSet;
 
