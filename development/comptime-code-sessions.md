@@ -398,3 +398,31 @@ Verification for the prepared/graph session stage (cwd `/home/fin/luna`):
 - `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`: all 367 passed; `/tmp/luna-tools-i95i6eae/result.json`.
 - The earlier builder run had the resolution failures described above: `/tmp/luna-tools-w2o4gv0o/result.json`.
 - Formatting check and diff check passed; `/tmp/luna-tools-gca9gfk9/result.json`.
+
+## Builder integration follow-up
+
+The explicit meta builder fixture now supplies both the shipped primitive
+bindings and the shipped `builtin.compiler` bindings. It remains an isolated
+package fixture; the separate complete-sysroot test still checks the full library.
+No math facade is removed from meta and no expected builder behavior is weakened.
+
+After resolution, `meta.math.wrapping_abs` exposed a finite-domain proof problem:
+a six-member signed integer constraint produced twelve proof cases because
+individual exclusion queries exhausted their per-query budget. The resulting
+spurious unsigned case failed intrinsic signature checking before invocation.
+A unit regression reproduced six expected cases versus twelve actual cases.
+
+Finite-domain enumeration now gathers primitive equality operands from the
+requirements and asks PTC to prove their disjunction covers the parameter. Only
+an entailed cover narrows enumeration. Mentioned types under negation are not
+assumptions; aliases without a directly provable cover retain the full-domain
+fallback. Per-case exclusions, correlated prefix pruning, original requirements,
+and program proofs remain intact. Collection and queries are metered without
+increasing budgets. This is universal verification of type cases, not inference
+from an arbitrary satisfying model, and does not solve general PTC search costs.
+
+Validation (cwd `/home/fin/luna`):
+
+- `python3 -B development/check.py --timeout 900 -- test -p program_verification --lib`: 101 passed; `/tmp/luna-tools-jc692kcc/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test builder_invocations public_struct_builder_copies_reflected_fields_through_mutating_methods`: passed; `/tmp/luna-tools-7f62ou_f/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test builder_invocations`: 78 passed, one failed; `/tmp/luna-tools-d6q9gdc2/result.json`. The remaining complete-sysroot case fails during parent-interface establishment with `head inference: BudgetExhausted` (package 1, declarations 480/490), before builder invocation. It is not a successful full-sysroot validation.

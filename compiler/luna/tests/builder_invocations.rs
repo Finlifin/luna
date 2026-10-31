@@ -28,6 +28,22 @@ impl Fixture {
         .unwrap();
         Self(path)
     }
+    fn builtin_entry(&self) -> PathBuf {
+        // This explicit-package fixture isolates meta and its compiler bindings.
+        // The complete sysroot has a separate end-to-end case below.
+        std::fs::create_dir_all(self.0.join("builtin")).unwrap();
+        std::fs::write(
+            self.0.join("builtin/lib.fl"),
+            concat!(
+                include_str!("../../../library/builtin/primitives.fl"),
+                "\npub mod compiler {\n",
+                include_str!("../../../library/builtin/bindings.fl"),
+                "\n}\n",
+            ),
+        )
+        .unwrap();
+        self.0.join("builtin/lib.fl")
+    }
     fn packages(&self) -> Vec<SourcePackage> {
         vec![SourcePackage {
             resolution_id: 17,
@@ -364,8 +380,7 @@ impl Fixture {
             resolution_id: 43,
             identity: 902,
             name: "builtin".into(),
-            entry: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../library/builtin/primitives.fl"),
+            entry: self.builtin_entry(),
         });
         let intrinsics: Vec<_> = nir::intrinsics::Operation::ALL
             .iter()
@@ -515,10 +530,7 @@ fn package_cli_invokes_public_builders_with_observed_inputs() {
             .args(["--package", "42", "901", "meta"])
             .arg(&meta)
             .args(["--package", "43", "902", "builtin"])
-            .arg(
-                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../library/builtin/primitives.fl"),
-            )
+            .arg(fixture.builtin_entry())
             .args(["--dependency", "42", "builtin", "43"])
             .args(["--package", "44", "903", "attrs"])
             .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../library/attrs/lib.fl"))

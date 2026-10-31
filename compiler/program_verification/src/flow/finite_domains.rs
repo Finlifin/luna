@@ -51,7 +51,7 @@ pub(super) fn integer_instances(
         limits.step(before - fuel).map_err(|_| fail())?;
         context.assume(formula);
     }
-    let mut prove = |formula| -> Result<bool, Error> {
+    let prove = |formula, limits: &mut Limits| -> Result<bool, Error> {
         // Bound each query, but charge its actual work on every outcome.
         // Cheap type facts must not consume an entire search allowance.
         let allowance = limits.arithmetic.steps.min(4096);
@@ -72,7 +72,7 @@ pub(super) fn integer_instances(
         };
         // Enumerate type identities, not layouts. Platform integers remain
         // distinct; literal completion and flow use the package's target.
-        let domain = [
+        let full_domain = [
             P::I8,
             P::I16,
             P::I32,
@@ -86,16 +86,44 @@ pub(super) fn integer_instances(
             P::Usize,
             P::Isize,
         ];
+        // Start from equality operands occurring in the requirements, then
+        // prove that they cover the parameter. Occurrence alone is not evidence:
+        // negations and disjunctions can mention types outside the true domain.
+        let mut mentioned = Vec::new();
+        for requirement in &function.requirements {
+            mentioned_primitives(requirement, &subject, &mut mentioned, limits).map_err(
+                |reason| Error {
+                    source: function.body.source,
+                    reason: Reason::Unknown(reason),
+                },
+            )?;
+        }
+        let narrowed: Vec<_> = full_domain
+            .iter()
+            .copied()
+            .filter(|primitive| mentioned.contains(primitive))
+            .collect();
+        let cover = Formula::Or(
+            narrowed
+                .iter()
+                .map(|p| Formula::equal(subject.clone(), Term::Primitive(*p)))
+                .collect(),
+        );
+        let domain = if !narrowed.is_empty() && prove(cover, limits)? {
+            narrowed
+        } else {
+            full_domain.to_vec()
+        };
         let alternatives: Vec<_> = domain
             .iter()
             .map(|p| Formula::equal(subject.clone(), Term::Primitive(*p)))
             .collect();
-        if !prove(Formula::Or(alternatives.clone()))? {
+        if !prove(Formula::Or(alternatives.clone()), limits)? {
             return Ok(None);
         }
         let mut possible = Vec::new();
         for (primitive, equal) in domain.into_iter().zip(alternatives) {
-            if !prove(Formula::Not(Box::new(equal)))? {
+            if !prove(Formula::Not(Box::new(equal)), limits)? {
                 possible.push(Term::Primitive(primitive));
             }
         }
@@ -127,7 +155,7 @@ pub(super) fn integer_instances(
                             })
                             .collect(),
                     );
-                    if prove(Formula::Not(Box::new(conjunction)))? {
+                    if prove(Formula::Not(Box::new(conjunction)), limits)? {
                         continue;
                     }
                 }
@@ -158,6 +186,40 @@ pub(super) fn integer_instances(
         output.push(instance);
     }
     Ok(Some(output))
+}
+
+fn mentioned_primitives(
+    predicate: &nir::program::TypePredicate,
+    subject: &Term,
+    output: &mut Vec<P>,
+    limits: &mut Limits,
+) -> Result<(), Unknown> {
+    limits.step(1)?;
+    use nir::program::TypePredicate as Q;
+    match predicate {
+        Q::Equal(left, right) => {
+            let other = if left == subject {
+                right
+            } else if right == subject {
+                left
+            } else {
+                return Ok(());
+            };
+            if let Term::Primitive(primitive) = other {
+                if !output.contains(primitive) {
+                    output.push(*primitive);
+                }
+            }
+        }
+        Q::Not(inner) => mentioned_primitives(inner, subject, output, limits)?,
+        Q::And(items) | Q::Or(items) => {
+            for item in items {
+                mentioned_primitives(item, subject, output, limits)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -299,6 +361,73 @@ mod tests {
                 1
             );
         }
+    }
+
+    #[test]
+    fn six_signed_alternatives_do_not_admit_unsigned_proof_cases() {
+        let mut function = template(1);
+        let Term::Function { parameters, .. } = &function.signature else {
+            unreachable!()
+        };
+        let domain = [P::I8, P::I16, P::I32, P::I64, P::I128, P::Isize];
+        function.requirements = vec![Q::Or(
+            domain
+                .iter()
+                .map(|primitive| Q::Equal(parameters[0].ty.clone(), Term::Primitive(*primitive)))
+                .collect(),
+        )];
+        let instances = integer_instances(&function, &mut Limits::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(instances.len(), domain.len());
+        for primitive in domain {
+            assert_eq!(
+                instances
+                    .iter()
+                    .filter(|instance| {
+                        let Term::Function { parameters, .. } = &instance.signature else {
+                            unreachable!()
+                        };
+                        parameters[0].ty == Term::Primitive(primitive)
+                    })
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn mentioned_candidates_require_a_proved_cover_and_aliases_use_fallback() {
+        let mut f = template(1);
+        let Term::Function { parameters, .. } = &f.signature else {
+            unreachable!()
+        };
+        f.requirements = vec![Q::Not(Box::new(Q::Equal(
+            parameters[0].ty.clone(),
+            Term::Primitive(P::I8),
+        )))];
+        assert!(
+            integer_instances(&f, &mut Limits::default())
+                .unwrap()
+                .is_none()
+        );
+
+        let mut f = template(2);
+        let Term::Function { parameters, .. } = &f.signature else {
+            unreachable!()
+        };
+        f.requirements = vec![
+            Q::Equal(parameters[0].ty.clone(), parameters[1].ty.clone()),
+            Q::Equal(parameters[1].ty.clone(), Term::Primitive(P::I8)),
+        ];
+        let instances = integer_instances(&f, &mut Limits::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(instances.len(), 1);
+        let Term::Function { parameters, .. } = &instances[0].signature else {
+            unreachable!()
+        };
+        assert!(parameters.iter().all(|p| p.ty == Term::Primitive(P::I8)));
     }
 
     #[test]
