@@ -966,3 +966,34 @@ fn dynamic_bitvector_type_widths_resume_calls_and_recover_after_invalid_inputs()
         assert_eq!(vm.bytecode_invocations() - before, 2);
     }
 }
+
+#[test]
+fn type_plan_imports_preserve_caller_locals_and_write_back_mutations() {
+    let package = support::compile(
+        "typealias Type = .Type'builtin;
+        typealias u8 = .u8'builtin;
+        pure comptime fn Tag<.T: Type = Type, value: T> -> Type { T }
+        comptime fn run() -> bool {
+            var untouched = true;
+            var touched = false;
+            let callback = || untouched;
+            let result = Tag<do { touched = true; 7 }, .T = u8>;
+            let retained = callback();
+            untouched = false;
+            touched and retained and not untouched
+        }
+        comptime fn early() -> bool {
+            let untouched = true;
+            let result = Tag<do { return untouched; 7 }, .T = u8>;
+            false
+        }",
+    );
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let mut reference = Interpreter::for_comptime_tree(&package, Budget::default()).unwrap();
+    for name in ["run", "early", "run"] {
+        let id = support::id(&package, name);
+        assert_eq!(vm.invoke(id, vec![]).unwrap(), Value::Bool(true));
+        assert_eq!(reference.invoke(id, vec![]).unwrap(), Value::Bool(true));
+    }
+    assert!(vm.bytecode_invocations() > 0);
+}

@@ -164,6 +164,7 @@ pub enum Op {
     TypeInputPlan {
         destination: Register,
         expression: Arc<Expr>,
+        environment: Vec<(LocalId, Register)>,
     },
     Stage(staged_inputs::Instruction),
     BeginContextualInput {
@@ -699,7 +700,14 @@ impl fmt::Display for Program {
                 Op::TypeInputPlan {
                     destination,
                     expression,
-                } => write!(f, "(type-input-plan %{destination} {expression})")?,
+                    environment,
+                } => {
+                    write!(f, "(type-input-plan %{destination} (environment")?;
+                    for (binding, slot) in environment {
+                        write!(f, " ({binding} %{slot})")?;
+                    }
+                    write!(f, ") {expression})")?;
+                }
                 Op::CheckListAppend { local, ty } => {
                     write!(f, "(check-list-append %{local} {ty})")?
                 }
@@ -1899,22 +1907,30 @@ fn compile_root<'a>(
                         let copied = nir::copy_budget::charge_expression(expr, &mut copy_steps);
                         *fuel = copy_steps as usize;
                         copied.map_err(|error| copy_error(error, source))?;
-                        for binding in
+                        let bindings =
                             nir::free_bindings::collect(expr, fuel).map_err(|message| {
                                 if message.contains("budget") {
                                     Error::Budget(source)
                                 } else {
                                     Error::Unsupported(source)
                                 }
-                            })?
-                        {
-                            locals.entry(binding).or_insert_with(&mut fresh);
-                        }
+                            })?;
+                        *fuel = fuel
+                            .checked_sub(bindings.len())
+                            .ok_or(Error::Budget(source))?;
+                        let environment = bindings
+                            .into_iter()
+                            .map(|binding| {
+                                let slot = *locals.entry(binding).or_insert_with(&mut fresh);
+                                (binding, slot)
+                            })
+                            .collect();
                         emit(
                             &mut work,
                             Op::TypeInputPlan {
                                 destination: dst,
                                 expression: Arc::new(expr.clone()),
+                                environment,
                             },
                         );
                     }
@@ -2946,6 +2962,33 @@ fn compile_root<'a>(
     }
     for instruction in &mut instructions {
         *fuel = fuel.checked_sub(1).ok_or(Error::Budget(source))?;
+        if let Op::TypeInputPlan {
+            expression,
+            environment,
+            ..
+        } = &mut instruction.op
+        {
+            // Retain the previous collision checks without allocating registers
+            // for plan-owned binders. A caller slot with the same identity must
+            // still be visible to plan admission, even if it is not a free read.
+            let owned = match &expression.kind {
+                K::NormalFormType {
+                    plan: Some(plan), ..
+                } => plan.local_bindings(),
+                _ => expression.kind.nominal_local_bindings(),
+            }
+            .ok_or(Error::Unsupported(instruction.source))?;
+            for binding in owned {
+                *fuel = fuel
+                    .checked_sub(environment.len().saturating_add(1))
+                    .ok_or(Error::Budget(instruction.source))?;
+                if let Some(&slot) = locals.get(&binding) {
+                    if !environment.iter().any(|(id, _)| *id == binding) {
+                        environment.push((binding, slot));
+                    }
+                }
+            }
+        }
         let target = match &mut instruction.op {
             Op::Jump(target) | Op::Branch { target, .. } => target,
             _ => continue,

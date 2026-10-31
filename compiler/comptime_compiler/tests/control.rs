@@ -727,6 +727,50 @@ fn normal_plan_templates_own_inputs_and_capture_only_free_bindings() {
             compile(&body, &mut (code.storage_work() - 1)),
             Err(Error::Budget(_))
         ));
+        // Hundreds of caller locals must not become type-plan imports.
+        let padded = expr(K::Block {
+            statements: (10..210)
+                .map(|index| {
+                    expr(K::Let {
+                        binding: LocalId { owner: 90, index },
+                        value: Box::new(expr(K::Unit)),
+                    })
+                })
+                .collect(),
+            result: Some(Box::new(body.clone())),
+        });
+        let padded_code = compile(&padded, &mut 100_000).unwrap();
+        let imports = padded_code
+            .instructions()
+            .iter()
+            .find_map(|instruction| {
+                if let comptime_compiler::Op::TypeInputPlan { environment, .. } = &instruction.op {
+                    Some(environment)
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        assert_eq!(
+            imports.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![external]
+        );
+        assert_eq!(padded_code.locals().len(), 201);
+
+        // A live caller binding colliding with a plan-owned identity must still
+        // reach admission, where it is rejected instead of silently overwritten.
+        let collision = expr(K::Block {
+            statements: vec![expr(K::Let {
+                binding: first,
+                value: Box::new(expr(K::Unit)),
+            })],
+            result: Some(Box::new(body.clone())),
+        });
+        let collision_code = compile(&collision, &mut 100_000).unwrap();
+        assert!(collision_code.instructions().iter().any(|instruction| {
+            matches!(&instruction.op, comptime_compiler::Op::TypeInputPlan { environment, .. }
+                if environment.iter().any(|(id, _)| *id == first))
+        }));
         let K::NormalFormType {
             plan: Some(plan), ..
         } = &mut body.kind

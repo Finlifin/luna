@@ -1342,11 +1342,12 @@ impl<'a> Interpreter<'a> {
                 Op::TypeInputPlan {
                     destination,
                     expression,
+                    environment: imports,
                 } => {
-                    self.effect_charge(frame.code.locals().len(), Some(source))?;
+                    self.effect_charge(imports.len(), Some(source))?;
                     let mut environment = std::mem::take(&mut frame.environment);
                     let mut borrowed = Vec::new();
-                    for &(binding, slot) in frame.code.locals() {
+                    for &(binding, slot) in imports {
                         if let Some(value) = frame.slots[slot].take() {
                             environment.insert(binding, value);
                             borrowed.push((binding, slot));

@@ -8178,3 +8178,36 @@ Validation in `/home/fin/luna`:
   10 tests passed, exit 0; `/tmp/luna-tools-h2itngfc/result.json`.
 - Formatting check exited 0 (`/tmp/luna-tools-qdprbmfb/result.json`) and
   `git diff --check` passed. No full language suite was run.
+
+## Sparse environments for staged Type plans
+
+`TypeInputPlan` now carries an explicit `(LocalId, Register)` import table,
+computed from lexical free bindings. Suspending a compiled caller transfers only
+those live registers into the plan environment, instead of iterating over every
+local in the function. Completion uses the existing borrowed-slot restoration
+path, retaining mutations and early transfers. Unrelated locals remain in place.
+The bytecode dump includes the import table as an S-expression.
+
+Plan-owned bindings that collide with caller registers are also included, so
+plan admission still rejects live identity collisions. These checks are linked
+after register allocation; ordinary plan-local bindings do not acquire caller
+registers merely to support the check. Import construction and transfer remain
+budgeted. Tests verify one imported dependency in a function with 200 unrelated
+locals, collision visibility, mutation writeback and early return against the
+reference engine.
+
+This reduces environment traversal at this suspension boundary; it does not
+remove the plan's expression carrier, complete IIR-only lowering, or establish a
+wall-clock speedup for arbitrary workloads.
+
+Validation in `/home/fin/luna`, all exit 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p luna --test control --test comptime_bytecode_types`:
+  25 compiler and 15 source tests; `/tmp/luna-tools-q50bh63i/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_clause_inputs --test comptime_iir_bytecode`:
+  46 clause-input and four IIR tests; `/tmp/luna-tools-irdooq1m/result.json`.
+- After refining collision-scan budget accounting,
+  `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler --test control`:
+  25 tests; `/tmp/luna-tools-6vdgjw_v/result.json`.
+- Formatting via command.py: `/tmp/luna-tools-073pr2bw/result.json`;
+  `git diff --check` passed. No full suite or timing benchmark was run.
