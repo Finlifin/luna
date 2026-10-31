@@ -58,8 +58,19 @@ fn repository_attribute_package_inspects_abi_without_claiming_abi_lowering() {
             .unwrap()
     };
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/attrs/lib.fl");
+    let builtin = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../library/builtin/primitives.fl");
     let arguments = [
         "--packages-v1",
+        "--package",
+        "3",
+        "303",
+        "builtin",
+        builtin.to_str().unwrap(),
+        "--dependency",
+        "2",
+        "builtin",
+        "3",
         "--package",
         "1",
         "101",
@@ -214,15 +225,30 @@ fn phase_attribute_alias_is_inspected_through_the_repository_package() {
     std::fs::create_dir_all(&directory).unwrap();
     std::fs::write(
         directory.join("input.fl"),
-        "use attrs.comptime_phase as staged; trait Code {^staged comptime fn value()->bool;}",
+        "use builtin.bool; use attrs.comptime_phase as staged; trait Code {^staged comptime fn value()->bool;}",
     )
     .unwrap();
     let attrs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/attrs/lib.fl");
+    let builtin = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../library/builtin/primitives.fl");
     for emit in ["attributes", "merged-attributes"] {
         let output = std::process::Command::new(env!("CARGO_BIN_EXE_luna"))
             .current_dir(&directory)
             .args([
                 "--packages-v1",
+                "--package",
+                "3",
+                "303",
+                "builtin",
+                builtin.to_str().unwrap(),
+                "--dependency",
+                "2",
+                "builtin",
+                "3",
+                "--dependency",
+                "1",
+                "builtin",
+                "3",
                 "--package",
                 "1",
                 "101",

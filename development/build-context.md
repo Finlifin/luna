@@ -234,3 +234,24 @@ associated query 保留 interface/member/arguments/subject，不选择实现，�
 - `python3 -B development/check.py --timeout 900 -- test --release -p luna --test metadata_wire`：
   6 项通过，报告 `/tmp/luna-tools-9sckwx6p/result.json`；新增用例检查 effect
   重复与顺序、跨包成员身份、错误结果独立表示和原始字节中未绑定主体的拒绝。
+
+## Build and attribute binding modules
+
+`build.bindings` now owns compiler-facing mode, target, package metadata, Object
+and named Object lookup bindings. The info modules import existing builtin
+primitive aliases, share one Object lookup binding, and re-export the contextual
+input identities. They do not wrap the inputs in new functions: definition-origin
+capture, saved callable behavior and dependency lookup remain unchanged.
+
+Attribute constructors now import `attrs.bindings`; Symbol reuses builtin's
+primitive alias. Explicit package fixtures and the documented attribute CLI entry
+supply that dependency. The isolated fixture assembles the real binding sources.
+Raw compiler access in these two packages is confined to their binding modules.
+Object bootstrap bindings still exist separately in attrs, build and meta; this
+stage does not claim a single cross-package compiler-domain registry.
+
+Verification in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test build_context`: 33 passed; `/tmp/luna-tools-m70cozr1/result.json`. Includes source ownership, saved metadata functions, dependency identities, resident invalidation/recovery and real-sysroot O0/O3.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test library_attributes --test trait_phases`: 76 passed; `/tmp/luna-tools-2ikah839/result.json`. Attribute fixture imports bool explicitly through its configured builtin dependency.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes complete_shipped_sysroot_reuses_text_bindings_for_comptime_and_hashing`: passed; `/tmp/luna-tools-ye2qmr75/result.json`.

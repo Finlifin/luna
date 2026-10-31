@@ -1,10 +1,5 @@
-use builtin.bool;
-
-typealias Symbol = .Symbol'builtin;
-typealias Integer = .Integer'builtin;
-typealias Object = .Object'builtin;
-
-const target_object_get = .object_get'builtin;
+use builtin.{bool, Symbol, Integer};
+use bindings.{Object, object_get};
 
 {-
     An immutable snapshot of the source package's host pipeline target. These
@@ -24,8 +19,8 @@ pub struct TargetFeatures {
 impl TargetFeatures {
     -- Missing is null; an explicitly disabled feature is false?.
     pub pure comptime fn get(self, name: Symbol) -> ?bool {
-        target_object_get(bool, self.entries, name)
+        object_get(bool, self.entries, name)
     }
 }
 
-pub const target: Target = .build_target'builtin;
+pub use bindings.target;

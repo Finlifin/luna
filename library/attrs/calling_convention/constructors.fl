@@ -1,5 +1,4 @@
-typealias Symbol = .Symbol'builtin;
-typealias Object = .Object'builtin;
+use bindings.{Symbol, Object};
 
 {-
     Attribute constructors produce ordinary comptime Objects. Consumers check

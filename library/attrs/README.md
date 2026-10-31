@@ -27,6 +27,8 @@ python3 -B development/cargo.py run --release -p luna -- \
   --packages-v1 \
   --package 1 101 app /tmp/attrs-example.fl \
   --package 2 202 attrs library/attrs/lib.fl \
+  --package 3 303 builtin library/builtin/primitives.fl \
+  --dependency 2 builtin 3 \
   --dependency 1 attrs 2 --primary 1 --emit merged-attributes
 ```
 

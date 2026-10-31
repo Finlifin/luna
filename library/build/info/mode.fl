@@ -1,7 +1,5 @@
-typealias Symbol = .Symbol'builtin;
-
 {-
     Contextual constant: each resolved read observes the build input of its
     source definition. The driver must supply a configuration for that package.
 -}
-pub const mode: Symbol = .build_mode'builtin;
+pub use bindings.mode;
