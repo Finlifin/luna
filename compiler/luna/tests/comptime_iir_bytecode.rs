@@ -154,3 +154,98 @@ fn graph_closures_and_structural_values_keep_invocation_state_isolated() {
     assert_eq!(compiled.bytecode_invocations(), 9);
     assert_eq!(reference.bytecode_invocations(), 0);
 }
+
+#[test]
+fn concrete_graph_contextual_inputs_execute_in_bytecode() {
+    let graph = graph(
+        "typealias Type=.Type'builtin;
+        pure comptime fn Payload<.T:Type=Type, value:T>->Type {T}
+        comptime fn run(element:Type)->Type {Payload<.T=element,17>}",
+        "run",
+    );
+    let mut compiled = Interpreter::from_iir_for_comptime(&graph, Budget::default()).unwrap();
+    let mut reference = Interpreter::from_iir_for_comptime_tree(&graph, Budget::default()).unwrap();
+    for primitive in [Primitive::U8, Primitive::U16] {
+        let inputs = vec![Value::Type(Term::Primitive(primitive))];
+        assert_eq!(
+            compiled
+                .invoke_instance(&graph.roots[0], inputs.clone())
+                .unwrap(),
+            reference.invoke_instance(&graph.roots[0], inputs).unwrap()
+        );
+    }
+    assert!(compiled.bytecode_contextual_inputs() > 0);
+    assert_eq!(reference.bytecode_contextual_inputs(), 0);
+}
+
+#[test]
+fn graph_deferred_inputs_preserve_effect_order_and_phase_checks() {
+    let original = graph(
+        "typealias Type=.Type'builtin;
+        pure comptime fn Payload<.T:Type=Type, value:T>->Type {T}
+        comptime fn enabled()->bool {true}
+        comptime fn run(element:Type)->Type {
+            var touched=false;
+            Payload<do { touched=not touched; if enabled() {17} else {23} },
+                .T=if touched {element} else {bool}>
+        }",
+        "run",
+    );
+    for compiled in [false, true] {
+        let mut vm = if compiled {
+            Interpreter::from_iir_for_comptime(&original, Budget::default())
+        } else {
+            Interpreter::from_iir_for_comptime_tree(&original, Budget::default())
+        }
+        .unwrap();
+        for primitive in [Primitive::U8, Primitive::U16] {
+            let value = vm
+                .invoke_instance(
+                    &original.roots[0],
+                    vec![Value::Type(Term::Primitive(primitive))],
+                )
+                .unwrap();
+            let Value::Type(Term::NormalForm { arguments, .. }) = value else {
+                panic!("expected opaque head")
+            };
+            assert_eq!(arguments[0], Term::Primitive(primitive));
+            assert_eq!(
+                arguments[1],
+                Term::Integer(comptime_runtime::Integer::from_u128(17))
+            );
+        }
+        assert_eq!(vm.bytecode_staged_inputs(), if compiled { 2 } else { 0 });
+        assert_eq!(
+            vm.invoke_instance(
+                &original.roots[0],
+                vec![Value::Type(Term::Primitive(Primitive::Bool))]
+            )
+            .unwrap_err()
+            .kind,
+            ErrorKind::Type
+        );
+        assert!(
+            vm.invoke_instance(
+                &original.roots[0],
+                vec![Value::Type(Term::Primitive(Primitive::U8))]
+            )
+            .is_ok()
+        );
+        assert_eq!(vm.bytecode_staged_inputs(), if compiled { 4 } else { 0 });
+    }
+    let mut denied = original.clone();
+    denied
+        .functions
+        .iter_mut()
+        .find(|f| f.function.name == "enabled")
+        .unwrap()
+        .function
+        .phase = nir::program::FunctionPhase::Runtime;
+    // Changing a retained callee's phase invalidates the graph certificate;
+    // rejection must happen before any contextual operand can execute.
+    let error = match Interpreter::from_iir_for_comptime(&denied, Budget::default()) {
+        Ok(_) => panic!("phase-corrupted graph was admitted"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind, ErrorKind::InvalidCallPlan);
+}

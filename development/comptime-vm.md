@@ -8960,3 +8960,32 @@ Validation in `/home/fin/luna`:
   diagnostics, source positions, and remaining work across five budgets for
   valid/overflowing literals, invalid unselected branches, wrong condition
   types, absent block results, and tuple domain mismatches.
+
+
+### Contextual input bytecode in concrete IIR graphs
+
+The residual `contextual_code_available` gate still required `graph.is_none()`
+after ordinary invocation bytecode had already admitted concrete graphs.
+A source-produced IIR regression returned correct values in both engines but
+recorded zero contextual bytecode inputs on the baseline
+(`/tmp/luna-tools-t1pj2z_u/result.json`, exit 101 at the execution-count assertion).
+
+Contextual and deferred input fragments now use the ordinary invocation gate.
+Comptime phase, bytecode enablement, cleanup scheduling, and active effect
+restrictions remain shared; simply having a concrete IIR graph no longer forces
+these fragments through the reference evaluator. Callees continue to resolve
+from retained graph instances. Corrupting a retained callee phase is rejected
+at graph admission, before operand execution.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_iir_bytecode --test comptime_bytecode_types --test comptime_staged_values`:
+  23 passed; `/tmp/luna-tools-fy0ndj2p/result.json`, exit 0.
+- The new IIR cases check actual contextual/staged fragment counters,
+  equivalent results against the tree evaluator across two input domains,
+  source-ordered mutation before domain formation, single evaluation,
+  rejection of an invalid domain followed by recovery in the same VM,
+  and rejection of inconsistent phase metadata.
+
+This removes a remaining IIR-specific fallback gate. It does not claim an
+independent IIR bytecode compiler, nor support for active cleanup/effect frames.

@@ -748,21 +748,13 @@ impl<'a> Interpreter<'a> {
         self.bytecode_staged_inputs
     }
 
-    fn contextual_code_available(&self) -> bool {
-        self.comptime_only
-            && self.bytecode_enabled
-            && self.cleanup_schedule.is_none()
-            && self.graph.is_none()
-            && self.effect_state.environment.is_empty()
-    }
-
     pub(super) fn start_staged_input(
         &mut self,
         input: &nir::program::NormalFormArgument,
         environment: &mut Environment,
         depth: usize,
     ) -> Result<Option<InputFrame>, Error> {
-        if !self.contextual_code_available() || depth != 0 {
+        if !self.bytecode_invocation_available() || depth != 0 {
             return Ok(None);
         }
         let Some((program, shape)) =
@@ -824,7 +816,7 @@ impl<'a> Interpreter<'a> {
         expected: &Term,
         environment: &mut Environment,
     ) -> Result<Option<InputFrame>, Error> {
-        if !self.contextual_code_available() {
+        if !self.bytecode_invocation_available() {
             return Ok(None);
         }
         let Some(program) = self.compile_bytecode(|fuel| {
