@@ -425,7 +425,7 @@ impl normal_plan::InputPlan for Frame<'_> {
                 let (shape, mut staged) = result
                     .staged
                     .ok_or_else(|| vm.failure(ErrorKind::InvalidControlFlow, Some(self.source)))?;
-                vm.rekey_staged_input(self.input(slot), &shape, &mut staged)?;
+                vm.rekey_staged_input(&shape, &mut staged)?;
                 self.pending.insert(slot, staged);
                 self.position += 1;
                 self.drain = true;

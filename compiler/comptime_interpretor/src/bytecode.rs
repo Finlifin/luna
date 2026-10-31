@@ -796,7 +796,7 @@ impl<'a> Interpreter<'a> {
         Ok(Some(match result.flow? {
             Flow::Value(_) => {
                 let (shape, mut staged) = result.staged.expect("completed staged fragment");
-                self.rekey_staged_input(input, &shape, &mut staged)?;
+                self.rekey_staged_input(&shape, &mut staged)?;
                 std::ops::ControlFlow::Continue(staged)
             }
             flow => std::ops::ControlFlow::Break(flow),

@@ -8912,3 +8912,24 @@ Validation in `/home/fin/luna`:
   Both staged engines preserve selected branches across cloning, still reject
   an invalid literal in an unselected branch at domain preparation, and the
   reference evaluator consumes only the selected prepared literals.
+
+
+### Compiled shape ownership at staged input completion
+
+Staged bytecode completion now reconstructs structural paths solely from its
+compiled `Shape`, without revisiting a `NormalFormArgument` tree. Normal and
+nominal invocation frames use that same completion boundary. Duplicate shape
+slots, excessive shape depth, missing registers, and budget failures reject
+before changing any operand key; the final rewrite has no fallible semantic
+work. This permits a fresh-budget retry without mixed register/path identities.
+The remaining delayed-domain preparation still specializes and checks NIR;
+this does not claim removal of that parallel path.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  359 passed; `/tmp/luna-tools-wzl8e2cr/result.json`, exit 0. Added standalone
+  compiled-shape tests with no source tree, each budget exhaustion point,
+  retry, missing register, duplicate slots, and exact S-expression output.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_clause_inputs --test nominal_staging --test nominal_value_parameters`:
+  364 passed; `/tmp/luna-tools-_uonopxz/result.json`, exit 0.

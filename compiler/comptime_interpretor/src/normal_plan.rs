@@ -306,11 +306,11 @@ impl<'a> Frame<'a> {
             Flow::Value(value) => match &self.waiting {
                 Some(Waiting::Preparation(_)) => Completion::Prepared,
                 Some(Waiting::Ready { .. }) => Completion::Value(value),
-                Some(Waiting::Stage { argument, .. }) => {
+                Some(Waiting::Stage { .. }) => {
                     let (shape, mut value) = result.staged.ok_or_else(|| {
                         vm.failure(ErrorKind::InvalidControlFlow, Some(self.source))
                     })?;
-                    vm.rekey_staged_input(argument, &shape, &mut value)?;
+                    vm.rekey_staged_input(&shape, &mut value)?;
                     Completion::Staged(value)
                 }
                 None => return Err(vm.failure(ErrorKind::InvalidControlFlow, Some(self.source))),
