@@ -34,7 +34,6 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), &'static str> {
             | Term::NormalForm { arguments, .. }
             | Term::Tuple(arguments)
             | Term::ClosureContextValue(arguments)
-            | Term::TypeListValue(arguments)
             | Term::TupleValue(arguments) => arguments.len(),
             Term::ContextualClosure { .. } => 2,
             Term::Closure { environment, .. } => environment.len().saturating_add(1),
@@ -77,7 +76,6 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), &'static str> {
             | Term::NormalForm { arguments, .. }
             | Term::Tuple(arguments)
             | Term::ClosureContextValue(arguments)
-            | Term::TypeListValue(arguments)
             | Term::TupleValue(arguments) => children.extend(arguments),
             Term::ContextualClosure { context, signature } => {
                 children.push(context);

@@ -58,7 +58,7 @@ fn scalar_payloads_and_empty_containers_need_no_disposal_stack() {
         Term::Symbol("owned symbol".into()),
         Term::Tuple(vec![]),
         Term::Record(vec![]),
-        Term::TypeListValue(vec![]),
+        Term::TupleValue(vec![]),
     ];
     ALLOCATIONS.with(|count| count.set(Some(0)));
     for term in terms {

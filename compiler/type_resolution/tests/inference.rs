@@ -3,6 +3,21 @@ use type_resolution::*;
 fn boolean() -> InferenceTerm {
     InferenceTerm::Stable(Term::Primitive(Primitive::Bool))
 }
+fn frozen_types(fields: Vec<nir::Term>) -> nir::Term {
+    nir::Term::NominalValue {
+        ty: Box::new(nir::Term::NormalForm {
+            head: nir::DeclarationId {
+                package: 901,
+                local: 1,
+            },
+            sort: nir::Sort::Type,
+            arguments: vec![nir::Term::Primitive(nir::Primitive::Type)],
+        }),
+        variant: None,
+        fields,
+    }
+}
+
 #[test]
 fn abandoned_trial_leaves_parent_unassigned() {
     let mut parent = InferenceContext::default();
@@ -299,16 +314,13 @@ fn metered_freezing_bounds_expansion_and_can_retry_without_assignments() {
     let input = Term::NormalForm {
         head,
         sort: Sort::Type,
-        arguments: vec![Term::TypeListValue(vec![
-            Term::Primitive(Primitive::Bool);
-            256
-        ])],
+        arguments: vec![frozen_types(vec![Term::Primitive(Primitive::Bool); 256])],
     };
     let expression = InferenceTerm::Instantiate {
         template: Term::NormalForm {
             head,
             sort: Sort::Type,
-            arguments: vec![Term::TypeListValue(vec![bound; 64])],
+            arguments: vec![frozen_types(vec![bound; 64])],
         },
         arguments: vec![InferenceTerm::Stable(input.clone())],
     };
@@ -326,7 +338,7 @@ fn metered_freezing_bounds_expansion_and_can_retry_without_assignments() {
         panic!("opaque head")
     };
     assert_eq!(actual, head);
-    assert_eq!(arguments, vec![Term::TypeListValue(vec![input; 64])]);
+    assert_eq!(arguments, vec![frozen_types(vec![input; 64])]);
 }
 
 #[test]

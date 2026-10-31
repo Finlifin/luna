@@ -86,7 +86,7 @@ fn concatenation_rejects_foreign_domains_variants_scalars_and_runtime_pieces() {
     for part in [
         list(&other, vec![]),
         list(&domain(Term::Primitive(P::Char)), vec![]),
-        Term::TypeListValue(vec![]),
+        Term::TupleValue(vec![]),
         Term::NominalValue {
             ty: Box::new(ty.clone()),
             variant: Some(0),
@@ -209,7 +209,7 @@ fn type_list_composition_never_invents_a_missing_or_foreign_domain() {
     };
     for fields in [vec![], vec![Term::Primitive(P::U8)]] {
         for bad in [
-            Term::TypeListValue(fields.clone()),
+            Term::TupleValue(fields.clone()),
             list(&other, fields.clone()),
         ] {
             assert_eq!(

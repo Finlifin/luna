@@ -631,7 +631,7 @@ mod tests {
         for (value, head) in [
             (&ordinary, None),
             (
-                &tuple(Term::TypeListValue(vec![p(P::Bool)])),
+                &tuple(Term::TupleValue(vec![p(P::Bool)])),
                 Some(metadata.clone()),
             ),
             (&foreign, Some(metadata.clone())),

@@ -141,17 +141,6 @@ impl PartialStagedValue {
         let known_fields = |fields: &[Term]| fields.iter().cloned().map(Self::known).collect();
         Some(match &self.data {
             PartialStagedData::Aggregate(shape, fields) => (shape.clone(), fields.clone()),
-            PartialStagedData::Known(Term::TypeListValue(fields)) => (
-                PartialStagedShape::List {
-                    ty: Term::NormalForm {
-                        head: meta_list?,
-                        sort: Sort::Type,
-                        arguments: vec![Term::Primitive(nir::Primitive::Type)],
-                    },
-                    exact: true,
-                },
-                known_fields(fields),
-            ),
             PartialStagedData::Known(Term::NominalValue {
                 ty,
                 variant: None,

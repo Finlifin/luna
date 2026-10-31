@@ -109,7 +109,6 @@ fn local_identity(
             }
             Term::Nominal { arguments, .. }
             | Term::Tuple(arguments)
-            | Term::TypeListValue(arguments)
             | Term::TupleValue(arguments) => arguments,
             Term::OptionalValue { ty, value } => {
                 work.push((ty, depth + 1));

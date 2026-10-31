@@ -38,6 +38,21 @@ fn template() -> Term {
     .unwrap()
 }
 
+fn frozen_types(fields: Vec<nir::Term>) -> nir::Term {
+    nir::Term::NominalValue {
+        ty: Box::new(nir::Term::NormalForm {
+            head: nir::DeclarationId {
+                package: 901,
+                local: 1,
+            },
+            sort: nir::Sort::Type,
+            arguments: vec![nir::Term::Primitive(nir::Primitive::Type)],
+        }),
+        variant: None,
+        fields,
+    }
+}
+
 #[test]
 fn context_parameters_complete_to_existing_abi_or_empty_signature() {
     let parameter = context_parameter();
@@ -75,7 +90,7 @@ fn same_sort_is_not_the_closure_context_domain() {
         .unwrap();
     for wrong in [
         Term::Bool(true),
-        Term::TypeListValue(vec![boolean()]),
+        frozen_types(vec![boolean()]),
         Term::TupleValue(vec![]),
         Term::Unit,
     ] {
@@ -266,7 +281,7 @@ fn declaration_admission_checks_context_domain_fields_scope_and_budget() {
     }
     for value in [
         Term::Bool(true),
-        Term::TypeListValue(vec![boolean()]),
+        frozen_types(vec![boolean()]),
         Term::ClosureContextValue(vec![Term::Bool(true)]),
         Term::ClosureContextValue(vec![bound(0, 0, Sort::Type)]),
     ] {

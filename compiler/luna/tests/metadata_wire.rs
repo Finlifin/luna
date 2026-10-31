@@ -374,20 +374,6 @@ fn wire_requires_declared_domains_for_type_lists_including_nested_inputs() {
         let encoded = encode_hex(&inputs).unwrap();
         assert_eq!(decode_hex(&encoded).unwrap(), inputs);
         assert_ne!(frozen(10), frozen(11));
-        for (ty, legacy) in [
-            (domain(10), T::TypeListValue(fields.clone())),
-            (
-                T::Primitive(P::Type),
-                opaque(T::TypeListValue(fields.clone())),
-            ),
-        ] {
-            let bad = packet(vec![("legacy".into(), entry(ty, legacy))]);
-            assert!(
-                encode_hex(&bad)
-                    .unwrap_err()
-                    .contains("lacks its declared domain")
-            );
-        }
         assert_eq!(encode_hex(&decode_hex(&encoded).unwrap()).unwrap(), encoded);
     }
     // Preserve the retired tag number; never reinterpret old bytes as an

@@ -7740,3 +7740,116 @@ Validation in `/home/fin/luna`:
 
 No full language suite was run. The pre-existing unrelated working-tree
 changes were left outside this change.
+
+### Retire the domainless Term representation
+
+`Term::TypeListValue` is removed. List inputs now have the same ordinary
+`NominalValue` carrier as other frozen aggregates, including their complete
+declared domain. Scope checking, substitution, dependency collection, disposal,
+PTC congruence, implementation indexing and S-expression dumps use the generic
+value paths. No NF head unfolds as part of this migration.
+
+Partial staged observation no longer invents a `List<Type>` domain from the
+currently registered list head. It decomposes an ordinary frozen list only
+when its own domain carries the registered layout identity. Metadata tag 19
+remains reserved and rejected; deleting the in-memory enum does not change
+other wire tags or make old domainless bytes admissible.
+
+The migration exposed an implementation-index bug: opaque Type-valued leaves
+inside ordinary frozen aggregates were compared syntactically and could prune
+potentially applicable implementations. Candidate filtering now uses generic
+positive value-difference evidence. Unknown Type relations retain candidates;
+known scalar or structural differences can still exclude them. This applies
+to nominal aggregates, optional values and error results, not only lists.
+
+The value comparison now has a budgeted Result entrypoint. Its conservative
+boolean wrapper remains for callers asking only for positive refutation, while
+candidate enumeration propagates exhaustion. Failure to charge a long payload
+can leave nonzero fuel; checking `fuel == 0` cannot replace an explicit result.
+Regression tests cover this case, repeated payload costs, type/domain
+uncertainty and fresh searches after exhaustion.
+
+Raw `Term` scope checks do not infer collection element contracts. Those
+contracts remain with declaration-owned admission, which already rejects
+wrong element domains. The old scope-specific list test was adjusted to this
+boundary; malformed runtime leaves still fail scope checks. Source fixtures
+now obtain expected list domains from registered metadata. Ambiguous fixture
+worlds must select a domain explicitly rather than silently picking one head.
+The variadic evaluation-order fixture now uses `Interpreter::for_comptime`
+for its comptime functions; its invocation-count and order assertions remain.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p iir -p ptc -p type_resolution -p comptime_interpretor -p elaboration -p program_verification -p materialization --no-fail-fast`:
+  `/tmp/luna-tools-cuaseu7d/result.json` recorded 1,944 passes and two failures:
+  the obsolete PTC scope-specific list expectation and the real candidate
+  pruning bug above. An earlier compile attempt found a misplaced test helper
+  (`/tmp/luna-tools-lk6j1cgy/result.json`); it was corrected before this run.
+- `python3 -B development/check.py --timeout 900 -- test -p ptc --test solver -p type_resolution --no-fail-fast`:
+  only the selected `solver` integration target ran: 60 passed, exit 0;
+  `/tmp/luna-tools-o0t2k_oq/result.json`. This is not evidence for all
+  type_resolution tests.
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p type_resolution --no-fail-fast`:
+  after the budgeted-comparison correction, 785 passed, exit 0;
+  `/tmp/luna-tools-3pqq0jtb/result.json`. Earlier type_resolution runs
+  (`/tmp/luna-tools-wsxr4np7/result.json` and
+  `/tmp/luna-tools-31c2tlsn/result.json`) exposed the repeated-payload budget
+  regression; they were not treated as passing validation.
+- Affected execution tests: 33 passed, exit 0;
+  `/tmp/luna-tools-af_q6ywq/result.json`. The initial run
+  (`/tmp/luna-tools-at7gxkp5/result.json`) had 32 passes and the comptime
+  entrypoint fixture failure described above. Exact final command:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p luna --test execution -- --exact \
+  comptime_type_values_select_forward_observe_and_construct_bit_widths \
+  generic_comptime_instances_form_types_and_execute_nested_calls \
+  normal_form_tuple_values_preserve_shape_types_contracts_and_order \
+  explicit_tuple_types_and_value_packets_preserve_late_inputs_and_effect_order \
+  alias_type_value_arguments_are_bound_once_even_when_repeated_or_unused \
+  alias_argument_order_failures_and_invocation_isolation_are_preserved \
+  variadic_normal_heads_collect_type_lists_without_replacing_the_head \
+  variadic_normal_type_collection_evaluates_each_input_once_in_source_order \
+  variadic_normal_heads_forward_named_whole_type_lists_once \
+  normal_type_list_named_supply_preserves_order_around_positional_anchors \
+  normal_type_list_spreads_preserve_elements_order_and_single_evaluation \
+  bound_tuple_values_keep_normal_form_identity_through_nested_patterns \
+  type_list_constants_reconstruct_and_specialize_without_tuple_coercion \
+  symbolic_type_list_spreads_in_annotations_specialize_without_unfolding \
+  partial_enum_payload_spreads_infer_literal_fields_and_evaluate_packets_once \
+  partial_enum_spreads_propagate_known_fields_into_generic_packets \
+  partial_enum_spreads_share_peer_types_without_rechecking_values \
+  partial_enum_peer_packets_settle_before_numeric_defaults \
+  partial_enum_packet_widths_come_from_checked_generic_results \
+  bound_tuple_dynamic_syntax_checks_independent_formation_requirements \
+  bound_tuple_deferred_list_contracts_check_values_and_recover \
+  comptime_type_list_indexing_preserves_elements_and_checks_bounds \
+  pending_type_computations_wait_resume_and_publish_opaque_types_once \
+  compact_residual_entries_preserve_tuple_head_and_single_collected_type_list \
+  completed_source_type_refinements_keep_tuple_identity_and_lexical_subjects \
+  abstract_compound_type_descriptions_preserve_tuple_heads_and_scope \
+  abstract_type_admission_preserves_nested_formation_requirements \
+  scoped_type_computations_resume_with_declaration_evidence_without_replay \
+  deferred_signature_tasks_wait_resolve_tuple_types_and_preserve_execution_order \
+  explicit_comptime_type_signature_computations_preserve_slots_and_nested_binders \
+  explicit_comptime_type_inputs_support_predicates_and_type_list_results \
+  deferred_signature_caller_substitution_preserves_nested_tuple_identity_and_guards \
+  deferred_runtime_signatures_wait_admit_and_erase_staged_inputs
+```
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test metadata_wire --test text_regions --test library_protocols --test type_lists --test extended_calls --test contextual_spreads --test comptime_bytecode_lists --test cmtt_type_inputs --test builder_invocations --test generated_definitions --no-fail-fast`:
+  275 passed, exit 0; `/tmp/luna-tools-pt5m6pnn/result.json`. An earlier compile
+  attempt (`/tmp/luna-tools-tgqjwx2m/result.json`) found a fixture helper using
+  the wrong local package variable; that reference was corrected.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-0sqcf6ds/result.json`; `git diff --check` passed.
+- `rg -n 'TypeListValue' compiler --glob '*.rs'`: no matches (exit 1), including
+  production code and tests. The reserved wire-tag rejection is tested as bytes.
+- `python3 -B development/library_check.py --stage sysroot-meta --stage sysroot-builders --stage native-tuple --stage native-conversion --timeout 300`:
+  all four native stages passed (14 source tests), exit 0;
+  `/tmp/luna-library-aqv9hymg/summary.json`. This covers shipped list methods,
+  builder-generated layouts, empty/nested tuples, single evaluation, affine
+  field transfer and conversion protocols.
+
+No full language suite or performance benchmark was run. The unrelated
+pre-existing worktree changes remain outside this migration.

@@ -625,7 +625,7 @@ fn tuple_implementation_infers_one_complete_type_list_input() {
     let tuple = |fields| nir::Term::NormalForm {
         head: tuple_head,
         sort: nir::Sort::Type,
-        arguments: vec![nir::Term::TypeListValue(fields)],
+        arguments: vec![frozen_lists::types(&metadata, fields)],
     };
     let subject = tuple(vec![
         nir::Term::Primitive(nir::Primitive::Bool),

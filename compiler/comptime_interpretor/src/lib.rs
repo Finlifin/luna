@@ -7019,7 +7019,6 @@ fn scoped_term_value_work_with_callables_in(
             Term::Record(fields) | Term::RecordValue(fields) => fields.len(),
             Term::Tuple(items)
             | Term::ClosureContextValue(items)
-            | Term::TypeListValue(items)
             | Term::TupleValue(items)
             | Term::ClosureSnapshot {
                 arguments: items, ..
@@ -7159,7 +7158,6 @@ fn scoped_term_value_work_with_callables_in(
             }
             Term::Tuple(items)
             | Term::ClosureContextValue(items)
-            | Term::TypeListValue(items)
             | Term::TupleValue(items)
             | Term::ClosureSnapshot {
                 arguments: items, ..
@@ -7573,7 +7571,7 @@ mod computation_type_tests {
                     sort: nir::Sort::Type,
                     arguments: vec![Term::Primitive(nir::Primitive::Type)],
                 }),
-                parts: vec![Term::TypeListValue(vec![rigid.clone()])],
+                parts: vec![Term::TupleValue(vec![rigid.clone()])],
             },
         ] {
             let nested = Term::NormalForm {
@@ -7700,7 +7698,7 @@ mod normal_input_data_tests {
         };
         for fields in [vec![], vec![Term::Primitive(Primitive::Bool)]] {
             assert_eq!(
-                check(Term::TypeListValue(fields.clone()), &[], &mut 10000),
+                check(Term::TupleValue(fields.clone()), &[], &mut 10000),
                 Err(ErrorKind::Type)
             );
             for input in [nominal(fields)] {
@@ -7726,7 +7724,7 @@ mod normal_input_data_tests {
             );
         }
         for input in [
-            Term::TypeListValue(vec![Term::Bool(true)]),
+            Term::TupleValue(vec![Term::Bool(true)]),
             nominal(vec![Term::Bool(true)]),
         ] {
             assert_eq!(check(input, &[], &mut 10000), Err(ErrorKind::Type));
@@ -7787,7 +7785,7 @@ mod normal_input_data_tests {
         for argument in [
             Term::Bool(true),
             Term::TupleValue(vec![Term::Bool(false), Term::Primitive(Primitive::Bool)]),
-            Term::TypeListValue(vec![Term::Primitive(Primitive::Bool)]),
+            Term::TupleValue(vec![Term::Primitive(Primitive::Bool)]),
         ] {
             let mut instance = closure.clone();
             instance.instance_arguments = Some(vec![argument.clone()]);
@@ -7817,7 +7815,7 @@ mod normal_input_data_tests {
                     sort: nir::Sort::Type,
                     arguments: vec![Term::Primitive(nir::Primitive::Type)],
                 }),
-                parts: vec![Term::TypeListValue(vec![])],
+                parts: vec![Term::TupleValue(vec![])],
             },
         ] {
             let mut instance = closure.clone();

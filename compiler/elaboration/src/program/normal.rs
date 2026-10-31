@@ -2478,7 +2478,6 @@ pub(super) fn clone_known_term(term: &Term, budget: &mut comptime_runtime::Budge
                 }
             }
             Term::Tuple(items)
-            | Term::TypeListValue(items)
             | Term::TupleValue(items)
             | Term::Nominal {
                 arguments: items, ..
@@ -2854,8 +2853,8 @@ mod tests {
             );
         }
         for bad in [
-            Term::TypeListValue(vec![]),
-            Term::TypeListValue(vec![Term::Primitive(Primitive::Bool)]),
+            Term::TupleValue(vec![]),
+            Term::TupleValue(vec![Term::Primitive(Primitive::Bool)]),
             nominal(&bool_domain, vec![Term::Primitive(Primitive::Bool)]),
             nominal(&type_domain, vec![Term::Bool(true)]),
             Term::NominalValue {
@@ -2876,7 +2875,7 @@ mod tests {
         }
         assert!(
             take_known_list_elements(
-                Term::TypeListValue(vec![]),
+                Term::TupleValue(vec![]),
                 &bool_domain,
                 &Term::Primitive(Primitive::Bool),
                 &mut Budget::default()

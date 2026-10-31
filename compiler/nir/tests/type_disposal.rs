@@ -17,7 +17,11 @@ fn owned_type_children_are_disposed_without_recursive_host_frames() {
                     1 => Term::ComptimeFunction(Box::new(term)),
                     2 => Term::Tuple(vec![term]),
                     3 => Term::TupleValue(vec![term]),
-                    4 => Term::TypeListValue(vec![term]),
+                    4 => Term::NominalValue {
+                        ty: Box::new(Term::Primitive(nir::Primitive::Type)),
+                        variant: None,
+                        fields: vec![term],
+                    },
                     5 => Term::ListConcat {
                         ty: Box::new(Term::NormalForm {
                             head: nir::DeclarationId {

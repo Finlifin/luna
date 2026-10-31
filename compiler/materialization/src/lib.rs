@@ -2696,9 +2696,7 @@ impl Builder<'_> {
                 }
                 children.push((**result).clone());
             }
-            Term::Tuple(items) | Term::TypeListValue(items) | Term::TupleValue(items) => {
-                children.extend(items.iter().cloned())
-            }
+            Term::Tuple(items) | Term::TupleValue(items) => children.extend(items.iter().cloned()),
             Term::OptionalValue { ty, value } => {
                 children.push((**ty).clone());
                 if let Some(value) = value {

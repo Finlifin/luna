@@ -24,6 +24,21 @@ fn bound(depth: u32, index: usize, sort: Sort) -> Term {
     Term::Bound { depth, index, sort }
 }
 
+fn frozen_types(fields: Vec<nir::Term>) -> nir::Term {
+    nir::Term::NominalValue {
+        ty: Box::new(nir::Term::NormalForm {
+            head: nir::DeclarationId {
+                package: 901,
+                local: 1,
+            },
+            sort: nir::Sort::Type,
+            arguments: vec![nir::Term::Primitive(nir::Primitive::Type)],
+        }),
+        variant: None,
+        fields,
+    }
+}
+
 #[test]
 fn scoped_declaration_substitution_preserves_local_and_caller_frames() {
     let generic = Term::Rigid {
@@ -2453,26 +2468,36 @@ fn scoped_call_binding_checks_view_results_and_does_not_unfold_opaque_domains() 
 #[test]
 fn type_list_values_preserve_opaque_heads_and_distinguish_tuple_representations() {
     let elements = vec![primitive(Primitive::U8), primitive(Primitive::Bool)];
-    let list = Term::TypeListValue(elements.clone());
+    let list = frozen_types(elements.clone());
     assert_eq!(list.sort(), Sort::ComptimeValue);
     assert!(list.check_scope(&[]).is_ok());
     assert_ne!(list, Term::Tuple(elements.clone()));
     assert_ne!(list, Term::TupleValue(elements.clone()));
-    assert_ne!(Term::TypeListValue(vec![]), Term::Unit);
-    assert_ne!(Term::TypeListValue(vec![]), Term::TupleValue(vec![]));
+    assert_ne!(frozen_types(vec![]), Term::Unit);
+    assert_ne!(frozen_types(vec![]), Term::TupleValue(vec![]));
     assert_eq!(
         list.to_string(),
-        "(type-list-value ((primitive u8) (primitive bool)))"
+        format!(
+            "(nominal-value (type {}) (variant none) (fields ((primitive u8) (primitive bool))))",
+            Term::NormalForm {
+                head: DeclarationId {
+                    package: 901,
+                    local: 1
+                },
+                sort: Sort::Type,
+                arguments: vec![primitive(Primitive::Type)],
+            }
+        )
     );
     assert_eq!(
-        HashSet::from([list.clone(), Term::TypeListValue(elements)]).len(),
+        HashSet::from([list.clone(), frozen_types(elements)]).len(),
         1
     );
 
     let application = Term::NormalForm {
         head: IDENTITY,
         sort: Sort::Type,
-        arguments: vec![Term::TypeListValue(vec![Term::Rigid {
+        arguments: vec![frozen_types(vec![Term::Rigid {
             declaration: SENSOR,
             sort: Sort::Type,
         }])],
@@ -2485,7 +2510,7 @@ fn type_list_values_preserve_opaque_heads_and_distinguish_tuple_representations(
         Term::NormalForm {
             head: IDENTITY,
             sort: Sort::Type,
-            arguments: vec![Term::TypeListValue(vec![primitive(Primitive::U8)])],
+            arguments: vec![frozen_types(vec![primitive(Primitive::U8)])],
         }
     );
     assert_ne!(instantiated, primitive(Primitive::U8));
@@ -2493,22 +2518,20 @@ fn type_list_values_preserve_opaque_heads_and_distinguish_tuple_representations(
 }
 
 #[test]
-fn type_list_values_validate_elements_and_substitute_without_adding_a_binder() {
-    for invalid in [
-        Term::Bool(true),
-        Term::Unit,
-        object(1),
-        Term::TypeListValue(vec![]),
-    ] {
-        assert!(Term::TypeListValue(vec![invalid]).check_scope(&[]).is_err());
+fn frozen_values_validate_scope_and_substitute_without_adding_a_binder() {
+    // A raw ordinary value validates scopes, not declaration-owned payload
+    // contracts. List element admission is exercised in normal_inputs.rs.
+    for value in [Term::Bool(true), Term::Unit, frozen_types(vec![])] {
+        assert!(frozen_types(vec![value]).check_scope(&[]).is_ok());
     }
-    let open = Term::TypeListValue(vec![bound(0, 0, Sort::Type)]);
+    assert!(frozen_types(vec![object(1)]).check_scope(&[]).is_err());
+    let open = frozen_types(vec![bound(0, 0, Sort::Type)]);
     assert!(open.check_scope(&[]).is_err());
     assert!(open.check_scope(&[vec![Sort::ComptimeValue]]).is_err());
     assert!(open.check_scope(&[vec![Sort::Type]]).is_ok());
     assert_eq!(
         open.substitute(&[primitive(Primitive::Char)]).unwrap(),
-        Term::TypeListValue(vec![primitive(Primitive::Char)])
+        frozen_types(vec![primitive(Primitive::Char)])
     );
     assert!(open.substitute(&[Term::Bool(true)]).is_err());
 }
@@ -2518,7 +2541,7 @@ fn type_list_inputs_retain_runtime_dependencies_inside_element_types() {
     let make = |element| Term::NormalForm {
         head: IDENTITY,
         sort: Sort::Type,
-        arguments: vec![Term::TypeListValue(vec![element])],
+        arguments: vec![frozen_types(vec![element])],
     };
     let template = make(Term::Nominal {
         declaration: SENSOR,

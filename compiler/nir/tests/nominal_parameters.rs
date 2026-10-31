@@ -10,6 +10,21 @@ fn rigid(local: u32, sort: Sort) -> Term {
     }
 }
 
+fn frozen_types(fields: Vec<nir::Term>) -> nir::Term {
+    nir::Term::NominalValue {
+        ty: Box::new(nir::Term::NormalForm {
+            head: nir::DeclarationId {
+                package: 901,
+                local: 1,
+            },
+            sort: nir::Sort::Type,
+            arguments: vec![nir::Term::Primitive(nir::Primitive::Type)],
+        }),
+        variant: None,
+        fields,
+    }
+}
+
 #[test]
 fn completed_value_domains_can_use_captured_type_suffixes() {
     let parameters = [id(1), id(2)];
@@ -642,7 +657,7 @@ fn symbolic_tuple_indices_require_registered_layout_and_leaf_evidence() {
     let tuple = Term::NormalForm {
         head: id(70),
         sort: Sort::Type,
-        arguments: vec![Term::TypeListValue(vec![boolean.clone(), boolean.clone()])],
+        arguments: vec![frozen_types(vec![boolean.clone(), boolean.clone()])],
     };
     let symbolic = rigid(71, Sort::ComptimeValue);
     let check = |domain: &Term, fields: Vec<Term>, registered: bool, evidence: bool, budget| {

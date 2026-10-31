@@ -626,8 +626,7 @@ pub(crate) fn visit_expanded_term(
             | Term::NormalForm { arguments, .. }
             | Term::Tuple(arguments)
             | Term::TupleValue(arguments)
-            | Term::ClosureContextValue(arguments)
-            | Term::TypeListValue(arguments) => {
+            | Term::ClosureContextValue(arguments) => {
                 for argument in arguments {
                     push(argument)?;
                 }

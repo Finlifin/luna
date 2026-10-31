@@ -95,19 +95,15 @@ fn stable_defaults_discard_tuple_values_using_registered_collector_layout() {
         normal_forms: vec![head],
         ..Default::default()
     };
-    let tuple = |fields: Vec<Expr>, compact| Expr {
+    let tuple = |fields: Vec<Expr>| Expr {
         source,
         ty: Term::NormalForm {
             head: id(1),
             sort: Sort::Type,
-            arguments: vec![if compact {
-                Term::TypeListValue(fields.iter().map(|field| field.ty.clone()).collect())
-            } else {
-                Term::NominalValue {
-                    ty: Box::new(domain.clone()),
-                    variant: None,
-                    fields: fields.iter().map(|field| field.ty.clone()).collect(),
-                }
+            arguments: vec![Term::NominalValue {
+                ty: Box::new(domain.clone()),
+                variant: None,
+                fields: fields.iter().map(|field| field.ty.clone()).collect(),
             }],
         },
         kind: ExprKind::Tuple(fields),
@@ -127,17 +123,15 @@ fn stable_defaults_discard_tuple_values_using_registered_collector_layout() {
     };
     let staged = BTreeSet::new();
     let protocols = Protocols::default();
-    for compact in [true, false] {
-        for fields in [
-            vec![],
-            vec![boolean.clone()],
-            vec![tuple(vec![boolean.clone()], compact)],
-        ] {
-            let body = block(tuple(fields, compact));
-            validate_defaults(&package, [(&body, source, &staged)], &protocols).unwrap();
-        }
+    for fields in [
+        vec![],
+        vec![boolean.clone()],
+        vec![tuple(vec![boolean.clone()])],
+    ] {
+        let body = block(tuple(fields));
+        validate_defaults(&package, [(&body, source, &staged)], &protocols).unwrap();
     }
-    let good = tuple(vec![boolean.clone()], false);
+    let good = tuple(vec![boolean.clone()]);
     let mut foreign_domain = good.clone();
     if let Term::NormalForm { arguments, .. } = &mut foreign_domain.ty {
         let Term::NominalValue { ty, .. } = &mut arguments[0] else {
@@ -157,20 +151,17 @@ fn stable_defaults_discard_tuple_values_using_registered_collector_layout() {
         capabilities: vec![],
         fields: vec![],
     });
-    let affine = tuple(
-        vec![Expr {
-            source,
-            ty: Term::Nominal {
-                declaration: id(9),
-                arguments: vec![],
-            },
-            kind: ExprKind::Record {
-                declaration: id(9),
-                fields: vec![],
-            },
-        }],
-        false,
-    );
+    let affine = tuple(vec![Expr {
+        source,
+        ty: Term::Nominal {
+            declaration: id(9),
+            arguments: vec![],
+        },
+        kind: ExprKind::Record {
+            declaration: id(9),
+            fields: vec![],
+        },
+    }]);
     for rejected in [foreign_domain, affine] {
         let body = block(rejected);
         assert!(validate_defaults(&package, [(&body, source, &staged)], &protocols).is_err());

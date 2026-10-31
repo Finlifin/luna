@@ -371,7 +371,6 @@ pub(super) fn validate(
             Work::Term(
                 Term::Tuple(items)
                 | Term::ClosureContextValue(items)
-                | Term::TypeListValue(items)
                 | Term::TupleValue(items)
                 | Term::Nominal {
                     arguments: items, ..
@@ -2033,7 +2032,7 @@ mod captured_head_domains {
                     sort: Sort::ComptimeValue,
                 }],
             ),
-            Term::TypeListValue(vec![Term::Primitive(P::Bool)]),
+            Term::TupleValue(vec![Term::Primitive(P::Bool)]),
         ] {
             assert!(
                 check(

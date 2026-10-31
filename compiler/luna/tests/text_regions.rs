@@ -795,7 +795,7 @@ fn error_row_transport_moves_view_slots_without_rewriting_origins() {
     let nir::Term::NormalForm { arguments, .. } = result.as_mut() else {
         panic!("Tuple")
     };
-    let nir::Term::TypeListValue(fields) = &mut arguments[0] else {
+    let nir::Term::NominalValue { fields, .. } = &mut arguments[0] else {
         panic!("fields")
     };
     let nir::Term::ErrorResult { errors, .. } = &mut fields[0] else {

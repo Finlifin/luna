@@ -1155,3 +1155,33 @@ fn type_valued_trait_indices_follow_completed_parameter_and_self_domains() {
             .is_err()
     );
 }
+
+#[test]
+fn value_difference_reports_exhaustion_separately_from_unknown_types() {
+    let left = Term::Symbol("x".repeat(512).into());
+    let right = Term::Symbol("y".repeat(512).into());
+    // Charging a payload can fail while leaving nonzero fuel; a boolean
+    // non-refutation must not be mistaken for a completed candidate search.
+    for budget in [0, 10, 600] {
+        assert!(matches!(
+            left.index_values_definitely_differ_budgeted(&right, &mut { budget }),
+            Err(nir::type_computations::Error::Budget)
+        ));
+        assert!(!left.index_values_definitely_differ(&right, &mut { budget }));
+    }
+    assert_eq!(
+        left.index_values_definitely_differ_budgeted(&right, &mut 10000),
+        Ok(true)
+    );
+    assert_eq!(
+        left.index_values_definitely_differ_budgeted(&left, &mut 10000),
+        Ok(false)
+    );
+    assert_eq!(
+        Term::Primitive(nir::Primitive::Bool).index_values_definitely_differ_budgeted(
+            &Term::Primitive(nir::Primitive::Char),
+            &mut 1000
+        ),
+        Ok(false)
+    );
+}

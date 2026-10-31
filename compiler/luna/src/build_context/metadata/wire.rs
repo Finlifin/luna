@@ -281,9 +281,6 @@ impl Writer {
                 self.byte(18)?;
                 self.fields(fields, d)?;
             }
-            T::TypeListValue(_) => {
-                return Err(failure("legacy Type-list value lacks its declared domain"));
-            }
             T::NominalValue {
                 ty,
                 variant,

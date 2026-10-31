@@ -20,6 +20,21 @@ fn input(value: Term) -> Input {
     }
 }
 
+fn frozen_types(fields: Vec<nir::Term>) -> nir::Term {
+    nir::Term::NominalValue {
+        ty: Box::new(nir::Term::NormalForm {
+            head: nir::DeclarationId {
+                package: 901,
+                local: 1,
+            },
+            sort: nir::Sort::Type,
+            arguments: vec![nir::Term::Primitive(nir::Primitive::Type)],
+        }),
+        variant: None,
+        fields,
+    }
+}
+
 #[test]
 fn residual_list_capture_retains_nested_domains_bindings_and_effect_boundaries() {
     use nir::program::{CallArgument, Expr, ExprKind as K, Literal, LocalId, SourceRange};
@@ -208,7 +223,7 @@ fn residuals_keep_stable_binders_and_nested_normal_form_heads() {
     let ty = Term::NormalForm {
         head,
         sort: Sort::Type,
-        arguments: vec![Term::TypeListValue(vec![slot(0, Sort::Type)])],
+        arguments: vec![frozen_types(vec![slot(0, Sort::Type)])],
     };
     let plan = Invocation::new(
         target(),
@@ -231,7 +246,7 @@ fn residuals_keep_stable_binders_and_nested_normal_form_heads() {
         Term::NormalForm {
             head,
             sort: Sort::Type,
-            arguments: vec![Term::TypeListValue(vec![Term::Primitive(Primitive::Bool)])]
+            arguments: vec![frozen_types(vec![Term::Primitive(Primitive::Bool)])]
         }
     );
     assert!(
@@ -311,10 +326,8 @@ fn residuals_reject_invalid_scope_runtime_reads_and_excessive_structure() {
         Invocation::new(
             target(),
             vec![],
-            vec![input(Term::TypeListValue(vec![
-                Term::Primitive(
-                    Primitive::Bool
-                );
+            vec![input(frozen_types(vec![
+                Term::Primitive(Primitive::Bool);
                 100
             ]))],
             &mut 10
@@ -583,7 +596,7 @@ fn compact_entries_keep_transitive_domains_and_nested_binder_identity() {
         result: Box::new(Term::NormalForm {
             head: target(),
             sort: Sort::Type,
-            arguments: vec![Term::TypeListValue(vec![
+            arguments: vec![frozen_types(vec![
                 slot(0, Sort::Type),
                 Term::Bound {
                     depth: 1,
@@ -619,7 +632,7 @@ fn compact_entries_keep_transitive_domains_and_nested_binder_identity() {
     assert_eq!(head, target());
     assert_eq!(
         arguments,
-        vec![Term::TypeListValue(vec![
+        vec![frozen_types(vec![
             slot(0, Sort::Type),
             Term::Bound {
                 depth: 1,

@@ -515,6 +515,21 @@ mod tests {
         }
     }
 
+    fn frozen_types(fields: Vec<nir::Term>) -> nir::Term {
+        nir::Term::NominalValue {
+            ty: Box::new(nir::Term::NormalForm {
+                head: nir::DeclarationId {
+                    package: 7,
+                    local: 12,
+                },
+                sort: nir::Sort::Type,
+                arguments: vec![nir::Term::Primitive(nir::Primitive::Type)],
+            }),
+            variant: None,
+            fields,
+        }
+    }
+
     #[test]
     fn required_value_and_type_proofs_consume_the_invocation_budget() {
         for type_result in [false, true] {
@@ -1081,7 +1096,7 @@ mod tests {
         let tuple = Term::NormalForm {
             head: declaration,
             sort: Sort::Type,
-            arguments: vec![Term::TypeListValue(vec![p(P::Bool), p(P::U8)])],
+            arguments: vec![frozen_types(vec![p(P::Bool), p(P::U8)])],
         };
         let prepared = PreparedRequired {
             package: n::Package::default(),

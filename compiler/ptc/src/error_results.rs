@@ -122,6 +122,21 @@ impl Search<'_> {
 mod tests {
     use super::*;
 
+    fn frozen_types(fields: Vec<nir::Term>) -> nir::Term {
+        nir::Term::NominalValue {
+            ty: Box::new(nir::Term::NormalForm {
+                head: nir::DeclarationId {
+                    package: 87,
+                    local: 3,
+                },
+                sort: nir::Sort::Type,
+                arguments: vec![nir::Term::Primitive(nir::Primitive::Type)],
+            }),
+            variant: None,
+            fields,
+        }
+    }
+
     #[test]
     fn tuple_error_absence_requires_registration_without_unpacking_the_head() {
         let head = DeclarationId {
@@ -131,7 +146,7 @@ mod tests {
         let tuple = |field| Term::NormalForm {
             head,
             sort: Sort::Type,
-            arguments: vec![Term::TypeListValue(vec![field])],
+            arguments: vec![frozen_types(vec![field])],
         };
         let boolean = Term::Primitive(nir::Primitive::Bool);
         let character = Term::Primitive(nir::Primitive::Char);

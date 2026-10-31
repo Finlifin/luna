@@ -33,6 +33,21 @@ fn proved(context: &Context, goal: F) {
     }
 }
 
+fn frozen_types(fields: Vec<nir::Term>) -> nir::Term {
+    nir::Term::NominalValue {
+        ty: Box::new(nir::Term::NormalForm {
+            head: nir::DeclarationId {
+                package: 0,
+                local: 992,
+            },
+            sort: nir::Sort::Type,
+            arguments: vec![nir::Term::Primitive(nir::Primitive::Type)],
+        }),
+        variant: None,
+        fields,
+    }
+}
+
 #[test]
 fn normal_form_callable_heads_preserve_mode_and_collector_identity() {
     let signature = |result| Term::Function {
@@ -787,7 +802,7 @@ fn structural_views_of_designated_heads_require_equality_without_injectivity() {
     };
     let accepts = |id| id == identity;
     let subject = variable(990);
-    let tuple = head(990, vec![Term::TypeListValue(vec![ty(P::Bool), ty(P::U8)])]);
+    let tuple = head(990, vec![frozen_types(vec![ty(P::Bool), ty(P::U8)])]);
     let mut context = Context::default();
     context.assume(eq(subject.clone(), tuple.clone()));
     let (found, used) =
@@ -843,8 +858,8 @@ fn structural_views_of_designated_heads_require_equality_without_injectivity() {
     let mut equality = Context::default();
     equality.admit_congruence(identity);
     equality.assume(eq(
-        head(990, vec![Term::TypeListValue(vec![left.clone()])]),
-        head(990, vec![Term::TypeListValue(vec![right.clone()])]),
+        head(990, vec![frozen_types(vec![left.clone()])]),
+        head(990, vec![frozen_types(vec![right.clone()])]),
     ));
     assert!(!matches!(
         equality.prove(eq(left, right), Budget::default()),
@@ -1827,7 +1842,7 @@ fn metered_proofs_preserve_remaining_work_on_all_outcomes() {
 #[test]
 fn type_list_inputs_lift_type_equalities_without_inverting_normal_forms() {
     let (a, b) = (variable(1), variable(2));
-    let wrap = |value| head(7, vec![Term::TypeListValue(vec![value])]);
+    let wrap = |value| head(7, vec![frozen_types(vec![value])]);
     let declaration = DeclarationId {
         package: 1,
         local: 7,
@@ -1850,14 +1865,23 @@ fn type_list_inputs_lift_type_equalities_without_inverting_normal_forms() {
     ));
     assert!(matches!(
         context.prove(
-            eq(Term::TypeListValue(vec![]), Term::TypeListValue(vec![])),
+            eq(frozen_types(vec![]), frozen_types(vec![])),
             Budget::default()
         ),
         Outcome::IllFormed(_)
     ));
     assert!(matches!(
         context.prove(
-            eq(wrap(Term::Bool(true)), wrap(Term::Bool(true))),
+            eq(
+                wrap(Term::Runtime(nir::RuntimeId {
+                    instance: 1,
+                    local: 0
+                })),
+                wrap(Term::Runtime(nir::RuntimeId {
+                    instance: 1,
+                    local: 0
+                }))
+            ),
             Budget::default()
         ),
         Outcome::IllFormed(_)
@@ -1871,7 +1895,7 @@ fn type_list_input_budget_failure_does_not_poison_later_proofs() {
         package: 1,
         local: 7,
     });
-    let application = head(7, vec![Term::TypeListValue(vec![ty(P::U8); 64])]);
+    let application = head(7, vec![frozen_types(vec![ty(P::U8); 64])]);
     let proposition = eq(application.clone(), application);
     assert!(matches!(
         context.prove(

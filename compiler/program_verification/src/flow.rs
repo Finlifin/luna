@@ -7632,12 +7632,36 @@ mod tuple_storage_tests {
             package: 0,
             local: 99,
         };
+        let domain = Term::NormalForm {
+            head: nir::DeclarationId {
+                package: 0,
+                local: 101,
+            },
+            sort: nir::Sort::Type,
+            arguments: vec![Term::Primitive(nir::Primitive::Type)],
+        };
+        let frozen = |fields| Term::NominalValue {
+            ty: Box::new(domain.clone()),
+            variant: None,
+            fields,
+        };
         let package = nir::program::Package {
             normal_forms: vec![nir::normal_forms::Head {
                 collector: None,
                 role: nir::normal_forms::Role::Tuple,
                 declaration: head,
-                parameters: vec![],
+                parameters: vec![nir::normal_forms::Parameter {
+                    declaration: nir::DeclarationId {
+                        package: 0,
+                        local: 102,
+                    },
+                    binding: LocalId {
+                        owner: 99,
+                        index: 0,
+                    },
+                    kind: nir::normal_forms::Kind::Value,
+                    ty: domain.clone(),
+                }],
                 requirements: vec![],
             }],
             ..Default::default()
@@ -7652,7 +7676,7 @@ mod tuple_storage_tests {
             Term::NormalForm {
                 head,
                 sort: nir::Sort::Type,
-                arguments: vec![Term::TypeListValue(fields.clone())],
+                arguments: vec![frozen(fields.clone())],
             },
         ] {
             let mut limits = Limits::default();
@@ -7683,7 +7707,7 @@ mod tuple_storage_tests {
                     local: 100,
                 },
                 sort: nir::Sort::Type,
-                arguments: vec![Term::TypeListValue(fields.clone())],
+                arguments: vec![frozen(fields.clone())],
             };
             assert!(
                 walker
@@ -7706,7 +7730,7 @@ mod tuple_storage_tests {
                 Term::NormalForm {
                     head,
                     sort: nir::Sort::Type,
-                    arguments: vec![Term::TypeListValue(closed_fields)],
+                    arguments: vec![frozen(closed_fields)],
                 }
             } else {
                 Term::Tuple(closed_fields)

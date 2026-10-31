@@ -718,9 +718,7 @@ impl Package {
                     }
                     pending.extend(arguments);
                 }
-                Term::Tuple(fields) | Term::TypeListValue(fields) | Term::TupleValue(fields) => {
-                    pending.extend(fields)
-                }
+                Term::Tuple(fields) | Term::TupleValue(fields) => pending.extend(fields),
                 Term::OptionalValue { ty, value } => {
                     pending.push(ty);
                     if let Some(value) = value {
@@ -887,7 +885,6 @@ pub fn completed_dependencies(
             | Term::ClosureSnapshot { arguments, .. }
             | Term::NormalForm { arguments, .. }
             | Term::Tuple(arguments)
-            | Term::TypeListValue(arguments)
             | Term::TupleValue(arguments) => pending.extend(arguments),
             Term::OptionalValue { ty, value } => {
                 pending.push(ty);

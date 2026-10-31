@@ -346,7 +346,11 @@ fn type_list_constants_validate_embedded_types_and_domain_authority() {
         Term::NormalForm {
             head: id(2),
             sort: Sort::Type,
-            arguments: vec![Term::TypeListValue(vec![primitive(Primitive::U8)])],
+            arguments: vec![Term::NominalValue {
+                ty: Box::new(list.clone()),
+                variant: None,
+                fields: vec![primitive(Primitive::U8)],
+            }],
         },
     ] {
         package.functions[0].function.body.kind = completed_list(vec![element]);

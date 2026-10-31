@@ -704,9 +704,7 @@ fn validate_value(
             target,
         );
     }
-    if matches!(domain, Term::NormalForm { .. })
-        && matches!(argument, Term::TypeListValue(_) | Term::NominalValue { .. })
-    {
+    if matches!(domain, Term::NormalForm { .. }) && matches!(argument, Term::NominalValue { .. }) {
         if let Some(element) = collection(domain, fuel)? {
             let fields =
                 crate::normal_forms::list_value_payload(domain, argument).ok_or_else(|| {

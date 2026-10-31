@@ -12,6 +12,21 @@ fn byte() -> D {
     known(Term::Primitive(Primitive::U8))
 }
 
+fn frozen_types(fields: Vec<nir::Term>) -> nir::Term {
+    nir::Term::NominalValue {
+        ty: Box::new(nir::Term::NormalForm {
+            head: nir::DeclarationId {
+                package: 9,
+                local: 4,
+            },
+            sort: nir::Sort::Type,
+            arguments: vec![nir::Term::Primitive(nir::Primitive::Type)],
+        }),
+        variant: None,
+        fields,
+    }
+}
+
 #[test]
 fn any_compatibility_does_not_create_type_equality_or_mutate_inference() {
     let inference = InferenceContext::default();
@@ -956,7 +971,7 @@ fn frozen_descriptions_preserve_declaration_scope_without_exporting_hypotheses()
             local: 3,
         },
         sort: Sort::Type,
-        arguments: vec![Term::TypeListValue(vec![
+        arguments: vec![frozen_types(vec![
             Term::Primitive(Primitive::Bool),
             Term::Primitive(Primitive::U8),
         ])],

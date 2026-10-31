@@ -132,7 +132,6 @@ impl Key {
                 | Term::NominalValue { .. }
                 | Term::NormalForm { .. }
                 | Term::ClosureContextValue(_)
-                | Term::TypeListValue(_)
                 | Term::ListConcat { .. }
                 | Term::TupleValue(_)
                 | Term::RecordValue(_) => {
@@ -164,7 +163,6 @@ impl Key {
                             | Term::Nominal { arguments, .. }
                             | Term::Tuple(arguments)
                             | Term::ClosureContextValue(arguments)
-                            | Term::TypeListValue(arguments)
                             | Term::TupleValue(arguments) => {
                                 if arguments.len() > *fuel {
                                     return Err(Error::BudgetExhausted);
@@ -291,7 +289,6 @@ impl Key {
                 (
                     Self::Leaf(
                         Term::NormalForm { .. }
-                        | Term::TypeListValue(_)
                         | Term::ListConcat { .. }
                         | Term::TupleValue(_)
                         | Term::Value { .. },
@@ -302,30 +299,31 @@ impl Key {
                     _,
                     Self::Leaf(
                         Term::NormalForm { .. }
-                        | Term::TypeListValue(_)
                         | Term::ListConcat { .. }
                         | Term::TupleValue(_)
                         | Term::Value { .. },
                     ),
                 ) => {}
                 (Self::Leaf(a), Self::Leaf(b)) => {
-                    // Every candidate comparison reads its own payload. Paying
-                    // for the query key once does not bound a whole bucket scan.
-                    nir::type_computations::charge_term(a, fuel)
-                        .map_err(|_| Error::BudgetExhausted)?;
-                    nir::type_computations::charge_term(b, fuel)
-                        .map_err(|_| Error::BudgetExhausted)?;
-                    if matches!((a, b), (Term::RecordValue(_), Term::RecordValue(_)))
-                        && a.is_structural_index_value()
-                        && b.is_structural_index_value()
-                    {
-                        if a.index_type_relations(b).is_none() {
+                    // Frozen aggregates can contain Type-valued leaves and
+                    // domains. Syntactic inequality is not evidence that these
+                    // types differ; only definite value differences may prune.
+                    // The common comparison charges both complete payloads.
+                    // Exhaustion cannot produce a completed candidate search.
+                    if a.sort() == Sort::ComptimeValue && b.sort() == Sort::ComptimeValue {
+                        if a.index_values_definitely_differ_budgeted(b, fuel)
+                            .map_err(|_| Error::BudgetExhausted)?
+                        {
                             return Ok(false);
                         }
-                        continue;
-                    }
-                    if a != b {
-                        return Ok(false);
+                    } else {
+                        nir::type_computations::charge_term(a, fuel)
+                            .map_err(|_| Error::BudgetExhausted)?;
+                        nir::type_computations::charge_term(b, fuel)
+                            .map_err(|_| Error::BudgetExhausted)?;
+                        if a != b {
+                            return Ok(false);
+                        }
                     }
                 }
                 (Self::Node(a, aa), Self::Node(b, ba)) => {

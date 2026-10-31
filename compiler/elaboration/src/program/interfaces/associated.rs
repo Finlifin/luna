@@ -979,7 +979,6 @@ impl Checker<'_, '_> {
                 Term::Nominal { arguments, .. }
                 | Term::NormalForm { arguments, .. }
                 | Term::Tuple(arguments)
-                | Term::TypeListValue(arguments)
                 | Term::TupleValue(arguments) => {
                     pending.extend(arguments.into_iter().map(|t| Work::Visit(t, depth + 1)))
                 }

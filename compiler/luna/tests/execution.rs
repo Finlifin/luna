@@ -1,5 +1,7 @@
 //! Source -> shared frontend -> owned NIR -> concrete interpreter behavior.
 //! These tests do not authorize runtime functions for comptime invocation.
+#[path = "support/frozen_lists.rs"]
+mod frozen_lists;
 use comptime_interpretor::{Budget, ErrorKind, Event, Interpreter, Value};
 use nir::program::Package;
 #[path = "support/execution.rs"]
@@ -108,7 +110,7 @@ fn tuple_type(package: &Package, elements: Vec<nir::Term>) -> nir::Term {
     nir::Term::NormalForm {
         head: id(package, "Tuple"),
         sort: nir::Sort::Type,
-        arguments: vec![nir::Term::TypeListValue(elements)],
+        arguments: vec![frozen_lists::types(&package, elements)],
     }
 }
 
@@ -15653,7 +15655,7 @@ fn normal_form_tuple_values_preserve_shape_types_contracts_and_order() {
     let tuple = |elements| Term::NormalForm {
         head: id(&package, "Tuple"),
         sort: Sort::Type,
-        arguments: vec![Term::TypeListValue(elements)],
+        arguments: vec![frozen_lists::types(&package, elements)],
     };
     let mut engine = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     let int = |n| Term::Integer(comptime_runtime::Integer::from_u128(n));
@@ -15920,7 +15922,7 @@ fn explicit_tuple_types_and_value_packets_preserve_late_inputs_and_effect_order(
     let tuple = |elements| Term::NormalForm {
         head: id(&package, "Tuple"),
         sort: Sort::Type,
-        arguments: vec![Term::TypeListValue(elements)],
+        arguments: vec![frozen_lists::types(&package, elements)],
     };
     let mut engine = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     let type_type = Term::Primitive(Primitive::Type);
@@ -16892,7 +16894,7 @@ fn alias_argument_order_failures_and_invocation_isolation_are_preserved() {
             Value::Type(nir::Term::NormalForm {
                 head: id(&package, "Tuple"),
                 sort: nir::Sort::Type,
-                arguments: vec![nir::Term::TypeListValue(vec![ty.clone(), ty])]
+                arguments: vec![frozen_lists::types(&package, vec![ty.clone(), ty])]
             })
         );
     }
@@ -34146,7 +34148,7 @@ fn variadic_normal_heads_collect_type_lists_without_replacing_the_head() {
         Value::Type(Term::NormalForm {
             head: tuple.declaration,
             sort: nir::Sort::Type,
-            arguments: vec![Term::TypeListValue(elements)],
+            arguments: vec![frozen_lists::types(&package, elements)],
         })
     };
     let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
@@ -34211,7 +34213,7 @@ fn variadic_normal_type_collection_evaluates_each_input_once_in_source_order() {
         .find(|f| f.name == "Build")
         .unwrap()
         .declaration;
-    let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     assert_eq!(
         vm.invoke(build, vec![]).unwrap(),
         Value::Type(Term::NormalForm {
@@ -34219,11 +34221,14 @@ fn variadic_normal_type_collection_evaluates_each_input_once_in_source_order() {
             sort: Sort::Type,
             arguments: vec![
                 Term::Primitive(P::U8),
-                Term::TypeListValue(vec![
-                    Term::Primitive(P::Bool),
-                    Term::Primitive(P::U8),
-                    Term::Primitive(P::Bool)
-                ])
+                frozen_lists::types(
+                    &package,
+                    vec![
+                        Term::Primitive(P::Bool),
+                        Term::Primitive(P::U8),
+                        Term::Primitive(P::Bool)
+                    ]
+                )
             ],
         })
     );
@@ -34231,7 +34236,7 @@ fn variadic_normal_type_collection_evaluates_each_input_once_in_source_order() {
         calls(&package, &vm),
         vec!["Build", "Second", "First", "Second", "First"]
     );
-    let mut early = Interpreter::new(&package, Budget::default()).unwrap();
+    let mut early = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     let exit = package
         .functions
         .iter()
@@ -34313,7 +34318,7 @@ fn variadic_normal_heads_forward_named_whole_type_lists_once() {
             Value::Type(Term::NormalForm {
                 head: tuple,
                 sort: Sort::Type,
-                arguments: vec![Term::TypeListValue(elements.clone())]
+                arguments: vec![frozen_lists::types(&package, elements.clone())]
             })
         );
         assert_eq!(calls(&package, &vm), vec!["Forward", "Pass"]);
@@ -34342,7 +34347,10 @@ fn variadic_normal_heads_forward_named_whole_type_lists_once() {
             Value::Type(Term::NormalForm {
                 head: product,
                 sort: Sort::Type,
-                arguments: vec![Term::Primitive(P::Bool), Term::TypeListValue(elements)]
+                arguments: vec![
+                    Term::Primitive(P::Bool),
+                    frozen_lists::types(&package, elements)
+                ]
             })
         );
         assert_eq!(calls(&package, &vm), vec!["ForwardTagged", "Pass"]);
@@ -34427,7 +34435,7 @@ fn normal_type_list_named_supply_preserves_order_around_positional_anchors() {
                 arguments: vec![
                     Term::Primitive(P::Bool),
                     Term::Primitive(P::U8),
-                    Term::TypeListValue(elements)
+                    frozen_lists::types(&package, elements)
                 ]
             })
         );
@@ -34475,7 +34483,7 @@ fn normal_type_list_named_supply_preserves_order_around_positional_anchors() {
                 arguments: vec![
                     Term::Primitive(P::Bool),
                     Term::Bool(true),
-                    Term::TypeListValue(vec![])
+                    frozen_lists::types(&package, vec![])
                 ]
             })
         );
@@ -34546,7 +34554,7 @@ fn normal_type_list_spreads_preserve_elements_order_and_single_evaluation() {
                 Value::Type(Term::NormalForm {
                     head: tuple,
                     sort: Sort::Type,
-                    arguments: vec![Term::TypeListValue(collected)],
+                    arguments: vec![frozen_lists::types(&package, collected)],
                 }),
                 vec!["Build", "Pass", "Pass"],
             ),
@@ -34555,7 +34563,7 @@ fn normal_type_list_spreads_preserve_elements_order_and_single_evaluation() {
                 Value::Type(Term::NormalForm {
                     head: tuple,
                     sort: Sort::Type,
-                    arguments: vec![Term::TypeListValue(elements.clone())],
+                    arguments: vec![frozen_lists::types(&package, elements.clone())],
                 }),
                 vec!["Forward", "Pass"],
             ),
@@ -34713,10 +34721,10 @@ fn bound_tuple_values_keep_normal_form_identity_through_nested_patterns() {
     let expected = Term::NormalForm {
         head: tuple,
         sort: Sort::Type,
-        arguments: vec![Term::TypeListValue(vec![
-            Term::Primitive(P::Bool),
-            Term::Primitive(P::U8),
-        ])],
+        arguments: vec![frozen_lists::types(
+            &package,
+            vec![Term::Primitive(P::Bool), Term::Primitive(P::U8)],
+        )],
     };
     let mut saw_value = false;
     nir::visit::expression(&pair.body, &mut 10_000, |expr, _| {
@@ -34741,7 +34749,14 @@ fn bound_tuple_values_keep_normal_form_identity_through_nested_patterns() {
             } = &expr.ty
             {
                 if *head == tuple {
-                    if let [Term::TypeListValue(elements)] = arguments.as_slice() {
+                    if let [
+                        Term::NominalValue {
+                            variant: None,
+                            fields: elements,
+                            ..
+                        },
+                    ] = arguments.as_slice()
+                    {
                         retained_generic_tuple |= elements
                             .iter()
                             .any(|field| matches!(field, Term::Rigid { .. }));
@@ -35296,7 +35311,7 @@ fn type_list_constants_reconstruct_and_specialize_without_tuple_coercion() {
     assert_eq!(selected.len(), 2);
     assert!(selected.iter().all(|instance| matches!(
         instance.key.arguments.as_slice(),
-        [nir::Term::TypeListValue(_)]
+        [nir::Term::NominalValue { variant: None, .. }]
     )));
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -35523,7 +35538,7 @@ fn symbolic_type_list_spreads_in_annotations_specialize_without_unfolding() {
                     declaration: metadata.parameters[0].declaration,
                     sort: nir::Sort::ComptimeValue,
                 }],
-                &[nir::Term::TypeListValue(elements.clone())],
+                &[frozen_lists::types(&package, elements.clone())],
             )
             .unwrap();
         let mut fields = vec![nir::Term::Primitive(nir::Primitive::Bool)];
@@ -35536,7 +35551,7 @@ fn symbolic_type_list_spreads_in_annotations_specialize_without_unfolding() {
                 ty: nir::Term::NormalForm {
                     head: tuple,
                     sort: nir::Sort::Type,
-                    arguments: vec![nir::Term::TypeListValue(fields)],
+                    arguments: vec![frozen_lists::types(&package, fields)],
                 },
             }],
             result: Box::new(nir::Term::Primitive(nir::Primitive::Bool)),
@@ -36108,7 +36123,7 @@ fn partial_enum_payload_spreads_infer_literal_fields_and_evaluate_packets_once()
     };
     assert!(
         matches!(result.as_ref(),nir::Term::NormalForm {arguments,..}
-        if matches!(arguments.as_slice(),[nir::Term::TypeListValue(elements)] if elements.len()==2))
+        if matches!(arguments.as_slice(),[nir::Term::NominalValue { variant: None, fields: elements, .. }] if elements.len()==2))
     );
     let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
     let mut vm = Interpreter::from_iir(&graph, Budget::default()).unwrap();
@@ -36178,7 +36193,7 @@ fn partial_enum_spreads_propagate_known_fields_into_generic_packets() {
             .unwrap();
         assert!(
             matches!(&forward.key.arguments[..],[nir::Term::NormalForm {arguments,..}]
-            if matches!(&arguments[..],[nir::Term::TypeListValue(elements)]
+            if matches!(&arguments[..],[nir::Term::NominalValue { variant: None, fields: elements, .. }]
                 if elements==&vec![nir::Term::Primitive(nir::Primitive::Bool),nir::Term::Primitive(nir::Primitive::U8)]))
         );
     }
@@ -36237,7 +36252,7 @@ fn partial_enum_spreads_share_peer_types_without_rechecking_values() {
             .unwrap();
         assert!(
             matches!(&forward.key.arguments[..],[nir::Term::NormalForm {arguments,..}]
-            if matches!(&arguments[..],[nir::Term::TypeListValue(elements)]
+            if matches!(&arguments[..],[nir::Term::NominalValue { variant: None, fields: elements, .. }]
                 if elements==&vec![nir::Term::Primitive(nir::Primitive::U8);2]))
         );
         let invalid = source.replace("forward((7,9))", "forward((true,9))");
@@ -36288,7 +36303,7 @@ fn partial_enum_peer_packets_settle_before_numeric_defaults() {
             .unwrap();
         assert!(
             matches!(&forward.key.arguments[..],[nir::Term::NormalForm {arguments,..}]
-            if matches!(&arguments[..],[nir::Term::TypeListValue(elements)]
+            if matches!(&arguments[..],[nir::Term::NominalValue { variant: None, fields: elements, .. }]
                 if elements==&vec![nir::Term::Primitive(nir::Primitive::U8)]))
         );
         assert!(
@@ -36347,7 +36362,14 @@ fn partial_enum_packet_widths_come_from_checked_generic_results() {
             let [nir::Term::NormalForm { arguments, .. }] = &function.key.arguments[..] else {
                 panic!("Tuple identity")
             };
-            let [nir::Term::TypeListValue(elements)] = &arguments[..] else {
+            let [
+                nir::Term::NominalValue {
+                    variant: None,
+                    fields: elements,
+                    ..
+                },
+            ] = &arguments[..]
+            else {
                 panic!("single list argument")
             };
             assert!(
@@ -36464,10 +36486,13 @@ fn bound_tuple_dynamic_syntax_checks_independent_formation_requirements() {
         let expected = Value::Type(nir::Term::NormalForm {
             head: id(&package, "Tuple"),
             sort: nir::Sort::Type,
-            arguments: vec![nir::Term::TypeListValue(vec![
-                nir::Term::Primitive(nir::Primitive::Bool),
-                nir::Term::Primitive(nir::Primitive::Bool),
-            ])],
+            arguments: vec![frozen_lists::types(
+                &package,
+                vec![
+                    nir::Term::Primitive(nir::Primitive::Bool),
+                    nir::Term::Primitive(nir::Primitive::Bool),
+                ],
+            )],
         });
         assert_eq!(vm.invoke(id(&package, "Build"), vec![]).unwrap(), expected);
         assert_eq!(calls(&package, &vm), vec!["Build", "Choose"]);
@@ -36537,10 +36562,13 @@ fn bound_tuple_deferred_list_contracts_check_values_and_recover() {
         let expected = Value::Type(nir::Term::NormalForm {
             head: id(&package, "Tuple"),
             sort: nir::Sort::Type,
-            arguments: vec![nir::Term::TypeListValue(vec![
-                nir::Term::Primitive(nir::Primitive::Bool),
-                nir::Term::Primitive(nir::Primitive::Bool),
-            ])],
+            arguments: vec![frozen_lists::types(
+                &package,
+                vec![
+                    nir::Term::Primitive(nir::Primitive::Bool),
+                    nir::Term::Primitive(nir::Primitive::Bool),
+                ],
+            )],
         });
         assert_eq!(
             vm.invoke(id(&package, "Build"), vec![Value::Bool(true)])
@@ -36592,9 +36620,10 @@ fn comptime_type_list_indexing_preserves_elements_and_checks_bounds() {
     let opaque = nir::Term::NormalForm {
         head: tuple,
         sort: nir::Sort::Type,
-        arguments: vec![nir::Term::TypeListValue(vec![nir::Term::Primitive(
-            nir::Primitive::Bool,
-        )])],
+        arguments: vec![frozen_lists::types(
+            &package,
+            vec![nir::Term::Primitive(nir::Primitive::Bool)],
+        )],
     };
     let types = vec![
         nir::Term::Primitive(nir::Primitive::Bool),
@@ -36877,9 +36906,10 @@ fn pending_type_computations_wait_resume_and_publish_opaque_types_once() {
     let nested = nir::Term::NormalForm {
         head: id(&package, "Tuple"),
         sort: nir::Sort::Type,
-        arguments: vec![nir::Term::TypeListValue(vec![nir::Term::Primitive(
-            nir::Primitive::Bool,
-        )])],
+        arguments: vec![frozen_lists::types(
+            &package,
+            vec![nir::Term::Primitive(nir::Primitive::Bool)],
+        )],
     };
     let mut context = InferenceContext::default();
     let input = context.fresh(nir::Sort::ComptimeValue);
@@ -36932,7 +36962,7 @@ fn pending_type_computations_wait_resume_and_publish_opaque_types_once() {
     context
         .assign(
             alias,
-            I::Stable(nir::Term::TypeListValue(vec![nested.clone()])),
+            I::Stable(frozen_lists::types(&package, vec![nested.clone()])),
         )
         .unwrap();
     assert!(
@@ -37847,10 +37877,13 @@ fn compact_residual_entries_preserve_tuple_head_and_single_collected_type_list()
     let expected = Term::NormalForm {
         head,
         sort: Sort::Type,
-        arguments: vec![Term::TypeListValue(vec![
-            Term::Primitive(Primitive::U8),
-            Term::Primitive(Primitive::Bool),
-        ])],
+        arguments: vec![frozen_lists::types(
+            &package,
+            vec![
+                Term::Primitive(Primitive::U8),
+                Term::Primitive(Primitive::Bool),
+            ],
+        )],
     };
     assert!(
         matches!(session.resume(&mut context,output).unwrap(),State::Complete(ty) if *ty==expected)
@@ -38306,7 +38339,7 @@ fn completed_source_type_refinements_keep_tuple_identity_and_lexical_subjects() 
     };
     assert_eq!(parameters[0].ty, **result);
     assert!(
-        matches!(&**result,nir::Term::NormalForm {head:actual,arguments,..} if *actual==head && arguments.len()==1 && matches!(arguments[0],nir::Term::TypeListValue(_)))
+        matches!(&**result,nir::Term::NormalForm {head:actual,arguments,..} if *actual==head && arguments.len()==1 && matches!(arguments[0],nir::Term::NominalValue { variant: None, .. }))
     );
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
@@ -38666,10 +38699,10 @@ fn abstract_compound_type_descriptions_preserve_tuple_heads_and_scope() {
     let pair = nir::Term::NormalForm {
         head,
         sort: nir::Sort::Type,
-        arguments: vec![nir::Term::TypeListValue(vec![
-            rigid.clone(),
-            nir::Term::Primitive(nir::Primitive::Bool),
-        ])],
+        arguments: vec![frozen_lists::types(
+            &package,
+            vec![rigid.clone(), nir::Term::Primitive(nir::Primitive::Bool)],
+        )],
     };
     let mut scoped = Interpreter::for_comptime(&package, Budget::default())
         .unwrap()
@@ -38806,10 +38839,10 @@ fn abstract_type_admission_preserves_nested_formation_requirements() {
     let tuple = Term::NormalForm {
         head: id(&package, "Tuple"),
         sort: Sort::Type,
-        arguments: vec![Term::TypeListValue(vec![
-            rigid.clone(),
-            Term::Primitive(Primitive::Bool),
-        ])],
+        arguments: vec![frozen_lists::types(
+            &package,
+            vec![rigid.clone(), Term::Primitive(Primitive::Bool)],
+        )],
     };
     let list = Term::NormalForm {
         head: id(&package, "List"),
@@ -39004,10 +39037,10 @@ fn scoped_type_computations_resume_with_declaration_evidence_without_replay() {
     let tuple = Term::NormalForm {
         head: id(&package, "Tuple"),
         sort: Sort::Type,
-        arguments: vec![Term::TypeListValue(vec![
-            rigid.clone(),
-            Term::Primitive(Primitive::Bool),
-        ])],
+        arguments: vec![frozen_lists::types(
+            &package,
+            vec![rigid.clone(), Term::Primitive(Primitive::Bool)],
+        )],
     };
     assert_eq!(context.freeze(&I::Meta(selected)).unwrap(), tuple);
     let before = session.remaining_steps();
@@ -39101,10 +39134,13 @@ fn deferred_signature_tasks_wait_resolve_tuple_types_and_preserve_execution_orde
     let nested = Term::NormalForm {
         head: id(&package, "Tuple"),
         sort: Sort::Type,
-        arguments: vec![Term::TypeListValue(vec![
-            Term::Primitive(Primitive::Bool),
-            Term::Primitive(Primitive::U8),
-        ])],
+        arguments: vec![frozen_lists::types(
+            &package,
+            vec![
+                Term::Primitive(Primitive::Bool),
+                Term::Primitive(Primitive::U8),
+            ],
+        )],
     };
     let invocation = |name| {
         Invocation::new(
@@ -39167,7 +39203,10 @@ fn deferred_signature_tasks_wait_resolve_tuple_types_and_preserve_execution_orde
     );
     assert!(session.events().is_empty());
     context
-        .assign(es, I::Stable(Term::TypeListValue(vec![nested.clone()])))
+        .assign(
+            es,
+            I::Stable(frozen_lists::types(&package, vec![nested.clone()])),
+        )
         .unwrap();
     assert!(matches!(
         session.resume_signature(&mut context, &mut task, &mut 0),
@@ -39236,7 +39275,10 @@ fn deferred_signature_tasks_wait_resolve_tuple_types_and_preserve_execution_orde
             .enqueue_signature(
                 &mut context,
                 schema(1, 0, vec![invocation("Later"), invocation("First")]),
-                &[I::Stable(Term::TypeListValue(values)), I::Meta(runtime)],
+                &[
+                    I::Stable(frozen_lists::types(&package, values)),
+                    I::Meta(runtime),
+                ],
             )
             .unwrap();
         let first = session
@@ -39655,14 +39697,17 @@ fn explicit_comptime_type_signature_computations_preserve_slots_and_nested_binde
     let expected = Term::NormalForm {
         head: id(&package, "Tuple"),
         sort: Sort::Type,
-        arguments: vec![Term::TypeListValue(vec![
-            Term::Bound {
-                depth: 0,
-                index: 0,
-                sort: Sort::Type,
-            },
-            Term::Primitive(Primitive::Bool),
-        ])],
+        arguments: vec![frozen_lists::types(
+            &package,
+            vec![
+                Term::Bound {
+                    depth: 0,
+                    index: 0,
+                    sort: Sort::Type,
+                },
+                Term::Primitive(Primitive::Bool),
+            ],
+        )],
     };
     assert_eq!(parameters[1].ty, expected);
     assert_eq!(**result, expected);
@@ -39747,14 +39792,17 @@ fn explicit_comptime_type_inputs_support_predicates_and_type_list_results() {
     let expected = Term::NormalForm {
         head: id(&package, "Tuple"),
         sort: Sort::Type,
-        arguments: vec![Term::TypeListValue(vec![
-            Term::Bound {
-                depth: 0,
-                index: 0,
-                sort: Sort::Type,
-            },
-            Term::Primitive(Primitive::Bool),
-        ])],
+        arguments: vec![frozen_lists::types(
+            &package,
+            vec![
+                Term::Bound {
+                    depth: 0,
+                    index: 0,
+                    sort: Sort::Type,
+                },
+                Term::Primitive(Primitive::Bool),
+            ],
+        )],
     };
     assert_eq!(parameters[1].ty, expected);
     assert_eq!(**result, expected);
@@ -41258,10 +41306,10 @@ fn deferred_signature_caller_substitution_preserves_nested_tuple_identity_and_gu
     let pair = Term::NormalForm {
         head: id(&package, "Tuple"),
         sort: Sort::Type,
-        arguments: vec![Term::TypeListValue(vec![
-            Term::Primitive(P::Bool),
-            Term::Primitive(P::U8),
-        ])],
+        arguments: vec![frozen_lists::types(
+            &package,
+            vec![Term::Primitive(P::Bool), Term::Primitive(P::U8)],
+        )],
     };
     let callable = |result| Term::Function {
         parameters: vec![Parameter {
@@ -43929,10 +43977,10 @@ fn deferred_runtime_signatures_wait_admit_and_erase_staged_inputs() {
     let pair = Term::NormalForm {
         head: id(&package, "Tuple"),
         sort: Sort::Type,
-        arguments: vec![Term::TypeListValue(vec![
-            Term::Primitive(P::Bool),
-            Term::Primitive(P::U8),
-        ])],
+        arguments: vec![frozen_lists::types(
+            &package,
+            vec![Term::Primitive(P::Bool), Term::Primitive(P::U8)],
+        )],
     };
     let schema = || {
         Signature::new(
@@ -43981,7 +44029,10 @@ fn deferred_runtime_signatures_wait_admit_and_erase_staged_inputs() {
     );
     assert!(session.events().is_empty());
     context
-        .assign(es, I::Stable(Term::TypeListValue(vec![pair.clone()])))
+        .assign(
+            es,
+            I::Stable(frozen_lists::types(&package, vec![pair.clone()])),
+        )
         .unwrap();
     assert!(matches!(
         session.resume_runtime_signature_checked(&mut context, &mut task, &mut 0, |_, _, _| Ok::<
@@ -44072,7 +44123,10 @@ fn deferred_runtime_signatures_wait_admit_and_erase_staged_inputs() {
         .enqueue_signature(
             &mut context,
             schema(),
-            &[I::Stable(Term::TypeListValue(vec![])), I::Meta(runtime)],
+            &[
+                I::Stable(frozen_lists::types(&package, vec![])),
+                I::Meta(runtime),
+            ],
         )
         .unwrap();
     assert!(matches!(

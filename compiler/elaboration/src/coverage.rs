@@ -1824,7 +1824,7 @@ mod tuple_layout_tests {
         let context = Context::default();
         assert_ne!(
             check(
-                &tuple(Term::TypeListValue(vec![Term::Primitive(P::Bool)])),
+                &tuple(Term::TupleValue(vec![Term::Primitive(P::Bool)])),
                 &[&yes, &no],
                 Some(&head),
                 &context,

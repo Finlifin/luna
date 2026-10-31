@@ -65,7 +65,6 @@ pub fn charge_structure(ty: &Term, fuel: &mut usize) -> Result<(), &'static str>
                 pending.extend(fields.iter().map(|(_, ty)| (ty, depth + 1)))
             }
             Term::Tuple(fields)
-            | Term::TypeListValue(fields)
             | Term::TupleValue(fields)
             | Term::Nominal {
                 arguments: fields, ..

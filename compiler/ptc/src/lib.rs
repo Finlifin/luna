@@ -726,7 +726,6 @@ fn within_input_limits(input: Input<'_>, limit: usize, fuel: &mut usize) -> bool
                 }
                 Term::Tuple(items)
                 | Term::ClosureContextValue(items)
-                | Term::TypeListValue(items)
                 | Term::TupleValue(items)
                 | Term::Nominal {
                     arguments: items, ..
@@ -831,7 +830,6 @@ fn subterms(term: &Term) -> Vec<&Term> {
         }
         Term::Tuple(items)
         | Term::ClosureContextValue(items)
-        | Term::TypeListValue(items)
         | Term::TupleValue(items)
         | Term::Nominal {
             arguments: items, ..
@@ -903,7 +901,6 @@ fn has_bound(term: &Term) -> bool {
         } => environment.iter().any(has_bound) || has_bound(signature),
         Term::Tuple(items)
         | Term::ClosureContextValue(items)
-        | Term::TypeListValue(items)
         | Term::TupleValue(items)
         | Term::Nominal {
             arguments: items, ..
@@ -1238,8 +1235,7 @@ fn same_congruent_head(a: &Term, b: &Term, context: &Context) -> bool {
     {
         return a.len() == b.len() && a.iter().zip(b).all(|((a, _), (b, _))| a == b);
     }
-    if let (Term::TypeListValue(a), Term::TypeListValue(b))
-    | (Term::ListConcat { parts: a, .. }, Term::ListConcat { parts: b, .. })
+    if let (Term::ListConcat { parts: a, .. }, Term::ListConcat { parts: b, .. })
     | (Term::TupleValue(a), Term::TupleValue(b)) = (a, b)
     {
         return a.len() == b.len();
@@ -1807,7 +1803,6 @@ fn closed_classification_input(
             arguments,
             ..
         }
-        | Term::TypeListValue(arguments)
         | Term::TupleValue(arguments) => arguments.iter().collect(),
         Term::NominalValue { ty, fields, .. } => {
             std::iter::once(ty.as_ref()).chain(fields).collect()
@@ -2304,6 +2299,21 @@ mod context_snapshot_tests {
 mod tuple_classification_tests {
     use super::*;
 
+    fn frozen_types(fields: Vec<nir::Term>) -> nir::Term {
+        nir::Term::NominalValue {
+            ty: Box::new(nir::Term::NormalForm {
+                head: nir::DeclarationId {
+                    package: 901,
+                    local: 1,
+                },
+                sort: nir::Sort::Type,
+                arguments: vec![nir::Term::Primitive(nir::Primitive::Type)],
+            }),
+            variant: None,
+            fields,
+        }
+    }
+
     #[test]
     fn completed_nominal_value_indices_require_constructor_authority() {
         let head = DeclarationId {
@@ -2349,7 +2359,7 @@ mod tuple_classification_tests {
         let tuple = Term::NormalForm {
             head,
             sort: Sort::Type,
-            arguments: vec![Term::TypeListValue(vec![])],
+            arguments: vec![frozen_types(vec![])],
         };
         let nominal = Term::Nominal {
             declaration: nominal_head,
@@ -2505,7 +2515,7 @@ mod tuple_classification_tests {
         let tuple = |field| Term::NormalForm {
             head,
             sort: Sort::Type,
-            arguments: vec![Term::TypeListValue(vec![field])],
+            arguments: vec![frozen_types(vec![field])],
         };
         let value = tuple(boolean.clone());
         let mut context = Context::default();

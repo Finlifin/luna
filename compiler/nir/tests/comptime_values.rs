@@ -114,7 +114,6 @@ fn type_elements_do_not_erase_the_declared_list_identity() {
         let a = freeze_admitted_list(&first, fields.clone(), &mut 1000).unwrap();
         let b = freeze_admitted_list(&second, fields.clone(), &mut 1000).unwrap();
         assert_ne!(a, b);
-        assert_ne!(a, Term::TypeListValue(fields.clone()));
         assert_eq!(
             a,
             Term::NominalValue {

@@ -133,6 +133,21 @@ fn with_world<R>(
     })
 }
 
+fn frozen_types(fields: Vec<nir::Term>) -> nir::Term {
+    nir::Term::NominalValue {
+        ty: Box::new(nir::Term::NormalForm {
+            head: nir::DeclarationId {
+                package: 901,
+                local: 1,
+            },
+            sort: nir::Sort::Type,
+            arguments: vec![nir::Term::Primitive(nir::Primitive::Type)],
+        }),
+        variant: None,
+        fields,
+    }
+}
+
 #[test]
 fn implementation_equalities_use_replayable_nested_associated_views() {
     use type_resolution::implementation::Selection;
@@ -705,7 +720,7 @@ fn type_list_inputs_resolve_associated_elements_without_changing_the_head() {
     let wrap = |item| Term::NormalForm {
         head: id(88),
         sort: Sort::Type,
-        arguments: vec![Term::TypeListValue(vec![item])],
+        arguments: vec![frozen_types(vec![item])],
     };
     let result = normalize(
         &[contract()],

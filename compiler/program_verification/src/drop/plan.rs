@@ -1332,7 +1332,18 @@ mod tuple_layout_tests {
         let ty = Term::NormalForm {
             head: id,
             sort: nir::Sort::Type,
-            arguments: vec![Term::TypeListValue(fields.clone())],
+            arguments: vec![Term::NominalValue {
+                ty: Box::new(Term::NormalForm {
+                    head: nir::DeclarationId {
+                        package: 9,
+                        local: 2,
+                    },
+                    sort: nir::Sort::Type,
+                    arguments: vec![Term::Primitive(nir::Primitive::Type)],
+                }),
+                variant: None,
+                fields: fields.clone(),
+            }],
         };
         let mut package = Package {
             normal_forms: vec![

@@ -386,10 +386,7 @@ impl Interpreter<'_> {
                     self.admit_type(argument, depth + 1)?;
                 }
             }
-            Term::Tuple(types)
-            | Term::ClosureContextValue(types)
-            | Term::TypeListValue(types)
-            | Term::TupleValue(types) => {
+            Term::Tuple(types) | Term::ClosureContextValue(types) | Term::TupleValue(types) => {
                 for ty in types {
                     self.admit_type(ty, depth + 1)?;
                 }

@@ -225,7 +225,7 @@ fn type_list_freezing_preserves_list_identity_order_and_opaque_heads() {
             local: 8,
         },
         sort: nir::Sort::Type,
-        arguments: vec![Term::TypeListValue(vec![Term::Primitive(Primitive::U8)])],
+        arguments: vec![frozen_types(vec![Term::Primitive(Primitive::U8)])],
     };
     let elements = vec![opaque, Term::Primitive(Primitive::Bool)];
     let list = ordinary_type_list(elements.clone());
@@ -266,7 +266,7 @@ fn type_list_freezing_rejects_non_types_and_unfinished_inputs() {
     };
     let invalid = [
         Term::Bool(true),
-        Term::TypeListValue(vec![]),
+        frozen_types(vec![]),
         Term::Rigid {
             declaration: identity,
             sort: nir::Sort::Type,
@@ -286,7 +286,11 @@ fn type_list_freezing_rejects_non_types_and_unfinished_inputs() {
         Term::NormalForm {
             head: identity,
             sort: nir::Sort::Type,
-            arguments: vec![Term::TypeListValue(vec![Term::Bool(false)])],
+            arguments: vec![Term::NominalValue {
+                ty: Box::new(Term::Bool(false)),
+                variant: None,
+                fields: vec![],
+            }],
         },
     ];
     for element in invalid {

@@ -1383,13 +1383,13 @@ fn bound_tuple_inference_proposes_fields_and_preserves_context_identity() {
         list_domain,
         Some(package.normal_forms[0].parameters[0].ty.clone())
     );
-    // A domainless legacy input cannot supply field checking hints, even
+    // A domainless product input cannot supply field checking hints, even
     // when the outer head is registered and all its elements are Types.
     let invalid_definition = scheme(
         vec![Term::NormalForm {
             head,
             sort: Sort::Type,
-            arguments: vec![Term::TypeListValue(vec![primitive(P::Bool)])],
+            arguments: vec![Term::TupleValue(vec![primitive(P::Bool)])],
         }],
         primitive(P::Bool),
         0,

@@ -192,7 +192,7 @@ fn homogeneous_value_lists_require_the_bound_head_and_validate_every_element() {
             fields: vec![Term::Primitive(P::Bool)],
         },
         Term::TupleValue(vec![Term::Bool(true)]),
-        Term::TypeListValue(vec![Term::Primitive(P::Bool)]),
+        Term::TupleValue(vec![Term::Primitive(P::Bool)]),
     ] {
         assert!(
             vm.invoke_with_normal_arguments(id(3), vec![(list.clone(), malformed)])

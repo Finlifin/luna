@@ -147,8 +147,8 @@ fn callable_list_inputs_require_unique_representation_evidence_and_recover() {
         );
     }
     for value in [
-        Term::TypeListValue(vec![]),
-        Term::TypeListValue(vec![Term::Primitive(Primitive::Bool)]),
+        Term::TupleValue(vec![]),
+        Term::TupleValue(vec![Term::Primitive(Primitive::Bool)]),
         frozen(vec![Term::Bool(true)]),
         frozen(vec![Term::Bound {
             depth: 0,

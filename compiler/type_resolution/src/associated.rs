@@ -716,7 +716,6 @@ impl Normalizer<'_, '_, '_> {
             },
             Term::Tuple(items) => Term::Tuple(self.many(items, depth + 1)?),
             Term::TupleValue(items) => Term::TupleValue(self.many(items, depth + 1)?),
-            Term::TypeListValue(items) => Term::TypeListValue(self.many(items, depth + 1)?),
             Term::ListConcat { ty, parts } => {
                 Term::list_concat(self.normalize(ty, depth + 1)?, self.many(parts, depth + 1)?)
                     .map_err(|error| error.to_string())?
@@ -895,7 +894,6 @@ pub fn charge_projection_copy(term: &Term, fuel: &mut usize) -> Result<(), Strin
                 0
             }
             Term::Tuple(items)
-            | Term::TypeListValue(items)
             | Term::TupleValue(items)
             | Term::Nominal {
                 arguments: items, ..

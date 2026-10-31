@@ -235,14 +235,6 @@ impl Checker<'_, '_> {
         let bounded = nir::type_computations::charge_term(&term, &mut fuel);
         self.required_steps -= (before - fuel) as u64;
         bounded.map_err(|e| error(span, e.to_string()))?;
-        if let Term::TypeListValue(types) = &term {
-            if types.iter().any(|ty| ty.sort() != Sort::Type) {
-                return Err(error(
-                    span,
-                    "normal-form Type-list input contains a non-Type",
-                ));
-            }
-        }
         term.check_scope(&self.call_input_frames())
             .map_err(|e| error(span, e.to_string()))?;
         Ok(Some(term))

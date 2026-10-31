@@ -1386,11 +1386,6 @@ impl Checker<'_, '_> {
                         PartialStagedValue::unknown()
                     });
                 }
-                PartialStagedData::Known(Term::TypeListValue(fields))
-                    if self.is_type_list_type(&values.ty) =>
-                {
-                    fields.get(index).filter(|field| field.sort() == Sort::Type)
-                }
                 PartialStagedData::Known(Term::NominalValue {
                     ty,
                     variant: None,

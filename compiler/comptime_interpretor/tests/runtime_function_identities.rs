@@ -120,7 +120,7 @@ fn runtime_identity_snapshots_validate_scope_and_recover_after_budget_failure() 
                 sort: nir::Sort::Type,
                 arguments: vec![Term::Primitive(nir::Primitive::Type)],
             }),
-            parts: vec![Term::TypeListValue(vec![])],
+            parts: vec![Term::TupleValue(vec![])],
         },
     ] {
         let unresolved = Value::FunctionInstance {

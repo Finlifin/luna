@@ -1110,13 +1110,13 @@ fn registered_layout_views_read_typed_list_payloads_without_unfolding_heads() {
     );
     assert!(
         tuple
-            .tuple_elements(&application(Term::TypeListValue(fields.clone())))
+            .tuple_elements(&application(Term::TupleValue(fields.clone())))
             .is_none()
     );
     for fields in [vec![], fields.clone()] {
-        let legacy = Term::TypeListValue(fields);
-        assert!(list.list_value_elements(&domain, &legacy).is_none());
-        assert!(tuple.tuple_elements(&application(legacy)).is_none());
+        let untyped = Term::TupleValue(fields);
+        assert!(list.list_value_elements(&domain, &untyped).is_none());
+        assert!(tuple.tuple_elements(&application(untyped)).is_none());
     }
     let mut missing = tuple.clone();
     missing.parameters.clear();
@@ -1127,7 +1127,7 @@ fn registered_layout_views_read_typed_list_payloads_without_unfolding_heads() {
     );
     assert!(
         missing
-            .tuple_elements(&application(Term::TypeListValue(vec![])))
+            .tuple_elements(&application(Term::TupleValue(vec![])))
             .is_none()
     );
     for wrong in [
@@ -1203,7 +1203,7 @@ fn collection_admission_never_supplies_a_missing_value_domain() {
             };
             let valid = type_list(fields.clone());
             assert!(check(valid.clone(), &mut 10000).is_ok());
-            assert!(check(Term::TypeListValue(fields.clone()), &mut 10000).is_err());
+            assert!(check(Term::TupleValue(fields.clone()), &mut 10000).is_err());
             let foreign = Term::NominalValue {
                 ty: Box::new(Term::NormalForm {
                     head: id(91),

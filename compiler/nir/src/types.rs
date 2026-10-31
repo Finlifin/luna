@@ -233,9 +233,6 @@ pub enum Term {
     Record(Vec<(String, Term)>),
     /// An immutable comptime tuple value; distinct from a tuple Type.
     TupleValue(Vec<Term>),
-    /// Immutable `meta.List<Type>` input, including symbolic Type elements.
-    /// A value supplied to a normal-form head, never a tuple Type or tuple value.
-    TypeListValue(Vec<Term>),
     /// Ordered concatenation of list values in one declared domain.
     /// This residual must complete before immutable value admission.
     ListConcat {
@@ -525,8 +522,7 @@ impl Term {
                 | Self::Nominal { arguments, .. }
                 | Self::Tuple(arguments)
                 | Self::TupleValue(arguments)
-                | Self::ClosureContextValue(arguments)
-                | Self::TypeListValue(arguments) => pending.extend(arguments),
+                | Self::ClosureContextValue(arguments) => pending.extend(arguments),
                 Self::Record(fields) | Self::RecordValue(fields) => {
                     pending.extend(fields.into_iter().map(|(_, field)| field))
                 }
@@ -888,7 +884,6 @@ impl Term {
             | Self::NominalValue { .. }
             | Self::TupleValue(_)
             | Self::ClosureContextValue(_)
-            | Self::TypeListValue(_)
             | Self::ListConcat { .. }
             | Self::RecordValue(_)
             | Self::Unit
@@ -1415,7 +1410,6 @@ impl Term {
                     .collect::<Result<_, TypeError>>()?,
             ),
             Self::TupleValue(items) => Self::TupleValue(many(items, leaf)?),
-            Self::TypeListValue(items) => Self::TypeListValue(many(items, leaf)?),
             Self::ListConcat { ty, parts } => {
                 Self::list_concat(ty.rewrite(nesting, leaf)?, many(parts, leaf)?)?
             }
@@ -1805,7 +1799,6 @@ fn collect_runtime_dependencies(term: &Term, result: &mut BTreeSet<RuntimeId>) {
         | Term::NormalForm { arguments, .. }
         | Term::Tuple(arguments)
         | Term::ClosureContextValue(arguments)
-        | Term::TypeListValue(arguments)
         | Term::TupleValue(arguments) => {
             for argument in arguments {
                 collect_runtime_dependencies(argument, result);
@@ -2069,7 +2062,7 @@ fn validate(
                 validate(ty, holes, frames, allow_free, core)?;
             }
         }
-        Term::Tuple(items) | Term::TypeListValue(items) => {
+        Term::Tuple(items) => {
             for item in items {
                 require_sort(item, Sort::Type)?;
                 validate(item, holes, frames, allow_free, core)?;
@@ -2422,11 +2415,6 @@ impl fmt::Display for Term {
             }
             Self::Tuple(items) => {
                 f.write_str("(tuple ")?;
-                list(f, items)?;
-                f.write_str(")")
-            }
-            Self::TypeListValue(items) => {
-                f.write_str("(type-list-value ")?;
                 list(f, items)?;
                 f.write_str(")")
             }

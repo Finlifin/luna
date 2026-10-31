@@ -36,6 +36,21 @@ fn add(index: &mut Index, n: u32, subject: Term) {
     index.insert(head(n, subject), Budget::default()).unwrap();
 }
 
+fn frozen_types(fields: Vec<nir::Term>) -> nir::Term {
+    nir::Term::NominalValue {
+        ty: Box::new(nir::Term::NormalForm {
+            head: nir::DeclarationId {
+                package: 0,
+                local: 992,
+            },
+            sort: nir::Sort::Type,
+            arguments: vec![nir::Term::Primitive(nir::Primitive::Type)],
+        }),
+        variant: None,
+        fields,
+    }
+}
+
 #[test]
 fn nominal_head_separation_reserves_solver_work_for_same_family_constraints() {
     use nir::program::TypePredicate;
@@ -990,7 +1005,7 @@ fn tuple_kind_conflict_excludes_uninferable_generic_candidates() {
     let tuple = |field| Term::NormalForm {
         head: id(990),
         sort: Sort::Type,
-        arguments: vec![Term::TypeListValue(vec![field])],
+        arguments: vec![frozen_types(vec![field])],
     };
     let mut trusted = Context::from_package(&package).unwrap();
     trusted.admit_nominal_constructor(id(10));
@@ -1092,7 +1107,7 @@ fn tuple_subject_eligibility_requires_trusted_metadata_at_selection_and_replay()
     let subject = Term::NormalForm {
         head: id(990),
         sort: Sort::Type,
-        arguments: vec![Term::TypeListValue(vec![ty(P::Bool)])],
+        arguments: vec![frozen_types(vec![ty(P::Bool)])],
     };
     let implementation = generic(200, var(1), vec![id(1)]);
     let trusted = Context::from_package(&package).unwrap();
@@ -1977,7 +1992,7 @@ fn type_list_inputs_keep_potentially_equal_opaque_candidates() {
         sort: Sort::Type,
         arguments: vec![],
     };
-    let subject = |field| node(10, vec![Term::TypeListValue(vec![field])]);
+    let subject = |field| node(10, vec![frozen_types(vec![field])]);
     add(&mut index, 200, subject(opaque(30)));
     for query in [subject(opaque(31)), subject(var(9))] {
         let candidates = index
@@ -3560,5 +3575,80 @@ fn dependent_head_inference_stages_domains_and_replays_original_declaration() {
             h.assess_types(&query, &interfaces, &context, Budget::default()),
             TypeAssessment::Applicable(_)
         ));
+    }
+}
+
+#[test]
+fn aggregate_candidate_keys_preserve_unknown_type_relations_and_prune_values() {
+    let opaque = |local| Term::NormalForm {
+        head: id(local),
+        sort: Sort::Type,
+        arguments: vec![],
+    };
+    let aggregate = |kind, domain, field, flag| match kind {
+        0 => Term::NominalValue {
+            ty: Box::new(domain),
+            variant: None,
+            fields: vec![field, Term::Bool(flag)],
+        },
+        1 => Term::OptionalValue {
+            ty: Box::new(Term::Optional(Box::new(domain))),
+            value: Some(Box::new(Term::TupleValue(vec![field, Term::Bool(flag)]))),
+        },
+        _ => Term::ErrorValue {
+            ty: Box::new(Term::ErrorResult {
+                errors: vec![ty(P::Bool)],
+                result: Box::new(domain),
+            }),
+            label: None,
+            value: Box::new(Term::TupleValue(vec![field, Term::Bool(flag)])),
+        },
+    };
+    for kind in 0..3 {
+        let mut index = Index::default();
+        let subject = |domain, field, flag| node(10, vec![aggregate(kind, domain, field, flag)]);
+        add(&mut index, 200, subject(opaque(30), opaque(40), true));
+        for query in [
+            subject(opaque(31), opaque(40), true),
+            subject(opaque(30), opaque(41), true),
+        ] {
+            let candidates = index
+                .candidates(Some(id(100)), &[], &query, Budget::default())
+                .unwrap();
+            assert!(
+                candidates.declarations().contains(&id(200)),
+                "kind {kind}: unresolved Type equality cannot prune"
+            );
+        }
+        // An equal domain makes the concrete payload mismatch definitive.
+        let different = subject(opaque(30), opaque(40), false);
+        assert!(
+            !index
+                .candidates(Some(id(100)), &[], &different, Budget::default())
+                .unwrap()
+                .declarations()
+                .contains(&id(200))
+        );
+        let query = subject(opaque(30), opaque(41), true);
+        assert!(
+            index
+                .candidates(
+                    Some(id(100)),
+                    &[],
+                    &query,
+                    Budget {
+                        steps: 0,
+                        ..Budget::default()
+                    }
+                )
+                .is_err()
+        );
+        assert!(
+            index
+                .candidates(Some(id(100)), &[], &query, Budget::default())
+                .unwrap()
+                .declarations()
+                .contains(&id(200))
+        );
     }
 }

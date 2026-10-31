@@ -595,9 +595,7 @@ fn decompose(
                 )?;
             }
         }
-        (Term::Tuple(a), Term::Tuple(b))
-        | (Term::TupleValue(a), Term::TupleValue(b))
-        | (Term::TypeListValue(a), Term::TypeListValue(b))
+        (Term::Tuple(a), Term::Tuple(b)) | (Term::TupleValue(a), Term::TupleValue(b))
             if a.len() == b.len() =>
         {
             for (a, b) in a.iter().zip(b) {

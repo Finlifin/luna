@@ -1434,8 +1434,7 @@ fn nominal_domain_scope(
             | Term::NormalForm { arguments, .. }
             | Term::Tuple(arguments)
             | Term::TupleValue(arguments)
-            | Term::ClosureContextValue(arguments)
-            | Term::TypeListValue(arguments) => pending.extend(arguments),
+            | Term::ClosureContextValue(arguments) => pending.extend(arguments),
             Term::Record(fields) | Term::RecordValue(fields) => {
                 pending.extend(fields.iter().map(|(_, ty)| ty))
             }

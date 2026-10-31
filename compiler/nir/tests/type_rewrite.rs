@@ -20,6 +20,21 @@ fn expr(kind: K) -> Expr {
         kind,
     }
 }
+fn frozen_types(fields: Vec<nir::Term>) -> nir::Term {
+    nir::Term::NominalValue {
+        ty: Box::new(nir::Term::NormalForm {
+            head: nir::DeclarationId {
+                package: 901,
+                local: 1,
+            },
+            sort: nir::Sort::Type,
+            arguments: vec![nir::Term::Primitive(nir::Primitive::Type)],
+        }),
+        variant: None,
+        fields,
+    }
+}
+
 #[test]
 fn rewrite_visits_hidden_call_identity_and_pattern_expressions() {
     let method = expr(K::TraitMethod {
@@ -210,7 +225,7 @@ fn type_list_index_rewriting_reaches_both_operands_and_keeps_head_identity() {
     let nested = Term::NormalForm {
         head: tuple_head,
         sort: Sort::Type,
-        arguments: vec![Term::TypeListValue(vec![rigid()])],
+        arguments: vec![frozen_types(vec![rigid()])],
     };
     let mut index = Expr {
         ty: Term::Primitive(Primitive::Type),
@@ -262,7 +277,7 @@ fn type_list_index_rewriting_reaches_both_operands_and_keeps_head_identity() {
             fields: vec![Term::NormalForm {
                 head: tuple_head,
                 sort: Sort::Type,
-                arguments: vec![Term::TypeListValue(vec![Term::Primitive(Primitive::U8)])]
+                arguments: vec![frozen_types(vec![Term::Primitive(Primitive::U8)])]
             }]
         })
     );

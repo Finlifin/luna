@@ -19,6 +19,21 @@ fn finish(engine: &mut Engine) {
     engine.advance(100, Budget::default());
 }
 
+fn frozen_types(fields: Vec<nir::Term>) -> nir::Term {
+    nir::Term::NominalValue {
+        ty: Box::new(nir::Term::NormalForm {
+            head: nir::DeclarationId {
+                package: 55,
+                local: 3,
+            },
+            sort: nir::Sort::Type,
+            arguments: vec![nir::Term::Primitive(nir::Primitive::Type)],
+        }),
+        variant: None,
+        fields,
+    }
+}
+
 #[test]
 fn normal_form_callable_inference_preserves_collector_and_transaction_scope() {
     let callable = |result, collector| {
@@ -130,7 +145,7 @@ fn tuple_pack_inference_preserves_head_proofs_and_transaction_isolation() {
     for fields in [
         vec![],
         vec![Term::Primitive(P::Bool)],
-        vec![Term::Primitive(P::Bool), tuple(Term::TypeListValue(vec![]))],
+        vec![Term::Primitive(P::Bool), tuple(frozen_types(vec![]))],
     ] {
         let mut engine = Engine::with_context(context.fork());
         let pack = engine.fresh(Sort::ComptimeValue);
@@ -142,7 +157,7 @@ fn tuple_pack_inference_preserves_head_proofs_and_transaction_isolation() {
             }),
             arguments: vec![I::Meta(pack)],
         };
-        let input = Term::TypeListValue(fields);
+        let input = frozen_types(fields);
         let (mut candidate, id) = engine
             .match_types(
                 template.clone(),
@@ -171,7 +186,7 @@ fn tuple_pack_inference_preserves_head_proofs_and_transaction_isolation() {
     let (mut candidate, id) = engine
         .match_types(
             template,
-            I::Stable(tuple(Term::TypeListValue(vec![]))),
+            I::Stable(tuple(frozen_types(vec![]))),
             Budget::default(),
         )
         .unwrap();
@@ -179,10 +194,7 @@ fn tuple_pack_inference_preserves_head_proofs_and_transaction_isolation() {
     assert!(candidate.state(id).unwrap().is_proven());
     assert!(engine.freeze(&I::Meta(pack)).is_err());
     engine.commit(candidate).unwrap();
-    assert_eq!(
-        engine.freeze(&I::Meta(pack)),
-        Ok(Term::TypeListValue(vec![]))
-    );
+    assert_eq!(engine.freeze(&I::Meta(pack)), Ok(frozen_types(vec![])));
 }
 
 #[test]

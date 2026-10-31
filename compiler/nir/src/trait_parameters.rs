@@ -183,15 +183,24 @@ impl Term {
     /// Refute value identity using only known scalar or record-shape differences.
     /// Unknown value leaves and Type relations cannot establish a mismatch.
     pub fn index_values_definitely_differ(&self, other: &Self, fuel: &mut usize) -> bool {
-        if crate::type_computations::charge_term(self, fuel).is_err()
-            || crate::type_computations::charge_term(other, fuel).is_err()
-        {
-            return false;
-        }
+        self.index_values_definitely_differ_budgeted(other, fuel)
+            .unwrap_or(false)
+    }
+
+    /// Distinguish an inconclusive comparison from exhausted work. Candidate
+    /// enumeration must propagate exhaustion instead of publishing a partial
+    /// search; callers seeking only positive refutation can use the wrapper.
+    pub fn index_values_definitely_differ_budgeted(
+        &self,
+        other: &Self,
+        fuel: &mut usize,
+    ) -> Result<bool, crate::type_computations::Error> {
+        crate::type_computations::charge_term(self, fuel)?;
+        crate::type_computations::charge_term(other, fuel)?;
         let mut pending = vec![(self, other)];
         while let Some((left, right)) = pending.pop() {
             let Some(remaining) = fuel.checked_sub(1) else {
-                return false;
+                return Err(crate::type_computations::Error::Budget);
             };
             *fuel = remaining;
             if left.sort() == Sort::Type || right.sort() == Sort::Type {
@@ -215,10 +224,10 @@ impl Term {
                     },
                 ) => {
                     if av != bv || a.len() != b.len() {
-                        return true;
+                        return Ok(true);
                     }
                     if a.len() > fuel.saturating_sub(pending.len()) {
-                        return false;
+                        return Err(crate::type_computations::Error::Budget);
                     }
                     pending.extend(a.iter().zip(b));
                 }
@@ -227,7 +236,7 @@ impl Term {
                     Self::OptionalValue { ty: b, value: bv },
                 ) => {
                     if av.is_some() != bv.is_some() {
-                        return true;
+                        return Ok(true);
                     }
                     if a == b {
                         if let (Some(a), Some(b)) = (av, bv) {
@@ -248,7 +257,7 @@ impl Term {
                     },
                 ) => {
                     if a.is_some() != b.is_some() {
-                        return true;
+                        return Ok(true);
                     }
                     // Distinct-looking labels may be equal by type evidence.
                     // Payload mismatches refute only an identical branch domain.
@@ -258,23 +267,23 @@ impl Term {
                 }
                 (Self::TupleValue(a), Self::TupleValue(b)) => {
                     if a.len() != b.len() {
-                        return true;
+                        return Ok(true);
                     }
                     if a.len() > fuel.saturating_sub(pending.len()) {
-                        return false;
+                        return Err(crate::type_computations::Error::Budget);
                     }
                     pending.extend(a.iter().zip(b));
                 }
                 (Self::RecordValue(a), Self::RecordValue(b)) => {
                     if a.len() != b.len() {
-                        return true;
+                        return Ok(true);
                     }
                     if a.len() > fuel.saturating_sub(pending.len()) {
-                        return false;
+                        return Err(crate::type_computations::Error::Budget);
                     }
                     for ((name, a), (other_name, b)) in a.iter().zip(b) {
                         if name != other_name {
-                            return true;
+                            return Ok(true);
                         }
                         pending.push((a, b));
                     }
@@ -282,19 +291,19 @@ impl Term {
                 (Self::RecordValue(_), value) | (value, Self::RecordValue(_))
                     if value.scalar_index_domain().is_some() =>
                 {
-                    return true;
+                    return Ok(true);
                 }
                 (a, b)
                     if a.scalar_index_domain().is_some() && b.scalar_index_domain().is_some() =>
                 {
                     if a != b {
-                        return true;
+                        return Ok(true);
                     }
                 }
                 _ => {}
             }
         }
-        false
+        Ok(false)
     }
 
     /// Intrinsic domain evidence for closed scalar interface indices. Equality

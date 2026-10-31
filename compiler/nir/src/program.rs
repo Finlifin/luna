@@ -4583,7 +4583,6 @@ impl Term {
                 | Term::NormalForm { arguments, .. }
                 | Term::Tuple(arguments)
                 | Term::ClosureContextValue(arguments)
-                | Term::TypeListValue(arguments)
                 | Term::TupleValue(arguments) => terms.extend(arguments),
                 Term::OptionalValue { ty, value } => {
                     terms.push(ty);

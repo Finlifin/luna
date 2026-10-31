@@ -225,7 +225,6 @@ fn charge(term: &Term, fuel: &mut usize, depth: usize) -> Result<(), Error> {
         | Term::NormalForm { arguments, .. }
         | Term::Tuple(arguments)
         | Term::ClosureContextValue(arguments)
-        | Term::TypeListValue(arguments)
         | Term::TupleValue(arguments) => terms(arguments, fuel, depth - 1),
         Term::AssociatedType {
             subject, arguments, ..
