@@ -119,14 +119,7 @@ pub(in crate::program) fn clone_member_with_inputs<'h>(
                     })?;
                 staged_parameters.push((rebind.id(parameter.hir_id), new));
             }
-            let mut parameter = parameter.clone();
-            parameter.hir_id = rebind.id(parameter.hir_id);
-            parameter.ty = rebind.ty(&parameter.ty, 0)?;
-            parameter.template_annotation = parameter
-                .template_annotation
-                .map(|expr| rebind.expr(expr, 0))
-                .transpose()?;
-            cloned_parameters.push(parameter);
+            cloned_parameters.push(rebind.parameter(parameter, 0)?);
         }
         let parameters = arena.alloc_fn_param_slice(cloned_parameters);
         let clause_constraints = rebind.constraints(clause_constraints)?;

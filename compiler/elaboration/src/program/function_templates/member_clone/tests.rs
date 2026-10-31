@@ -107,6 +107,123 @@ fn independent_members_preserve_receiver_links_and_publish() {
 }
 
 #[test]
+fn delivered_type_members_clone_and_reenter_destination_admission() {
+    use nir::{Primitive, Sort, Term};
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+    for ty in [
+        Term::Primitive(Primitive::Bool),
+        Term::Bound {
+            depth: 0,
+            index: 0,
+            sort: Sort::Type,
+        },
+        Term::Rigid {
+            declaration: nir::DeclarationId {
+                package: 73,
+                local: 90,
+            },
+            sort: Sort::Type,
+        },
+        Term::Nominal {
+            declaration: nir::DeclarationId {
+                package: 73,
+                local: 91,
+            },
+            arguments: vec![],
+        },
+    ] {
+        let arena = HirArena::new();
+        let (mut source, member) = fixture(&arena, false);
+        let delivered = Arc::new(ty.clone());
+        let annotation = arena.alloc_expr(Expr {
+            hir_id: HirId::new(member, ItemLocalId::new(10)),
+            span: DUMMY_SP,
+            kind: E::DeliveredType(delivered.clone()),
+        });
+        let mut item = source.item(member).unwrap().clone();
+        let ItemKind::Fn(signature, body_id) = &mut item.kind else {
+            unreachable!()
+        };
+        let mut parameter = signature.params[0].clone();
+        parameter.ty.kind = T::Positional(annotation);
+        parameter.template_annotation = Some(annotation);
+        signature.params = arena.alloc_fn_param_slice(vec![parameter]);
+        signature.return_ty = Some(annotation);
+        signature.modifiers.is_comptime = true;
+        let mut body = source.body(*body_id).unwrap().clone();
+        body.params = arena.alloc_param_slice(
+            signature
+                .params
+                .iter()
+                .map(hir::body::BodyParam::from_fn_param),
+        );
+        source.insert_body(*body_id, body);
+        source.insert_owner(
+            member,
+            OwnerInfo {
+                node: OwnerNode::Item(arena.alloc_item(item)),
+                nodes: OwnerNodes::new(),
+            },
+        );
+
+        let mut destination = Package::new();
+        destination.alloc_owner_id();
+        let mut batch = hir::definitions::DefinitionBatch::new(&mut destination);
+        let owner = batch.reserve().unwrap();
+        let draft =
+            clone_member(&source, &arena, member, owner, &HashMap::new(), &mut 1000).unwrap();
+        let ItemKind::Fn(signature, _) = &draft.item.kind else {
+            unreachable!()
+        };
+        let returned = signature.return_ty.unwrap();
+        assert_ne!(returned.hir_id, annotation.hir_id);
+        let E::DeliveredType(cloned) = &returned.kind else {
+            unreachable!()
+        };
+        assert!(Arc::ptr_eq(cloned, &delivered));
+        batch
+            .define(
+                OwnerInfo {
+                    node: OwnerNode::Item(arena.alloc_item(draft.item)),
+                    nodes: draft.nodes,
+                },
+                None,
+                None,
+            )
+            .unwrap();
+        for (id, body) in draft.bodies {
+            batch.body(id, body).unwrap();
+        }
+        let result = crate::definitions::publish(
+            &mut batch,
+            &mut 1000,
+            &BTreeMap::from([(0, 73)]),
+            &crate::program::Protocols::default(),
+            None,
+        );
+        if ty == Term::Primitive(Primitive::Bool) {
+            let (_, program) = result.unwrap();
+            let function = &program.functions[0];
+            let mut vm =
+                comptime_interpretor::Interpreter::for_comptime(&program, Default::default())
+                    .unwrap();
+            assert_eq!(
+                vm.invoke(
+                    function.declaration,
+                    vec![comptime_interpretor::Value::Bool(true)]
+                )
+                .unwrap(),
+                comptime_interpretor::Value::Bool(true)
+            );
+        } else {
+            assert!(result.is_err(), "unadmitted delivered type escaped: {ty}");
+            assert!(batch.published().owners().next().is_none());
+        }
+    }
+}
+
+#[test]
 fn rejects_captures_occupied_owners_and_recovers_after_budget_exhaustion() {
     let arena = HirArena::new();
     let (source, member) = fixture(&arena, true);
@@ -298,6 +415,53 @@ fn generic_fixture<'h>(arena: &'h HirArena) -> (Package<'h>, OwnerId, DefId, Def
         },
     );
     (source, member, first, second)
+}
+
+#[test]
+fn strategy_input_annotations_rebind_with_their_domains() {
+    let arena = HirArena::new();
+    let (source, member, first, _) = generic_fixture(&arena);
+    let ItemKind::Fn(signature, _) = &source.item(member).unwrap().kind else {
+        panic!()
+    };
+    let annotation = signature.params[0].template_annotation.unwrap();
+    let mut parameter = signature.params[0].clone();
+    parameter.ty.kind = T::Positional(annotation);
+    let owner = OwnerId::new(hir::LocalDefId::new(99));
+    let fresh_type = DefId::new(0, 80);
+    let staged_input = DefId::new(0, 81);
+    let draft = super::super::generation_inputs::execution_draft(
+        &source,
+        &arena,
+        owner,
+        member,
+        annotation,
+        &[parameter.clone()],
+        &[],
+        &HashMap::from([(parameter.hir_id, staged_input)]),
+        &[],
+        &[],
+        &BTreeSet::from([0]),
+        &HashMap::from([(first, fresh_type)]),
+        DUMMY_SP,
+        &mut 1000,
+    )
+    .unwrap();
+    let ItemKind::Fn(signature, _) = &draft.item.kind else {
+        panic!()
+    };
+    let cloned = &signature.params[0];
+    let T::Positional(domain) = &cloned.ty.kind else {
+        panic!()
+    };
+    for expression in [*domain, cloned.template_annotation.unwrap()] {
+        assert_ne!(expression.hir_id, annotation.hir_id);
+        assert!(matches!(expression.kind, E::ResolvedClauseParam(_, id) if id == fresh_type));
+    }
+    assert_ne!(cloned.hir_id, parameter.hir_id);
+    assert_eq!(draft.staged_parameters, vec![(cloned.hir_id, staged_input)]);
+    let body = &draft.bodies.last().unwrap().1;
+    assert_eq!(body.params[0].hir_id, cloned.hir_id);
 }
 
 #[test]

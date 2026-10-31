@@ -149,7 +149,7 @@ pub(super) fn expand<'h>(source: &Package<'h>, arena: &'h HirArena) -> Result<Pa
             .zip(parameters)
             .enumerate()
             .map(|(index, (p, input))| {
-                let mut p = p.clone();
+                let mut p = rebind.parameter(p, 0)?;
                 if let Some(explicit) = explicit_parameters {
                     let explicit = &explicit[index];
                     if explicit.ty.flags != p.ty.flags {
@@ -162,7 +162,6 @@ pub(super) fn expand<'h>(source: &Package<'h>, arena: &'h HirArena) -> Result<Pa
                 }
                 p.hir_id = input.binding;
                 p.name = input.name;
-                p.ty = rebind.ty(&p.ty, 0)?;
                 Ok(p)
             })
             .collect::<Result<Vec<_>, Error>>()?;
@@ -314,6 +313,21 @@ impl<'h> Rebind<'_, 'h> {
         );
         *self.bindings.entry(id).or_insert(next)
     }
+    fn parameter(
+        &mut self,
+        parameter: &hir::common::FnParam<'h>,
+        depth: usize,
+    ) -> Result<hir::common::FnParam<'h>, Error> {
+        let mut parameter = parameter.clone();
+        parameter.hir_id = self.id(parameter.hir_id);
+        parameter.ty = self.ty(&parameter.ty, depth)?;
+        parameter.template_annotation = parameter
+            .template_annotation
+            .map(|annotation| self.expr(annotation, depth))
+            .transpose()?;
+        Ok(parameter)
+    }
+
     fn ty(&mut self, ty: &TyParam<'h>, depth: usize) -> Result<TyParam<'h>, Error> {
         self.charge(ty.span, depth)?;
         let depth = depth + 1;
@@ -404,6 +418,10 @@ impl<'h> Rebind<'_, 'h> {
             }
         }
         let kind = match &expr.kind {
+            // These are completed Type values, not source binders. Preserve
+            // semantic identities and let ordinary destination admission check
+            // closure, formation contracts and declaration availability again.
+            E::DeliveredType(ty) => E::DeliveredType(ty.clone()),
             E::ResolvedClauseParam(name, id) => E::ResolvedClauseParam(
                 *name,
                 self.definitions.get(id).copied().ok_or_else(|| {

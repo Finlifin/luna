@@ -726,3 +726,29 @@ Validation from `/home/fin/luna`:
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test test_templates`: 87 passed (`/tmp/luna-tools-wzipvxvu/result.json`). New cases execute IIR, check import/use-site lookup and reject incompatible domains, phase changes, contract violations and opaque-head unfolding.
 - After adding generic annotation cloning assertions, `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib function_templates::member_clone`: 9 passed (`/tmp/luna-tools-gpmqyt_1/result.json`).
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: passed (`/tmp/luna-tools-7ol9z41h/result.json`); `git diff --check` passed.
+
+
+## Generated members retain delivered Types and parameter annotations
+
+Member cloning now accepts HIR `DeliveredType` and shares the completed Type
+value without rewriting nominal or normal-form declaration identities. The cloned
+HIR expression gets a fresh syntax identity. Destination elaboration still checks
+scope, formation contracts and declaration availability; cloning does not grant
+admission into a different declaration world.
+
+Signature template expansion, generated member cloning and strategy execution
+inputs now use one parameter rebind operation. It maps the parameter domain and
+its template annotation together. Explicit instance annotations remain in the
+instance lexical environment. This fixes strategy inputs retaining references to
+source clause identities in their annotations.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib --tests`: 325 passed (`/tmp/luna-tools-_jc2li7t/result.json`). New tests execute a cloned generated function, reject free/foreign Type descriptions during destination publication, and check strategy annotation, domain and staged-input identities.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: passed (`/tmp/luna-tools-bbwoilzf/result.json`).
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test test_templates`: 87 passed (`/tmp/luna-tools-ly04wsge/result.json`).
+- `git diff --check`: passed.
+
+This removes a cloning-path restriction; it does not complete shared CMTT template
+bodies, quoted-arm assembly or unrestricted definition-builder coverage.

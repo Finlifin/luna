@@ -78,9 +78,7 @@ pub(in crate::program) fn execution_draft<'h>(
         let mut staged_parameters = Vec::new();
         for (index, parameter) in parameters.iter().enumerate() {
             rebind.charge(parameter.span, 0)?;
-            let mut cloned = parameter.clone();
-            cloned.hir_id = rebind.id(parameter.hir_id);
-            cloned.ty = rebind.ty(&parameter.ty, 0)?;
+            let mut cloned = rebind.parameter(parameter, 0)?;
             cloned.ty.flags |= hir::common::TPARAM_COMPTIME;
             let identity = input_stages
                 .get(&parameter.hir_id)
