@@ -466,3 +466,41 @@ elaboration 组 446 项通过，以下 5 项失败于诊断文本期望。临时
 所属对象，`ar p` 提取对象后用 `objdump -d -j .text.<符号>` 读取函数入口；
 无需运行 ptrace。对整个 rlib 的可选反汇编耗时过长，已中止并改为精确读取
 该函数 section；没有把被中止的观察当作编译或测试成功。
+
+## Pattern checking module boundary
+
+The source pattern checker now lives in `program/pattern_checking`:
+
+- `mod.rs` checks HIR pattern forms and installs candidate-local bindings.
+- `matches.rs` coordinates match expressions, contextual inputs, arm guards,
+  inline selection and restoration of the caller's candidate state.
+- `evidence.rs` owns guard evidence, binding identities and finite boolean
+  coverage. Its existing finite-model tests moved with it into `evidence/tests.rs`.
+
+The same live Checker owns inference, substitutions, locals and budgets. No
+candidate state is frozen or cached, no PTC responsibility changes, and program
+verification still checks resource delivery independently. Existing sibling
+consumers access only program-scoped Rust interfaces. Pattern guard internals
+remain private where no sibling needs them.
+
+Before formatting, extracted function bodies were checked byte-for-byte against
+the original after removing only the new Rust visibility qualifiers. The parent
+file shrank from 10,452 to 8,690 lines. This is a navigation and ownership-boundary
+refactor, not a claim about build time or execution throughput. In particular,
+borrowed reconstruction of Clone-only optional/error payloads is still missing;
+this change does not relax Copy or introduce new reference-pattern semantics.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib program::pattern_checking::evidence::tests`:
+  three finite-model/evidence tests passed, exit 0;
+  `/tmp/luna-tools-g7yrdhih/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test normal_patterns --test error_surface --test list_patterns --test negated_nominal_patterns --test pure_bitvec --test comptime_bytecode_patterns --no-fail-fast`:
+  275 tests passed, exit 0; `/tmp/luna-tools-bmxphsb7/result.json`.
+- `python3 -B development/library_check.py --stage sysroot-patterns --stage sysroot-meta-patterns --timeout 300`:
+  both stages passed, six native tests total, exit 0;
+  `/tmp/luna-library-phx2ff71/summary.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-bbaxe5sj/result.json`; `git diff --check` passed.
+
+No full language suite or performance benchmark was run for this refactor.
