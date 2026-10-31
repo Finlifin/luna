@@ -236,3 +236,40 @@ Validation in `/home/fin/luna`:
   13 runner tests passed, exit 0.
 - `git diff --check` passed. No Rust code changed and no full language suite
   was run. The previously recorded multi-label Copy limitation is unchanged.
+
+## Nested pattern guards as program predicates
+
+Boolean pattern selection now composes a nested effect-free guard with its
+structural selection condition. Previously an error payload guard such as
+`assumes input matches (error Low.value(value) if value < 255)` was admitted
+but lost its bound before later arithmetic, unlike the equivalent match body.
+The same mechanism applies to optional payloads and tuple fields.
+
+Guard bindings are established in a forked successful pattern candidate.
+The guard condition is translated back to existing input observations before
+combining it with the structural selector; candidate locals and candidate-only
+facts are not installed in the caller state. Unsupported or effectful guards
+retain the conservative path. PTC is not involved.
+
+Regression checks pair `< 255` acceptance with `<= 255` rejection, then check
+negated selection, an unbounded alternative, and replacement after observation.
+Predicate admission still rejects calls in both nested guards and match bodies.
+The initial focused regression failed with the missing arithmetic-range proof
+(`/tmp/luna-tools-a4y76b4k/result.json`), before this implementation change.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p program_verification --no-fail-fast`:
+  105 passed, exit 0; `/tmp/luna-tools-le7u393d/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test error_result_flow --test integer_contracts --test arithmetic_contexts --no-fail-fast`:
+  14 + 18 + 10 passed, exit 0; `/tmp/luna-tools-i_ubauvm/result.json`.
+- Final `error_result_flow` rerun after adding prior-field-binding compatibility:
+  15 passed, exit 0; `/tmp/luna-tools-lfnupjwu/result.json`.
+- `python3 -B development/library_check.py --stage sysroot-fallible-iteration --timeout 300`:
+  13 native tests passed, exit 0; `/tmp/luna-library-zoc9juk3/summary.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-fd91da5d/result.json`; `git diff --check` passed.
+
+No full language suite was run. The prior-field-binding test checks that ordinary
+matching remains valid; it does not claim complete relational predicate export
+for arbitrary cross-field guards. Multi-label Copy inference is unaffected.

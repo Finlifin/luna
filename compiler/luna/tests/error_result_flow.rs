@@ -226,17 +226,22 @@ fn product_transport_retires_stale_source_observations() {
 
 #[test]
 fn error_predicate_admission_still_rejects_calls_in_payload_guards() {
-    let error = compile_with_protocols(
-        "typealias Byte = .u8'builtin;
-        enum Low {value(Byte)}
-        fn inspect_byte(value:Byte)->bool {true}
-        fn run(input:!Low bool) {
-            assumes input match {error Low.value(value) => inspect_byte(value), _ => false};
-        }",
-        &Default::default(),
-    )
-    .unwrap_err();
-    assert!(error.contains("effect-free program predicate"), "{error}");
+    for predicate in [
+        "input match {error Low.value(value) => inspect_byte(value), _ => false}",
+        "input matches (error Low.value(value) if inspect_byte(value))",
+    ] {
+        let error = compile_with_protocols(
+            &format!(
+                "typealias Byte = .u8'builtin;
+                enum Low {{value(Byte)}}
+                fn inspect_byte(value:Byte)->bool {{true}}
+                fn run(input:!Low bool) {{assumes {predicate};}}"
+            ),
+            &Default::default(),
+        )
+        .unwrap_err();
+        assert!(error.contains("effect-free program predicate"), "{error}");
+    }
 }
 
 #[test]
@@ -270,4 +275,88 @@ fn anonymous_record_transport_preserves_error_payloads() {
             assert!(error.contains("range"), "{error}");
         }
     }
+}
+
+#[test]
+fn nested_error_pattern_guards_export_only_checked_payload_conditions() {
+    for relation in ["<", "<="] {
+        let source = format!(
+            "typealias Byte = .u8'builtin;
+            enum Low {{value(Byte)}}
+            fn run(input:!Low bool)->Byte {{
+                assumes input matches (error Low.value(value) if value {relation} 255);
+                input match {{_! => 0, error Low.value(value) => value + 1}}
+            }}"
+        );
+        let result = compile_with_protocols(&source, &Default::default());
+        if relation == "<" {
+            result.unwrap();
+        } else {
+            let error = result.unwrap_err();
+            assert!(error.contains("range"), "{error}");
+        }
+    }
+}
+
+#[test]
+fn nested_guard_conditions_do_not_leak_from_failed_or_stale_candidates() {
+    for assumption in [
+        "assumes not (input matches (error Low.value(value) if value < 255));",
+        "assumes input matches (error Low.value(value) if value < 255); input = error Low.value(255);",
+        "assumes input matches ((error Low.value(value) if value < 255) or error Low.value(value));",
+    ] {
+        let source = format!(
+            "typealias Byte = .u8'builtin;
+            enum Low {{value(Byte)}}
+            fn run(original:!Low bool)->Byte {{
+                var input = original;
+                {assumption}
+                input match {{_! => 0, error Low.value(value) => value + 1}}
+            }}"
+        );
+        let error = compile_with_protocols(&source, &Default::default()).unwrap_err();
+        assert!(error.contains("range"), "{error}");
+    }
+}
+
+#[test]
+fn structural_nested_guards_preserve_optional_and_tuple_payload_bounds() {
+    for (ty, pattern, output) in [
+        (
+            "?Byte",
+            "(value if value < 255)?",
+            "input match {value? => value + 1, null => 0}",
+        ),
+        (
+            "Tuple<Byte>",
+            "(value if value < 255,)",
+            "{let (value,) = input; value + 1}",
+        ),
+    ] {
+        let source = format!(
+            "typealias Byte = .u8'builtin;
+            fn run(input:{ty})->Byte {{
+                assumes input matches {pattern};
+                {output}
+            }}"
+        );
+        support::compile_with_tuple_protocols(&source, &Default::default()).unwrap();
+        let error = support::compile_with_tuple_protocols(
+            &source.replace("< 255", "<= 255"),
+            &Default::default(),
+        )
+        .unwrap_err();
+        assert!(error.contains("range"), "{error}");
+    }
+}
+
+#[test]
+fn nested_guard_with_prior_field_binding_keeps_ordinary_match_valid() {
+    support::compile_with_tuple(
+        "typealias Byte = .u8'builtin;
+        fn run(input:Tuple<Byte,Byte>)->bool {
+            let result = input matches (first, (second if first == second));
+            result
+        }",
+    );
 }

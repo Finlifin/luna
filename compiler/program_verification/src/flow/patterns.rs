@@ -177,6 +177,31 @@ impl Walker<'_> {
                 }
                 return Ok(Some(selected));
             }
+            Pattern::Guard { pattern, condition } => {
+                if !nir::program::checkable_predicate(condition) {
+                    return Ok(None);
+                }
+                let Some(selected) =
+                    self.pattern_selection_condition(pattern, value, ty, state, depth + 1)?
+                else {
+                    return Ok(None);
+                };
+                // Bind guard inputs in an isolated successful candidate. Export
+                // only relations to the original observations, never its locals
+                // or facts assumed solely by taking this candidate.
+                let existing = state.domains.keys().copied().collect();
+                let candidate = state.fork(self.limits)?;
+                let (mut candidate, _) = self.pattern(pattern, value, ty, candidate, depth + 1)?;
+                if !candidate.facts.is_reachable() {
+                    return Ok(Some(Condition::Bool(false)));
+                }
+                let Some(guard) = self.child(condition, &mut candidate, depth + 1)?.condition
+                else {
+                    return Ok(None);
+                };
+                let guard = self.scoped_condition(&guard, &candidate, &existing)?;
+                return Ok(Some(conjunction(selected, guard)));
+            }
             Pattern::Literal(literal) => return self.literal_condition(value, literal, state),
             Pattern::Tuple(patterns) => {
                 let Some(types) = self.tuple_field_types(ty)? else {
