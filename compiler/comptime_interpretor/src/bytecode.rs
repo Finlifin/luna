@@ -577,6 +577,20 @@ impl CodeCache {
             return false;
         }
         if self.weight + weight > LIMIT {
+            // Owned bodies are held weakly. Reclaim dead invocation fragments
+            // before discarding reusable declaration code or live closure bodies.
+            // Scan only under pressure, not on every insertion or cache hit.
+            let retained_weight = &mut self.weight;
+            self.owned.retain(|_, entry| {
+                if entry.body.strong_count() == 0 {
+                    *retained_weight -= Self::program_weight(&entry.program);
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        if self.weight + weight > LIMIT {
             self.entries.clear();
             self.owned.clear();
             self.weight = 0;
@@ -3814,6 +3828,57 @@ mod tests {
         cache.insert(first, None);
         assert!(cache.entries.contains_key(&first));
         assert_eq!(cache.weight, 2);
+    }
+
+    #[test]
+    fn cache_pressure_reclaims_expired_bodies_before_live_code() {
+        let mut cache = CodeCache::default();
+        let body = || {
+            Arc::new(Expr {
+                source: SourceRange { start: 1, end: 2 },
+                ty: Term::Primitive(Primitive::Void),
+                kind: K::Unit,
+            })
+        };
+        let live = body();
+        let code = Arc::new(comptime_compiler::compile(&live, &mut 1000).unwrap());
+        let live_weight = CodeCache::program_weight(&Some(code.clone()));
+        cache.insert_owned(&live, Some(code.clone()));
+        let expired = body();
+        let expired_key = Arc::as_ptr(&expired) as usize;
+        cache.insert_owned(&expired, None);
+        drop(expired);
+        let named_count = (100_000 - live_weight - 1) as u32;
+        for local in 0..named_count {
+            cache.insert(DeclarationId { package: 1, local }, None);
+        }
+        assert_eq!(cache.weight, 100_000);
+        let first = DeclarationId {
+            package: 1,
+            local: 0,
+        };
+        let added = DeclarationId {
+            package: 1,
+            local: named_count,
+        };
+        cache.insert(added, None);
+        assert!(cache.entries.contains_key(&first));
+        assert!(cache.entries.contains_key(&added));
+        assert!(
+            matches!(cache.owned(&live), Some(Some(retained)) if Arc::ptr_eq(&retained, &code))
+        );
+        assert!(!cache.owned.contains_key(&expired_key));
+        assert_eq!(cache.weight, 100_000);
+        // With no dead entries left, the established bounded eviction policy applies.
+        cache.insert(
+            DeclarationId {
+                package: 1,
+                local: named_count + 1,
+            },
+            None,
+        );
+        assert_eq!(cache.weight, 1);
+        assert!(!cache.entries.contains_key(&first));
     }
 
     #[test]

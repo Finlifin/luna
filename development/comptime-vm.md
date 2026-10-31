@@ -9343,3 +9343,35 @@ Validation in `/home/fin/luna`:
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
   passed after formatting the fixture imports;
   `/tmp/luna-tools-awsmka8a/result.json`, exit 0.
+
+
+## Reclaim expired owned code before evicting live cache entries
+
+CodeCache holds owned expression identities weakly. Previously an expired body
+was reclaimed only if lookup revisited that exact allocation address; otherwise
+its code/unsupported marker occupied retention weight until pressure cleared the
+whole cache. reserve now removes expired owned entries first when the next entry
+would exceed the limit. If that recovers enough weight, live closure code and
+named declaration entries survive. With no sufficient dead entries, the existing
+bounded full-eviction policy still applies. Normal hits and inserts below the
+limit do not scan the table. No invocation values or captured environments are
+cached, and result memoization policy is unchanged.
+
+The pressure regression reproduced loss of a live declaration entry before the
+fix. Its final version also checks Arc identity of retained compiled closure
+code, exact weight after reclaiming an unsupported marker, and eventual eviction
+when all remaining entries are live. This is cache lifecycle evidence, not a
+wall-clock speedup claim or a completed bytecode migration.
+
+Validation in `/home/fin/luna`:
+
+- Baseline pressure regression: `/tmp/luna-tools-1q60chco/result.json`, exit 101.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  365 passed; `/tmp/luna-tools-mc48idvd/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib cache_pressure_reclaims`:
+  passed with the compiled-body retention assertions;
+  `/tmp/luna-tools-2bxl8mu0/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_closures --test comptime_iir_bytecode`:
+  passed; `/tmp/luna-tools-h6icod6k/result.json`, exit 0.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed; `/tmp/luna-tools-_xpm9ti1/result.json`, exit 0.
