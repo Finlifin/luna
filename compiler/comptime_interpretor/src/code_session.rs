@@ -69,6 +69,10 @@ impl<'program> Interpreter<'program> {
         budget.steps = vm.remaining_steps();
         session.indexes.get_or_insert_with(|| {
             Arc::new(declaration_index::SourceIndexes {
+                method_parameters: vm.method_parameters.clone(),
+                method_origins: vm.method_origins.clone(),
+                parameter_domains: vm.declaration_parameter_domains.clone(),
+                parameter_sorts: vm.declaration_parameter_sorts.clone(),
                 functions: vm.functions.positions.clone(),
                 runtime_identities: vm.runtime_function_identities.positions.clone(),
                 effects: vm.effect_declarations.positions.clone(),
@@ -104,6 +108,10 @@ mod tests {
             package: 1,
             local: 2,
         };
+        let parameter = DeclarationId {
+            package: 1,
+            local: 4,
+        };
         let effect = DeclarationId {
             package: 1,
             local: 3,
@@ -115,8 +123,13 @@ mod tests {
         let source = Arc::new(Package {
             runtime_function_identities: vec![nir::program::RuntimeFunctionIdentity {
                 declaration: identity,
-                type_parameters: vec![],
+                type_parameters: vec![parameter],
                 signature: signature.clone(),
+            }],
+            function_parameters: vec![nir::function_parameters::Declaration {
+                declaration: identity,
+                parameters: vec![parameter],
+                domains: vec![Term::Primitive(Primitive::Bool)],
             }],
             effects: vec![nir::effects::Declaration {
                 declaration: effect,
@@ -139,6 +152,8 @@ mod tests {
         let index = first.functions.positions.clone();
         let identities = first.runtime_function_identities.positions.clone();
         let effects = first.effect_declarations.positions.clone();
+        let domains = first.declaration_parameter_domains.clone();
+        let sorts = first.declaration_parameter_sorts.clone();
         first.events.push(Event::EnterFunction(DeclarationId {
             package: 1,
             local: 1,
@@ -152,6 +167,8 @@ mod tests {
             &next.runtime_function_identities.positions
         ));
         assert!(Arc::ptr_eq(&effects, &next.effect_declarations.positions));
+        assert!(Arc::ptr_eq(&domains, &next.declaration_parameter_domains));
+        assert!(Arc::ptr_eq(&sorts, &next.declaration_parameter_sorts));
         assert!(next.events().is_empty());
         assert!(next.effect_state.environment.is_empty());
         assert!(std::ptr::eq(
@@ -162,7 +179,25 @@ mod tests {
             next.effect_declarations.get(&effect).unwrap(),
             &source.effects[0]
         ));
-        assert_eq!(budget.steps, next_budget.steps);
+        assert!(next_budget.steps > budget.steps);
+        assert_eq!(
+            next.declaration_parameter_domains.get(&parameter),
+            Some(&Term::Primitive(Primitive::Bool))
+        );
+        assert_eq!(
+            next.declaration_parameter_sorts.get(&parameter),
+            Some(&nir::Sort::ComptimeValue)
+        );
+        let mut changed = source.as_ref().clone();
+        changed.function_parameters[0].domains[0] = Term::Primitive(Primitive::Char);
+        let other =
+            Interpreter::for_comptime_in_session(&changed, &mut session, &mut Budget::default())
+                .unwrap();
+        assert_eq!(
+            other.declaration_parameter_domains.get(&parameter),
+            Some(&Term::Primitive(Primitive::Char))
+        );
+        assert!(!Arc::ptr_eq(&domains, &other.declaration_parameter_domains));
         let mut exhausted = Budget {
             steps: 0,
             depth: 128,

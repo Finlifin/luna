@@ -180,11 +180,11 @@ impl<'a> Interpreter<'a> {
             enum_builder: None,
             type_solver: None,
             pointer_copy: None,
-            declaration_parameter_sorts: BTreeMap::new(),
-            declaration_parameter_domains: BTreeMap::new(),
-            method_parameters: HashMap::new(),
+            declaration_parameter_sorts: Default::default(),
+            declaration_parameter_domains: Default::default(),
+            method_parameters: Default::default(),
             method_contracts: HashMap::new(),
-            method_origins: HashMap::new(),
+            method_origins: Default::default(),
             assumed_interfaces: HashSet::new(),
             implemented_interfaces: graph
                 .dispatch

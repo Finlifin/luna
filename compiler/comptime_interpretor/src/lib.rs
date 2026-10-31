@@ -810,11 +810,11 @@ pub struct Interpreter<'a> {
     abstract_value_parameters: BTreeMap<DeclarationId, Term>,
     type_solver: Option<TypeSolver<'a>>,
     pointer_copy: Option<PointerCopyPermission<'a>>,
-    declaration_parameter_sorts: BTreeMap<DeclarationId, nir::Sort>,
-    declaration_parameter_domains: BTreeMap<DeclarationId, Term>,
-    method_parameters: HashMap<(DeclarationId, DeclarationId), Vec<LocalId>>,
+    declaration_parameter_sorts: Arc<BTreeMap<DeclarationId, nir::Sort>>,
+    declaration_parameter_domains: Arc<BTreeMap<DeclarationId, Term>>,
+    method_parameters: Arc<HashMap<(DeclarationId, DeclarationId), Vec<LocalId>>>,
     // None records an ambiguous member identity across different interfaces.
-    method_origins: HashMap<DeclarationId, Option<DeclarationId>>,
+    method_origins: Arc<HashMap<DeclarationId, Option<DeclarationId>>>,
     method_contracts: HashMap<
         (DeclarationId, DeclarationId),
         (
@@ -1024,22 +1024,34 @@ impl<'a> Interpreter<'a> {
             .collect();
         let mut premise_fuel = budget.steps;
         let mut trait_parameter_fuel = usize::try_from(budget.steps).unwrap_or(usize::MAX);
-        let declaration_parameter_domains = package
-            .declaration_parameter_domains(&mut trait_parameter_fuel)
-            .map_err(|_| invalid())?;
-        let declaration_parameter_sorts: BTreeMap<_, _> = declaration_parameter_domains
-            .iter()
-            .map(|(id, domain)| {
+        let (declaration_parameter_domains, declaration_parameter_sorts) =
+            if let Some(index) = &positions {
                 (
-                    *id,
-                    if *domain == Term::Primitive(Primitive::Type) {
-                        nir::Sort::Type
-                    } else {
-                        nir::Sort::ComptimeValue
-                    },
+                    index.parameter_domains.clone(),
+                    index.parameter_sorts.clone(),
                 )
-            })
-            .collect();
+            } else {
+                let declaration_parameter_domains = package
+                    .declaration_parameter_domains(&mut trait_parameter_fuel)
+                    .map_err(|_| invalid())?;
+                let declaration_parameter_sorts: BTreeMap<_, _> = declaration_parameter_domains
+                    .iter()
+                    .map(|(id, domain)| {
+                        (
+                            *id,
+                            if *domain == Term::Primitive(Primitive::Type) {
+                                nir::Sort::Type
+                            } else {
+                                nir::Sort::ComptimeValue
+                            },
+                        )
+                    })
+                    .collect();
+                (
+                    Arc::new(declaration_parameter_domains),
+                    Arc::new(declaration_parameter_sorts),
+                )
+            };
         let input_binders = |parameters: &[DeclarationId]| {
             parameters
                 .iter()
@@ -1646,15 +1658,20 @@ impl<'a> Interpreter<'a> {
                 }
             }
         }
-        let method_parameters = package
-            .traits
-            .iter()
-            .flat_map(|t| {
-                t.methods
-                    .iter()
-                    .map(move |m| ((t.declaration, m.declaration), m.parameter_bindings.clone()))
-            })
-            .collect();
+        let method_parameters = if let Some(index) = &positions {
+            index.method_parameters.clone()
+        } else {
+            let method_parameters: HashMap<_, _> = package
+                .traits
+                .iter()
+                .flat_map(|t| {
+                    t.methods.iter().map(move |m| {
+                        ((t.declaration, m.declaration), m.parameter_bindings.clone())
+                    })
+                })
+                .collect();
+            Arc::new(method_parameters)
+        };
         let mut method_contracts = HashMap::new();
         let mut method_origins = HashMap::new();
         for contract in &package.traits {
@@ -1662,10 +1679,12 @@ impl<'a> Interpreter<'a> {
                 .binders_with_self(&mut trait_parameter_fuel)
                 .map_err(|_| invalid())?;
             for member in &contract.methods {
-                method_origins
-                    .entry(member.declaration)
-                    .and_modify(|origin| *origin = None)
-                    .or_insert(Some(contract.declaration));
+                if positions.is_none() {
+                    method_origins
+                        .entry(member.declaration)
+                        .and_modify(|origin| *origin = None)
+                        .or_insert(Some(contract.declaration));
+                }
                 let mut binders = parameters.clone();
                 binders.extend(input_binders(&member.type_parameters));
                 method_contracts.insert(
@@ -1674,6 +1693,10 @@ impl<'a> Interpreter<'a> {
                 );
             }
         }
+        let method_origins = positions
+            .as_ref()
+            .map(|index| index.method_origins.clone())
+            .unwrap_or_else(|| Arc::new(method_origins));
         let remaining_steps = premise_fuel
             .checked_sub(budget.steps.saturating_sub(trait_parameter_fuel as u64))
             .ok_or(Error {
@@ -7439,9 +7462,8 @@ mod normal_input_data_tests {
             sort: nir::Sort::Type,
             arguments: vec![Term::Primitive(Primitive::Type)],
         };
-        vm.declaration_parameter_domains
-            .insert(parameter, domain.clone());
-        vm.declaration_parameter_sorts
+        Arc::make_mut(&mut vm.declaration_parameter_domains).insert(parameter, domain.clone());
+        Arc::make_mut(&mut vm.declaration_parameter_sorts)
             .insert(parameter, nir::Sort::ComptimeValue);
         let nominal = |fields| Term::NominalValue {
             ty: Box::new(domain.clone()),

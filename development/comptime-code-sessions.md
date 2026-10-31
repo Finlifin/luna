@@ -47,7 +47,7 @@ The checks passed: 38 runtime identity tests and 18 driver memory tests
 
 ## Remaining work
 
-Trait and layout tables are still rebuilt; source function, runtime-identity
+Trait evidence and layout tables are still rebuilt; source function, runtime-identity
 and effect declaration indexes are shared.
 This is not yet a
 shared VM world, persistent disk cache, or a suspended elaboration session.
@@ -199,3 +199,37 @@ a body-free runtime identity and must still receive `PhaseMismatch`.
 This stage passed the code-session unit check and all four integration groups
 (71 tests total). Evidence: `/tmp/luna-tools-7d3tc8kq/result.json` and
 `/tmp/luna-tools-3b8d28x6/result.json`. Formatting and diff checks passed.
+
+## Declaration parameter and method metadata
+
+The immutable source bundle also retains declaration parameter domains and
+sorts, method parameter bindings, and method-origin ambiguity information.
+These owned maps are shared through `Arc`. They contain source declaration
+metadata, not active inference variables, invocation values or proof outcomes.
+
+Domain collection and validation run on the first successful source-world
+construction. Subsequent construction for the exact same immutable Package can
+reuse that completed result, avoiding repeated recursive Term copies and their
+associated work charges. A changed Package obtains its own domains. The source
+world's ordinary traversal reservation and remaining formation checks still run.
+The nonempty domain regression confirms a bool domain remains ComptimeValue,
+a changed snapshot can use char instead, and warm construction saves fuel.
+
+Method bindings and origin ambiguity depend only on the source traits. Selected
+implementations, caller assumptions, associated values and instantiated method
+contracts remain VM-local and are rebuilt/checked as before. Runtime method
+interface bindings remain distinct from implementation-body parameter names.
+
+Verification commands:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib code_session
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor -p luna --test runtime_function_identities --test instance_budget --test comptime_memory --test comptime_clause_inputs --test comptime_bytecode_traits --test trait_phases
+python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_traits
+```
+
+All groups passed (189 distinct tests). The final method test additionally runs
+default parameters, named overrides, stored methods and generic trait calls
+across fresh VMs in a shared session. Evidence:
+`/tmp/luna-tools-4int1nsu/result.json`, `/tmp/luna-tools-2_19jpbf/result.json`,
+and `/tmp/luna-tools-wtabqcrk/result.json`. Formatting and diff checks passed.

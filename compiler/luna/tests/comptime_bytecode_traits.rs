@@ -46,6 +46,26 @@ fn interface_defaults_use_declaration_bindings_and_method_values_compile() {
             );
         }
     }
+    let package = std::sync::Arc::new(package);
+    let mut session = comptime_interpretor::CodeSession::new(package.clone());
+    for _ in 0..2 {
+        let mut vm =
+            Interpreter::for_comptime_in_session(&package, &mut session, &mut Budget::default())
+                .unwrap();
+        for (name, expected) in [
+            ("direct", false),
+            ("overridden", true),
+            ("stored", true),
+            ("specialized", true),
+        ] {
+            let value = vm
+                .with_code_session(&mut session, |vm| {
+                    vm.invoke(support::id(&package, name), vec![])
+                })
+                .unwrap();
+            assert_eq!(value, Value::Bool(expected), "session call {name}");
+        }
+    }
 }
 
 #[test]
