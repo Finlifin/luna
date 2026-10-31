@@ -9625,3 +9625,34 @@ Validation in `/home/fin/luna`:
   79 passed; `/tmp/luna-tools-3p57b6a1/result.json`, exit 0.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
   passed; `/tmp/luna-tools-cij6cbuz/result.json`, exit 0.
+
+
+## Index retained generic instance code by declaration and inputs
+
+The CodeSession prepared-instance cache now uses declaration buckets and
+content-keyed shared input frames, replacing the linear retained-entry scan.
+Lookup borrows the current input slice. The caller supplies the structural work
+computed by its already bounded input preflight; lookup charges that work before
+hashing/comparing inputs in an existing declaration bucket. Unrelated declarations
+and other specializations no longer require a linear charged scan.
+
+The existing 64-entry and 100000-weight retention policy remains. Replacement
+removes the old count and weight before checking pressure; an oversized insertion
+leaves existing entries intact. All cache keys remain structural, session scope
+still requires the exact immutable source world, and current invocation contracts
+are checked independently of cache reuse. This is a prepared-code cache, not a
+result cache. Type-only result memoization remains unchanged.
+
+Tests exercise borrowed lookup, 64 declaration buckets, 64 specializations of
+one declaration, differing inputs, replacement accounting, oversized refusal,
+retention pressure and budget exhaustion followed by successful retry. Hashing
+still costs input work; no wall-clock timing claim is made.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  367 passed; `/tmp/luna-tools-hg75ri_2/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test scoped_comptime_callables --test comptime_staged_values --test comptime_iir_bytecode`:
+  19 passed; `/tmp/luna-tools-rq2eicv1/result.json`, exit 0.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed; `/tmp/luna-tools-sd2vyjvv/result.json`, exit 0.

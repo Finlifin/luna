@@ -31,26 +31,30 @@ impl Instances {
 
 #[derive(Default)]
 pub(super) struct Cache {
-    entries: Vec<(DeclarationId, Arc<[Term]>, Arc<Closure>, u64)>,
+    entries: HashMap<DeclarationId, HashMap<Arc<[Term]>, Retained>>,
+    count: usize,
+    weight: u64,
+}
+struct Retained {
+    code: Arc<Closure>,
     weight: u64,
 }
 impl Cache {
+    // Callers preflight the query's term depth and compute its structural work.
+    // Charge hashing/comparison before looking up the borrowed input slice.
     fn lookup(
         &self,
         declaration: DeclarationId,
         arguments: &[Term],
+        key_work: u64,
         fuel: &mut u64,
     ) -> Result<Option<Arc<Closure>>, ()> {
-        for (id, inputs, code, key_work) in &self.entries {
-            *fuel = fuel.checked_sub(1).ok_or(())?;
-            if *id == declaration {
-                *fuel = fuel.checked_sub(*key_work).ok_or(())?;
-                if inputs.as_ref() == arguments {
-                    return Ok(Some(code.clone()));
-                }
-            }
-        }
-        Ok(None)
+        *fuel = fuel.checked_sub(1).ok_or(())?;
+        let Some(entries) = self.entries.get(&declaration) else {
+            return Ok(None);
+        };
+        *fuel = fuel.checked_sub(key_work).ok_or(())?;
+        Ok(entries.get(arguments).map(|entry| entry.code.clone()))
     }
 
     fn insert(
@@ -64,12 +68,25 @@ impl Cache {
         if weight > 100_000 {
             return;
         }
-        if self.entries.len() >= 64 || self.weight.saturating_add(weight) > 100_000 {
+        if let Some(previous) = self
+            .entries
+            .get_mut(&key.0)
+            .and_then(|entries| entries.remove(key.1.as_ref()))
+        {
+            self.count -= 1;
+            self.weight -= previous.weight;
+        }
+        if self.count >= 64 || self.weight.saturating_add(weight) > 100_000 {
             self.entries.clear();
+            self.count = 0;
             self.weight = 0;
         }
         self.weight += weight;
-        self.entries.push((key.0, key.1, code, key_work));
+        self.count += 1;
+        self.entries
+            .entry(key.0)
+            .or_default()
+            .insert(key.1, Retained { code, weight });
     }
 }
 
@@ -131,7 +148,7 @@ impl Interpreter<'_> {
                 .all(|argument| argument.check_scope(&[]).is_ok());
         let shared = if persistent && existing.is_none() {
             self.prepared_instance_cache
-                .lookup(declaration, arguments, &mut self.budget.steps)
+                .lookup(declaration, arguments, key_work, &mut self.budget.steps)
                 .map_err(|()| self.failure(ErrorKind::StepsExhausted, Some(source)))?
         } else {
             None
@@ -318,10 +335,13 @@ mod frame_tests {
         );
         let mut cache = Cache::default();
         cache.insert((declaration, frame.clone()), code.clone(), 1, 1);
-        assert!(Arc::ptr_eq(&cache.entries[0].1, &frame));
-        assert!(cache.lookup(declaration, &query, &mut 0).is_err());
+        assert!(Arc::ptr_eq(
+            cache.entries[&declaration].keys().next().unwrap(),
+            &frame
+        ));
+        assert!(cache.lookup(declaration, &query, 1, &mut 0).is_err());
         let restored = cache
-            .lookup(declaration, &query, &mut 100)
+            .lookup(declaration, &query, 1, &mut 100)
             .unwrap()
             .unwrap();
         assert!(Arc::ptr_eq(&restored, &code));
@@ -329,5 +349,82 @@ mod frame_tests {
             restored.instance_arguments.as_ref().unwrap(),
             &frame
         ));
+        for local in 2..=64 {
+            cache.insert(
+                (
+                    DeclarationId {
+                        local,
+                        ..declaration
+                    },
+                    frame.clone(),
+                ),
+                code.clone(),
+                1,
+                1,
+            );
+        }
+        assert_eq!(cache.count, 64);
+        // Unrelated declarations no longer consume a scan of their input frames.
+        assert!(
+            cache
+                .lookup(declaration, &query, 1, &mut 2)
+                .unwrap()
+                .is_some()
+        );
+        cache.insert((declaration, frame.clone()), code.clone(), 1, 5);
+        assert_eq!(cache.count, 64);
+        assert_eq!(cache.weight, 63 * 3 + 7);
+        cache.insert((declaration, frame.clone()), code.clone(), 1, 100_000);
+        assert_eq!(cache.count, 64);
+        assert_eq!(cache.weight, 63 * 3 + 7);
+        cache.insert(
+            (
+                DeclarationId {
+                    local: 65,
+                    ..declaration
+                },
+                frame,
+            ),
+            code.clone(),
+            1,
+            1,
+        );
+        assert_eq!(cache.count, 1);
+        assert_eq!(cache.weight, 3);
+        assert!(
+            cache
+                .lookup(declaration, &query, 1, &mut 2)
+                .unwrap()
+                .is_none()
+        );
+
+        let mut specializations = Cache::default();
+        for value in 0..64 {
+            let inputs: Arc<[Term]> = (0..6)
+                .map(|bit| Term::Bool(value & (1 << bit) != 0))
+                .collect();
+            specializations.insert((declaration, inputs), code.clone(), 6, 1);
+        }
+        let last = vec![Term::Bool(true); 6];
+        assert!(
+            specializations
+                .lookup(declaration, &last, 6, &mut 6)
+                .is_err()
+        );
+        let mut remaining = 7;
+        assert!(
+            specializations
+                .lookup(declaration, &last, 6, &mut remaining)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(remaining, 0);
+        assert_eq!(specializations.count, 64);
+        assert!(
+            specializations
+                .lookup(declaration, &[Term::Bool(true)], 1, &mut 2)
+                .unwrap()
+                .is_none()
+        );
     }
 }
