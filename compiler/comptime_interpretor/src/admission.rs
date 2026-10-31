@@ -84,8 +84,8 @@ impl Interpreter<'_> {
     /// authorize closed export. No source Eq/Hash or user function executes here.
     pub fn validate_immutable_input(&mut self, value: &Value, ty: &Term) -> Result<(), Error> {
         self.tick(None)?;
-        let work = value
-            .scoped_copy_work_with_evidence(
+        let (_, work) = value
+            .scoped_representation_work(
                 &self.abstract_type_parameters,
                 &self.abstract_value_parameters,
             )

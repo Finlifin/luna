@@ -8720,3 +8720,53 @@ the previously reproduced baseline rejection of an ordinary opaque NF domain,
 not a newly skipped receiver failure. Initial receiver failures, prepared-input
 admission failures, forwarding failures and a quote context leak were fixed,
 not converted into expected failures. No full-workspace test claim.
+
+
+### Borrowed inspection accounting versus owned copies
+
+The representation walker now returns two costs: the full bounded size of an
+owned copy and the description work actually inspected. A closed list payload
+summary can avoid revisiting its contents, but never reduces the cost of
+copying those contents. Mutable access still invalidates the summary; scoped
+value/type evidence does not populate the closed summary.
+
+Immutable input admission and fused append result checks consume inspection
+work instead of charging a nonexistent full copy. Admission still checks the
+current type domain and visits embedded type descriptions. Limits on complete
+representation size and nesting remain enforced, including on summary hits.
+This is not result memoization and stores no type proof or solver outcome.
+
+Tests compare cold and warm 512-element admission, require continued element
+admission work, reject a warmed payload with the wrong element type, and check
+recovery. Separate tests keep full copy cost unchanged and reject a mutated
+payload containing live storage. Existing append budget/representation failure
+and rollback cases exercise both execution engines.
+
+Remaining costs: append still charges the combined element count; current
+admission still traverses elements. This change removes duplicate representation
+charges but does not establish linear total list construction or a wall-time
+speedup. The CMTT opaque-domain exclusion recorded above is now retired by
+`b5eedb9d`, with explicit wrong-identity rejection and spread-receiver coverage.
+
+
+Validation in `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --test type_list_inputs
+python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_lists --test comptime_list_operations --test comptime_list_type_evidence --test meta_list_pattern_cost --test type_lists
+python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_list_operations comptime_list_view_rejects_pointer_receivers_before_use
+python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_list_type_evidence --test meta_list_pattern_cost --test type_lists
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+```
+
+Interpreter unit (352) and input integration (27) checks exited 0:
+`/tmp/luna-tools-uv9q2670/result.json`, `/tmp/luna-tools-9m76uy4s/result.json`.
+The first source invocation exited 101 after 4 bytecode-list and 64 list-operation
+passes: an old pointer-receiver test expected the former protocol diagnostic,
+where the existing receiver validation now rejects `*self` earlier. Updated
+only that diagnostic assertion; its isolated rerun exited 0
+(`/tmp/luna-tools-r620n5rx/result.json`). The remaining three source suites
+passed 13, 3 and 32 tests, exit 0 (`/tmp/luna-tools-85hwdmdm/result.json`).
+Original source report: `/tmp/luna-tools-l1co1iet/result.json`; formatting:
+`/tmp/luna-tools-8hrvbwd_/result.json`, exit 0. `git diff --check` passed.

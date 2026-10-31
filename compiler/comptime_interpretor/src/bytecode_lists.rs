@@ -873,3 +873,34 @@ fn warm_append_prefix_rechecks_embedded_type_proofs_and_recovers() {
         }
     }
 }
+
+#[test]
+fn immutable_list_admission_charges_inspection_and_rechecks_warm_domains() {
+    let package = package();
+    let ty = list(Primitive::Bool);
+    let make = || Value::List {
+        ty: ty.clone(),
+        values: vec![Value::Bool(true); 512].into(),
+    };
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let cold = make();
+    let before = vm.budget.steps;
+    vm.validate_immutable_input(&cold, &ty).unwrap();
+    let cold_cost = before - vm.budget.steps;
+    let before = vm.budget.steps;
+    vm.validate_immutable_input(&cold, &ty).unwrap();
+    let warm_cost = before - vm.budget.steps;
+    assert!(cold_cost >= warm_cost + 512);
+    assert!(warm_cost >= 512, "element domain admission must still run");
+
+    let wrong = Value::List {
+        ty: ty.clone(),
+        values: vec![Value::Type(Term::Primitive(Primitive::Bool)); 512].into(),
+    };
+    wrong.immutable_copy_work().unwrap();
+    assert_eq!(
+        vm.validate_immutable_input(&wrong, &ty).unwrap_err().kind,
+        ErrorKind::Type
+    );
+    vm.validate_immutable_input(&cold, &ty).unwrap();
+}

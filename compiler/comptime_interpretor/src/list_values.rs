@@ -121,6 +121,28 @@ mod tests {
         values
     }
     #[test]
+    fn cached_inspection_cost_does_not_discount_owned_copies() {
+        let value = test_type_list(vec![Term::Primitive(Primitive::Bool); 512]);
+        let inspect = |value: &Value| {
+            value.scoped_representation_work(&Default::default(), &Default::default())
+        };
+        let (copy, cold) = inspect(&value).unwrap();
+        let (same_copy, warm) = inspect(&value).unwrap();
+        assert_eq!(same_copy, copy);
+        assert_eq!(cold, copy);
+        assert!(warm < cold / 16);
+        assert_eq!(value.immutable_copy_work(), Some(copy));
+
+        let mut changed = value.clone();
+        let Value::List { values, .. } = &mut changed else {
+            unreachable!()
+        };
+        values[0] = Value::Storage(crate::Storage::new(Value::Bool(true)));
+        assert!(inspect(&changed).is_none());
+        assert_eq!(inspect(&value), Some((copy, warm)));
+    }
+
+    #[test]
     fn summaries_survive_reads_and_clones_but_not_mutable_access() {
         let original = test_type_list(vec![Term::Primitive(Primitive::Bool)]);
         let work = original.immutable_copy_work().unwrap();

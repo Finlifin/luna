@@ -1021,7 +1021,10 @@ fn real_meta_lists_match_through_comptime_observation_protocol() {
 fn comptime_list_view_rejects_pointer_receivers_before_use() {
     let source = LIST_VIEW.split("    impl ListView").next().unwrap();
     let error = compile_list_view(&source.replace("(self", "(*self")).unwrap_err();
-    assert!(error.contains("invalid ListPatternView"), "{error}");
+    assert!(
+        error.contains("comptime methods use value-reference self; replace *self with self"),
+        "{error}"
+    );
 }
 
 #[test]

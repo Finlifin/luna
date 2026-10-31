@@ -103,8 +103,8 @@ impl Interpreter<'_> {
         let count = self
             .list_value_length(combined, source)
             .map_err(|error| error.kind)?;
-        let work = combined
-            .scoped_copy_work_with_evidence(
+        let (_, work) = combined
+            .scoped_representation_work(
                 &self.abstract_type_parameters,
                 &self.abstract_value_parameters,
             )

@@ -354,6 +354,18 @@ impl Value {
         parameters: &BTreeSet<DeclarationId>,
         value_parameters: &BTreeMap<DeclarationId, Term>,
     ) -> Option<usize> {
+        self.scoped_representation_work(parameters, value_parameters)
+            .map(|(copy, _)| copy)
+    }
+
+    /// Separate the size of an owned copy from the work of inspecting the
+    /// current representation. Cached list summaries skip inspection only;
+    /// actual copies still pay for every element and all payload bytes.
+    fn scoped_representation_work(
+        &self,
+        parameters: &BTreeSet<DeclarationId>,
+        value_parameters: &BTreeMap<DeclarationId, Term>,
+    ) -> Option<(usize, usize)> {
         // Keep only the bounded traversal depth on the call stack. The old
         // worklist allocated one entry per sibling on every immutable scan.
         // Count pending siblings separately to preserve its admission bound
@@ -362,6 +374,7 @@ impl Value {
             value: &Value,
             depth: usize,
             work: &mut usize,
+            inspected: &mut usize,
             pending: &mut usize,
             parameters: &BTreeSet<DeclarationId>,
             value_parameters: &BTreeMap<DeclarationId, Term>,
@@ -444,6 +457,7 @@ impl Value {
                 _ => 0,
             };
             *work = work.checked_add(extra)?;
+            *inspected = inspected.checked_add(1)?.checked_add(extra)?;
             let children = match value {
                 Value::List { values: fields, .. } => fields.len(),
                 Value::Record { fields, .. }
@@ -485,6 +499,7 @@ impl Value {
                     value,
                     depth + 1,
                     work,
+                    inspected,
                     pending,
                     parameters,
                     value_parameters,
@@ -532,8 +547,17 @@ impl Value {
             Some(height)
         }
         let mut work = 0;
-        visit(self, 0, &mut work, &mut 1, parameters, value_parameters)?;
-        Some(work)
+        let mut inspected = 0;
+        visit(
+            self,
+            0,
+            &mut work,
+            &mut inspected,
+            &mut 1,
+            parameters,
+            value_parameters,
+        )?;
+        Some((work, inspected))
     }
 
     /// Freeze supported immutable scalars and aggregates. Nominal values retain
