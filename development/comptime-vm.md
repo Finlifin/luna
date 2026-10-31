@@ -9375,3 +9375,34 @@ Validation in `/home/fin/luna`:
   passed; `/tmp/luna-tools-h6icod6k/result.json`, exit 0.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
   passed; `/tmp/luna-tools-_xpm9ti1/result.json`, exit 0.
+
+
+## Evict retained code by recency instead of clearing the session
+
+The session CodeCache now orders declaration and owned-body entries together.
+Successful lookups (including stable unsupported markers) refresh recency. Under
+pressure, expired owned bodies are reclaimed first, then the oldest live entries
+are removed individually until the new entry fits the existing 100000 weight
+limit. Replacing an entry removes its previous weight and ordering record.
+Recency metadata contains exactly one record per retained entry in each index;
+repeated hits cannot grow a stale-entry queue. Counter exhaustion compacts the
+ordering without changing relative recency.
+
+Only immutable compiled code and unsupported markers participate. Captured
+values, environments and invocation results are not added to this cache, and
+Type-output-only result memoization remains unchanged. Borrowed fragment and
+contextual-input caches retain their separate policies. Pressure still scans
+owned bodies for expired identities; this change does not establish wall-clock
+speedups or complete the VM migration.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  366 passed; `/tmp/luna-tools-lnbc16s2/result.json`, exit 0. Regression coverage
+  includes mixed declaration/owned eviction, live compiled-code retention,
+  expired identities, replacement accounting, negative entries, repeated hits,
+  and clock exhaustion.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed; `/tmp/luna-tools-q6n17r7r/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_closures --test comptime_iir_bytecode`:
+  passed; `/tmp/luna-tools-k3749mpw/result.json`, exit 0.

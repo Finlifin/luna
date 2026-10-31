@@ -506,7 +506,16 @@ impl Frame {
 pub(super) struct CodeCache {
     entries: BTreeMap<DeclarationId, Option<Arc<Program>>>,
     owned: BTreeMap<usize, OwnedCode>,
+    recency: BTreeMap<CodeKey, u64>,
+    order: BTreeMap<u64, CodeKey>,
+    clock: u64,
     weight: usize,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum CodeKey {
+    Named(DeclarationId),
+    Owned(usize),
 }
 
 // Borrowed fragments belong to this VM's immutable source lifetime. Unlike the
@@ -555,12 +564,46 @@ struct OwnedCode {
 }
 
 impl CodeCache {
+    fn forget(&mut self, key: CodeKey) {
+        if let Some(stamp) = self.recency.remove(&key) {
+            self.order.remove(&stamp);
+        }
+    }
+
+    fn touch(&mut self, key: CodeKey) {
+        self.forget(key);
+        if self.clock == u64::MAX {
+            // Compact only on counter exhaustion; hits never accumulate stale
+            // queue nodes, so recency metadata stays bounded by entry count.
+            let keys: Vec<_> = self.order.values().copied().collect();
+            self.order.clear();
+            self.recency.clear();
+            self.clock = 0;
+            for key in keys {
+                self.order.insert(self.clock, key);
+                self.recency.insert(key, self.clock);
+                self.clock += 1;
+            }
+        }
+        self.order.insert(self.clock, key);
+        self.recency.insert(key, self.clock);
+        self.clock += 1;
+    }
+
+    fn named(&mut self, id: DeclarationId) -> Option<Option<Arc<Program>>> {
+        let program = self.entries.get(&id)?.clone();
+        self.touch(CodeKey::Named(id));
+        Some(program)
+    }
+
     fn insert(&mut self, id: DeclarationId, program: Option<Arc<Program>>) {
+        self.forget(CodeKey::Named(id));
         if let Some(previous) = self.entries.remove(&id) {
             self.weight -= Self::program_weight(&previous);
         }
         if self.reserve(&program) {
             self.entries.insert(id, program);
+            self.touch(CodeKey::Named(id));
         }
     }
 
@@ -581,19 +624,28 @@ impl CodeCache {
             // before discarding reusable declaration code or live closure bodies.
             // Scan only under pressure, not on every insertion or cache hit.
             let retained_weight = &mut self.weight;
-            self.owned.retain(|_, entry| {
+            let recency = &mut self.recency;
+            let order = &mut self.order;
+            self.owned.retain(|key, entry| {
                 if entry.body.strong_count() == 0 {
                     *retained_weight -= Self::program_weight(&entry.program);
+                    if let Some(stamp) = recency.remove(&CodeKey::Owned(*key)) {
+                        order.remove(&stamp);
+                    }
                     false
                 } else {
                     true
                 }
             });
         }
-        if self.weight + weight > LIMIT {
-            self.entries.clear();
-            self.owned.clear();
-            self.weight = 0;
+        while self.weight + weight > LIMIT {
+            let (_, key) = self.order.pop_first().expect("weighted cache has an entry");
+            self.recency.remove(&key);
+            let program = match key {
+                CodeKey::Named(id) => self.entries.remove(&id).unwrap(),
+                CodeKey::Owned(id) => self.owned.remove(&id).unwrap().program,
+            };
+            self.weight -= Self::program_weight(&program);
         }
         self.weight += weight;
         true
@@ -609,8 +661,11 @@ impl CodeCache {
             .upgrade()
             .is_some_and(|source| Arc::ptr_eq(&source, body))
         {
-            return Some(entry.program.clone());
+            let program = entry.program.clone();
+            self.touch(CodeKey::Owned(key));
+            return Some(program);
         }
+        self.forget(CodeKey::Owned(key));
         let expired = self.owned.remove(&key).unwrap();
         self.weight -= Self::program_weight(&expired.program);
         None
@@ -618,6 +673,7 @@ impl CodeCache {
 
     fn insert_owned(&mut self, body: &Arc<Expr>, program: Option<Arc<Program>>) {
         let key = Arc::as_ptr(body) as usize;
+        self.forget(CodeKey::Owned(key));
         if let Some(previous) = self.owned.remove(&key) {
             self.weight -= Self::program_weight(&previous.program);
         }
@@ -629,6 +685,7 @@ impl CodeCache {
                     program,
                 },
             );
+            self.touch(CodeKey::Owned(key));
         }
     }
 }
@@ -700,8 +757,8 @@ impl<'a> Interpreter<'a> {
         }
         // Decide the execution route before any instruction has run.
         if let Some(id) = stable_code {
-            if let Some(program) = self.bytecode_cache.entries.get(&id) {
-                return Ok(program.clone());
+            if let Some(program) = self.bytecode_cache.named(id) {
+                return Ok(program);
             }
             // The invocation boundary supplies either immutable package code
             // or a validated input-independent prepared body of that declaration.
@@ -3818,8 +3875,8 @@ mod tests {
         for local in 0..=100_000 {
             cache.insert(DeclarationId { package: 1, local }, None);
         }
-        assert_eq!(cache.entries.len(), 1);
-        assert_eq!(cache.weight, 1);
+        assert_eq!(cache.entries.len(), 100_000);
+        assert_eq!(cache.weight, 100_000);
         let first = DeclarationId {
             package: 1,
             local: 0,
@@ -3827,7 +3884,58 @@ mod tests {
         assert!(!cache.entries.contains_key(&first));
         cache.insert(first, None);
         assert!(cache.entries.contains_key(&first));
-        assert_eq!(cache.weight, 2);
+        assert_eq!(cache.weight, 100_000);
+    }
+
+    #[test]
+    fn cache_recency_survives_hits_replacement_and_clock_exhaustion() {
+        let mut cache = CodeCache::default();
+        let body = Arc::new(Expr {
+            source: SourceRange { start: 1, end: 2 },
+            ty: Term::Primitive(Primitive::Void),
+            kind: K::Unit,
+        });
+        let code = Arc::new(comptime_compiler::compile(&body, &mut 1000).unwrap());
+        let id = |local| DeclarationId { package: 1, local };
+        cache.insert(id(0), Some(code.clone()));
+        cache.insert_owned(&body, None);
+        // Replacement must remove both old weight and its recency node.
+        cache.insert(id(0), None);
+        for local in 1..99_999 {
+            cache.insert(id(local), None);
+        }
+        assert_eq!(cache.weight, 100_000);
+        cache.clock = u64::MAX;
+        assert!(matches!(cache.named(id(0)), Some(None)));
+        cache.insert(id(99_999), None);
+        // The live owned marker is older than the refreshed declaration.
+        assert!(cache.owned(&body).is_none());
+        assert!(cache.entries.contains_key(&id(0)));
+        cache.insert_owned(&body, Some(code.clone()));
+        let code_weight = CodeCache::program_weight(&Some(code));
+        for local in 1..=code_weight as u32 {
+            assert!(!cache.entries.contains_key(&id(local)));
+        }
+        assert!(cache.entries.contains_key(&id(code_weight as u32 + 1)));
+        assert_eq!(cache.weight, 100_000);
+        for _ in 0..1000 {
+            assert!(cache.named(id(0)).is_some());
+        }
+        assert_eq!(cache.recency.len(), cache.entries.len() + cache.owned.len());
+        assert_eq!(cache.order.len(), cache.recency.len());
+        assert_eq!(
+            cache.weight,
+            cache
+                .entries
+                .values()
+                .map(CodeCache::program_weight)
+                .sum::<usize>()
+                + cache
+                    .owned
+                    .values()
+                    .map(|entry| CodeCache::program_weight(&entry.program))
+                    .sum::<usize>()
+        );
     }
 
     #[test]
@@ -3877,8 +3985,11 @@ mod tests {
             },
             None,
         );
-        assert_eq!(cache.weight, 1);
+        assert_eq!(cache.weight, 100_000);
         assert!(!cache.entries.contains_key(&first));
+        assert!(
+            matches!(cache.owned(&live), Some(Some(retained)) if Arc::ptr_eq(&retained, &code))
+        );
     }
 
     #[test]
