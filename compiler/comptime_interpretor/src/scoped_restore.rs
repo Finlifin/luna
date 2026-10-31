@@ -207,7 +207,7 @@ impl Restore<'_> {
                 instance_arguments: closure
                     .instance_arguments
                     .as_ref()
-                    .map(|args| self.types(args))
+                    .map(|args| self.types(args).map(Into::into))
                     .transpose()?,
                 parameters: closure.parameters.clone(),
                 capture_order: closure.capture_order.clone(),

@@ -205,7 +205,7 @@ impl<'a> Interpreter<'a> {
             associated_values: HashMap::new(),
             associated_initializers: HashMap::new(),
             active_associated_initializers: HashSet::new(),
-            instances: HashMap::new(),
+            instances: Default::default(),
             functions: Default::default(),
             normal_forms: declaration_index::NormalForms::new(&graph.normal_forms, None, |head| {
                 head.declaration
@@ -269,7 +269,7 @@ impl<'a> Interpreter<'a> {
         if let Some(graph) = self.graph {
             let arguments = match value {
                 Value::Closure(c) => c.instance_arguments.clone().unwrap_or_default(),
-                _ => vec![],
+                _ => Arc::from([]),
             };
             graph
                 .function(&iir::InstanceKey {
@@ -318,14 +318,14 @@ impl<'a> Interpreter<'a> {
             .function(key)
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?
             .function;
-        let cache_key = (key.declaration, key.arguments.to_vec());
-        if let Some(callable) = self.instances.get(&cache_key) {
+        let cache_key = (key.declaration, key.arguments.clone());
+        if let Some(callable) = self.instances.lookup(key.declaration, &key.arguments) {
             return Ok(Value::Closure(callable.clone()));
         }
         let callable = Arc::new(Closure {
             definition_source: None,
             origin: Some(key.declaration),
-            instance_arguments: Some(key.arguments.to_vec()),
+            instance_arguments: Some(key.arguments.clone()),
             parameters: definition.parameters.clone(),
             environment: Environment::new(),
             capture_order: vec![],

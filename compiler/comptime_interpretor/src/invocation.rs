@@ -655,7 +655,7 @@ impl<'a> Interpreter<'a> {
                     Value::Closure(closure) => {
                         closure.instance_arguments.clone().unwrap_or_default()
                     }
-                    _ => vec![],
+                    _ => Arc::from([]),
                 })
                 .into(),
             })

@@ -734,7 +734,10 @@ impl<'a> Interpreter<'a> {
                 let arguments = closure
                     .instance_arguments
                     .as_ref()
-                    .map(|arguments| self.copy_instance_arguments(arguments, source))
+                    .map(|arguments| {
+                        self.check_instance_arguments(arguments, source)?;
+                        Ok::<_, Error>(arguments.clone())
+                    })
                     .transpose()?;
                 let mut environment = Environment::new();
                 for (binding, value) in &closure.environment {
@@ -1939,11 +1942,21 @@ mod representation_copy_tests {
         let Value::Closure(original) = &mut value else {
             unreachable!()
         };
-        Arc::make_mut(original).instance_arguments = Some(arguments.clone());
+        Arc::make_mut(original).instance_arguments = Some(arguments.clone().into());
         let Value::Closure(copied) = vm.copy_representation(&value, source, 0).unwrap() else {
             panic!("closure")
         };
-        assert_eq!(copied.instance_arguments, Some(arguments));
+        assert_eq!(
+            copied.instance_arguments.as_deref(),
+            Some(arguments.as_slice())
+        );
+        let Value::Closure(original) = &value else {
+            unreachable!()
+        };
+        assert!(Arc::ptr_eq(
+            original.instance_arguments.as_ref().unwrap(),
+            copied.instance_arguments.as_ref().unwrap(),
+        ));
         assert!(
             vm.copy_representation(&crate::test_type_list(vec![Term::Bool(true)]), source, 0)
                 .is_err()

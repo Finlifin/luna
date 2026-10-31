@@ -1,9 +1,37 @@
 //! Checked generic function formation shared by reference and bytecode execution.
 use super::*;
 
+// Separate declaration lookup allows borrowed slice queries without constructing
+// an owned tuple key. Stored frames are immutable and shared with their closure.
+#[derive(Default)]
+pub(super) struct Instances {
+    entries: HashMap<DeclarationId, HashMap<Arc<[Term]>, Arc<Closure>>>,
+}
+impl Instances {
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.entries.values().map(HashMap::len).sum()
+    }
+    #[cfg(test)]
+    pub(super) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub(super) fn lookup(
+        &self,
+        declaration: DeclarationId,
+        arguments: &[Term],
+    ) -> Option<&Arc<Closure>> {
+        self.entries.get(&declaration)?.get(arguments)
+    }
+    pub(super) fn insert(&mut self, key: (DeclarationId, Arc<[Term]>), code: Arc<Closure>) {
+        self.entries.entry(key.0).or_default().insert(key.1, code);
+    }
+}
+
 #[derive(Default)]
 pub(super) struct Cache {
-    entries: Vec<(DeclarationId, Vec<Term>, Arc<Closure>, u64)>,
+    entries: Vec<(DeclarationId, Arc<[Term]>, Arc<Closure>, u64)>,
     weight: u64,
 }
 impl Cache {
@@ -17,7 +45,7 @@ impl Cache {
             *fuel = fuel.checked_sub(1).ok_or(())?;
             if *id == declaration {
                 *fuel = fuel.checked_sub(*key_work).ok_or(())?;
-                if inputs == arguments {
+                if inputs.as_ref() == arguments {
                     return Ok(Some(code.clone()));
                 }
             }
@@ -27,7 +55,7 @@ impl Cache {
 
     fn insert(
         &mut self,
-        key: (DeclarationId, Vec<Term>),
+        key: (DeclarationId, Arc<[Term]>),
         code: Arc<Closure>,
         key_work: u64,
         work: u64,
@@ -95,13 +123,13 @@ impl Interpreter<'_> {
             Ok(())
         })?;
         let key_work = before_key - self.budget.steps;
-        let key = (declaration, arguments.to_vec());
+        let existing = self.instances.lookup(declaration, arguments).cloned();
         let persistent = self.abstract_type_parameters.is_empty()
             && self.abstract_value_parameters.is_empty()
             && arguments
                 .iter()
                 .all(|argument| argument.check_scope(&[]).is_ok());
-        let shared = if persistent && !self.instances.contains_key(&key) {
+        let shared = if persistent && existing.is_none() {
             self.prepared_instance_cache
                 .lookup(declaration, arguments, &mut self.budget.steps)
                 .map_err(|()| self.failure(ErrorKind::StepsExhausted, Some(source)))?
@@ -110,7 +138,7 @@ impl Interpreter<'_> {
         };
         let before_preparation = self.budget.steps;
         let binders = self.input_binders(&definition.type_parameters);
-        if !self.instances.contains_key(&key) && shared.is_none() {
+        if existing.is_none() && shared.is_none() {
             self.charge_copy_work(Some(source), |fuel| {
                 nir::copy_budget::charge_function_substitution(
                     definition, &binders, arguments, fuel,
@@ -155,7 +183,7 @@ impl Interpreter<'_> {
                 return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
             }
         }
-        let instance = if let Some(instance) = self.instances.get(&key).cloned().or(shared) {
+        let instance = if let Some(instance) = existing.or(shared) {
             instance
         } else {
             let definition = self
@@ -196,10 +224,11 @@ impl Interpreter<'_> {
                     Some(source),
                 )
             })?;
+            let key = (declaration, Arc::<[Term]>::from(arguments));
             let instance = Arc::new(Closure {
                 definition_source: None,
                 origin: Some(declaration),
-                instance_arguments: Some(arguments.to_vec()),
+                instance_arguments: Some(key.1.clone()),
                 parameters: definition.parameters.clone(),
                 environment: Environment::new(),
                 capture_order: vec![],
@@ -228,5 +257,77 @@ impl Interpreter<'_> {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         }
         Ok(Value::Closure(instance))
+    }
+}
+
+#[cfg(test)]
+mod frame_tests {
+    use super::*;
+
+    #[test]
+    fn borrowed_lookup_preserves_shared_frames_and_distinguishes_inputs() {
+        let declaration = DeclarationId {
+            package: 1,
+            local: 1,
+        };
+        let frame: Arc<[Term]> = vec![Term::Bool(true)].into();
+        let code = Arc::new(Closure {
+            definition_source: None,
+            origin: Some(declaration),
+            instance_arguments: Some(frame.clone()),
+            parameters: vec![],
+            environment: Environment::new(),
+            capture_order: vec![],
+            body: Arc::new(Expr {
+                source: SourceRange { start: 0, end: 1 },
+                ty: Term::Primitive(Primitive::Void),
+                kind: K::Unit,
+            }),
+            ty: Term::Function {
+                parameters: vec![],
+                result: Box::new(Term::Primitive(Primitive::Void)),
+            },
+        });
+        let mut instances = Instances::default();
+        instances.insert((declaration, frame.clone()), code.clone());
+        let query = vec![Term::Bool(true)];
+        let found = instances.lookup(declaration, &query).unwrap();
+        assert!(Arc::ptr_eq(found, &code));
+        let (retained, _) = instances.entries[&declaration]
+            .get_key_value(query.as_slice())
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            retained,
+            found.instance_arguments.as_ref().unwrap()
+        ));
+        assert!(
+            instances
+                .lookup(declaration, &[Term::Bool(false)])
+                .is_none()
+        );
+        assert!(
+            instances
+                .lookup(
+                    DeclarationId {
+                        local: 2,
+                        ..declaration
+                    },
+                    &query
+                )
+                .is_none()
+        );
+        let mut cache = Cache::default();
+        cache.insert((declaration, frame.clone()), code.clone(), 1, 1);
+        assert!(Arc::ptr_eq(&cache.entries[0].1, &frame));
+        assert!(cache.lookup(declaration, &query, &mut 0).is_err());
+        let restored = cache
+            .lookup(declaration, &query, &mut 100)
+            .unwrap()
+            .unwrap();
+        assert!(Arc::ptr_eq(&restored, &code));
+        assert!(Arc::ptr_eq(
+            restored.instance_arguments.as_ref().unwrap(),
+            &frame
+        ));
     }
 }

@@ -649,7 +649,7 @@ impl Value {
 pub struct Closure {
     definition_source: Option<SourceRange>,
     origin: Option<DeclarationId>,
-    instance_arguments: Option<Vec<Term>>,
+    instance_arguments: Option<Arc<[Term]>>,
     parameters: Vec<LocalId>,
     environment: Environment,
     capture_order: Vec<LocalId>,
@@ -900,7 +900,7 @@ pub struct Interpreter<'a> {
     associated_values: HashMap<(InterfaceInstance, Term, DeclarationId), &'a Expr>,
     associated_initializers: HashMap<(InterfaceInstance, Term, DeclarationId), &'a Expr>,
     active_associated_initializers: HashSet<(InterfaceInstance, Term, DeclarationId)>,
-    instances: HashMap<(DeclarationId, Vec<Term>), Arc<Closure>>,
+    instances: function_instances::Instances,
     functions: declaration_index::Functions<'a>,
     runtime_function_identities: declaration_index::RuntimeIdentities<'a>,
     retained_callable_signatures: HashMap<(DeclarationId, &'a [Term]), &'a Term>,
@@ -1843,7 +1843,7 @@ impl<'a> Interpreter<'a> {
             associated_values,
             associated_initializers,
             active_associated_initializers: HashSet::new(),
-            instances: HashMap::new(),
+            instances: Default::default(),
             functions,
             runtime_function_identities,
             retained_callable_signatures: HashMap::new(),
@@ -7599,7 +7599,7 @@ mod normal_input_data_tests {
         let closure = Closure {
             definition_source: None,
             origin: Some(declaration),
-            instance_arguments: Some(vec![]),
+            instance_arguments: Some(vec![].into()),
             parameters: vec![],
             environment: Environment::new(),
             capture_order: vec![],
@@ -7635,14 +7635,14 @@ mod normal_input_data_tests {
         captured.environment.insert(binding, Value::Bool(true));
         captured.capture_order.push(binding);
         let mut specialized = closure.clone();
-        specialized.instance_arguments = Some(vec![Term::Primitive(Primitive::Bool)]);
+        specialized.instance_arguments = Some(vec![Term::Primitive(Primitive::Bool)].into());
         for argument in [
             Term::Bool(true),
             Term::TupleValue(vec![Term::Bool(false), Term::Primitive(Primitive::Bool)]),
             Term::TupleValue(vec![Term::Primitive(Primitive::Bool)]),
         ] {
             let mut instance = closure.clone();
-            instance.instance_arguments = Some(vec![argument.clone()]);
+            instance.instance_arguments = Some(vec![argument.clone()].into());
             assert_eq!(
                 freeze(Value::Closure(Arc::new(instance))).unwrap(),
                 Term::FunctionValue {
@@ -7673,7 +7673,7 @@ mod normal_input_data_tests {
             },
         ] {
             let mut instance = closure.clone();
-            instance.instance_arguments = Some(vec![argument]);
+            instance.instance_arguments = Some(vec![argument].into());
             assert_eq!(
                 Value::Closure(Arc::new(instance)).into_scoped_invocation_term(
                     &mut comptime_runtime::Budget::default(),
@@ -7687,7 +7687,7 @@ mod normal_input_data_tests {
             declaration,
             sort: nir::Sort::Type,
         };
-        scoped.instance_arguments = Some(vec![parameter.clone()]);
+        scoped.instance_arguments = Some(vec![parameter.clone()].into());
         assert_eq!(
             freeze(Value::Closure(Arc::new(scoped.clone()))),
             Err(ErrorKind::Type)

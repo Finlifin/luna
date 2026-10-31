@@ -9592,3 +9592,36 @@ Validation in `/home/fin/luna`:
   passed; `/tmp/luna-tools-fd0n4cm4/result.json`, exit 0.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
   passed; `/tmp/luna-tools-h2babd5h/result.json`, exit 0.
+
+
+## Retain shared instance frames through VM caches and closure copies
+
+The VM's invocation-local instance cache now indexes declaration identity first,
+then performs content-based lookup using a borrowed &[Term]. Source generic
+formation no longer constructs a deep-copied tuple key before a cache hit. On a
+miss it creates one shared frame used by the closure, local cache and retained
+prepared-code cache. IIR callable construction keeps the graph's existing shared
+frame. Representation copies validate instance inputs before sharing that frame;
+mutable environments still follow their existing copy rules. Scoped restoration
+that substitutes input terms allocates a new frame rather than rebinding the old
+one in place.
+
+Input admission, requirements, capabilities and output-domain checks still run
+in the ordinary order. No invocation result or mutable execution environment is
+added to code caches. Type-output-only result memoization policy is unchanged.
+Hashing and validation still inspect term contents; this is removal of redundant
+owned input copies, not a claim that invocation or type comparison is constant
+time. Event payloads and other Vec-based representations remain separate.
+
+Validation in `/home/fin/luna`:
+
+- Intermediate compilation checks caught representation changes in scoped
+  restoration and old test constructors; corrected before behavioral checks.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  367 passed; `/tmp/luna-tools-s7rf1vj3/result.json`, exit 0. This includes current
+  contract rechecking, failed-input recovery, scope restoration, representation
+  copying, and new borrowed lookup/shared frame assertions.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test scoped_comptime_callables --test comptime_iir_bytecode --test closure_environment_parameters --test function_type_dependencies`:
+  79 passed; `/tmp/luna-tools-3p57b6a1/result.json`, exit 0.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed; `/tmp/luna-tools-cij6cbuz/result.json`, exit 0.
