@@ -230,7 +230,7 @@ fn main() {
         .unwrap_or(20);
     assert!(iterations > 0);
     println!(
-        "benchmark=list-append iterations={iterations} warmup=5 cache=none receivers=value-reference,owned-local"
+        "benchmark=list-append iterations={iterations} warmup=5 result-cache=none representation-summaries=enabled receivers=value-reference,owned-local"
     );
     for owned in [false, true] {
         for element in [Primitive::Bool, Primitive::Type] {

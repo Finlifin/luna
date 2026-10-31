@@ -553,3 +553,66 @@ From `/home/fin/luna`, `python3 -B development/check.py --timeout 900 -- test -p
 comptime_interpretor --lib` passed all 337 tests
 (`/tmp/luna-tools-7m3jqdzb/result.json`, exit 0). Formatting
 (`/tmp/luna-tools-uqmgbkac/result.json`) and `git diff --check` passed.
+
+## Structural summary and full append measurements
+
+Baseline implementation: `763366fe`. Measurements use the existing unoptimized
+no-debuginfo test profile and shared target cache; these are diagnostic scaling
+measurements, not release throughput claims. No compiler implementation changed
+between these measurements.
+
+The new `list_summary` benchmark isolates `immutable_copy_work` with synthetic
+closed list payloads, without parsing, elaboration, nominal admission or VM
+construction. Cold queries invalidate metadata through mutable access without
+changing contents. Warm queries retain metadata. Every query asserts the same
+logical work. Five rounds alternate cold/warm order, each with 100 queries;
+reported figures below are median nanoseconds per query.
+
+| Elements | Bool cold | Bool warm | Type cold | Type warm |
+| --- | ---: | ---: | ---: | ---: |
+| 16 | 559 | 200 | 1461 | 212 |
+| 256 | 4782 | 203 | 19001 | 210 |
+| 4096 | 74205 | 206 | 300900 | 205 |
+
+This confirms constant-size summary observation for these fixed-domain payloads,
+while cold traversal scales with payload size. The returned work stays 19/259/
+4099 for Bool and 35/515/8195 for Type: the VM still charges logical work.
+Cold timing includes cache invalidation, so the difference is not a pure isolated
+instruction-count measurement.
+
+The full existing append benchmark covers owned locals and references,
+single-body and per-call execution, fused and general concatenation, and Bool
+and Type elements. Five warmups precede three measured invocations per shape.
+The owned, fused, single-body path reports:
+
+| Element | Appends | ns/invocation | VM steps/invocation |
+| --- | ---: | ---: | ---: |
+| Bool | 256 | 5432935 | 223779 |
+| Bool | 1024 | 37253928 | 3254307 |
+| Type | 256 | 9216168 | 356387 |
+| Type | 1024 | 94309608 | 5357603 |
+
+Four times as many appends cost about 6.9x (Bool) and 10.2x (Type) wall time,
+with roughly 15x logical work. Structural caching therefore does not resolve
+whole-append complexity. Source inspection still finds prefix-wide borrowed
+representation checks and element/nominal admission. Timing alone does not
+attribute the remaining cost among those paths; safe reuse of admission would
+need evidence tied to the current domain and declaration/proof environment,
+not merely the payload's structural summary.
+
+Commands from `/home/fin/luna`, all exit 0:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --bench list_summary
+LUNA_BENCH_ITERATIONS=3 python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --bench list_append
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+```
+
+Reports: `/tmp/luna-tools-h3ban0yu/result.json` (summary),
+`/tmp/luna-tools-09wdut2q/result.json` (append), and
+`/tmp/luna-tools-aiwh6v_z/result.json` (formatting). An initial one-invocation
+append sample is `/tmp/luna-tools-sx6t98_5/result.json`; its 256-Bool time was
+5387748 ns, not the 3.6 ms mistakenly stated in an intermediate update.
+The append benchmark header now distinguishes result caching from enabled
+representation summaries. `git diff --check` passed. No language implementation
+changed in this benchmark commit, so no unrelated full test suite was rerun.
