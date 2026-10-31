@@ -1648,7 +1648,7 @@ impl TypeInterner {
             .collect::<Result<Vec<_>, TypeError>>()?;
         let body = body.rewrite(0, &mut abstract_identity)?;
         let core = self.intern_with_budget(holes, body, fuel)?;
-        TypeRef::bind(
+        TypeRef::bind_shape(
             core,
             dependencies
                 .iter()
@@ -1715,6 +1715,26 @@ pub struct TypeRef {
 
 impl TypeRef {
     pub fn bind(core: Arc<TypeCore>, arguments: Vec<Term>) -> Result<Self, TypeError> {
+        Self::bind_with_budget(core, arguments, &mut 100_000)
+    }
+
+    pub fn bind_with_budget(
+        core: Arc<TypeCore>,
+        arguments: Vec<Term>,
+        fuel: &mut usize,
+    ) -> Result<Self, TypeError> {
+        *fuel = fuel
+            .checked_sub(arguments.len().saturating_add(1))
+            .ok_or(TypeError::ConstructionBudget)?;
+        for argument in &arguments {
+            crate::type_computations::charge_term(argument, fuel)
+                .map_err(|_| TypeError::ConstructionBudget)?;
+        }
+        Self::bind_shape(core, arguments)
+    }
+
+    // Only callers that preflighted the complete reference inputs may use this.
+    fn bind_shape(core: Arc<TypeCore>, arguments: Vec<Term>) -> Result<Self, TypeError> {
         if arguments.len() != core.holes.len() {
             return Err(TypeError::ArgumentCount {
                 expected: core.holes.len(),
@@ -1738,6 +1758,13 @@ impl TypeRef {
     }
 
     pub fn materialize(&self) -> Result<Term, TypeError> {
+        self.materialize_with_budget(&mut 100_000)
+    }
+
+    /// Account for every occurrence of a substituted input before allocating
+    /// the expanded type. Sharing a core does not make its expansion free.
+    pub fn materialize_with_budget(&self, fuel: &mut usize) -> Result<Term, TypeError> {
+        charge_reference_expansion(&self.core.body, &self.arguments, true, fuel)?;
         expand_holes(&self.core.body, &self.arguments)
     }
 
@@ -1746,8 +1773,22 @@ impl TypeRef {
     /// a mere structural interning hit must not bypass that check.
     pub fn check_with<E>(
         &self,
+        check: impl FnMut(usize, &Term, &Term) -> Result<(), E>,
+    ) -> Result<(), ContractError<E>> {
+        self.check_with_budget(&mut 100_000, check)
+    }
+
+    pub fn check_with_budget<E>(
+        &self,
+        fuel: &mut usize,
         mut check: impl FnMut(usize, &Term, &Term) -> Result<(), E>,
     ) -> Result<(), ContractError<E>> {
+        // Resource admission precedes callbacks, so budget failure cannot leave
+        // an externally observed prefix of contract checks.
+        for (index, parameter) in self.core.holes.iter().enumerate() {
+            charge_reference_expansion(&parameter.ty, &self.arguments[..index], true, fuel)
+                .map_err(ContractError::Shape)?;
+        }
         for (index, (parameter, argument)) in
             self.core.holes.iter().zip(&self.arguments).enumerate()
         {
@@ -1761,7 +1802,18 @@ impl TypeRef {
     /// Compose the reference with a surrounding binder substitution. This
     /// creates a new reference and never modifies the shared core or old one.
     pub fn substitute(&self, substitution: &[Term]) -> Result<Self, TypeError> {
-        Self::bind(
+        self.substitute_with_budget(substitution, &mut 100_000)
+    }
+
+    pub fn substitute_with_budget(
+        &self,
+        substitution: &[Term],
+        fuel: &mut usize,
+    ) -> Result<Self, TypeError> {
+        for argument in &self.arguments {
+            charge_reference_expansion(argument, substitution, false, fuel)?;
+        }
+        Self::bind_shape(
             self.core.clone(),
             self.arguments
                 .iter()
@@ -1924,6 +1976,53 @@ fn collect_runtime_dependencies(term: &Term, result: &mut BTreeSet<RuntimeId>) {
 pub enum ContractError<E> {
     Shape(TypeError),
     Contract(E),
+}
+
+// Charge source traversal and each inserted occurrence separately. Substitution
+// is simultaneous: inserted terms are inspected but never substituted again.
+// The structural depth limit applies to the resulting tree, not just each input.
+fn charge_reference_expansion(
+    root: &Term,
+    arguments: &[Term],
+    holes: bool,
+    fuel: &mut usize,
+) -> Result<(), TypeError> {
+    crate::type_computations::charge_term(root, fuel).map_err(|_| TypeError::ConstructionBudget)?;
+    let mut pending = vec![(root, 0usize, 0u32)];
+    while let Some((term, depth, nesting)) = pending.pop() {
+        *fuel = fuel.checked_sub(1).ok_or(TypeError::ConstructionBudget)?;
+        let input = match term {
+            Term::Hole { index, sort } if holes => Some((*index, *sort)),
+            Term::Bound { depth, index, sort } if !holes && *depth == nesting => {
+                Some((*index, *sort))
+            }
+            _ => None,
+        };
+        if let Some((index, sort)) = input {
+            let argument = arguments
+                .get(index)
+                .ok_or(TypeError::MissingArgument(index))?;
+            require_sort(argument, sort)?;
+            crate::type_computations::charge_term_with_depth(argument, fuel, 128 - depth)
+                .map_err(|_| TypeError::ConstructionBudget)?;
+        } else {
+            let nesting = if matches!(term, Term::Function { .. }) {
+                nesting
+                    .checked_add(1)
+                    .ok_or(TypeError::BinderDepthOverflow)?
+            } else {
+                nesting
+            };
+            term.visit_children(|child| {
+                if pending.len() >= *fuel {
+                    return Err(TypeError::ConstructionBudget);
+                }
+                pending.push((child, depth + 1, nesting));
+                Ok(())
+            })?;
+        }
+    }
+    Ok(())
 }
 
 fn expand_holes(term: &Term, arguments: &[Term]) -> Result<Term, TypeError> {

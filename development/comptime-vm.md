@@ -9485,3 +9485,40 @@ Validation in `/home/fin/luna`:
   passed; `/tmp/luna-tools-y4zruvei/result.json`, exit 0.
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test associated_signatures --test associated_purity`:
   passed; `/tmp/luna-tools-oafktyi6/result.json`, exit 0.
+
+
+## Bound reference-side expansion before allocating repeated inputs
+
+TypeRef now exposes budgeted binding, materialization, substitution composition
+and contract checking. Convenience entrypoints use finite default budgets.
+Binding checks complete argument structure before recursive scope validation.
+Expansion preflight accounts for every inserted occurrence, including immutable
+payloads, and bounds the combined output depth rather than inspecting the core
+and replacement in isolation. Simultaneous substitution does not recursively
+substitute newly inserted terms. Binder depth selects only the surrounding frame;
+ordinary capture-avoiding rewriting still performs the actual composition.
+
+Contract expansion is preflighted across the full telescope before invoking any
+semantic callbacks. Resource refusal therefore cannot expose a partial callback
+prefix; semantic contract errors retain ordinary ordered short-circuit behavior.
+Retries preserve the shared core and original reference. Runtime abstraction
+uses the internal shape binder only after its own operation-budget preflight,
+avoiding a second unrelated default limit after core publication.
+
+These APIs complete another resource boundary of the shared representation.
+NormalFormArgument still represents contextual inputs whose domains depend on
+previous inputs; it has not been removed or generalized into an elaboration
+suspension protocol here. General IIR annotations and runtime environment plans
+also remain unfinished. Existing IIR frozen signatures and template storage use
+closed references; this change does not claim a newly connected runtime path.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir --test type_reference_budget --test type_core_budget --test types --test closure_contexts --test computations --test associated_types --test optional_types`:
+  passed; `/tmp/luna-tools-qzrc3w18/result.json`, exit 0. New cases cover repeated
+  large inputs, combined depth, binding refusal, nested binders, unchanged cores
+  and substitutions after failure, retry, and contract callback ordering.
+- `python3 -B development/check.py --timeout 900 -- test -p iir`:
+  passed; `/tmp/luna-tools-sc33uonr/result.json`, exit 0.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed; `/tmp/luna-tools-jp_bmnsl/result.json`, exit 0.
