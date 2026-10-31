@@ -1,44 +1,8 @@
 //! Public command grammar, independent of the versioned package wire format.
 use super::{Command, OsString};
 
-pub const USAGE: &str = "Usage: luna <command> [options]\n       luna help [command]";
-pub const HELP: &str = "Luna — Flurry compiler\n\nUsage: luna <command> [options]\n\nCommands:\n  check       Type-check a source without emitting a dump\n  build       Build a host executable (or --emit object|bitcode)\n  test        Run tests (--engine native|reference; default native)\n  dump        Emit AST, HIR, NIR, IIR, LLVM, assembly or attributes\n  comptime    Invoke a comptime function\n  interpret   Execute a runtime entry in the reference interpreter\n  analyze     Inspect resources or text regions\n  packages    Apply a command to explicit package inputs\n  serve       Serve the versioned package stream protocol\n  help        Show command-specific help\n\nUse luna <command> --help for options and examples.\nSource-first invocations and --packages-v1/--packages-stream-v1 remain\ncompatibility entries; new automation should use subcommands.\n";
-const COMMON: &str = "\nCommon options:\n  --sysroot <path>           Library directory\n  -o, --output <path>        Output file (otherwise stdout where supported)\n  --fuel <steps>             Positive action budget\n  --dispatch-fuel <steps>    Frontend preparation budget\n  --build-mode <mode>        Primary package mode\n  --build-target <arch> <os> <bits>\n  --build-feature <name=true|false>\n  --package-build-mode <identity=mode>\n  --package-build-target <identity> <arch> <os> <bits>\n  --package-build-feature <identity> <name=true|false>\n  --copy-protocol <trait>, --drop-protocol <trait>\n  --splice-protocol, --meta-list-type, --tuple-type, --index-protocol,\n  --ord-protocol, --eq-protocol, --list-pattern-protocol,\n  --literal-into-protocol, --iterator-protocol, --into-iterator-protocol,\n  --add-protocol, --sub-protocol, --mul-protocol, --div-protocol,\n  --rem-protocol, --neg-protocol, --not-protocol <source-selector>\n  --comptime-intrinsic <operation=selector> (repeatable)\nHost options: --opt-level 0|1|2|3, --inline-functions, --discard-result,\n  --host-intrinsic <operation=selector> (repeatable),\n  --host-fma <selector>, --host-sqrt <selector>, --host-copysign <selector>\nOptions are validated against the selected pipeline. Targets describe build\ncontext, not cross-compiling LLVM backend selection. Use -- before an input\npath beginning with a dash. Source and output paths need not be UTF-8.\n";
+use super::help::help;
 
-pub fn help(name: &str) -> Result<String, String> {
-    let usage = match name {
-        "check" => {
-            "check <input.fl> [options]\n  Check through typed NIR; no artifact is printed. --output is not accepted."
-        }
-        "build" => {
-            "build <input.fl> -o <path> [--entry <name>] [--emit executable|object|bitcode]\n  Entry defaults to main; output is required."
-        }
-        "test" => {
-            "test <input.fl> [--engine native|reference] [--list] [--filter <text>]\n  --timeout-ms <ms> sets the native per-test deadline. --list only discovers\n  tests and cannot be combined with --engine or --timeout-ms."
-        }
-        "dump" => {
-            "dump <input.fl> [--emit ast|hir|nir|iir|llvm|asm|attributes|merged-attributes]\n  Defaults to nir. --entry <name> (default main) applies to iir, llvm and asm."
-        }
-        "comptime" => {
-            "comptime <input.fl> --entry <name> [--definition-fuel <steps>]\n  Invoke a comptime function and print its result."
-        }
-        "interpret" => {
-            "interpret <input.fl> [--entry <name>]\n  Reference-execute a runtime entry (default main) and print its value."
-        }
-        "analyze" => {
-            "analyze <resources|text-regions> <input.fl> [--entry <name>]\n  Entry defaults to main. resources requires --copy-protocol; optional\n  --drop-protocol supplies cleanup planning. Analysis is not verification."
-        }
-        "packages" => {
-            "packages <check|build|test|dump|comptime|interpret|analyze> [command options]\n  --package <id> <identity> <name> <entry> (repeatable)\n  --primary <id> [--dependency <requester> <alias> <provider>]\n  [--builtin <id>] [--builtin-impl-package <id>] [--with-inputs]\n  [--package-metadata-v1 <hex>]\n  No positional source path; actions and options match source commands."
-        }
-        "serve" => {
-            "serve packages-v1 [--cache-entries <count>]\n  Read versioned package requests from stdin; write protocol responses to\n  stdout. The request wire format remains unchanged. Default cache size: 8."
-        }
-        _ => return Err(format!("unknown command '{name}'")),
-    };
-    let options = if name == "serve" { "" } else { COMMON };
-    Ok(format!("Usage: luna {usage}\n{options}"))
-}
 fn value(args: &[OsString], index: &mut usize, flag: &str) -> Result<OsString, String> {
     *index += 1;
     let value = args
@@ -68,13 +32,30 @@ pub fn parse(args: Vec<OsString>) -> Result<Command, String> {
         return Ok(Command::Help);
     }
     if first == "help" {
-        return match args.as_slice() {
-            [_] => Ok(Command::Help),
-            [_, name] => Ok(Command::HelpTopic(help(
-                name.to_str().ok_or("command must be UTF-8")?,
-            )?)),
-            _ => Err("usage: luna help [command]".into()),
-        };
+        if args.len() == 1 {
+            return Ok(Command::Help);
+        }
+        let path = args[1..]
+            .iter()
+            .map(|part| part.to_str().ok_or("command must be UTF-8"))
+            .collect::<Result<Vec<_>, _>>()?;
+        return help(&path).map(Command::HelpTopic);
+    }
+    // Resolve only an exact command path here; option-bearing invocations
+    // continue through normal parsing so invalid input is not silently ignored.
+    if args
+        .last()
+        .is_some_and(|arg| arg == "--help" || arg == "-h")
+    {
+        let path = args[..args.len() - 1]
+            .iter()
+            .map(|part| part.to_str())
+            .collect::<Option<Vec<_>>>();
+        if let Some(path) = path {
+            if let Ok(text) = help(&path) {
+                return Ok(Command::HelpTopic(text));
+            }
+        }
     }
     // Preserve the established source and v1 wire entrypoints. Unknown command
     // spellings are errors, not filenames silently sent to the compiler.
@@ -87,14 +68,14 @@ pub fn parse(args: Vec<OsString>) -> Result<Command, String> {
         return super::parse_options(args);
     }
     if args.len() == 2 && (args[1] == "--help" || args[1] == "-h") {
-        return Ok(Command::HelpTopic(help(first)?));
+        return Ok(Command::HelpTopic(help(&[first])?));
     }
     if first == "serve" {
         if args.get(1).is_none_or(|s| s != "packages-v1") {
             return Err("usage: luna serve packages-v1 [--cache-entries <count>]".into());
         }
         if args.len() == 3 && args[2] == "--help" {
-            return Ok(Command::HelpTopic(help("serve")?));
+            return Ok(Command::HelpTopic(help(&["serve"])?));
         }
         return super::parse_options(
             std::iter::once(OsString::from("--packages-stream-v1")).chain(args.into_iter().skip(2)),
@@ -109,12 +90,15 @@ pub fn parse(args: Vec<OsString>) -> Result<Command, String> {
     } else {
         first
     };
-    help(command)?;
+    if command == "bindings" {
+        return Err("bindings is a help topic; use luna help bindings".into());
+    }
+    help(&[command])?;
     if matches!(command, "packages" | "serve") {
         return Err(format!("unsupported packages action '{command}'"));
     }
     if packages && args.len() == 3 && args[2] == "--help" {
-        return Ok(Command::HelpTopic(help(command)?));
+        return Ok(Command::HelpTopic(help(&[command])?));
     }
     let analysis = if command == "analyze" {
         let topic = args
@@ -130,6 +114,7 @@ pub fn parse(args: Vec<OsString>) -> Result<Command, String> {
         None
     };
     let mut forwarded = Vec::new();
+    let mut flags = std::collections::BTreeSet::new();
     let (mut input, mut entry, mut emit, mut engine) = (None, None, None, None);
     let mut list = false;
     let mut timeout = false;
@@ -137,8 +122,21 @@ pub fn parse(args: Vec<OsString>) -> Result<Command, String> {
     while index < args.len() {
         let arg = &args[index];
         let flag = arg.to_str().unwrap_or("");
+        if flag.starts_with('-') {
+            flags.insert(if flag == "-o" { "--output" } else { flag });
+        }
         match flag {
-            "--help" | "-h" => return Ok(Command::HelpTopic(help(command)?)),
+            "--help" | "-h" => {
+                let mut path = Vec::new();
+                if packages {
+                    path.push("packages");
+                }
+                path.push(command);
+                if let Some(topic) = analysis {
+                    path.push(topic);
+                }
+                return Ok(Command::HelpTopic(help(&path)?));
+            }
             "--" => {
                 if packages || input.is_some() || index + 2 != args.len() {
                     return Err("exactly one input path is required after --".into());
@@ -261,6 +259,30 @@ pub fn parse(args: Vec<OsString>) -> Result<Command, String> {
         .as_ref()
         .map(|s| s.to_str().ok_or("format must be UTF-8"))
         .transpose()?;
+    // Validate public pipeline names before translating to internal options.
+    // Diagnostics must teach the subcommand grammar, not legacy action flags.
+    let host = command == "build"
+        || (command == "dump" && matches!(format, Some("llvm" | "asm")))
+        || (command == "test" && !list && engine.as_ref().is_none_or(|e| e == "native"));
+    for flag in [
+        "--opt-level",
+        "--host-intrinsic",
+        "--host-fma",
+        "--host-sqrt",
+        "--host-copysign",
+    ] {
+        if flags.contains(flag) && !host {
+            return Err(format!(
+                "{flag} requires build, test --engine native, or dump --emit llvm|asm"
+            ));
+        }
+    }
+    if command == "build" && !flags.contains("--output") {
+        return Err("build requires -o <path> or --output <path>".into());
+    }
+    if flags.contains("--discard-result") && !(command == "build" || (command == "dump" && host)) {
+        return Err("--discard-result requires build or dump --emit llvm|asm".into());
+    }
     let supplied_entry = entry.is_some();
     let entry = entry.unwrap_or_else(|| "main".into());
     let mut action: Vec<OsString> = match command {

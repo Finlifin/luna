@@ -2,7 +2,12 @@
 
 Luna 使用子命令选择工作，再用该命令的选项配置输入、目标与产物。
 不带参数显示总览；`luna help <command>` 与 `luna <command> --help`
-显示对应帮助；`luna --version`（或 `-V`）显示编译器版本。
+显示对应帮助。嵌套命令也支持完整路径，例如
+`luna help packages build`、`luna packages build --help`、
+`luna help analyze resources`；两种形式显示相同内容。
+`luna help bindings` 单独列出协议绑定覆盖参数。
+帮助按命令限定选项，`check` 不展示产物或后端参数；
+`luna --version`（或 `-V`）显示编译器版本。
 命令解析不读取源文件，也不启动编译。
 
 | 命令 | 作用 | 默认行为 |
@@ -93,7 +98,8 @@ luna serve packages-v1 --cache-entries 8
 
 ## 实现与验证
 
-公共命令语法位于 `compiler/luna/src/cli/subcommands.rs`。它先校验命令所属
+公共命令语法位于 `compiler/luna/src/cli/subcommands.rs`，
+分层帮助位于 `compiler/luna/src/cli/help.rs`。它先校验命令所属
 参数，再进入共享的选项验证与既有执行管线；包流 v1 不经过交互命令解析，
 避免改变传输协议。`check` 和 `packages check` 各有显式执行分支，不通过
 丢弃已经格式化的 dump 来伪装检查模式。
@@ -157,3 +163,23 @@ Validation in `/home/fin/luna`:
   exit 0; `/tmp/luna-tools-zzveju75/result.json`; `git diff --check` passed.
 
 No full language suite was run for this test-fixture-only change.
+
+## 分层帮助与参数诊断
+
+帮助支持完整子命令路径；多包动作的帮助展示包输入，不再要求位置源文件。
+编译器协议覆盖参数集中于 `luna help bindings`，常用命令只展示对应管线的选项。
+Host 选项被误用于前端、参考解释器或普通 IR dump 时，诊断提示子命令用法。
+旧 source-first 和 v1 入口仍保留兼容，内部共享选项解析与执行管线。
+
+在 `/home/fin/luna` 验证：
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test subcommands`：
+  9 项通过，包含真实 native 构建执行、测试及其他子命令；
+  `/tmp/luna-tools-7s35kadl/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test subcommands --lib cli`：
+  9 项原有 CLI 单元测试通过（该过滤不运行集成用例）；
+  `/tmp/luna-tools-strft_p5/result.json`。
+- `cargo fmt --all` 经 `development/command.py` 执行通过；
+  `/tmp/luna-tools-ozuppbdw/result.json`；`git diff --check` 通过。
+
+未运行全量语言测试；本次不改变编译与运行语义。

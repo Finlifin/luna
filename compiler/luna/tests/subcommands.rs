@@ -89,6 +89,7 @@ fn formats_and_analysis_routes_preserve_options() {
 fn misplaced_duplicate_and_conflicting_actions_are_rejected() {
     for args in [
         vec!["buid", "input.fl"],
+        vec!["bindings", "input.fl"],
         vec!["check"],
         vec!["build", "input.fl"],
         vec!["check", "input.fl", "--output", "out"],
@@ -253,4 +254,78 @@ fn executable_native_build_and_package_check_use_subcommands() {
     );
     assert!(output.stdout.is_empty());
     std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn nested_help_resolves_the_entire_command_path() {
+    for path in [
+        vec!["packages", "build"],
+        vec!["packages", "check"],
+        vec!["packages", "analyze", "resources"],
+        vec!["analyze", "resources"],
+        vec!["analyze", "text-regions"],
+        vec!["serve", "packages-v1"],
+    ] {
+        let mut explicit = vec!["help"];
+        explicit.extend(&path);
+        let Command::HelpTopic(text) = parse(&explicit).unwrap() else {
+            panic!()
+        };
+        assert!(text.contains(&format!("Usage: luna {}", path.join(" "))));
+        for flag in ["--help", "-h"] {
+            let mut trailing = path.clone();
+            trailing.push(flag);
+            assert_eq!(parse(&trailing).unwrap(), Command::HelpTopic(text.clone()));
+        }
+        if path[0] == "packages" {
+            assert!(!text.contains("<input.fl>"));
+            assert!(text.contains("--package <id>"));
+        }
+    }
+    for path in [
+        vec!["help", "packages", "serve"],
+        vec!["help", "analyze", "typo"],
+        vec!["help", "build", "extra"],
+        vec!["packages", "analyze", "typo", "--help"],
+    ] {
+        assert!(parse(&path).is_err(), "{path:?}");
+    }
+}
+
+#[test]
+fn help_and_errors_use_pipeline_specific_public_options() {
+    let Command::HelpTopic(check) = parse(&["check", "--help"]).unwrap() else {
+        panic!()
+    };
+    for unrelated in [
+        "--output",
+        "--opt-level",
+        "--discard-result",
+        "--host-intrinsic",
+        "--fuel",
+    ] {
+        assert!(!check.contains(unrelated), "check advertises {unrelated}");
+    }
+    let Command::HelpTopic(bindings) = parse(&["help", "bindings"]).unwrap() else {
+        panic!()
+    };
+    assert!(bindings.contains("--copy-protocol"));
+    for args in [
+        vec!["check", "input.fl", "--opt-level", "2"],
+        vec![
+            "test",
+            "input.fl",
+            "--engine",
+            "reference",
+            "--host-fma",
+            "fma",
+        ],
+        vec!["dump", "input.fl", "--emit", "hir", "--discard-result"],
+        vec!["build", "input.fl"],
+    ] {
+        let message = parse(&args).unwrap_err();
+        for legacy in ["--build", "--emit-llvm", "--test-native"] {
+            assert!(!message.contains(legacy), "{message}");
+        }
+    }
 }

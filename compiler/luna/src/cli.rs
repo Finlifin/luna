@@ -1,8 +1,9 @@
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
+mod help;
 mod subcommands;
-pub use subcommands::{HELP, USAGE};
+pub use help::{HELP, USAGE};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Emit {
