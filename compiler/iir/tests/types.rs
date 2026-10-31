@@ -747,3 +747,148 @@ fn captured_comptime_values_must_materialize_before_iir_validation() {
     package.functions[0].function.body.kind = K::Literal(nir::program::Literal::Bool(true));
     package.validate(&mut 10000).unwrap();
 }
+
+#[test]
+fn closure_contexts_cannot_hide_unfinished_iir_dependencies() {
+    let unresolved = Term::Rigid {
+        declaration: DeclarationId {
+            package: 91,
+            local: 1,
+        },
+        sort: Sort::Type,
+    };
+    let context = Term::ClosureContextValue(vec![unresolved]);
+    assert!(
+        completed_type(&context, &BTreeSet::new(), &mut 1000)
+            .unwrap_err()
+            .contains("unresolved")
+    );
+    let contextual = Term::ContextualClosure {
+        context: Box::new(Term::Rigid {
+            declaration: DeclarationId {
+                package: 91,
+                local: 2,
+            },
+            sort: Sort::ComptimeValue,
+        }),
+        signature: Box::new(Term::Function {
+            parameters: vec![],
+            result: Box::new(Term::Primitive(Primitive::Bool)),
+        }),
+    };
+    assert!(
+        completed_type(&contextual, &BTreeSet::new(), &mut 1000)
+            .unwrap_err()
+            .contains("unresolved")
+    );
+    completed_type(
+        &Term::ClosureContextValue(vec![Term::Primitive(Primitive::Bool)]),
+        &BTreeSet::new(),
+        &mut 1000,
+    )
+    .unwrap();
+}
+
+#[test]
+fn closure_contexts_and_snapshots_cannot_hide_dangling_iir_links() {
+    let missing = Term::Nominal {
+        declaration: DeclarationId {
+            package: 92,
+            local: 1,
+        },
+        arguments: vec![],
+    };
+    for argument in [
+        Term::ClosureContextValue(vec![missing.clone()]),
+        Term::ClosureSnapshot {
+            factory: DeclarationId {
+                package: 92,
+                local: 2,
+            },
+            arguments: vec![missing],
+        },
+    ] {
+        let identity = iir::CallableIdentity::intern(
+            iir::InstanceKey {
+                declaration: DeclarationId {
+                    package: 92,
+                    local: 3,
+                },
+                arguments: vec![argument],
+            },
+            Term::Function {
+                parameters: vec![],
+                result: Box::new(Term::Primitive(Primitive::Bool)),
+            },
+            &mut Default::default(),
+            &mut 1000,
+        )
+        .unwrap();
+        let package = iir::Package {
+            callable_identities: vec![identity],
+            ..Default::default()
+        };
+        assert!(
+            package
+                .validate(&mut 1000)
+                .unwrap_err()
+                .contains("nominal reference is dangling")
+        );
+    }
+}
+
+#[test]
+fn completed_types_preflight_depth_before_recursive_scope_validation() {
+    let mut deep = Term::Primitive(Primitive::Bool);
+    for _ in 0..140 {
+        deep = Term::Pointer(Box::new(deep));
+    }
+    assert!(
+        completed_type(&deep, &BTreeSet::new(), &mut 10_000)
+            .unwrap_err()
+            .contains("budget")
+    );
+    let malformed = Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: Sort::Type,
+    };
+    assert!(
+        completed_type(&malformed, &BTreeSet::new(), &mut 0)
+            .unwrap_err()
+            .contains("budget")
+    );
+    assert!(
+        completed_type(&malformed, &BTreeSet::new(), &mut 100)
+            .unwrap_err()
+            .contains("scope")
+    );
+    completed_type(
+        &Term::Primitive(Primitive::Bool),
+        &BTreeSet::new(),
+        &mut 100,
+    )
+    .unwrap();
+}
+
+#[test]
+fn closure_context_capture_types_retain_runtime_availability_obligations() {
+    let runtime = RuntimeId {
+        instance: 93,
+        local: 7,
+    };
+    let context = Term::ClosureContextValue(vec![Term::NormalForm {
+        head: DeclarationId {
+            package: 93,
+            local: 1,
+        },
+        sort: Sort::Type,
+        arguments: vec![Term::Runtime(runtime)],
+    }]);
+    assert!(
+        completed_type(&context, &BTreeSet::new(), &mut 1000)
+            .unwrap_err()
+            .contains("unavailable runtime")
+    );
+    completed_type(&context, &BTreeSet::from([runtime]), &mut 1000).unwrap();
+}

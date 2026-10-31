@@ -203,7 +203,6 @@ impl Package {
             if !matches!(signature.callable_signature(), Term::Function { .. }) {
                 return Err("IIR callable identity has a non-callable signature".into());
             }
-            signature.check_scope(&[]).map_err(|e| e.to_string())?;
             self.validate_type(signature, fuel)?;
             for argument in &identity.key.arguments {
                 self.validate_type(argument, fuel)?;
@@ -743,7 +742,16 @@ impl Package {
                     }
                     pending.extend(arguments);
                 }
-                Term::Tuple(fields) | Term::TupleValue(fields) => pending.extend(fields),
+                Term::Tuple(fields)
+                | Term::TupleValue(fields)
+                | Term::ClosureContextValue(fields)
+                | Term::ClosureSnapshot {
+                    arguments: fields, ..
+                } => pending.extend(fields),
+                Term::ContextualClosure { context, signature } => {
+                    pending.push(context);
+                    pending.push(signature);
+                }
                 Term::OptionalValue { ty, value } => {
                     pending.push(ty);
                     if let Some(value) = value {
@@ -780,7 +788,27 @@ impl Package {
                     pending.extend(environment);
                     pending.push(signature);
                 }
-                _ => {}
+                // Completion rejects these before link validation starts.
+                Term::AssociatedType { .. }
+                | Term::Rigid { .. }
+                | Term::Hole { .. }
+                | Term::Value { .. } => {}
+                Term::Primitive(_)
+                | Term::ClosureContextType
+                | Term::Bound { .. }
+                | Term::Runtime(_)
+                | Term::Unit
+                | Term::Bool(_)
+                | Term::Char(_)
+                | Term::BitVec(_)
+                | Term::Float16(_)
+                | Term::BFloat16(_)
+                | Term::Float32(_)
+                | Term::Float64(_)
+                | Term::String(_)
+                | Term::Symbol(_)
+                | Term::Integer(_)
+                | Term::Float(_) => {}
             }
         }
         Ok(())
@@ -857,6 +885,10 @@ pub fn completed_type(
     available: &BTreeSet<RuntimeId>,
     fuel: &mut usize,
 ) -> Result<(), String> {
+    // Scope validation is recursive; guard depth and payload work first, even
+    // for externally assembled IIR that has not passed a producer's preflight.
+    nir::type_computations::charge_term(ty, fuel)
+        .map_err(|e| format!("IIR type validation budget: {e}"))?;
     ty.check_scope(&[])
         .map_err(|e| format!("IIR type scope: {e}"))?;
     completed_dependencies(ty, available, fuel)
@@ -910,7 +942,12 @@ pub fn completed_dependencies(
             | Term::ClosureSnapshot { arguments, .. }
             | Term::NormalForm { arguments, .. }
             | Term::Tuple(arguments)
-            | Term::TupleValue(arguments) => pending.extend(arguments),
+            | Term::TupleValue(arguments)
+            | Term::ClosureContextValue(arguments) => pending.extend(arguments),
+            Term::ContextualClosure { context, signature } => {
+                pending.push(context);
+                pending.push(signature);
+            }
             Term::OptionalValue { ty, value } => {
                 pending.push(ty);
                 if let Some(value) = value {
@@ -947,7 +984,22 @@ pub fn completed_dependencies(
                 pending.extend(environment);
                 pending.push(signature);
             }
-            _ => {}
+            Term::Primitive(_)
+            | Term::ClosureContextType
+            | Term::Bound { .. }
+            | Term::Runtime(_)
+            | Term::Unit
+            | Term::Bool(_)
+            | Term::Char(_)
+            | Term::BitVec(_)
+            | Term::Float16(_)
+            | Term::BFloat16(_)
+            | Term::Float32(_)
+            | Term::Float64(_)
+            | Term::String(_)
+            | Term::Symbol(_)
+            | Term::Integer(_)
+            | Term::Float(_) => {}
         }
     }
     Ok(())

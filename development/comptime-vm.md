@@ -9150,3 +9150,33 @@ Validation in `/home/fin/luna`:
   3 passed; `/tmp/luna-tools-p4qupoe7/result.json`, exit 0.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
   passed; `/tmp/luna-tools-bmqgu9_6/result.json`, exit 0.
+
+
+## Close IIR completion and link traversal gaps in closure contexts
+
+IIR completion now visits ClosureContextValue capture types and both sides of
+ContextualClosure. Link validation visits these nodes and ClosureSnapshot
+arguments. The previous wildcard branches silently accepted unresolved rigid
+parameters, unavailable runtime dependencies and dangling nominal references
+hidden there. Both traversals now match Term exhaustively so new variants
+require an explicit decision. This does not provide missing runtime access-path
+or lifetime evidence; availability remains a separate, narrower obligation.
+
+completed_type now charges structure and bounds depth before recursive scope
+validation. Retained callable validation uses that guarded path instead of an
+extra unguarded scope traversal. Existing signature-construction copy guards
+remain, because they also cover frozen expression payloads before interning.
+
+Validation in `/home/fin/luna`:
+
+- New closure-context rejection tests failed on the old implementation because
+  completion and package validation returned Ok for invalid inputs:
+  `/tmp/luna-tools-qtdjguwo/result.json`, exit 101.
+- `python3 -B development/check.py --timeout 900 -- test -p iir`:
+  104 tests passed; `/tmp/luna-tools-1694_0ub/result.json`, exit 0. Regressions
+  cover unresolved contexts, dangling links in contexts and snapshots, runtime
+  availability, depth rejection and successful validation after failure.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test function_type_dependencies --test scoped_comptime_callables --test comptime_iir_bytecode`:
+  56 passed; `/tmp/luna-tools-xw2fhl6k/result.json`, exit 0.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed; `/tmp/luna-tools-1b16d2mn/result.json`, exit 0.
