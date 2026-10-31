@@ -3,8 +3,9 @@
 //! Analogous to `rustc_middle`. Contains:
 //!
 //! - [`ty`] — the semantic type system (`Ty`, `TyKind`, `TyCtxt`, …).
-//! - [`queries`] — the salsa query-group trait, the concrete [`Db`], and
-//!   all query provider stubs.
+//! - [`queries`] — the concrete [`Db`], [`Providers`] table, and query
+//!   methods.  Memoisation / cycle detection live in the [`query`] crate;
+//!   see [`query::howto`] for how to add a new query.
 //!
 //! # Dependency position
 //!
@@ -29,7 +30,7 @@ pub mod ty;
 // Convenience re-exports for the most commonly used items.
 pub use hir_package::HirPackageBox;
 pub use hir_query::HirQueryInput;
-pub use queries::{Db, LunaDatabase, Providers};
+pub use queries::{Db, LunaDatabase, Providers, QueryCaches};
 pub use ty::{
     AdtDef, CommonTypes, FieldDef, InferTy, NFId, PrimTy, Ty, TyCtxt, TyInterner, TyKind,
 };

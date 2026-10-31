@@ -1,0 +1,24 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+typealias Byte = .u8'builtin;
+
+-- Deliver an instance-selected constant as a runtime value.
+fn materialize(comptime value: Byte) -> Byte {
+    value
+}
+
+-- The contract makes both arithmetic branches safe for every admitted input.
+-- Selection and arithmetic finish when the input's instance is selected.
+fn scaled(comptime value: Byte) -> Byte
+where requires value <= 10
+{
+    materialize(do {
+        let selected = if value < 5 { value + 1 } else { value * 2 };
+        selected
+    })
+}
+
+fn run() -> Tuple<Byte, Byte> {
+    (scaled(3), scaled(7))
+}

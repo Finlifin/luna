@@ -1,0 +1,27 @@
+-- Type-elaborated runtime behavior; resource verification is a later phase.
+trait Keep {
+    fn keep(self) -> Self { self }
+}
+
+trait Read {
+    fn read(self, enabled: bool) -> bool;
+}
+
+struct Flag { value: bool, }
+
+impl Keep for Flag {}
+impl Read for Flag {
+    fn read(self, enabled: bool) -> bool {
+        self.value and enabled
+    }
+}
+impl Flag {
+    fn invert(self) -> Self { Self { value: not self.value } }
+}
+
+fn make() -> Flag { Flag { value: false } }
+fn enabled() -> bool { true }
+
+fn run() -> bool {
+    make().as(Keep).keep().invert().as(Read).read(enabled())
+}

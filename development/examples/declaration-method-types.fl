@@ -1,0 +1,23 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
+typealias Type = .Type'builtin;
+typealias Chosen = Select(Selector {});
+const StoredType = Select(Selector {});
+struct Holder { value: Chosen }
+fn preserve(value: Chosen) -> StoredType { value }
+typealias Pair = (Selector {}).as(Shape).Pair();
+typealias Character = Select(Box<'x''type> { value: 'x' });
+enum Choice { value(Character), }
+fn pair() -> Pair { (true, false) }
+fn character() -> Character { let .value(value) = Choice.value('z'); value }
+trait Shape {
+    comptime fn Output(self) -> Type;
+    comptime fn Pair(self) -> Type { Tuple<self.Output(), bool> }
+}
+struct Box where T { value: T }
+impl Shape for Box<T> where T { comptime fn Output(self) -> Type { T } }
+struct Selector {}
+impl Shape for Selector { comptime fn Output(self) -> Type { bool } }
+comptime fn Select(value: T) -> Type where T :- Shape { value.Output() }
+fn run() -> bool { preserve(Holder { value: true }.value) }

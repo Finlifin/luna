@@ -1,0 +1,18 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+fn accept(a: bool, b: bool, c: bool) -> bool
+where requires (a or b) or c {
+    true
+}
+
+-- Pure program predicates admit association and permutation. Argument
+-- evaluation and executable short-circuit order remain source ordered.
+fn forward(a: bool, b: bool, c: bool) -> bool
+where requires a or (b or c) {
+    accept(c, a, b)
+}
+
+fn run() -> Tuple<bool, bool, bool> {
+    (forward(true, false, false), forward(false, true, false), forward(false, false, true))
+}

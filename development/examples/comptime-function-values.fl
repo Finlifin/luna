@@ -1,0 +1,30 @@
+typealias Int = .Integer'builtin;
+typealias Callback = comptime fn(Int) -> Int;
+
+comptime fn identity(value: T) -> T where T { value }
+comptime fn increment(value: Int) -> Int { value + 1 }
+comptime fn twice(callback: Callback, value: Int) -> Int {
+    callback(callback(value))
+}
+comptime fn choose(flag: bool) -> Callback {
+    if flag { increment } else { identity }
+}
+comptime fn forward(callback: comptime fn(T) -> T, value: T) -> T where T {
+    callback(value)
+}
+
+const IDENTITY: Callback = identity;
+const INCREMENT = increment;
+const SELECTED = choose(true);
+const WIDTH = twice(SELECTED, 6);
+typealias Byte = .BitVec'builtin<WIDTH>;
+
+struct Pipeline { first: Callback, second: Callback }
+const PIPELINE = Pipeline { first: IDENTITY, second: INCREMENT };
+
+comptime fn run() -> Int {
+    let callback = choose(false);
+    let value = twice(SELECTED, 6);
+    let forwarded = forward(identity, value);
+    PIPELINE.second(PIPELINE.first(callback(forwarded)))
+}

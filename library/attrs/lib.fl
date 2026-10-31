@@ -1,0 +1,8 @@
+{- Attribute values are ordinary comptime data checked by their consumers. -}
+pub use calling_convention.constructors.abi;
+pub use staging.phase.comptime_phase;
+
+pub mod prelude {
+    pub use .abi;
+    pub use .comptime_phase;
+}

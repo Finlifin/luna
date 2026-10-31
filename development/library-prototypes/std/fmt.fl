@@ -1,0 +1,13 @@
+-- ==========================================================================
+-- std/fmt – string formatting
+-- ==========================================================================
+
+pub fn format(format_string: String, ...args: Any) -> String {
+    __builtin_format(format_string, args)
+}
+
+pub trait Display {
+    fn fmt(self) -> String;
+}
+
+-- Primitive Display implementations are provided by the compiler.

@@ -1,0 +1,17 @@
+[package]
+name = "elaboration"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+program_verification = { path = "../program_verification" }
+materialization = { path = "../materialization" }
+verification_core = { path = "../verification_core" }
+type_resolution = { path = "../type_resolution" }
+ptc = { path = "../ptc" }
+nir = { path = "../nir" }
+hir = { path = "../hir" }
+rustc_span = { workspace = true }
+comptime_runtime = { path = "../comptime_runtime" }
+comptime_interpretor = { path = "../comptime_interpretor" }
+iir = { path = "../iir" }

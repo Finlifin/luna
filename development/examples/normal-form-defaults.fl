@@ -1,0 +1,48 @@
+typealias Type = .Type'builtin;
+
+-- The body does not reduce Pair<T, U> to T in normalized IR.
+pure comptime fn Pair<T, .U: Type = T> -> Type { T }
+
+comptime fn First() -> Type { bool }
+comptime fn Second() -> Type { 'x''type }
+
+-- First is evaluated once; its result supplies both retained head inputs.
+comptime fn Defaulted() -> Type { Pair<First()> }
+
+-- Explicit inputs run in source order: Second, then First.
+comptime fn Ordered() -> Type { Pair<.U = Second(), First()> }
+
+-- Omitted and explicitly supplied defaults have the same complete identity.
+fn keep(value: Pair<bool>) -> Pair<bool, .U = bool> { value }
+
+typealias Integer = .Integer'builtin;
+
+-- Scalar inputs can feed later scalar defaults; the head is still opaque.
+pure comptime fn Bits<width: Integer, .storage: Integer = (width + 1)> -> Type {
+    bool
+}
+
+comptime fn PaddedBits() -> Type { Bits<4> }
+fn same_bits(value: Bits<4>) -> Bits<4, .storage = 5> { value }
+
+-- Literal conversion waits for the Type input; copy reuses the checked value.
+pure comptime fn Repeated<T, value: T, .copy: T = value> -> Type { T }
+comptime fn RepeatByte(t: Type) -> Type { Repeated<t, 200> }
+comptime fn Dynamic() -> Type { RepeatByte(.u8'builtin) }
+
+-- The explicit value is evaluated before its later Type supplier. Conversion
+-- waits for that Type, then copy reuses the converted value without replay.
+pure comptime fn WithLateType<.T: Type = bool, value: T, .copy: T = value> -> Type { T }
+comptime fn Late(t: Type) -> Type { WithLateType<200, .T = t> }
+comptime fn LateByte() -> Type { Late(.u8'builtin) }
+
+-- A generic alias retains T and the opaque Layout head while normalizing
+-- the concrete default storage input. It does not need to invoke Layout.
+pure comptime fn Layout<T, width: Integer, .storage: Integer = (width + 1)> -> Type { T }
+typealias Packed<T> = Layout<T, 4>;
+fn preserve_generic(value: Packed<T>) -> Layout<T, 4, .storage = 5> where T { value }
+
+comptime fn NextStorage(width: Integer) -> Integer { width + 1 }
+pure comptime fn ComputedLayout<T, width: Integer, .storage: Integer = NextStorage(width)> -> Type { T }
+typealias ComputedPacked<T> = ComputedLayout<T, 4>;
+fn preserve_computed(value: ComputedPacked<T>) -> ComputedLayout<T, 4, .storage = 5> where T { value }

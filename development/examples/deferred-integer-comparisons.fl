@@ -1,0 +1,23 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+typealias Integer = .Integer'builtin;
+
+fn choose(comptime selected: bool) -> bool { selected }
+
+fn defaulted(comptime count: Integer,
+             comptime .selected: bool = count == 3) -> bool {
+    selected
+}
+
+fn forward(comptime count: Integer) -> Tuple<bool, bool> {
+    let outer = || {
+        let inner = || choose(count + 1 == 3);
+        inner()
+    };
+    (outer(), defaulted(count))
+}
+
+fn run() -> Tuple<Tuple<bool, bool>, Tuple<bool, bool>> {
+    (forward(2), forward(3))
+}

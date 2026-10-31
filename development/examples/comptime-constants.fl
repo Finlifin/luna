@@ -1,0 +1,21 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
+typealias Type = .Type'builtin;
+typealias Int = .Integer'builtin;
+const WIDTH: Int = 4 * 2;
+const FLAG = true;
+const BYTE: Type = .u8'builtin;
+const MASK: .BitVec'builtin<WIDTH> = 0xAF;
+const PAIR = (WIDTH, FLAG);
+const MESSAGE = "λ";
+const NEGATIVE: Int = -9;
+comptime fn width() -> Int { WIDTH }
+comptime fn mask() -> .BitVec'builtin<WIDTH> { MASK }
+comptime fn pair() -> Tuple<Int, bool> { PAIR }
+comptime fn negative() -> Int { NEGATIVE }
+const COMPUTED = width() + 1;
+typealias Data = .BitVec'builtin<COMPUTED>;
+fn use_type(value: BYTE) -> BYTE { value }
+typealias Observed = MASK'type;
+fn observed(value: Observed) -> Observed { value }

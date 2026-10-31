@@ -1,0 +1,13 @@
+-- Build run for success, or missing for an error payload.
+typealias Symbol = .Symbol'builtin;
+typealias Char = .char'builtin;
+
+fn run() -> !Symbol Char { '中' }
+fn missing() -> !Symbol Char { error .missing }
+
+-- Success may carry no payload; falling through still produces a success tag.
+typealias Void = .void'builtin;
+fn acknowledge(failed: bool) -> !Symbol Void {
+    if failed { return error .missing; }
+}
+fn completed() -> !Symbol Void { acknowledge(false) }

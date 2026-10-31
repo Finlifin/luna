@@ -12,27 +12,16 @@ use std::collections::HashMap;
 use symbol::Symbol;
 
 use crate::binding::Binding;
-use crate::ids::ScopeId;
+use crate::ids::{AstNodeRef, ScopeId};
 
 /// What syntactic construct pushed this rib.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RibKind {
-    /// A normal block `{ … }`.
-    Normal,
-    /// A function parameter list.
-    FnParams,
-    /// A closure / lambda capture boundary.
-    Closure,
-    /// A `let` / `const` binding.
-    LetBinding,
-    /// A `for` loop pattern.
-    ForLoop,
-    /// A match arm pattern.
-    MatchArm,
-    /// An `if-let` pattern binding.
-    IfLet,
-    /// Type parameter scope (clause-level).
-    TypeParam,
+    ClauseParam,
+    FnParam,
+    Block,
+    Lambda,
+    MatchBody,
 }
 
 /// A rib on the lexical resolution stack.
@@ -46,6 +35,9 @@ pub struct Rib {
     pub bindings: HashMap<Symbol, Binding>,
     /// The scope this rib is associated with.
     pub scope_id: ScopeId,
+    /// A generated output scope at this lexical position. Known bindings in
+    /// this rib take precedence; outer bindings remain fallback candidates.
+    pub pending_outputs: Option<AstNodeRef>,
 }
 
 impl Rib {
@@ -54,6 +46,7 @@ impl Rib {
             kind,
             bindings: HashMap::new(),
             scope_id,
+            pending_outputs: None,
         }
     }
 
@@ -63,8 +56,8 @@ impl Rib {
     }
 
     /// Look up a name in this rib only.
-    pub fn get(&self, name: &str) -> Option<&Binding> {
-        self.bindings.get(&Symbol::intern(name))
+    pub fn get(&self, name: Symbol) -> Option<&Binding> {
+        self.bindings.get(&name)
     }
 }
 
@@ -110,14 +103,23 @@ impl RibStack {
         }
     }
 
-    /// Look up a name by walking the rib stack top-to-bottom.
-    pub fn lookup(&self, name: &str) -> Option<&Binding> {
+    /// Ordinary-only lookup. Stop at a pending export scope rather than
+    /// silently selecting an outer binding; use Resolver's deferred query
+    /// when the caller can resume generated output resolution.
+    pub fn lookup(&self, name: Symbol) -> Option<&Binding> {
         for rib in self.ribs.iter().rev() {
             if let Some(binding) = rib.get(name) {
                 return Some(binding);
             }
+            if rib.pending_outputs.is_some() {
+                return None;
+            }
         }
         None
+    }
+
+    pub fn inner_to_outer(&self) -> impl Iterator<Item = &Rib> {
+        self.ribs.iter().rev()
     }
 
     /// Depth of the stack.

@@ -1,0 +1,30 @@
+-- The handler borrows a stable callback slot with an explicit Copy protocol proof.
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+impl Duplicate for fn(*bool) {}
+impl Duplicate for *T where T {}
+
+effect inspect(pointer: *bool) -> bool;
+fn subject(pointer: *bool) -> #inspect bool { inspect(pointer)# }
+fn change(value: *bool) { value.* = true; }
+
+typealias Answer = %{previous: bool} fn() -> bool;
+fn update(pointer: *bool) -> Answer {
+    let callback = change;
+    subject(pointer)# {
+        inspect(value) => do {
+            callback(value);
+            let previous = value.*;
+            return || {return previous;};
+        },
+    };
+    let previous = false;
+    || previous
+}
+
+fn run() -> bool {
+    var seen = false;
+    let selected = update(seen.ref);
+    selected() and seen
+}

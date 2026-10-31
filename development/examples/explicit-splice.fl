@@ -1,0 +1,28 @@
+-- Explicit protocol invocation; automatic cross-stage insertion is separate.
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+typealias Type = .Type'builtin;
+pure comptime fn TupleElements<T> -> Type { T }
+pure comptime fn Tuple<...Es: TupleElements<Type>> -> Type { bool }
+
+trait Splice {
+    assoc RuntimeTarget: Type;
+    fn splice(comptime data: Self) -> RuntimeTarget;
+}
+
+impl Splice for bool {
+    assoc RuntimeTarget: Type = Tuple<bool, bool>;
+    fn splice(comptime data: bool) -> Tuple<bool, bool> {
+        construct(data)
+    }
+}
+
+-- An ordinary runtime call must survive specialization of the staged input.
+fn construct(value: bool) -> Tuple<bool, bool> {
+    (value, not value)
+}
+
+const FLAG = true;
+
+fn run() -> Tuple<Tuple<bool, bool>, Tuple<bool, bool>> {
+    (bool.as(Splice).splice(FLAG), bool.as(Splice).splice(false))
+}

@@ -1,0 +1,26 @@
+use builtin.{bool, Symbol, Integer};
+use bindings.{Object, object_get};
+
+{-
+    An immutable snapshot of the source package's host pipeline target. These
+    values describe compilation, not the machine running the compiler.
+-}
+pub struct Target {
+    arch: Symbol,
+    os: Symbol,
+    pointer_bits: Integer,
+    features: TargetFeatures,
+}
+
+pub struct TargetFeatures {
+    entries: Object,
+}
+
+impl TargetFeatures {
+    -- Missing is null; an explicitly disabled feature is false?.
+    pub pure comptime fn get(self, name: Symbol) -> ?bool {
+        object_get(bool, self.entries, name)
+    }
+}
+
+pub use bindings.target;

@@ -1,0 +1,15 @@
+use builtin.{Symbol, str};
+use info.target.Target;
+use info.package.PackageMetadata;
+
+{-
+    Compiler-facing build inputs and Object operations. Public info modules
+    re-export these identities; forwarding a binding must preserve the source
+    definition's contextual package ownership.
+-}
+pub typealias Object = .Object'builtin;
+pub const object_get = .object_get'builtin;
+pub const mode: Symbol = .build_mode'builtin;
+pub const target: Target = .build_target'builtin;
+pub const package_metadata: comptime fn(str) -> PackageMetadata =
+    .build_package_metadata'builtin;

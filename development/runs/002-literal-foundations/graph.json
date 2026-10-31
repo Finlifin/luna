@@ -1,0 +1,719 @@
+{
+  "task": {
+    "objective": "Lossless documented literal frontend as next milestone toward full Flurry implementation",
+    "scope": "Lexer, literal AST/parser, HIR payloads/lowering, standalone tests; no type elaboration yet",
+    "acceptance_criteria": [
+      {
+        "id": "C11",
+        "criterion": "Documented decimal/binary/octal/hex and floating spellings are tokenized and reach HIR without fixed-width overflow, precision loss or fabricated zero; invalid digit, mixed hex case and scientific forms diagnose; suffix identifiers remain one separate conversion request.",
+        "class": "rerun"
+      },
+      {
+        "id": "C12",
+        "criterion": "Characters and fixed strings decode precisely the documented escapes and Unicode scalars; adjacent whitespace-separated strings concatenate; quote/take-view tokens remain distinguishable; unsupported interpolation is rejected explicitly, never emitted as a fixed string.",
+        "class": "rerun"
+      },
+      {
+        "id": "C13",
+        "criterion": "CLI and constant-pattern paths preserve literal and suffix payloads in deterministic readable S-expressions, with targeted valid/rejection/boundary tests and previous frontend regression tests passing.",
+        "class": "rerun"
+      },
+      {
+        "id": "C14",
+        "criterion": "Development remains on dev, unrelated dirty baseline is preserved, dependency-free frontend milestone and remaining elaboration/comptime/full-language work are stated honestly.",
+        "class": "rerun"
+      }
+    ],
+    "constraints": [
+      "Preserve existing dirty changes",
+      "Use canonical docs",
+      "No backend work",
+      "No history/prompt review loop"
+    ],
+    "baseline": {
+      "commit": "4f5e3733ca88121b086b3a9e4389923abb9d837c",
+      "snapshot": "/tmp/luna-dev-002/baseline",
+      "manifest": "/tmp/luna-dev-002/baseline-manifest.json"
+    }
+  },
+  "units": [
+    {
+      "id": "parser",
+      "input": "/tmp/luna-dev-002/baseline and contract.md",
+      "output": "Scoped source delta and command evidence",
+      "evidence_required": "Real targeted checks and inspectable diff",
+      "owner": "/root",
+      "write_boundary": [
+        "compiler/parse/src/basic.rs",
+        "compiler/parse/src/expressions.rs",
+        "compiler/parse/src/patterns.rs",
+        "compiler/parse/tests/",
+        "development/README.md",
+        "development/implementation-plan.md",
+        "compiler/ast/src/lib.rs",
+        "compiler/parse/src/parser.rs"
+      ],
+      "isolation": "/home/fin/luna",
+      "verifier": "root integration and fresh grader",
+      "selected_skills": [
+        {
+          "name": "graph-engineering-workflow",
+          "reason": "bounded ownership, evidence and no nested dispatch"
+        }
+      ],
+      "retry": 1,
+      "stop_condition": "Deliver bounded changes and real checks; report missing dependencies without expanding scope",
+      "status": "verified"
+    },
+    {
+      "id": "lex",
+      "input": "/tmp/luna-dev-002/lex and contract.md",
+      "output": "Scoped source delta and command evidence",
+      "evidence_required": "Real targeted checks and inspectable diff",
+      "owner": "/root/dev002_lex",
+      "write_boundary": [
+        "compiler/lex/src/lexer.rs",
+        "compiler/lex/src/error.rs",
+        "compiler/lex/tests/"
+      ],
+      "isolation": "/tmp/luna-dev-002/lex",
+      "verifier": "root integration and fresh grader",
+      "selected_skills": [
+        {
+          "name": "graph-engineering-workflow",
+          "reason": "bounded ownership, evidence and no nested dispatch"
+        }
+      ],
+      "retry": 1,
+      "stop_condition": "Deliver bounded changes and real checks; report missing dependencies without expanding scope",
+      "status": "verified",
+      "integrated_paths": [
+        "compiler/lex/src/error.rs",
+        "compiler/lex/src/lexer.rs",
+        "compiler/lex/tests/literals.rs"
+      ]
+    },
+    {
+      "id": "hir",
+      "input": "/tmp/luna-dev-002/hir and contract.md",
+      "output": "Scoped source delta and command evidence",
+      "evidence_required": "Real targeted checks and inspectable diff",
+      "owner": "/root/dev002_hir",
+      "write_boundary": [
+        "compiler/hir/src/common.rs",
+        "compiler/hir/src/expr.rs",
+        "compiler/hir/src/display.rs",
+        "compiler/hir/tests/display.rs",
+        "compiler/ast_lowering/src/expr.rs",
+        "compiler/ast_lowering/src/pattern.rs"
+      ],
+      "isolation": "/tmp/luna-dev-002/hir",
+      "verifier": "root integration and fresh grader",
+      "selected_skills": [
+        {
+          "name": "graph-engineering-workflow",
+          "reason": "bounded ownership, evidence and no nested dispatch"
+        }
+      ],
+      "retry": 1,
+      "stop_condition": "Deliver bounded changes and real checks; report missing dependencies without expanding scope",
+      "status": "verified",
+      "integrated_paths": [
+        "compiler/ast_lowering/src/expr.rs",
+        "compiler/ast_lowering/src/pattern.rs",
+        "compiler/hir/src/common.rs",
+        "compiler/hir/src/display.rs",
+        "compiler/hir/src/expr.rs",
+        "compiler/hir/tests/display.rs"
+      ]
+    },
+    {
+      "id": "tests",
+      "input": "/tmp/luna-dev-002/tests and contract.md",
+      "output": "Scoped source delta and command evidence",
+      "evidence_required": "Real targeted checks and inspectable diff",
+      "owner": "/root/dev002_literals_tests",
+      "write_boundary": [
+        "compiler/luna/tests/literals.rs"
+      ],
+      "isolation": "/tmp/luna-dev-002/tests",
+      "verifier": "root integration and fresh grader",
+      "selected_skills": [
+        {
+          "name": "graph-engineering-workflow",
+          "reason": "bounded ownership, evidence and no nested dispatch"
+        }
+      ],
+      "retry": 1,
+      "stop_condition": "Deliver bounded changes and real checks; report missing dependencies without expanding scope",
+      "status": "verified",
+      "integrated_paths": [
+        "compiler/luna/tests/literals.rs"
+      ]
+    },
+    {
+      "id": "grader",
+      "input": "Final diff, fixed rubric, contract and run record; no build conversation",
+      "output": "/tmp/luna-dev-002/grading.json",
+      "evidence_required": "Independent rerun and per-criterion verdicts",
+      "owner": "/root/dev002_acceptance",
+      "write_boundary": [
+        "/tmp/luna-dev-002/grader*"
+      ],
+      "isolation": "fresh read-only agent context",
+      "verifier": "root computes acceptance",
+      "selected_skills": [
+        {
+          "name": "graph-engineering-workflow",
+          "reason": "fresh rubric grading"
+        }
+      ],
+      "retry": 1,
+      "stop_condition": "Return all verdicts, defects and unreachable criteria",
+      "status": "verified"
+    }
+  ],
+  "edges": [
+    {
+      "from": "parser",
+      "to": "integration",
+      "crosses": "Owned source delta and local evidence"
+    },
+    {
+      "from": "lex",
+      "to": "integration",
+      "crosses": "Owned source delta and local evidence"
+    },
+    {
+      "from": "hir",
+      "to": "integration",
+      "crosses": "Owned source delta and local evidence"
+    },
+    {
+      "from": "tests",
+      "to": "integration",
+      "crosses": "Owned source delta and local evidence"
+    },
+    {
+      "from": "integration",
+      "to": "grader",
+      "crosses": "Final source, diff, test logs, report and state"
+    },
+    {
+      "from": "parser",
+      "to": "hir-check",
+      "crosses": "AST StringConcat enum/interface; parser algorithm remains independent"
+    },
+    {
+      "from": "lex-repair",
+      "to": "parser-repair",
+      "crosses": "Char token for complete character spelling after RBrace; contextual Pratt reinterpretation preserves object-view chains"
+    }
+  ],
+  "rejected_edges": [
+    {
+      "from": "implementation",
+      "to": "test-design",
+      "reason": "Independent tests consume fixed docs/contract, not implementation"
+    },
+    {
+      "from": "lex",
+      "to": "hir",
+      "reason": "AST leaf spans and number spellings fixed in shared contract"
+    }
+  ],
+  "parallel_groups": [
+    [
+      "parser",
+      "lex",
+      "hir",
+      "tests"
+    ]
+  ],
+  "skills": [
+    {
+      "name": "graph-engineering-workflow",
+      "node": "all",
+      "status": "selected",
+      "reason": "Explicit user invocation"
+    },
+    {
+      "name": "graphify",
+      "node": "discovery",
+      "status": "skipped",
+      "reason": "No index; bounded literal dependencies resolved with rg per AGENTS"
+    }
+  ],
+  "claims": [],
+  "verifications": [
+    {
+      "target": "integration before repair",
+      "anchor": "cargo test -p lex -p parse -p hir -p ast_lowering -p luna --locked --offline --target-dir /tmp/luna-dev-002/target",
+      "result": "fail",
+      "output_pointer": "/tmp/luna-dev-002/integration-tests.log"
+    },
+    {
+      "target": "parser",
+      "anchor": "cargo test -p parse --test literals --locked --offline --target-dir /tmp/luna-dev-002/parser-target",
+      "result": "pass",
+      "output_pointer": "/tmp/luna-dev-002/parser-tests.log"
+    },
+    {
+      "target": "integrated frontend",
+      "anchor": "cargo test -p lex -p parse -p hir -p ast_lowering -p luna --locked --offline --target-dir /tmp/luna-dev-002/target",
+      "result": "pass",
+      "output_pointer": "/tmp/luna-dev-002/final-tests.log"
+    },
+    {
+      "target": "driver build",
+      "anchor": "cargo check -p luna --locked --offline --target-dir /tmp/luna-dev-002/target",
+      "result": "pass",
+      "output_pointer": "/tmp/luna-dev-002/final-check.log"
+    },
+    {
+      "target": "protected workspace",
+      "anchor": "python3 development/runs/002-literal-foundations/verify-workspace.py",
+      "result": "pass",
+      "output_pointer": "/tmp/luna-dev-002/workspace-check.json"
+    },
+    {
+      "target": "grader fresh-target build",
+      "anchor": "cargo test targeted crates in grader-target",
+      "result": "fail",
+      "output_pointer": "/tmp/luna-dev-002/grader-tests.log"
+    },
+    {
+      "target": "grader serialized build retry",
+      "anchor": "CARGO_BUILD_JOBS=1 cargo test targeted crates in grader-target",
+      "result": "fail",
+      "output_pointer": "/tmp/luna-dev-002/grader-tests-retry.log"
+    },
+    {
+      "target": "repaired integrated frontend",
+      "anchor": "CARGO_BUILD_JOBS=1 cargo test -p lex -p parse -p hir -p ast_lowering -p luna --locked --offline --target-dir /tmp/luna-dev-002/target",
+      "result": "pass",
+      "output_pointer": "/tmp/luna-dev-002/repaired-tests.log"
+    },
+    {
+      "target": "independent repaired tests",
+      "anchor": "CARGO_BUILD_JOBS=1 cargo test -p lex -p parse -p hir -p ast_lowering -p luna --locked --offline --target-dir /tmp/luna-dev-002/target",
+      "result": "pass",
+      "output_pointer": "/tmp/luna-dev-002/grader2-tests.log"
+    },
+    {
+      "target": "independent build",
+      "anchor": "cargo check -p luna --locked --offline --target-dir /tmp/luna-dev-002/target",
+      "result": "pass",
+      "output_pointer": "/tmp/luna-dev-002/grader2-check.log"
+    },
+    {
+      "target": "independent boundary probes",
+      "anchor": "13 CLI probes covering fixed defects and literal contracts",
+      "result": "pass",
+      "output_pointer": "/tmp/luna-dev-002/grader2-probes-checked.json"
+    }
+  ],
+  "conflicts": [],
+  "repairs": [
+    {
+      "finding": "Valid BitVec pattern AST was called invalid rather than unsupported",
+      "severity": "minor",
+      "owner": "hir",
+      "artifact": "compiler/ast_lowering/src/pattern.rs",
+      "round": 0,
+      "rechecks": [
+        "cargo test -p luna --test literals",
+        "cargo check -p ast_lowering"
+      ],
+      "status": "repaired; independent whole-rubric acceptance passed"
+    },
+    {
+      "finding": "C12: char after closed statement block and quoted content inside interpolation lex incorrectly",
+      "severity": "major",
+      "owner": "lex",
+      "artifact": "compiler/lex/src/lexer.rs",
+      "round": 1,
+      "rechecks": [
+        "lexer tests",
+        "independent literal CLI regressions",
+        "fresh full-rubric regrade"
+      ],
+      "status": "repaired; independent whole-rubric acceptance passed"
+    }
+  ],
+  "run_log": [
+    {
+      "at": "discovery",
+      "event": "Read-only investigation completed",
+      "detail": "Read active AGENTS, manifests, docs literals/grammar/compilation and affected source; found i64/f64 fallback-to-zero and missing escape decoding; exact dirty baseline copied before writers"
+    },
+    {
+      "at": "plan",
+      "event": "Contract frozen before dispatch",
+      "detail": "User delegated routine review and autonomous development; source-copy isolation preserves uncommitted input"
+    },
+    {
+      "at": "wave1",
+      "event": "Independent writer dispatch",
+      "detail": "Three isolated writers received frozen contract and ownership; root writes parser. No build-to-test-design dependency."
+    },
+    {
+      "at": "wave1",
+      "event": "AST concat interface made structurally explicit",
+      "detail": "AST Str has NoChild node type; root adds StringConcat/MultiChildren and sends interface file to HIR writer. This preserves AST visitor traversal; outcome criteria unchanged."
+    },
+    {
+      "at": "wave1",
+      "event": "Parser integration boundary repair",
+      "detail": "Block Comment tokens previously entered grammar; root filters trivia and remaps symbol indices. Source gaps still inspected to avoid joining comment-separated strings. Radix patterns retain documented BitVec identity."
+    },
+    {
+      "at": "integration",
+      "event": "Scoped delta integrated",
+      "detail": {
+        "role": "hir",
+        "paths": [
+          "compiler/ast_lowering/src/expr.rs",
+          "compiler/ast_lowering/src/pattern.rs",
+          "compiler/hir/src/common.rs",
+          "compiler/hir/src/display.rs",
+          "compiler/hir/src/expr.rs",
+          "compiler/hir/tests/display.rs"
+        ]
+      }
+    },
+    {
+      "at": "integration",
+      "event": "Scoped delta integrated",
+      "detail": {
+        "role": "tests",
+        "paths": [
+          "compiler/luna/tests/literals.rs"
+        ]
+      }
+    },
+    {
+      "at": "integration",
+      "event": "Scoped delta integrated",
+      "detail": {
+        "role": "lex",
+        "paths": [
+          "compiler/lex/src/error.rs",
+          "compiler/lex/src/lexer.rs",
+          "compiler/lex/tests/literals.rs"
+        ]
+      }
+    },
+    {
+      "at": "wave2",
+      "event": "Targeted diagnostic repair",
+      "detail": "Integrated run passed prior 32 CLI tests and 22/23 new literal groups; failure routed to HIR owner, one-file repaired output integrated after original hash verification."
+    },
+    {
+      "at": "integration",
+      "event": "Targeted integration passed",
+      "detail": "97 tests passed; four existing doctests ignored. Source-to-HIR example exported; independent grading follows final report. One diagnostic repair; no unrelated reruns."
+    },
+    {
+      "at": "wave3",
+      "event": "Fresh independent grader dispatched",
+      "detail": "Received only contract, fixed rubric, source snapshot/diff, final report and record. Assigned read-only independent reruns; source repair rights withheld."
+    },
+    {
+      "at": "grading1",
+      "event": "Build-cache quota failure and reroute",
+      "detail": "Fresh grader target link initially SIGBUS; one serialized build retry revealed EDQUOT. No source failure inferred. Root transfers existing completed /tmp/luna-dev-002/target exclusively to grader for actual tests/probes; no cache deletion."
+    },
+    {
+      "at": "grading1",
+      "event": "Disposed failed reproducible build cache",
+      "detail": "cargo clean --target-dir /tmp/luna-dev-002/grader-target removed only task-generated failed cache (44.5 MiB). Source snapshots, independent inputs and logs retained. Routine reversible build housekeeping under standing autonomous-development authorization; no workspace source deletion."
+    },
+    {
+      "at": "grading1",
+      "event": "Independent grade 12/13 applicable; targeted repair dispatched",
+      "detail": "97 existing tests independently passed. C12 has two new boundary defects; lexer owner repairs, test owner independently adds cases. Existing-target rebuild quota failure distinguished from source behavior; later binary rerun 97/97 passed. Completed tests/hir caches removed via cargo clean, source and logs preserved."
+    },
+    {
+      "at": "wave4",
+      "event": "C12 lexical ambiguity assigned to parser context",
+      "detail": "After RBrace lexer prioritizes complete Char spelling; root Pratt continuation reconstructs two view nodes only for raw identifier Char followed by Id. New statement keeps Char. Test owner delivered 4 independent regression groups, integrated after hash verification. No new token kind or syntax introduced."
+    },
+    {
+      "at": "wave4",
+      "event": "Lexer repair integrated",
+      "detail": "Two owned files copied after pre-repair hashes verified. Lexer preserves closed characters after braces for parser context and consumes balanced interpolation with nested strings/chars/comments. Root takes build-cache ownership back after grader completed round1."
+    },
+    {
+      "at": "wave4",
+      "event": "Repaired integration passed",
+      "detail": "106 tests pass (18 lex,9 parser,9 HIR,4 decoder,7 CLI unit,32 prior CLI,27 literal CLI). Changed-file rustfmt and baseline protection pass. Semantics remain scoped to HIR; full objective active."
+    },
+    {
+      "at": "wave5",
+      "event": "Whole fixed rubric regrade dispatched",
+      "detail": "Repaired source and independent regression tests integrated; root transfers existing build target exclusively to read-only grader. Scope and C1-C14 criteria unchanged."
+    },
+    {
+      "at": "grading2",
+      "event": "Independent acceptance passed 13/13 applicable",
+      "detail": "106 tests and 13 additional probes passed; independent build and final-diff/baseline checks passed. Four process criteria are record-class; C4 not applicable. Full Flurry implementation remains active; no goal completion claimed."
+    },
+    {
+      "at": "close",
+      "event": "Acceptance metadata finalized",
+      "detail": "Recorded independent verdicts and limits; implementation map status updated to accepted literal milestone. Refreshed final patch for this documentation-only status update. No code changed after independent acceptance."
+    }
+  ],
+  "limits": {
+    "max_workers": 5,
+    "max_concurrency": 4,
+    "max_waves": 6,
+    "max_retries": 1,
+    "max_depth": 1,
+    "time_limit_seconds": 5400,
+    "budget": {
+      "kind": "worker_turns",
+      "value": 16
+    },
+    "max_grader_rounds": 2
+  },
+  "observed": {
+    "workers": 5,
+    "peak_concurrency": 4,
+    "waves": 5,
+    "retries": 1,
+    "depth": 1,
+    "elapsed_seconds": 3377,
+    "budget_used": 9,
+    "grader_rounds": 2
+  },
+  "approvals": {
+    "graph": "approved by standing autonomous-development delegation",
+    "commit": "not_requested",
+    "push": "not_requested",
+    "deploy": "not_requested",
+    "publish": "not_requested",
+    "delete": "not_requested",
+    "payment": "not_requested",
+    "external_send": "not_requested"
+  },
+  "started_at": 1791356152.8285983,
+  "acceptance": {
+    "grader": "independent",
+    "round": 2,
+    "score": "13/13",
+    "gate": "passed",
+    "criteria": [
+      {
+        "id": "C1",
+        "verdict": "pass",
+        "class": "record",
+        "severity": "none",
+        "evidence": "Refreshed graph.json retains concrete source-delta/interface edges and rejected fake edges; the added lexer-to-parser repair edge carries the Char-token ambiguity contract, with staged dispatch/integration records."
+      },
+      {
+        "id": "C2",
+        "verdict": "pass",
+        "class": "record",
+        "severity": "none",
+        "evidence": "Refreshed graph.json declares bounded input, output, owner, write boundary, verifier, selected skill, retry and stop conditions for every worker; repair responsibilities remain within lexer/parser/test ownership."
+      },
+      {
+        "id": "C3",
+        "verdict": "pass",
+        "class": "artifact",
+        "severity": "none",
+        "evidence": "/tmp/luna-dev-002/grader2-artifacts.json independently verifies the manifest and isolated lex/hir/tests copies. All deltas stay within ownership apart from the documented root-supplied AST interface in HIR, whose final difference is formatting only."
+      },
+      {
+        "id": "C4",
+        "verdict": "not_applicable",
+        "class": "artifact",
+        "severity": "none",
+        "evidence": "No external research nodes or claims; repository documentation remains the semantic authority."
+      },
+      {
+        "id": "C5",
+        "verdict": "pass",
+        "class": "artifact",
+        "severity": "none",
+        "evidence": "Independent anchors are retrievable in grader2-tests.log, grader2-check.log, grader2-workspace.json, grader2-artifacts.json and grader2-probes-checked.json."
+      },
+      {
+        "id": "C6",
+        "verdict": "pass",
+        "class": "rerun",
+        "severity": "none",
+        "evidence": "Independent CARGO_BUILD_JOBS=1 TMPDIR=/tmp/luna-dev-002/grader-probes cargo test -p lex -p parse -p hir -p ast_lowering -p luna --locked --offline --target-dir /tmp/luna-dev-002/target exits 0: 106 tests pass, four existing doctests ignored; cargo check -p luna also exits 0. See grader2-tests.log and grader2-check.log. Final CLI independently exercised by 13 additional probes."
+      },
+      {
+        "id": "C7",
+        "verdict": "pass",
+        "class": "record",
+        "severity": "none",
+        "evidence": "Refreshed graph.json records both diagnosed defects, assigns lexer repair plus parser-context and independent-test work, and records their integration/rechecks. Independent grader2-tests.log and grader2-probes-checked.json confirm the repaired behavior."
+      },
+      {
+        "id": "C8",
+        "verdict": "pass",
+        "class": "record",
+        "severity": "none",
+        "evidence": "Refreshed graph.json records explicit positive caps and observed counts within each cap: workers 5 including root, peak concurrency 4, waves 5, retries 1, depth 1, worker_turns 9/16 and elapsed 2915/5400 seconds; grading count remains within its declared cap."
+      },
+      {
+        "id": "C9",
+        "verdict": "pass",
+        "class": "artifact",
+        "severity": "none",
+        "evidence": "Independent Git inspection and grader2-workspace.json retain dev at baseline HEAD 4f5e3733ca88121b086b3a9e4389923abb9d837c. Disclosed cleanup concerns reproducible task build caches; source, snapshots, logs and history remain preserved. No commit/push/publication/external-send artifact."
+      },
+      {
+        "id": "C10",
+        "verdict": "pass",
+        "class": "artifact",
+        "severity": "none",
+        "evidence": "Refreshed report.md accurately distinguishes 106 passing tests from earlier quota and source failures, points to retrievable repaired outputs, identifies record-class evidence, leaves grading pending and explicitly retains elaboration/comptime/interpolation/full BitVec/full-language limitations."
+      },
+      {
+        "id": "C11",
+        "verdict": "pass",
+        "class": "rerun",
+        "severity": "none",
+        "evidence": "grader2-tests.log passes numeric/radix/scientific rejection and lossless-spelling tests. grader2-probes-checked.json independently verifies a 42-digit integer, exact large-exponent float spelling and separate u128/unit conversion suffixes using parsed HIR structure."
+      },
+      {
+        "id": "C12",
+        "verdict": "pass",
+        "class": "rerun",
+        "severity": "none",
+        "evidence": "grader2-tests.log passes 18 lexer and 27 literal CLI groups. grader2-probes-checked.json independently confirms repaired character statements after closing braces, suffixed Unicode characters after nested comments, nested-string/multiline interpolation rejection with explicit unsupported-interpolation diagnostics, escaped-dollar concatenation, scalar boundaries and preserved output files on rejection. Reviewed lexer context save/restore and parser compact take-view reconstruction; object-view regression tests pass."
+      },
+      {
+        "id": "C13",
+        "verdict": "pass",
+        "class": "rerun",
+        "severity": "none",
+        "evidence": "grader2-tests.log passes nine HIR Display groups, all 32 prior CLI tests, nine parser groups and 27 literal CLI groups. Independent probe HIR parses as one complete S-expression, repeats identically, and retains the literal-conversion subtree inside a constant pattern. Fixed-radix BitVec AST identity and unsupported lowering remain tested."
+      },
+      {
+        "id": "C14",
+        "verdict": "pass",
+        "class": "rerun",
+        "severity": "none",
+        "evidence": "Independent verify-workspace.py exits 0; grader2-workspace.json verifies 480 baseline files, no unowned changes, dev and unchanged HEAD. grader2-artifacts.json confirms baseline hashes and that final.patch exactly matches current files. No dependency/backend delta; contract and report clearly retain unfinished language work."
+      }
+    ],
+    "unreachable": []
+  },
+  "previous_grading": [
+    {
+      "grader": "independent",
+      "round": 1,
+      "score": "12/13",
+      "gate": "blocked",
+      "criteria": [
+        {
+          "id": "C1",
+          "verdict": "pass",
+          "class": "record",
+          "severity": "none",
+          "evidence": "development/runs/002-literal-foundations/graph.json: edges name source deltas, the AST StringConcat interface and final integration artifacts; rejected_edges excludes implementation-to-test-design and lex-to-hir dependencies; staged run_log records dispatch and integration."
+        },
+        {
+          "id": "C2",
+          "verdict": "pass",
+          "class": "record",
+          "severity": "none",
+          "evidence": "graph.json units declare inputs, outputs, owners, write boundaries, verifiers, selected graph-engineering-workflow skill, retry and stop conditions; run_log records bounded dispatches."
+        },
+        {
+          "id": "C3",
+          "verdict": "pass",
+          "class": "artifact",
+          "severity": "none",
+          "evidence": "/tmp/luna-dev-002/grader-isolation.json independently verifies manifest hashes and separate lex/hir/tests source copies. Lex and tests change only owned paths; HIR's additional AST file is the recorded root-supplied StringConcat interface, differing from final AST only in line wrapping."
+        },
+        {
+          "id": "C4",
+          "verdict": "not_applicable",
+          "class": "artifact",
+          "severity": "none",
+          "evidence": "No external research nodes or claims; semantics are checked against supplied repository documentation."
+        },
+        {
+          "id": "C5",
+          "verdict": "pass",
+          "class": "artifact",
+          "severity": "none",
+          "evidence": "/tmp/luna-dev-002/grader-workspace.json, grader-isolation.json, grader-binary-tests.json and grader-probes/confirmed-defects.json contain independent verifier, executable-test and CLI-probe evidence."
+        },
+        {
+          "id": "C6",
+          "verdict": "pass",
+          "class": "rerun",
+          "severity": "none",
+          "evidence": "Independent execution of all ten targeted test binaries passed all 97 tests; /tmp/luna-dev-002/grader-binary-tests.json and grader-binary-0.log through grader-binary-9.log. Final luna was independently executed for CLI probes. Fresh cargo compilation failed from temporary-file quota, recorded separately in grader-tests.log, grader-tests-retry.log and grader-tests-existing-target.log; final AST differs from the successfully built version only by verified formatting."
+        },
+        {
+          "id": "C7",
+          "verdict": "pass",
+          "class": "record",
+          "severity": "none",
+          "evidence": "graph.json repairs assigns the BitVec diagnostic defect to hir and records affected rechecks; integration-tests.log preserves the original failure and final-tests.log records the passing integrated result."
+        },
+        {
+          "id": "C8",
+          "verdict": "pass",
+          "class": "record",
+          "severity": "none",
+          "evidence": "graph.json records positive worker/concurrency/wave/retry/depth/grader limits and matching observed counts within each cap, including root in five workers; worker_turns is the observable budget unit."
+        },
+        {
+          "id": "C9",
+          "verdict": "pass",
+          "class": "artifact",
+          "severity": "none",
+          "evidence": "Independent git inspection and grader-workspace.json retain dev at baseline HEAD 4f5e3733ca88121b086b3a9e4389923abb9d837c; no source/history deletion, commit, push, deployment, publication or external-send artifact is present."
+        },
+        {
+          "id": "C10",
+          "verdict": "pass",
+          "class": "artifact",
+          "severity": "none",
+          "evidence": "report.md links retrievable test/check/format/Emacs/workspace outputs, retains the initial failure, explicitly leaves independent grading pending and documents that elaboration, comptime, interpolation, full BitVec semantics and full-language implementation remain incomplete; regular-file baseline limitations are disclosed."
+        },
+        {
+          "id": "C11",
+          "verdict": "pass",
+          "class": "rerun",
+          "severity": "none",
+          "evidence": "grader-binary-4.log and grader-binary-7.log pass numeric/radix/scientific rejection and lossless-spelling cases; grader-probes/results.json numeric_suffixes independently emits 100/u32px, binary suffix conversion and a large negative exponent without rounding or fabricated zero."
+        },
+        {
+          "id": "C12",
+          "verdict": "fail",
+          "class": "rerun",
+          "severity": "major",
+          "evidence": "/tmp/luna-dev-002/grader-probes/confirmed-defects.json: `fn f() { if true {} 1; }` succeeds, but replacing 1 with 'a' fails with [2002], including across a newline; `fn f() { \"${\"x\"}\"; }` also emits [2002] rather than unsupported interpolation. compiler/lex/src/lexer.rs:102, :482, :457; docs/grammar/index.md:95 and docs/basics/literals.md interpolation contract.",
+          "defect": "Two lexer boundary defects: RBrace unconditionally leaves can_end_expression true, so a following character statement is tokenized as take-view punctuation even though the preceding statement must omit its semicolon; string recognition terminates on a quote inside ${expr}, preventing syntactically valid nested-string interpolation from reaching the required explicit unsupported-interpolation diagnostic. Preserve valid take-view chains while repairing the statement boundary, and diagnose interpolations containing quoted expressions without publishing HIR."
+        },
+        {
+          "id": "C13",
+          "verdict": "pass",
+          "class": "rerun",
+          "severity": "none",
+          "evidence": "grader-binary-2.log, grader-binary-6.log and grader-binary-7.log independently pass nine HIR Display groups, 32 previous CLI tests and 23 literal CLI groups, including constant conversion patterns, escaped S-expression reading, determinism, and output preservation. New payloads and Display branches were inspected directly; fixed-radix BitVec identity remains distinct and lowering diagnoses unsupported."
+        },
+        {
+          "id": "C14",
+          "verdict": "pass",
+          "class": "rerun",
+          "severity": "none",
+          "evidence": "python3 development/runs/002-literal-foundations/verify-workspace.py exits 0; /tmp/luna-dev-002/grader-workspace.json verifies 480 baseline files, no unowned changes, dev and unchanged HEAD. Snapshot hashes independently match the manifest. No dependency/backend paths changed in the milestone delta; contract.md and report.md explicitly describe the incomplete language work."
+        }
+      ],
+      "unreachable": []
+    }
+  ]
+}

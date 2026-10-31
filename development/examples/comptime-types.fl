@@ -1,0 +1,26 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
+typealias Type = .Type'builtin;
+typealias Int = .Integer'builtin;
+typealias Byte = .u8'builtin;
+struct Packet { tag: Byte }
+struct Box where T { value: T }
+
+pure comptime fn Identity(value: Type) -> Type { value }
+comptime fn Select(flag: bool) -> Type {
+    if flag { Byte } else { Packet }
+}
+comptime fn Selected() -> Type { Identity(Select(true)) }
+comptime fn Pair() -> Type { Tuple<Byte, Packet> }
+comptime fn Generic() -> Type { Box<Byte> }
+comptime fn Bits(width: Int) -> Type { .BitVec'builtin<width> }
+comptime fn ComputedBits() -> Type { Bits(8 * 32 + 1) }
+comptime fn EmptyBits() -> Type { Bits(0) }
+comptime fn InvalidBits() -> Type { Bits(-1) }
+comptime fn TooWide() -> Type { Bits(340282366920938463463374607431768211456) }
+fn runtime_value() -> Byte { 7 }
+comptime fn Observed() -> Type { runtime_value()'type }
+comptime fn LiteralType() -> Type { 7'type }
+comptime fn Universe() -> Type { Type }
+comptime fn FunctionType() -> Type { (fn(Byte) -> Byte) }

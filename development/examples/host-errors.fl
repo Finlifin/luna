@@ -1,0 +1,17 @@
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+typealias Word = .u32'builtin;
+enum ReadError { missing, invalid(bool) }
+impl Duplicate for ReadError {}
+fn read(found: bool) -> !ReadError Word {
+    if found { 42 } else { error ReadError.missing }
+}
+fn forward(found: bool) -> !ReadError Word { read(found)! }
+fn recover(found: bool) -> Word {
+    forward(found)! {
+        ReadError.missing => 7,
+        ReadError.invalid(_) => 9,
+    }
+}
+fn run() -> bool { recover(true) == 42 and recover(false) == 7 }

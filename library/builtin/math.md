@@ -1,0 +1,80 @@
+# builtin.math 的原生验收
+
+`math` 由 `builtin.prelude` 默认导入，使用者直接写 `math.sqrt<f32>(81.0)`。
+它仍是 builtin 的模块；不需要创建独立 math 包，也不需要手工指定 intrinsic
+或 Copy/Drop 绑定。声明和 LLVM 操作的对应关系由 sysroot 提供。
+
+真实消费者示例见
+[host-math-tests.fl](../../development/examples/host-math-tests.fl)。
+示例只使用公开类型，没有直接访问编译器内置符号。十一项原生测试覆盖：
+
+- f32/f64 的算术、舍入、负零、NaN 与最小次正规数。
+- 位计数的零输入、位反转、字节交换及有符号位组合。
+- 旋转量超过位宽或等于位宽，以及 funnel 两个输入不同的情况。
+- 有符号和无符号饱和边界，最小负数的 wrapping_abs。
+- 多个参数的源序求值，以及旋转包装复用输入时不重复求值。
+
+在仓库根目录执行：
+
+```sh
+python3 -B development/library_check.py --release --timeout 900 --stage native-math
+```
+
+单独验证优化后的原生产物：
+
+```sh
+python3 -B development/check.py --timeout 900 -- run --release -p luna -- development/examples/host-math-tests.fl --sysroot library --test-native --fuel 2000000 --opt-level 3
+```
+
+将最后的 `3` 改为 `0` 可验证 O0。入口显式提供 200 万步预算：完整 sysroot
+下 wrapping_abs 的契约检查会耗尽默认 10 万步预算。这里没有关闭契约或资源
+检查，也没有改变整数溢出规则。该验收只覆盖 host pipeline 的 math 接口，
+不代表全部内置包完成，也不承诺这些 LLVM 操作已能在 comptime VM 执行。
+
+最终 residual 契约验证已省去供分析报告使用的逐检查点事实、聚合值和字段
+路径快照；证明及成功路径上的事实更新仍然执行。优化器使用的分析入口继续
+保留完整报告。该优化降低了验证开销，但尚不足以让上述全部用例在 10 万步
+内完成，因此验收入口仍保留显式预算。
+
+后续验证又省去了同一事实状态上的立即证明重放，并为无写入的标量短路
+表达式保留入口状态，避免分支结束时重建相同存储的关系。右侧算术仍在
+对应分支内检查溢出；含调用、指针读取或赋值的表达式不使用这条路径。
+独立 i8 wrapping_abs 实例的 residual 验证从 135,634 步降到 128,643 步
+（约 5.2%）。这是确定性工作预算的测量，不是端到端耗时，也不代表默认
+10 万步已足够。回归同时检查错误保护条件的拒绝和右侧赋值的执行顺序。
+
+`isnan`、`isinf`、`isfinite`、`isnormal`、`issubnormal` 和 `signbit`
+也接受 `f16`、`bf16`。分类按原始格式进行，不先扩宽到 f32；因此次正规数
+分类不会改变，符号位检查能识别负零与带符号 NaN。对应的 `meta.math`
+函数遵循相同规则。半精度分类的 sysroot 集成测试覆盖 comptime 与 LLVM O0/O3；
+这不代表其余半精度数学包装已实现。
+
+半精度还支持 `abs`、`copysign` 和四种极值操作。前两者只修改符号位，
+保留 NaN 载荷与 signaling 位。`minimum/maximum` 传播 NaN；
+`minimumnum/maximumnum` 在仅一侧为 NaN 时选择数值。最小值选择负零，
+最大值选择正零。`meta.math` 提供相同的 comptime 行为。
+
+半精度的 `floor`、`ceil`、`trunc`、`roundeven`、`round` 返回相同浮点类型。
+`roundeven` 的中点取偶数，`round` 的中点远离零；所有操作保留零的符号，
+无穷不变，NaN 仍为 NaN。bf16 在 LLVM 路径中精确扩宽到 f32 后取整，
+结果可精确表示为 bf16，因此回存不引入第二次舍入。
+
+`sqrt` 接受 f16/bf16，按最近偶数舍入返回原类型。负零仍为负零，正无穷
+保持不变；负非零输入与 NaN 输入产生 NaN，不承诺 NaN 的具体载荷。
+f16 使用 LLVM half sqrt，bf16 使用精确扩宽后的 f32 sqrt，再按最近偶数
+舍入回 bf16。对 bf16 输入，这条路径不会因中间舍入跨过 bf16 的舍入中点。
+
+`ldexp` 同样接受 f16/bf16，指数参数保持 i32。缩放不先生成浮点数
+`2^exponent`：极端正指数使非零有限值溢出为同号无穷，极端负指数使其
+下溢为同号零；零与无穷在任意指数下保持不变，NaN 仍为 NaN。次正规
+结果按最近偶数舍入，允许舍入后进位到最小正规数。VM 的指数调整采用
+有界整数运算，覆盖 i32 的全部取值而不按指数大小分配内存或循环。
+
+`fma` 支持 f16/bf16，计算精确乘积与加数之和后只做一次目标格式舍入。
+不能用普通乘法加法替代，也不能简单扩宽到 f32 做 fma 后再缩窄：后者
+仍可能出现双舍入。当前 LLVM 21 x86_64 后端存在这种
+[可复现的 half fma 行为](../../development/repros/half-fma-double-rounding.ll)。
+Flurry 的半精度 lowering 在 f64 中精确表示乘积，再用 TwoSum 保存加法
+残差；缩窄前采用 round-to-odd 保留结果位于目标舍入中点哪一侧的信息。
+bf16 直接从该 f64 中间值缩窄，不再经过 f32。特殊值和有符号零遵循
+融合乘加规则；不把 NaN 载荷作为接口承诺。

@@ -1,0 +1,4211 @@
+//! Invocation-only execution of linear code. Runtime cleanup and mixed-stage
+//! interpretation keep their existing paths. No opcode recursively evaluates NIR.
+use super::*;
+use comptime_compiler::{Op, Program};
+#[path = "bytecode_interface.rs"]
+mod interface;
+
+pub(super) struct Frame {
+    code: Arc<Program>,
+    environment: Environment,
+    imported: Vec<(LocalId, usize)>,
+    terminal: bool,
+    interface: Option<Box<interface::InterfaceCall>>,
+    waiting: Option<Waiting>,
+    calls: BTreeMap<usize, PendingCall>,
+    newtype_conversions: BTreeMap<usize, nir::newtypes::Conversion>,
+    instance_origins: BTreeMap<usize, Option<(DeclarationId, usize)>>,
+    instance_methods: BTreeMap<usize, comptime_compiler::methods::Method>,
+    closures: BTreeMap<usize, PendingClosure>,
+    bit_updates: BTreeMap<usize, (Arc<comptime_compiler::bit_updates::Plan>, usize, usize)>,
+    normal_types: BTreeMap<usize, super::normal_types::Inputs>,
+    staged: Option<Box<staged_bytecode::State>>,
+    pc: usize,
+    slots: Vec<Option<Value>>,
+    scopes: Vec<PatternScope>,
+    pattern_inputs: BTreeMap<usize, (usize, usize)>,
+    type_patterns: BTreeMap<usize, super::type_patterns::TypePattern>,
+}
+
+#[derive(Default)]
+struct PatternScope {
+    locals: Vec<usize>,
+    previous: BTreeMap<usize, Option<Value>>,
+    exports: BTreeSet<usize>,
+    type_patterns: Vec<usize>,
+}
+
+impl Frame {
+    fn pattern_binding(
+        &mut self,
+        slot: usize,
+        value: Option<Value>,
+        exported: bool,
+    ) -> Result<(), Error> {
+        let scope = self.scopes.last_mut().ok_or(Error {
+            kind: ErrorKind::InvalidControlFlow,
+            source: None,
+        })?;
+        scope
+            .previous
+            .entry(slot)
+            .or_insert_with(|| self.slots[slot].clone());
+        if exported {
+            scope.exports.insert(slot);
+        } else {
+            scope.exports.remove(&slot);
+        }
+        self.slots[slot] = value;
+        Ok(())
+    }
+
+    fn leave_scope(&mut self) -> Result<(), Error> {
+        let scope = self.scopes.pop().ok_or(Error {
+            kind: ErrorKind::InvalidControlFlow,
+            source: None,
+        })?;
+        for identity in scope.type_patterns {
+            self.type_patterns.remove(&identity);
+        }
+        for slot in scope.locals {
+            self.slots[slot] = None;
+        }
+        for (slot, previous) in scope.previous {
+            self.slots[slot] = previous;
+        }
+        Ok(())
+    }
+
+    fn commit_scope(&mut self) -> Result<(), Error> {
+        let scope = self.scopes.pop().ok_or(Error {
+            kind: ErrorKind::InvalidControlFlow,
+            source: None,
+        })?;
+        if let Some(parent) = self.scopes.last_mut() {
+            parent.locals.extend(scope.locals);
+            parent.type_patterns.extend(scope.type_patterns);
+            for (slot, previous) in scope.previous {
+                parent.previous.entry(slot).or_insert(previous);
+                if scope.exports.contains(&slot) {
+                    parent.exports.insert(slot);
+                } else {
+                    parent.exports.remove(&slot);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+enum Waiting {
+    Interface,
+    Call(usize),
+    Default {
+        call: usize,
+        destination: usize,
+    },
+    Plan {
+        destination: usize,
+        borrowed: Vec<(LocalId, usize)>,
+    },
+}
+
+struct PendingCall {
+    callee: Value,
+    normal_head: Option<DeclarationId>,
+    trait_defaults: Option<(Vec<nir::DeclarationParameter>, Vec<Term>)>,
+    interface: Option<(nir::contracts::ProgramContract, Vec<LocalId>)>,
+    arguments: Vec<Option<PreparedArgument>>,
+    parameter_bindings: Vec<LocalId>,
+    defaults: Environment,
+    last_default: Option<usize>,
+}
+
+enum PreparedArgument {
+    Value(Value),
+    Normal(Term),
+}
+
+struct PendingClosure {
+    constructor: Arc<comptime_compiler::closures::Constructor>,
+    environment: Environment,
+    next: usize,
+}
+
+impl std::fmt::Display for PreparedArgument {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Value(value) => write!(f, "(value {value})"),
+            Self::Normal(term) => write!(f, "(normal-input {term})"),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(super) enum Progress {
+    Associated {
+        access: Arc<comptime_compiler::associated::Access>,
+        source: SourceRange,
+    },
+    Contract {
+        expression: Arc<Expr>,
+        environment: Environment,
+    },
+    TypeInputPlan {
+        expression: Arc<Expr>,
+        environment: Environment,
+    },
+    Default {
+        expression: Arc<Expr>,
+        environment: Environment,
+    },
+    Call {
+        callee: Value,
+        arguments: Vec<Value>,
+    },
+    Suspended,
+    Complete(Flow),
+}
+
+impl fmt::Display for Frame {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(bytecode-frame (pc {}) (terminal {}) (registers",
+            self.pc, self.terminal
+        )?;
+        for (slot, value) in self.slots.iter().enumerate() {
+            if let Some(value) = value {
+                write!(f, " (slot {slot} {value})")?;
+            }
+        }
+        write!(f, ") (pattern-inputs")?;
+        for (slot, (base, index)) in &self.pattern_inputs {
+            write!(f, " (%{slot} (base %{base}) (field {index}))")?;
+        }
+        write!(f, ") (type-patterns")?;
+        for (identity, state) in &self.type_patterns {
+            write!(f, " (%{identity} {state})")?;
+        }
+        write!(f, ") (scopes")?;
+        for scope in &self.scopes {
+            write!(f, " (scope")?;
+            for slot in &scope.locals {
+                write!(f, " {slot}")?;
+            }
+            write!(f, " (pattern-previous")?;
+            for (slot, value) in &scope.previous {
+                write!(f, " (%{slot}")?;
+                if let Some(value) = value {
+                    write!(f, " {value}")?;
+                }
+                write!(f, ")")?;
+            }
+            write!(f, ") (exports")?;
+            for slot in &scope.exports {
+                write!(f, " %{slot}")?;
+            }
+            write!(f, ") (type-patterns")?;
+            for identity in &scope.type_patterns {
+                write!(f, " %{identity}")?;
+            }
+            write!(f, "))")?;
+        }
+        write!(f, ") (imported")?;
+        for (binding, slot) in &self.imported {
+            write!(f, " ({binding} {slot})")?;
+        }
+        write!(f, ") (waiting")?;
+        match &self.waiting {
+            Some(Waiting::Interface) => write!(f, " (interface)")?,
+            Some(Waiting::Plan {
+                destination,
+                borrowed,
+            }) => {
+                write!(f, " (plan %{destination} (borrowed")?;
+                for (binding, slot) in borrowed {
+                    write!(f, " ({binding} %{slot})")?;
+                }
+                write!(f, "))")?;
+            }
+            Some(Waiting::Call(destination)) => write!(f, " (call {destination})")?,
+            Some(Waiting::Default { call, destination }) => {
+                write!(f, " (default {call} {destination})")?
+            }
+            None => {}
+        }
+        write!(f, ")")?;
+        if let Some(interface) = &self.interface {
+            write!(f, " {interface}")?;
+        }
+        if let Some(staged) = &self.staged {
+            write!(f, " {staged}")?;
+        }
+        write!(f, " (instance-origins")?;
+        for (slot, origin) in &self.instance_origins {
+            write!(f, " (%{slot}")?;
+            if let Some((interface, count)) = origin {
+                write!(f, " (interface {interface} {count})")?;
+            }
+            write!(f, ")")?;
+        }
+        write!(f, ") (instance-methods")?;
+        for (slot, method) in &self.instance_methods {
+            write!(f, " (%{slot} {method})")?;
+        }
+        write!(f, ") (normal-types")?;
+        for (slot, inputs) in &self.normal_types {
+            write!(f, " (%{slot} {inputs})")?;
+        }
+        write!(f, ") (calls")?;
+        for (id, call) in &self.calls {
+            write!(f, " ({id} (callee {})", call.callee)?;
+            if let Some(head) = call.normal_head {
+                write!(f, " (normal-head {head})")?;
+            }
+            if let Some((binders, arguments)) = &call.trait_defaults {
+                write!(f, " (trait-defaults")?;
+                for (binder, argument) in binders.iter().zip(arguments) {
+                    write!(f, " ({} {argument})", binder.declaration)?;
+                }
+                write!(f, ")")?;
+            }
+            write!(f, " (arguments")?;
+            for value in &call.arguments {
+                match value {
+                    Some(value) => write!(f, " (ready {value})")?,
+                    None => write!(f, " (pending)")?,
+                }
+            }
+            write!(f, ") (defaults")?;
+            for (binding, value) in &call.defaults {
+                write!(f, " ({binding} {value})")?;
+            }
+            write!(f, ") (last-default")?;
+            if let Some(parameter) = call.last_default {
+                write!(f, " {parameter}")?;
+            }
+            write!(f, "))")?;
+        }
+        write!(f, ") (closures")?;
+        for (id, closure) in &self.closures {
+            write!(
+                f,
+                " (%{id} (next {}) {} (environment",
+                closure.next, closure.constructor
+            )?;
+            for (binding, value) in &closure.environment {
+                write!(f, " ({binding} {value})")?;
+            }
+            write!(f, "))")?;
+        }
+        write!(f, ") (environment-bindings {}))", self.environment.len())
+    }
+}
+
+pub(super) struct InputFrame {
+    pub code: Frame,
+    pub finish: InputFinish,
+}
+pub(super) enum InputFinish {
+    Ready,
+    Preparation {
+        exports: Vec<(LocalId, usize)>,
+        source: SourceRange,
+    },
+    Staged {
+        shape: Arc<comptime_compiler::normal_types::Shape>,
+        depth: usize,
+        source: SourceRange,
+    },
+}
+pub(super) struct InputResult {
+    pub flow: Result<Flow, Error>,
+    pub environment: Environment,
+    pub staged: Option<(
+        Arc<comptime_compiler::normal_types::Shape>,
+        normal_inputs::StagedNormalInput,
+    )>,
+}
+impl fmt::Display for InputFinish {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ready => write!(f, "(input-finish ready)"),
+            Self::Preparation { exports, source } => {
+                write!(
+                    f,
+                    "(input-finish preparation (source {} {}) (exports",
+                    source.start, source.end
+                )?;
+                for (binding, slot) in exports {
+                    write!(f, " ({binding} %{slot})")?;
+                }
+                write!(f, "))")
+            }
+            Self::Staged {
+                shape,
+                depth,
+                source,
+            } => write!(
+                f,
+                "(input-finish staged (depth {depth}) (source {} {}) {shape})",
+                source.start, source.end
+            ),
+        }
+    }
+}
+impl fmt::Display for InputFrame {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(input-frame {} {})", self.finish, self.code)
+    }
+}
+impl InputFinish {
+    pub fn complete(
+        self,
+        vm: &mut Interpreter<'_>,
+        mut code: Frame,
+        mut flow: Result<Flow, Error>,
+    ) -> InputResult {
+        let mut staged = None;
+        match self {
+            Self::Ready => {}
+            Self::Preparation { exports, source } => {
+                if matches!(&flow, Ok(Flow::Value(_))) {
+                    if exports.iter().any(|(_, slot)| code.slots[*slot].is_none()) {
+                        flow = Err(vm.failure(ErrorKind::MissingBinding, Some(source)));
+                    } else {
+                        code.imported.extend(exports);
+                    }
+                }
+            }
+            Self::Staged {
+                shape,
+                depth,
+                source,
+            } => {
+                vm.depth = depth;
+                if matches!(&flow, Ok(Flow::Value(_))) {
+                    match code
+                        .staged
+                        .as_mut()
+                        .and_then(|state| state.completed.take())
+                    {
+                        Some(value) => staged = Some((shape, value)),
+                        None => flow = Err(vm.failure(ErrorKind::InvalidControlFlow, Some(source))),
+                    }
+                }
+            }
+        }
+        InputResult {
+            flow,
+            environment: code.restore_environment(),
+            staged,
+        }
+    }
+}
+impl InputFrame {
+    fn run(mut self, vm: &mut Interpreter<'_>) -> InputResult {
+        let flow = vm.run_fragment(&mut self.code);
+        self.finish.complete(vm, self.code, flow)
+    }
+}
+
+impl Frame {
+    pub(super) fn deliver(&mut self, value: Value) -> Result<(), Error> {
+        let Some(Waiting::Call(destination)) = self.waiting else {
+            return Err(Error {
+                kind: ErrorKind::InvalidControlFlow,
+                source: None,
+            });
+        };
+        self.waiting = None;
+        self.slots[destination] = Some(value);
+        Ok(())
+    }
+
+    pub(super) fn receive(
+        &mut self,
+        result: Result<Flow, Error>,
+        defaults: Option<Environment>,
+    ) -> Result<Option<Flow>, Error> {
+        if matches!(self.waiting, Some(Waiting::Interface)) {
+            let interface = self.interface.as_mut().ok_or(Error {
+                kind: ErrorKind::InvalidControlFlow,
+                source: None,
+            })?;
+            interface.receive(result, defaults)?;
+            self.waiting = None;
+            return Ok(None);
+        }
+        if let Some(environment) = defaults {
+            if let Some(Waiting::Plan { .. }) = &self.waiting {
+                let Some(Waiting::Plan {
+                    destination,
+                    borrowed,
+                }) = self.waiting.take()
+                else {
+                    unreachable!()
+                };
+                self.environment = environment;
+                let mut missing = false;
+                for (binding, slot) in borrowed {
+                    self.slots[slot] = self.environment.remove(&binding);
+                    missing |= self.slots[slot].is_none();
+                }
+                self.waiting = Some(Waiting::Call(destination));
+                if missing {
+                    return Err(Error {
+                        kind: ErrorKind::MissingBinding,
+                        source: None,
+                    });
+                }
+            } else {
+                let Some(Waiting::Default { call, destination }) = self.waiting else {
+                    return Err(Error {
+                        kind: ErrorKind::InvalidControlFlow,
+                        source: None,
+                    });
+                };
+                let pending = self.calls.get_mut(&call).ok_or(Error {
+                    kind: ErrorKind::InvalidControlFlow,
+                    source: None,
+                })?;
+                pending.defaults = environment;
+                self.waiting = Some(Waiting::Call(destination));
+            }
+        }
+        match result? {
+            Flow::Value(value) => {
+                self.deliver(value)?;
+                Ok(None)
+            }
+            flow => {
+                self.waiting = None;
+                Ok(Some(flow))
+            }
+        }
+    }
+
+    pub(super) fn restore_environment(mut self) -> Environment {
+        while !self.scopes.is_empty() {
+            self.leave_scope().expect("existing scope");
+        }
+        for (binding, slot) in self.imported {
+            if let Some(value) = self.slots[slot].take() {
+                self.environment.insert(binding, value);
+            }
+        }
+        self.environment
+    }
+}
+
+/// Only immutable code bodies are admitted. Neither invocation results nor
+/// captured environments are stored here. A missing program records unsupported
+/// lowering, so repeated calls do not repeatedly traverse a migration body.
+#[derive(Default)]
+pub(super) struct CodeCache {
+    entries: BTreeMap<DeclarationId, Option<Arc<Program>>>,
+    owned: BTreeMap<usize, OwnedCode>,
+    recency: BTreeMap<CodeKey, u64>,
+    order: BTreeMap<u64, CodeKey>,
+    clock: u64,
+    weight: usize,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum CodeKey {
+    Named(DeclarationId),
+    Owned(usize),
+}
+
+// Borrowed fragments belong to this VM's immutable source lifetime. Unlike the
+// session cache, this table never outlives or moves between source worlds.
+#[derive(Default)]
+pub(super) struct BorrowedCodeCache<'a> {
+    entries: HashMap<BorrowedBody<'a>, Option<Arc<Program>>>,
+    weight: usize,
+}
+
+#[derive(Clone, Copy)]
+struct BorrowedBody<'a>(&'a Expr);
+impl PartialEq for BorrowedBody<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self.0, other.0)
+    }
+}
+impl Eq for BorrowedBody<'_> {}
+impl std::hash::Hash for BorrowedBody<'_> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::ptr::hash(self.0, state);
+    }
+}
+
+impl<'a> BorrowedCodeCache<'a> {
+    fn insert(&mut self, body: &'a Expr, program: Option<Arc<Program>>) {
+        const LIMIT: usize = 100_000;
+        let weight = CodeCache::program_weight(&program);
+        if weight > LIMIT {
+            return;
+        }
+        if self.weight + weight > LIMIT {
+            self.entries.clear();
+            self.weight = 0;
+        }
+        if let Some(previous) = self.entries.insert(BorrowedBody(body), program) {
+            self.weight -= CodeCache::program_weight(&previous);
+        }
+        self.weight += weight;
+    }
+}
+
+struct OwnedCode {
+    body: std::sync::Weak<Expr>,
+    program: Option<Arc<Program>>,
+}
+
+impl CodeCache {
+    fn forget(&mut self, key: CodeKey) {
+        if let Some(stamp) = self.recency.remove(&key) {
+            self.order.remove(&stamp);
+        }
+    }
+
+    fn touch(&mut self, key: CodeKey) {
+        self.forget(key);
+        if self.clock == u64::MAX {
+            // Compact only on counter exhaustion; hits never accumulate stale
+            // queue nodes, so recency metadata stays bounded by entry count.
+            let keys: Vec<_> = self.order.values().copied().collect();
+            self.order.clear();
+            self.recency.clear();
+            self.clock = 0;
+            for key in keys {
+                self.order.insert(self.clock, key);
+                self.recency.insert(key, self.clock);
+                self.clock += 1;
+            }
+        }
+        self.order.insert(self.clock, key);
+        self.recency.insert(key, self.clock);
+        self.clock += 1;
+    }
+
+    fn named(&mut self, id: DeclarationId) -> Option<Option<Arc<Program>>> {
+        let program = self.entries.get(&id)?.clone();
+        self.touch(CodeKey::Named(id));
+        Some(program)
+    }
+
+    fn insert(&mut self, id: DeclarationId, program: Option<Arc<Program>>) {
+        self.forget(CodeKey::Named(id));
+        if let Some(previous) = self.entries.remove(&id) {
+            self.weight -= Self::program_weight(&previous);
+        }
+        if self.reserve(&program) {
+            self.entries.insert(id, program);
+            self.touch(CodeKey::Named(id));
+        }
+    }
+
+    fn program_weight(program: &Option<Arc<Program>>) -> usize {
+        program.as_ref().map_or(1, |code| {
+            1 + code.storage_work() + code.locals().len() + code.registers()
+        })
+    }
+
+    fn reserve(&mut self, program: &Option<Arc<Program>>) -> bool {
+        const LIMIT: usize = 100_000;
+        let weight = Self::program_weight(program);
+        if weight > LIMIT {
+            return false;
+        }
+        if self.weight + weight > LIMIT {
+            // Owned bodies are held weakly. Reclaim dead invocation fragments
+            // before discarding reusable declaration code or live closure bodies.
+            // Scan only under pressure, not on every insertion or cache hit.
+            let retained_weight = &mut self.weight;
+            let recency = &mut self.recency;
+            let order = &mut self.order;
+            self.owned.retain(|key, entry| {
+                if entry.body.strong_count() == 0 {
+                    *retained_weight -= Self::program_weight(&entry.program);
+                    if let Some(stamp) = recency.remove(&CodeKey::Owned(*key)) {
+                        order.remove(&stamp);
+                    }
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        while self.weight + weight > LIMIT {
+            let (_, key) = self.order.pop_first().expect("weighted cache has an entry");
+            self.recency.remove(&key);
+            let program = match key {
+                CodeKey::Named(id) => self.entries.remove(&id).unwrap(),
+                CodeKey::Owned(id) => self.owned.remove(&id).unwrap().program,
+            };
+            self.weight -= Self::program_weight(&program);
+        }
+        self.weight += weight;
+        true
+    }
+
+    fn owned(&mut self, body: &Arc<Expr>) -> Option<Option<Arc<Program>>> {
+        // This address is only an interpreter-local lookup index. A live weak
+        // identity check prevents stale allocation reuse from selecting code.
+        let key = Arc::as_ptr(body) as usize;
+        let entry = self.owned.get(&key)?;
+        if entry
+            .body
+            .upgrade()
+            .is_some_and(|source| Arc::ptr_eq(&source, body))
+        {
+            let program = entry.program.clone();
+            self.touch(CodeKey::Owned(key));
+            return Some(program);
+        }
+        self.forget(CodeKey::Owned(key));
+        let expired = self.owned.remove(&key).unwrap();
+        self.weight -= Self::program_weight(&expired.program);
+        None
+    }
+
+    fn insert_owned(&mut self, body: &Arc<Expr>, program: Option<Arc<Program>>) {
+        let key = Arc::as_ptr(body) as usize;
+        self.forget(CodeKey::Owned(key));
+        if let Some(previous) = self.owned.remove(&key) {
+            self.weight -= Self::program_weight(&previous.program);
+        }
+        if self.reserve(&program) {
+            self.owned.insert(
+                key,
+                OwnedCode {
+                    body: Arc::downgrade(body),
+                    program,
+                },
+            );
+            self.touch(CodeKey::Owned(key));
+        }
+    }
+}
+
+impl<'a> Interpreter<'a> {
+    pub fn bytecode_invocations(&self) -> usize {
+        self.bytecode_invocations
+    }
+
+    pub fn bytecode_default_evaluations(&self) -> usize {
+        self.bytecode_default_evaluations
+    }
+
+    pub fn bytecode_compilations(&self) -> usize {
+        self.bytecode_compilations
+    }
+
+    /// Actual compilation work charged to invocation budgets, including failures.
+    pub fn bytecode_compilation_steps(&self) -> u64 {
+        self.bytecode_compilation_steps
+    }
+
+    fn compile_body(&mut self, body: &Expr) -> Result<Option<Program>, Error> {
+        self.compile_bytecode(|fuel| comptime_compiler::compile(body, fuel))
+    }
+
+    pub(super) fn compile_bytecode<T>(
+        &mut self,
+        compile: impl FnOnce(&mut usize) -> Result<T, comptime_compiler::Error>,
+    ) -> Result<Option<T>, Error> {
+        self.bytecode_compilations += 1;
+        // Compilation is actual invocation work, including unsuccessful probes.
+        // Use the caller's remaining budget rather than an unrelated fixed cap;
+        // cache hits bypass this function and do not pay this work again.
+        let before = self.budget.steps;
+        let available = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+        let mut remaining = available;
+        let result = compile(&mut remaining);
+        self.budget.steps -= (available - remaining) as u64;
+        self.bytecode_compilation_steps = self
+            .bytecode_compilation_steps
+            .saturating_add(before - self.budget.steps);
+        match result {
+            Ok(program) => Ok(Some(program)),
+            Err(comptime_compiler::Error::Unsupported(_)) => Ok(None),
+            Err(comptime_compiler::Error::Budget(source)) => {
+                Err(self.failure(ErrorKind::StepsExhausted, Some(source)))
+            }
+            Err(comptime_compiler::Error::InvalidControl(source)) => {
+                Err(self.failure(ErrorKind::InvalidControlFlow, Some(source)))
+            }
+        }
+    }
+
+    pub(super) fn bytecode_invocation_available(&self) -> bool {
+        self.comptime_only
+            && self.bytecode_enabled
+            && self.cleanup_schedule.is_none()
+            && self.effect_state.environment.is_empty()
+    }
+
+    pub(super) fn invocation_code(
+        &mut self,
+        body: &Expr,
+        stable_code: Option<DeclarationId>,
+    ) -> Result<Option<Arc<Program>>, Error> {
+        if !self.bytecode_invocation_available() {
+            return Ok(None);
+        }
+        // Decide the execution route before any instruction has run.
+        if let Some(id) = stable_code {
+            if let Some(program) = self.bytecode_cache.named(id) {
+                return Ok(program);
+            }
+            // The invocation boundary supplies either immutable package code
+            // or a validated input-independent prepared body of that declaration.
+            let program = self.compile_body(body)?.map(Arc::new);
+            self.bytecode_cache.insert(id, program.clone());
+            Ok(program)
+        } else {
+            Ok(self.compile_body(body)?.map(Arc::new))
+        }
+    }
+
+    pub(super) fn borrowed_invocation_code(
+        &mut self,
+        body: &'a Expr,
+    ) -> Result<Option<Arc<Program>>, Error> {
+        if !self.bytecode_invocation_available() {
+            return Ok(None);
+        }
+        if let Some(program) = self.borrowed_code_cache.entries.get(&BorrowedBody(body)) {
+            return Ok(program.clone());
+        }
+        // Budget and malformed-control errors are not cached. Only completed
+        // compilation or a stable unsupported-lowering decision can be reused.
+        let program = self.compile_body(body)?.map(Arc::new);
+        self.borrowed_code_cache.insert(body, program.clone());
+        Ok(program)
+    }
+
+    pub(super) fn owned_invocation_code(
+        &mut self,
+        body: &Arc<Expr>,
+    ) -> Result<Option<Arc<Program>>, Error> {
+        if !self.bytecode_invocation_available() {
+            return Ok(None);
+        }
+        if let Some(program) = self.bytecode_cache.owned(body) {
+            return Ok(program);
+        }
+        let program = self.compile_body(body)?.map(Arc::new);
+        self.bytecode_cache.insert_owned(body, program.clone());
+        Ok(program)
+    }
+
+    #[cfg(test)]
+    pub(super) fn execute_code(
+        &mut self,
+        code: &Arc<Program>,
+        environment: &mut Environment,
+    ) -> Result<Flow, Error> {
+        let mut frame = self.start_frame(code, environment)?;
+        let result = self.run_fragment(&mut frame);
+        *environment = frame.restore_environment();
+        result
+    }
+
+    /// Staged input fragments actually started, including failed evaluations.
+    pub fn bytecode_staged_inputs(&self) -> usize {
+        self.bytecode_staged_inputs
+    }
+
+    pub(super) fn start_staged_input(
+        &mut self,
+        input: &nir::program::NormalFormArgument,
+        environment: &mut Environment,
+        depth: usize,
+    ) -> Result<Option<InputFrame>, Error> {
+        if !self.bytecode_invocation_available() || depth != 0 {
+            return Ok(None);
+        }
+        let Some(compiled) = self.contextual_input_code(input, None)? else {
+            return Ok(None);
+        };
+        let code = self.start_frame(&compiled.program, environment)?;
+        let shape = compiled.shape.expect("staged input shape");
+        self.bytecode_staged_inputs += 1;
+        Ok(Some(InputFrame {
+            code,
+            finish: InputFinish::Staged {
+                shape,
+                depth: self.depth,
+                source: input.source(),
+            },
+        }))
+    }
+
+    pub(super) fn try_stage_bytecode(
+        &mut self,
+        input: &nir::program::NormalFormArgument,
+        environment: &mut Environment,
+        depth: usize,
+    ) -> Result<Option<std::ops::ControlFlow<Flow, normal_inputs::StagedNormalInput>>, Error> {
+        let Some(frame) = self.start_staged_input(input, environment, depth)? else {
+            return Ok(None);
+        };
+        let result = frame.run(self);
+        *environment = result.environment;
+        Ok(Some(match result.flow? {
+            Flow::Value(_) => {
+                let (shape, mut staged) = result.staged.expect("completed staged fragment");
+                self.rekey_staged_input(&shape, &mut staged)?;
+                std::ops::ControlFlow::Continue(staged)
+            }
+            flow => std::ops::ControlFlow::Break(flow),
+        }))
+    }
+
+    pub(super) fn start_expression_input(
+        &mut self,
+        expression: &Expr,
+        environment: &mut Environment,
+    ) -> Result<Option<InputFrame>, Error> {
+        let Some(code) = self.invocation_code(expression, None)? else {
+            return Ok(None);
+        };
+        let code = self.start_frame(&code, environment)?;
+        Ok(Some(InputFrame {
+            code,
+            finish: InputFinish::Ready,
+        }))
+    }
+
+    pub(super) fn start_contextual_input(
+        &mut self,
+        input: &nir::program::NormalFormArgument,
+        expected: &Term,
+        environment: &mut Environment,
+    ) -> Result<Option<InputFrame>, Error> {
+        if !self.bytecode_invocation_available() {
+            return Ok(None);
+        }
+        let Some(compiled) = self.contextual_input_code(input, Some(expected))? else {
+            return Ok(None);
+        };
+        let code = self.start_frame(&compiled.program, environment)?;
+        self.bytecode_contextual_inputs += 1;
+        Ok(Some(InputFrame {
+            code,
+            finish: InputFinish::Ready,
+        }))
+    }
+
+    pub(super) fn interpret_contextual_input(
+        &mut self,
+        input: &nir::program::NormalFormArgument,
+        expected: &Term,
+        environment: &mut Environment,
+    ) -> Result<Flow, Error> {
+        let mut literals = BTreeMap::new();
+        self.prepare_normal_argument(input, expected, &mut literals, 0)?;
+        self.eval_normal_argument(input, &mut literals, environment)
+    }
+
+    pub(super) fn evaluate_contextual_argument(
+        &mut self,
+        input: &nir::program::NormalFormArgument,
+        expected: &Term,
+        environment: &mut Environment,
+    ) -> Result<Flow, Error> {
+        if let Some(frame) = self.start_contextual_input(input, expected, environment)? {
+            let result = frame.run(self);
+            *environment = result.environment;
+            return result.flow;
+        }
+        self.interpret_contextual_input(input, expected, environment)
+    }
+
+    pub fn bytecode_contextual_inputs(&self) -> usize {
+        self.bytecode_contextual_inputs
+    }
+
+    pub(super) fn start_input_preparation(
+        &mut self,
+        preparation: &nir::program::NormalFormPreparation,
+        environment: &mut Environment,
+    ) -> Result<Option<InputFrame>, Error> {
+        let source = preparation.expression.source;
+        if let K::LetPattern {
+            pattern: nir::program::Pattern::Tuple(fields),
+            ..
+        } = &preparation.expression.kind
+        {
+            self.effect_charge(fields.len(), Some(source))?;
+        }
+        let bindings = preparation
+            .local_bindings()
+            .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
+        if bindings
+            .iter()
+            .any(|binding| environment.contains_key(binding))
+            || bindings.iter().collect::<BTreeSet<_>>().len() != bindings.len()
+        {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        }
+        let Some(code) = self.invocation_code(&preparation.expression, None)? else {
+            return Ok(None);
+        };
+        let mut exports = Vec::with_capacity(bindings.len());
+        for binding in bindings {
+            self.tick(Some(source))?;
+            let index = code
+                .locals()
+                .binary_search_by_key(&binding, |(id, _)| *id)
+                .map_err(|_| self.failure(ErrorKind::MissingBinding, Some(source)))?;
+            exports.push((binding, code.locals()[index].1));
+        }
+        let code = self.start_frame(&code, environment)?;
+        self.bytecode_input_preparations += 1;
+        Ok(Some(InputFrame {
+            code,
+            finish: InputFinish::Preparation { exports, source },
+        }))
+    }
+
+    pub(super) fn evaluate_input_preparation(
+        &mut self,
+        preparation: &nir::program::NormalFormPreparation,
+        environment: &mut Environment,
+    ) -> Result<Flow, Error> {
+        let Some(frame) = self.start_input_preparation(preparation, environment)? else {
+            return self.eval(&preparation.expression, environment);
+        };
+        let result = frame.run(self);
+        *environment = result.environment;
+        result.flow
+    }
+
+    pub fn bytecode_input_preparations(&self) -> usize {
+        self.bytecode_input_preparations
+    }
+
+    fn bytecode_pattern_input<'frame>(
+        &mut self,
+        frame: &'frame Frame,
+        mut slot: usize,
+        source: SourceRange,
+    ) -> Result<&'frame Value, Error> {
+        let mut path = Vec::new();
+        while let Some((base, index)) = frame.pattern_inputs.get(&slot) {
+            self.tick(Some(source))?;
+            if path.len() >= frame.slots.len() {
+                return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
+            }
+            path.push(*index);
+            slot = *base;
+        }
+        let mut value = frame.slots[slot]
+            .as_ref()
+            .ok_or_else(|| self.failure(ErrorKind::MissingBinding, Some(source)))?;
+        for index in path.into_iter().rev() {
+            value = match value {
+                Value::Tuple(fields)
+                | Value::Record { fields, .. }
+                | Value::Variant { fields, .. } => fields.get(index),
+                Value::AnonymousRecord(fields) => fields.get(index).map(|(_, value)| value),
+                Value::Optional {
+                    value: Some(value), ..
+                }
+                | Value::ErrorResult { value, .. }
+                    if index == 0 =>
+                {
+                    Some(value.as_ref())
+                }
+                _ => None,
+            }
+            .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
+        }
+        Ok(value)
+    }
+
+    pub(super) fn start_frame(
+        &mut self,
+        code: &Arc<Program>,
+        environment: &mut Environment,
+    ) -> Result<Frame, Error> {
+        self.effect_charge(
+            code.registers(),
+            code.instructions().first().map(|i| i.source),
+        )?;
+        let mut frame = Frame {
+            code: code.clone(),
+            environment: std::mem::take(environment),
+            imported: Vec::new(),
+            terminal: false,
+            interface: None,
+            waiting: None,
+            calls: BTreeMap::new(),
+            newtype_conversions: BTreeMap::new(),
+            instance_origins: BTreeMap::new(),
+            instance_methods: BTreeMap::new(),
+            normal_types: BTreeMap::new(),
+            closures: BTreeMap::new(),
+            bit_updates: BTreeMap::new(),
+            staged: None,
+            pc: 0,
+            scopes: Vec::new(),
+            pattern_inputs: BTreeMap::new(),
+            type_patterns: BTreeMap::new(),
+            slots: (0..code.registers()).map(|_| None).collect(),
+        };
+        for &(binding, slot) in code.locals() {
+            if let Some(value) = frame.environment.remove(&binding) {
+                frame.imported.push((binding, slot));
+                frame.slots[slot] = Some(value);
+            }
+        }
+        Ok(frame)
+    }
+
+    pub(super) fn resume_frame(
+        &mut self,
+        frame: &mut Frame,
+        quantum: usize,
+    ) -> Result<Progress, Error> {
+        if frame.terminal || frame.waiting.is_some() {
+            return Err(self.failure(ErrorKind::InvalidControlFlow, None));
+        }
+        let result = self.run_frame(frame, quantum);
+        // A failed instruction may have consumed operands or changed storage.
+        // Such a frame is terminal; resumption must never replay that work.
+        if matches!(result, Ok(Progress::Complete(_)) | Err(_)) {
+            frame.terminal = true;
+        }
+        result
+    }
+
+    fn run_frame(&mut self, frame: &mut Frame, quantum: usize) -> Result<Progress, Error> {
+        if let Some(mut interface) = frame.interface.take() {
+            match interface.advance(self)? {
+                interface::Step::Suspend(progress) => {
+                    frame.interface = Some(interface);
+                    frame.waiting = Some(Waiting::Interface);
+                    return Ok(progress);
+                }
+                interface::Step::Complete(value) => {
+                    frame.slots[interface.destination] = Some(value)
+                }
+            }
+        }
+        let code = frame.code.clone();
+        for _ in 0..quantum {
+            let instruction = code
+                .instructions()
+                .get(frame.pc)
+                .ok_or_else(|| self.failure(ErrorKind::InvalidControlFlow, None))?;
+            let source = instruction.source;
+            if matches!(&instruction.op, Op::Stage(operation) if !matches!(operation, comptime_compiler::staged_inputs::Instruction::Enter))
+            {
+                self.effect_charge(1, Some(source))?;
+            } else {
+                self.tick(Some(source))?;
+            }
+            frame.pc += 1;
+            let missing = || Error {
+                kind: ErrorKind::MissingBinding,
+                source: Some(source),
+            };
+            match &instruction.op {
+                Op::BeginInstance {
+                    destination,
+                    constructor,
+                } => {
+                    let origin = self.admit_dynamic_trait_instance(
+                        constructor.declaration,
+                        &constructor.input,
+                        &constructor.output,
+                        source,
+                    )?;
+                    if origin.is_none() {
+                        self.admit_dynamic_function_instance(
+                            constructor.declaration,
+                            &constructor.input,
+                            &constructor.output,
+                            source,
+                        )?;
+                    }
+                    frame.instance_origins.insert(*destination, origin);
+                }
+                Op::FinishInstance {
+                    destination,
+                    packet,
+                    constructor,
+                    direct,
+                } => {
+                    let origin = frame
+                        .instance_origins
+                        .remove(destination)
+                        .ok_or_else(missing)?;
+                    let packet = frame.slots[*packet].take().ok_or_else(missing)?;
+                    if origin.is_none() {
+                        let arguments =
+                            self.dynamic_instance_arguments(&constructor.input, packet, source)?;
+                        frame.slots[*destination] = Some(self.function_instance_value(
+                            constructor.declaration,
+                            &arguments,
+                            &constructor.output,
+                            source,
+                        )?);
+                        continue;
+                    }
+                    let instance = self.dynamic_trait_method(
+                        constructor.declaration,
+                        &constructor.input,
+                        &constructor.output,
+                        origin.ok_or_else(missing)?,
+                        packet,
+                        source,
+                    )?;
+                    if *direct {
+                        // Keep interface identity until call preparation. Resolving just
+                        // the implementation here would erase its contract and defaults.
+                        frame.instance_methods.insert(*destination, instance);
+                    } else {
+                        frame.slots[*destination] =
+                            Some(self.bytecode_trait_method(instance.view(), false)?);
+                    }
+                }
+                Op::PreparePredicate { valid } => {
+                    if !valid {
+                        return Err(self.failure(ErrorKind::Type, Some(source)));
+                    }
+                }
+                Op::CheckPredicate {
+                    value,
+                    condition_source,
+                } => {
+                    let value = frame.slots[*value].take().ok_or_else(missing)?;
+                    self.finish_predicate(
+                        value,
+                        source,
+                        *condition_source,
+                        &mut frame.environment,
+                    )?;
+                }
+
+                Op::PrepareNewtypeConversion {
+                    identity,
+                    input,
+                    output,
+                } => {
+                    let plan = self.prepare_newtype_conversion(input, output, source)?;
+                    frame.newtype_conversions.insert(*identity, plan);
+                }
+                Op::FinishNewtypeConversion {
+                    identity,
+                    destination,
+                    value,
+                } => {
+                    let plan = frame
+                        .newtype_conversions
+                        .remove(identity)
+                        .ok_or_else(missing)?;
+                    let value = frame.slots[*value].take().ok_or_else(missing)?;
+                    frame.slots[*destination] =
+                        Some(self.complete_newtype_conversion(&plan, value, source)?);
+                }
+                Op::CheckBuildMetadata => self.check_build_metadata(source)?,
+                Op::ReadBuildMetadata {
+                    destination,
+                    selector,
+                    snapshot,
+                } => {
+                    let selector = frame.slots[*selector].take().ok_or_else(missing)?;
+                    frame.slots[*destination] = Some(self.read_build_metadata(
+                        snapshot.owner,
+                        &snapshot.output,
+                        &snapshot.entries,
+                        selector,
+                        source,
+                    )?);
+                }
+                Op::CheckDefinitionBuild(build) => {
+                    self.check_definition_build(&build.output, source)?
+                }
+                Op::BuildDefinition {
+                    destination,
+                    value,
+                    build,
+                } => {
+                    let value = frame.slots[*value].take().ok_or_else(missing)?;
+                    frame.slots[*destination] =
+                        Some(self.complete_definition_build(build.as_ref(), value, source)?);
+                }
+                Op::CheckObservation(observation) => self.check_observation(observation, source)?,
+                Op::Observe {
+                    destination,
+                    value,
+                    observation,
+                } => {
+                    let value = frame.slots[*value].take().ok_or_else(missing)?;
+                    frame.slots[*destination] =
+                        Some(self.observe_value(observation, value, source)?);
+                }
+
+                Op::BeginBitUpdate { identity, plan } => {
+                    frame.slots[plan.local].as_ref().ok_or_else(missing)?;
+                    self.charge_preparation(plan.selections.len())?;
+                    if nir::program::bit_update_layout_error_in(
+                        &plan.storage,
+                        plan.layouts(),
+                        &plan.value,
+                        &plan.output,
+                        self.target,
+                    )
+                    .is_some()
+                    {
+                        return Err(self.failure(ErrorKind::Type, Some(source)));
+                    }
+                    let width = match &plan.storage {
+                        Term::Primitive(Primitive::BitVec(width)) => *width,
+                        Term::Primitive(p) => {
+                            p.unrestricted_scalar_width_in(self.target)
+                                .ok_or_else(missing)? as usize
+                        }
+                        _ => return Err(missing()),
+                    };
+                    frame
+                        .bit_updates
+                        .insert(*identity, (plan.clone(), 0, width));
+                }
+                Op::SelectBitRange { identity, index } => {
+                    use nir::program::BitSelectionLayout as L;
+                    let (plan, offset, width) =
+                        frame.bit_updates.get_mut(identity).ok_or_else(missing)?;
+                    let selection = plan.selections.get(*index).ok_or_else(missing)?;
+                    let mut inputs = Vec::new();
+                    for input in selection.inputs() {
+                        let value = frame.slots[input.register].take().ok_or_else(missing)?;
+                        if !self.has_type(&value, &input.ty) {
+                            let location = if matches!(selection, L::Index(_)) {
+                                input.source
+                            } else {
+                                source
+                            };
+                            return Err(self.failure(ErrorKind::Type, Some(location)));
+                        }
+                        inputs.push(value);
+                    }
+                    let mut inputs = inputs.into_iter();
+                    let position = |value: Value, location| -> Result<usize, Error> {
+                        let n = match value {
+                            Value::Integer(n) => n.to_u128().ok(),
+                            Value::UnsignedInteger(n) => Some(n),
+                            Value::SignedInteger(n) => u128::try_from(n).ok(),
+                            _ => None,
+                        }
+                        .and_then(|n| usize::try_from(n).ok());
+                        n.ok_or_else(|| self.failure(ErrorKind::IndexOutOfBounds, Some(location)))
+                    };
+                    let (lo, hi, expected) = match selection {
+                        L::Static { start, end } => (*start, *end, end.saturating_sub(*start)),
+                        L::Index(input) => {
+                            let lo = position(inputs.next().unwrap(), input.source)?;
+                            let hi = lo.checked_add(1).ok_or_else(|| {
+                                self.failure(ErrorKind::IndexOutOfBounds, Some(input.source))
+                            })?;
+                            (lo, hi, 1)
+                        }
+                        L::Window { start, end, width } => (
+                            position(inputs.next().unwrap(), start.source)?,
+                            position(inputs.next().unwrap(), end.source)?,
+                            *width,
+                        ),
+                    };
+                    if lo > hi || hi > *width {
+                        return Err(self.failure(ErrorKind::IndexOutOfBounds, Some(source)));
+                    }
+                    if hi - lo != expected {
+                        return Err(self.failure(ErrorKind::Type, Some(source)));
+                    }
+                    *offset = offset
+                        .checked_add(lo)
+                        .ok_or_else(|| self.failure(ErrorKind::IndexOutOfBounds, Some(source)))?;
+                    *width = expected;
+                }
+                Op::FinishBitUpdate { identity, value } => {
+                    let (plan, start, width) =
+                        frame.bit_updates.remove(identity).ok_or_else(missing)?;
+                    let end = start
+                        .checked_add(width)
+                        .ok_or_else(|| self.failure(ErrorKind::IndexOutOfBounds, Some(source)))?;
+                    let Value::BitVec(rhs) = frame.slots[*value].take().ok_or_else(missing)? else {
+                        return Err(self.failure(ErrorKind::Type, Some(source)));
+                    };
+                    let target = frame.slots[plan.local].as_mut().ok_or_else(missing)?;
+                    self.write_bit_place(
+                        target,
+                        &plan.fields,
+                        &plan.storage,
+                        start,
+                        end,
+                        rhs,
+                        &plan.output,
+                        source,
+                    )?;
+                }
+
+                Op::BitOperand {
+                    value,
+                    requires_bits,
+                } => {
+                    let operand = frame.slots[*value].take().ok_or_else(missing)?;
+                    frame.slots[*value] =
+                        Some(self.prepare_bit_operand(operand, *requires_bits, source)?);
+                }
+                Op::Bits {
+                    destination,
+                    operation,
+                    inputs,
+                    output,
+                } => {
+                    let values = inputs
+                        .iter()
+                        .map(|(slot, _)| frame.slots[*slot].take().ok_or_else(missing))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let types = inputs.iter().map(|(_, ty)| ty).collect::<Vec<_>>();
+                    frame.slots[*destination] =
+                        Some(self.bit_values(*operation, &types, output, values, source)?);
+                }
+                Op::BeginClosure {
+                    closure,
+                    constructor,
+                } => {
+                    self.closure_capture_types(
+                        &constructor.ty,
+                        constructor.parameters.len(),
+                        constructor.captures.len(),
+                        source,
+                    )?;
+                    frame.closures.insert(
+                        *closure,
+                        PendingClosure {
+                            constructor: constructor.clone(),
+                            environment: Environment::new(),
+                            next: 0,
+                        },
+                    );
+                }
+                Op::Capture {
+                    closure,
+                    index,
+                    value,
+                } => {
+                    let pending = frame.closures.get_mut(closure).ok_or_else(missing)?;
+                    if *index != pending.next {
+                        return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
+                    }
+                    let constructor = &pending.constructor;
+                    let (binding, ty) = constructor.captures.get(*index).ok_or_else(missing)?;
+                    let capture_types = self.closure_capture_types(
+                        &constructor.ty,
+                        constructor.parameters.len(),
+                        constructor.captures.len(),
+                        source,
+                    )?;
+                    let value = frame.slots[*value].take().ok_or_else(missing)?;
+                    if ty != &capture_types[*index] || !self.has_type(&value, ty) {
+                        return Err(self.failure(ErrorKind::Type, Some(source)));
+                    }
+                    if constructor.parameters.contains(binding)
+                        || pending.environment.contains_key(binding)
+                    {
+                        return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
+                    }
+                    pending
+                        .environment
+                        .insert(*binding, Value::Storage(Storage::new(value)));
+                    pending.next += 1;
+                }
+                Op::Closure {
+                    closure,
+                    destination,
+                } => {
+                    let pending = frame.closures.remove(closure).ok_or_else(missing)?;
+                    let constructor = pending.constructor;
+                    if pending.next != constructor.captures.len() {
+                        return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
+                    }
+                    self.effect_charge(
+                        constructor.parameters.len() + constructor.captures.len(),
+                        Some(source),
+                    )?;
+                    let mut fuel = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+                    let charged = nir::type_computations::charge_term(&constructor.ty, &mut fuel);
+                    self.budget.steps = fuel as u64;
+                    charged.map_err(|_| self.failure(ErrorKind::StepsExhausted, Some(source)))?;
+                    self.events.push(Event::CreateClosure {
+                        source,
+                        captures: constructor.captures.len(),
+                    });
+                    frame.slots[*destination] = Some(Value::Closure(Arc::new(Closure {
+                        definition_source: Some(source),
+                        origin: None,
+                        instance_arguments: None,
+                        parameters: constructor.parameters.clone(),
+                        environment: pending.environment,
+                        capture_order: constructor.captures.iter().map(|(id, _)| *id).collect(),
+                        body: constructor.body.clone(),
+                        ty: constructor.ty.clone(),
+                    })));
+                }
+                Op::TypeInputPlan {
+                    destination,
+                    expression,
+                    environment: imports,
+                } => {
+                    self.effect_charge(imports.len(), Some(source))?;
+                    let mut environment = std::mem::take(&mut frame.environment);
+                    let mut borrowed = Vec::new();
+                    for &(binding, slot) in imports {
+                        if let Some(value) = frame.slots[slot].take() {
+                            environment.insert(binding, value);
+                            borrowed.push((binding, slot));
+                        }
+                    }
+                    frame.waiting = Some(Waiting::Plan {
+                        destination: *destination,
+                        borrowed,
+                    });
+                    return Ok(Progress::TypeInputPlan {
+                        expression: expression.clone(),
+                        environment,
+                    });
+                }
+                Op::Stage(operation) => {
+                    if let Some(flow) = frame
+                        .staged
+                        .get_or_insert_with(|| Box::new(staged_bytecode::State::default()))
+                        .step(operation, &mut frame.slots, self, source)?
+                    {
+                        return Ok(Progress::Complete(flow));
+                    }
+                }
+                Op::CheckListAppend { local, ty } => {
+                    self.check_list_append(
+                        frame.slots[*local].as_ref().ok_or_else(missing)?,
+                        ty,
+                        source,
+                    )?;
+                }
+                Op::ListAppend { local, suffix, ty } => {
+                    let suffix = frame.slots[*suffix].take().ok_or_else(missing)?;
+                    self.complete_list_append(
+                        frame.slots[*local].as_mut().ok_or_else(missing)?,
+                        suffix,
+                        ty,
+                        source,
+                    )?;
+                }
+                Op::PrepareListIndex(contract) => {
+                    self.prepare_list_index(&contract.ty, &contract.list, &contract.index, source)?
+                }
+                Op::CheckIndexedList { value, contract } => {
+                    self.index_list_length(
+                        frame.slots[*value].as_ref().ok_or_else(missing)?,
+                        &contract.list,
+                        source,
+                    )?;
+                }
+                Op::ListIndex {
+                    destination,
+                    list,
+                    index,
+                } => {
+                    let list = frame.slots[*list].take().ok_or_else(missing)?;
+                    let index = frame.slots[*index].take().ok_or_else(missing)?;
+                    frame.slots[*destination] =
+                        Some(self.complete_list_index(list, index, source)?);
+                }
+                Op::LocalListIndex {
+                    destination,
+                    contract,
+                    list,
+                    list_source,
+                    index,
+                } => {
+                    use comptime_compiler::leaf_inputs::Selector;
+                    use leaf_inputs::LocalSelector;
+                    self.tick(Some(*list_source))?;
+                    let list = frame.slots[*list].as_ref().ok_or_else(|| {
+                        self.failure(ErrorKind::MissingBinding, Some(*list_source))
+                    })?;
+                    let index = match index {
+                        Selector::Local(slot, at) => {
+                            LocalSelector::Value(frame.slots[*slot].as_ref(), *at)
+                        }
+                        Selector::Literal(expr) => LocalSelector::Literal(expr),
+                    };
+                    let independent = matches!(
+                        &index,
+                        LocalSelector::Literal(_)
+                            | LocalSelector::Value(Some(Value::Integer(_)), _)
+                    );
+                    let Flow::Value(value) = self.read_local_list_index(
+                        list,
+                        &contract.list,
+                        independent,
+                        *list_source,
+                        source,
+                        |this| {
+                            this.read_leaf_selector(Some(index))
+                                .map(|value| Flow::Value(value.unwrap()))
+                        },
+                    )?
+                    else {
+                        return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source)));
+                    };
+                    frame.slots[*destination] = Some(value);
+                }
+                Op::PrepareList(list) => {
+                    self.prepare_list_construction(&list.ty, list.inputs.iter(), source)?;
+                }
+                Op::List {
+                    destination,
+                    list,
+                    values,
+                } => {
+                    let values = values
+                        .iter()
+                        .map(|slot| frame.slots[*slot].take().ok_or_else(missing))
+                        .collect::<Result<_, _>>()?;
+                    frame.slots[*destination] =
+                        Some(self.complete_list_construction(&list.ty, values, source)?);
+                }
+                Op::PrepareListOperation(operation) => self.prepare_list_operation(
+                    &operation.ty,
+                    &operation.left,
+                    operation.right.as_ref(),
+                    source,
+                )?,
+                Op::CheckListOperand { value, ty } => {
+                    self.list_operand_length(
+                        frame.slots[*value].as_ref().ok_or_else(missing)?,
+                        ty,
+                        source,
+                    )?;
+                }
+                Op::ListLength {
+                    destination,
+                    value,
+                    ty,
+                    local,
+                    value_source,
+                } => {
+                    let value = frame.slots[*value].as_ref().ok_or_else(|| {
+                        self.failure(ErrorKind::MissingBinding, Some(*value_source))
+                    })?;
+                    let flow = if *local {
+                        self.tick(Some(*value_source))?;
+                        self.local_list_length(value, ty, *value_source, source)?
+                    } else {
+                        let length = self.list_value_length(value, source)?;
+                        self.list_length_value(length, source)?
+                    };
+                    let Flow::Value(value) = flow else {
+                        return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source)));
+                    };
+                    frame.slots[*destination] = Some(value);
+                }
+                Op::ListConcat {
+                    destination,
+                    left,
+                    right,
+                } => {
+                    let left = frame.slots[*left].take().ok_or_else(missing)?;
+                    let right = frame.slots[*right].take().ok_or_else(missing)?;
+                    let length = self.list_value_length(&left, source)?;
+                    let other_length = self.list_value_length(&right, source)?;
+                    let Flow::Value(value) =
+                        self.complete_list_concat(left, right, length, other_length, source)?
+                    else {
+                        return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source)));
+                    };
+                    frame.slots[*destination] = Some(value);
+                }
+                Op::LocalObjectAccess {
+                    destination,
+                    access,
+                    receiver,
+                    receiver_source,
+                    selectors,
+                } => {
+                    use comptime_compiler::leaf_inputs::Selector;
+                    use leaf_inputs::LocalSelector;
+                    let receiver = frame.slots[*receiver].as_ref().ok_or_else(|| {
+                        self.failure(ErrorKind::MissingBinding, Some(*receiver_source))
+                    })?;
+                    if selectors.len() > 2 {
+                        return Err(self.failure(ErrorKind::Type, Some(source)));
+                    }
+                    let selectors = [0, 1].map(|index| {
+                        selectors.get(index).map(|selector| match selector {
+                            Selector::Local(slot, source) => {
+                                LocalSelector::Value(frame.slots[*slot].as_ref(), *source)
+                            }
+                            Selector::Literal(expr) => LocalSelector::Literal(expr),
+                        })
+                    });
+                    let Flow::Value(value) = self.access_local_object(
+                        access,
+                        receiver,
+                        *receiver_source,
+                        selectors,
+                        source,
+                    )?
+                    else {
+                        return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source)));
+                    };
+                    frame.slots[*destination] = Some(value);
+                }
+                Op::BeginContextualInput {
+                    destination,
+                    expected,
+                    input,
+                } => {
+                    let mut state = super::normal_types::Inputs::contextual();
+                    self.prepare_normal_shape(input, expected, &mut state.prepared, 0)?;
+                    frame.normal_types.insert(*destination, state);
+                }
+                Op::BeginNormalType {
+                    destination,
+                    constructor,
+                } => {
+                    self.prepare_normal_type(
+                        constructor.head,
+                        &constructor.ty,
+                        constructor.count,
+                        constructor.diverges,
+                        source,
+                    )?;
+                    frame.normal_types.insert(
+                        *destination,
+                        super::normal_types::Inputs::new(constructor.head, constructor.count),
+                    );
+                }
+                Op::PrepareNormalInput {
+                    destination,
+                    index,
+                    input,
+                } => {
+                    let state = frame
+                        .normal_types
+                        .get_mut(destination)
+                        .ok_or_else(missing)?;
+                    self.prepare_compiled_normal_input(state, *index, input, source)?;
+                }
+                Op::AppendNormalContainer {
+                    constructor,
+                    parent,
+                    value,
+                    spread,
+                    diverges,
+                } => {
+                    if *diverges {
+                        return Err(self.failure(ErrorKind::Type, Some(source)));
+                    }
+                    let value = frame.slots[*value].take().ok_or_else(missing)?;
+                    let input = frame
+                        .normal_types
+                        .get_mut(constructor)
+                        .ok_or_else(missing)?;
+                    let parent = input.prepared.get_mut(parent).ok_or_else(missing)?;
+                    self.append_compiled_normal_container(parent, value, *spread, source)?;
+                }
+                Op::FinishNormalContainer {
+                    constructor,
+                    value,
+                    diverges,
+                } => {
+                    if *diverges {
+                        return Err(self.failure(ErrorKind::Type, Some(source)));
+                    }
+                    let input = frame
+                        .normal_types
+                        .get_mut(constructor)
+                        .ok_or_else(missing)?;
+                    let container = input.prepared.remove(value).ok_or_else(missing)?;
+                    frame.slots[*value] =
+                        Some(self.finish_compiled_normal_container(container, source)?);
+                }
+                Op::NormalResult {
+                    destination,
+                    value,
+                    diverges,
+                } => {
+                    if *diverges {
+                        return Err(self.failure(ErrorKind::Type, Some(source)));
+                    }
+                    let value = frame.slots[*value].take().ok_or_else(missing)?;
+                    frame.slots[*destination] = Some(value);
+                }
+                Op::NormalLiteral {
+                    constructor,
+                    destination,
+                } => {
+                    let input = frame
+                        .normal_types
+                        .get_mut(constructor)
+                        .ok_or_else(missing)?;
+                    let Some(super::normal_types::Prepared::Literal(value)) =
+                        input.prepared.remove(destination)
+                    else {
+                        return Err(missing());
+                    };
+                    frame.slots[*destination] = Some(value);
+                }
+                Op::BindNormalInput {
+                    destination,
+                    value,
+                    diverges,
+                } => {
+                    if *diverges {
+                        return Err(self.failure(ErrorKind::Type, Some(source)));
+                    }
+                    let value = frame.slots[*value].take().ok_or_else(missing)?;
+                    let input = frame
+                        .normal_types
+                        .get_mut(destination)
+                        .ok_or_else(missing)?;
+                    self.bind_compiled_normal_input(input, value, source)?;
+                }
+                Op::FinishNormalType { destination } => {
+                    let input = frame
+                        .normal_types
+                        .remove(destination)
+                        .and_then(|input| input.normal)
+                        .ok_or_else(missing)?;
+                    frame.slots[*destination] = Some(self.complete_normal_type(
+                        input.head,
+                        input.bindings.finish().ok_or_else(missing)?,
+                        source,
+                    )?);
+                }
+                Op::AssociatedValue {
+                    destination,
+                    access,
+                } => {
+                    frame.waiting = Some(Waiting::Call(*destination));
+                    return Ok(Progress::Associated {
+                        access: access.clone(),
+                        source,
+                    });
+                }
+                Op::PrepareSnapshot { input, output } => {
+                    self.prepare_snapshot(input, output, source)?;
+                }
+                Op::PrepareBitVecType { input, output } => {
+                    self.prepare_bitvec_type(input, output, source)?
+                }
+                Op::BitVecType { destination, width } => {
+                    let value = frame.slots[*width].take().ok_or_else(missing)?;
+                    frame.slots[*destination] = Some(self.complete_bitvec_type(value, source)?);
+                }
+                Op::PrepareTypeConstructor(constructor) => {
+                    let inputs: Vec<_> = constructor.inputs.iter().collect();
+                    self.prepare_type_constructor(
+                        &constructor.kind,
+                        &constructor.ty,
+                        &inputs,
+                        source,
+                    )?;
+                }
+                Op::CheckTypeConstructorInput {
+                    constructor,
+                    index,
+                    value,
+                } => {
+                    let input = frame.slots[*value].take().ok_or_else(missing)?;
+                    frame.slots[*value] = Some(Value::Type(self.check_type_constructor_input(
+                        &constructor.kind,
+                        *index,
+                        constructor.inputs.len(),
+                        input,
+                        source,
+                    )?));
+                }
+                Op::TypeConstructor {
+                    destination,
+                    constructor,
+                    inputs,
+                } => {
+                    let types = inputs
+                        .iter()
+                        .map(|slot| match frame.slots[*slot].take() {
+                            Some(Value::Type(ty)) => Ok(ty),
+                            _ => Err(self.failure(ErrorKind::Type, Some(source))),
+                        })
+                        .collect::<Result<_, _>>()?;
+                    frame.slots[*destination] =
+                        Some(self.complete_type_constructor(&constructor.kind, types, source)?);
+                }
+                Op::PrepareTypeEqual { ty, inputs } => {
+                    self.prepare_type_equal(ty, &inputs[0], &inputs[1], source)?
+                }
+                Op::TypeDescription(slot) => {
+                    let value = frame.slots[*slot].take().ok_or_else(missing)?;
+                    frame.slots[*slot] =
+                        Some(Value::Type(self.type_description_term(value, source)?));
+                }
+                Op::TypeEqual {
+                    destination,
+                    left,
+                    right,
+                } => {
+                    let Some(Value::Type(left)) = frame.slots[*left].take() else {
+                        return Err(self.failure(ErrorKind::Type, Some(source)));
+                    };
+                    let Some(Value::Type(right)) = frame.slots[*right].take() else {
+                        return Err(self.failure(ErrorKind::Type, Some(source)));
+                    };
+                    frame.slots[*destination] =
+                        Some(self.complete_type_equal(left, right, source)?);
+                }
+                Op::PrepareObjectAccess(access) => {
+                    use comptime_compiler::objects::ObjectOperation;
+                    match access.operation {
+                        ObjectOperation::Query(query) => {
+                            self.prepare_object_query(query, &access.ty, source)?
+                        }
+                        ObjectOperation::Edit(edit) => {
+                            self.prepare_object_edit(edit, &access.ty, &access.input, source)?
+                        }
+                    }
+                }
+                Op::ObjectAccess {
+                    destination,
+                    access,
+                    packet,
+                } => {
+                    use comptime_compiler::objects::ObjectOperation;
+                    let packet = frame.slots[*packet].take().ok_or_else(missing)?;
+                    let result = match access.operation {
+                        ObjectOperation::Query(query) => {
+                            self.complete_object_query(query, &access.ty, packet, source)?
+                        }
+                        ObjectOperation::Edit(edit) => self.complete_object_edit(
+                            edit,
+                            &access.ty,
+                            &access.input,
+                            packet,
+                            source,
+                        )?,
+                    };
+                    let Flow::Value(value) = result else {
+                        return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source)));
+                    };
+                    frame.slots[*destination] = Some(value);
+                }
+                Op::PrepareObject(object) => self.prepare_object(
+                    &object.ty,
+                    object.names.len(),
+                    object.fields.len(),
+                    object
+                        .fields
+                        .iter()
+                        .any(|ty| *ty == Term::Primitive(Primitive::Never)),
+                    source,
+                )?,
+                Op::CheckObjectEntry {
+                    object,
+                    index,
+                    value,
+                } => {
+                    self.check_object_entry(
+                        frame.slots[*value].as_ref().ok_or_else(missing)?,
+                        &object.fields[*index],
+                        object.names[*index].as_deref(),
+                        source,
+                    )?;
+                }
+                Op::Object {
+                    destination,
+                    object,
+                    fields,
+                } => {
+                    let mut entries = Vec::with_capacity(fields.len());
+                    for (index, slot) in fields.iter().enumerate() {
+                        let value = ObjectValue {
+                            ty: object.fields[index].clone(),
+                            value: frame.slots[*slot].take().ok_or_else(missing)?,
+                        };
+                        entries.push(match &object.names[index] {
+                            Some(key) => ObjectEntry::Property {
+                                key: key.clone(),
+                                value,
+                            },
+                            None => ObjectEntry::Value(value),
+                        });
+                    }
+                    frame.slots[*destination] = Some(Value::Object(Object::from_entries(entries)));
+                }
+                Op::Tuple {
+                    destination,
+                    fields,
+                } => {
+                    let values = fields
+                        .iter()
+                        .map(|slot| frame.slots[*slot].take().ok_or_else(missing))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    frame.slots[*destination] = Some(Value::Tuple(values));
+                }
+
+                Op::BeginTypePattern {
+                    identity,
+                    destination,
+                    value,
+                    shape,
+                } => {
+                    let input = self.bytecode_pattern_input(frame, *value, source)?;
+                    let state = self.prepare_type_pattern(*shape, input)?;
+                    let matched = state.is_some();
+                    frame.type_patterns.remove(identity);
+                    if let Some(state) = state {
+                        frame
+                            .scopes
+                            .last_mut()
+                            .ok_or_else(missing)?
+                            .type_patterns
+                            .push(*identity);
+                        frame.type_patterns.insert(*identity, state);
+                    }
+                    frame.slots[*destination] = Some(Value::Bool(matched));
+                }
+                Op::TypePatternField {
+                    identity,
+                    destination,
+                    value,
+                    index,
+                } => {
+                    let mut state = frame.type_patterns.remove(identity).ok_or_else(missing)?;
+                    let input = self.bytecode_pattern_input(frame, *value, source)?;
+                    let value =
+                        self.type_pattern_field(&mut state, input, *index, destination.is_none())?;
+                    frame.type_patterns.insert(*identity, state);
+                    if let Some(destination) = destination {
+                        frame.slots[*destination] = Some(value.ok_or_else(missing)?);
+                    }
+                }
+                Op::FinishTypePattern { identity } => {
+                    frame.type_patterns.remove(identity).ok_or_else(missing)?;
+                }
+                Op::CheckPatternStructure {
+                    destination,
+                    value,
+                    shape,
+                } => {
+                    let input = self.bytecode_pattern_input(frame, *value, source)?;
+                    let matched = self.prepare_pattern_structure(shape.view(), input)?;
+                    frame.slots[*destination] = Some(Value::Bool(matched));
+                }
+                Op::PatternStructureField {
+                    destination,
+                    value,
+                    shape,
+                    index,
+                } => {
+                    let input = self.bytecode_pattern_input(frame, *value, source)?;
+                    self.pattern_structure_field(shape.view(), input, *index)?;
+                    if let Some(destination) = destination {
+                        frame.pattern_inputs.insert(*destination, (*value, *index));
+                    }
+                }
+                Op::MatchLeaf {
+                    destination,
+                    value,
+                    pattern,
+                } => {
+                    use comptime_compiler::leaf_patterns::Leaf;
+                    self.tick(None)?;
+                    let subject = self.bytecode_pattern_input(frame, *value, source)?;
+                    if !matches!(pattern.as_ref(), Leaf::Wild) {
+                        if matches!(subject, Value::AbstractValue { .. }) {
+                            return Err(self.failure(ErrorKind::AbstractValueUnresolved, None));
+                        }
+                        if matches!(
+                            subject,
+                            Value::TypeParameter(_) | Value::Type(Term::Rigid { .. })
+                        ) {
+                            return Err(self.failure(ErrorKind::TypeContractUnresolved, None));
+                        }
+                    }
+                    let matched = match pattern.as_ref() {
+                        Leaf::Wild => true,
+                        Leaf::Unit => matches!(subject, Value::Unit),
+                        Leaf::OptionalAbsent => {
+                            matches!(subject, Value::Optional { value: None, .. })
+                        }
+                        Leaf::Literal(literal) => self.match_literal_value(literal, subject)?,
+                    };
+                    frame.slots[*destination] = Some(Value::Bool(matched));
+                }
+                Op::CommitScope => frame.commit_scope()?,
+                Op::BindPattern {
+                    local,
+                    value,
+                    observe,
+                } => {
+                    let value = self.bytecode_pattern_input(frame, *value, source)?.clone();
+                    if *observe {
+                        if frame.slots[*local].is_some() {
+                            return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
+                        }
+                        if matches!(
+                            value,
+                            Value::TypeParameter(_) | Value::Type(Term::Rigid { .. })
+                        ) {
+                            return Err(
+                                self.failure(ErrorKind::TypeContractUnresolved, Some(source))
+                            );
+                        }
+                    }
+                    frame.pattern_binding(*local, Some(value), !observe)?;
+                }
+                Op::ClearPatternAlias { local } => frame.pattern_binding(*local, None, false)?,
+                Op::CheckPatternRemap(pairs) => {
+                    let mut sources = BTreeSet::new();
+                    let mut targets = BTreeSet::new();
+                    for (from, to) in pairs.iter() {
+                        self.tick(Some(source))?;
+                        if !sources.insert(*from) || !targets.insert(*to) {
+                            return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
+                        }
+                    }
+                }
+                Op::RemapPattern(pairs) => {
+                    let scope = frame.scopes.last().ok_or_else(missing)?;
+                    self.effect_charge(scope.previous.len() + pairs.len() * 2, Some(source))?;
+                    let sources: BTreeSet<_> = pairs.iter().map(|(from, _)| *from).collect();
+                    let targets: BTreeSet<_> = pairs.iter().map(|(_, to)| *to).collect();
+                    if sources.iter().any(|slot| !scope.exports.contains(slot))
+                        || targets
+                            .iter()
+                            .any(|slot| scope.exports.contains(slot) && !sources.contains(slot))
+                    {
+                        return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
+                    }
+                    let values = pairs
+                        .iter()
+                        .map(|(from, to)| {
+                            frame.slots[*from]
+                                .clone()
+                                .map(|value| (*to, value))
+                                .ok_or_else(missing)
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    for (slot, value) in values {
+                        frame.pattern_binding(slot, Some(value), true)?;
+                    }
+                    for from in sources.difference(&targets) {
+                        frame.pattern_binding(*from, None, false)?;
+                    }
+                }
+                Op::InvalidControlFlow => {
+                    return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source)));
+                }
+                Op::NonExhaustiveMatch => {
+                    return Err(self.failure(ErrorKind::NonExhaustiveMatch, Some(source)));
+                }
+
+                Op::PrepareOptional { ty, input } => {
+                    self.prepare_optional(
+                        ty,
+                        input.as_ref().map(|(ty, at)| (ty.as_ref(), *at)),
+                        source,
+                    )?;
+                }
+                Op::Optional {
+                    destination,
+                    ty,
+                    value,
+                    value_source,
+                } => {
+                    let value = value
+                        .map(|slot| frame.slots[slot].take().ok_or_else(missing))
+                        .transpose()?;
+                    frame.slots[*destination] =
+                        Some(self.complete_optional(ty, value, *value_source)?);
+                }
+                Op::PrepareError(conversion) => {
+                    self.prepare_error_conversion(
+                        conversion.conversion,
+                        &conversion.input,
+                        &conversion.output,
+                        source,
+                    )?;
+                }
+                Op::ErrorConvert {
+                    destination,
+                    value,
+                    conversion,
+                } => {
+                    let value = frame.slots[*value].take().ok_or_else(missing)?;
+                    if !self.has_type(&value, &conversion.input) {
+                        return Err(self.failure(ErrorKind::Type, Some(source)));
+                    }
+                    frame.slots[*destination] = Some(self.complete_error_conversion(
+                        conversion.conversion,
+                        &conversion.input,
+                        &conversion.output,
+                        value,
+                        source,
+                    )?);
+                }
+
+                Op::Variant {
+                    destination,
+                    declaration,
+                    index,
+                    ty,
+                    fields,
+                } => {
+                    let values = fields
+                        .iter()
+                        .map(|field| frame.slots[*field].take().ok_or_else(missing))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    frame.slots[*destination] =
+                        Some(self.construct_variant(ty, *declaration, *index, values, source)?);
+                }
+
+                Op::Record {
+                    destination,
+                    declaration,
+                    ty,
+                    fields,
+                } => {
+                    let values = fields
+                        .iter()
+                        .map(|field| frame.slots[*field].take().ok_or_else(missing))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    frame.slots[*destination] =
+                        Some(self.construct_record(ty, *declaration, values, source)?);
+                }
+
+                Op::WriteBits {
+                    local,
+                    value,
+                    fields,
+                    storage_type,
+                    output,
+                    start,
+                    end,
+                } => {
+                    let Value::BitVec(rhs) = frame.slots[*value].take().ok_or_else(missing)? else {
+                        return Err(self.failure(ErrorKind::Type, Some(source)));
+                    };
+                    let target = frame.slots[*local].as_mut().ok_or_else(missing)?;
+                    self.write_bit_place(
+                        target,
+                        fields,
+                        storage_type,
+                        *start,
+                        *end,
+                        rhs,
+                        output,
+                        source,
+                    )?;
+                }
+                Op::CheckBinding(local) => {
+                    frame.slots[*local].as_ref().ok_or_else(missing)?;
+                }
+                Op::WritePlace {
+                    local,
+                    value,
+                    fields,
+                } => {
+                    let value = frame.slots[*value].take().ok_or_else(missing)?;
+                    let target = frame.slots[*local].as_mut().ok_or_else(missing)?;
+                    self.write_comptime_place(target, fields, value, source)?;
+                }
+                Op::Field {
+                    destination,
+                    base,
+                    local,
+                    nominal,
+                    name,
+                    index,
+                    ty,
+                    base_source,
+                } => {
+                    let temporary = if *local {
+                        None
+                    } else {
+                        frame.slots[*base].take()
+                    };
+                    let record = if *local {
+                        frame.slots[*base].as_ref()
+                    } else {
+                        temporary.as_ref()
+                    }
+                    .ok_or_else(missing)?;
+                    let value = self.read_record_field(
+                        record,
+                        *nominal,
+                        name.as_deref(),
+                        *index,
+                        ty,
+                        *base_source,
+                        source,
+                    )?;
+                    frame.slots[*destination] = Some(value);
+                }
+
+                Op::BeginCall {
+                    call,
+                    callee,
+                    callee_source,
+                    normal_form,
+                    parameter_bindings,
+                    prepare_defaults,
+                    method,
+                } => {
+                    let dynamic_method = frame.instance_methods.remove(callee);
+                    let trait_defaults = if *prepare_defaults {
+                        dynamic_method
+                            .as_ref()
+                            .map(|method| self.trait_method_default_inputs(method.view()))
+                            .transpose()?
+                    } else {
+                        None
+                    };
+                    let method = method.as_deref().or(dynamic_method.as_ref());
+                    let (interface_program, interface_parameters) = if let Some(method) = method {
+                        self.interface_method_contract(method.view(), source)?
+                    } else {
+                        (Default::default(), None)
+                    };
+                    let callee = if let Some(method) = method {
+                        self.tick(Some(method.source))?;
+                        self.depth += 1;
+                        let value = self.bytecode_trait_method(method.view(), true);
+                        self.depth -= 1;
+                        value?
+                    } else {
+                        frame.slots[*callee].take().ok_or_else(missing)?
+                    };
+                    let callee = if normal_form.is_none() {
+                        self.resolve_invocation_identity(callee)?
+                    } else {
+                        callee
+                    };
+                    let (normal_head, parameters, count) = if let Some((ty, count)) = normal_form {
+                        if !self.has_type(&callee, ty) {
+                            return Err(self.failure(ErrorKind::Type, Some(*callee_source)));
+                        }
+                        let Value::Function(head) = &callee else {
+                            return Err(self.failure(ErrorKind::Type, Some(*callee_source)));
+                        };
+                        let metadata = self.normal_forms.get(head).ok_or_else(missing)?;
+                        if !parameter_bindings.is_empty() || *count != metadata.parameters.len() {
+                            return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
+                        }
+                        (Some(*head), vec![], *count)
+                    } else {
+                        let parameters = self.call_parameters(&callee, source)?;
+                        let count = parameters.len();
+                        (None, parameters, count)
+                    };
+                    let preparation_parameters =
+                        interface_parameters.as_ref().unwrap_or(&parameters);
+                    if !parameter_bindings.is_empty()
+                        && (*parameter_bindings != *preparation_parameters
+                            || parameter_bindings.len() != count)
+                    {
+                        return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
+                    }
+                    self.effect_charge(count, Some(source))?;
+                    frame.calls.insert(
+                        *call,
+                        PendingCall {
+                            callee,
+                            normal_head,
+                            trait_defaults,
+                            interface: interface_parameters
+                                .map(|parameters| (interface_program, parameters)),
+                            arguments: (0..count).map(|_| None).collect(),
+                            parameter_bindings: if *prepare_defaults {
+                                parameter_bindings.clone()
+                            } else {
+                                vec![]
+                            },
+                            defaults: Environment::new(),
+                            last_default: None,
+                        },
+                    );
+                }
+                Op::CheckCallArgument {
+                    call,
+                    parameter,
+                    is_default,
+                    passing,
+                    argument_source,
+                } => {
+                    if *passing != nir::program::ArgumentPassing::Value
+                        && (*is_default || *parameter != 0)
+                    {
+                        return Err(
+                            self.failure(ErrorKind::InvalidCallPlan, Some(*argument_source))
+                        );
+                    }
+                    let pending = frame.calls.get_mut(call).ok_or_else(missing)?;
+                    if pending.normal_head.is_some()
+                        && (*is_default || *passing != nir::program::ArgumentPassing::Value)
+                    {
+                        return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
+                    }
+                    if *parameter >= pending.arguments.len()
+                        || pending.arguments[*parameter].is_some()
+                    {
+                        return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
+                    }
+                    if *is_default {
+                        if pending.parameter_bindings.is_empty()
+                            || pending.last_default.is_some_and(|last| last >= *parameter)
+                        {
+                            return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
+                        }
+                        pending.last_default = Some(*parameter);
+                    } else if pending.last_default.is_some() {
+                        return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
+                    }
+                }
+                Op::Reference {
+                    destination,
+                    base,
+                    local,
+                    fields,
+                    rebind,
+                } => {
+                    let reference = if *local {
+                        value_reference::ValueReference::for_slot(
+                            frame.slots[*base].as_mut().ok_or_else(missing)?,
+                        )
+                    } else {
+                        value_reference::ValueReference::root(Storage::new(
+                            frame.slots[*base].take().ok_or_else(missing)?,
+                        ))
+                    };
+                    let mut reference = self.project_value_reference(reference, fields, source)?;
+                    if !rebind {
+                        reference.prohibit_rebind();
+                    }
+                    frame.slots[*destination] = Some(Value::ComptimeReference(reference));
+                }
+                Op::DefaultArgument {
+                    call,
+                    destination,
+                    value,
+                    dynamic,
+                } => {
+                    let pending = frame.calls.get_mut(call).ok_or_else(missing)?;
+                    let expression = self.specialized_default_code(
+                        value,
+                        pending.trait_defaults.as_ref(),
+                        *dynamic,
+                        &pending.callee,
+                        source,
+                    )?;
+                    let environment = std::mem::take(&mut pending.defaults);
+                    frame.waiting = Some(Waiting::Default {
+                        call: *call,
+                        destination: *destination,
+                    });
+                    return Ok(Progress::Default {
+                        expression,
+                        environment,
+                    });
+                }
+                Op::StoreCallArgument {
+                    call,
+                    parameter,
+                    value,
+                } => {
+                    let value = frame.slots[*value].take().ok_or_else(missing)?;
+                    let pending = frame.calls.get_mut(call).ok_or_else(missing)?;
+                    let slot = pending.arguments.get_mut(*parameter).ok_or_else(missing)?;
+                    if pending.normal_head.is_some() {
+                        *slot = Some(PreparedArgument::Normal(
+                            self.residual_input_term(value, source)?,
+                        ));
+                        continue;
+                    }
+                    let value = self.prepare_argument(*parameter, source, value)?;
+                    if !pending.parameter_bindings.is_empty() {
+                        pending
+                            .defaults
+                            .insert(pending.parameter_bindings[*parameter], value.clone());
+                    }
+                    *slot = Some(PreparedArgument::Value(value));
+                }
+                Op::Invoke { call, destination } => {
+                    let pending = frame.calls.remove(call).ok_or_else(missing)?;
+                    let arguments = pending
+                        .arguments
+                        .into_iter()
+                        .collect::<Option<Vec<_>>>()
+                        .ok_or_else(|| self.failure(ErrorKind::Arity, Some(source)))?;
+                    if let Some(head) = pending.normal_head {
+                        let inputs = arguments
+                            .into_iter()
+                            .map(|argument| match argument {
+                                PreparedArgument::Normal(term) => Ok(term),
+                                PreparedArgument::Value(_) => {
+                                    Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)))
+                                }
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        frame.slots[*destination] =
+                            Some(self.complete_normal_type(head, inputs, source)?);
+                        continue;
+                    }
+                    let arguments = arguments
+                        .into_iter()
+                        .map(|argument| match argument {
+                            PreparedArgument::Value(value) => Ok(value),
+                            PreparedArgument::Normal(_) => {
+                                Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)))
+                            }
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    if let Some((program, parameters)) = pending.interface {
+                        if !program.is_empty() {
+                            let mut interface = Box::new(interface::InterfaceCall::new(
+                                self,
+                                *destination,
+                                source,
+                                program,
+                                &parameters,
+                                pending.defaults,
+                                pending.callee,
+                                arguments,
+                            )?);
+                            let interface::Step::Suspend(progress) = interface.advance(self)?
+                            else {
+                                return Err(missing());
+                            };
+                            frame.interface = Some(interface);
+                            frame.waiting = Some(Waiting::Interface);
+                            return Ok(progress);
+                        }
+                    }
+                    frame.waiting = Some(Waiting::Call(*destination));
+                    return Ok(Progress::Call {
+                        callee: pending.callee,
+                        arguments,
+                    });
+                }
+                Op::PrepareIntrinsic {
+                    tag,
+                    binding,
+                    inputs,
+                    output,
+                } => {
+                    let binding = binding
+                        .as_deref()
+                        .filter(|binding| binding.is_comptime())
+                        .ok_or_else(|| self.failure(ErrorKind::Unsupported, Some(source)))?;
+                    binding
+                        .validate_types(*tag, inputs.iter(), output)
+                        .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
+                }
+                Op::Intrinsic {
+                    destination,
+                    binding,
+                    inputs,
+                } => {
+                    let binding = binding
+                        .as_deref()
+                        .ok_or_else(|| self.failure(ErrorKind::Unsupported, Some(source)))?;
+                    let values: Vec<_> = inputs
+                        .iter()
+                        .map(|slot| frame.slots[*slot].take().ok_or_else(missing))
+                        .collect::<Result<_, _>>()?;
+                    frame.slots[*destination] =
+                        Some(self.scalar_math_values(binding, &values, source)?);
+                }
+                Op::Constant { destination, value } => {
+                    use comptime_compiler::constants::Kind;
+                    let result = match &value.kind {
+                        Kind::Literal(literal) => {
+                            self.literal_constant(literal, &value.ty, source)?
+                        }
+                        Kind::Type(ty) => self.type_constant(ty, &value.ty, source)?,
+                        Kind::Frozen(term) => self.frozen_constant(term, &value.ty, source)?,
+                        Kind::Function(id) if self.graph.is_some() => {
+                            self.iir_function_value(*id, &[], &value.ty, source)?
+                        }
+                        Kind::Function(id) if self.runtime_function_identities.contains_key(id) => {
+                            Value::FunctionInstance {
+                                declaration: *id,
+                                arguments: vec![],
+                            }
+                        }
+                        Kind::Function(id) => Value::Function(*id),
+                    };
+                    frame.slots[*destination] = Some(result);
+                }
+                Op::FunctionInstance {
+                    destination,
+                    instance,
+                } => {
+                    frame.slots[*destination] = Some(self.function_instance_value(
+                        instance.declaration,
+                        &instance.arguments,
+                        &instance.output,
+                        source,
+                    )?);
+                }
+                Op::TraitMethod {
+                    destination,
+                    method,
+                } => {
+                    frame.slots[*destination] =
+                        Some(self.bytecode_trait_method(method.view(), false)?);
+                }
+                Op::EnterScope => frame.scopes.push(PatternScope::default()),
+                Op::LeaveScope => frame.leave_scope()?,
+                Op::Unwind(depth) => {
+                    if *depth > frame.scopes.len() {
+                        return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source)));
+                    }
+                    while frame.scopes.len() > *depth {
+                        frame.leave_scope()?;
+                    }
+                }
+                Op::PrepareScalar(scalar) => {
+                    self.prepare_scalar(scalar.descriptor(), source)?;
+                }
+                Op::CheckScalarOperand { scalar, value } => {
+                    let plan = self.prepare_scalar(scalar.descriptor(), source)?;
+                    self.scalar_operand(
+                        plan,
+                        frame.slots[*value].as_ref().ok_or_else(missing)?,
+                        source,
+                    )?;
+                }
+                Op::Scalar {
+                    destination,
+                    scalar,
+                    left,
+                    right,
+                } => {
+                    let plan = self.prepare_scalar(scalar.descriptor(), source)?;
+                    let a = frame.slots[*left].take().ok_or_else(missing)?;
+                    let b = right
+                        .map(|slot| frame.slots[slot].take().ok_or_else(missing))
+                        .transpose()?;
+                    frame.slots[*destination] =
+                        Some(self.scalar_values(scalar.descriptor(), plan, a, b, source)?);
+                }
+                Op::Unit(dst) => frame.slots[*dst] = Some(Value::Unit),
+                Op::Read { destination, local } => {
+                    let input = frame.slots[*local].as_ref().ok_or_else(missing)?;
+                    let value = self.invocation_slot_value(input, Some(source))?;
+                    frame.slots[*destination] = Some(value);
+                }
+                Op::Store {
+                    local,
+                    value,
+                    initialize,
+                } => {
+                    let value = frame.slots[*value].take().ok_or_else(missing)?;
+                    if *initialize {
+                        if frame.slots[*local].is_none() {
+                            if let Some(scope) = frame.scopes.last_mut() {
+                                scope.locals.push(*local);
+                            }
+                        }
+                        frame.slots[*local] = Some(value);
+                    } else {
+                        let target = frame.slots[*local].as_mut().ok_or_else(missing)?;
+                        self.write_comptime_place(target, &[], value, source)?;
+                    }
+                }
+                Op::Not {
+                    destination,
+                    value,
+                    ty,
+                } => {
+                    let value = Self::concrete_value(
+                        frame.slots[*value].take().ok_or_else(missing)?,
+                        source,
+                    )?;
+                    let result = match value {
+                        Value::Bool(value) => Value::Bool(!value),
+                        Value::BitVec(value)
+                            if *ty == Term::Primitive(Primitive::BitVec(value.width())) =>
+                        {
+                            Value::BitVec(self.bit_operation(source, |budget| value.not(budget))?)
+                        }
+                        _ => return Err(self.failure(ErrorKind::Type, Some(source))),
+                    };
+                    frame.slots[*destination] = Some(result);
+                }
+                Op::Jump(target) => frame.pc = *target,
+                Op::Branch {
+                    condition,
+                    when,
+                    target,
+                } => match frame.slots[*condition].as_ref().ok_or_else(missing)? {
+                    Value::Bool(value) => {
+                        if value == when {
+                            frame.pc = *target;
+                        }
+                    }
+                    Value::AbstractValue { .. } => {
+                        return Err(self.failure(ErrorKind::AbstractValueUnresolved, Some(source)));
+                    }
+                    _ => return Err(self.failure(ErrorKind::Type, Some(source))),
+                },
+                Op::Finish { value, explicit } => {
+                    let value = frame.slots[*value].take().ok_or_else(missing)?;
+                    return Ok(Progress::Complete(if *explicit {
+                        Flow::Return(value)
+                    } else {
+                        Flow::Value(value)
+                    }));
+                }
+            }
+        }
+        Ok(Progress::Suspended)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn object_access_bytecode_preserves_domains_errors_and_recovery() {
+        use nir::program::{ObjectEditKind as O, ObjectQueryKind as Q};
+        let package = Package::default();
+        let source = SourceRange { start: 1, end: 2 };
+        let boolean = Term::Primitive(Primitive::Bool);
+        let object_ty = Term::Primitive(Primitive::Object);
+        let integer = Term::Primitive(Primitive::Integer);
+        let symbol = Term::Primitive(Primitive::Symbol);
+        let local = |index, ty| Expr {
+            source,
+            ty,
+            kind: K::Local(LocalId { owner: 1, index }),
+        };
+        let original = Value::Object(Object::from_entries(vec![
+            ObjectEntry::Property {
+                key: "flag".into(),
+                value: ObjectValue {
+                    ty: boolean.clone(),
+                    value: Value::Bool(true),
+                },
+            },
+            ObjectEntry::Property {
+                key: "flag".into(),
+                value: ObjectValue {
+                    ty: Term::Primitive(Primitive::Char),
+                    value: Value::Char('x'),
+                },
+            },
+        ]));
+        let mut bodies = Vec::new();
+        for query in [Q::Length, Q::Key, Q::EntryType, Q::Value, Q::NamedValue] {
+            let mut fields = vec![local(0, object_ty.clone())];
+            if query != Q::Length {
+                fields.push(local(
+                    1,
+                    if query == Q::NamedValue {
+                        symbol.clone()
+                    } else {
+                        integer.clone()
+                    },
+                ));
+            }
+            let ty = match query {
+                Q::Length => integer.clone(),
+                Q::Key => Term::Optional(Box::new(symbol.clone())),
+                Q::EntryType => Term::Primitive(Primitive::Type),
+                _ => Term::Optional(Box::new(boolean.clone())),
+            };
+            let subject = Box::new(Expr {
+                source,
+                ty: Term::Tuple(fields.iter().map(|v| v.ty.clone()).collect()),
+                kind: K::Tuple(fields),
+            });
+            bodies.push(Expr {
+                source,
+                ty,
+                kind: K::ObjectQuery { query, subject },
+            });
+        }
+        for operation in [O::Concat, O::Append, O::Replace, O::Remove] {
+            let mut fields = vec![
+                local(0, object_ty.clone()),
+                local(
+                    1,
+                    match operation {
+                        O::Concat => object_ty.clone(),
+                        O::Append => Term::Optional(Box::new(symbol.clone())),
+                        _ => integer.clone(),
+                    },
+                ),
+            ];
+            if matches!(operation, O::Append | O::Replace) {
+                fields.push(local(2, boolean.clone()));
+            }
+            let subject = Box::new(Expr {
+                source,
+                ty: Term::Tuple(fields.iter().map(|v| v.ty.clone()).collect()),
+                kind: K::Tuple(fields),
+            });
+            bodies.push(Expr {
+                source,
+                ty: object_ty.clone(),
+                kind: K::ObjectEdit { operation, subject },
+            });
+        }
+        for body in bodies {
+            let code = Arc::new(comptime_compiler::compile(&body, &mut 10000).unwrap());
+            let instruction = if matches!(body.kind, K::ObjectQuery { .. }) {
+                "(local-object-access "
+            } else {
+                "(object-access "
+            };
+            assert!(code.to_string().contains(instruction));
+            let mut tree = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            // Invalid payloads, bounds, keys, and absence followed by valid inputs
+            // exercise recovery with the same interpreter and compiled program.
+            for selector in [
+                Value::Char('!'),
+                Value::Integer(comptime_runtime::Integer::from_u128(99)),
+                Value::Symbol("missing".into()),
+                Value::Symbol("flag".into()),
+                original.clone(),
+                Value::Optional {
+                    ty: Term::Optional(Box::new(symbol.clone())),
+                    value: None,
+                },
+                Value::Integer(comptime_runtime::Integer::from_u128(0)),
+                Value::Integer(comptime_runtime::Integer::from_u128(1)),
+            ] {
+                for payload in [Value::Char('!'), Value::Bool(false)] {
+                    let mut environment = Environment::new();
+                    environment.insert(LocalId { owner: 1, index: 0 }, original.clone());
+                    environment.insert(LocalId { owner: 1, index: 1 }, selector.clone());
+                    environment.insert(LocalId { owner: 1, index: 2 }, payload);
+                    let mut expected_environment = environment.clone();
+                    let value = |result: Result<Flow, Error>| {
+                        result.map(|flow| match flow {
+                            Flow::Value(value) => value,
+                            _ => panic!("unexpected flow"),
+                        })
+                    };
+                    assert_eq!(
+                        value(vm.execute_code(&code, &mut environment)),
+                        value(tree.eval(&body, &mut expected_environment)),
+                        "{body:?}"
+                    );
+                    assert_eq!(
+                        environment.get(&LocalId { owner: 1, index: 0 }),
+                        Some(&original)
+                    );
+                }
+            }
+            let mut invalid = body.clone();
+            invalid.ty = boolean.clone();
+            let code = Arc::new(comptime_compiler::compile(&invalid, &mut 10000).unwrap());
+            assert_eq!(
+                vm.execute_code(&code, &mut Environment::new())
+                    .unwrap_err()
+                    .kind,
+                ErrorKind::Type
+            );
+            vm.comptime_only = false;
+            assert_eq!(
+                vm.execute_code(&code, &mut Environment::new())
+                    .unwrap_err()
+                    .kind,
+                ErrorKind::PhaseMismatch
+            );
+        }
+    }
+
+    #[test]
+    fn object_validation_orders_effects_and_stops_before_later_entries() {
+        let package = Package::default();
+        let source = SourceRange { start: 7, end: 9 };
+        let trace = LocalId { owner: 1, index: 0 };
+        let boolean = Term::Primitive(Primitive::Bool);
+        let field = |effect, malformed| Expr {
+            source,
+            ty: boolean.clone(),
+            kind: K::Block {
+                statements: vec![Expr {
+                    source,
+                    ty: Term::Primitive(Primitive::Void),
+                    kind: K::Assign {
+                        place: nir::program::Place {
+                            root: trace,
+                            fields: vec![],
+                        },
+                        value: Box::new(Expr {
+                            source,
+                            ty: boolean.clone(),
+                            kind: K::Literal(Literal::Bool(effect)),
+                        }),
+                    },
+                }],
+                result: Some(Box::new(Expr {
+                    source,
+                    ty: boolean.clone(),
+                    kind: if malformed {
+                        K::Unit
+                    } else {
+                        K::Literal(Literal::Bool(true))
+                    },
+                })),
+            },
+        };
+        for compiled in [false, true] {
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            for case in 0..3 {
+                let body = Expr {
+                    source,
+                    ty: Term::Primitive(Primitive::Object),
+                    kind: K::Object {
+                        names: if case == 0 {
+                            vec![]
+                        } else {
+                            vec![None, Some("same".into())]
+                        },
+                        fields: vec![field(true, case == 1), field(false, false)],
+                    },
+                };
+                let mut environment = Environment::new();
+                environment.insert(trace, Value::Bool(false));
+                let result = if compiled {
+                    let code = Arc::new(comptime_compiler::compile(&body, &mut 1000).unwrap());
+                    vm.execute_code(&code, &mut environment)
+                } else {
+                    vm.eval(&body, &mut environment)
+                };
+                assert_eq!(environment.get(&trace), Some(&Value::Bool(case == 1)));
+                if case < 2 {
+                    assert_eq!(result.unwrap_err().kind, ErrorKind::Type);
+                } else {
+                    assert!(matches!(result.unwrap(), Flow::Value(Value::Object(_))));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn failed_declarations_reject_missing_or_fallthrough_else_without_publishing() {
+        use nir::program::Pattern;
+        let package = Package::default();
+        let source = SourceRange { start: 7, end: 9 };
+        let binding = LocalId { owner: 1, index: 0 };
+        let unit = Expr {
+            source,
+            ty: Term::Primitive(Primitive::Void),
+            kind: K::Unit,
+        };
+        for compiled in [false, true] {
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            let mut environment = Environment::new();
+            for (otherwise, expected) in [
+                (None, ErrorKind::NonExhaustiveMatch),
+                (Some(Box::new(unit.clone())), ErrorKind::InvalidControlFlow),
+            ] {
+                let body = Expr {
+                    source,
+                    ty: unit.ty.clone(),
+                    kind: K::LetPattern {
+                        pattern: Pattern::Binding {
+                            binding,
+                            inner: Box::new(Pattern::Wild),
+                        },
+                        value: Box::new(unit.clone()),
+                        guard: Some(Box::new(Expr {
+                            source,
+                            ty: Term::Primitive(Primitive::Bool),
+                            kind: K::Literal(Literal::Bool(false)),
+                        })),
+                        otherwise,
+                    },
+                };
+                let result = if compiled {
+                    let code = Arc::new(comptime_compiler::compile(&body, &mut 1000).unwrap());
+                    vm.execute_code(&code, &mut environment)
+                } else {
+                    vm.eval(&body, &mut environment)
+                };
+                assert_eq!(result.unwrap_err().kind, expected);
+                assert!(!environment.contains_key(&binding));
+            }
+        }
+    }
+
+    #[test]
+    fn compiled_match_rejects_missing_arms_and_bad_guards_then_recovers() {
+        use nir::program::{MatchArm, Pattern};
+        let package = Package::default();
+        let source = SourceRange { start: 7, end: 9 };
+        let boolean = Term::Primitive(Primitive::Bool);
+        let literal = Expr {
+            source,
+            ty: boolean.clone(),
+            kind: K::Literal(Literal::Bool(true)),
+        };
+        let binding = LocalId { owner: 1, index: 0 };
+        let mut body = Expr {
+            source,
+            ty: boolean.clone(),
+            kind: K::Match {
+                value: Box::new(literal.clone()),
+                arms: vec![],
+            },
+        };
+        for compiled in [false, true] {
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            let mut environment = Environment::new();
+            let run = |vm: &mut Interpreter<'_>, body: &Expr, environment: &mut Environment| {
+                if compiled {
+                    let code = Arc::new(comptime_compiler::compile(body, &mut 1000).unwrap());
+                    vm.execute_code(&code, environment)
+                } else {
+                    vm.eval(body, environment)
+                }
+            };
+            assert!(matches!(
+                run(&mut vm, &body, &mut environment),
+                Err(Error {
+                    kind: ErrorKind::NonExhaustiveMatch,
+                    ..
+                })
+            ));
+            let K::Match { arms, .. } = &mut body.kind else {
+                unreachable!()
+            };
+            arms.push(MatchArm {
+                pattern: Pattern::Binding {
+                    binding,
+                    inner: Box::new(Pattern::Wild),
+                },
+                guard: Some(Expr {
+                    source,
+                    ty: boolean.clone(),
+                    kind: K::Unit,
+                }),
+                body: Expr {
+                    source,
+                    ty: boolean.clone(),
+                    kind: K::Local(binding),
+                },
+            });
+            assert!(matches!(run(&mut vm, &body, &mut environment),
+                Err(Error { kind: ErrorKind::Type, source: Some(at) }) if at == source));
+            assert!(!environment.contains_key(&binding));
+            let K::Match { arms, .. } = &mut body.kind else {
+                unreachable!()
+            };
+            arms[0].guard = None;
+            assert!(matches!(
+                run(&mut vm, &body, &mut environment).unwrap(),
+                Flow::Value(Value::Bool(true))
+            ));
+            assert!(!environment.contains_key(&binding));
+            let K::Match { arms, .. } = &mut body.kind else {
+                unreachable!()
+            };
+            arms.clear();
+        }
+    }
+
+    #[test]
+    fn qualified_construction_checks_plans_before_effects_and_payloads_afterward() {
+        use nir::error_results::Conversion;
+        let package = Package::default();
+        let source = SourceRange { start: 1, end: 2 };
+        let trace = LocalId { owner: 1, index: 0 };
+        let boolean = Term::Primitive(Primitive::Bool);
+        let optional = Term::Optional(Box::new(boolean.clone()));
+        let error = Term::ErrorResult {
+            errors: vec![Term::Primitive(Primitive::Char)],
+            result: Box::new(boolean.clone()),
+        };
+        let operand = |kind| Expr {
+            source,
+            ty: boolean.clone(),
+            kind: K::Block {
+                statements: vec![Expr {
+                    source,
+                    ty: Term::Primitive(Primitive::Void),
+                    kind: K::Assign {
+                        place: nir::program::Place {
+                            root: trace,
+                            fields: vec![],
+                        },
+                        value: Box::new(Expr {
+                            source,
+                            ty: boolean.clone(),
+                            kind: K::Literal(Literal::Bool(true)),
+                        }),
+                    },
+                }],
+                result: Some(Box::new(Expr {
+                    source,
+                    ty: boolean.clone(),
+                    kind,
+                })),
+            },
+        };
+        let present = |ty, operand| Expr {
+            source,
+            ty,
+            kind: K::OptionalPresent(Box::new(operand)),
+        };
+        let converted = |ty, conversion, operand| Expr {
+            source,
+            ty,
+            kind: K::ErrorConvert {
+                conversion,
+                value: Box::new(operand),
+            },
+        };
+        for (body, effect) in [
+            (
+                present(
+                    Term::Optional(Box::new(Term::Primitive(Primitive::Char))),
+                    operand(K::Literal(Literal::Bool(true))),
+                ),
+                false,
+            ),
+            (present(optional.clone(), operand(K::Unit)), true),
+            (
+                converted(
+                    optional,
+                    Conversion::Success,
+                    operand(K::Literal(Literal::Bool(true))),
+                ),
+                false,
+            ),
+            (
+                converted(
+                    error.clone(),
+                    Conversion::Failure,
+                    operand(K::Literal(Literal::Bool(true))),
+                ),
+                false,
+            ),
+            (
+                converted(error, Conversion::Success, operand(K::Unit)),
+                true,
+            ),
+        ] {
+            let code = Arc::new(comptime_compiler::compile(&body, &mut 1000).unwrap());
+            for compiled in [false, true] {
+                let mut environment = Environment::new();
+                environment.insert(trace, Value::Bool(false));
+                let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+                let result = if compiled {
+                    vm.execute_code(&code, &mut environment)
+                } else {
+                    vm.eval(&body, &mut environment)
+                };
+                assert_eq!(result.unwrap_err().kind, ErrorKind::Type);
+                assert_eq!(environment.get(&trace), Some(&Value::Bool(effect)));
+            }
+        }
+    }
+
+    #[test]
+    fn product_error_transport_preserves_labels_and_payloads_inside_records() {
+        use nir::error_results::Conversion;
+        let package = Package::default();
+        let source = SourceRange { start: 1, end: 2 };
+        let boolean = Term::Primitive(Primitive::Bool);
+        let character = Term::Primitive(Primitive::Char);
+        let original = Term::ErrorResult {
+            errors: vec![character.clone(), boolean.clone()],
+            result: Box::new(boolean.clone()),
+        };
+        let reordered = Term::ErrorResult {
+            errors: vec![boolean, character.clone()],
+            result: Box::new(Term::Primitive(Primitive::Bool)),
+        };
+        let input = Term::Record(vec![("entry".into(), original.clone())]);
+        let output = Term::Record(vec![("entry".into(), reordered.clone())]);
+        let body = Expr {
+            source,
+            ty: output,
+            kind: K::ErrorConvert {
+                conversion: Conversion::Product,
+                value: Box::new(Expr {
+                    source,
+                    ty: input,
+                    kind: K::AnonymousRecord {
+                        fields: vec![Expr {
+                            source,
+                            ty: original,
+                            kind: K::ErrorConvert {
+                                conversion: Conversion::Failure,
+                                value: Box::new(Expr {
+                                    source,
+                                    ty: character,
+                                    kind: K::Literal(Literal::Char('x')),
+                                }),
+                            },
+                        }],
+                    },
+                }),
+            },
+        };
+        let code = Arc::new(comptime_compiler::compile(&body, &mut 1000).unwrap());
+        assert!(code.to_string().contains("(error-conversion product"));
+        let expected = Value::AnonymousRecord(vec![(
+            "entry".into(),
+            Value::ErrorResult {
+                ty: reordered,
+                error: Some(1),
+                value: Box::new(Value::Char('x')),
+            },
+        )]);
+        // Product transport preserves the field types; it is not covariance.
+        let mut widening = body.clone();
+        if let K::ErrorConvert { value, .. } = &mut widening.kind {
+            let Term::Record(fields) = &mut value.ty else {
+                unreachable!()
+            };
+            let Term::ErrorResult { errors, .. } = &mut fields[0].1 else {
+                unreachable!()
+            };
+            errors.pop();
+            let narrowed = fields[0].1.clone();
+            let K::AnonymousRecord { fields } = &mut value.kind else {
+                unreachable!()
+            };
+            fields[0].ty = narrowed;
+        }
+        let widening_code = Arc::new(comptime_compiler::compile(&widening, &mut 1000).unwrap());
+        for compiled in [false, true] {
+            let mut environment = Environment::new();
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            let K::ErrorConvert { value, .. } = &widening.kind else {
+                unreachable!()
+            };
+            assert!(matches!(
+                vm.eval(value, &mut environment).unwrap(),
+                Flow::Value(_)
+            ));
+            let rejected = if compiled {
+                vm.execute_code(&widening_code, &mut environment)
+            } else {
+                vm.eval(&widening, &mut environment)
+            };
+            assert!(matches!(
+                rejected,
+                Err(Error {
+                    kind: ErrorKind::Type,
+                    ..
+                })
+            ));
+            let result = if compiled {
+                vm.execute_code(&code, &mut environment)
+            } else {
+                vm.eval(&body, &mut environment)
+            };
+            assert!(matches!(result.unwrap(), Flow::Value(value) if value == expected));
+        }
+    }
+
+    #[test]
+    fn record_validation_follows_effects_but_early_exit_skips_remaining_fields() {
+        let package = Package::default();
+        let source = SourceRange { start: 1, end: 2 };
+        let trace = LocalId { owner: 1, index: 0 };
+        let boolean = Term::Primitive(Primitive::Bool);
+        let literal = Expr {
+            source,
+            ty: boolean.clone(),
+            kind: K::Literal(Literal::Bool(true)),
+        };
+        let field = Expr {
+            source,
+            ty: boolean.clone(),
+            kind: K::Block {
+                statements: vec![Expr {
+                    source,
+                    ty: Term::Primitive(Primitive::Void),
+                    kind: K::Assign {
+                        place: nir::program::Place {
+                            root: trace,
+                            fields: vec![],
+                        },
+                        value: Box::new(literal.clone()),
+                    },
+                }],
+                result: Some(Box::new(literal.clone())),
+            },
+        };
+        let invalid = Expr {
+            source,
+            ty: Term::Record(vec![("flag".into(), Term::Primitive(Primitive::Str))]),
+            kind: K::AnonymousRecord {
+                fields: vec![field.clone()],
+            },
+        };
+        let early = Expr {
+            source,
+            ty: Term::Record(vec![
+                ("first".into(), boolean.clone()),
+                ("second".into(), boolean),
+            ]),
+            kind: K::AnonymousRecord {
+                fields: vec![
+                    Expr {
+                        source,
+                        ty: Term::Primitive(Primitive::Never),
+                        kind: K::Return(Some(Box::new(literal))),
+                    },
+                    field,
+                ],
+            },
+        };
+        for (body, exits) in [(invalid, false), (early, true)] {
+            let code = Arc::new(comptime_compiler::compile(&body, &mut 1000).unwrap());
+            assert!(code.to_string().contains("(record "));
+            for compiled in [false, true] {
+                let mut environment = Environment::new();
+                environment.insert(trace, Value::Bool(false));
+                let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+                let result = if compiled {
+                    vm.execute_code(&code, &mut environment)
+                } else {
+                    vm.eval(&body, &mut environment)
+                };
+                if exits {
+                    assert!(matches!(result.unwrap(), Flow::Return(Value::Bool(true))));
+                    assert_eq!(environment.get(&trace), Some(&Value::Bool(false)));
+                } else {
+                    assert_eq!(result.unwrap_err().kind, ErrorKind::Type);
+                    assert_eq!(environment.get(&trace), Some(&Value::Bool(true)));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn anonymous_field_reads_validate_name_index_and_result_type() {
+        let package = Package::default();
+        let source = SourceRange { start: 1, end: 2 };
+        let root = LocalId { owner: 1, index: 0 };
+        let boolean = Term::Primitive(Primitive::Bool);
+        for (name, index, ty, valid) in [
+            ("flag", 0, boolean.clone(), true),
+            ("other", 0, boolean.clone(), false),
+            ("flag", 1, boolean.clone(), false),
+            ("flag", 0, Term::Primitive(Primitive::U8), false),
+        ] {
+            let body = Expr {
+                source,
+                ty,
+                kind: K::AnonymousField {
+                    value: Box::new(Expr {
+                        source,
+                        ty: Term::Record(vec![("flag".into(), boolean.clone())]),
+                        kind: K::Local(root),
+                    }),
+                    name: name.into(),
+                    index,
+                },
+            };
+            let code = Arc::new(comptime_compiler::compile(&body, &mut 1000).unwrap());
+            assert!(code.to_string().contains("(field "));
+            let stored = Value::AnonymousRecord(vec![("flag".into(), Value::Bool(true))]);
+            let mut environment = Environment::new();
+            environment.insert(root, stored.clone());
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            let result = vm.execute_code(&code, &mut environment);
+            if valid {
+                assert!(matches!(result.unwrap(), Flow::Value(Value::Bool(true))));
+            } else {
+                assert_eq!(result.unwrap_err().kind, ErrorKind::Type);
+            }
+            assert_eq!(environment.get(&root), Some(&stored));
+        }
+    }
+
+    #[test]
+    fn missing_assignment_root_prevents_rhs_effects() {
+        let package = Package::default();
+        let source = SourceRange { start: 1, end: 2 };
+        let trace = LocalId { owner: 1, index: 0 };
+        let missing = LocalId { owner: 1, index: 1 };
+        let boolean = Term::Primitive(Primitive::Bool);
+        let void = Term::Primitive(Primitive::Void);
+        let literal = Expr {
+            source,
+            ty: boolean.clone(),
+            kind: K::Literal(Literal::Bool(true)),
+        };
+        let write = |root, value| Expr {
+            source,
+            ty: void.clone(),
+            kind: K::Assign {
+                place: nir::program::Place {
+                    root,
+                    fields: vec![],
+                },
+                value: Box::new(value),
+            },
+        };
+        let body = write(
+            missing,
+            Expr {
+                source,
+                ty: boolean,
+                kind: K::Block {
+                    statements: vec![write(trace, literal.clone())],
+                    result: Some(Box::new(literal)),
+                },
+            },
+        );
+        let code = Arc::new(comptime_compiler::compile(&body, &mut 1000).unwrap());
+        let mut environment = Environment::new();
+        environment.insert(trace, Value::Bool(false));
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        assert_eq!(
+            vm.execute_code(&code, &mut environment).unwrap_err().kind,
+            ErrorKind::MissingBinding
+        );
+        assert_eq!(environment.get(&trace), Some(&Value::Bool(false)));
+        assert_eq!(
+            vm.eval(&body, &mut environment).unwrap_err().kind,
+            ErrorKind::MissingBinding
+        );
+        assert_eq!(environment.get(&trace), Some(&Value::Bool(false)));
+    }
+
+    #[test]
+    fn receiver_path_is_revalidated_after_later_arguments_change_storage() {
+        let package = Package::default();
+        let source = SourceRange { start: 1, end: 2 };
+        let boolean = Term::Primitive(Primitive::Bool);
+        let root = LocalId { owner: 1, index: 0 };
+        let function = LocalId { owner: 1, index: 1 };
+        let parameters = vec![
+            LocalId { owner: 2, index: 0 },
+            LocalId { owner: 2, index: 1 },
+        ];
+        let signature = Term::ComptimeFunction(Box::new(Term::Function {
+            parameters: parameters
+                .iter()
+                .map(|_| nir::Parameter {
+                    sort: nir::Sort::Runtime,
+                    ty: boolean.clone(),
+                })
+                .collect(),
+            result: Box::new(boolean.clone()),
+        }));
+        let literal = Expr {
+            source,
+            ty: boolean.clone(),
+            kind: K::Literal(Literal::Bool(true)),
+        };
+        let closure = Value::Closure(Arc::new(Closure {
+            definition_source: None,
+            origin: None,
+            instance_arguments: None,
+            parameters,
+            environment: Environment::new(),
+            capture_order: vec![],
+            body: Arc::new(literal.clone()),
+            ty: signature.clone(),
+        }));
+        let receiver = Expr {
+            source,
+            ty: boolean.clone(),
+            kind: K::AnonymousField {
+                value: Box::new(Expr {
+                    source,
+                    ty: Term::Record(vec![("flag".into(), boolean.clone())]),
+                    kind: K::Local(root),
+                }),
+                name: "flag".into(),
+                index: 0,
+            },
+        };
+        // Deliberately malformed typed IR invalidates the acquired path after
+        // selection. Storage updates must survive failure, but entry must fail.
+        let later = Expr {
+            source,
+            ty: boolean.clone(),
+            kind: K::Block {
+                statements: vec![Expr {
+                    source,
+                    ty: Term::Primitive(Primitive::Void),
+                    kind: K::Assign {
+                        place: nir::program::Place {
+                            root,
+                            fields: vec![],
+                        },
+                        value: Box::new(Expr {
+                            source,
+                            ty: Term::Primitive(Primitive::Void),
+                            kind: K::Unit,
+                        }),
+                    },
+                }],
+                result: Some(Box::new(literal)),
+            },
+        };
+        let body = Expr {
+            source,
+            ty: boolean,
+            kind: K::Call {
+                callee: Box::new(Expr {
+                    source,
+                    ty: signature,
+                    kind: K::Local(function),
+                }),
+                arguments: vec![
+                    nir::program::CallArgument {
+                        passing: nir::program::ArgumentPassing::ComptimeReference,
+                        parameter: 0,
+                        value: receiver,
+                        is_default: false,
+                    },
+                    nir::program::CallArgument {
+                        passing: nir::program::ArgumentPassing::Value,
+                        parameter: 1,
+                        value: later,
+                        is_default: false,
+                    },
+                ],
+                parameter_bindings: vec![],
+            },
+        };
+        let code = Arc::new(comptime_compiler::compile(&body, &mut 1000).unwrap());
+        let mut environment = Environment::new();
+        environment.insert(function, closure);
+        environment.insert(
+            root,
+            Value::AnonymousRecord(vec![("flag".into(), Value::Bool(false))]),
+        );
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        assert_eq!(
+            vm.execute_code(&code, &mut environment).unwrap_err().kind,
+            ErrorKind::InvalidValueReference
+        );
+        assert_eq!(
+            vm.local_value(&environment, root, Some(source)).unwrap(),
+            Value::Unit
+        );
+        assert_eq!(vm.depth, 0);
+    }
+
+    #[test]
+    fn invalid_call_preparation_is_checked_before_evaluating_the_next_expression() {
+        let package = Package::default();
+        let source = SourceRange { start: 1, end: 2 };
+        let boolean = Term::Primitive(Primitive::Bool);
+        let binding = LocalId { owner: 1, index: 0 };
+        let parameters = vec![
+            LocalId { owner: 2, index: 0 },
+            LocalId { owner: 2, index: 1 },
+        ];
+        let signature = Term::ComptimeFunction(Box::new(Term::Function {
+            parameters: parameters
+                .iter()
+                .map(|_| nir::Parameter {
+                    sort: nir::Sort::Runtime,
+                    ty: boolean.clone(),
+                })
+                .collect(),
+            result: Box::new(boolean.clone()),
+        }));
+        let literal = Expr {
+            source,
+            ty: boolean.clone(),
+            kind: K::Literal(Literal::Bool(true)),
+        };
+        let closure = Value::Closure(Arc::new(Closure {
+            definition_source: None,
+            origin: None,
+            instance_arguments: None,
+            parameters: parameters.clone(),
+            environment: Environment::new(),
+            capture_order: vec![],
+            body: Arc::new(literal.clone()),
+            ty: signature.clone(),
+        }));
+        for fault in 0..5 {
+            let mut arguments: Vec<_> = (0..2)
+                .map(|parameter| nir::program::CallArgument {
+                    passing: nir::program::ArgumentPassing::Value,
+                    parameter,
+                    is_default: true,
+                    value: literal.clone(),
+                })
+                .collect();
+            let mut parameter_bindings = parameters.clone();
+            match fault {
+                0 => arguments.reverse(),
+                1 => arguments[1].is_default = false,
+                2 => parameter_bindings.clear(),
+                3 => {
+                    arguments[0].is_default = false;
+                    arguments[1].is_default = false;
+                    arguments[1].passing = nir::program::ArgumentPassing::ComptimeReference;
+                }
+                4 => arguments[0].passing = nir::program::ArgumentPassing::ComptimeReference,
+                _ => unreachable!(),
+            }
+            // This expression would fail with MissingBinding if evaluated.
+            arguments[1].value.kind = K::Local(LocalId {
+                owner: 99,
+                index: 0,
+            });
+            let body = Expr {
+                source,
+                ty: boolean.clone(),
+                kind: K::Call {
+                    callee: Box::new(Expr {
+                        source,
+                        ty: signature.clone(),
+                        kind: K::Local(binding),
+                    }),
+                    arguments,
+                    parameter_bindings,
+                },
+            };
+            let code = Arc::new(comptime_compiler::compile(&body, &mut 1000).unwrap());
+            let mut environment = Environment::new();
+            environment.insert(binding, closure.clone());
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            assert_eq!(
+                vm.execute_code(&code, &mut environment).unwrap_err().kind,
+                ErrorKind::InvalidCallPlan
+            );
+        }
+    }
+
+    #[test]
+    fn pending_call_requires_delivery_and_rejects_bad_slots_before_effects() {
+        let package = Package::default();
+        let source = SourceRange { start: 1, end: 2 };
+        let function = LocalId { owner: 1, index: 0 };
+        let trace = LocalId { owner: 1, index: 1 };
+        let boolean = Term::Primitive(Primitive::Bool);
+        let signature = Term::ComptimeFunction(Box::new(Term::Function {
+            parameters: vec![],
+            result: Box::new(boolean.clone()),
+        }));
+        let closure = Value::Closure(Arc::new(Closure {
+            definition_source: None,
+            origin: None,
+            instance_arguments: None,
+            parameters: vec![],
+            environment: Environment::new(),
+            capture_order: vec![],
+            body: Arc::new(Expr {
+                source,
+                ty: boolean.clone(),
+                kind: K::Literal(Literal::Bool(true)),
+            }),
+            ty: signature.clone(),
+        }));
+        let body = Expr {
+            source,
+            ty: boolean.clone(),
+            kind: K::Call {
+                callee: Box::new(Expr {
+                    source,
+                    ty: signature,
+                    kind: K::Local(function),
+                }),
+                arguments: vec![],
+                parameter_bindings: vec![],
+            },
+        };
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let mut environment = Environment::new();
+        environment.insert(function, closure);
+        environment.insert(trace, Value::Bool(true));
+        let code = Arc::new(comptime_compiler::compile(&body, &mut 1000).unwrap());
+        let mut frame = vm.start_frame(&code, &mut environment).unwrap();
+        let Progress::Call { callee, arguments } = vm.resume_frame(&mut frame, 100).unwrap() else {
+            panic!("expected suspended call");
+        };
+        let stopped = frame.to_string();
+        assert_eq!(
+            vm.resume_frame(&mut frame, 100).unwrap_err().kind,
+            ErrorKind::InvalidControlFlow
+        );
+        assert_eq!(frame.to_string(), stopped);
+        let result = vm.invoke_value_scoped(callee, arguments, None).unwrap();
+        frame.deliver(result).unwrap();
+        assert_eq!(
+            frame.deliver(Value::Bool(false)).unwrap_err().kind,
+            ErrorKind::InvalidControlFlow
+        );
+        assert!(matches!(
+            vm.resume_frame(&mut frame, 100).unwrap(),
+            Progress::Complete(Flow::Value(Value::Bool(true)))
+        ));
+        environment = frame.restore_environment();
+
+        let mut invalid = body;
+        let K::Call { arguments, .. } = &mut invalid.kind else {
+            unreachable!()
+        };
+        arguments.push(nir::program::CallArgument {
+            passing: nir::program::ArgumentPassing::Value,
+            parameter: 0,
+            is_default: false,
+            value: Expr {
+                source,
+                ty: Term::Primitive(Primitive::Void),
+                kind: K::Assign {
+                    place: nir::program::Place {
+                        root: trace,
+                        fields: vec![],
+                    },
+                    value: Box::new(Expr {
+                        source,
+                        ty: boolean,
+                        kind: K::Literal(Literal::Bool(false)),
+                    }),
+                },
+            },
+        });
+        let code = Arc::new(comptime_compiler::compile(&invalid, &mut 1000).unwrap());
+        assert_eq!(
+            vm.execute_code(&code, &mut environment).unwrap_err().kind,
+            ErrorKind::InvalidCallPlan
+        );
+        assert_eq!(environment.get(&trace), Some(&Value::Bool(true)));
+    }
+
+    #[test]
+    fn suspended_frame_owns_code_after_source_and_cache_are_released() {
+        let package = Package::default();
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let mut environment = Environment::new();
+        let mut frame = {
+            let body = Expr {
+                source: SourceRange { start: 1, end: 2 },
+                ty: Term::Primitive(Primitive::Bool),
+                kind: K::Not(Box::new(Expr {
+                    source: SourceRange { start: 1, end: 2 },
+                    ty: Term::Primitive(Primitive::Bool),
+                    kind: K::Literal(Literal::Bool(false)),
+                })),
+            };
+            let code = Arc::new(comptime_compiler::compile(&body, &mut 100).unwrap());
+            vm.bytecode_cache.insert(
+                DeclarationId {
+                    package: 1,
+                    local: 0,
+                },
+                Some(code.clone()),
+            );
+            let mut frame = vm.start_frame(&code, &mut environment).unwrap();
+            assert!(matches!(
+                vm.resume_frame(&mut frame, 1).unwrap(),
+                Progress::Suspended
+            ));
+            frame
+        };
+        vm.bytecode_cache = CodeCache::default();
+        assert!(matches!(
+            vm.resume_frame(&mut frame, 100).unwrap(),
+            Progress::Complete(Flow::Value(Value::Bool(true)))
+        ));
+        assert!(frame.restore_environment().is_empty());
+    }
+
+    #[test]
+    fn execution_slices_preserve_values_scopes_and_work_charges() {
+        let package = Package::default();
+        let input = LocalId { owner: 1, index: 0 };
+        let temporary = LocalId { owner: 1, index: 1 };
+        let unrelated = LocalId { owner: 2, index: 0 };
+        let expr = |primitive, kind| Expr {
+            source: SourceRange { start: 1, end: 2 },
+            ty: Term::Primitive(primitive),
+            kind,
+        };
+        let mut statements = vec![expr(
+            Primitive::Void,
+            K::Let {
+                binding: temporary,
+                value: Box::new(expr(Primitive::Void, K::Unit)),
+            },
+        )];
+        for _ in 0..3 {
+            statements.push(expr(
+                Primitive::Void,
+                K::Assign {
+                    place: nir::program::Place {
+                        root: input,
+                        fields: vec![],
+                    },
+                    value: Box::new(expr(
+                        Primitive::Bool,
+                        K::Not(Box::new(expr(Primitive::Bool, K::Local(input)))),
+                    )),
+                },
+            ));
+        }
+        let body = expr(
+            Primitive::Bool,
+            K::Block {
+                statements,
+                result: Some(Box::new(expr(Primitive::Bool, K::Local(input)))),
+            },
+        );
+        let code = Arc::new(comptime_compiler::compile(&body, &mut 1000).unwrap());
+        let mut remaining = None;
+        for quantum in [1, 2, 7, 1024] {
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            let mut environment = Environment::new();
+            environment.insert(input, Value::Bool(true));
+            environment.insert(unrelated, Value::Bool(true));
+            let mut frame = vm.start_frame(&code, &mut environment).unwrap();
+            assert!(environment.is_empty());
+            let initial = frame.to_string();
+            let before = vm.budget.steps;
+            assert!(matches!(
+                vm.resume_frame(&mut frame, 0).unwrap(),
+                Progress::Suspended
+            ));
+            assert_eq!(frame.to_string(), initial);
+            assert_eq!(vm.budget.steps, before);
+            loop {
+                match vm.resume_frame(&mut frame, quantum).unwrap() {
+                    Progress::Suspended => assert!(!frame.terminal),
+                    Progress::Complete(Flow::Value(Value::Bool(false))) => break,
+                    progress => panic!("unexpected progress: {progress:?}"),
+                }
+            }
+            assert!(frame.scopes.is_empty());
+            assert!(frame.to_string().contains("(terminal true)"));
+            let before = vm.budget.steps;
+            assert_eq!(
+                vm.resume_frame(&mut frame, quantum).unwrap_err().kind,
+                ErrorKind::InvalidControlFlow
+            );
+            assert_eq!(vm.budget.steps, before);
+            environment = frame.restore_environment();
+            assert_eq!(environment.get(&input), Some(&Value::Bool(false)));
+            assert_eq!(environment.get(&unrelated), Some(&Value::Bool(true)));
+            assert!(!environment.contains_key(&temporary));
+            if let Some(remaining) = remaining {
+                assert_eq!(vm.budget.steps, remaining);
+            }
+            remaining = Some(vm.budget.steps);
+        }
+    }
+
+    #[test]
+    fn unbound_intrinsic_rejects_before_operand_effects() {
+        let package = Package::default();
+        let trace = LocalId { owner: 1, index: 0 };
+        let source = SourceRange { start: 1, end: 2 };
+        let body = Expr {
+            source,
+            ty: Term::Primitive(Primitive::Void),
+            kind: K::Intrinsic {
+                tag: nir::intrinsics::Tag {
+                    family: DeclarationId {
+                        package: 1,
+                        local: 0,
+                    },
+                    variant: 0,
+                },
+                binding: None,
+                inputs: vec![Expr {
+                    source,
+                    ty: Term::Primitive(Primitive::Void),
+                    kind: K::Assign {
+                        place: nir::program::Place {
+                            root: trace,
+                            fields: vec![],
+                        },
+                        value: Box::new(Expr {
+                            source,
+                            ty: Term::Primitive(Primitive::Bool),
+                            kind: K::Literal(Literal::Bool(true)),
+                        }),
+                    },
+                }],
+            },
+        };
+        let code = Arc::new(comptime_compiler::compile(&body, &mut 100).unwrap());
+        let dump = code.to_string();
+        assert!(dump.contains("(prepare-intrinsic (intrinsic-tag"));
+        assert!(dump.contains("(inputs (primitive void)) (output (primitive void))"));
+        for compiled in [false, true] {
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            let mut environment = Environment::new();
+            environment.insert(trace, Value::Bool(false));
+            let result = if compiled {
+                vm.execute_code(&code, &mut environment)
+            } else {
+                vm.eval(&body, &mut environment)
+            };
+            assert_eq!(result.unwrap_err().kind, ErrorKind::Unsupported);
+            assert_eq!(environment.get(&trace), Some(&Value::Bool(false)));
+        }
+    }
+
+    #[test]
+    fn unsupported_code_cache_is_bounded_and_eviction_allows_reinsertion() {
+        let mut cache = CodeCache::default();
+        for local in 0..=100_000 {
+            cache.insert(DeclarationId { package: 1, local }, None);
+        }
+        assert_eq!(cache.entries.len(), 100_000);
+        assert_eq!(cache.weight, 100_000);
+        let first = DeclarationId {
+            package: 1,
+            local: 0,
+        };
+        assert!(!cache.entries.contains_key(&first));
+        cache.insert(first, None);
+        assert!(cache.entries.contains_key(&first));
+        assert_eq!(cache.weight, 100_000);
+    }
+
+    #[test]
+    fn cache_recency_survives_hits_replacement_and_clock_exhaustion() {
+        let mut cache = CodeCache::default();
+        let body = Arc::new(Expr {
+            source: SourceRange { start: 1, end: 2 },
+            ty: Term::Primitive(Primitive::Void),
+            kind: K::Unit,
+        });
+        let code = Arc::new(comptime_compiler::compile(&body, &mut 1000).unwrap());
+        let id = |local| DeclarationId { package: 1, local };
+        cache.insert(id(0), Some(code.clone()));
+        cache.insert_owned(&body, None);
+        // Replacement must remove both old weight and its recency node.
+        cache.insert(id(0), None);
+        for local in 1..99_999 {
+            cache.insert(id(local), None);
+        }
+        assert_eq!(cache.weight, 100_000);
+        cache.clock = u64::MAX;
+        assert!(matches!(cache.named(id(0)), Some(None)));
+        cache.insert(id(99_999), None);
+        // The live owned marker is older than the refreshed declaration.
+        assert!(cache.owned(&body).is_none());
+        assert!(cache.entries.contains_key(&id(0)));
+        cache.insert_owned(&body, Some(code.clone()));
+        let code_weight = CodeCache::program_weight(&Some(code));
+        for local in 1..=code_weight as u32 {
+            assert!(!cache.entries.contains_key(&id(local)));
+        }
+        assert!(cache.entries.contains_key(&id(code_weight as u32 + 1)));
+        assert_eq!(cache.weight, 100_000);
+        for _ in 0..1000 {
+            assert!(cache.named(id(0)).is_some());
+        }
+        assert_eq!(cache.recency.len(), cache.entries.len() + cache.owned.len());
+        assert_eq!(cache.order.len(), cache.recency.len());
+        assert_eq!(
+            cache.weight,
+            cache
+                .entries
+                .values()
+                .map(CodeCache::program_weight)
+                .sum::<usize>()
+                + cache
+                    .owned
+                    .values()
+                    .map(|entry| CodeCache::program_weight(&entry.program))
+                    .sum::<usize>()
+        );
+    }
+
+    #[test]
+    fn cache_pressure_reclaims_expired_bodies_before_live_code() {
+        let mut cache = CodeCache::default();
+        let body = || {
+            Arc::new(Expr {
+                source: SourceRange { start: 1, end: 2 },
+                ty: Term::Primitive(Primitive::Void),
+                kind: K::Unit,
+            })
+        };
+        let live = body();
+        let code = Arc::new(comptime_compiler::compile(&live, &mut 1000).unwrap());
+        let live_weight = CodeCache::program_weight(&Some(code.clone()));
+        cache.insert_owned(&live, Some(code.clone()));
+        let expired = body();
+        let expired_key = Arc::as_ptr(&expired) as usize;
+        cache.insert_owned(&expired, None);
+        drop(expired);
+        let named_count = (100_000 - live_weight - 1) as u32;
+        for local in 0..named_count {
+            cache.insert(DeclarationId { package: 1, local }, None);
+        }
+        assert_eq!(cache.weight, 100_000);
+        let first = DeclarationId {
+            package: 1,
+            local: 0,
+        };
+        let added = DeclarationId {
+            package: 1,
+            local: named_count,
+        };
+        cache.insert(added, None);
+        assert!(cache.entries.contains_key(&first));
+        assert!(cache.entries.contains_key(&added));
+        assert!(
+            matches!(cache.owned(&live), Some(Some(retained)) if Arc::ptr_eq(&retained, &code))
+        );
+        assert!(!cache.owned.contains_key(&expired_key));
+        assert_eq!(cache.weight, 100_000);
+        // With no dead entries left, the established bounded eviction policy applies.
+        cache.insert(
+            DeclarationId {
+                package: 1,
+                local: named_count + 1,
+            },
+            None,
+        );
+        assert_eq!(cache.weight, 100_000);
+        assert!(!cache.entries.contains_key(&first));
+        assert!(
+            matches!(cache.owned(&live), Some(Some(retained)) if Arc::ptr_eq(&retained, &code))
+        );
+    }
+
+    #[test]
+    fn scalar_failures_preserve_signature_and_operand_check_order() {
+        let package = Package::default();
+        let trace = LocalId { owner: 1, index: 0 };
+        let expr = |primitive, kind| Expr {
+            ty: Term::Primitive(primitive),
+            kind,
+            source: SourceRange { start: 1, end: 2 },
+        };
+        // Malformed typed values exercise the execution boundary independently
+        // of frontend admission. Integer operands must fail before right-side
+        // effects, while scalar comparisons evaluate both sides before checking.
+        for (comparison, invalid_signature, changed) in [
+            (false, false, false),
+            (true, false, true),
+            (true, true, false),
+        ] {
+            let domain = if comparison {
+                Primitive::Bool
+            } else {
+                Primitive::Integer
+            };
+            let left = Box::new(expr(domain, K::Unit));
+            let right = Box::new(expr(
+                domain,
+                K::Block {
+                    statements: vec![expr(
+                        Primitive::Void,
+                        K::Assign {
+                            place: nir::program::Place {
+                                root: trace,
+                                fields: vec![],
+                            },
+                            value: Box::new(expr(Primitive::Bool, K::Literal(Literal::Bool(true)))),
+                        },
+                    )],
+                    result: Some(Box::new(expr(domain, K::Unit))),
+                },
+            ));
+            let body = expr(
+                if invalid_signature {
+                    Primitive::Void
+                } else {
+                    domain
+                },
+                if comparison {
+                    K::ScalarEqual(left, right)
+                } else {
+                    K::IntegerBinary {
+                        op: nir::program::IntegerOp::Add,
+                        left,
+                        right,
+                    }
+                },
+            );
+            let code = Arc::new(comptime_compiler::compile(&body, &mut 1000).unwrap());
+            for compiled in [false, true] {
+                let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+                let mut environment = Environment::new();
+                environment.insert(trace, Value::Bool(false));
+                let result = if compiled {
+                    vm.execute_code(&code, &mut environment)
+                } else {
+                    vm.eval(&body, &mut environment)
+                };
+                assert_eq!(result.unwrap_err().kind, ErrorKind::Type);
+                assert_eq!(environment.get(&trace), Some(&Value::Bool(changed)));
+            }
+        }
+    }
+
+    #[test]
+    fn failed_frame_preserves_prior_writes_and_does_not_leak_locals() {
+        let package = Package::default();
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let input = LocalId {
+            owner: 1,
+            index: 1000,
+        };
+        let temporary = LocalId {
+            owner: 2,
+            index: u32::MAX,
+        };
+        let expr = |ty, kind| Expr {
+            ty,
+            kind,
+            source: SourceRange { start: 1, end: 2 },
+        };
+        let boolean = Term::Primitive(Primitive::Bool);
+        let void = Term::Primitive(Primitive::Void);
+        let body = expr(
+            boolean.clone(),
+            K::Block {
+                statements: vec![
+                    expr(
+                        void.clone(),
+                        K::Assign {
+                            place: nir::program::Place {
+                                root: input,
+                                fields: vec![],
+                            },
+                            value: Box::new(expr(
+                                boolean.clone(),
+                                K::Literal(Literal::Bool(false)),
+                            )),
+                        },
+                    ),
+                    expr(
+                        void.clone(),
+                        K::Let {
+                            binding: temporary,
+                            value: Box::new(expr(void.clone(), K::Unit)),
+                        },
+                    ),
+                ],
+                // Deliberately malformed typed input probes the engine's error
+                // boundary; source elaboration rejects this operation earlier.
+                result: Some(Box::new(expr(
+                    boolean.clone(),
+                    K::Not(Box::new(expr(void, K::Unit))),
+                ))),
+            },
+        );
+        let code = Arc::new(comptime_compiler::compile(&body, &mut 100).unwrap());
+        assert!(
+            code.registers() < 16,
+            "sparse identities must not size the frame"
+        );
+        let mut environment = Environment::new();
+        environment.insert(input, Value::Bool(true));
+        let mut frame = vm.start_frame(&code, &mut environment).unwrap();
+        let failure = loop {
+            match vm.resume_frame(&mut frame, 1) {
+                Ok(Progress::Suspended) => continue,
+                Ok(
+                    Progress::Complete(_)
+                    | Progress::Call { .. }
+                    | Progress::Default { .. }
+                    | Progress::TypeInputPlan { .. }
+                    | Progress::Contract { .. }
+                    | Progress::Associated { .. },
+                ) => {
+                    panic!("malformed operation completed")
+                }
+                Err(error) => break error,
+            }
+        };
+        assert_eq!(failure.kind, ErrorKind::Type);
+        let stopped = frame.to_string();
+        assert_eq!(
+            vm.resume_frame(&mut frame, 1).unwrap_err().kind,
+            ErrorKind::InvalidControlFlow
+        );
+        assert_eq!(frame.to_string(), stopped);
+        environment = frame.restore_environment();
+        assert_eq!(environment.get(&input), Some(&Value::Bool(false)));
+        assert!(!environment.contains_key(&temporary));
+        let recovered = expr(boolean, K::Local(input));
+        let code = Arc::new(comptime_compiler::compile(&recovered, &mut 100).unwrap());
+        assert!(matches!(
+            vm.execute_code(&code, &mut environment).unwrap(),
+            Flow::Value(Value::Bool(false))
+        ));
+    }
+}
+
+#[cfg(test)]
+#[path = "bytecode_type_equality.rs"]
+mod type_equality_tests;
+
+#[cfg(test)]
+#[path = "bytecode_type_constructors.rs"]
+mod type_constructor_tests;
+
+#[cfg(test)]
+#[path = "bytecode_object_borrows.rs"]
+mod object_borrow_tests;
+
+#[cfg(test)]
+#[path = "bytecode_closures.rs"]
+mod closure_tests;
+
+#[cfg(test)]
+#[path = "bytecode_bits.rs"]
+mod bit_tests;
+
+#[cfg(test)]
+#[path = "bytecode_lists.rs"]
+mod list_tests;
+
+#[cfg(test)]
+#[path = "bytecode_compilation.rs"]
+mod compilation_tests;
+
+#[cfg(test)]
+#[path = "normal_types/tests.rs"]
+mod normal_type_tests;
+
+#[cfg(test)]
+#[path = "input_preparation_tests.rs"]
+mod input_preparation_tests;
+
+#[cfg(test)]
+#[path = "bytecode_observations.rs"]
+mod observation_tests;
+
+#[cfg(test)]
+#[path = "bytecode_patterns.rs"]
+mod pattern_tests;
+
+#[cfg(test)]
+#[path = "bytecode_snapshots.rs"]
+mod snapshots;
+
+#[cfg(test)]
+#[path = "bytecode_associated.rs"]
+mod associated;

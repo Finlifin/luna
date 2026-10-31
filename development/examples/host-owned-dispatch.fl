@@ -1,0 +1,50 @@
+-- Ordinary functions carry distinct checked cleanup plans across invocations.
+use resources.{Once, Clone, Copy, Drop};
+
+struct Watch { dropped: *bool, called: *bool }
+impl Drop for Watch {
+    fn drop(*self) {
+        assumes not self.dropped.*.*;
+        self.dropped.*.* = true;
+    }
+}
+
+enum Choice { none, some(Watch) }
+typealias Consume = fn(Choice, bool) -> bool;
+impl Once for Consume {}
+impl Clone for Consume { fn clone(*self) -> Self { self.* } }
+impl Copy for Consume {}
+
+fn first(value: Choice, again: bool) -> bool {
+    if again { first(value, false) } else { value match {
+        .none => false,
+        .some(item) => do {
+            assumes not item.dropped.*;
+            item.called.* = true;
+            true
+        },
+    }}
+}
+
+fn second(value: Choice, again: bool) -> bool {
+    if again { second(value, false) } else { value match {
+        .none => false,
+        .some(item) => do {
+            assumes not item.dropped.*;
+            item.called.* = true;
+            false
+        },
+    }}
+}
+
+fn scenario(select: bool) -> bool {
+    var retired = false;
+    var called = false;
+    let consume = if select { first } else { second };
+    let empty = consume(Choice.none, true);
+    assumes not empty and not called and not retired;
+    let full = consume(Choice.some(Watch { dropped: retired.ref, called: called.ref }), true);
+    full == select and called and retired
+}
+
+fn run() -> bool { scenario(false) and scenario(true) }

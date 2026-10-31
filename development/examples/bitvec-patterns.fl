@@ -1,0 +1,40 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
+typealias Byte = .u8'builtin;
+fn packet() -> .u16'builtin { 0xAF3C }
+fn payload() -> Byte {
+    packet()'bitvec match {
+        0xAF (tail: Byte) => tail,
+        _ => 0,
+    }
+}
+fn split() -> Tuple<Byte, Byte> {
+    packet()'bitvec match {
+        0x(high: Byte) (low: Byte) => (high, low),
+    }
+}
+fn nested() -> bool {
+    packet()'bitvec match {
+        0x(_: Byte) ((59 or 60): Byte) => true,
+        _ => false,
+    }
+}
+fn zeros() -> bool {
+    let byte: Byte = 42;
+    byte'bitvec match {
+        0b0010 1010 => true,
+        _ => false,
+    }
+}
+fn letters() -> bool {
+    packet()'bitvec match {
+        0x AF 3 C => true,
+        _ => false,
+    }
+}
+
+fn binding() -> Tuple<Byte, Byte> {
+    let 0x(high: Byte) (low: Byte) = packet()'bitvec;
+    (high, low)
+}

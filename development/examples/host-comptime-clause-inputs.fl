@@ -1,0 +1,42 @@
+{-
+  Each clause instantiation snapshots the current comptime value. The selected
+  callable keeps that snapshot after the caller changes its local variable.
+-}
+comptime fn select() -> bool where flag:bool { flag }
+comptime fn defaulted() -> bool where flag:bool, .inverse:bool=not flag { inverse }
+comptime fn ordinary_default(.value:bool=flag) -> bool where flag:bool { value }
+comptime fn constrained(comptime Actual:.Type'builtin, .value:bool=flag) -> bool
+    where Expected, flag:bool, requires Expected == bool,
+        requires Actual == Expected { value }
+
+struct Factory { enabled:bool }
+impl Factory {
+    comptime fn choose(self, input:bool, .value:bool=flag) -> bool where flag:bool {
+        self.enabled and input and value
+    }
+}
+
+comptime fn inherited() -> bool where seed:bool {
+    comptime fn nested() -> bool where value:bool, .fallback:bool=seed {
+        value and fallback
+    }
+    let value = true;
+    nested<value>()
+}
+
+comptime fn configured() -> <|-bool> {
+    var flag = true;
+    let first = select<flag>;
+    flag = false;
+    let second = select<flag>;
+    let from_default = defaulted<flag>();
+    let overridden = defaulted<flag, .inverse=flag>();
+    let result = first() and not second() and from_default and not overridden
+        and inherited<true>() and not inherited<false>()
+        and not ordinary_default<flag>() and ordinary_default<flag>(.value=true)
+        and not constrained<bool, flag>(bool)
+        and Factory { enabled:true }.choose<not flag>(...do {(true,)});
+    '(result)
+}
+
+fn run() -> bool { ~<configured()> }

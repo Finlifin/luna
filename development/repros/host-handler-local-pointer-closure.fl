@@ -1,0 +1,28 @@
+-- A local closure borrows the request pointer; the returned closure owns a bool snapshot.
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+impl Duplicate for *T where T {}
+
+effect inspect(pointer: *bool) -> bool;
+fn subject(pointer: *bool) -> #inspect bool { inspect(pointer)# }
+
+typealias Answer = %{previous: bool} fn() -> bool;
+fn update(pointer: *bool) -> Answer {
+    subject(pointer)# {
+        inspect(value) => do {
+            let change = || { value.* = true; };
+            change();
+            let previous = value.*;
+            return || {return previous;};
+        },
+    };
+    let previous = false;
+    || previous
+}
+
+fn run() -> bool {
+    var seen = false;
+    let selected = update(seen.ref);
+    selected() and seen
+}

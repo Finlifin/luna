@@ -1,0 +1,4 @@
+typealias Type=.Type'builtin;
+struct Box where T {value:T,flag:bool,}
+fn set(comptime T:Type,box:*Box<T>) {box.*.flag=true;}
+fn run()->result:bool where ensures result {var box=Box<bool>{value:true,flag:false};set(bool,box.ref);box.value}

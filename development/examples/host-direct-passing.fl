@@ -1,0 +1,11 @@
+-- luna host-direct-passing.fl --build run --output /tmp/flurry-direct-passing
+-- Expected native output: (bool true)
+^attrs.effects.direct_passing
+effect setting()->bool;
+fn run()->bool {
+    var installed=false;
+    let result=(setting()# and setting()#)# {
+        setting()=>do {installed=not installed;resume true;},
+    };
+    result and installed
+}

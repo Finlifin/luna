@@ -1,0 +1,72 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+-- This fixture uses an explicit type alias until builtin.prelude is wired in.
+typealias Flag = bool;
+typealias Unary = fn(Flag) -> Flag;
+
+fn invert(value: Flag) -> Flag {
+    not value
+}
+
+fn apply(operation: Unary, value: Flag) -> Flag {
+    operation(value)
+}
+
+fn choose(flag: Flag, left: Flag, right: Flag) -> Flag {
+    let selected = if flag { left } else { right }
+    apply(|value| not value, selected)
+}
+
+fn main() -> Flag {
+    choose(true, false, true)
+}
+
+fn captured(flag: Flag) -> Flag {
+    let read = || flag;
+    read()
+}
+
+fn configured(value: Flag, .fallback: Flag = not value) -> Flag {
+    fallback
+}
+
+fn use_defaults() -> Flag {
+    configured(.fallback = true, false) and configured(true)
+}
+
+fn loop_capture() -> Tuple<Flag, Flag> {
+    var active = true;
+    let initial = || active;
+    while:outer active {
+        while true {
+            active = false;
+            continue outer;
+        }
+    }
+    (initial(), active)
+}
+
+fn classify(value: Flag) -> Flag {
+    value match {
+        candidate if not candidate => false,
+        true as confirmed => {
+            let read = || confirmed;
+            read()
+        },
+        _ => false,
+    }
+}
+
+fn require_enabled(value: Flag) -> Flag {
+    let true as enabled = value else {
+        return false;
+    }
+    let read = || enabled;
+    read()
+}
+
+fn preserve_flag(value: Flag) -> Flag {
+    let (true as selected) or (false as selected) = value;
+    selected
+}

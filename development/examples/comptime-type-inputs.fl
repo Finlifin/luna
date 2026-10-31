@@ -1,0 +1,18 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+typealias Type = .Type'builtin;
+pure comptime fn Identity<T> -> Type { T }
+
+fn selected(comptime flag: bool) -> bool { flag }
+
+fn has_identity_head(comptime T: Type) -> bool {
+    selected(T match {
+        Identity<Element> => true,
+        _ => false,
+    })
+}
+
+fn run() -> Tuple<bool, bool> {
+    (has_identity_head(Identity<bool>), has_identity_head(bool))
+}

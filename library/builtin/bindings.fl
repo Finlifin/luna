@@ -1,0 +1,10 @@
+{-
+    Compiler operation bindings shared by builtin implementations and the other
+    builtin packages. Consumers import these identities instead of rebinding
+    compiler symbols. Phase-specific public APIs remain in their own modules.
+-}
+pub const str_byte_length = .str_byte_length'builtin;
+pub const str_byte = .str_byte'builtin;
+pub const symbol_byte_length = .symbol_byte_length'builtin;
+pub const symbol_byte = .symbol_byte'builtin;
+pub const integer_representation = .integer_representation'builtin;

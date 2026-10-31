@@ -1,0 +1,114 @@
+typealias Byte = .u8'builtin;
+fn changed(value: Byte) -> result: Byte
+where ensures result == value'old {
+    let original = value;
+    value = 0;
+    original
+}
+fn increment(value: Byte) -> result: Byte
+where requires value < 255,
+    ensures result == value'old + 1 {
+    value = value + 1;
+    value
+}
+fn conditional(value: Byte) -> result: Byte
+where ensures value'old == 255 or result == (value + 1)'old {
+    if value == 255 { return 0; }
+    value + 1
+}
+fn bounded(value: Byte) -> result: Byte
+where requires value < 100,
+    ensures result == value'old { value }
+fn use_bounded(value: Byte) -> Byte
+where requires value < 100 { bounded(value) + 156 }
+fn ignore() {}
+fn after_call(value: Byte) -> result: Byte
+where requires value < 100,
+    ensures value'old < 100 {
+    ignore();
+    0
+}
+struct Pair { first: Byte, last: Byte }
+fn fields(pair: Pair) -> result: Byte
+where requires pair.first <= pair.last,
+    ensures result == pair'old.last - pair'old.first {
+    let distance = pair.last - pair.first;
+    pair.first = 0;
+    pair.last = 0;
+    distance
+}
+comptime fn ct_increment(value: Byte) -> result: Byte
+where requires value < 255, ensures result == value'old + 1 {
+    value = value + 1;
+    value
+}
+comptime fn run() -> Byte { ct_increment(41) }
+fn relay(value: Byte) -> result: Byte
+where requires value < 100,
+    ensures result == value'old { bounded(value) }
+fn twice(value: Byte) -> result: Byte
+where requires value < 99,
+    ensures result == value'old + 2 {
+    let first = increment(value);
+    increment(first)
+}
+fn field_after_call(pair: Pair) -> result: Byte
+where requires pair.first <= pair.last,
+    ensures pair'old.first <= pair'old.last {
+    ignore();
+    0
+}
+fn squares(value: Byte) -> result: Byte
+where requires value <= 15,
+    ensures result == (value * value)'old {
+    value = value * value;
+    value
+}
+fn defaults(value: Byte, .other: Byte = value) -> result: Byte
+where requires value < 100,
+    ensures result == other'old { other }
+fn use_defaults(value: Byte) -> result: Byte
+where requires value < 100,
+    ensures result == value'old { defaults(value) }
+fn generic(flag: bool, value: T) -> result: T
+where T, ensures flag == flag'old { value }
+fn pair_identity(pair: Pair) -> result: Pair
+where ensures result.first == pair'old.first,
+    ensures result.last == pair'old.last { pair }
+fn pair_relay(pair: Pair) -> result: Byte
+where requires pair.first <= pair.last,
+    ensures result == pair'old.last - pair'old.first {
+    let copied = pair_identity(pair);
+    copied.last - copied.first
+}
+fn first(a: Byte, b: Byte) -> result: Byte
+where ensures result == a'old { a }
+fn ordered(value: Byte) -> result: Byte
+where ensures result == value'old {
+    first(value, do { value = 0; value })
+}
+fn nested(value: Byte) -> result: Byte
+where ensures result == value'old'old { value }
+fn cubes(value: Byte) -> result: Byte
+where requires value <= 6,
+    ensures result == (value * value * value)'old {
+    value = value * value * value;
+    value
+}
+fn generic_call(value: Byte) -> Byte { generic(true, value) }
+fn invert(flag: bool) -> result: bool
+where ensures result == not flag'old {
+    flag = not flag;
+    flag
+}
+comptime fn Selected(flag: bool) -> result: .Type'builtin
+where requires flag,
+    ensures flag == flag'old { Byte }
+typealias SelectedByte = Selected(true);
+comptime fn selected() -> SelectedByte { 7 }
+fn square_relay(value: Byte) -> result: Byte
+where requires value <= 15,
+    ensures result == (value * value)'old { squares(value) }
+fn cube_relay(value: Byte) -> result: Byte
+where requires value <= 6,
+    ensures result == (value * value * value)'old { cubes(value) }

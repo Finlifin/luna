@@ -1,0 +1,12 @@
+-- Pointer-based calls need a borrowed callable-place contract.
+trait Duplicate {}
+trait Retire {fn drop(*self);}
+impl Duplicate for bool {}
+fn run()->bool {
+    var flag=false;
+    let next=|| {flag=not flag;flag};
+    let pointer=next.ref;
+    let first=pointer.*();
+    let second=pointer.*();
+    first and not second
+}

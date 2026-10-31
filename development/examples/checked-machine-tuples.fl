@@ -1,0 +1,73 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
+typealias Byte = .u8'builtin;
+fn literal_pair() -> Byte {
+    let pair: Tuple<Byte, Byte> = (4, 5);
+    let copy = pair;
+    let (a, b) = copy;
+    a + b
+}
+fn snapshot() -> Byte {
+    var value: Byte = 4;
+    let pair: Tuple<Byte, Byte> = (value, 1);
+    value = 255;
+    let (a, b) = pair;
+    a + b
+}
+fn reassigned() -> Byte {
+    var pair: Tuple<Byte, Byte> = (4, 5);
+    pair = (100, 100);
+    let (a, b) = pair;
+    a + b
+}
+fn branches(flag: bool) -> Byte {
+    let pair: Tuple<Byte, Byte> = if flag { (4, 5) } else { (10, 20) };
+    let (a, b) = pair;
+    a + b
+}
+fn capture() -> Byte {
+    let pair: Tuple<Byte, Byte> = (4, 5);
+    let callback = || { let (a, b) = pair; a + b };
+    callback()
+}
+fn parameter(pair: Tuple<Byte, Byte>) -> Byte {
+    let (a, b) = pair;
+    assumes a <= 100 and b <= 100;
+    a + b
+}
+fn nested(pair: Tuple<Byte, Tuple<Byte, Byte>>) -> Byte {
+    pair match {
+        (a, (b, c)) if a <= 100 and b <= 100 and c <= 55 => a + b + c,
+        _ => 0,
+    }
+}
+fn remapped() -> Byte {
+    let pair: Tuple<Byte, Byte> = (4, 5);
+    pair match {
+        ((a, b) or (b, a)) if a <= 100 and b <= 100 => a + b,
+        _ => 0,
+    }
+}
+comptime fn run() -> Byte {
+    let pair: Tuple<Byte, Byte> = (100, 155);
+    let (a, b) = pair;
+    a + b
+}
+fn element_order() -> Byte {
+    var value: Byte = 4;
+    let pair: Tuple<Byte, Byte> = (value, do { value = 10; value });
+    let (a, b) = pair;
+    a + b
+}
+fn selected(flag: bool) -> Byte {
+    let pair: Tuple<Byte, Byte> = flag match { true => (4, 5), false => (10, 20) };
+    let (a, b) = pair;
+    a + b
+}
+fn capture_snapshot() -> Byte {
+    var pair: Tuple<Byte, Byte> = (4, 5);
+    let callback = || { let (a, b) = pair; a + b };
+    pair = (255, 255);
+    callback()
+}

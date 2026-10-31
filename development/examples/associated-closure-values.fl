@@ -1,0 +1,30 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
+typealias Int = .Integer'builtin;
+typealias Counter = %{value: Int} comptime fn() -> Int;
+comptime fn counter() -> Counter {
+    var value: Int = 0;
+    || { value = value + 1; value }
+}
+trait Stored { assoc pair: Tuple<Counter, Counter>; }
+impl Stored for bool {
+    assoc pair: Tuple<Counter, Counter> = do { let next = counter(); (next, next) };
+}
+impl Stored for 'x''type {
+    assoc pair: Tuple<Counter, Counter> = (counter(), counter());
+}
+comptime fn run() -> Tuple<Int, Int> where T :- Stored {
+    let (left, right) = T.as(Stored).pair;
+    (left(), right())
+}
+comptime fn shared() -> Tuple<Int, Int> { run<bool>() }
+comptime fn distinct() -> Tuple<Int, Int> { run<'x''type>() }
+trait Result {
+    assoc valid: bool = do {
+        let (first, second) = run<bool>();
+        first == 1 and second == 2
+    };
+}
+impl Result for bool {}
+fn entry() -> bool { bool.as(Result).valid }

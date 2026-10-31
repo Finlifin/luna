@@ -1,0 +1,24 @@
+typealias Flag = bool;
+
+struct Box where T {
+    value: T,
+}
+
+impl Box<T> where T {
+    fn make(value: T, .flag: Flag = true) -> Self {
+        Box<T> { value: value }
+    }
+
+    fn choose(self, value: Flag, .first: Flag = not value, .last: Flag = first) -> Flag {
+        last
+    }
+}
+
+fn forward(value: U) -> Flag where U {
+    -- Receiver first; explicit inputs in source order; defaults in declaration order.
+    Box<U>.make(value).choose(true, .first = true)
+}
+
+fn run() -> Flag {
+    forward('x')
+}

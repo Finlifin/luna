@@ -1,0 +1,25 @@
+-- P4 allows private mutation and recursion; it does not promise termination.
+-- Run with: luna runtime-purity.fl --interpret run
+
+typealias Byte = .u8'builtin;
+
+pure fn smaller(left: Byte, right: Byte) -> Byte {
+    var result = left;
+    if right < left { result = right; }
+    result
+}
+
+pure fn even(value: Byte) -> bool {
+    if value == 0 { true } else { odd(value - 1) }
+}
+
+fn odd(value: Byte) -> bool {
+    if value == 0 { false } else { even(value - 1) }
+}
+
+-- Legal P4 declaration. Calling it would still diverge.
+pure fn spin() { while true {} }
+
+fn run() -> bool {
+    smaller(7, 3) == 3 and even(8) and not even(7)
+}

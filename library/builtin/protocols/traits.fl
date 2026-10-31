@@ -1,0 +1,188 @@
+use bindings.{str_byte_length as hash_str_byte_length, str_byte as hash_str_byte,
+    symbol_byte_length as hash_symbol_byte_length, symbol_byte as hash_symbol_byte,
+    integer_representation as hash_integer_representation};
+
+-- ==========================================================================
+-- builtin/traits – fundamental traits
+-- ==========================================================================
+--
+-- Fundamental protocols exposed through ordinary trait declarations.
+
+-- Comparison protocols can be loaded without formatting/owned strings.
+pub use comparison.{Eq, Ord, Order};
+
+-- Resource protocols live separately from formatting and owned strings.
+pub use resources.{Once, Clone, Copy, Drop};
+
+-- ── Hash ───────────────────────────────────────────────────────────────────
+
+pub trait Hash {
+    fn hash(self) -> u64;
+}
+
+{-
+    Scalar hashes preserve all representation bits up to 64 bits. Wider
+    integers fold both 64-bit halves with xor. Equal values must hash equally;
+    collisions are resolved with Eq. These are not cryptographic hashes.
+-}
+impl Hash for bool {
+    fn hash(self) -> u64 {
+        if self { 1 } else { 0 }
+    }
+}
+impl Hash for u8 {
+    fn hash(self) -> u64 {
+        self'bitvec.as(u64)
+    }
+}
+impl Hash for u16 {
+    fn hash(self) -> u64 {
+        self'bitvec.as(u64)
+    }
+}
+impl Hash for u32 {
+    fn hash(self) -> u64 {
+        self'bitvec.as(u64)
+    }
+}
+impl Hash for u64 {
+    fn hash(self) -> u64 {
+        self'bitvec.as(u64)
+    }
+}
+impl Hash for i8 {
+    fn hash(self) -> u64 {
+        self'bitvec.as(u64)
+    }
+}
+impl Hash for i16 {
+    fn hash(self) -> u64 {
+        self'bitvec.as(u64)
+    }
+}
+impl Hash for i32 {
+    fn hash(self) -> u64 {
+        self'bitvec.as(u64)
+    }
+}
+impl Hash for i64 {
+    fn hash(self) -> u64 {
+        self'bitvec.as(u64)
+    }
+}
+impl Hash for u128 {
+    fn hash(self) -> u64 {
+        let bits = self'bitvec;
+        let low = bits[0..64];
+        let high = bits[64..128];
+        ((low and not high) or (not low and high)).as(u64)
+    }
+}
+impl Hash for i128 {
+    fn hash(self) -> u64 {
+        let bits = self'bitvec;
+        let low = bits[0..64];
+        let high = bits[64..128];
+        ((low and not high) or (not low and high)).as(u64)
+    }
+}
+
+impl Hash for char {
+    fn hash(self) -> u64 {
+        self'bitvec.as(u64)
+    }
+}
+
+{-
+    Text hashes use FNV-1a over UTF-8 bytes, never backing storage addresses.
+    Multiplication is widened to u128 and the low 64 bits are selected
+    explicitly. This deterministic hash is not collision-resistant; Eq must
+    still decide equality. Runtime and comptime use the same recurrence.
+-}
+impl Hash for str {
+    fn hash(self) -> u64 {
+        let name = self;
+        let length = hash_str_byte_length(name);
+        var index: u64 = 0;
+        var state: u64 = 14695981039346656037;
+        while index < length {
+            let byte = hash_str_byte(name, index) match {
+                value? => value,
+                null => return state,
+            };
+            let bits = state'bitvec;
+            let widened = byte'bitvec.as(u64);
+            let input = widened'bitvec;
+            let mixed = ((bits and not input) or (not bits and input)).as(u128);
+            assumes mixed <= 18446744073709551615;
+            let product = mixed * 1099511628211;
+            state = product'bitvec[0..64].as(u64);
+            index = index + 1;
+        }
+        state
+    }
+}
+
+{-
+    Symbol names have immutable storage independent of their local carrier.
+    Observe bytes directly, without creating a borrowed str descriptor.
+-}
+impl Hash for Symbol {
+    fn hash(self) -> u64 {
+        let name = self;
+        let length = hash_symbol_byte_length(name);
+        var index: u64 = 0;
+        var state: u64 = 14695981039346656037;
+        while index < length {
+            let byte = hash_symbol_byte(name, index) match {
+                value? => value,
+                null => return state,
+            };
+            let bits = state'bitvec;
+            let widened = byte'bitvec.as(u64);
+            let input = widened'bitvec;
+            let mixed = ((bits and not input) or (not bits and input)).as(u128);
+            assumes mixed <= 18446744073709551615;
+            let product = mixed * 1099511628211;
+            state = product'bitvec[0..64].as(u64);
+            index = index + 1;
+        }
+        state
+    }
+}
+
+{-
+    Target-sized integers retain their target representation width. Widening
+    to u128 zero-extends those bits; folding handles every supported width,
+    including targets wider than 64 bits, without assuming host pointer size.
+-}
+impl Hash for usize {
+    fn hash(self) -> u64 {
+        let widened = hash_integer_representation(self);
+        let bits = widened'bitvec;
+        let low = bits[0..64];
+        let high = bits[64..128];
+        ((low and not high) or (not low and high)).as(u64)
+    }
+}
+
+impl Hash for isize {
+    fn hash(self) -> u64 {
+        let widened = hash_integer_representation(self);
+        let bits = widened'bitvec;
+        let low = bits[0..64];
+        let high = bits[64..128];
+        ((low and not high) or (not low and high)).as(u64)
+    }
+}
+
+-- ── Conversion ─────────────────────────────────────────────────────────────
+
+pub use conversion.{Into, From};
+
+-- ── Default ────────────────────────────────────────────────────────────────
+
+pub trait Default {
+    -- default is reserved; the method uses an ordinary identifier.
+    fn default_value() -> Self;
+}

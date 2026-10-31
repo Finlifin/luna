@@ -62,8 +62,11 @@ pub enum TokenKind {
     Underscore,       // _
 
     // primitive literals
-    Str,     // "..."
-    Int,     // 123
+    Str, // "..."
+    Int, // 123
+    BitBinPrefix,
+    BitOctPrefix,
+    BitHexPrefix,
     IntBin,  // 0b1010
     IntOct,  // 0o777
     IntHex,  // 0xFF
@@ -81,11 +84,11 @@ pub enum TokenKind {
     Atomic,    // atomic
     Axiom,     // axiom
     Await,     // await
-    Bool,      // bool
     Break,     // break
     Case,      // case
     Catch,     // catch
     Comptime,  // comptime
+    Defer,     // defer
     Const,     // const
     Continue,  // continue
     Decreases, // decreases
@@ -101,7 +104,6 @@ pub enum TokenKind {
     Error,     // error
     Exists,    // exists
     Extend,    // extend
-    Extern,    // extern
     False,     // false
     Fn,        // fn
     FnCap,     // Fn
@@ -119,6 +121,7 @@ pub enum TokenKind {
     Itself,    // itself
     Lambda,    // lambda
     Lemma,     // lemma
+    Var,
     Let,       // let
     Lift,      // lift
     Match,     // match
@@ -147,6 +150,7 @@ pub enum TokenKind {
     Spec,      // spec
     Static,    // static
     Struct,    // struct
+    Template,  // template
     Test,      // test
     Trait,     // trait
     True,      // true
@@ -251,11 +255,11 @@ impl TokenKind {
             TokenKind::Atomic => "atomic",
             TokenKind::Axiom => "axiom",
             TokenKind::Await => "await",
-            TokenKind::Bool => "bool",
             TokenKind::Break => "break",
             TokenKind::Case => "case",
             TokenKind::Catch => "catch",
             TokenKind::Comptime => "comptime",
+            TokenKind::Defer => "defer",
             TokenKind::Const => "const",
             TokenKind::Continue => "continue",
             TokenKind::Decreases => "decreases",
@@ -271,7 +275,6 @@ impl TokenKind {
             TokenKind::Error => "error",
             TokenKind::Exists => "exists",
             TokenKind::Extend => "extend",
-            TokenKind::Extern => "extern",
             TokenKind::False => "false",
             TokenKind::Fn => "fn",
             TokenKind::FnCap => "Fn",
@@ -290,6 +293,7 @@ impl TokenKind {
             TokenKind::Lambda => "lambda",
             TokenKind::Lemma => "lemma",
             TokenKind::Let => "let",
+            TokenKind::Var => "var",
             TokenKind::Lift => "lift",
             TokenKind::Match => "match",
             TokenKind::Matches => "matches",
@@ -317,6 +321,7 @@ impl TokenKind {
             TokenKind::Spec => "spec",
             TokenKind::Static => "static",
             TokenKind::Struct => "struct",
+            TokenKind::Template => "template",
             TokenKind::Test => "test",
             TokenKind::Trait => "trait",
             TokenKind::True => "true",
@@ -337,6 +342,9 @@ impl TokenKind {
             TokenKind::Eof => "<end of file>",
             TokenKind::Str => "<string literal>",
             TokenKind::Int => "<integer literal>",
+            TokenKind::BitBinPrefix => "0b",
+            TokenKind::BitOctPrefix => "0o",
+            TokenKind::BitHexPrefix => "0x",
             TokenKind::IntBin => "<binary integer literal>",
             TokenKind::IntOct => "<octal integer literal>",
             TokenKind::IntHex => "<hexadecimal integer literal>",
@@ -363,11 +371,11 @@ impl Token {
         map.insert("atomic", TokenKind::Atomic);
         map.insert("axiom", TokenKind::Axiom);
         map.insert("await", TokenKind::Await);
-        map.insert("bool", TokenKind::Bool);
         map.insert("break", TokenKind::Break);
         map.insert("case", TokenKind::Case);
         map.insert("catch", TokenKind::Catch);
         map.insert("comptime", TokenKind::Comptime);
+        map.insert("defer", TokenKind::Defer);
         map.insert("const", TokenKind::Const);
         map.insert("continue", TokenKind::Continue);
         map.insert("decreases", TokenKind::Decreases);
@@ -383,7 +391,6 @@ impl Token {
         map.insert("error", TokenKind::Error);
         map.insert("exists", TokenKind::Exists);
         map.insert("extend", TokenKind::Extend);
-        map.insert("extern", TokenKind::Extern);
         map.insert("false", TokenKind::False);
         map.insert("fn", TokenKind::Fn);
         map.insert("Fn", TokenKind::FnCap);
@@ -402,6 +409,7 @@ impl Token {
         map.insert("lambda", TokenKind::Lambda);
         map.insert("lemma", TokenKind::Lemma);
         map.insert("let", TokenKind::Let);
+        map.insert("var", TokenKind::Var);
         map.insert("lift", TokenKind::Lift);
         map.insert("match", TokenKind::Match);
         map.insert("matches", TokenKind::Matches);
@@ -429,6 +437,7 @@ impl Token {
         map.insert("spec", TokenKind::Spec);
         map.insert("static", TokenKind::Static);
         map.insert("struct", TokenKind::Struct);
+        map.insert("template", TokenKind::Template);
         map.insert("test", TokenKind::Test);
         map.insert("trait", TokenKind::Trait);
         map.insert("true", TokenKind::True);

@@ -1,0 +1,21 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+typealias F32 = .f32'builtin;
+typealias F64 = .f64'builtin;
+
+fn identity(comptime value: F64, comptime .copy: F64 = value) -> F64 { copy }
+fn forward(comptime value: F64) -> F64 { identity(value) }
+fn same(comptime value: F64) -> bool { value == value }
+
+comptime fn nan_payload() -> F64 {
+    var value: F64 = 0.0;
+    value'bitvec = 0x7FF8000000000042;
+    value
+}
+
+fn run() -> Tuple<F64, F64, F64, bool> {
+    -- Instance identity preserves representations; numeric comparisons keep
+    -- IEEE semantics, so the NaN does not compare equal to itself.
+    (forward(0.0), forward(-0.0), forward(nan_payload()), same(nan_payload()))
+}

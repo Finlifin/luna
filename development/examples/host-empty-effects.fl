@@ -1,0 +1,5 @@
+-- luna host-empty-effects.fl --build run --output /tmp/flurry-empty-effects
+-- Expected native output: (unsigned-integer 42)
+typealias Count = .u32'builtin;
+fn value()->#[] Count {42}
+fn run()->Count {value()# {}}

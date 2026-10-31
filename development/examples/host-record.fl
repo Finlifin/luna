@@ -1,0 +1,12 @@
+fn pack(...fields: T) -> T where T { fields }
+fn keep(value: T) -> T where T { value }
+
+fn run() -> bool {
+    var options = keep(pack {
+        state: pack {enabled: false},
+        callback: |value: bool| not value,
+    });
+    options.state.enabled = true;
+    let {enabled: flag} = options.state;
+    flag and options.callback(false)
+}

@@ -1,0 +1,25 @@
+trait Compute {
+    comptime fn capacity() -> .u8'builtin;
+}
+struct Provider {}
+impl Compute for Provider {
+    comptime fn capacity() -> .u8'builtin { 9 }
+}
+
+trait Source {
+    -- Demand order differs from declaration order here.
+    assoc capacity: .u8'builtin = Holder.as(Source).base + 1;
+    assoc Alias: .Type'builtin = Holder.as(Source).Element;
+    assoc base: .u8'builtin = 1;
+    assoc Element: .Type'builtin = bool;
+}
+struct Holder {}
+impl Source for Holder {
+    -- Default capacity uses this selected override, producing 10.
+    assoc base: .u8'builtin = Provider.as(Compute).capacity();
+}
+
+fn entry() -> bool {
+    let flag: Holder.as(Source).Alias = true;
+    flag and Holder.as(Source).capacity == 10
+}

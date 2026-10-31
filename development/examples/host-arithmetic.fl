@@ -1,0 +1,20 @@
+-- luna host-arithmetic.fl --build run --output /tmp/flurry-arithmetic
+-- /tmp/flurry-arithmetic prints (unsigned-integer 42).
+typealias UInt = .u32'builtin;
+
+fn quotient(numerator: UInt, denominator: UInt) -> result: UInt
+where requires denominator != 0, ensures result <= numerator {
+    numerator / denominator
+}
+
+fn descend(value: UInt) -> UInt {
+    if value == 0 { 42 } else { descend(value - 1) }
+}
+
+fn run() -> UInt {
+    var count: UInt = 0;
+    while count < 42 {
+        count = count + 1;
+    }
+    quotient(descend(count), 1)
+}

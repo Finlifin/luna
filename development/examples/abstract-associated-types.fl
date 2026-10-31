@@ -1,0 +1,46 @@
+-- The default method keeps an abstract Element in its definition.
+-- Each call checks the Element selected by its own implementation.
+trait Source {
+    assoc Element: .Type'builtin = bool;
+
+    fn keep(value: Self.as(Source).Element) -> Self.as(Source).Element {
+        value
+    }
+
+    fn apply(action: fn(Element) -> Element, value: Element) -> Element {
+        action(value)
+    }
+}
+
+struct Flags {}
+struct Letters {}
+
+impl Source for Flags {}
+impl Source for Letters {
+    assoc Element: .Type'builtin = 'x''type;
+
+    fn keep(value: Self.as(Source).Element) -> Self.as(Source).Element {
+        value
+    }
+}
+
+fn forward(owner: T, value: T.as(Source).Element) -> T.as(Source).Element
+where T :- Source {
+    T.as(Source).keep(value)
+}
+
+fn apply_for(owner: T,
+             action: fn(T.as(Source).Element) -> T.as(Source).Element,
+             value: T.as(Source).Element) -> T.as(Source).Element
+where T :- Source {
+    action(value)
+}
+
+fn entry() -> bool {
+    let flag: fn(Flags, bool) -> bool = forward;
+    let letter: fn('x''type) -> 'x''type = Letters.as(Source).keep;
+    flag(Flags {}, true)
+        and (letter(forward(Letters {}, 'x')) == 'x')
+        and Flags.as(Source).apply(...do { (|value| not value, false) })
+        and apply_for(Flags {}, ...do { (|value| not value, false) })
+}

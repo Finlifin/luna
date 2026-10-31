@@ -1,0 +1,33 @@
+-- Inner resume returns to its request; outer return delivers an owned snapshot.
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+impl Duplicate for *T where T {}
+
+effect change(pointer: *bool) -> bool;
+effect inspect(pointer: *bool) -> bool;
+fn subject(pointer: *bool) -> #inspect bool { inspect(pointer)# }
+
+typealias Answer = %{previous: bool} fn() -> bool;
+fn update(pointer: *bool) -> Answer {
+    subject(pointer)# {
+        inspect(value) => do {
+            change(value)# {
+                change(target) => do {
+                    target.* = true;
+                    resume target.*;
+                },
+            };
+            let previous = value.*;
+            return || {return previous;};
+        },
+    };
+    let previous = false;
+    || previous
+}
+
+fn run() -> bool {
+    var seen = false;
+    let selected = update(seen.ref);
+    selected() and seen
+}

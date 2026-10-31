@@ -1,0 +1,26 @@
+-- python3 -B development/host_examples.py generic-order --compare-optimization
+-- Reuse scalar comparisons without claiming every domain has a total order.
+fn bound_if_ordered(value: T, lower: T, upper: T) -> T
+where T, requires T == .i8'builtin or T == .i16'builtin
+    or T == .i32'builtin or T == .i64'builtin or T == .i128'builtin
+    or T == .u8'builtin or T == .u16'builtin or T == .u32'builtin
+    or T == .u64'builtin or T == .u128'builtin
+    or T == .f32'builtin or T == .f64'builtin or T == .char'builtin
+    or T == .usize'builtin or T == .isize'builtin {
+    assumes lower <= upper;
+    if value < lower { lower }
+    else if value > upper { upper }
+    else { value }
+}
+
+fn run() -> bool {
+    let integer = bound_if_ordered<.i32'builtin>(-9, 0, 10);
+    let floating = bound_if_ordered<.f64'builtin>(12.5, 0.0, 10.0);
+    let character = bound_if_ordered<.char'builtin>('m', 'a', 'z');
+    let nan: .f32'builtin = 0.0 / 0.0;
+    let unordered = bound_if_ordered<.f32'builtin>(nan, 0.0, 1.0);
+    let count = bound_if_ordered<.usize'builtin>(0, 1, 9);
+    let offset = bound_if_ordered<.isize'builtin>(-1, -9, 0);
+    count == 1 and offset == -1 and integer == 0 and floating == 10.0 and character == 'm'
+        and unordered != unordered
+}

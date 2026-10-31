@@ -1,0 +1,15 @@
+-- Bind --meta-list-type input.Elements --tuple-type input.Tuple.
+pure comptime fn Elements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: Elements<.Type'builtin>> -> .Type'builtin { bool }
+
+typealias U = .u128'builtin;
+typealias F = .f32'builtin;
+fn pair() -> Tuple<U, F> {
+    (340282366920938463463374607431768211455, 1.0)
+}
+fn record(...fields: T) -> T where T { fields }
+typealias Result = (record {ready: true, data: pair(), empty: ()})'type;
+
+fn run() -> Result {
+    record {ready: true, data: pair(), empty: ()}
+}

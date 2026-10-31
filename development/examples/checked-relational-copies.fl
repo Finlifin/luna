@@ -1,0 +1,110 @@
+typealias Byte = .u8'builtin;
+struct Pair { start: Byte, end: Byte }
+struct Outer { pair: Pair, tag: Byte }
+fn scalar_copy(start: Byte, end: Byte) -> Byte {
+    var a = start;
+    var b = end;
+    assumes a <= b;
+    let old_a = a;
+    let old_b = b;
+    a = 255;
+    b = 0;
+    old_b - old_a
+}
+fn record_copy(pair: Pair) -> Byte {
+    var original = pair;
+    assumes original.start <= original.end;
+    let copy = original;
+    original.start = 255;
+    original.end = 0;
+    copy.end - copy.start
+}
+fn nested_copy(outer: Outer) -> Byte {
+    var original = outer;
+    assumes original.pair.start <= original.pair.end;
+    let copy = original.pair;
+    original.pair = Pair { start: 255, end: 0 };
+    copy.end - copy.start
+}
+fn scalar_capture(start: Byte, end: Byte) -> Byte {
+    var a = start;
+    var b = end;
+    assumes a <= b;
+    let callback = || b - a;
+    a = 255;
+    b = 0;
+    callback()
+}
+fn record_capture(pair: Pair) -> Byte {
+    var original = pair;
+    assumes original.start <= original.end;
+    let callback = || original.end - original.start;
+    original.start = 255;
+    callback()
+}
+fn nested_capture(outer: Outer) -> Byte {
+    assumes outer.pair.start <= outer.pair.end;
+    let callback = || outer.pair.end - outer.pair.start;
+    callback()
+}
+fn transitive_capture(a: Byte, b: Byte, c: Byte) -> Byte {
+    assumes a <= b and b <= c;
+    let callback = || c - a;
+    callback()
+}
+fn sum_binding(a: Byte, b: Byte) -> Byte {
+    assumes a < 100 and b < 100;
+    let sum = a + b;
+    assumes sum <= 150;
+    a + b + 100
+}
+fn same_value_copy(value: Byte) -> Byte {
+    let copy = value;
+    copy - value
+}
+fn nested_closure(start: Byte, end: Byte) -> Byte {
+    assumes start <= end;
+    let outer = || { let inner = || end - start; inner() };
+    outer()
+}
+comptime fn run() -> Byte {
+    var pair = Pair { start: 100, end: 255 };
+    assumes pair.start <= pair.end;
+    let copy = pair;
+    pair.start = 255;
+    pair.end = 0;
+    copy.end - copy.start
+}
+fn field_write(pair: Pair) -> Byte {
+    assumes pair.start <= pair.end;
+    var outer = Outer { pair: Pair { start: 255, end: 0 }, tag: 255 };
+    outer.pair = pair;
+    outer.pair.end - outer.pair.start
+}
+fn scalar_field_write(start: Byte, end: Byte) -> Byte {
+    assumes start <= end;
+    var pair = Pair { start: 255, end: 0 };
+    pair.start = start;
+    pair.end = end;
+    pair.end - pair.start
+}
+fn pattern_copy(pair: Pair) -> Byte {
+    assumes pair.start <= pair.end;
+    pair match { copy => copy.end - copy.start }
+}
+fn remapped_copy(pair: Pair, flag: bool) -> Byte {
+    assumes pair.start <= pair.end;
+    pair match { ((copy if flag) or copy) => copy.end - copy.start }
+}
+struct Span where T { start: T, end: T }
+fn generic_copy(span: Span<Byte>) -> Byte {
+    assumes span.start <= span.end;
+    let copy = span;
+    copy.end - copy.start
+}
+fn branch_copy(pair: Pair, flag: bool) -> Byte {
+    assumes pair.start <= pair.end;
+    var copy = Pair { start: 255, end: 0 };
+    if flag { copy = pair; } else { copy = pair; }
+    copy.end - copy.start
+}

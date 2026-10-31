@@ -91,6 +91,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "comptime_compiler"
+version = "0.1.0"
+dependencies = [
+ "nir",
+]
+
+[[package]]
+name = "comptime_executor"
+version = "0.1.0"
+
+[[package]]
+name = "comptime_interpretor"
+version = "0.1.0"
+dependencies = [
+ "comptime_compiler",
+ "comptime_runtime",
+ "iir",
+ "nir",
+]
+
+[[package]]
+name = "comptime_runtime"
+version = "0.1.0"
+
+[[package]]
 name = "concolor"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -200,6 +225,23 @@ name = "either"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
+
+[[package]]
+name = "elaboration"
+version = "0.1.0"
+dependencies = [
+ "comptime_interpretor",
+ "comptime_runtime",
+ "hir",
+ "iir",
+ "materialization",
+ "nir",
+ "program_verification",
+ "ptc",
+ "rustc_span",
+ "type_resolution",
+ "verification_core",
+]
 
 [[package]]
 name = "ena"
@@ -314,11 +356,20 @@ checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
 name = "hir"
 version = "0.1.0"
 dependencies = [
+ "nir",
  "rustc-arena-modified",
  "rustc_data_structures",
  "rustc_span",
  "symbol",
  "thin-vec",
+]
+
+[[package]]
+name = "iir"
+version = "0.1.0"
+dependencies = [
+ "comptime_runtime",
+ "nir",
 ]
 
 [[package]]
@@ -370,6 +421,7 @@ version = "0.1.0"
 dependencies = [
  "hir",
  "middle",
+ "nir",
  "rustc_data_structures",
 ]
 
@@ -442,14 +494,33 @@ name = "luna"
 version = "0.1.0"
 dependencies = [
  "ast_lowering",
+ "comptime_executor",
+ "comptime_interpretor",
+ "comptime_runtime",
  "diagnostic",
+ "elaboration",
  "hir",
+ "iir",
  "interface",
+ "intrinsic",
  "lex",
  "middle",
+ "nir",
  "parse",
  "resolve",
  "rustc_span",
+ "vfs",
+]
+
+[[package]]
+name = "materialization"
+version = "0.1.0"
+dependencies = [
+ "comptime_interpretor",
+ "comptime_runtime",
+ "iir",
+ "nir",
+ "type_resolution",
 ]
 
 [[package]]
@@ -484,6 +555,14 @@ dependencies = [
  "rustc_data_structures",
  "rustc_span",
  "salsa",
+ "vfs",
+]
+
+[[package]]
+name = "nir"
+version = "0.1.0"
+dependencies = [
+ "comptime_runtime",
 ]
 
 [[package]]
@@ -554,6 +633,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "89ae43fd86e4158d6db51ad8e2b80f313af9cc74f5c0e03ccb87de09998732de"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "program_verification"
+version = "0.1.0"
+dependencies = [
+ "comptime_runtime",
+ "iir",
+ "materialization",
+ "nir",
+ "type_resolution",
+ "verification_core",
+]
+
+[[package]]
+name = "ptc"
+version = "0.1.0"
+dependencies = [
+ "nir",
 ]
 
 [[package]]
@@ -906,6 +1004,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "type_resolution"
+version = "0.1.0"
+dependencies = [
+ "comptime_runtime",
+ "hir",
+ "nir",
+ "ptc",
+]
+
+[[package]]
 name = "typenum"
 version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -922,6 +1030,14 @@ name = "unicode-width"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7dd6e30e90baa6f72411720665d41d89b9a3d039dc45b8faea1ddd07f617f6af"
+
+[[package]]
+name = "verification_core"
+version = "0.1.0"
+dependencies = [
+ "comptime_runtime",
+ "nir",
+]
 
 [[package]]
 name = "version_check"

@@ -1,0 +1,13 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
+typealias Int = .Integer'builtin;
+comptime fn logical(a: bool, b: bool) -> Tuple<bool, bool, bool, bool> {
+    (not a and b, not a or b, not (a and b), not (a or b))
+}
+comptime fn arithmetic(a: Int, b: Int, c: Int) -> Int { -a + b * c }
+struct Flag { value: bool }
+comptime fn postfix() -> bool { not Flag { value: false }.value }
+comptime fn condition() -> bool { if not false { true } else { false } }
+comptime fn pattern(value: Int) -> bool { value match { < -1 > => true, _ => false } }
+comptime fn run() -> Tuple<bool, bool, bool> { (postfix(), condition(), pattern(-1)) }

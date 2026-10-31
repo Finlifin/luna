@@ -1,0 +1,11 @@
+{-
+    Inspect with luna packages dump --emit attributes. This example checks
+    metadata; it does not test native execution or C interoperability.
+-}
+use attrs.abi;
+use builtin.bool;
+
+^abi(.c)
+fn identity(value: bool) -> bool {
+    value
+}

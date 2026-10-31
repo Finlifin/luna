@@ -1,0 +1,20 @@
+-- luna host-unsafe-call.fl --build run --output /tmp/flurry-unsafe-call
+-- /tmp/flurry-unsafe-call prints (bool true).
+-- Unsafe marks caller responsibility; it does not waive ordinary type,
+-- arithmetic, resource or program-contract checks inside these bodies.
+typealias Unary = unsafe fn(bool) -> bool;
+
+unsafe fn invert(value: bool) -> bool {
+    not value
+}
+
+unsafe fn apply(callback: Unary, value: bool) -> bool {
+    callback(value)
+}
+
+fn run() -> bool {
+    let callback: Unary = invert;
+    unsafe {
+        apply(callback, false)
+    }
+}

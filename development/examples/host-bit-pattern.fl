@@ -1,0 +1,15 @@
+typealias Instruction = .BitVec'builtin<32>;
+typealias Register = .BitVec'builtin<5>;
+typealias Byte = .u8'builtin;
+fn destination(code: Instruction) -> Byte {
+    code match {
+        0b0000000 (_: Register) (_: Register) 000 (rd: Register) 0110011
+            or 0b0100000 (_: Register) (_: Register) 000 (rd: Register) 0110011 => rd.as(Byte),
+        _ => 255,
+    }
+}
+fn run() -> bool {
+    destination(0x003100b3) == 1
+        and destination(0x403103b3) == 7
+        and destination(0xFFFFFFFF) == 255
+}

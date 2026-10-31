@@ -1,0 +1,49 @@
+-- Normal completion, break and continue must retire handler, subject, loop
+-- owner and outer owner in order, without skipping or repeating a destructor.
+typealias Stage = .u8'builtin;
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+impl Duplicate for Stage {}
+impl Duplicate for *T where T {}
+
+struct Step { counter: *Stage, expected: Stage, next: Stage }
+impl Retire for Step {
+    fn drop(*self) {
+        assumes self.counter.*.* == self.expected.*;
+        self.counter.*.* = self.next.*;
+    }
+}
+
+effect select(pointer: *bool) -> *bool;
+fn subject(pointer: *bool, counter: *Stage) -> #select *bool {
+    let called = Step {counter: counter, expected: 1, next: 2};
+    select(pointer)#
+}
+
+fn trial(early: bool, again: bool) -> bool {
+    var stage: Stage = 0;
+    let counter = stage.ref;
+    var first = false;
+    var active = true;
+    do {
+        let caller = Step {counter: counter, expected: 3, next: 4};
+        while active {
+            active = false;
+            let installer = Step {counter: counter, expected: 2, next: 3};
+            let selected = subject(first.ref, counter)# {
+                select(value) => do {
+                    let arm = Step {counter: counter, expected: 0, next: 1};
+                    if early {
+                        if again {continue;}
+                        break;
+                    }
+                    value
+                },
+            };
+            selected.* = true;
+        }
+    };
+    stage == 4 and first == not early
+}
+fn run() -> bool {trial(false, false) and trial(true, false) and trial(true, true)}

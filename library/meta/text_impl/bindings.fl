@@ -1,0 +1,2 @@
+-- Reuse builtin's compiler operation identities across execution phases.
+pub use builtin.compiler.{str_byte_length as byte_length, str_byte as byte};

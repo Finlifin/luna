@@ -1,0 +1,22 @@
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+typealias Payload = .BitVec'builtin<256>;
+enum Message {
+    .width 257,
+    .discrete_tag true,
+    low: 0b0 (payload: Payload),
+    high: 0b1 (payload: Payload),
+}
+impl Duplicate for Message {}
+fn make(payload: Payload) -> Message { Message.high {payload: payload} }
+fn inspect(message: Message) -> bool {
+    let bits = message'bitvec;
+    message match {
+        .high {payload} => bits[256] == 1 and bits[0..256] == payload,
+        .low {payload: _} => false,
+    }
+}
+fn run() -> bool {
+    inspect(make(not 0)) and not inspect(Message.low {payload: 0})
+}

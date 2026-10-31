@@ -1,0 +1,36 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+fn accept(a: bool, b: bool) -> bool
+where requires a or b {
+    true
+}
+
+fn forward(a: bool, b: bool) -> bool
+where requires a or b {
+    let x = a;
+    let y = b;
+    accept(x, y)
+}
+
+fn snapshot(left: bool, right: bool) -> bool
+where requires left or right {
+    var a = left;
+    var b = right;
+    let x = a;
+    let y = b;
+    a = false;
+    b = false;
+    -- Copies retain the values they received, independently of later writes.
+    accept(x, y)
+}
+
+fn capture(a: bool, b: bool) -> bool
+where requires a or b {
+    let call = || accept(a, b);
+    call()
+}
+
+fn run() -> Tuple<bool, bool, bool> {
+    (forward(false, true), snapshot(true, false), capture(false, true))
+}

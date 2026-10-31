@@ -1,0 +1,213 @@
+use builtin.{Integer, Symbol, Type, void};
+use bindings;
+
+pub use bindings.Object;
+
+impl Object {
+    {-
+        Visit a fixed snapshot in declaration order. Each callback receives a
+        one-entry Object, retaining its optional key, exact domain and value.
+        This does not erase heterogeneous entries to Any or merge duplicate keys.
+        Empty input never invokes the callback; errors propagate normally.
+    -}
+    pub comptime fn foreach(self, visit: %c comptime fn(Object))
+    where c: Type.vars.Closure
+    {
+        let input = self;
+        let count = input.length();
+        var index: Integer = 0;
+        while index < count {
+            visit(input.slice(index, index + 1));
+            index += 1;
+        };
+    }
+
+    pub comptime fn fold(self, initial: A,
+        combine: %c comptime fn(A, Object) -> A) -> A
+    where A, c: Type.vars.Closure
+    {
+        let input = self;
+        let count = input.length();
+        var accumulator = initial;
+        var index: Integer = 0;
+        while index < count {
+            accumulator = combine(accumulator, input.slice(index, index + 1));
+            index += 1;
+        };
+        accumulator
+    }
+
+    {-
+        Fallible traversal visits a fixed snapshot and stops at the first error.
+        Earlier callback effects remain visible; partial output is not returned.
+        Empty input succeeds without invoking the callback. Each one-entry Object
+        keeps its optional key, exact domain and value, including duplicate keys.
+    -}
+    pub comptime fn try_foreach(self, visit: %c comptime fn(Object) -> !E void) -> !E void
+    where E, c: Type.vars.Closure
+    {
+        let input = self;
+        let count = input.length();
+        var index: Integer = 0;
+        while index < count {
+            visit(input.slice(index, index + 1)) match {
+                _! => {},
+                error failure => { return error failure; },
+            };
+            index += 1;
+        };
+    }
+
+    pub comptime fn try_fold(self, initial: A,
+        combine: %c comptime fn(A, Object) -> !E A) -> !E A
+    where A, E, c: Type.vars.Closure
+    {
+        let input = self;
+        let count = input.length();
+        var accumulator = initial;
+        var index: Integer = 0;
+        while index < count {
+            accumulator = combine(accumulator, input.slice(index, index + 1)) match {
+                value! => value,
+                error failure => { return error failure; },
+            };
+            index += 1;
+        };
+        accumulator
+    }
+
+    pub comptime fn try_flat_map(self,
+        transform: %c comptime fn(Object) -> !E Object) -> !E Object
+    where E, c: Type.vars.Closure
+    {
+        let input = self;
+        let count = input.length();
+        var output: Object = {};
+        var index: Integer = 0;
+        while index < count {
+            transform(input.slice(index, index + 1)) match {
+                entries! => { output = output.concat(entries); },
+                error failure => { return error failure; },
+            };
+            index += 1;
+        };
+        output
+    }
+
+    {- Retain complete entries, in order, without reinterpreting their values. -}
+    pub comptime fn filter(self, pred: %c comptime fn(Object) -> bool) -> Object
+    where c: Type.vars.Closure
+    {
+        let input = self;
+        let count = input.length();
+        var output: Object = {};
+        var index: Integer = 0;
+        while index < count {
+            let entry = input.slice(index, index + 1);
+            if pred(entry) { output = output.concat(entry); };
+            index += 1;
+        };
+        output
+    }
+
+    {-
+        Replace each entry with zero or more complete entries. Concatenate each
+        callback result in order; an empty result removes only that input entry.
+        Input and returned snapshots remain ordinary Object values. Construction
+        uses checked concat and does not promise linear-time accumulation.
+    -}
+    pub comptime fn flat_map(self, transform: %c comptime fn(Object) -> Object) -> Object
+    where c: Type.vars.Closure
+    {
+        let input = self;
+        let count = input.length();
+        var output: Object = {};
+        var index: Integer = 0;
+        while index < count {
+            let entries = transform(input.slice(index, index + 1));
+            output = output.concat(entries);
+            index += 1;
+        };
+        output
+    }
+
+    {-
+        Observe ordered entries without merging duplicate keys. Indices are
+        checked; an out-of-range index fails the invocation. A positional entry
+        has no key. Typed reads return null only for a domain mismatch.
+    -}
+    pub pure comptime fn length(self) -> Integer {
+        bindings.compiler_object_length(self)
+    }
+
+    pub pure comptime fn key(self, index: Integer) -> ?Symbol {
+        bindings.compiler_object_key(self, index)
+    }
+
+    pub pure comptime fn EntryType(self, index: Integer) -> Type {
+        bindings.CompilerObjectEntryType(self, index)
+    }
+
+    pub pure comptime fn value(self, index: Integer) -> ?T where T {
+        bindings.compiler_object_value(T, self, index)
+    }
+
+    {-
+        Read the last named entry. A missing key or a different stored domain
+        returns null; a mismatched last entry never reveals an earlier duplicate.
+    -}
+    pub pure comptime fn get(self, key: Symbol) -> ?T where T {
+        bindings.compiler_object_get(T, self, key)
+    }
+
+    {-
+        Editing returns a new ordered Object and preserves the input snapshot.
+        Duplicate keys remain distinct entries. Replacement retains the entry's
+        key and position while recording the new value's domain.
+    -}
+    pub pure comptime fn concat(self, right: Object) -> Object {
+        bindings.object_concat(self, right)
+    }
+
+    pub pure comptime fn append(self, value: T, .key: ?Symbol = null) -> Object where T {
+        bindings.object_append<T>(self, value, .key = key)
+    }
+
+    pub pure comptime fn replace(self, index: Integer, value: T) -> Object where T {
+        bindings.object_replace<T>(self, index, value)
+    }
+
+    {-
+        Replace one entry through the receiver's value reference. The checked
+        replacement is prepared before writeback; saved Objects stay unchanged.
+    -}
+    pub comptime fn set(self, index: Integer, value: T) where T {
+        self = bindings.object_replace<T>(self, index, value);
+    }
+
+    pub pure comptime fn remove(self, index: Integer) -> Object {
+        bindings.object_remove(self, index)
+    }
+
+    {-
+        Select the half-open interval [start, end), preserving every entry's
+        name, domain and value. Empty ranges are valid, including at length().
+        Negative, reversed or out-of-range bounds fail the invocation.
+    -}
+    pub pure comptime fn slice(self, start: Integer, end: Integer) -> Object {
+        bindings.compiler_object_slice(self, start, end)
+    }
+
+    {-
+        Replace an interval with the complete ordered replacement. This also
+        supports insertion at an empty interval and removal with an empty Object.
+        Both input snapshots remain unchanged; duplicate names are not merged.
+    -}
+    pub pure comptime fn replace_range(self, start: Integer, end: Integer,
+        replacement: Object) -> Object {
+        -- Validate the entire interval before constructing the result.
+        self.slice(start, end);
+        self.slice(0, start).concat(replacement).concat(self.slice(end, self.length()))
+    }
+
+}

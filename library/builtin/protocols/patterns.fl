@@ -1,0 +1,11 @@
+{-
+    Finite list syntax observes the length before extracting elements in order.
+    Extraction returns Element by value; borrowing the receiver does not grant
+    Copy to its payload. Ordinary call and resource contracts remain required.
+-}
+pub trait ListPatternView {
+    assoc Element: Type;
+    fn list_pattern_view_get_len(*self) -> usize;
+    fn list_pattern_view_get_element(*self, comptime index: usize) -> Element;
+
+}

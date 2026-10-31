@@ -1,0 +1,23 @@
+typealias Flag = bool;
+
+enum Entry where T {
+    empty,
+    value(T),
+    tagged { value: T, ready: Flag = true },
+}
+
+fn build(value: T) -> Entry<T> where T {
+    .value(value)
+}
+
+fn check(value: Entry<Flag>) -> Flag {
+    value match {
+        .empty => false,
+        Entry<bool>.value(flag) => flag,
+        .tagged { value: flag, ready } => flag and ready,
+    }
+}
+
+fn run() -> Flag {
+    check(build(true)) and check(Entry<Flag>.tagged { value: true })
+}

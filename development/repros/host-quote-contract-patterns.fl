@@ -1,0 +1,24 @@
+-- Actual library Tuple/meta.List identities, with a computed pattern in a quote contract.
+-- Resource-checked native compilation currently rejects the observation of this affine Tuple.
+-- Requires tuples -> meta package dependency, Tuple/meta.List bindings, and resources Copy/Drop.
+use tuples.Tuple;
+
+trait Checked {
+    quote fn keep(self, pair: Tuple<bool, bool>) -> bool
+    where requires do {
+        let (first, second) and (first, second) is (left, right) = pair;
+        first and second
+    };
+}
+
+struct Holder {}
+impl Checked for Holder {
+    quote fn keep(self, values: Tuple<bool, bool>) -> bool { true }
+}
+
+fn invoke(flag: bool) -> bool {
+    assumes flag;
+    Holder {}.as(Checked).keep((flag, true))
+}
+
+fn run() -> bool { invoke(true) }

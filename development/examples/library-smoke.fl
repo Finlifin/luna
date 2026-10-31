@@ -1,0 +1,17 @@
+{-
+  Build and run against the complete repository sysroot and its language-item
+  manifest. Prelude names and protocol identities come from the real packages.
+-}
+fn run() -> bool {
+    let present: ?bool = true;
+    let absent: ?bool = null;
+    let word: usize = 41;
+    let incremented = word + 1;
+    let cloned = incremented.as(Clone).clone();
+    let pair: Tuple<bool, bool> = (
+        present.as(OptionalOps<bool>).unwrap_or(false),
+        absent.as(OptionalOps<bool>).unwrap_or(true),
+    );
+    let (first, second) = pair;
+    first and second and cloned == 42
+}

@@ -1,0 +1,10 @@
+-- Explicit builtin views until builtin package/prelude loading is connected.
+typealias F32 = .f32'builtin;
+typealias F64 = .f64'builtin;
+
+-- Round straight to f32: converting through f64 would lose this distinction.
+fn single() -> F32 { 1.0000000596046447753906250000001 }
+fn double() -> F64 { 0.1 }
+fn negative_zero() -> F32 { -0.0 }
+fn tiny() -> F64 { 4.940656458412465441765687928682213723650e-324 }
+fn underflow() -> F64 { -1.0e-9999 }

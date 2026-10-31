@@ -1,0 +1,35 @@
+-- Constraints belong to the declaration and are proved at every type use.
+typealias Flag = bool;
+
+-- Forward reference: collecting a signature does not assume Checked's contract.
+struct Envelope where T, requires T == Flag {
+    item: Checked<T>,
+}
+
+struct Checked where T, requires T == Flag {
+    value: T = true,
+}
+
+enum Reply where T, requires T == Flag {
+    empty,
+    ready(Envelope<T>),
+    fallback { value: T = false },
+}
+
+fn build() -> Reply<U> where U, requires U == Flag {
+    .ready(Envelope<U> { item: Checked<U> {} })
+}
+
+fn read(reply: Reply<U>) -> Flag where U, requires U == Flag {
+    reply match {
+        Reply<U>.empty => false,
+        .ready(envelope) => envelope.item.value,
+        .fallback { value: flag } => flag,
+    }
+}
+
+fn run() -> Flag {
+    -- The outer concrete type supplies the missing type argument to build.
+    let reply: Reply<Flag> = build();
+    read(reply)
+}

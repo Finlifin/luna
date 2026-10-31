@@ -1,0 +1,119 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+typealias Type = .Type'builtin;
+typealias Char = 'x''type;
+
+trait Allowed {}
+impl Allowed for bool {}
+
+fn identity(value: G) -> G where G :- Allowed {
+    value
+}
+
+fn forward(comptime A: Type, value: A) -> A
+where requires A :- Allowed {
+    -- The ordinary Type input supplies evidence for this generic callback.
+    let action: fn(A) -> A = identity;
+    action(value)
+}
+
+trait Accepts where Other {}
+impl Accepts<Char> for bool {}
+
+fn witness(comptime A: Type, comptime B: Type) -> bool
+where requires A :- Accepts<B> {
+    -- These inputs occur only in the contract, not in the result or body.
+    true
+}
+
+fn forward_witness(comptime A: Type, comptime B: Type) -> bool
+where requires A :- Accepts<B> {
+    witness(A, B)
+}
+
+fn run() -> Tuple<bool, bool> {
+    (forward(bool, true), forward_witness(bool, Char))
+}
+
+trait Source { assoc Item: Type; }
+trait Derived :- Source {}
+impl Source for bool { assoc Item: Type = bool; }
+impl Derived for bool {}
+impl Source for Char { assoc Item: Type = Char; }
+
+fn pair(comptime A: Type, left: A.as(Source).Item,
+        comptime B: Type, right: B.as(Source).Item)
+    -> Tuple<A.as(Source).Item, B.as(Source).Item>
+where requires A :- Derived and B :- Source {
+    (left, right)
+}
+
+fn forward_pair(comptime A: Type, left: A.as(Source).Item,
+                comptime B: Type, right: B.as(Source).Item)
+    -> Tuple<A.as(Source).Item, B.as(Source).Item>
+where requires A :- Derived and B :- Source {
+    -- A's bound is available while checking left; B is bound later.
+    pair(A, left, B, right)
+}
+
+fn associated() -> Tuple<bool, Char> {
+    forward_pair(bool, true, Char, 'x')
+}
+
+fn select_default(comptime A: Type, comptime value: A.as(Source).Item,
+                  comptime .copy: A.as(Source).Item = value) -> A.as(Source).Item
+where requires A :- Source {
+    copy
+}
+
+fn forward_default(comptime A: Type, comptime value: A.as(Source).Item)
+    -> A.as(Source).Item where requires A :- Source {
+    select_default(A, value)
+}
+
+fn defaults() -> Tuple<bool, bool, Char> {
+    (forward_default(bool, true),
+     select_default(bool, true, .copy = false),
+     forward_default(Char, 'x'))
+}
+
+struct TypeDomain {}
+impl Source for TypeDomain { assoc Item: Type = Type; }
+
+fn inspect_input(comptime A: Type, comptime value: A.as(Source).Item,
+                 comptime .copy: A.as(Source).Item = value) -> bool
+where requires A :- Source {
+    true
+}
+
+fn type_domain() -> Tuple<bool, bool, bool> {
+    -- The selected domain decides whether value/copy are Types or bool values.
+    (inspect_input(TypeDomain, bool),
+     inspect_input(TypeDomain, Char),
+     inspect_input(bool, true))
+}
+
+pure comptime fn IndexedValue<T, value: T> -> Type { T }
+
+fn indexed_input(comptime A: Type, comptime value: A.as(Source).Item,
+                 comptime .copy: A.as(Source).Item = value,
+                 witness: IndexedValue<A.as(Source).Item, copy>) -> bool
+where requires A :- Source {
+    true
+}
+
+-- These signature examples require an opaque witness from the caller.
+-- IndexedValue<bool, true> is not interchangeable with bool.
+fn boolean_index(witness: IndexedValue<bool, true>) -> bool {
+    indexed_input(bool, true, witness)
+}
+
+fn character_index(witness: IndexedValue<Char, 'x'>) -> bool {
+    indexed_input(Char, 'x', witness)
+}
+
+-- A Type-valued associated domain can index opaque types through a default.
+fn type_index(comptime T: Type, witness: IndexedValue<Type, T>) -> bool {
+    indexed_input(TypeDomain, T, witness)
+}

@@ -1,0 +1,6 @@
+use primitives.*;
+
+{- Tuple retains its opaque head and accepts one ordinary comptime list input.
+   Layout observations do not unfold the head or replace its identity.
+-}
+pub const Tuple: pure comptime fn<...Es: meta.List<Type>> -> Type = .Tuple'builtin;

@@ -1,0 +1,177 @@
+# 位向量模式
+
+## Intro
+
+位向量模式按固定进制把一段连续比特拆成若干段：数字字面段、comptime 段，或「子模式 : 宽度类型」。它只匹配 `BitVec`。每一段都占据自己的宽度，绑定段不会为前一段重新命名。
+
+## 语法
+
+```text
+bit_vec_bin_pattern -> 0b segment+
+bit_vec_oct_pattern -> 0o segment+
+bit_vec_hex_pattern -> 0x segment+
+
+segment -> id
+         | integer
+         | <expr>
+         | (pattern : expr)
+```
+
+`pattern`、`expr` 同全局语法。类型位置写 `expr`。`0b` / `0o` / `0x` 选定进制；其后为一段或多段 `segment` 并置。
+
+## 正式定义
+
+普通值匹配以 BitVec 为主语；enum 表示模式的 base type 豁免及整体宽度规则见[enum](../../type/user-defined-types/enums.md)。该豁免不使普通整数值自动取得位视图。
+
+### 适用对象
+
+普通值匹配的被匹配值必须是 `BitVec`，否则为**静态错误**。enum 表示模式使用其独立的 base type 规则。
+
+### 段
+
+1. **字面段**：按当前进制书写的固定比特约束（例如 `10000010`、`10`）。
+2. **`<expr>`**：编译期求出的固定段约束；须能确定本段宽度与比较值。
+3. **`(pattern : expr)`**：按类型表达式给出的宽度切出一段，再对切出的值匹配内层 `pattern`（常见为绑定名）。该类型须有确定大小。
+
+整条 pattern 的总宽度为各段宽度之和，文本从最高位写到最低位。要同时绑定并约束一段，应在该绑定上使用内层模式或 guard，而不是再并置一份同宽字面段。位序、宽度与存储字节序的关系见[BitVec 代数](../../program-synthesis/bitvec-algebra.md#宽度顺序与表示)。
+
+### Base type 与宽度
+
+参与此类布局的类型须通过**属性**声明 base type（属性语法见 [属性系统](../../comptime/attribute.md)；数据定义体内的配置写法亦可）。Base type 的宽度是对齐基准。
+
+- 整段 pattern 必须与适用的对齐约束在宽度上对齐。
+- **未启用跨元素**时：pattern 总宽度必须**等于** base type 宽度。
+- **启用跨元素**时：一个逻辑值可跨越多个 base 元素；总宽度须与该逻辑布局对齐（仍由属性声明；见下节示例中的 `.dst`）。
+
+### 与运算的边界
+
+本章定义分段匹配。值的连接、逐位组合、切片、回写与转换见[BitVec 代数与程序合成](../../program-synthesis/bitvec-algebra.md)。跨元素匹配允许一个逻辑值占用多个 base 元素，消费该类型提供的布局与读取契约。
+
+## 常见示例
+
+### 取反、替代模式与候选绑定
+
+```flurry
+typealias Bits = .BitVec'builtin<4>;
+typealias Tail = .BitVec'builtin<2>;
+
+fn outside_prefix(value: Bits) -> bool {
+    value match {
+        not (0b10 (_: Tail)) => true,
+        0b10 (_: Tail) => false,
+    }
+}
+
+fn selected_segment(value: Bits) -> Tail {
+    value match {
+        0b (part: Tail) 11 or 0b00 (part: Tail) => part,
+        _ => 0,
+    }
+}
+```
+
+`outside_prefix` 排除二进制 `1000` 至 `1011`，两个分支共同覆盖全部四位值。`selected_segment` 的两个候选分别从高两位和低两位取得 part；按源码顺序选择第一个成功候选。位段检查使用内部的候选局部主语观察，只导出显式声明的位段绑定，不要求不同候选的内部临时绑定相同。
+
+这些位约束也可嵌在结构体或 enum 模式中参与取反和覆盖证明。求补前必须取得精确的位约束区域；未知 guard 只能提供保守的正向覆盖信息，不能反转成补集证据。零宽和跨机器字宽度继续使用 BitVec 自身的宽度，不能截断成机器整数。聚合主语的 Copy 和清理检查仍独立进行。
+
+```flurry
+use std.prelude.*;
+
+test {
+    let num: f32 = 13.625;
+    if num'bitvec matches 0b(sign: u1) (exponent: u8) (mantissa: BitVec<23>)
+        if exponent == 130 and mantissa == 0b10110100000000000000000 {
+        println("sign: {}, exponent: {}, mantissa: {}",
+            sign'bitvec.as(u8), exponent, mantissa.as(u32));
+    }
+
+    num'bitvec match {
+        0b(_: u1) 11111111 (mantissa: BitVec<23>)
+            if mantissa != 0 => println("NaN"),
+        0b(_: u1) 11111111 00000000000000000000000 => println("Infinity"),
+        _ => println("finite"),
+    }
+}
+```
+
+输出 `sign: 0, exponent: 130, mantissa: 5898240`，随后输出 finite。每个模式的宽度都是 1+8+23=32。第一个模式绑定三个字段，再由 guard 检查其值；分类模式直接固定八位指数，不再重复添加指数绑定段。
+
+跨元素（base / DST 等用配置属性声明；变体右侧为 bitvec pattern）：
+
+```flurry
+use std.prelude.*;
+
+enum Utf8CodePoint {
+    .base_type u8,
+    .discrete_tag true,
+    .dst true,
+
+    one: 0b0(ascii_char: BitVec<7>),
+    two: 0b110(ys: BitVec<5>) 10(zs: BitVec<6>),
+    three: 0b1110(xs: BitVec<4>) 10(ys: BitVec<6>) 10(zs: BitVec<6>),
+    four: 0b11110(ws: BitVec<3>) 10(xs: BitVec<6>) 10(ys: BitVec<6>) 10(zs: BitVec<6>),
+}
+```
+
+
+## 与 Rust / Zig / C / C++ 的关键差异
+
+C / C++ / Rust / Zig 没有与「`0b`/`0o`/`0x` + 多段并置、按宽度切开并绑定」直接对应的模式语法。常见做法是：
+
+| 语言侧常见手段 | 与 Flurry 的对照 |
+|----------------|------------------|
+| C/C++：结构体位域，或手写移位 / 掩码 | 位域是字段布局，不是 `match`/`is` 上的模式；掩码散落在表达式里 |
+| Rust：对整数 `match`、或 crate 级 bitfield | 标准匹配不按比特段切开绑定；位操作仍多是掩码 |
+| Zig：`packed struct`、`@bitCast` 等 | 按字段/重解释取值，不是进制前缀的分段 pattern |
+
+Flurry 把分段约束写在 **pattern** 里（字面段、`<expr>`、`(pattern : expr)`），并在属性声明的 base / 跨元素布局上做宽度对齐检查。
+
+## guard 中的局部计算
+
+guard 可以保存主语的切片视图和布尔匹配结果，再更新块内变量。先前保存的值不会随变量更新而改变：
+
+```flurry
+fn selected(bits: BitVec<4>) -> bool {
+    bits match {
+        x if do {
+            var part = x[0..2];
+            let low = part;
+            part = x[2..4];
+            var accepted = (low matches 0b01) and (part matches 0b10);
+            let saved = accepted;
+            accepted = not accepted;
+            saved and not accepted
+        } => true,
+        _ => false,
+    }
+}
+```
+
+这里只接纳 `0b1001`。覆盖分析保留切片位置、保存时的布尔条件与后续分支范围；这些条件可以参与取反和布尔等值比较，也适用于零宽和跨机器字的 BitVec。分析预算耗尽或遇到未知计算时不能给出覆盖证明；外部变量和投影位置的写入不属于这里的局部赋值分析。
+
+布尔结果还可继续作为模式主语，例如 `x and (x matches 0b01) is (selected if selected)`，或者在 guard 中写 `(x matches 0b01) match { true => true, false => false }`。后续绑定表示这个布尔结果，而不是原位向量的某一段。匹配与 guard 都按顺序处理；guard 失败后，后续 arm 接收原主语和自己的候选作用域，不能继承失败 arm 的绑定。
+
+直接的 `==`、`!=` 也可参与覆盖分析，例如 `x == 0b1001`、`x[0..2] == x[2..4]`。切片比较按实际位位置建立关系，重叠切片不会被当成两个独立值；`x == x` 对零宽和其他宽度均成立。块内显式标为 BitVec 类型的常量可以保存、赋值并参与比较。外部未知实参、函数调用结果及超出预算的复杂位关系仍不能提供精确覆盖证据。
+
+已知掩码和逐位取反也可保留覆盖依据。例如 `(x and 0b1100) == 0b1000` 接纳高两位为 `10` 的四个四位值；`(x or 0b0011) == 0b1011` 接纳同一集合。分析保存每一位的来源或常量，因而可以继续切片、保存到局部变量、重新赋值，以及与位模式匹配。`x == not x` 在非零宽时恒假，零宽时恒真。
+
+不同输入位之间的组合也可以建立覆盖依据，例如 `(x[0..2] and x[2..4]) == 0b01`，或 `(x[0..2] or x[2..4]) matches 0b10`。分析按结果位组合真假区域，保留它们与原输入的关联；组合结果仍可取反、继续组合、切片及保存到局部变量。关系复杂度可能随组合增长，达到分析预算时保持未知。
+
+BitVec 的 `and`、`or` 求值两个操作数。因此 `(unknown(x) and 0b0000) == 0b0000` 不能因结果掩码固定就获得完整覆盖证明。上述区域分解是静态分析方法，不赋予位运算运行时短路语义，也不允许忽略未知计算。
+
+## 运行时实现设计引导
+
+1. **输入**：`BitVec` 值、分段 pattern、由属性得到的 base 宽度与是否跨元素。
+2. **静态前置**：总宽度相对对齐约束合法；每段宽度可确定；普通值主语为 `BitVec`，enum 表示模式满足其 base type 规则。不满足则不得生成匹配代码。
+3. **匹配步骤**：从高位向低位依次切段；字面/`<expr>` 段做相等比较；`(pattern : expr)` 段将切片交给内层模式。取得某类型值时还须满足它的表示与构造契约，不能凭宽度相同绕过合法编码检查。
+4. **跨元素**：按 base 元素序列构成逻辑比特流后再切，或生成等价的多元素决策树；语义以逻辑比特布局为准。
+5. **失败**：宽度不对齐、普通值主语非 `BitVec`、段宽无法确定 → 编译期拒绝。
+
+## 编译器实现引导
+
+1. **字面段词法**：语法上为 `id` 或 `integer`；分析阶段溯源回源码字形，再按 `0b` / `0o` / `0x` 进制解释为固定比特约束。
+2. **解析**：`0b` / `0o` / `0x` 后接 `segment+`；`<expr>` 与 `(pattern : expr)` 进入既有表达式/模式管线。
+3. **属性**：读取 base type 与跨元素相关属性（配置写法或 `^` 属性）；缺失 base type 或宽度冲突 → 诊断。
+4. **类型与宽度**：普通值主语必须是 `BitVec`，enum 表示模式按其 base type 契约检查；对 `(pattern : expr)` 检查类型有确定大小并可得到宽度；对各段宽度求和并与对齐规则比较。
+5. **降码**：生成可超优化的比较 / 掩码 / 决策树；不把具体优化算法升格为语义定义。
+6. **与枚举 / DST 布局**：跨元素匹配依赖布局属性；布局属性的完整集合在数据/枚举文档定义，本章只消费「base 宽度」与「是否跨元素」两类事实。

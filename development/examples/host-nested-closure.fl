@@ -1,0 +1,29 @@
+-- luna host-nested-closure.fl --build run --copy-protocol Duplicate --drop-protocol Retire --output /tmp/flurry-nested-closure
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+
+struct Watch { target: *bool }
+impl Retire for Watch {
+    fn drop(*self) { self.target.*.* = not self.target.*.*; }
+}
+
+typealias Action = %{target: *bool} fn() -> .void'builtin;
+
+fn forward(action: Action) { action(); }
+fn relay(action: Action) { forward(action); }
+
+fn run() -> bool {
+    let seen = false;
+    let target = seen.ref;
+    let outer = || {
+        let inner = || {
+            let watch = Watch {target: target};
+        };
+        relay(inner);
+    };
+    outer();
+    let first_finished = seen;
+    outer();
+    first_finished and not seen
+}

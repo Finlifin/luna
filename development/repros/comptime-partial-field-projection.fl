@@ -1,0 +1,17 @@
+struct Outer {
+    pub struct Inner where T {pub typealias Payload = T;}
+}
+struct Packet {selected: .Type'builtin, value: bool}
+struct Envelope {packet: Packet, untouched: bool}
+comptime fn configured(flag: bool) -> bool {
+    const packet = Envelope {packet: Packet {selected: Outer, value: flag}, untouched: flag};
+    const saved = packet;
+    const Selected = saved.packet.selected;
+    let checked: Selected.Inner<bool>.Payload = saved.packet.value;
+    checked
+}
+fn run() -> bool {
+    const yes = configured(true);
+    const no = configured(false);
+    yes and not no
+}

@@ -1,0 +1,27 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+trait Read {
+    fn read(self) -> bool;
+}
+trait Left :- Read {}
+trait Right :- Read {}
+trait Child :- Left + Right {
+    -- Source is fixed by Child's inherited capability, not by later members.
+    fn inspect(self) -> bool { self.read() }
+}
+
+struct Flag {}
+impl Child for Flag {}
+impl Left for Flag {}
+impl Right for Flag {}
+impl Read for Flag {
+    fn read(self) -> bool { true }
+}
+impl Flag {
+    fn read(self) -> bool { false }
+}
+
+fn run() -> Tuple<bool, bool, bool> {
+    (Flag {}.as(Child).read(), Flag {}.as(Child).inspect(), Flag {}.read())
+}

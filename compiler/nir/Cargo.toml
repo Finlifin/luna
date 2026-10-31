@@ -1,0 +1,11 @@
+[package]
+name = "nir"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+comptime_runtime = { path = "../comptime_runtime" }
+
+[[bench]]
+name = "input_binding"
+harness = false

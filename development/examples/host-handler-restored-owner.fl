@@ -1,0 +1,25 @@
+-- Each request replaces the borrowed owner, then retires the old value locally.
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+struct State { flag: bool, live: bool }
+impl Retire for State {
+    fn drop(*self) { assumes self.live.*; self.live.* = false; }
+}
+effect step() -> bool;
+fn subject() -> #step bool {
+    let first = step()#;
+    let second = step()#;
+    first and not second
+}
+fn run() -> bool {
+    var state = State {flag: false, live: true};
+    let result = subject()# {
+        step() => do {
+            let old = state;
+            state = State {flag: not old.flag, live: true};
+            resume state.flag;
+        },
+    };
+    result and not state.flag and state.live
+}

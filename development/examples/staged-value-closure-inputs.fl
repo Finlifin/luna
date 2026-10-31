@@ -1,0 +1,26 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+typealias Type = .Type'builtin;
+typealias Integer = .Integer'builtin;
+
+pure comptime fn Shape<N: Integer> -> Type { bool }
+
+fn tag(comptime n: Integer, comptime flag: bool,
+       comptime .T: Type = Shape<n>) -> bool {
+    flag
+}
+
+fn apply(comptime n: Integer, comptime flag: bool) -> bool {
+    -- Both values are needed only for staging these calls. Neither lambda
+    -- requires runtime storage for the Integer or Boolean input.
+    let outer = || {
+        let inner = || tag(n, flag);
+        inner()
+    };
+    outer()
+}
+
+fn run() -> Tuple<bool, bool, bool> {
+    (apply(3, true), apply(3, false), apply(7, true))
+}

@@ -1,0 +1,22 @@
+-- luna host-inline-effect-cleanup.fl --build run --inline-functions --copy-protocol Duplicate --drop-protocol Retire --output /tmp/flurry-inline-effect
+-- Expected native output: (bool true)
+trait Duplicate {}
+trait Retire {fn drop(*self);}
+impl Duplicate for bool {}
+impl Duplicate for *T where T {}
+struct Watch {target:*bool}
+impl Retire for Watch {
+    fn drop(*self) {self.target.*.* = not self.target.*.*;}
+}
+inline effect get(target:*bool)->bool;
+inline fn subject(target:*bool)->#get bool {get(target)#}
+fn run()->bool {
+    let seen=false;
+    let result=subject(seen.ref)# {
+        get(target)=>do {let watch=Watch {target:target};resume true;},
+    };
+    result and seen
+}
+
+-- Also run with --test-native --inline-functions and the same protocol flags.
+test cleanup {let result=run();assumes result;}

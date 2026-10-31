@@ -1,0 +1,25 @@
+-- Build with --copy-protocol Duplicate --drop-protocol Retire.
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+
+typealias Byte = .u8'builtin;
+enum State {
+    .base_type Byte,
+    .width 8,
+    .discrete_tag true,
+    off: 0b01011010,
+    on: 0b10100101,
+}
+impl Duplicate for State {}
+
+fn enable(pointer: *State) { pointer.* = State.on; }
+
+fn run() -> bool {
+    var state = State.off;
+    enable(state.ref);
+    state match {
+        .off => false,
+        .on => true,
+    }
+}

@@ -1,0 +1,25 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+-- Self is abstract in the default body and concrete in each selected instance.
+trait Keep {
+    fn keep(value: Self) -> Self { value }
+    fn apply(value: Self, f: fn(Self) -> Self) -> Self { f(value) }
+}
+
+struct Flag { value: bool, }
+struct Other { value: bool, }
+
+impl Keep for Flag {}
+impl Keep for Other {}
+
+impl Flag {
+    fn create(value: bool) -> Self { Self { value: value } }
+}
+
+fn run() -> Tuple<bool, bool> {
+    let keep = Other.as(Keep).keep;
+    let first = Flag.as(Keep).apply(Flag.create(false), |flag| Flag { value: not flag.value });
+    let second = keep(Other { value: false });
+    (first.value, second.value)
+}

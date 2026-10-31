@@ -1,0 +1,47 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
+typealias Word = .u16'builtin;
+
+fn overlap() -> Word {
+    var word: Word = 0x1234;
+    word'bitvec[4..12] = word'bitvec[0..8];
+    word
+}
+fn snapshot() -> Tuple<Word, Word> {
+    var word: Word = 0x1234;
+    let saved = word'bitvec;
+    word'bitvec[0..8] = 0xAB;
+    (word, saved.as(Word))
+}
+fn nested() -> Word {
+    var word: Word = 0;
+    word'bitvec[4..12][2..6] = 0xF;
+    word
+}
+struct Packet { word: Word, other: Word }
+fn rhs_update() -> Tuple<Word, Word> {
+    let packet = Packet { word: 0x1234, other: 0 };
+    packet.word'bitvec[0..8] = do {
+        packet.word = 0xABCD;
+        packet.other = 99;
+        0x12
+    };
+    (packet.word, packet.other)
+}
+fn sign() -> .i8'builtin {
+    var value: .i8'builtin = 0;
+    value'bitvec[7] = 1;
+    value
+}
+fn saved_value() -> Word {
+    var value: Word = 0x1234;
+    var bits = value'bitvec;
+    bits[0..8] = 0xAB;
+    value
+}
+fn empty() -> Word {
+    var value: Word = 0x1234;
+    value'bitvec[16..16] = 0;
+    value
+}

@@ -1,0 +1,41 @@
+typealias Unit = .void'builtin;
+typealias Number = .u8'builtin;
+
+inline effect emit(value: T) where T;
+
+inline fn produce() -> #emit<Number> Unit {
+    var value: Number = 1;
+    while value < 4 {
+        emit<Number>(value)#;
+        value = value + 1;
+    }
+}
+
+inline fn mapped() -> #emit<Number> Unit {
+    produce()# {
+        emit<Number>(value) => {
+            assumes value < 255;
+            emit<Number>(value + 1)#;
+        },
+    };
+}
+
+inline fn filtered() -> #emit<Number> Unit {
+    mapped()# {
+        emit<Number>(value) => {
+            if value > 2 { emit<Number>(value)#; }
+        },
+    };
+}
+
+fn entry() -> Number {
+    var sum: Number = 0;
+    filtered()# {
+        emit<Number>(value) => {
+            assumes value <= 4;
+            assumes sum <= 251;
+            sum = sum + value;
+        },
+    };
+    sum
+}

@@ -1,0 +1,19 @@
+typealias Bits = .BitVec'builtin<1024>;
+typealias Position = .u16'builtin;
+
+pure fn mark(position: Position) -> Bits where requires position <= 768 {
+    var bits: Bits = 0;
+    bits[position..(position + 256)] = not 0;
+    bits
+}
+pure fn rotate(bits: Bits) -> Bits {
+    bits[0..256] ++ bits[256..1024]
+}
+fn run() -> bool {
+    let bits = mark(768);
+    let shifted = rotate(bits);
+    bits[768..1024] == (not 0)
+        and bits[0..768] == 0
+        and shifted[512..768] == (not 0)
+        and shifted[768..1024] == 0
+}

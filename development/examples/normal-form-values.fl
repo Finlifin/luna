@@ -1,0 +1,13 @@
+typealias Type = .Type'builtin;
+typealias Int = .Integer'builtin;
+pure comptime fn Bits<N: Int> -> Type { .BitVec'builtin<N> }
+pure comptime fn Tagged<T: Type, N: Int> -> Type { T }
+pure comptime fn Forward<N: Int> -> Type { Bits<N> }
+comptime fn width() -> Int { 4 * 2 }
+typealias Byte = Bits<8>;
+typealias AlsoByte = Bits<width()>;
+fn same(value: Byte) -> AlsoByte { value }
+fn generic(value: Tagged<T, 8>) -> Tagged<T, 8> where T { value }
+comptime fn Observed() -> Type { Tagged<.u8'builtin, 18446744073709551616> }
+comptime fn Negative() -> Type { Bits<-1> }
+fn forwarded(value: Tagged<.u8'builtin, 8>) -> Tagged<.u8'builtin, 8> { generic<.u8'builtin>(value) }

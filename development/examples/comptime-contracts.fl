@@ -1,0 +1,11 @@
+typealias Type = .Type'builtin;
+typealias Flag = Checked(true);
+comptime fn Checked(value: T) -> Type where T, requires T == bool {
+    RequireFlag(value);
+    T
+}
+comptime fn RequireFlag(value: T) -> T where T, requires T == bool { true }
+comptime fn Always() -> Type where requires true { .u16'builtin }
+typealias Word = Always();
+fn flag() -> Flag { true }
+fn word() -> Word { 65535 }

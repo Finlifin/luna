@@ -1,0 +1,64 @@
+-- Use real Tuple/meta.List packages; every tuple is consumed once.
+-- Run: python3 -B development/host_examples.py library-tuple --release-driver --compare-optimization
+use builtin.{Type, bool};
+use tuples.Tuple;
+
+fn reverse(pair: Tuple<bool, bool>) -> Tuple<bool, bool> {
+    let (first, second) = pair;
+    (second, first)
+}
+
+comptime fn FieldTypes() -> meta.List<Type> {
+    [Tuple<bool, bool>, Tuple<bool>, Tuple<>]
+}
+
+fn run() -> bool {
+    let packet: Tuple<.Es = FieldTypes()> = (reverse((false, true)), (true,), ());
+    let ((first, second), (third,), ()) = packet;
+    first and not second and third
+}
+
+
+test nested_type_list {
+    let passed = run();
+    assumes passed;
+}
+
+test empty_tuple {
+    let value: Tuple<> = ();
+    let () = value;
+}
+
+test singleton_evaluates_once {
+    var called = false;
+    let value: Tuple<bool> = (do {
+        assumes not called;
+        called = true;
+        true
+    },);
+    let (flag,) = value;
+    assumes called and flag;
+}
+
+struct Tracked { retired: *bool }
+impl resources.Drop for Tracked {
+    fn drop(*self) {
+        assumes not self.retired.*.*;
+        self.retired.*.* = true;
+    }
+}
+fn retire(value: Tracked) {}
+
+test affine_fields_transfer_once {
+    var first = false;
+    var second = false;
+    let packet: Tuple<Tracked, Tuple<Tracked>> = (
+        Tracked {retired: first.ref},
+        (Tracked {retired: second.ref},),
+    );
+    let (head, (tail,)) = packet;
+    retire(head);
+    assumes first and not second;
+    retire(tail);
+    assumes first and second;
+}

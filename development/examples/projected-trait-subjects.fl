@@ -1,0 +1,37 @@
+trait Source {
+    assoc Item: .Type'builtin;
+}
+impl Source for bool {
+    assoc Item: .Type'builtin = bool;
+}
+impl Source for 'x''type {
+    assoc Item: .Type'builtin = 'x''type;
+}
+
+trait Read {
+    comptime fn read() -> bool;
+}
+impl Read for bool {
+    comptime fn read() -> bool { true }
+}
+impl Read for 'x''type {
+    comptime fn read() -> bool { false }
+}
+
+-- U supplies Read evidence; equality transfers it to the projected subject.
+-- The receiver is Source.Item, not the type of its comptime representation.
+comptime fn forward() -> bool where T :- Source, U :- Read,
+    requires U == T.as(Source).Item
+{
+    T.as(Source).Item.as(Read).read()
+}
+
+trait Results {
+    assoc flag: bool = forward<bool, bool>();
+    assoc letter: bool = forward<'x''type, 'x''type>();
+}
+impl Results for bool {}
+
+fn entry() -> bool {
+    bool.as(Results).flag and not bool.as(Results).letter
+}

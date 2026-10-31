@@ -1,0 +1,39 @@
+-- Both control transfers cross the subject's machine frame.
+-- Expected output: (bool true), with three cleanups per iteration.
+trait Duplicate {}
+trait Retire {fn drop(*self);}
+typealias U=.u32'builtin;
+impl Duplicate for bool {}
+impl Duplicate for U {}
+impl Duplicate for *T where T {}
+
+struct Watch {count:*U}
+impl Retire for Watch {
+    fn drop(*self) {
+        let previous=self.count.*.*;
+        assumes previous < 100;
+        self.count.*.* = previous + 1;
+    }
+}
+effect read()->bool;
+fn subject(count:*U)->#read bool {
+    let owner=Watch {count:count};
+    read()#
+}
+fn run()->bool {
+    var again=true;
+    let count:U=0;
+    let pointer=count.ref;
+    while true {
+        let owner=Watch {count:pointer};
+        subject(pointer)# {
+            read()=>do {
+                let handler_owner=Watch {count:pointer};
+                if again {again=false;continue;}
+                break;
+            },
+        };
+        return false;
+    }
+    not again and count == 6
+}

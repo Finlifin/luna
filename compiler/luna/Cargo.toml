@@ -4,12 +4,23 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+vfs = { path = "../vfs" }
 ast_lowering = { path = "../ast_lowering" }
 diagnostic = { path = "../diagnostic" }
 interface = { path = "../interface" }
+intrinsic = { path = "../intrinsic" }
 middle = { path = "../middle" }
 lex = { path = "../lex" }
 parse = { path = "../parse" }
 resolve = { path = "../resolve" }
 hir = { path = "../hir" }
 rustc_span = { workspace = true }
+elaboration = { path = "../elaboration" }
+nir = { path = "../nir" }
+iir = { path = "../iir" }
+
+comptime_interpretor = { path = "../comptime_interpretor" }
+
+comptime_executor = { path = "../comptime_executor" }
+
+comptime_runtime = { path = "../comptime_runtime" }

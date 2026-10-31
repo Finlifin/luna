@@ -1,0 +1,10 @@
+-- The example runner supplies the math package and target bindings.
+fn run() -> bool {
+    let brightness = math.saturating_add<.u8'builtin>(250, 20);
+    let remaining = math.saturating_sub<.u32'builtin>(10, 30);
+    let low = math.saturating_add<.i8'builtin>(-120, -20);
+    let high = math.saturating_sub<.i8'builtin>(120, -20);
+    brightness == 255 and remaining == 0 and low == -128 and high == 127
+        and math.saturating_sub<.usize'builtin>(10, 30) == 0
+        and math.saturating_add<.isize'builtin>(-20, 10) == -10
+}

@@ -37,7 +37,7 @@ pub mod symbols;
 pub mod sysroot;
 
 // pub use builtins::{ALL_BUILTINS, BuiltinFn, BuiltinFnId, BuiltinTy};
-pub use lang_item::{LangItem, LangItemDef, LangItems};
+pub use lang_item::{LangItem, LangItemDef, LangItems, SourceBindingError};
 pub use sysroot::{PackageId, Sysroot, SysrootPackage};
 
 use middle::TyCtxt;
@@ -66,10 +66,12 @@ pub fn initialize(_ty_ctxt: &TyCtxt) -> IntrinsicContext {
     let mut lang_items = LangItems::new();
     use LangItem::*;
     for item in [
-        AnyType, U8, U16, U32, U64, U128, Usize, I8, I16, I32, I64, I128, Isize, Integer, F16, F32,
-        F64, Real, Bool, Char, Str, Void, NoReturn, Type,
+        AnyType, U8, U16, U32, U64, U128, Usize, I8, I16, I32, I64, I128, Isize, Integer, F16,
+        Bf16, F32, F64, Real, Bool, Char, Str, Void, NoReturn, Type,
     ] {
-        lang_items.set(item, LangItemDef::Builtin);
+        lang_items
+            .set(item, LangItemDef::Builtin)
+            .expect("bootstrap language items are unique");
     }
 
     IntrinsicContext { lang_items }

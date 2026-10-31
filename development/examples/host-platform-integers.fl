@@ -1,0 +1,10 @@
+typealias Word = .usize'builtin;
+
+fn next(value: Word) -> Word
+where requires value < 100 {
+    value + 1
+}
+
+fn run() -> Word {
+    next(41)
+}

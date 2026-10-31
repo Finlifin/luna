@@ -1,0 +1,21 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+trait Read {
+    fn read(self) -> bool;
+    fn invert(self) -> bool { not self.as(Read).read() }
+}
+
+struct Yes {}
+struct No {}
+
+impl Read for Yes {
+    fn read(self) -> bool { true }
+}
+impl Read for No {
+    fn read(self) -> bool { false }
+}
+
+fn run() -> Tuple<bool, bool> {
+    (Yes {}.as(Read).invert(), No {}.as(Read).invert())
+}

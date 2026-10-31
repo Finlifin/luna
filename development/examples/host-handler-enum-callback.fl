@@ -1,0 +1,36 @@
+-- Code evidence is conditional on the captured enum tag.
+trait Duplicate {}
+trait Retire {fn drop(*self);}
+impl Duplicate for bool {}
+typealias Action = fn(bool) -> bool;
+impl Duplicate for Action {}
+enum Choice {none, first(Action), second(Action)}
+impl Duplicate for Choice {}
+struct Actions {selected: Choice, flag: bool}
+impl Duplicate for Actions {}
+fn identity(value: bool) -> bool {value}
+fn other(value: bool) -> bool {value}
+effect step() -> bool;
+fn subject() -> #step bool {
+    let first = step()#;
+    let second = step()#;
+    first and not second
+}
+fn trial(tag: bool, empty: bool) -> bool {
+    var actions = Actions {
+        selected: if empty {Choice.none} else if tag {Choice.first(identity)} else {Choice.second(other)},
+        flag: false,
+    };
+    let result = subject()# {
+        step() => do {
+            actions.flag = not actions.flag;
+            actions.selected match {
+                .none => actions.flag,
+                .first(call) => call(actions.flag),
+                .second(call) => call(actions.flag),
+            }
+        },
+    };
+    result and not actions.flag
+}
+fn run() -> bool {trial(true, false) and trial(false, false) and trial(true, true)}

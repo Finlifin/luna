@@ -1,0 +1,34 @@
+{-
+  Machine arithmetic in a Type argument must preserve its effects while
+  reflection and checked list indexing build the resulting runtime type.
+-}
+use primitives.Type;
+
+struct Inner { flag: bool }
+struct Source where T { inner: Inner }
+
+comptime fn FirstType(types: meta.List<Type>) -> Type {
+    var calls: primitives.u8 = 0;
+    let ignored = types[do {
+        calls = calls + 1;
+        return if calls == 1 { types[0] } else { bool };
+    }];
+    bool
+}
+
+comptime fn Generate() -> Type {
+    let selected = bool;
+    var calls: primitives.u32 = 0;
+    let types = meta.struct_field_types(Source<do { calls = calls + 1; selected }>);
+    var builder = meta.StructBuilder.new();
+    builder.add_field(.inner, FirstType(types));
+    if calls == 1 { builder.Build() } else { bool }
+}
+
+typealias Generated = Generate();
+impl Generated {
+    fn read(self) -> bool { self.inner.flag }
+}
+fn run() -> bool {
+    Generated { inner: Inner { flag: true } }.read()
+}

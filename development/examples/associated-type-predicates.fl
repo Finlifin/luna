@@ -1,0 +1,28 @@
+trait Source {
+    assoc Item: .Type'builtin;
+}
+
+impl Source for bool {
+    assoc Item: .Type'builtin = bool;
+}
+impl Source for 'x''type {
+    assoc Item: .Type'builtin = 'x''type;
+}
+
+-- Item occurs only in the type predicate, not in the signature or body.
+comptime fn supported() -> bool where T :- Source,
+    requires (T.as(Source).Item == bool or T.as(Source).Item == 'x''type)
+        and not (T.as(Source).Item == .u8'builtin)
+{
+    true
+}
+
+trait Results {
+    assoc boolean: bool = supported<bool>();
+    assoc character: bool = supported<'x''type>();
+}
+impl Results for bool {}
+
+fn entry() -> bool {
+    bool.as(Results).boolean and bool.as(Results).character
+}

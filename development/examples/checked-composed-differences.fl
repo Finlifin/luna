@@ -1,0 +1,19 @@
+typealias Word = .u16'builtin;
+fn combined(a: Word, b: Word, c: Word, d: Word) -> Word {
+    assumes a <= 10000 and b <= 10000;
+    assumes c <= a and d <= b;
+    (a + b) - (c + d)
+}
+fn shared(a: Word, c: Word, d: Word) -> Word {
+    assumes a <= 10000;
+    assumes c <= a and d <= a;
+    2 * a - (c + d)
+}
+comptime fn run() -> Word {
+    let a: Word = 10000;
+    let b: Word = 9999;
+    let c: Word = 10;
+    let d: Word = 20;
+    assumes c <= a and d <= b;
+    (a + b) - (c + d)
+}

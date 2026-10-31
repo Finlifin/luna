@@ -1,0 +1,153 @@
+use builtin.{Integer, Symbol, Type, usize};
+use List;
+
+pub typealias Object = .Object'builtin;
+
+const compiler_list_length = .list_length'builtin;
+pub const compiler_list_concat = .list_concat'builtin;
+const compiler_comptime_integer_convert = .comptime_integer_convert'builtin;
+const compiler_comptime_integer_div_trunc = .comptime_integer_div_trunc'builtin;
+const compiler_comptime_integer_rem_trunc = .comptime_integer_rem_trunc'builtin;
+pub const compiler_object_length = .object_length'builtin;
+pub const compiler_object_key = .object_key'builtin;
+pub const CompilerObjectEntryType = .object_entry_type'builtin;
+pub const compiler_object_value = .object_value'builtin;
+pub const compiler_object_get = .object_get'builtin;
+const compiler_object_concat = .object_concat'builtin;
+const compiler_object_append = .object_append'builtin;
+const compiler_object_replace = .object_replace'builtin;
+const compiler_object_remove = .object_remove'builtin;
+pub const compiler_object_slice = .object_slice'builtin;
+const compiler_struct_field_types = .struct_field_types'builtin;
+const compiler_struct_field_names = .struct_field_names'builtin;
+const compiler_enum_group_paths = .enum_group_paths'builtin;
+const compiler_enum_variant_paths = .enum_variant_paths'builtin;
+const compiler_enum_variant_shapes = .enum_variant_shapes'builtin;
+const compiler_enum_variant_field_names = .enum_variant_field_names'builtin;
+const compiler_enum_variant_field_types = .enum_variant_field_types'builtin;
+const CompilerBuildStruct = .build_struct'builtin;
+const CompilerBuildEnumPaths = .build_enum_paths'builtin;
+const CompilerBuildSymbolEnumPaths = .build_symbol_enum_paths'builtin;
+const CompilerBuildBitsEnumPaths = .build_bits_enum_paths'builtin;
+
+{-
+    Named compiler-operation bindings for comptime data and definitions.
+    Library algorithms use these ordinary functions; raw compiler symbols stay
+    at this boundary. Type parameters retain the List normal-form identity.
+-}
+pub pure comptime fn list_length(values: List<T>) -> Integer where T {
+    compiler_list_length(values)
+}
+
+pub pure comptime fn list_concat(left: List<T>, right: List<T>) -> List<T> where T {
+    compiler_list_concat(left, right)
+}
+
+pub pure comptime fn to_usize(value: Integer) -> usize {
+    compiler_comptime_integer_convert(usize, value)
+}
+
+pub pure comptime fn from_usize(value: usize) -> Integer {
+    compiler_comptime_integer_convert(Integer, value)
+}
+
+pub pure comptime fn div_trunc(left: Integer, right: Integer) -> Integer {
+    compiler_comptime_integer_div_trunc(left, right)
+}
+
+pub pure comptime fn rem_trunc(left: Integer, right: Integer) -> Integer {
+    compiler_comptime_integer_rem_trunc(left, right)
+}
+
+pub pure comptime fn object_length(value: Object) -> Integer {
+    compiler_object_length(value)
+}
+
+pub pure comptime fn object_key(value: Object, index: Integer) -> ?Symbol {
+    compiler_object_key(value, index)
+}
+
+pub pure comptime fn ObjectEntryType(value: Object, index: Integer) -> Type {
+    CompilerObjectEntryType(value, index)
+}
+
+pub pure comptime fn object_value(value: Object, index: Integer) -> ?T where T {
+    compiler_object_value(T, value, index)
+}
+
+pub pure comptime fn object_get(value: Object, key: Symbol) -> ?T where T {
+    compiler_object_get(T, value, key)
+}
+
+pub pure comptime fn object_concat(left: Object, right: Object) -> Object {
+    compiler_object_concat(left, right)
+}
+
+pub pure comptime fn object_append(object: Object, value: T, .key: ?Symbol = null) -> Object where T {
+    compiler_object_append(object, key, value)
+}
+
+pub pure comptime fn object_replace(object: Object, index: Integer, value: T) -> Object where T {
+    compiler_object_replace(object, index, value)
+}
+
+pub pure comptime fn object_remove(object: Object, index: Integer) -> Object {
+    compiler_object_remove(object, index)
+}
+
+pub pure comptime fn object_slice(object: Object, start: Integer, end: Integer) -> Object {
+    compiler_object_slice(object, start, end)
+}
+
+pub pure comptime fn struct_field_types(subject: Type) -> List<Type> {
+    compiler_struct_field_types(subject)
+}
+
+pub pure comptime fn struct_field_names(subject: Type) -> List<Symbol> {
+    compiler_struct_field_names(subject)
+}
+
+pub pure comptime fn enum_group_paths(subject: Type) -> List<List<Symbol>> {
+    compiler_enum_group_paths(subject)
+}
+
+pub pure comptime fn enum_variant_paths(subject: Type) -> List<List<Symbol>> {
+    compiler_enum_variant_paths(subject)
+}
+
+pub pure comptime fn enum_variant_shapes(subject: Type) -> List<Symbol> {
+    compiler_enum_variant_shapes(subject)
+}
+
+pub pure comptime fn enum_variant_field_names(subject: Type) -> List<List<Symbol>> {
+    compiler_enum_variant_field_names(subject)
+}
+
+pub pure comptime fn enum_variant_field_types(subject: Type) -> List<List<Type>> {
+    compiler_enum_variant_field_types(subject)
+}
+
+pub comptime fn BuildStruct(name: Symbol, names: List<Symbol>, types: List<Type>) -> Type {
+    CompilerBuildStruct(name, names, types)
+}
+
+pub comptime fn BuildEnum(name: Symbol, groups: List<List<Symbol>>,
+    paths: List<List<Symbol>>, shapes: List<Symbol>,
+    names: List<List<Symbol>>, types: List<List<Type>>) -> Type {
+    CompilerBuildEnumPaths(name, groups, paths, shapes, names, types)
+}
+
+pub comptime fn BuildSymbolEnum(name: Symbol, groups: List<List<Symbol>>,
+    paths: List<List<Symbol>>, shapes: List<Symbol>,
+    names: List<List<Symbol>>, types: List<List<Type>>, codes: List<Symbol>) -> Type {
+    CompilerBuildSymbolEnumPaths(name, groups, paths, shapes, names, types, codes)
+}
+
+pub comptime fn BuildBitsEnum(name: Symbol, groups: List<List<Symbol>>,
+    paths: List<List<Symbol>>, shapes: List<Symbol>,
+    names: List<List<Symbol>>, types: List<List<Type>>, width: Integer,
+    base_type: ?Type, masks: List<Integer>, values: List<Integer>,
+    offsets: List<List<Integer>>) -> Type {
+    CompilerBuildBitsEnumPaths(name, groups, paths, shapes, names, types,
+        width, base_type, masks, values, offsets)
+}

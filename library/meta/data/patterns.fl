@@ -1,0 +1,20 @@
+use builtin.{Type, usize};
+
+{- List patterns observe comptime values through ordinary value-reference self. -}
+pub pure comptime trait ComptimeListPatternView {
+    assoc Element: Type;
+    comptime fn list_pattern_view_get_len(self) -> usize;
+    comptime fn list_pattern_view_get_element(self, index: usize) -> Element;
+}
+
+comptime impl ComptimeListPatternView for List<T> where T {
+    assoc Element: Type = T;
+    comptime fn list_pattern_view_get_len(self) -> usize {
+        to_usize(self.length())
+    }
+    comptime fn list_pattern_view_get_element(self, index: usize) -> T {
+        -- A local index lets the VM copy only the selected element.
+        let position = from_usize(index);
+        self[position]
+    }
+}

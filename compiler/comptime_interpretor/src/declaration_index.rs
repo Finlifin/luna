@@ -1,0 +1,97 @@
+//! Snapshot-local declaration positions, shared without self-referential storage.
+use super::*;
+
+pub(super) struct Declarations<'a, T> {
+    declarations: &'a [T],
+    pub(super) positions: Arc<BTreeMap<DeclarationId, usize>>,
+}
+impl<'a, T> Declarations<'a, T> {
+    pub(super) fn new(
+        declarations: &'a [T],
+        positions: Option<Arc<BTreeMap<DeclarationId, usize>>>,
+        identity: impl Fn(&T) -> DeclarationId,
+    ) -> Result<Self, Error> {
+        let positions = match positions {
+            Some(positions) => positions,
+            None => {
+                let mut positions = BTreeMap::new();
+                for (position, declaration) in declarations.iter().enumerate() {
+                    if positions.insert(identity(declaration), position).is_some() {
+                        return Err(Error {
+                            kind: ErrorKind::InvalidCallPlan,
+                            source: None,
+                        });
+                    }
+                }
+                Arc::new(positions)
+            }
+        };
+        Ok(Self {
+            declarations,
+            positions,
+        })
+    }
+    pub(super) fn get(&self, id: &DeclarationId) -> Option<&'a T> {
+        self.positions
+            .get(id)
+            .map(|position| &self.declarations[*position])
+    }
+    pub(super) fn values(&self) -> impl Iterator<Item = &'a T> + Clone + '_ {
+        let declarations = self.declarations;
+        self.positions
+            .values()
+            .map(move |position| &declarations[*position])
+    }
+    pub(super) fn contains_key(&self, id: &DeclarationId) -> bool {
+        self.positions.contains_key(id)
+    }
+}
+
+impl<T> Default for Declarations<'_, T> {
+    fn default() -> Self {
+        Self {
+            declarations: &[],
+            positions: Arc::new(BTreeMap::new()),
+        }
+    }
+}
+pub(super) type Functions<'a> = Declarations<'a, nir::program::Function>;
+pub(super) type RuntimeIdentities<'a> = Declarations<'a, nir::program::RuntimeFunctionIdentity>;
+
+pub(super) type Effects<'a> = Declarations<'a, nir::effects::Declaration>;
+
+pub(super) type Newtypes<'a> = Declarations<'a, nir::newtypes::Newtype>;
+pub(super) type Aliases<'a> = Declarations<'a, nir::type_aliases::Contract>;
+
+pub(super) type NormalForms<'a> = Declarations<'a, nir::normal_forms::Head>;
+
+pub(super) struct SourceIndexes {
+    pub(super) method_contracts: Arc<method_catalog::Entries>,
+    pub(super) normal_forms: Arc<BTreeMap<DeclarationId, usize>>,
+    pub(super) newtypes: Arc<BTreeMap<DeclarationId, usize>>,
+    pub(super) aliases: Arc<BTreeMap<DeclarationId, usize>>,
+    pub(super) structs: Arc<BTreeMap<DeclarationId, generated_structs::StructDefinition<'static>>>,
+    pub(super) enums: Arc<BTreeMap<DeclarationId, generated_enums::EnumDefinition<'static>>>,
+    pub(super) method_parameters: Arc<HashMap<(DeclarationId, DeclarationId), Vec<LocalId>>>,
+    pub(super) method_origins: Arc<HashMap<DeclarationId, Option<DeclarationId>>>,
+    pub(super) parameter_domains: Arc<BTreeMap<DeclarationId, Term>>,
+    pub(super) parameter_sorts: Arc<BTreeMap<DeclarationId, nir::Sort>>,
+    pub(super) functions: Arc<BTreeMap<DeclarationId, usize>>,
+    pub(super) runtime_identities: Arc<BTreeMap<DeclarationId, usize>>,
+    pub(super) effects: Arc<BTreeMap<DeclarationId, usize>>,
+}
+
+/// Shape admission needs declaration lookup, not ownership of a particular map.
+pub(super) trait HeadLookup {
+    fn head(&self, id: &DeclarationId) -> Option<&nir::normal_forms::Head>;
+}
+impl HeadLookup for NormalForms<'_> {
+    fn head(&self, id: &DeclarationId) -> Option<&nir::normal_forms::Head> {
+        self.get(id)
+    }
+}
+impl HeadLookup for BTreeMap<DeclarationId, &nir::normal_forms::Head> {
+    fn head(&self, id: &DeclarationId) -> Option<&nir::normal_forms::Head> {
+        self.get(id).copied()
+    }
+}

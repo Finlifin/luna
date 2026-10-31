@@ -1,0 +1,20 @@
+typealias Type = .Type'builtin;
+typealias Int = .Integer'builtin;
+pure comptime fn Identity<T: Type> -> Type { T }
+pure comptime fn Bits<N: Int> -> Type { .BitVec'builtin<N> }
+pure comptime fn Same<A: Type, B: Type> -> Type where requires A == B { A }
+pure comptime fn ByteHead<T: Type> -> Type where requires T == Bits<8> { T }
+comptime fn Nested(value: T) -> Type where T {
+    Same<Identity<T>, Identity<T>>
+}
+comptime fn Observed() -> Type { Nested(true) }
+comptime fn Literal() -> Type { ByteHead<Bits<0x8>> }
+-- Symbolic scalar inputs retain their declaration identity in nested heads.
+pure comptime fn Symbolic<N: Int> -> Type { Same<Bits<N>, Bits<N>> }
+comptime fn Ordered() -> Type {
+    var count: Int = 0;
+    Identity<Bits<do { count = count + 1; count }>>
+}
+typealias NestedFlag = Nested(true);
+typealias SameNestedFlag = Same<Identity<bool>, Identity<bool>>;
+fn same(value: NestedFlag) -> SameNestedFlag { value }

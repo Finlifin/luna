@@ -1,0 +1,159 @@
+{-
+    Reflect an enum, edit payload shapes and group paths, then use the generated
+    type normally. Indices describe declaration order, not discriminant values.
+-}
+enum Source { net.{old(bool), dead}, spare.{} }
+
+comptime fn EditedEnum() -> Type {
+    var builder = meta.EnumBuilder.from_type(Source, .name = .EditedEnum);
+    let replaced_payload = builder.replace_tuple(0, .data, [u8], .group = [.net]);
+    assumes replaced_payload;
+    let replaced_unit = builder.replace_unit(1, .ready);
+    assumes replaced_unit;
+    let inserted_record = builder.insert_named(1, .record, [.old], [u8], .group = [.net]);
+    assumes inserted_record;
+    let inserted_idle = builder.insert_unit(0, .idle);
+    assumes inserted_idle;
+    let removed_group = builder.remove_group(1);
+    assumes removed_group;
+    let inserted_group = builder.insert_group(1, .io);
+    assumes inserted_group;
+    let renamed_group = builder.replace_group(1, .remote);
+    assumes renamed_group;
+    let inserted_packet = builder.insert_tuple(4, .packet, [bool], .group = [.remote]);
+    assumes inserted_packet;
+    let removed_ready = builder.remove_variant(3);
+    assumes removed_ready;
+    let replaced_record = builder.replace_named(2, .record, [.flag], [bool], .group = [.net]);
+    assumes replaced_record;
+    let renamed_idle = builder.replace_unit(0, .waiting);
+    assumes renamed_idle;
+    let negative_index = builder.insert_tuple(-1, .wrong, [bool]);
+    assumes not negative_index;
+    let past_end = builder.replace_named(4, .wrong, [], []);
+    assumes not past_end;
+    let missing_group = builder.remove_group(2);
+    assumes not missing_group;
+    builder.Build()
+}
+
+typealias Event = EditedEnum();
+
+fn read_event(value: Event) -> bool {
+    value match {
+        .waiting => false,
+        .net.data(byte) => byte == 7,
+        .net.record { flag: flag } => flag,
+        .remote.packet(flag) => flag,
+    }
+}
+
+fn exercise_enum() -> bool {
+    not read_event(Event.waiting) and read_event(Event.net.data(7))
+        and read_event(Event.net.record { flag: true })
+        and read_event(Event.remote.packet(true))
+}
+
+{- A subject's own associated method retains priority over Type methods. -}
+enum OwnReflection { item }
+impl OwnReflection {
+    pub pure comptime fn enum_variant_paths() -> bool { true }
+}
+
+comptime fn inspect_enum() -> bool {
+    let type_value: Type = OwnReflection;
+    let groups = Event.enum_group_paths();
+    let paths = Event.enum_variant_paths();
+    let shapes = Event.enum_variant_shapes();
+    let names = Event.enum_variant_field_names();
+    let types = Event.enum_variant_field_types();
+    let original = Source.enum_variant_paths();
+    groups.length() == 2 and groups[0][0] == .net and groups[1][0] == .remote
+        and paths.length() == 4 and paths[0][0] == .waiting
+        and paths[1][0] == .net and paths[1][1] == .data
+        and paths[2][1] == .record and paths[3][0] == .remote and paths[3][1] == .packet
+        and shapes[0] == .unit and shapes[1] == .tuple and shapes[2] == .named
+        and shapes[3] == .tuple and (types[0]).length() == 0
+        and (names[1]).length() == 0 and names[2][0] == .flag
+        and types[1][0] == u8 and types[2][0] == bool and types[3][0] == bool
+        and original.length() == 2 and original[0][1] == .old
+        and original[1][1] == .dead and (Source.enum_group_paths()).length() == 2
+        and OwnReflection.enum_variant_paths()
+        and type_value.enum_variant_paths()[0][0] == .item
+}
+
+test edited_enum_values {
+    let accepted = exercise_enum();
+    assumes accepted;
+}
+
+test edited_enum_reflection {
+    inline if inspect_enum() { assumes true; } else { assumes false; };
+}
+
+{- Batch composition keeps group paths and payload Types in declaration order. -}
+comptime fn ComposedEnum() -> Type {
+    let builder = meta.EnumBuilder.new(.name = .Composed);
+    let groups_added = builder.add_groups(Source.enum_group_paths());
+    assumes groups_added;
+    let variants_added = builder.add_variants(Source.enum_variant_paths(),
+        Source.enum_variant_shapes(), Source.enum_variant_field_names(),
+        Source.enum_variant_field_types());
+    assumes variants_added;
+    let saved = builder;
+    let bad_shapes = not builder.add_variants([[.bad]], [], [[]], [[]]);
+    assumes bad_shapes;
+    let bad_names = not builder.add_variants([[.bad]], [.unit], [], [[]]);
+    assumes bad_names;
+    let bad_types = not builder.add_variants([[.bad]], [.unit], [[]], []);
+    assumes bad_types;
+    let negative_range = not builder.replace_variants(-1, 0, [], [], [], []);
+    assumes negative_range;
+    let reversed_range = not builder.replace_variants(1, 0, [], [], [], []);
+    assumes reversed_range;
+    let past_variants = not builder.replace_variants(0, 3, [], [], [], []);
+    assumes past_variants;
+    let past_groups = not builder.replace_groups(0, 3, []);
+    assumes past_groups;
+    let intact = builder.Build();
+    let path_intact = intact.enum_variant_paths()[0][1] == .old;
+    assumes path_intact;
+    let count_intact = intact.enum_variant_paths().length() == 2;
+    assumes count_intact;
+    let groups_replaced = builder.replace_groups(1, 2, [[.io]]);
+    assumes groups_replaced;
+    let variants_replaced = builder.replace_variants(0, 2,
+        [[.net, .data], [.io, .record]], [.tuple, .named], [[], [.ready]], [[u8], [bool]]);
+    assumes variants_replaced;
+    let idle_added = builder.add_variants([[.idle]], [.unit], [[]], [[]]);
+    assumes idle_added;
+    let empty_variants = builder.add_variants([], [], [], []);
+    assumes empty_variants;
+    let empty_groups = builder.add_groups([]);
+    assumes empty_groups;
+    let original = saved.Build();
+    let saved_path = original.enum_variant_paths()[0][1] == .old;
+    assumes saved_path;
+    let saved_group = original.enum_group_paths()[1][0] == .spare;
+    assumes saved_group;
+    builder.Build()
+}
+
+typealias Composed = ComposedEnum();
+
+fn read_composed(value: Composed) -> bool {
+    value match {
+        .net.data(byte) => byte == 7,
+        .io.record {ready: ready} => ready,
+        .idle => false,
+    }
+}
+
+test batch_enum_composition {
+    let tuple_case = read_composed(Composed.net.data(7));
+    assumes tuple_case;
+    let named_case = read_composed(Composed.io.record {ready: true});
+    assumes named_case;
+    let unit_case = not read_composed(Composed.idle);
+    assumes unit_case;
+}

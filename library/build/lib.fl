@@ -1,0 +1,6 @@
+{- Build inputs are observed through source-owned contextual bindings. -}
+pub use info.mode.mode;
+pub use info.target.{Target, TargetFeatures, target};
+pub use info.package.{PackageMetadata, MetadataFeatures, package_metadata};
+
+pub mod prelude {}

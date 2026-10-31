@@ -1,0 +1,12 @@
+typealias Type = .Type'builtin;
+typealias Chosen = Choose(.kind = bool);
+comptime fn Choose(.kind: Type = Chosen) -> Type { kind }
+fn run() -> Chosen { true }
+comptime fn Later() -> Type { Choose() }
+fn later() -> Later() { false }
+trait Shape { comptime fn Output(self) -> Type; }
+struct Box where T { value: T }
+impl Shape for Box<T> where T { comptime fn Output(self) -> Type { T } }
+comptime fn Select(value: T, .kind: Type = value.Output()) -> Type where T :- Shape { kind }
+typealias Character = Select(Box<'x''type> { value: 'x' });
+fn character() -> Character { 'z' }

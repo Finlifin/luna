@@ -1,0 +1,120 @@
+use primitives.*;
+
+-- Affine resource protocols, independent of allocation and formatting.
+
+-- ── Once / Clone / Copy ────────────────────────────────────────────────────
+
+pub trait Once {}
+
+-- Every type has affine transfer; copying and cloning require extra protocols.
+impl Once for T where T {}
+
+pub trait Clone :- Once {
+    fn clone(*self) -> Self;
+}
+
+pub trait Copy :- Clone {}
+
+-- ── Drop ───────────────────────────────────────────────────────────────────
+
+pub trait Drop {
+    fn drop(*self);
+}
+
+-- Scalar clones read the source value; Copy itself never calls clone.
+
+impl Clone for bool {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for bool {}
+
+impl Clone for Symbol {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for Symbol {}
+
+impl Clone for char {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for char {}
+
+impl Clone for void {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for void {}
+
+impl Clone for u8 {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for u8 {}
+
+impl Clone for u16 {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for u16 {}
+
+impl Clone for u32 {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for u32 {}
+
+impl Clone for u64 {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for u64 {}
+
+impl Clone for u128 {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for u128 {}
+
+impl Clone for usize {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for usize {}
+
+impl Clone for i8 {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for i8 {}
+
+impl Clone for i16 {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for i16 {}
+
+impl Clone for i32 {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for i32 {}
+
+impl Clone for i64 {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for i64 {}
+
+impl Clone for i128 {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for i128 {}
+
+impl Clone for isize {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for isize {}
+
+impl Clone for f32 {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for f32 {}
+
+impl Clone for f64 {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for f64 {}
+
+-- Cloning a pointer preserves its target dependency, never its ownership.
+impl Clone for *T where T {
+    fn clone(*self) -> Self { self.* }
+}
+impl Copy for *T where T {}

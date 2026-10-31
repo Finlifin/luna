@@ -1,0 +1,18 @@
+{-
+    Required native behavior: all assertions succeed with the real sysroot.
+    Current blocker: pointer_input_layout rejects the str backing-region input.
+    Reproduce with luna test <this file> --sysroot library. Do not disable the
+    resource checks or add Copy evidence to bypass the missing region proof.
+-}
+fn text_at_runtime() -> bool {
+    let value = "a🦀";
+    value.byte_length() == 5
+        and (value.byte(4) matches 128?)
+        and (value.byte(5) matches null)
+        and "".byte_length() == 0
+}
+
+test {
+    let passed = text_at_runtime();
+    assumes passed;
+}

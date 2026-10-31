@@ -1,0 +1,29 @@
+typealias Type = .Type'builtin;
+typealias Int = .Integer'builtin;
+
+-- Forward references: type formation requests only the necessary definitions.
+typealias Number = Identity(.u32'builtin);
+typealias Nine = Bits(Width());
+typealias AlsoNine = .BitVec'builtin<Width()>;
+fn number() -> Number { 9 }
+fn bits() -> Nine { 511 }
+fn same(value: Nine) -> AlsoNine { value }
+fn forwarded() -> AlsoNine { same(bits()) }
+
+pure comptime fn Identity(value: Type) -> Type { value }
+comptime fn Width() -> Int { 3 * 3 }
+comptime fn Bits(width: Int) -> Type { .BitVec'builtin<width> }
+comptime fn Choose(flag: bool) -> Type {
+    if flag { .u8'builtin } else { .u16'builtin }
+}
+typealias Chosen = Choose(false);
+fn chosen() -> Chosen { 65535 }
+
+-- Merely declaring a comptime function does not invoke it.
+comptime fn Unused() -> Type { Unused() }
+
+typealias Conditional = if 1 == 1 { Identity(.u8'builtin) } else { .u16'builtin };
+typealias BlockType = do { let flag = true; Choose(flag) };
+fn direct() -> Identity(.u16'builtin) { 65535 }
+fn conditional() -> Conditional { 255 }
+fn block_type() -> BlockType { 255 }

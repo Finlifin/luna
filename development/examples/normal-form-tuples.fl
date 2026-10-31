@@ -1,0 +1,27 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+typealias Type = .Type'builtin;
+typealias Int = .Integer'builtin;
+typealias Flag = bool;
+pure comptime fn Config<value: Tuple<Int, Flag>> -> Type { .u8'builtin }
+pure comptime fn Tagged<T: Type, value: T> -> Type { T }
+pure comptime fn Dependent<T: Type, value: Tuple<T, Flag>> -> Type { T }
+pure comptime fn Checked<T: Type, value: Tuple<Int, Flag>> -> Type where requires T == Config<value> { T }
+comptime fn Build(value: Tuple<Int, Flag>) -> Type { Config<value> }
+comptime fn Verified(value: Tuple<Int, Flag>) -> Type { Checked<Config<value>, value> }
+comptime fn Typed(ty: Type) -> Type { Tagged<ty, (255, true)> }
+comptime fn Partial(ty: Type) -> Type { Dependent<ty, (255, true)> }
+comptime fn Nested(ty: Type) -> Type { Tagged<ty, ((1, false), "λ")> }
+comptime fn Types(ty: Type) -> Type { Tagged<ty, (.u8'builtin, true)> }
+comptime fn Ordered(ty: Type) -> Type {
+    var count: Int = 0;
+    Tagged<ty, (do { count = count + 1; 7 }, do { count = count + 1; count })>
+}
+typealias First = Config<(2 * 4, true)>;
+typealias Second = Build((8, true));
+fn same(value: First) -> Second { value }
+typealias ByteConfig = Typed(Tuple<.u8'builtin, Flag>);
+typealias PartialConfig = Partial(.u8'builtin);
+typealias NestedConfig = Nested(Tuple<Tuple<.u8'builtin, Flag>, ""'type>);
+typealias TypeConfig = Types(Tuple<Type, Flag>);

@@ -1,0 +1,17 @@
+typealias Int = .i32'builtin;
+
+fn in_range(value: Int) -> bool {
+    value match {
+        -10..0 => true,
+        0..=10 => true,
+        _ => false,
+    }
+}
+
+fn run() -> bool {
+    let true as accepted = in_range(-3) else { return false; };
+    let recovered = false match {
+        (true as flag) or (false as flag) => not flag,
+    };
+    accepted and recovered and not in_range(11)
+}

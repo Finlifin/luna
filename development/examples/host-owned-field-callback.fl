@@ -1,0 +1,51 @@
+-- python3 -B development/host_examples.py owned-field-callback --release-driver --compare-optimization
+-- A generic call owns the callback, updates it, and returns that same environment.
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+impl Duplicate for *T where T {}
+typealias Count = .u8'builtin;
+impl Duplicate for Count {}
+
+struct State { bit: bool, calls: Count, live: bool, done: *bool }
+impl Retire for State {
+    fn drop(*self) {
+        assumes self.live.*;
+        assumes self.bit.* and self.calls.* == 3;
+        assumes not self.done.*.*;
+        self.done.*.* = true;
+        self.live.* = false;
+    }
+}
+
+fn pack(...fields: T) -> T where T { fields }
+
+fn warm(callback: %{state: T} fn(*bool) -> bool, target: *bool,
+        .twice: bool = true) -> %{state: T} fn(*bool) -> bool where T {
+    callback(target);
+    if twice { callback(target); }
+    callback
+}
+
+fn run() -> bool {
+    var done = false;
+    var seen = false;
+    do {
+        var state = State {bit: false, calls: 0, live: true, done: done.ref};
+        let actions = pack {call: |target: *bool| {
+            assumes state.calls < 3;
+            state.calls = state.calls + 1;
+            state.bit = not state.bit;
+            target.* = state.bit;
+            state.bit
+        }};
+        -- Move the field into warm; neither the old record nor the parameter
+        -- may retire the returned environment.
+        let returned = warm(actions.call, seen.ref);
+        let packet = pack {inner: pack {call: returned}};
+        packet.inner.call(seen.ref);
+        assumes not done;
+        -- The final owner retires State once, after exactly three calls.
+    };
+    done and seen
+}

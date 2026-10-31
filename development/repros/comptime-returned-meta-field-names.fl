@@ -1,0 +1,9 @@
+struct Fields {Closure: .Type'builtin, value: bool}
+struct Packet {vars: Fields}
+comptime fn packet() -> Packet {
+    Packet {vars: Fields {Closure: bool, value: true}}
+}
+fn run() -> bool {
+    let checked: packet().vars.Closure = true;
+    checked
+}

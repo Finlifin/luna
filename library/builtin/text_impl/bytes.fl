@@ -1,0 +1,23 @@
+use primitives.{str, u64, u8};
+
+use bindings.{str_byte_length as text_str_byte_length, str_byte as text_str_byte};
+
+{-
+    Immutable UTF-8 byte observations. Indices count bytes, not characters.
+    Lengths and indices use u64 independently of the compilation target.
+    Byte reads outside the string return null, including index == length.
+-}
+pub trait TextBytes {
+    pure fn byte_length(self) -> u64;
+    pure fn byte(self, index: u64) -> ?u8;
+}
+
+impl TextBytes for str {
+    pure fn byte_length(self) -> u64 {
+        text_str_byte_length(self)
+    }
+
+    pure fn byte(self, index: u64) -> ?u8 {
+        text_str_byte(self, index)
+    }
+}

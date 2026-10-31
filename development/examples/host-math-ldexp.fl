@@ -1,0 +1,33 @@
+-- Scaling is performed directly, without a separate floating power of two.
+fn single(value: .f32'builtin, exponent: .i32'builtin) -> .f32'builtin {
+    math.ldexp(value, exponent)
+}
+fn double(value: .f64'builtin, exponent: .i32'builtin) -> .f64'builtin {
+    math.ldexp(value, exponent)
+}
+fn run() -> bool {
+    var value_seen = false;
+    var exponent_seen = false;
+    let ordered = double(
+        do { assumes not value_seen; value_seen = true; let value: .f64'builtin = 1.5; value },
+        do { assumes value_seen and not exponent_seen; exponent_seen = true; let exponent: .i32'builtin = 3; exponent });
+    value_seen and exponent_seen and ordered == 12.0
+        and single(1.5, -1) == 0.75
+        and single(1.0, -149)'bitvec == 1
+        and double(1.0, -1074)'bitvec == 1
+        and single(1.0, -150)'bitvec == 0
+        and double(1.0, -1075)'bitvec == 0
+        and single(-0.0, 2147483647)'bitvec == 2147483648
+        and double(-1.0, -2147483648)'bitvec == 9223372036854775808
+        and math.isinf(single(1.0, 128))
+        and math.isinf(double(1.0, 1024))
+        -- These results remain representable although an intermediate 2^n
+        -- would overflow. They catch an incorrect multiply-by-pow rewrite.
+        and single(0.5, 128)'bitvec == 2130706432
+        and double(0.5, 1024)'bitvec == 9214364837600034816
+}
+
+test binary_scaling {
+    let passed = run();
+    assumes passed;
+}

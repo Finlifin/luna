@@ -1,33 +1,46 @@
--- ==========================================================================
--- builtin – package root
--- ==========================================================================
---
--- The `builtin` package is the implicit foundation of every Flurry program.
--- It re-exports all fundamental types, traits, and protocols that the
--- compiler and standard library depend on.
---
--- User code does NOT need to `use builtin` – its public items are injected
--- into every module's scope automatically (the "prelude").
+{-
+  builtin package root. Files and directories are discovered as modules.
+  Public root re-exports also supply names to builtin's own child modules.
+  The prelude supplies default imports to other packages.
+-}
 
--- Fundamental type definitions
-mod primitives
--- Core traits (Eq, Ord, Display, Debug, Clone, Copy, Drop, Hash, Into, From)
-mod traits
--- Option type (?T)
-mod option
--- Result type
-mod result
--- Iterator protocol
-mod iterator
--- Operator traits (Add, Sub, Mul, …)
-mod ops
+use protocols.{resources, native_resources, conversion, patterns, ops, iterator, traits};
+use types.{tuple, option, result};
+use numeric.{comparison, math_intrinsics};
 
--- ── Prelude re-exports ─────────────────────────────────────────────────────
--- Everything below is auto-imported into every user module.
+pub use primitives.*;
+pub use tuple.Tuple;
+pub use option.OptionalOps;
+pub use text_impl.bytes.TextBytes;
+pub use result.ErrorResultOps;
+pub use traits.*;
+pub use patterns.ListPatternView;
+pub use iterator.{Iterator, IntoIterator, FromIterator, emit_item, MapIterator, MapWhileIterator, ScanIterator, FilterIterator, FilterMapIterator, FlatMapIterator, FlattenIterator, TakeWhileIterator, SkipWhileIterator, TakeIterator, SkipIterator, ChainIterator, InspectIterator, IntersperseWithIterator};
+pub use ops.*;
 
-pub use primitives.*
-pub use traits.*
-pub use option.{Option, Some, None}
-pub use result.{Result, Ok, Err}
-pub use iterator.{Iterator, FromIterator}
-pub use ops.*
+{- Shared operation identities for the other builtin packages; not a prelude. -}
+pub mod compiler {
+    pub use bindings.*;
+}
+
+pub mod text {
+    pub use text_impl.bytes.*;
+}
+
+pub mod math {
+    pub use comparison.{Eq, Ord, Order};
+    pub use math_intrinsics.*;
+}
+
+pub mod prelude {
+    pub use .math;
+    pub use primitives.*;
+    pub use tuple.Tuple;
+    pub use option.OptionalOps;
+    pub use text_impl.bytes.TextBytes;
+    pub use result.ErrorResultOps;
+    pub use traits.*;
+    pub use patterns.ListPatternView;
+    pub use iterator.{Iterator, IntoIterator, FromIterator};
+    pub use ops.*;
+}

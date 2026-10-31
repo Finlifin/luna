@@ -1,0 +1,102 @@
+-- Compile-time type-list inputs determine runtime local types.
+use meta.List;
+typealias Type = .Type'builtin;
+
+comptime fn First() -> Type where Es: List<Type> { Es[0] }
+comptime fn Second() -> Type where Es: List<Type> { Es[1] }
+comptime fn Defaulted() -> Type where .Es: List<Type> = [bool] { Es[0] }
+comptime fn Forward() -> Type where Es: List<Type> { First<Es>() }
+
+fn identity(value: defer First<Es>()) -> defer First<Es>() where Es: List<Type> {
+    value
+}
+
+fn invoke(callback: fn(bool) -> bool) -> bool { callback(true) }
+
+fn factory() -> fn(T) -> T where T { identity<[T]> }
+
+fn defaulted(value: defer First<Es>()) -> defer First<Es>()
+where .Es: List<Type> = [bool] { value }
+
+fn defaulted_callbacks() -> bool {
+    let annotated: fn(bool) -> bool = defaulted;
+    let inferred = defaulted;
+    let explicit: fn(.u8'builtin) -> .u8'builtin = defaulted<.Es=[.u8'builtin]>;
+    annotated(true) and inferred(true) and explicit(42) == 42 and invoke(defaulted)
+}
+
+fn forward(value: T) -> defer First<Es>() where T, .Es: List<Type> = [T] { value }
+fn reverse(value: defer First<Es>()) -> T where T, .Es: List<Type> = [T] { value }
+
+fn inferred_callbacks() -> bool {
+    let flag: fn(bool) -> bool = forward;
+    let byte: fn(.u8'builtin) -> .u8'builtin = forward;
+    let from_result: fn(bool) -> bool = reverse;
+    flag(true) and byte(42) == 42 and from_result(true) and invoke(forward)
+}
+
+fn choose(value: defer First<Es>(), state: *bool) -> defer First<Es>()
+where Es: List<Type>, flag: bool { state.* = flag; value }
+
+fn value_factory() -> fn(bool, *bool) -> bool where flag: bool { choose<[bool], flag> }
+
+fn captured_clauses() -> bool {
+    var state = false;
+    let yes = value_factory<true>();
+    let no = value_factory<false>();
+    let a = yes(true, state.ref);
+    assumes state;
+    let b = no(true, state.ref);
+    a and b and not state
+}
+
+fn tagged(value: defer First<Es>(), state: *.u8'builtin) -> defer First<Es>()
+where Es: List<Type>, tag: .u8'builtin { state.* = tag; value }
+
+fn tagged_factory() -> fn(bool, *.u8'builtin) -> bool where tag: .u8'builtin {
+    tagged<[bool], tag>
+}
+
+fn captured_integer_clauses() -> bool {
+    var state: .u8'builtin = 0;
+    let first = tagged_factory<7>();
+    let second = tagged_factory<255>();
+    let a = first(true, state.ref);
+    assumes state == 7;
+    let b = second(true, state.ref);
+    a and b and state == 255
+}
+
+fn evaluation_order() -> bool {
+    var callee = false;
+    var argument = false;
+    let result = (do {
+        assumes not callee and not argument;
+        callee = true;
+        factory<bool>()
+    })(do {
+        assumes callee and not argument;
+        argument = true;
+        true
+    });
+    let byte = factory<.u8'builtin>();
+    result and callee and argument and byte(42) == 42
+}
+
+fn run() -> bool {
+    let first: First<[bool, .u8'builtin]>() = true;
+    let second: Second<[.u8'builtin, bool]>() = true;
+    let fallback: Defaulted<>() = true;
+    let explicit: Defaulted<.Es=[bool, .u8'builtin]>() = true;
+    let forwarded: Forward<[bool]>() = true;
+    let flag = identity<[bool]>(forwarded);
+    let byte = identity<[.u8'builtin]>(42);
+    let callback: fn(bool) -> bool = identity<[bool]>;
+    let byte_callback: fn(.u8'builtin) -> .u8'builtin = identity<[.u8'builtin]>;
+    let captured: fn(bool) -> bool = identity<[bool]>;
+    let closure = || captured(true);
+    first and second and fallback and explicit and flag and byte == 42
+        and invoke(callback) and byte_callback(42) == 42 and closure() and evaluation_order()
+        and defaulted_callbacks() and inferred_callbacks() and captured_clauses()
+        and captured_integer_clauses()
+}

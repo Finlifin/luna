@@ -40,17 +40,14 @@ impl HirPackageBox {
         // SAFETY: `package` borrows from `arena`.  Both are moved into `Self`
         // together, so the transmuted `Package<'static>` is only accessible via
         // `package()` which re-constrains the lifetime to `'a ≤ lifetime-of-self`.
-        let package =
-            unsafe { std::mem::transmute::<Package<'_>, Package<'static>>(package) };
+        let package = unsafe { std::mem::transmute::<Package<'_>, Package<'static>>(package) };
         HirPackageBox { arena, package }
     }
 
     /// Borrow the HIR package with a safe lifetime `'a` tied to `self`.
     pub fn package<'a>(&'a self) -> &'a Package<'a> {
         // SAFETY: rebind lifetime from 'static (internal repr) to 'a (borrow of self).
-        unsafe {
-            std::mem::transmute::<&Package<'static>, &'a Package<'a>>(&self.package)
-        }
+        unsafe { std::mem::transmute::<&Package<'static>, &'a Package<'a>>(&self.package) }
     }
 
     /// Borrow the HIR arena.

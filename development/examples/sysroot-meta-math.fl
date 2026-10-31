@@ -1,0 +1,91 @@
+{-
+    Compile-time math uses the public library interface and VM bindings.
+    Runtime math keeps its ordinary default-prelude name.
+-}
+comptime fn run() -> bool {
+    let root = meta.math.sqrt<f64>(81.0);
+    let scale = meta.math.ldexp(root, 2);
+    let reverse = meta.math.bit_reverse<u8>(3);
+    let count = meta.math.leading_zeros<usize>(0);
+    let saturated = meta.math.saturating_add<i8>(120, 30);
+    let negative_zero = meta.math.minimum<f32>(0.0, -0.0);
+    root == 9.0 and scale == 36.0 and reverse == 192 and count == 64
+        and saturated == 127 and meta.math.signbit(negative_zero)
+        and half_f16() and half_bf16()
+}
+
+comptime fn half_f16() -> bool {
+    let fused = meta.math.fma<f16>(2.0, 3.0, 1.0);
+    let recovered = meta.math.fma<f16>(256.0, 256.0, -65280.0);
+    let tiny = meta.math.ldexp<f16>(1.0, -24);
+    let tiny_class = meta.math.issubnormal(tiny);
+    let overflow = meta.math.ldexp<f16>(1.0, 10000);
+    let overflow_class = meta.math.isinf(overflow);
+    let invalid = meta.math.sqrt<f16>(-1.0);
+    let invalid_class = meta.math.isnan(invalid);
+    let root = meta.math.sqrt<f16>(4.0);
+    let signed = meta.math.copysign<f16>(2.0, -1.0);
+    let floor = meta.math.floor<f16>(-1.5);
+    let ceil = meta.math.ceil<f16>(-1.5);
+    let truncated = meta.math.trunc<f16>(-1.5);
+    let even = meta.math.roundeven<f16>(2.5);
+    let away = meta.math.round<f16>(-2.5);
+    let magnitude = meta.math.abs<f16>(-2.0);
+    let scaled = meta.math.ldexp<f16>(1.5, 3);
+    let lower = meta.math.minimumnum<f16>(2.0, -1.0);
+    let upper = meta.math.maximumnum<f16>(2.0, -1.0);
+    let minus_zero = meta.math.minimum<f16>(0.0, -0.0);
+    let plus_zero = meta.math.maximum<f16>(-0.0, 0.0);
+    let negative = meta.math.signbit(minus_zero);
+    let positive = not meta.math.signbit(plus_zero);
+    let normal = meta.math.isnormal(root);
+    let finite = meta.math.isfinite(root);
+    let nan = meta.math.isnan(root);
+    let infinite = meta.math.isinf(root);
+    let subnormal = meta.math.issubnormal(root);
+    (recovered == 256.0 and tiny_class and overflow_class and invalid_class)
+        and (fused == 7.0 and root == 2.0 and signed == -2.0)
+        and (floor == -2.0 and ceil == -1.0 and truncated == -1.0)
+        and (even == 2.0 and away == -3.0 and magnitude == 2.0)
+        and (scaled == 12.0 and lower == -1.0 and upper == 2.0)
+        and (negative and positive and normal and finite)
+        and (not nan and not infinite and not subnormal)
+}
+
+comptime fn half_bf16() -> bool {
+    let fused = meta.math.fma<bf16>(2.0, 3.0, 1.0);
+    let recovered = meta.math.fma<bf16>(256.0, 256.0, -65280.0);
+    let tiny = meta.math.ldexp<bf16>(1.0, -133);
+    let tiny_class = meta.math.issubnormal(tiny);
+    let overflow = meta.math.ldexp<bf16>(1.0, 10000);
+    let overflow_class = meta.math.isinf(overflow);
+    let invalid = meta.math.sqrt<bf16>(-1.0);
+    let invalid_class = meta.math.isnan(invalid);
+    let root = meta.math.sqrt<bf16>(4.0);
+    let signed = meta.math.copysign<bf16>(2.0, -1.0);
+    let floor = meta.math.floor<bf16>(-1.5);
+    let ceil = meta.math.ceil<bf16>(-1.5);
+    let truncated = meta.math.trunc<bf16>(-1.5);
+    let even = meta.math.roundeven<bf16>(2.5);
+    let away = meta.math.round<bf16>(-2.5);
+    let magnitude = meta.math.abs<bf16>(-2.0);
+    let scaled = meta.math.ldexp<bf16>(1.5, 3);
+    let lower = meta.math.minimumnum<bf16>(2.0, -1.0);
+    let upper = meta.math.maximumnum<bf16>(2.0, -1.0);
+    let minus_zero = meta.math.minimum<bf16>(0.0, -0.0);
+    let plus_zero = meta.math.maximum<bf16>(-0.0, 0.0);
+    let negative = meta.math.signbit(minus_zero);
+    let positive = not meta.math.signbit(plus_zero);
+    let normal = meta.math.isnormal(root);
+    let finite = meta.math.isfinite(root);
+    let nan = meta.math.isnan(root);
+    let infinite = meta.math.isinf(root);
+    let subnormal = meta.math.issubnormal(root);
+    (recovered == 256.0 and tiny_class and overflow_class and invalid_class)
+        and (fused == 7.0 and root == 2.0 and signed == -2.0)
+        and (floor == -2.0 and ceil == -1.0 and truncated == -1.0)
+        and (even == 2.0 and away == -3.0 and magnitude == 2.0)
+        and (scaled == 12.0 and lower == -1.0 and upper == 2.0)
+        and (negative and positive and normal and finite)
+        and (not nan and not infinite and not subnormal)
+}

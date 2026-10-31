@@ -1,0 +1,21 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+fn selected(comptime value: bool) -> bool { value }
+
+fn independent(comptime flag: bool) -> bool {
+    selected(do {
+        let toggle: %{flag: bool} comptime fn() -> bool = || {
+            flag = not flag;
+            flag
+        };
+        let read: %{flag: bool} comptime fn() -> bool = || flag;
+        let changed = toggle();
+        let restored = toggle();
+        changed != read() and restored == flag
+    })
+}
+
+fn run() -> Tuple<bool, bool> {
+    (independent(false), independent(true))
+}

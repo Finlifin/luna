@@ -1,0 +1,11 @@
+-- Regression: defer member selection until Make returns its container identity.
+struct Holder where flag: bool {
+    pub const FLAG = flag;
+}
+comptime fn Make(flag: bool) -> .Type'builtin { Holder<flag> }
+fn configured(comptime flag: bool) -> bool {
+    const Container = Make(flag);
+    const result = Container.FLAG;
+    result
+}
+fn run() -> bool { configured(true) and not configured(false) }

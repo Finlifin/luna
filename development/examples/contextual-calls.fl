@@ -1,0 +1,71 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+-- Result context flows through nested generic calls before runtime execution.
+typealias Flag = bool;
+
+fn keep(value: T) -> T where T {
+    value
+}
+
+fn factory() -> fn(T) -> T where T {
+    keep<T>
+}
+
+fn apply(callback: fn(T) -> T, value: T) -> T where T {
+    callback(value)
+}
+
+fn run() -> Tuple<Flag, Flag> {
+    (
+        apply(keep(factory()), true),
+        apply(keep(keep(|value| value)), false),
+    )
+}
+
+-- T comes from value; checking callback supplies U without an annotation.
+fn map(value: T, callback: fn(T) -> U) -> U where T, U {
+    callback(value)
+}
+
+fn inferred_result() -> 'x''type {
+    let result = map(true, |flag| if flag { 'y' } else { 'n' });
+    result
+}
+
+-- A generic function value can also use the known input part of its context.
+fn inferred_function_value() -> Flag {
+    let result = map(true, keep);
+    result
+}
+
+-- The callback's input is known before its output. This information crosses
+-- the branch expression; choosing the callback remains a runtime operation.
+fn selected_callback(flag: Flag) -> 'x''type {
+    let result = map(true, if flag {
+        |value| if value { 'y' } else { 'n' }
+    } else {
+        |value| if value { 'a' } else { 'b' }
+    });
+    result
+}
+
+fn matched_callback(flag: Flag) -> Flag {
+    let result = map(true, flag match {
+        true => do { keep },
+        false => |value| not value,
+    });
+    result
+}
+
+-- A partial callback context also crosses generic identity calls. The inner
+-- lambda learns its input type while its output supplies the remaining type.
+fn nested_partial_callback() -> 'x''type {
+    let result = map(true, keep(keep(|flag| if flag { 'y' } else { 'n' })));
+    result
+}
+
+fn nested_factory() -> Flag {
+    let result = map(true, keep(factory()));
+    result
+}

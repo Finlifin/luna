@@ -1,0 +1,6 @@
+pub fn choose(value: Flag) -> Flag {
+    let true as accepted = value else {
+        return false;
+    }
+    accepted
+}

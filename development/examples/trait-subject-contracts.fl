@@ -1,0 +1,25 @@
+-- Interface formation fixes T; each implementation must then establish Self == T.
+trait Same where T, requires Self == T {
+    fn convert(self) -> T { self }
+}
+
+impl Same<T> for T where T {}
+
+-- A parent's subject guarantee is also available in child default bodies.
+trait Child :- Same<T> where T {
+    fn inherited(self) -> T { self }
+}
+
+impl Child<T> for T where T :- Same<T> {}
+
+-- The type equation follows from the declared capability, without unfolding
+-- any normal-form head or inspecting a selected implementation's body.
+fn forward(value: S) -> T where T, S :- Child<T> {
+    value
+}
+
+fn flag() -> bool { forward<bool, bool>(true) }
+fn letter() -> 'x''type { 'x'.as(Child<'x''type>).inherited() }
+
+-- This implementation would be rejected: char does not establish Self == bool.
+-- impl Same<bool> for 'x''type {}

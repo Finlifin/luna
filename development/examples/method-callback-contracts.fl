@@ -1,0 +1,10 @@
+typealias Type=.Type'builtin;
+struct Box where T {value:T,}
+trait Service {
+ fn apply(comptime A:Type,comptime B:Type,value:A,callback:Box<fn(A)->A>)->A where requires A == B;
+}
+impl Service for bool {
+ fn apply(comptime X:Type,comptime Y:Type,value:Y,callback:Box<fn(Y)->Y>)->Y where requires X == Y {callback.value(value)}
+}
+fn identity(value:bool)->bool {value}
+fn run()->bool {bool.as(Service).apply(bool,bool,true,Box<fn(bool)->bool>{value:identity})}

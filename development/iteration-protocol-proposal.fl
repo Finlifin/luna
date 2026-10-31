@@ -1,0 +1,53 @@
+-- Proposed ordinary-for protocol boundary; NOT an accepted language contract.
+-- Sources: docs/control-flow/basic.md and
+-- docs/algebraic-effect-and-delimited-continuation/algebraic-effect.md.
+-- The current library Iterator.next protocol is not the lowering target.
+-- This file is deliberately not installed in library/language-items.conf.
+
+inline effect iteration_yield(item: T) where T;
+
+trait Iter {
+    assoc Item: .Type'builtin;
+    inline fn iterate(self) -> #iteration_yield<Item> void;
+}
+
+trait IntoIterator {
+    assoc Iterator: .Type'builtin;
+    fn into_iter(self) -> Iterator;
+}
+
+-- Proposed selection rule, requiring confirmation:
+-- 1. Evaluate the iterable exactly once, outside the loop binding scope.
+-- 2. Prefer directly established Iter evidence. Otherwise select one
+--    IntoIterator implementation and require Iter for its result type.
+-- 3. Do not recursively search conversion chains or guess methods by spelling.
+--    Driver-bound declaration identities select these protocols and the effect.
+-- 4. Protocol validation requires the exact Item/yield payload relationship.
+--    Conversion, iteration, and yielded values retain their resource contracts.
+
+-- Lowering sketch (internal operations, not new surface syntax):
+--   acquire iterable / converted iterator;
+--   establish the original for-loop identity;
+--   install the matching iteration_yield<Item> handler;
+--   call the selected Iter.iterate method;
+--   for each delivered item: match pattern, test guard, execute body;
+--   release remaining iterator state on normal and nonlocal exits.
+-- Proposed mismatch/false-guard behavior: discard this delivered item under
+-- its normal cleanup obligations and resume the producer for the next item.
+
+-- continue resumes this loop's producer after releasing the iteration scope.
+-- break abandons that producer and exits this loop after required cleanup.
+-- return and transfers to an outer loop retain their original lexical targets.
+-- A yielded pointer does not acquire ownership of its pointee. Its lifetime
+-- remains governed by the selected iterator's memory/effect contract.
+
+-- Inline is an optimization intent in the current formal effect documentation.
+-- Joint caller/callee/handler expansion should use the existing checked pass;
+-- failure to inline retains the ordinary evidence path with the same behavior.
+-- Do not promise mandatory expansion merely by recognizing a for statement.
+
+-- Decisions still needed: public names/signatures; direct-Iter priority;
+-- mismatch behavior; and whether IntoIterator carries the result-Iter bound
+-- in its source declaration or as an explicitly checked language-item contract.
+-- Until confirmed, ordinary for continues to retain its complete HIR payload
+-- and report the existing unsupported-elaboration diagnostic at the NIR boundary.

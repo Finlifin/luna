@@ -1,0 +1,97 @@
+-- Defaults observe staged declaration inputs without fixing them to one call.
+fn invert(comptime mode: bool, value: bool) -> bool {
+    inline if mode { not value } else { value }
+}
+fn choose(comptime mode: bool, first: T, second: T) -> T where T {
+    inline if mode { first } else { second }
+}
+fn invert_selected(comptime mode: bool, value: bool) -> bool where flip: bool {
+    inline if mode == flip { not value } else { value }
+}
+fn take(comptime mode: bool, value: bool, .next: bool = invert(mode, value)) -> bool {
+    next
+}
+fn forward(comptime mode: bool, value: bool) -> bool {
+    take(mode, value)
+}
+fn computed(comptime mode: bool, value: bool,
+    .next: bool = invert(not mode, value)) -> bool {
+    next
+}
+fn local_constant(comptime mode: bool, value: bool, .next: bool = do {
+    const operation = invert;
+    const selected = not mode;
+    operation(selected, value)
+}) -> bool {
+    next
+}
+fn chain(comptime mode: bool, value: bool,
+    .next: bool = invert(mode, value), .last: bool = invert(mode, next)) -> bool {
+    last
+}
+fn direct(comptime .mode: bool = true, value: bool,
+    .next: bool = inline if mode { not value } else { value }) -> bool {
+    next
+}
+fn patterned(comptime mode: bool, value: bool,
+    .next: bool = inline if true is do {
+        'mode => not value,
+        _ => value,
+    }) -> bool {
+    next
+}
+fn destructured(comptime mode: bool, value: bool, .next: bool = do {
+    let (first and (inline if mode { not first } else { first }) is result) = value;
+    result
+}) -> bool {
+    next
+}
+fn conditional_constant(comptime mode: bool, .next: bool = do {
+    var selected = false;
+    while true {
+        const found if mode = true else { break; };
+        selected = found;
+        break;
+    }
+    selected
+}) -> bool {
+    next
+}
+fn run() -> bool {
+    const choose_bool = choose<bool>;
+    const choose_context: fn(comptime bool, bool, bool) -> bool = choose;
+    const flip_true = invert_selected<true>;
+    var called = false;
+    let first = forward(true, do {
+        assumes not called;
+        called = true;
+        false
+    });
+    let second = forward(false, false);
+    let overridden = take(true, false, .next = false);
+    let chained = chain(true, false);
+    let chained_override = chain(true, false, .next = false);
+    called and first and not second and not overridden and not chained and chained_override
+        and direct(false) and not direct(false, .mode = false)
+        and not direct(false, .next = false)
+        and patterned(true, false) and not patterned(false, false)
+        and destructured(true, false) and not destructured(false, false)
+        and computed(false, false) and not computed(true, false)
+        and local_constant(false, false) and not local_constant(true, false)
+        and choose_bool(true, true, false) and not choose_context(false, true, false)
+        and flip_true(true, false) and not flip_true(false, false)
+        and conditional_constant(true) and not conditional_constant(false)
+        and conditional_pattern(true) and not conditional_pattern(false)
+}
+fn conditional_pattern(comptime mode: bool, .next: bool = do {
+    var selected = false;
+    while true {
+        const 'mode as found = true else { break; };
+        selected = found;
+        break;
+    }
+    selected
+}) -> bool {
+    next
+}
+test staged_default_forwarding { let passed = run(); assumes passed; }

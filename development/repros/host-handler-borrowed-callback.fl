@@ -1,0 +1,30 @@
+-- The handler borrows one live closure environment across two requests.
+-- Neither the function type nor the closure type is given a Copy implementation.
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+impl Duplicate for *T where T {}
+
+effect inspect(pointer: *bool) -> bool;
+fn subject(pointer: *bool) -> #inspect bool {
+    inspect(pointer)#;
+    inspect(pointer)#
+}
+
+fn run() -> bool {
+    var seen = false;
+    var bit = false;
+    let callback = |target: *bool| {
+        bit = not bit;
+        target.* = bit;
+    };
+    let result = subject(seen.ref)# {
+        inspect(value) => do {
+            callback(value);
+            resume value.*;
+        },
+    };
+    let previous = seen;
+    callback(seen.ref);
+    not result and not previous and seen
+}

@@ -26,6 +26,7 @@ define_symbols! {
     sym_isize   => "isize",
     sym_integer => "Integer",
     sym_f16     => "f16",
+    sym_bf16    => "bf16",
     sym_f32     => "f32",
     sym_f64     => "f64",
     sym_real    => "Real",
@@ -47,7 +48,8 @@ define_symbols! {
     sym_eq      => "Eq",
     sym_ord     => "Ord",
     sym_hash    => "Hash",
-    sym_iterator => "Iterator",
+    sym_iter    => "Iter",
+    sym_into_iterator => "IntoIterator",
     sym_into    => "Into",
     sym_from    => "From",
 }

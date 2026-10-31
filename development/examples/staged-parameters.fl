@@ -1,0 +1,36 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+-- Compile-time inputs select an instance; ordinary inputs still arrive at runtime.
+comptime fn prefer_first() -> bool {
+    true
+}
+
+fn choose(comptime .use_first: bool = prefer_first(), first: T, second: T) -> T
+where T
+{
+    if use_first { first } else { second }
+}
+
+-- Forward the selected input without evaluating it during definition checking.
+fn forward(comptime use_first: bool, first: T, second: T) -> T
+where T
+{
+    choose(first, second, .use_first = use_first)
+}
+
+-- This boolean computation becomes a literal when the instance is selected.
+fn opposite(comptime use_first: bool, first: T, second: T) -> T
+where T
+{
+    choose(first, second, .use_first = not use_first)
+}
+
+typealias Byte = .u8'builtin;
+
+fn run() -> Tuple<bool, Byte> {
+    (
+        choose(true, false),
+        opposite<Byte>(true, 3, 8),
+    )
+}

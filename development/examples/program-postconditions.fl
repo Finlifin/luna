@@ -1,0 +1,72 @@
+typealias Byte = .u8'builtin;
+fn identity(value: Byte) -> result: Byte
+where ensures result == value { value }
+fn next(value: Byte) -> result: Byte
+where requires value < 255,
+    ensures result == value + 1 { value + 1 }
+fn early(value: Byte) -> result: Byte
+where ensures result <= value {
+    if value == 0 { return 0; }
+    value
+}
+fn branches(value: Byte, flag: bool) -> result: Byte
+where ensures result <= value {
+    if flag { return value; }
+    0
+}
+fn closures(value: Byte) -> result: Byte
+where ensures result == value {
+    let unrelated = || { return 200; };
+    value
+}
+fn total_bool(flag: bool) -> result: bool
+where ensures result or not result { flag }
+fn parameters(value: Byte)
+where ensures value <= 255 {}
+fn checked(value: Byte) -> result: Byte
+where ensures result < 100 {
+    assumes value < 100;
+    value
+}
+fn generic(value: T, flag: bool) -> result: T
+where T, requires flag,
+    ensures flag { value }
+fn generic_call(value: Byte) -> Byte { generic(value, true) }
+comptime fn ct_next(value: Byte) -> result: Byte
+where requires value < 255,
+    ensures result == value + 1 { value + 1 }
+comptime fn run() -> result: Byte
+where ensures result == 101 { 101 }
+comptime fn Selected(flag: bool) -> result: .Type'builtin
+where requires flag,
+    ensures flag { Byte }
+typealias SelectedByte = Selected(true);
+comptime fn selected() -> SelectedByte { 3 }
+fn small() -> result: Byte
+where ensures result + 1 <= 100 { 42 }
+fn use_small() -> Byte { small() + 155 }
+struct Pair { first: Byte, last: Byte }
+fn pair() -> result: Pair
+where ensures result.first <= result.last {
+    Pair { first: 100, last: 255 }
+}
+fn use_pair() -> Byte {
+    let value = pair();
+    value.last - value.first
+}
+fn changed(value: Byte) -> result: Byte
+where ensures result == value {
+    value = 0;
+    value
+}
+comptime fn integer() -> result: .Integer'builtin
+where ensures result == 7 { 7 }
+comptime fn baseline() -> Byte {
+    let ignored = integer();
+    1 + 1
+}
+fn shadow() -> result: Byte
+where ensures result == 0 {
+    let result = 255;
+    0
+}

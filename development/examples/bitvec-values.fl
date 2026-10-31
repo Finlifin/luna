@@ -1,0 +1,30 @@
+-- Explicit builtin views until builtin package/prelude loading is connected.
+typealias Byte = .u8'builtin;
+typealias Signed = .i8'builtin;
+fn byte() -> Byte { 175 }
+fn signed() -> Signed { -1 }
+-- Type observation follows signatures without evaluating these calls.
+typealias Bits = byte()'bitvec'type;
+typealias Pair = (byte()'bitvec ++ byte()'bitvec)'type;
+fn high() -> Bits { byte()'bitvec }
+fn low() -> Bits { 60 }
+fn combined() -> Pair { high() ++ low() }
+fn complemented() -> Bits { not high() }
+fn signed_bits() -> Bits { signed()'bitvec }
+fn identity(value: T) -> T where T { value }
+fn contextual() -> Bits { identity(255) }
+fn check_pattern() -> bool { contextual() match { 255 => true, _ => false } }
+
+-- An explicit slice chooses which bits to discard before a narrower conversion.
+fn low_byte() -> Byte { combined()[0..8].as(Byte) }
+fn swapped() -> .u16'builtin {
+    let bits = combined();
+    (bits[0..8] ++ bits[8..16]).as(.u16'builtin)
+}
+fn top_bit() -> Byte { high()[7].as(Byte) }
+fn empty_equal() -> bool {
+    let empty = high()[8..8];
+    empty == not empty
+}
+fn widened() -> Pair { high().as(Pair) }
+fn comparison() -> bool { high() == 175 and low() != 175 }

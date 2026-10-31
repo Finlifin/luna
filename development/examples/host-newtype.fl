@@ -1,0 +1,21 @@
+-- Build with --copy-protocol Duplicate --drop-protocol Retire.
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+
+newtype Enabled = bool;
+impl Duplicate for Enabled {}
+newtype Handle = *bool;
+impl Duplicate for Handle {}
+
+fn enable(handle: Handle) {
+    let pointer = handle.as(*bool);
+    pointer.* = true;
+}
+
+fn run() -> bool {
+    var flag = false;
+    enable(flag.ref.as(Handle));
+    let enabled = flag.as(Enabled);
+    enabled.as(bool)
+}

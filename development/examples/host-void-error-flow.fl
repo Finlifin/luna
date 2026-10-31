@@ -1,0 +1,70 @@
+-- Build with --copy-protocol Duplicate --drop-protocol Retire --build run.
+-- stop selects an early exit: 0 = none, 1 = before, 2 = ordinary arm, 3 = after.
+typealias Void = .void'builtin;
+typealias Byte = .u8'builtin;
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+impl Duplicate for Byte {}
+enum InputErr { Rejected }
+impl Duplicate for InputErr {}
+
+struct Lease { released: *bool }
+impl Retire for Lease {
+    fn drop(*self) {
+        let previous = self.released.*.*;
+        assumes not previous;
+        self.released.*.* = true;
+    }
+}
+
+fn validate(failed: bool) -> !InputErr Void {
+    if failed { return error InputErr.Rejected; }
+}
+fn forward(failed: bool, continued: *bool) -> !InputErr Void {
+    validate(failed)!;
+    continued.* = true;
+}
+fn handle(failed: bool, stop: Byte, continued: *bool, released: *bool,
+          before: *bool, arm: *bool, after: *bool, finished: *bool) {
+    let lease = Lease { released: released };
+    forward(failed, continued)! {
+        catch original => {
+            before.* = true;
+            if stop == 1 { return; }
+        },
+        .Rejected => {
+            let started = before.*;
+            assumes started;
+            arm.* = true;
+            if stop == 2 { return; }
+        },
+        catch original => {
+            let selected = arm.*;
+            assumes selected;
+            after.* = true;
+            if stop == 3 { return; }
+        },
+    };
+    finished.* = true;
+}
+fn scenario(failed: bool, stop: Byte) -> bool {
+    var continued = false;
+    var released = false;
+    var before = false;
+    var arm = false;
+    var after = false;
+    var finished = false;
+    handle(failed, stop, continued.ref, released.ref, before.ref, arm.ref, after.ref, finished.ref);
+    released and continued == not failed
+        and finished == (not failed or stop == 0)
+        and before == failed
+        and arm == (failed and stop != 1)
+        and after == (failed and stop != 1 and stop != 2)
+}
+fn run() -> bool {
+    scenario(false, 0) and scenario(true, 0)
+        and scenario(false, 1) and scenario(true, 1)
+        and scenario(false, 2) and scenario(true, 2)
+        and scenario(false, 3) and scenario(true, 3)
+}

@@ -5,6 +5,10 @@ use super::parser::*;
 use ast::*;
 use lex::TokenKind;
 
+// Endpoints may contain projections/applications, but lower-precedence
+// propagation, alternatives and guards apply to the completed range.
+const RANGE_ENDPOINT_PRECEDENCE: i32 = 41;
+
 /// 模式选项，包含是否记录调用和优先级
 #[derive(Debug, Clone, Copy)]
 pub struct PatternOption {
@@ -52,6 +56,33 @@ impl Parser<'_> {
         self.scoped(|p| p.try_pattern_pratt(0, PatternOption::new().with_no_extended_call(true)))
     }
 
+    // A projection after the matching diamond makes this a type-expression
+    // qualifier (Choice<T>.value), not a type-pattern application (Choice<T>).
+    // Look ahead without building speculative AST nodes or publishing binders.
+    fn diamond_qualifies_projection(&self) -> bool {
+        let mut depth = 0usize;
+        for (index, token) in self.tokens.iter().enumerate().skip(self.cursor + 1) {
+            match token.kind {
+                TokenKind::Lt => depth += 1,
+                TokenKind::Gt => {
+                    let Some(next) = depth.checked_sub(1) else {
+                        return false;
+                    };
+                    depth = next;
+                    if depth == 0 {
+                        return self
+                            .tokens
+                            .get(index + 1)
+                            .is_some_and(|token| token.kind == TokenKind::Dot);
+                    }
+                }
+                TokenKind::Eof => return false,
+                _ => {}
+            }
+        }
+        false
+    }
+
     pub fn try_pattern_pratt(&mut self, min_prec: i32, option: PatternOption) -> ParseResult {
         self.scoped(|p| {
             // 尝试解析前缀模式作为左操作数
@@ -59,6 +90,21 @@ impl Parser<'_> {
                 0 => return Ok(0),
                 node => node,
             };
+
+            if p.peek_next_token().kind == TokenKind::Id
+                && matches!(
+                    p.ast.get_node_kind(current_left),
+                    Some(
+                        NodeKind::Int
+                            | NodeKind::Real
+                            | NodeKind::Str
+                            | NodeKind::StringConcat
+                            | NodeKind::Char
+                    )
+                )
+            {
+                current_left = p.try_literal_extension_expr(current_left)?;
+            }
 
             // 循环处理操作符和右操作数
             loop {
@@ -116,18 +162,19 @@ impl Parser<'_> {
 
     pub fn try_prefix_pattern(&mut self, option: PatternOption) -> ParseResult {
         self.scoped(|p| {
-            // Check for bit vector patterns (0b..., 0o..., 0x...)
-            // TODO: you need to check two tokens instead of one
-            if p.peek_next_token().kind == TokenKind::Int {
-                let token = p.peek_next_token();
-                let text = p.token_text(&token);
-                if text.starts_with("0b") {
+            // Prefix notation in pattern position denotes BitVec segments,
+            // not an ordinary Integer equality pattern.
+            match p.peek_next_token().kind {
+                TokenKind::IntBin | TokenKind::BitBinPrefix => {
                     return p.try_bit_vec_pattern(NodeKind::BitVecBinPattern);
-                } else if text.starts_with("0o") {
+                }
+                TokenKind::IntOct | TokenKind::BitOctPrefix => {
                     return p.try_bit_vec_pattern(NodeKind::BitVecOctPattern);
-                } else if text.starts_with("0x") || text.starts_with("0X") {
+                }
+                TokenKind::IntHex | TokenKind::BitHexPrefix => {
                     return p.try_bit_vec_pattern(NodeKind::BitVecHexPattern);
                 }
+                _ => {}
             }
 
             let token = p.peek_next_token();
@@ -135,6 +182,7 @@ impl Parser<'_> {
                 // 原子模式
                 TokenKind::Int
                 | TokenKind::Real
+                | TokenKind::RealSci
                 | TokenKind::Str
                 | TokenKind::Char
                 | TokenKind::Id
@@ -145,6 +193,31 @@ impl Parser<'_> {
                 | TokenKind::Underscore
                 | TokenKind::Null => p.try_atomic(),
 
+                TokenKind::Minus | TokenKind::SeparatedMinus => {
+                    p.eat_tokens(1);
+                    if !matches!(
+                        p.peek_next_token().kind,
+                        TokenKind::Int
+                            | TokenKind::IntBin
+                            | TokenKind::IntOct
+                            | TokenKind::IntHex
+                            | TokenKind::Real
+                            | TokenKind::RealSci
+                    ) {
+                        return Err(ParseError::invalid_syntax(
+                            "Expected a numeric literal after `-` in a pattern".into(),
+                            p.peek_next_token().kind,
+                            p.next_token_span(),
+                        ));
+                    }
+                    let mut value = p.try_atomic()?;
+                    if p.peek_next_token().kind == TokenKind::Id {
+                        value = p.try_literal_extension_expr(value)?;
+                    }
+                    Ok(NodeBuilder::new(NodeKind::Negative, p.current_span())
+                        .add_single_child(value)
+                        .build(&mut p.ast))
+                }
                 TokenKind::Dot => p.try_range_to_or_symbol(option),
                 TokenKind::LBracket => p.try_list_pattern(),
                 TokenKind::LParen => p.try_tuple_pattern(),
@@ -238,6 +311,7 @@ impl Parser<'_> {
                     )
                 }
 
+                TokenKind::Tilde => p.try_pattern_splice(),
                 _ => Ok(0),
             }
         })
@@ -253,7 +327,7 @@ impl Parser<'_> {
     ) -> ParseResult {
         let option_ = option.clone();
 
-        self.scoped(|p| {
+        let node = self.scoped(|p| {
             match token_kind {
                 TokenKind::LParen => {
                     // 模式调用
@@ -270,17 +344,28 @@ impl Parser<'_> {
                 }
 
                 TokenKind::Lt => {
+                    if p.diamond_qualifies_projection() {
+                        return p.try_diamond_call_expr(left);
+                    }
                     // 钻石模式调用
                     let nodes = p.try_multi_with_bracket(
-                        &[Rule::comma("pattern", |p| p.try_pattern())],
+                        &[Rule::comma("type pattern argument", move |p| {
+                            let named = p.try_property_pattern(option)?;
+                            if named != 0 {
+                                Ok(named)
+                            } else {
+                                p.try_pattern()
+                            }
+                        })],
                         (TokenKind::Lt, TokenKind::Gt),
                     )?;
-                    Ok(
-                        NodeBuilder::new(NodeKind::NormalFormApplicationPattern, p.current_span())
-                            .add_single_child(left)
-                            .add_multiple_children(nodes)
-                            .build(&mut p.ast),
+                    Ok(NodeBuilder::new(
+                        NodeKind::NormalFormHeadApplicationPattern,
+                        p.current_span(),
                     )
+                    .add_single_child(left)
+                    .add_multiple_children(nodes)
+                    .build(&mut p.ast))
                 }
 
                 TokenKind::Dot => {
@@ -294,16 +379,17 @@ impl Parser<'_> {
                     } else if p.peek(&[TokenKind::Dot, TokenKind::Dot]) {
                         p.eat_tokens(2);
                         if p.eat_token(TokenKind::Eq) {
-                            let end = match p.try_pattern_with_option(option_)? {
-                                0 => {
-                                    return Err(ParseError::invalid_syntax(
-                                        "Expected a pattern after `..=`".to_string(),
-                                        p.peek_next_token().kind,
-                                        p.next_token_span(),
-                                    ));
-                                }
-                                node => node,
-                            };
+                            let end =
+                                match p.try_pattern_pratt(RANGE_ENDPOINT_PRECEDENCE, option_)? {
+                                    0 => {
+                                        return Err(ParseError::invalid_syntax(
+                                            "Expected a pattern after `..=`".to_string(),
+                                            p.peek_next_token().kind,
+                                            p.next_token_span(),
+                                        ));
+                                    }
+                                    node => node,
+                                };
                             Ok(NodeBuilder::new(
                                 NodeKind::RangeFromToInclusivePattern,
                                 p.current_span(),
@@ -312,7 +398,7 @@ impl Parser<'_> {
                             .add_single_child(end)
                             .build(&mut p.ast))
                         } else {
-                            match p.try_pattern_with_option(option_)? {
+                            match p.try_pattern_pratt(RANGE_ENDPOINT_PRECEDENCE, option_)? {
                                 0 => Ok(NodeBuilder::new(
                                     NodeKind::RangeFromPattern,
                                     p.current_span(),
@@ -391,7 +477,14 @@ impl Parser<'_> {
                 TokenKind::If => {
                     // if 守卫
                     p.eat_tokens(1);
-                    let guard = match p.try_expr_without_extended_call()? {
+                    // Inherit the surrounding brace boundary. Match arms and
+                    // bindings may contain ordinary constructors/property
+                    // calls in their guards; a condition followed by a body
+                    // block still reserves that brace for the caller.
+                    let mut guard_options = super::expressions::ExprOption::new()
+                        .with_no_extended_call(option.no_extended_call);
+                    guard_options.stop_at_do = true;
+                    let guard = match p.try_expr_with_option(guard_options)? {
                         0 => {
                             return Err(ParseError::invalid_syntax(
                                 "Expected an expression after `if`".to_string(),
@@ -467,40 +560,54 @@ impl Parser<'_> {
 
                 _ => Ok(0),
             }
-        })
+        })?;
+        if node != 0 {
+            self.include_left_span(left, node);
+        }
+        Ok(node)
     }
 
     /// Parse a bit vector pattern.
-    /// bit_vec_*_pattern -> 0b/0o/0x (integer | (id: expr) | <expr>)+
+    /// bit_vec_*_pattern -> 0b/0o/0x (id | integer | (pattern: expr) | <expr>)+
     /// Returns a MultiChildren node whose children are the segments.
     fn try_bit_vec_pattern(&mut self, kind: NodeKind) -> ParseResult {
         self.scoped(|p| {
             let mut segments = Vec::new();
 
             // First segment is the initial integer literal (e.g., 0b1110)
-            let first = NodeBuilder::new(NodeKind::Int, p.next_token_span()).build(&mut p.ast);
-            p.eat_tokens(1);
-            segments.push(first);
+            if matches!(
+                p.peek_next_token().kind,
+                TokenKind::BitBinPrefix | TokenKind::BitOctPrefix | TokenKind::BitHexPrefix
+            ) {
+                p.eat_tokens(1);
+            } else {
+                let first = NodeBuilder::new(NodeKind::Int, p.next_token_span()).build(&mut p.ast);
+                p.eat_tokens(1);
+                segments.push(first);
+            }
 
-            // Parse additional segments: integer | (id: expr) | <expr>
+            // Parse additional literal, typed-pattern and computed segments.
             loop {
                 let next = p.peek_next_token();
                 match next.kind {
                     // Another integer literal segment (e.g., 10 in 0b1110 10)
+                    TokenKind::Id => {
+                        segments.push(p.try_id()?);
+                    }
                     TokenKind::Int => {
                         let seg =
                             NodeBuilder::new(NodeKind::Int, p.next_token_span()).build(&mut p.ast);
                         p.eat_tokens(1);
                         segments.push(seg);
                     }
-                    // (id: expr) — named bit field
+                    // (pattern: expr) — a typed bit segment
                     TokenKind::LParen => {
                         let seg = p.scoped(|p2| {
                             p2.eat_tokens(1); // eat '('
-                            let id = p2.try_id()?;
+                            let id = p2.try_pattern()?;
                             if id == 0 {
                                 return Err(ParseError::invalid_syntax(
-                                    "Expected identifier in bit vector field".to_string(),
+                                    "Expected pattern in bit vector field".to_string(),
                                     p2.peek_next_token().kind,
                                     p2.next_token_span(),
                                 ));
@@ -527,7 +634,7 @@ impl Parser<'_> {
                                     p2.next_token_span(),
                                 ));
                             }
-                            // Store as TypeBoundDeclClause (id: type)
+                            // Preserve both the complete subpattern and its type expression.
                             Ok(
                                 NodeBuilder::new(NodeKind::TypeBoundDeclClause, p2.current_span())
                                     .add_single_child(id)
@@ -538,10 +645,12 @@ impl Parser<'_> {
                         segments.push(seg);
                     }
                     // <expr> — computed bit field
-                    TokenKind::SeparatedLt => {
+                    TokenKind::Lt | TokenKind::SeparatedLt => {
                         let seg = p.scoped(|p2| {
                             p2.eat_tokens(1); // eat ' < '
-                            let expr = p2.try_expr()?;
+                            let mut option = super::expressions::ExprOption::new();
+                            option.stop_at_pattern_gt = true;
+                            let expr = p2.try_expr_with_option(option)?;
                             if expr == 0 {
                                 return Err(ParseError::invalid_syntax(
                                     "Expected expression in bit vector computed field".to_string(),
@@ -549,7 +658,8 @@ impl Parser<'_> {
                                     p2.next_token_span(),
                                 ));
                             }
-                            if !p2.eat_token(TokenKind::SeparatedGt) {
+                            if !p2.eat_token(TokenKind::SeparatedGt) && !p2.eat_token(TokenKind::Gt)
+                            {
                                 return Err(ParseError::unexpected_token(
                                     TokenKind::SeparatedGt,
                                     p2.peek_next_token().kind,
@@ -567,6 +677,13 @@ impl Parser<'_> {
                 }
             }
 
+            if segments.is_empty() {
+                return Err(ParseError::invalid_syntax(
+                    "Expected at least one bit-vector segment".into(),
+                    p.peek_next_token().kind,
+                    p.current_span(),
+                ));
+            }
             Ok(NodeBuilder::new(kind, p.current_span())
                 .add_multiple_children(segments)
                 .build(&mut p.ast))
@@ -578,7 +695,9 @@ impl Parser<'_> {
         self.scoped_with_expected_prefix(&[TokenKind::SeparatedLt], |p| {
             p.eat_tokens(1);
 
-            let expr = match p.try_expr()? {
+            let mut option = super::expressions::ExprOption::new();
+            option.stop_at_pattern_gt = true;
+            let expr = match p.try_expr_with_option(option)? {
                 0 => {
                     return Err(ParseError::invalid_syntax(
                         "Expected an expression after ` < `".to_string(),
@@ -608,7 +727,7 @@ impl Parser<'_> {
         self.scoped(|p| {
             if p.peek(&[TokenKind::Dot, TokenKind::Dot, TokenKind::Eq]) {
                 p.eat_tokens(3); // 消耗 "..="
-                let end = match p.try_pattern_with_option(option)? {
+                let end = match p.try_pattern_pratt(RANGE_ENDPOINT_PRECEDENCE, option)? {
                     0 => {
                         return Err(ParseError::invalid_syntax(
                             "Expected a pattern after `..=`".to_string(),
@@ -625,13 +744,10 @@ impl Parser<'_> {
                 )
             } else if p.peek(&[TokenKind::Dot, TokenKind::Dot]) {
                 p.eat_tokens(2); // 消耗 ".."
-                let end = match p.try_pattern_with_option(option)? {
+                let end = match p.try_pattern_pratt(RANGE_ENDPOINT_PRECEDENCE, option)? {
                     0 => {
-                        return Err(ParseError::invalid_syntax(
-                            "Expected a pattern after `..`".to_string(),
-                            p.peek_next_token().kind,
-                            p.next_token_span(),
-                        ));
+                        return Ok(NodeBuilder::new(NodeKind::RangeFull, p.current_span())
+                            .build(&mut p.ast));
                     }
                     node => node,
                 };
@@ -702,17 +818,23 @@ impl Parser<'_> {
         })
     }
 
-    /// Try parse list rest pattern: `...id`
+    /// Try parse list rest pattern: `...id` or `..._`.
     fn try_list_rest_pattern(&mut self) -> ParseResult {
         self.scoped(|p| {
             if !p.peek(&[TokenKind::Dot, TokenKind::Dot, TokenKind::Dot]) {
                 return Ok(0);
             }
             p.eat_tokens(3); // consume '...'
-            let id = p.try_id()?;
+            let id = if p.peek(&[TokenKind::Underscore]) {
+                let span = p.next_token_span();
+                p.eat_tokens(1);
+                NodeBuilder::new(NodeKind::Wildcard, span).build(&mut p.ast)
+            } else {
+                p.try_id()?
+            };
             if id == 0 {
                 return Err(ParseError::invalid_syntax(
-                    "Expected an identifier after `...` in list rest pattern".to_string(),
+                    "Expected an identifier or `_` after `...` in list rest pattern".to_string(),
                     p.peek_next_token().kind,
                     p.next_token_span(),
                 ));
@@ -745,11 +867,37 @@ impl Parser<'_> {
     /// 尝试解析元组模式 (items)
     fn try_tuple_pattern(&mut self) -> ParseResult {
         self.scoped_with_expected_prefix(&[TokenKind::LParen], |p| {
-            let nodes = p.try_multi_with_bracket(
-                &[Rule::comma("pattern", |p| p.try_pattern())],
-                (TokenKind::LParen, TokenKind::RParen),
-            )?;
-
+            p.eat_tokens(1);
+            if p.eat_token(TokenKind::RParen) {
+                return Ok(NodeBuilder::new(NodeKind::Unit, p.current_span()).build(&mut p.ast));
+            }
+            let first = p.try_pattern()?;
+            if first == 0 {
+                return Err(ParseError::invalid_syntax(
+                    "Expected a pattern".to_string(),
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
+            if p.eat_token(TokenKind::RParen) {
+                return Ok(first);
+            }
+            if !p.eat_token(TokenKind::Comma) {
+                return Err(ParseError::unexpected_token(
+                    TokenKind::Comma,
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
+            let mut nodes = vec![first];
+            nodes.extend(p.try_multi(&[Rule::comma("pattern", |p| p.try_pattern())])?);
+            if !p.eat_token(TokenKind::RParen) {
+                return Err(ParseError::unexpected_token(
+                    TokenKind::RParen,
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
             Ok(NodeBuilder::new(NodeKind::TuplePattern, p.current_span())
                 .add_multiple_children(nodes)
                 .build(&mut p.ast))

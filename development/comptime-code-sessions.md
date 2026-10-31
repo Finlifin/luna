@@ -1,0 +1,556 @@
+# Comptime code sessions
+
+`comptime_interpretor::CodeSession` owns an exact immutable source or IIR graph
+allocation and bounded bytecode, input-independent body and default-specialization
+caches. `CodeSession::new` accepts `Arc<nir::program::Package>`;
+`CodeSession::for_iir` accepts `Arc<iir::Package>`. `luna::memoization::Invocation` retains one
+session across evaluations, including calls whose result is not `Type` and
+therefore bypass result memoization entirely.
+
+`Interpreter::with_code_session` lends those caches to a fresh interpreter.
+Only an identical source world can use them; equality of declaration IDs or
+structural similarity of packages is insufficient. Owning the allocation also
+prevents address reuse and makes `Arc::make_mut` produce a distinct snapshot.
+A different source or graph allocation uses its own local caches. The scope
+returns completed code on success, error and unwind, but never publishes caches
+from a replacement interpreter belonging to another world.
+
+This retains code, not execution state: invocation frames, local storage, events,
+proof callbacks, cleanup responsibilities and result values remain local. The
+existing cache bounds and compilation-failure publication rules still apply.
+Cache hits avoid compilation charges; world construction and actual execution
+still consume each invocation's budget. No wall-clock speedup is claimed from
+budget tests alone.
+
+An explicit invocation with no declaration binders now retains the ordinary
+function's stable identity after checking input arity. Actual generic functions
+keep the specialization and contract path. Without this distinction the driver
+would rebuild an owned body for every ordinary call and defeat session reuse.
+
+## Verification
+
+From `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor -p luna --test runtime_function_identities --test comptime_memory
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --test instance_budget --test nominal_types
+```
+
+The tests cover repeated execution with zero warm bytecode compilations,
+changed bodies using the same declaration IDs, unwind recovery, and actual
+driver calls with alternating boolean inputs. The latter must execute on every
+call, retain zero cached results, and consume less fuel after code preparation.
+
+The checks passed: 38 runtime identity tests and 18 driver memory tests
+(`/tmp/luna-tools-gvuba7qo/result.json`). Additional `instance_budget` and
+`nominal_types` checks passed 6 and 23 tests respectively using the same wrapper
+(`/tmp/luna-tools-e1g6ol27/result.json`). Formatting and `git diff --check` passed.
+
+## Remaining work
+
+Trait evidence is still rebuilt; source function, runtime-identity
+and effect declaration indexes are shared.
+This is not yet a
+shared VM world, persistent disk cache, or a suspended elaboration session.
+Input-dependent generated packages still need their own explicit immutable
+lifetime. Graph sessions now retain immutable instance bodies, but memoization's
+per-input graph preparation now retains the most recent Type specialization, as described below.
+A generic body whose parameter telescope depends on ordinary invocation values
+can still require a fresh per-call body after declaration specialization.
+
+## Generic declaration specialization
+
+The source session also retains closed, noncapturing declaration specializations
+keyed by declaration identity and the complete ordered argument list. The cache
+has at most 64 entries and a 100,000-work retention allowance; oversized entries
+are not retained. Key construction and comparisons consume invocation fuel.
+Eviction discards code handles and permits ordinary re-specialization.
+
+Only completed substitutions formed outside active abstract type/value scopes
+are admitted. Each hit still admits declaration inputs, checks current type
+requirements and capabilities, and checks the expected callable signature.
+Proof outcomes are never part of the reusable code. Capabilities now run before
+both local and session cache hits; previously they only ran on misses.
+
+The cached closure representation has an empty environment and capture list;
+it is a prepared function body, not an invocation closure with captured storage.
+This retained body identity allows the bytecode cache to survive VM teardown.
+Independent ordinary input binding and execution still occur on every call.
+
+Targeted checks:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --test instance_budget --test runtime_function_identities --test nominal_types
+python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_memory
+```
+
+Generic session regressions cover distinct declaration inputs, cold/warm code
+compilation, changed proof callbacks (Satisfied, Rejected and Unknown), recovery
+after rejection, bounded eviction, and driver calls which bypass result caching.
+
+The generic stage passed 8 instance-budget, 23 nominal-type and 38 runtime
+identity tests (`/tmp/luna-tools-pcspcsx8/result.json`), plus 19 driver memory
+tests (`/tmp/luna-tools-xawxep4u/result.json`). The affected dynamic-instance
+unit group also passed:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib dynamic_instances
+```
+
+Evidence: `/tmp/luna-tools-_zbya17g/result.json`. No wall-clock benchmark or
+whole-workspace test run was performed for this stage.
+
+## Ordinary input binding on retained code
+
+Input-independent preparation now also keys owned function bodies by live code
+identity. Declaration-specialized functions and ordinary closures reuse their
+prepared body even when they have ordinary parameters. Captured environments
+and arguments are still bound independently on every invocation. Only immutable
+code is retained; weak source identities avoid keeping discarded closure bodies
+alive or confusing reused allocation addresses with old code.
+
+This uses the same contextual-type scan and specialization checks as declaration
+bodies. A body with types dependent on the current parameter telescope is marked
+dependent and rewritten each time. Both owned and declaration entries share the
+existing 100,000-work retention bound.
+
+Verification commands:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib input_bodies
+python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_memory --test comptime_bytecode_closures --test scoped_comptime_callables
+python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_clause_inputs
+```
+
+The source regression invokes `keep(value:T)->T where T` through a code session
+with alternating boolean values. Each invocation returns its own argument;
+only the first compiles bytecode. Unit checks exercise changing dependent Type
+inputs, distinct source bodies and release of the original source allocation.
+
+This stage passed the input-body unit group (3 tests), bytecode closures (2),
+driver memory (20), scoped callables (10), and declaration clause-input tests.
+Evidence: `/tmp/luna-tools-g_87w65z/result.json`,
+`/tmp/luna-tools-grpz6w2a/result.json`, and
+`/tmp/luna-tools-v9f_3oxd/result.json`. Formatting and diff checks passed.
+
+## Shared source declaration index
+
+`Interpreter::for_comptime_in_session` reuses the source snapshot's function
+index while constructing fresh VM state. The index owns declaration IDs and
+positions only. Each VM binds those positions to its own immutable Package
+slice and returns references with that slice's lifetime. No self-referential
+VM/package allocation or unsafe lifetime extension is needed.
+
+The session holds the Package allocation alive and shares the position map
+through `Arc`. Only the exact source allocation can reuse it. Different source
+snapshots use the ordinary constructor and recheck duplicate declarations;
+constructor failure never replaces the session's existing index. The luna
+invocation driver uses this constructor for its unchanged source snapshot.
+
+Phase, formation and trait checks still run per construction, and their existing
+world-work reservation remains in force. This stage removes repeated function
+index allocation/building; it does not claim to eliminate declaration-world
+construction. Trait evidence is still local. Runtime-identity and effect indexes
+now use the shared typed declaration index described below.
+IIR instance lookup retains its separate graph authority.
+
+Validation commands:
+
+```sh
+python3 -B development/check.py --timeout 900 -- check -p luna
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib code_session
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor -p luna --test runtime_function_identities --test instance_budget --test comptime_memory --test comptime_iir_bytecode
+```
+
+The tests inspect actual index allocation sharing and fresh event state, retain
+the index after exhaustion, reject duplicate IDs in another snapshot, and run
+both source and concrete IIR invocation paths.
+
+The source-index stage passed `check -p luna`, the code-session unit check and
+all four listed integration groups. Evidence:
+`/tmp/luna-tools-eqs77556/result.json`, `/tmp/luna-tools-ukcivhz2/result.json`,
+and `/tmp/luna-tools-5pk4hmgb/result.json`. Formatting and diff checks passed.
+
+## Runtime identity and effect declaration indexes
+
+The position index is now generic over declaration type. Function bodies,
+body-free runtime identities and effect declarations bind distinct typed slices
+through one immutable source index bundle. A source session retains that bundle
+once; warm VM construction shares its maps without rebuilding them or retaining
+execution state.
+
+Runtime identity signatures and collisions with executable function declarations
+are still checked during construction. A cached body-free identity remains
+transport metadata and cannot authorize comptime execution. Effect signatures
+are also rechecked; sharing their lookup index does not install handlers or
+satisfy an effect capability. IIR keeps separate authority and empty source
+catalogs as before.
+
+Verification commands:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib code_session
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor -p luna --test runtime_function_identities --test effect_contracts --test comptime_memory --test comptime_iir_bytecode
+```
+
+The unit test uses nonempty runtime-identity and effect catalogs, checks shared
+index allocations and original declaration references, and verifies fresh
+execution state. The warm-session integration test explicitly attempts to invoke
+a body-free runtime identity and must still receive `PhaseMismatch`.
+
+This stage passed the code-session unit check and all four integration groups
+(71 tests total). Evidence: `/tmp/luna-tools-7d3tc8kq/result.json` and
+`/tmp/luna-tools-3b8d28x6/result.json`. Formatting and diff checks passed.
+
+## Declaration parameter and method metadata
+
+The immutable source bundle also retains declaration parameter domains and
+sorts, method parameter bindings, and method-origin ambiguity information.
+These owned maps are shared through `Arc`. They contain source declaration
+metadata, not active inference variables, invocation values or proof outcomes.
+
+Domain collection and validation run on the first successful source-world
+construction. Subsequent construction for the exact same immutable Package can
+reuse that completed result, avoiding repeated recursive Term copies and their
+associated work charges. A changed Package obtains its own domains. The source
+world's ordinary traversal reservation and remaining formation checks still run.
+The nonempty domain regression confirms a bool domain remains ComptimeValue,
+a changed snapshot can use char instead, and warm construction saves fuel.
+
+Method bindings and origin ambiguity depend only on the source traits. Selected
+implementations, caller assumptions, associated values and instantiated method
+contracts remain VM-local and are rebuilt/checked as before. Runtime method
+interface bindings remain distinct from implementation-body parameter names.
+
+Verification commands:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib code_session
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor -p luna --test runtime_function_identities --test instance_budget --test comptime_memory --test comptime_clause_inputs --test comptime_bytecode_traits --test trait_phases
+python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_traits
+```
+
+All groups passed (189 distinct tests). The final method test additionally runs
+default parameters, named overrides, stored methods and generic trait calls
+across fresh VMs in a shared session. Evidence:
+`/tmp/luna-tools-4int1nsu/result.json`, `/tmp/luna-tools-2_19jpbf/result.json`,
+and `/tmp/luna-tools-wtabqcrk/result.json`. Formatting and diff checks passed.
+
+## Shared layouts and local generated definitions
+
+Struct and enum catalogs now have an immutable source base and a VM-local map
+for generated definitions. A source session owns the base through `Arc`. Source
+layout handles retain the Package allocation and an index into its original
+struct/enum vectors; field trees are not cloned into a second owned world.
+Fresh session VMs share the base maps but start with an empty generated map.
+
+Builder publication, collision checks and rollback see both parts of the
+catalog. Publication inserts only into the local map; rollback removes only
+those local entries. Source definitions cannot be replaced by generated entries.
+Existing borrowed and owned generated batches retain their lifetimes as before.
+The standalone constructor also uses the catalog abstraction, while IIR retains
+its separate graph authority.
+
+The initial source-base construction consumes fuel before allocation and before
+publishing session metadata. Failure leaves the session unpublished and retains
+the construction budget reservation. Successful later construction reuses the
+base maps; existing phase and enum encoding checks still run.
+
+Verification commands:
+
+```sh
+python3 -B development/check.py --timeout 900 -- check -p comptime_interpretor
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib generated_
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib
+python3 -B development/check.py --timeout 900 -- test -p luna --test builder_invocations --test encoded_enums --test comptime_memory --test comptime_iir_bytecode
+```
+
+The source-session struct and enum tests verify original declaration references,
+shared map allocations, successful local publication, rejection of source
+identity collisions, publisher-failure rollback, and absence of generated
+entries in the next VM. A constructor test exhausts fuel specifically between
+ordinary VM creation and session catalog publication, then retries successfully.
+
+Remaining world construction includes instantiated trait evidence/contracts.
+NF declaration lookup now uses shared source positions as described below. Newtype and alias indexes now use the shared source
+index mechanism described below. No active builder transaction or proof outcome is
+published as shared metadata.
+
+The layout stage passed the interpreter check, 331 interpreter unit tests and
+117 driver integration tests (79 builder, 14 encoded-enum, 20 memory, 4 IIR).
+Evidence: `/tmp/luna-tools-xgwqvme7/result.json`,
+`/tmp/luna-tools-76ebnu9z/result.json`, and
+`/tmp/luna-tools-6n9bh7c8/result.json`. The initial generated-definition subset
+also passed (`/tmp/luna-tools-k3xrfzmp/result.json`). Formatting and diff checks
+passed; no whole-workspace test run or wall-clock performance claim is made.
+
+## Newtype and alias catalogs
+
+Newtype definitions and alias contracts now bind typed Package slices through
+shared source declaration positions. Conversion planning iterates the indexed
+newtypes in declaration-ID order, preserving the previous deterministic map
+order. Lookup still returns the original declaration, not an unfolded or copied
+representation. Distinct nominal identities remain distinct.
+
+Only descriptor lookup is shared. Representation conversions, pattern checks,
+alias obligations and capability checks remain in their invocation paths. The
+alias session regression switches a host proof callback from Satisfied to
+Rejected and Unknown and back; denied calls must not enter the guarded body.
+
+Verification commands:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor -p luna --test nominal_types --test newtypes --test comptime_memory
+```
+
+All checks passed: 331 interpreter unit tests plus 256 integration tests (24
+nominal types, 212 source newtype cases, 20 driver memory cases). Nonempty source
+session catalogs are checked for allocation sharing and original declaration
+references. Evidence: `/tmp/luna-tools-0gxn642o/result.json` and
+`/tmp/luna-tools-kfl8hbks/result.json`. Formatting and diff checks passed.
+
+## NF declaration lookup
+
+NF heads now use the same immutable source-position index as other declaration
+catalogs. Value-shape inspection depends on a read-only `HeadLookup` interface,
+so its admission rules work with both source indexes and isolated metadata maps.
+This separates declaration ownership from validation without adding another
+value representation or unfolding any head.
+
+Source session VMs share the NF index and refer to the original Head objects.
+IIR interpreters construct their index from the validated graph's own NF catalog;
+a source-session index cannot grant graph execution or layout authority.
+Normal input formation, frozen value checks and type equality proofs keep their
+existing paths and budgets.
+
+Verification commands:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor -p luna --test type_equality --test immutable_normal_inputs --test normal_values --test normal_form_domains --test comptime_iir_bytecode --test comptime_memory
+```
+
+All checks passed: 331 interpreter unit tests and 58 integration tests.
+The source regression repeatedly forms a head with dependent Tuple value inputs
+in a shared session and compares its complete value with reference execution.
+Nonempty NF catalogs are checked for shared index allocation and original Head
+references. Evidence: `/tmp/luna-tools-ps6f2h47/result.json` and
+`/tmp/luna-tools-plogkqwp/result.json`. Formatting and diff checks passed.
+
+## Shared trait method binder catalogs
+
+Source sessions now retain immutable method binder arrays and source positions
+for their interface contracts. Fresh VMs resolve the contract in the original
+Package slice instead of cloning all declaration binders during construction.
+The catalog is scoped to the exact immutable Package allocation; graph execution
+continues to obtain method authority from its IIR graph.
+
+This does not retain method selection, caller substitutions, assumptions or
+proof results. Preconditions, postconditions and capability checks still execute
+on each call. The source regression exercises both successful and rejected calls
+across fresh VMs in a warm session, including an implementation that violates
+its interface postcondition; failed preconditions must not enter its body.
+
+Verification (working directory `/home/fin/luna`, all exit 0):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib
+python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_traits --test dynamic_trait_clauses --test trait_phases --test comptime_memory --test comptime_iir_bytecode
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+```
+
+Evidence: `/tmp/luna-tools-_c0qakun/result.json` (interpreter units),
+`/tmp/luna-tools-vm8xhj_v/result.json` (trait, memory and IIR regressions),
+and `/tmp/luna-tools-rkb4j1sg/result.json` (formatting). The unit run preceded
+removal of a redundant inner condition; integration tests ran on the final code.
+No end-to-end speedup is claimed without measurement. Trait implementation
+selection tables and associated values still reconstruct per VM; this stage
+does not complete the unified VM or interned type representation migration.
+
+## Prepared direct invocations and graph code
+
+`luna::invocation::PreparedInvocation::new(Arc<Package>, entry, identity)` owns
+entry/default/dispatch preparation and its exact source or graph snapshot.
+Repeated `invoke(fuel)` calls reuse code with fresh execution state and contract
+checks. `last_stats()` exposes per-call compilation and execution counts; it is
+not a result-cache counter. The borrowed one-shot APIs remain available, including
+builder publishers and resource protocol selection. Prepared invocations currently
+expose the ordinary entry path without publisher or protocol configuration.
+
+IIR callables now use the bounded noncapturing instance-code cache. Retaining the
+cache alone was insufficient: cloning a graph body into a new closure on each VM
+created a fresh code identity. Reusing immutable, empty-environment graph closures
+keeps body identities live while arguments, locals and contracts remain per call.
+Key and preparation work is metered; graph validation still runs for every VM.
+This does not change the Type-only result memoization policy or finish VM-world
+reuse, graph preparation caching in memoization, or elaboration suspension.
+
+A broader builder regression run found 48 package-resolution failures before
+invocation: its builtin fixture uses `library/builtin/primitives.fl` as the package
+root while current meta text bindings import `builtin.compiler`. The remaining
+31 builder tests passed. This fixture integration issue is separate from the VM
+cache change and remains to be corrected; the full builder group is not green.
+
+Verification for the prepared/graph session stage (cwd `/home/fin/luna`):
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test prepared_invocations --test comptime_iir_bytecode`: passed; `/tmp/luna-tools-6p_971gq/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`: all 367 passed; `/tmp/luna-tools-i95i6eae/result.json`.
+- The earlier builder run had the resolution failures described above: `/tmp/luna-tools-w2o4gv0o/result.json`.
+- Formatting check and diff check passed; `/tmp/luna-tools-gca9gfk9/result.json`.
+
+## Builder integration follow-up
+
+The explicit meta builder fixture now supplies both the shipped primitive
+bindings and the shipped `builtin.compiler` bindings. It remains an isolated
+package fixture; the separate complete-sysroot test still checks the full library.
+No math facade is removed from meta and no expected builder behavior is weakened.
+
+After resolution, `meta.math.wrapping_abs` exposed a finite-domain proof problem:
+a six-member signed integer constraint produced twelve proof cases because
+individual exclusion queries exhausted their per-query budget. The resulting
+spurious unsigned case failed intrinsic signature checking before invocation.
+A unit regression reproduced six expected cases versus twelve actual cases.
+
+Finite-domain enumeration now gathers primitive equality operands from the
+requirements and asks PTC to prove their disjunction covers the parameter. Only
+an entailed cover narrows enumeration. Mentioned types under negation are not
+assumptions; aliases without a directly provable cover retain the full-domain
+fallback. Per-case exclusions, correlated prefix pruning, original requirements,
+and program proofs remain intact. Collection and queries are metered without
+increasing budgets. This is universal verification of type cases, not inference
+from an arbitrary satisfying model, and does not solve general PTC search costs.
+
+Validation (cwd `/home/fin/luna`):
+
+- `python3 -B development/check.py --timeout 900 -- test -p program_verification --lib`: 101 passed; `/tmp/luna-tools-jc692kcc/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test builder_invocations public_struct_builder_copies_reflected_fields_through_mutating_methods`: passed; `/tmp/luna-tools-7f62ou_f/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test builder_invocations`: 78 passed, one failed; `/tmp/luna-tools-d6q9gdc2/result.json`. The remaining complete-sysroot case fails during parent-interface establishment with `head inference: BudgetExhausted` (package 1, declarations 480/490), before builder invocation. It is not a successful full-sysroot validation.
+
+The subsequent candidate-budget repair resolves the remaining complete-sysroot
+case without raising its budget. Eligibility/refutation and matching now share
+an explicitly metered head partition; spending an early slot no longer zeroes
+all later reserved slots. The complete-sysroot contextual-data builder test
+passed in `/tmp/luna-tools-hwaapn8f/result.json`; see `development/ptc.md` for
+commands and the independent candidate proof regressions. The entire builder
+group was not rerun after this repair; its other 78 cases passed in the preceding
+run, not in this latest targeted check.
+
+## Reusing input-bound invocation graphs
+
+`memoization::Invocation` now owns a one-entry preparation cache in addition to
+its source code session. The owner fixes the source snapshot, declaration and
+clause arguments. Its conservative key records the ordered Type-parameter values
+that input binding actually stages; ordinary arguments are never retained.
+A matching key reuses the prepared source/graph allocations and a graph CodeSession.
+A different key successfully prepares a replacement before discarding the old
+entry. This bounds retained specializations to one; alternating types can rebuild.
+
+Key copying/comparison is metered. Each invocation still binds and validates its
+current inputs, discharges contracts, validates the graph and creates fresh VM
+state. Failed preparation does not publish a partial graph. Execution failures
+may retain successfully compiled code but no execution or contract result.
+`staged_preparations()` and `last_execution_stats()` distinguish graph construction,
+bytecode compilation and actual execution from result-cache hits.
+
+Result caching remains Type-only, with the existing source Eq/Hash admission.
+Code preparation can be reused even with result-cache capacity zero. Previous
+tests equating uncached results with identical cold/warm fuel usage now check
+actual body execution and reduced preparation cost instead; collision, dependent
+contract and result-admission expectations remain unchanged.
+
+Verification (cwd `/home/fin/luna`, exit 0):
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test staged_invocation_reuse`: four passed; `/tmp/luna-tools-972ftvoq/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test execution memoized_invocation`: eleven passed; `/tmp/luna-tools-2x9zcoqw/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --lib memoization`: admission success/failure budget test passed; `/tmp/luna-tools-nd_qwhma/result.json`.
+
+This does not finish VM-world reuse: graph validation still runs each call,
+Type-result source admission still constructs a separate source VM, and
+elaboration suspension remains unimplemented. No wall-clock speedup is claimed.
+
+
+## Retained immutable graph validation
+
+Graph sessions now retain successful structural validation for their exact owned
+`Arc<iir::Package>`. Both PreparedInvocation and input-bound memoization execution
+use the session-aware constructor. The owner keeps the allocation alive; a clone
+with the same declaration identities cannot inherit its validation or code.
+The trusted marker is published only after successful VM construction. Failed
+validation and insufficient preparation fuel do not publish it.
+
+Warm construction still charges a preparation step and callable signature index
+work, creates fresh execution state, and enables comptime phase restrictions.
+Current inputs, contracts and body execution remain per invocation. The ordinary
+non-session constructor still validates every graph. This supersedes the earlier
+notes above that graph validation always runs on repeated session invocations.
+Source result admission still creates another source VM; graph indexes are still
+rebuilt. This change does not implement elaboration suspension or model search.
+
+Verification (cwd `/home/fin/luna`):
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_iir_bytecode --test staged_invocation_reuse --test prepared_invocations`: exit 0, fourteen tests; `/tmp/luna-tools-cfjqerjs/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`: exit 0, 367 tests; `/tmp/luna-tools-rc5ila7v/result.json`.
+- Initial regression fixture omitted `where` before `requires`; parsing rejected
+  it. Corrected the fixture to the documented clause syntax before the passing run.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_iir_bytecode`: exit 0, eight tests after adding repeated invalid-owner rejection; `/tmp/luna-tools-ll_1e7te/result.json`.
+- Workspace formatting and `git diff --check` passed.
+
+
+## Source admission indexes for prepared Type results
+
+The bounded specialization now owns a source CodeSession beside its graph
+session. Source admission constructs a fresh VM using that exact snapshot's
+shared declaration and layout indexes. Replacing the staged Type key replaces
+both sessions; failed preparation keeps the prior pair intact.
+
+This admission validates the result representation and Type formation, not source
+Eq/Hash. It executes no user code, so lending bytecode caches is unnecessary.
+Each result is still admitted with the current solver and remaining allowance.
+Constructor failures reserve their budget as before; admission failure cannot
+refund work or cache a rejected value. Non-Type results bypass this path.
+
+The second VM has not been eliminated: source phase and formation preparation
+still run. Some shared-index work remains conservatively charged per call. This
+change removes repeated index allocation rather than promising a measured
+wall-clock speedup or a proportional fuel reduction.
+
+Verification (cwd `/home/fin/luna`):
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --lib memoization`: exit 0, two tests; `/tmp/luna-tools-dv2qxdzb/result.json`.
+  Covers cold/warm source layout preparation, current-value rejection, exhausted
+  construction and successful recovery. The first fixture used only runtime
+  signatures, whose world charge remains unchanged; it was corrected to exercise
+  the separately metered source layout catalog publication.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test execution memoized_invocation`: exit 0, eleven tests; `/tmp/luna-tools-1yhhe4ey/result.json`.
+  Includes zero-capacity Type-result admission and staged Type-key replacement.
+- Workspace formatting and `git diff --check` passed.
+
+
+## Shared immutable IIR lookup indexes
+
+IIR CodeSession preparation now retains its callable-instance positions,
+normal-form declaration positions and implementation relationship index after
+validation and successful preparation. The same exact immutable graph can create
+fresh VMs from those indexes without rebuilding the tables. Callable keys share
+the graph's immutable argument slices; signatures remain borrowed from the graph
+through checked positions. Source VMs retain their existing lookup behavior.
+
+Initial index construction is metered, including dispatch subject/interface
+argument copies that were previously collected without a separate index-work
+charge. A failed preparation publishes no partial indexes. A session presented
+with another graph, even with identical declaration IDs, validates and indexes
+that graph independently and leaves its own snapshot's indexes intact.
+
+Input contracts, callable signature lookup work, phase authority and execution
+remain invocation-local. This does not enable bytecode suspension under effect
+handlers or cleanup schedules: those paths require integration with continuation
+and cleanup semantics, not removal of their current execution guards.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_iir_bytecode --test scoped_comptime_callables`: 20 passed (`/tmp/luna-tools-0sfnitgq/result.json`).
+- The new source-driven graph retains two specializations of one callable, a normal-form head and trait dispatch. Cold preparation is bounded; a one-step-short attempt does not authorize reuse. Warm preparation costs one bookkeeping step. False inputs still reject the current precondition. Reordered tables in a different valid graph execute using their own indexes, then the original session recovers its warm path.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor`: 589 passed (`/tmp/luna-tools-3ajwlqfe/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test execution memoized_`: 13 passed (`/tmp/luna-tools-2t7ka1u6/result.json`).
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: passed (`/tmp/luna-tools-13ko725_/result.json`); `git diff --check` passed.

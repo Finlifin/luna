@@ -1,0 +1,39 @@
+{- Ordered Object descriptions become named enum payloads through the ordinary
+   builder library. Publication checks the resulting nominal definition.
+-}
+comptime fn EventType() -> Type {
+    let draft = meta.EnumBuilder.new(.name = .Event);
+    draft.add_unit(.idle);
+    draft.add_group(.net);
+    let added = draft.add_named_from_object(.packet,
+        {flag: bool, count: u32}, .group = [.net]);
+    assumes added;
+    let inserted = draft.insert_named_from_object(1, .empty, {});
+    assumes inserted;
+    let replaced = draft.replace_named_from_object(2, .data,
+        {ready: bool, count: u32}, .group = [.net]);
+    assumes replaced;
+    let rejected = draft.replace_named_from_object(2, .broken,
+        {ready: bool, invalid: true}, .group = [.net]);
+    assumes not rejected;
+    draft.Build()
+}
+
+typealias Event = EventType();
+
+fn read_event(value: Event) -> bool {
+    value match {
+        .idle => false,
+        .empty {} => true,
+        .net.data {ready: ready, count: count} => ready and count == 27,
+    }
+}
+
+test {
+    let idle = read_event(Event.idle);
+    let empty = read_event(Event.empty {});
+    let data = read_event(Event.net.data {ready: true, count: 27});
+    assumes not idle;
+    assumes empty;
+    assumes data;
+}

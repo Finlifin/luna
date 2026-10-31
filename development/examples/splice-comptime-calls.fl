@@ -1,0 +1,22 @@
+-- Compile the producer, then invoke the conversion at runtime.
+-- Run with --interpret run --splice-protocol Splice
+-- --meta-list-type input.TupleElements --tuple-type input.Tuple.
+typealias Type = .Type'builtin;
+pure comptime fn TupleElements<T> -> Type { T }
+pure comptime fn Tuple<...Es: TupleElements<Type>> -> Type { bool }
+trait Splice {
+    assoc RuntimeTarget: Type;
+    fn splice(comptime data: Self) -> RuntimeTarget;
+}
+impl Splice for bool {
+    assoc RuntimeTarget: Type = Tuple<bool, bool>;
+    fn splice(comptime data: bool) -> Tuple<bool, bool> { construct(data) }
+}
+fn construct(value: bool) -> Tuple<bool, bool> { (value, not value) }
+comptime fn invert(value: bool) -> bool { not value }
+comptime fn identity(value: T) -> T where T { value }
+const FLAG = true;
+fn forward(comptime flag: bool) -> Tuple<bool, bool> { invert(flag) }
+fn run() -> Tuple<Tuple<bool, bool>, Tuple<bool, bool>, Tuple<bool, bool>> {
+    (invert(FLAG), identity(false), forward(true))
+}

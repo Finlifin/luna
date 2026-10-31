@@ -1,0 +1,36 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+trait Mapper where A {
+    fn pair(self, other: B) -> Tuple<A, B> where B;
+}
+
+struct Holder where X {
+    value: X,
+}
+
+impl Mapper<X> for Holder<X> where X {
+    fn pair(self, other: Y) -> Tuple<X, Y> where Y {
+        (self.value, other)
+    }
+}
+
+fn apply(subject: S, value: T) -> Tuple<.u8'builtin, T>
+where S :- Mapper<.u8'builtin>, T {
+    subject.as(Mapper<.u8'builtin>).pair(value)
+}
+
+trait Identity {
+    fn identity(self, value: T) -> T where T {
+        value
+    }
+}
+struct DefaultIdentity {}
+impl Identity for DefaultIdentity {}
+
+fn entry() -> bool {
+    let (first, flag) = apply(Holder<.u8'builtin> { value: 9 }, true);
+    let (second, letter) = apply(Holder<.u8'builtin> { value: 7 }, 'x');
+    let accepted = DefaultIdentity {}.as(Identity).identity(flag);
+    first == 9 and second == 7 and letter == 'x' and accepted
+}

@@ -1,0 +1,58 @@
+-- python3 -B development/host_examples.py effect-callback-cleanup --opt-level 3
+-- A captured callback requests a pointer. The inner handler may return from
+-- forward; otherwise the outer handler supplies the original request argument.
+-- Destructors check handler -> callback -> installer -> caller order. The
+-- returned pointer must still select the correct live caller-owned variable.
+typealias Stage = .u8'builtin;
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+impl Duplicate for Stage {}
+impl Duplicate for *T where T {}
+
+struct Step { counter: *Stage, expected: Stage, next: Stage }
+impl Retire for Step {
+    fn drop(*self) {
+        assumes self.counter.*.* == self.expected.*;
+        self.counter.*.* = self.next.*;
+    }
+}
+
+effect select(pointer: *bool) -> *bool;
+fn subject(pointer: *bool, counter: *Stage) -> #select *bool {
+    -- The closure keeps the request's pointer and cleanup state in its environment.
+    let action: %{counter:*Stage,pointer:*bool} fn()->#select *bool = || {
+        let called = Step {counter: counter, expected: 1, next: 2};
+        select(pointer)#
+    };
+    action()
+}
+
+fn forward(first: *bool, second: *bool, counter: *Stage, early: bool) -> *bool {
+    let installer = Step {counter: counter, expected: 2, next: 3};
+    (subject(first, counter)# {
+        select(value) if early => do {
+            let arm = Step {counter: counter, expected: 0, next: 1};
+            return second;
+        },
+    })# {
+        select(value) => do {
+            let arm = Step {counter: counter, expected: 0, next: 1};
+            value
+        },
+    }
+}
+
+fn trial(early: bool) -> bool {
+    var stage: Stage = 0;
+    var first = false;
+    var second = false;
+    do {
+        let caller = Step {counter: stage.ref, expected: 3, next: 4};
+        let selected = forward(first.ref, second.ref, stage.ref, early);
+        selected.* = true;
+    };
+    stage == 4 and first == not early and second == early
+}
+
+fn run() -> bool { trial(false) and trial(true) }

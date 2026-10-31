@@ -1,0 +1,49 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
+typealias Type = .Type'builtin;
+typealias Int = .Integer'builtin;
+trait Shape {
+    comptime fn Output(self) -> Type;
+    comptime fn Pair(self) -> Type { Tuple<self.Output(), bool> }
+    fn runtime_only(self) -> bool;
+}
+struct Selector {}
+impl Shape for Selector {
+    comptime fn Output(self) -> Type { bool }
+    fn runtime_only(self) -> bool { true }
+}
+comptime fn Select(value: T) -> Type where T :- Shape { value.Output() }
+fn keep() -> bool {
+    let value: Select(Selector {}) = true;
+    value
+}
+fn pair() -> Tuple<bool, bool> {
+    let value: Selector {}.as(Shape).Pair() = (true, false);
+    value
+}
+trait Size { comptime fn size(self) -> Int; }
+impl Size for Selector { comptime fn size(self) -> Int { 8 } }
+fn bits() -> bool {
+    let value: .BitVec'builtin<Selector {}.as(Size).size()> = 255;
+    value == 255
+}
+struct Other {}
+impl Shape for Other {
+    comptime fn Output(self) -> Type { 'x''type }
+    fn runtime_only(self) -> bool { false }
+}
+struct Box where T { value: T }
+impl Shape for Box<T> where T {
+    comptime fn Output(self) -> Type { T }
+    fn runtime_only(self) -> bool { true }
+}
+fn character() -> 'x''type {
+    let value: Select(Other {}) = 'x';
+    value
+}
+fn generic_box() -> bool {
+    let value: Select(Box<bool> { value: false }) = true;
+    value
+}
+fn runtime_read() -> bool { Selector {}.as(Shape).runtime_only() }

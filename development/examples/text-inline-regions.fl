@@ -1,0 +1,19 @@
+{-
+    Analyze with the real sysroot and --inline-functions. This query describes
+    backing dependencies; it does not certify runtime view lifetimes.
+-}
+inline effect deliver(value: str);
+
+inline fn produce(value: str) -> #deliver void {
+    deliver(value)#;
+}
+
+fn observed(value: str) -> str {
+    produce(value)# {
+        deliver(text) => {
+            let first = text.byte(0);
+            return text;
+        },
+    };
+    "unused"
+}

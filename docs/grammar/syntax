@@ -1,5 +1,24 @@
+-- 表面语法速查；列表分隔符、空白和词法细节见 grammar/index.md 与 basics/lexical.md。
+-- * 列表在产生式中省略分隔符；各构造的可用位置、阶段与组合限制由对应章节规定。
+
+-- multi 语法元素列表的通用前缀规则：每个元素可带任意层属性；分隔符仍由基本元素决定。
+-- base_element 是该列表允许的元素元记号，不是新增源构造；不将此规则推广到原始 token*。
+multi_element -> base_element
+    | ^expr multi_element
+
+-- expr 与 pattern 的入口保留外层结构边界，防止后缀扩展应用吞掉 if 等构造的主体。
+-- matches 将该边界传入 pattern；括号及其他已封闭内部范围使用自己的上下文。
+
 -- expressions
 expr -> id
+    | literal
+    | literal_suffix
+    | unit_expr
+    | null_construct
+    | undefined_expr
+    | wildcard
+    | self_expr
+    | parenthesized_expr
     | prefix
     | infix
     | postfix
@@ -11,12 +30,29 @@ literal -> integer
     | char
     | str
     | bool
-    | ()
-    | _
-    | null
-    | undefined
-    | self_cap
-    | self_lower
+    | symbol
+
+integer -> decimal | binary | octal | hex
+decimal -> digit (digit | _)*
+binary -> 0b (bindigit | _)*
+octal -> 0o (octdigit | _)*
+hex -> 0x (hexdigit | _)*
+float -> digits . digits
+    | digits . digits exp
+exp -> (e | E) (+ | -)? digits
+char -> ' char_body '
+str -> " str_body "
+bool -> true | false
+-- 字符内容、转义、数字分隔符与前缀的词法限制见字面量章。
+
+literal_suffix -> (integer | float | char | str) id
+unit_expr -> ()
+null_construct -> null
+undefined_expr -> undefined
+wildcard -> _
+self_expr -> Self | self | Itself | itself
+parenthesized_expr -> (expr)
+-- _ 与反身名称的合法位置由模式、参数和所属上下文约束。
 
 prefix -> symbol
     | list_of
@@ -36,13 +72,20 @@ prefix -> symbol
     | range_all
     | bool_forall
     | bool_exists
+    | splice_expr
+    | defer_expr
+    | token_buffer
+    | quote_expr
+    | quote_pattern
 
 symbol -> .id
 list_of -> [expr*]
 tuple -> (expr, expr*)
 object -> { (property | expr)* }
-lambda -> |parameter*| (-> expr) expr
+lambda -> |anchored_parameter*| (-> expr)? expr
+anchored_parameter -> id | id : expr
 bool_not -> not expr
+-- not 在 bool 与 BitVec 上分别按各自契约解释；BitVec 的 and/or 为同宽逐位运算，两侧均求值。
 error_new -> error expr
 negative -> -expr
 range_to -> .. expr
@@ -51,10 +94,14 @@ atomic_block -> atomic(id*) { statement* }
 do_block -> do { statement* }
 async_block -> async { statement* }
 unsafe_block -> unsafe { statement* }
-comptime_block -> comptime { statement* }
+comptime_block -> comptime { (definition | statement)* }
 range_all -> ..
 bool_forall -> forall type_bound_param* => expr
 bool_exists -> exists type_bound_param* => expr
+splice_expr -> ~<expr> | ~[ substitution* ] <expr>
+quote_expr -> '(expr) | '[ substitution* ] (expr)
+substitution -> id = id
+defer_expr -> defer expr
 
 
 infix -> expr + expr
@@ -68,6 +115,8 @@ infix -> expr + expr
     | expr > expr
     | expr <= expr
     | expr >= expr
+    | expr and expr
+    | expr or expr
     | expr ++ expr
     | expr ==> expr
     | expr | expr
@@ -85,7 +134,7 @@ postfix -> projection
     | post_match
     | post_lambda
     | application
-    | normal_form_application
+    | normal_form_head_application
     | extended_application
     | index_application
     | type_cast
@@ -104,13 +153,19 @@ postfix -> projection
 projection -> expr . id
 take_view -> expr ' id
 range_from -> expr ..
-post_match -> expr match { case_arm* }
+post_match -> expr match { match_entry* }
 post_lambda -> expr do (lambda | block | expr)
 application -> expr (argument*)
-normal_form_application -> expr<argument*>
-extended_application -> expr { (property | expr)* }
+normal_form_head_application -> expr<argument*>
+extended_application -> expr { (property | extend_arg | expr)* }
 index_application -> expr [expr]
+-- BitVec 下标可为索引或半开范围；结果位宽必须在 comptime 确定，位置可以来自 runtime。
+-- 直接作用于合法可写位置的 bitvec 位段可赋值；读出的 BitVec 值不持续关联源存储。
 type_cast -> expr.as(expr)
+-- intrinsic 调用复用 take_view 与 application；以下是组合形式，不是新增关键字。
+intrinsic_application -> expr'intrinsic(argument*)
+typed_intrinsic_application -> intrinsic_application.as(expr)
+-- 紧接 intrinsic 调用的 as 指定输出类型；缺省为 void，外围期望类型不替代它。
 dyn_cast -> expr.dyn(expr)
 handler_application -> expr.use(expr)
 async_await -> expr.await
@@ -118,18 +173,21 @@ bool_matches -> expr matches pattern
 deref -> expr.*
 refer -> expr.ref
 effect_elimination -> expr# { case_arm* }
-error_elimination -> expr! { case_arm* }
+error_elimination -> expr! { error_arm* }
+error_arm -> case_arm | catch_arm
+catch_arm -> catch pattern => (block | statement)
 option_propagation -> expr?
 effect_propagation -> expr#
 error_propagation -> expr!
 
 argument -> expr_arg
     | extend_arg
-    | optional_arg
+    | named_arg
 
 expr_arg -> expr
 extend_arg -> ... expr
-optional_arg -> .id = expr
+named_arg -> .id = expr
+-- 命名供应适用于 optional、implicit、变参与拓展变参；直接供应完整值。
 
 
 type -> optional_type
@@ -140,27 +198,35 @@ type -> optional_type
     | trait_object_type
     | pointer_type
     | fn_type
-    | forall_type
+    | refinement_type
     | for_type
     | lift_type
+    | contextual_expr_type
+    | contextual_pattern_type
 
 optional_type -> ?expr
 error_qualified_type -> !expr expr
 effect_qualified_type -> #expr expr
--- 这两种日后需要拓展语法而不是直接用expr
+-- error/effect 行复用表达式及其各自类型契约。
 reachability_qualified_type -> &expr expr
-closure_qualified_type -> ^expr expr
-trait_object_type -> dyn trait_ref
+closure_qualified_type -> %closure_context expr
+trait_object_type -> dyn expr
 pointer_type -> *expr
-fn_type -> pure? comptime? inline? (unsafe | spec | verified)? (extern "ABI")? fn(parameter_type*)
-forall_type -> forall<parameter*> expr
+fn_type -> pure? comptime? inline? (unsafe | spec | verified)? fn(parameter_type*) (-> expr)?
+    | pure comptime fn<parameter_type*> (-> expr)?
+refinement_type -> refines { expr } expr
 for_type -> for<parameter*> expr
 lift_type -> lift expr
+contextual_expr_type -> < runtime_binding* |- expr >
+contextual_pattern_type -> < expr -| runtime_binding* >
+runtime_binding -> id : expr
+closure_context -> expr | { environment_binding* }
+environment_binding -> id : expr (= expr)?
 
-parameter_type -> trivial_param_type
-    | type_bound_param_type
-    | optional_param_type
-    | vararg_param_type
+parameter_type -> type_param_type
+    | decl_param_type
+    | optional_decl_param_type
+    | vararg_decl_param_type
     | itself_param_type
     | itself_ref_param_type
     | comptime_param_type
@@ -210,10 +276,11 @@ parameter -> trivial_param
     | implicit_param
     | quote_param
     | attr_param
+    | case_param
 
 trivial_param -> id
 type_bound_param -> id : expr
-optional_param -> .id : expr
+optional_param -> .id : expr = expr
 vararg_param -> ...id : expr
 self_param -> self
 self_ref_param -> *self
@@ -224,9 +291,11 @@ lambda_param -> lambda parameter
 implicit_param -> implicit parameter
 quote_param -> quote parameter
 attr_param -> ^expr parameter
+case_param -> case pattern
+-- lambda 只接收 anchored_parameter；parameter 的递归前缀不表示任意组合均合法。
 
 clauses -> where clause*
-claus -> decl_clause | verification_clause | outcome_clause
+clause -> decl_clause | verification_clause | outcome_clause
 decl_clause -> type_decl_clause
     | trait_bound_decl_clause
     | type_bound_decl_clause
@@ -236,8 +305,9 @@ decl_clause -> type_decl_clause
     
 type_decl_clause -> id
 trait_bound_decl_clause -> id :- expr
+-- 此处 expr 可用 A + B + C 组合正向 trait 约束；否定约束写入 requires 子句。
 type_bound_decl_clause -> id : expr
-optional_decl_clause -> .id : expr = default_expr
+optional_decl_clause -> .id : expr = expr
 vararg_decl_clause -> ...id : expr
 quote_decl_clause -> quote decl_clause
 
@@ -249,12 +319,16 @@ requires_clause -> requires expr
 ensures_clause -> ensures expr
 decreases_clause -> decreases expr
 
-outcome_clause -> TODO
+outcome_clause -> outcomes expr
 
 
 definition -> function
-    | normal_form_def
+    | quote_function
+    | template_definition
+    | template_instance
+    | normal_form_head_def
     | algebraic_effect
+    | effect_enum
     | case_def
     | const_def
     | newtype_def
@@ -262,37 +336,52 @@ definition -> function
     | trait_def
     | impl_def
     | impl_trait_def
-    | extend_def
-    | extend_trait_def
     | derive_def
+    | deriver_def
     | test_def
     | module_def
     | struct_def
     | enum_def
     | union_def
     | attr_def
+    | visibility_definition
+    | program_predicate
+    | comptime_predicate
     
 result -> (id :)? expr
-function -> pure? comptime? inline? (unsafe | spec | verified | atomic)? (extern "ABI")? fn id ( parameter* ) (-> result)? (handles(expr))? clauses? (block | (= expr))
-normal_form_def -> pure comptime fn id<parameter*> (-> result)? clauses? (block | (= expr))
-algebraic_effect -> async? effect id (parameter*) (-> result)? clauses? (block | (= expr))
-case_def -> case id (parameter*) (-> result)? clauses? block
+-- 函数 ABI 通过属性指定，例如 ^attrs.abi(.c)，复用 attr_def。
+function -> pure? comptime? inline? (unsafe | spec | verified | atomic)? fn id ( parameter* ) (-> result)? clauses? (block | (= expr))?
+quote_function -> quote fn id(parameter*) (-> result)? clauses? (block | (= expr))?
+template_definition -> template function
+    | template quote_function
+    | template test id clauses block
+-- template 的 function 必须是非 comptime 函数；保留实例所用修饰的原有要求。
+template_instance -> pure? inline? (unsafe | spec | verified | atomic)? fn id use expr block
+    | quote fn id use expr block
+    | quote fn id(parameter*) use expr block
+    | test id use expr block
+normal_form_head_def -> pure comptime fn id<parameter*> (-> result)? clauses? (block | (= expr))
+algebraic_effect -> async? inline? effect id(parameter*) (-> result)? clauses?
+effect_enum -> effect enum id clauses? { effect_variant* }
+effect_variant -> attribute* async? inline? id(parameter*) (-> result)?
+-- effect 签名以分号结束，省略结果为 void；组内各项是独立操作。
+case_def -> case id (parameter*) -> result clauses? block
 const_def -> const id (: expr)? = expr
 newtype_def -> newtype id(<parameter*>)? = expr
 typealias_def -> typealias id(<parameter*>)? = expr
--- definition.function中，(block | (= expr))处的child可能为0, 即trait中只有函数签名没有函数体的情况
-trait_def -> trait id (:- expr)? clauses? { (assoc_decl | definition | statement)* }
-assoc_decl -> assoc id(<parameter*>)?: expr (= default)? clauses?
-impl_def -> impl expr clauses? { (definition | statement)* }
-impl_trait_def -> impl expr for expr clauses? { (assoc_decl | definition | statement)* }
-extend_def -> extend expr clauses? { (definition | statement)* }
-extend_trait_def -> extend expr for expr clauses? { (assoc_decl | definition | statement)* }
-derive_def -> derive expr for expr clauses? 
+-- 无主体的签名声明以分号结束；函数类别与所在上下文决定其合法性。
+trait_def -> (pure comptime)? trait id (:- expr)? clauses? { (assoc_decl | definition | statement)* }
+-- 父 trait 的 expr 同样接受 A + B + C；复用表达式组合，不限于单一 trait。
+assoc_decl -> assoc id(<parameter*>)?: expr (= expr)? clauses?
+impl_def -> comptime? impl expr clauses? { (definition | statement)* }
+impl_trait_def -> comptime? impl expr for expr clauses? { (assoc_decl | definition | statement)* }
+derive_def -> comptime? derive expr for expr clauses?
+deriver_def -> derive fn id (parameter*)? for expr clauses? { (assoc_decl | definition | statement)* }
 test_def -> test id? block
-module_def -> mod id { (definition | statement)* }
-struct_def -> struct id clauses? { (property | struct_field | definition | statement)* }
-struct_field -> id : expr (= default_expr)?
-enum_def -> enum id clauses? { (property | enum_variant | definition | statement)* }
+module_def -> mod id { (configuration | definition | statement)* }
+struct_def -> struct id clauses? { (configuration | struct_field | definition | statement)* }
+struct_field -> id : expr (= expr)?
+enum_def -> enum id clauses? { (configuration | enum_variant | definition | statement)* }
 enum_variant -> trivial_enum_variant
     | tuple_enum_variant
     | struct_enum_variant
@@ -305,10 +394,17 @@ struct_enum_variant -> id { struct_field* }
 pattern_enum_variant -> id: pattern
 expr_enum_variant -> id = expr
 sub_enum_enum_variant -> id.{ enum_variant* }
-union_def -> union id clauses? { (property | union_variant | definition | statement)* }
+union_def -> union id clauses? { (configuration | union_variant | definition | statement)* }
 union_variant -> id : expr
 
 attr_def -> ^expr definition
+attribute -> ^expr
+visibility -> pub | private
+visibility_definition -> visibility definition
+-- 一项至多指定一档显式可见性；可见性不为任意构造新增成员或导出资格。
+program_predicate -> predicate id(parameter*) (-> expr)? clauses? block
+comptime_predicate -> comptime predicate id(parameter*) block
+-- 程序 predicate 与 PTC comptime predicate 由各自规格体系解释。
 
 
 statement -> expr_statement
@@ -317,7 +413,9 @@ statement -> expr_statement
     | sub_assignment
     | mul_assignment
     | div_assignment
+    | rem_assignment
     | let_decl
+    | var_decl
     | const_decl
     | while_statement
     | while_is_match
@@ -333,18 +431,31 @@ statement -> expr_statement
     | if_match
     | inline_statement
     | assert_statement
-    | axiom_statement
     | asserts_statement
     | assumes_statement
     | invariant_statement
     | decreases_statement
     | use_statement
+    | attributed_statement
+
+expr_statement -> expr
+assignment -> expr = expr
+add_assignment -> expr += expr
+sub_assignment -> expr -= expr
+mul_assignment -> expr *= expr
+div_assignment -> expr /= expr
+rem_assignment -> expr %= expr
+const_decl -> const pattern (: expr)? = expr (else block)?
+assumes_statement -> assumes expr
+attributed_statement -> ^expr statement
 
 for_statement -> for label? pattern in expr block
 while_statement -> while label? expr block
 while_is_match -> while label? expr is pattern do block
 while_match -> while label? expr is do { case_arm* }
 label -> : id
+let_decl -> let pattern (: expr)? = expr (else block)?
+var_decl -> var pattern (: expr)? = expr (else block)?
 return_statement -> return expr? (while expr)?
 resume_statement -> resume expr? (while expr)?
 break_statement -> break id? (while expr)?
@@ -352,28 +463,58 @@ continue_statement -> continue id? (while expr)?
 if_statement -> if expr block (else (block | if_statement))?
 when_statement -> when { (condition_arm | else_arm)* }
 if_is_match -> if expr is pattern do block (else (block | if_is_match))?
-if_match -> if expr is do { case_arm* }
-inline_statement -> inline statement_expr
+if_match -> if expr is do { match_entry* }
+inline_statement -> inline_if
+    | inline_when
+    | inline_if_is
+    | inline_if_match
+    | inline_for
+inline_if -> inline if expr block (else block)?
+inline_when -> inline when { condition_arm* else_arm? }
+inline_if_is -> inline if expr is pattern do block (else block)?
+inline_if_match -> inline if expr is do { match_entry* }
+inline_for -> inline for label? pattern in expr block
 
 case_arm -> pattern => (block | statement)
-condition_arm -> pattern => (block | statement)
+    | attributed_case_arm
+match_entry -> case_arm | arm_import
+arm_import -> use expr
+-- 具有 arm 接入协议的 match 可用 use 接入 quoted arm；普通模块导入不因此变成分支。
+condition_arm -> expr => (block | statement)
+    | attributed_condition_arm
 else_arm -> else => (block | statement)
+attributed_case_arm -> ^expr case_arm
+attributed_condition_arm -> ^expr condition_arm
 
 
 -- patterns
 pattern -> id
+    | wildcard
+    | unit_expr
+    | null_construct
     | literal_pattern
     | prefix_pattern
     | infix_pattern 
     | postfix_pattern
+    | parenthesized_pattern
+    | handler_bind
+    | splice_pattern
 
--- 直接跟表达式literal用一套吧，解析的时候再分开处理
+parenthesized_pattern -> (pattern)
+handler_bind -> pattern handles expr
+quote_pattern -> '<pattern> | '[ substitution* ] <pattern>
+splice_pattern -> ~<expr> | ~[ substitution* ] <expr>
+-- pattern splice 的操作数为 comptime 表达式；(pattern) 是分组，(pattern,) 是单元素元组。
+
 literal_pattern -> literal
+    | literal_suffix
+    | - (integer | float) id?
 
 prefix_pattern -> symbol
     | error_pattern
     | not_pattern
     | list_pattern
+    | list_rest_pattern
     | tuple_pattern
     | struct_pattern
     | property_pattern
@@ -389,7 +530,8 @@ prefix_pattern -> symbol
 error_pattern -> error pattern
 not_pattern -> not pattern
 list_pattern -> [pattern*]
-list_rest_pattern -> ...id
+-- rest 仅可位于列表模式末尾；_ 忽略剩余部分。
+list_rest_pattern -> ... (id | _)
 tuple_pattern -> (pattern, pattern*)
 struct_pattern -> { (property_pattern | pattern)* }
 property_pattern -> id : pattern
@@ -400,9 +542,14 @@ ref_pattern -> ref pattern
 async_pattern -> async pattern
 
 -- 比如0b1110(xs: BitVec<4>) 10(ys: BitVec<6>) 10(zs: BitVec<6>)
-bit_vec_bin_pattern -> 0b (integer | (id: expr) | <expr>)+
-bit_vec_oct_pattern -> 0o (integer | (id: expr) | <expr>)+
-bit_vec_hex_pattern -> 0x (integer | (id: expr) | <expr>)+
+-- segment 中 id/integer：分析阶段溯源回源码字形，再按前缀进制解释
+bit_vec_bin_pattern -> 0b segment+
+bit_vec_oct_pattern -> 0o segment+
+bit_vec_hex_pattern -> 0x segment+
+segment -> id
+    | integer
+    | <expr>
+    | (pattern : expr)
 
 infix_pattern -> or_pattern
     | range_from_to_pattern
@@ -418,7 +565,7 @@ postfix_pattern -> option_some_pattern
     | and_is_pattern
     | as_bind_pattern
     | application_pattern
-    | normal_form_application_pattern
+    | normal_form_head_application_pattern
     | extended_application_pattern
 
 option_some_pattern -> pattern?
@@ -428,29 +575,53 @@ and_is_pattern -> pattern and expr is pattern
 as_bind_pattern -> pattern as id
 application_pattern -> pattern (pattern*)
 -- 注意这里是expr哦
-normal_form_application_pattern -> pattern<expr*>
+normal_form_head_application_pattern -> expr<type_pattern_argument*>
+type_pattern_argument -> id: pattern
+    | type_pattern_expression
+    | pattern
+type_pattern_expression -> 'id
 extended_application_pattern -> pattern { (property_pattern | pattern)* }
 
--- use pathes
-mod_statement -> mod id
-use_statement -> use path
+-- modules and use paths
+use_statement -> visibility? use path
 
-path -> projection_path
+path -> id
+    | projection_path
     | projection_multi_path
     | projection_all_path
     | super_path
-    | package_path
     | path_as_bind
 
 projection_path -> path . id
 projection_multi_path -> path . { path* }
 projection_all_path -> path . *
 super_path -> . path
-package_path -> @ path
 path_as_bind -> path as id
+
+-- token macros；先接回调用位置，再按该位置的普通语法检查。
+template_macro_definition -> define id integer { token* }
+    | define id integer ... { token* }
+    | define id(id*) { token* }
+fixed_template_call -> $id token*
+repeated_template_call -> $id token* $
+named_template_call -> $id(token*)
+template_macro_parameter -> $integer
+    | $id
+
+macro_import -> @use path
+ast_macro_call -> @path(argument*)
+block_macro_call -> @path { macro_input }
+token_buffer -> {{ token_part* }}
+token_part -> token
+    | $expr
+ast_macro_definition -> @define_macro1 { mapping_definition }
+peg_macro_definition -> @define_macro2 { peg_rule* mapping_definition }
+-- mapping_definition、peg_rule、macro_input 按相应构造宏的输入契约读取。
+raw_str -> @builtin.str.raw { raw_source }
 
 
 -- others
-property -> .id expr
+property -> id: expr
+configuration -> .id expr
 block -> { (definition | statement)* }
-filescope
+filescope -> (configuration | definition | statement)*

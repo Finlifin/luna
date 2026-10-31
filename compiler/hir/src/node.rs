@@ -5,7 +5,7 @@
 //! table, which is the primary way to look up a node by [`HirId`].
 
 use crate::ClauseParam;
-use crate::body::Param;
+use crate::body::BodyParam;
 use crate::clause::ClauseConstraint;
 use crate::decl::LetDecl;
 use crate::expr::{Block, Expr};
@@ -22,12 +22,27 @@ pub enum Node<'hir> {
     FieldDef(&'hir FieldDef<'hir>),
     Variant(&'hir Variant<'hir>),
     ClauseConstraint(&'hir ClauseConstraint<'hir>),
-    Param(&'hir Param<'hir>),
+    Param(&'hir BodyParam<'hir>),
     ClauseParam(&'hir ClauseParam<'hir>),
     LetDecl(&'hir LetDecl<'hir>),
 }
 
 impl Node<'_> {
+    pub fn hir_id(&self) -> crate::HirId {
+        match self {
+            Node::Item(node) => node.hir_id(),
+            Node::Pattern(node) => node.hir_id,
+            Node::Expr(node) => node.hir_id,
+            Node::Block(node) => node.hir_id,
+            Node::PatternArm(node) => node.hir_id,
+            Node::FieldDef(node) => node.hir_id,
+            Node::Variant(node) => node.hir_id,
+            Node::ClauseConstraint(node) => node.hir_id,
+            Node::Param(node) => node.hir_id,
+            Node::ClauseParam(node) => node.hir_id,
+            Node::LetDecl(node) => node.hir_id,
+        }
+    }
     pub fn kind_name(&self) -> &'static str {
         match self {
             Node::Item(_) => "item",

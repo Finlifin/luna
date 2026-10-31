@@ -13,7 +13,12 @@ impl Parser<'_> {
             }
             // consume '^'
             p.eat_tokens(1);
-            let expr = p.try_expr()?;
+            let expression_start = p.next_token_span().lo();
+            // A following named input belongs to the attributed element,
+            // not to the attribute's postfix projection chain.
+            let mut option = super::expressions::ExprOption::default();
+            option.stop_at_named_parameter = true;
+            let expr = p.try_expr_with_option(option)?;
             if expr == 0 {
                 return Err(ParseError::invalid_syntax(
                     "Expected attribute expression after `^`".to_string(),
@@ -21,6 +26,11 @@ impl Parser<'_> {
                     p.current_span(),
                 ));
             }
+            // Postfix parsing may assign the root a suffix-only span. An
+            // attribute must retain the entire expression for deferred name
+            // resolution, including its callee/path prefix.
+            p.ast.spans[expr as usize] =
+                rustc_span::Span::new(expression_start, p.current_span().hi());
             Ok(expr)
         })
     }
@@ -42,7 +52,11 @@ impl Parser<'_> {
     }
 
     // TODO: GPT写的, 拉胯, 没有用scoped
-    fn wrap_with_attributes(&mut self, mut target: NodeIndex, attrs: &[NodeIndex]) -> NodeIndex {
+    pub(crate) fn wrap_with_attributes(
+        &mut self,
+        mut target: NodeIndex,
+        attrs: &[NodeIndex],
+    ) -> NodeIndex {
         // Writing order: first parsed attribute should be the outermost wrapper.
         // attrs collected in textual order; we fold from last to first to keep that property.
         for &attr_expr in attrs.iter().rev() {
@@ -68,9 +82,13 @@ impl Parser<'_> {
                 Underscore => {
                     Ok(NodeBuilder::new(NodeKind::Wildcard, p.next_token_span()).build(&mut p.ast))
                 }
-                Int => Ok(NodeBuilder::new(NodeKind::Int, p.next_token_span()).build(&mut p.ast)),
-                Real => Ok(NodeBuilder::new(NodeKind::Real, p.next_token_span()).build(&mut p.ast)),
-                Str => Ok(NodeBuilder::new(NodeKind::Str, p.next_token_span()).build(&mut p.ast)),
+                Int | IntBin | IntOct | IntHex => {
+                    Ok(NodeBuilder::new(NodeKind::Int, p.next_token_span()).build(&mut p.ast))
+                }
+                Real | RealSci => {
+                    Ok(NodeBuilder::new(NodeKind::Real, p.next_token_span()).build(&mut p.ast))
+                }
+                Str => return p.try_string_literal(),
                 Char => Ok(NodeBuilder::new(NodeKind::Char, p.next_token_span()).build(&mut p.ast)),
                 Id => {
                     let sym = p.next_token_symbol();
@@ -108,6 +126,40 @@ impl Parser<'_> {
         })
     }
 
+    /// Keep individual token spans for decoding; comments never become text.
+    fn try_string_literal(&mut self) -> ParseResult {
+        let first_span = self.next_token_span();
+        let mut last_span = first_span;
+        let mut last_end = self.peek_next_token().to;
+        let mut leaves = Vec::new();
+        loop {
+            let token = self.peek_next_token();
+            if token.kind != TokenKind::Str {
+                break;
+            }
+            if !leaves.is_empty() {
+                let gap = lex::Token::new(TokenKind::Str, last_end, token.from);
+                if !self.token_text(&gap).chars().all(char::is_whitespace) {
+                    break;
+                }
+            }
+            last_span = self.next_token_span();
+            leaves.push(NodeBuilder::new(NodeKind::Str, last_span).build(&mut self.ast));
+            last_end = token.to;
+            self.eat_tokens(1);
+        }
+        if leaves.len() == 1 {
+            Ok(leaves[0])
+        } else {
+            Ok(NodeBuilder::new(
+                NodeKind::StringConcat,
+                rustc_span::Span::new(first_span.lo(), last_span.hi()),
+            )
+            .add_multiple_children(leaves)
+            .build(&mut self.ast))
+        }
+    }
+
     pub fn try_id(&mut self) -> ParseResult {
         self.scoped_with_expected_prefix(TokenKind::Id.as_ref(), |p| {
             let sym = p.next_token_symbol();
@@ -119,6 +171,20 @@ impl Parser<'_> {
             p.eat_tokens(1);
             result
         })
+    }
+
+    /// Reserved spellings accepted only as qualified member components.
+    pub(crate) fn try_member_id(&mut self) -> ParseResult {
+        if !self.peek(TokenKind::Default.as_ref()) {
+            return self.try_id();
+        }
+        let (hi, lo) = lex::Symbol::intern("default").to_raw_parts();
+        let id = NodeBuilder::new(NodeKind::Id, self.next_token_span())
+            .add_single_child(hi)
+            .add_single_child(lo)
+            .build(&mut self.ast);
+        self.eat_tokens(1);
+        Ok(id)
     }
 
     // symbol -> . id
@@ -245,6 +311,28 @@ impl Parser<'_> {
             }
             Ok(NodeBuilder::new(result_kind, p.current_span())
                 .add_single_child(node)
+                .build(&mut p.ast))
+        })
+    }
+
+    /// Configuration belongs to the enclosing definition, not the next member.
+    pub fn try_configuration(&mut self) -> ParseResult {
+        self.scoped_with_expected_prefix(&[TokenKind::Dot, TokenKind::Id], |p| {
+            p.eat_tokens(1);
+            let id = p.try_id()?;
+            let value_start = p.next_token_span().lo();
+            let value = p.try_expr()?;
+            if value == 0 {
+                return Err(ParseError::invalid_syntax(
+                    "Expected a value after configuration name".into(),
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
+            p.ast.spans[value as usize] = rustc_span::Span::new(value_start, p.current_span().hi());
+            Ok(NodeBuilder::new(NodeKind::Configuration, p.current_span())
+                .add_single_child(id)
+                .add_single_child(value)
                 .build(&mut p.ast))
         })
     }

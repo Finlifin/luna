@@ -1,0 +1,14 @@
+-- std package root. Sibling .fl files are discovered as modules.
+-- Consumers explicitly import std.prelude when they want these short names.
+
+pub use builtin.*;
+pub use io.{print, println};
+pub use fmt.format;
+pub use collections.{Vec, Map, Set};
+
+pub mod prelude {
+    pub use builtin.prelude.*;
+    pub use io.{print, println};
+    pub use fmt.format;
+    pub use collections.{Vec, Map, Set};
+}

@@ -1,0 +1,12 @@
+{-
+    Regression: parent-interface evidence for a disjunctive generic impl.
+    Run with --sysroot library --build-target x86_64 linux 64 --interpret run;
+    the expected result is true.
+    Eligibility preserves symbolic T while proving that every alternative is
+    admissible, without selecting f16 or bf16 during generic checking.
+-}
+trait Parent {}
+trait Child :- Parent {}
+impl Parent for T where T, requires T == f16 or T == bf16 {}
+impl Child for T where T, requires T == f16 or T == bf16 {}
+fn run() -> bool { true }

@@ -1,0 +1,355 @@
+{-
+    Use the complete sysroot and public meta interfaces. The callback state and
+    input snapshots belong to this invocation, not to the collection helpers.
+    Zero is a probe input for the stateful callbacks below; the source contains
+    only positive values. Probes inspect captured state without source pointers.
+-}
+{- An empty or singleton traversal must never execute this callback path. -}
+comptime fn invalid_callback() -> bool {
+    let empty: meta.List<bool> = [];
+    empty[0]
+}
+
+comptime fn select(value: Integer) -> ?Integer {
+    if value == 2 { null } else { value * 10 }
+}
+
+comptime fn expand(value: Integer) -> meta.List<Integer> {
+    if value == 2 { [] } else { [value, value + 10] }
+}
+
+comptime fn optional(flag: bool) -> ??Integer {
+    let values: meta.List<?Integer> = [null];
+    values.find(|value| flag)
+}
+
+comptime fn run() -> bool {
+    var original: meta.List<Integer> = [1, 2, 3];
+    let saved = original;
+    var visits: Integer = 0;
+    let mapper = |value: Integer| -> ?Integer {
+        if value == 0 {visits + original.length()} else {
+            visits = visits * 10 + value;
+            original = [];
+            select(value)
+        }
+    };
+    let selected = saved.filter_map(mapper);
+    let trace = mapper(0);
+    let flattened = saved.flat_map(expand);
+    let nested = meta.List<bool>.filter_map([false, true, false],optional);
+    let empty: meta.List<Integer> = [];
+    let unused = empty.flat_map(|value| {
+        invalid_callback();
+        expand(value)
+    });
+    let unused_filter = empty.filter_map(|value| {
+        invalid_callback();
+        select(value)
+    });
+    (trace match {value? => value == 123, null => false})
+        and visits == 0 and original.length() == 3 and saved.length() == 3
+        and selected.length() == 2 and selected[0] == 10 and selected[1] == 30
+        and flattened.length() == 4
+        and flattened[0] == 1 and flattened[1] == 11
+        and flattened[2] == 3 and flattened[3] == 13
+        and nested.length() == 1
+        and (nested[0] match { null => true, _? => false })
+        and unused.length() == 0 and unused_filter.length() == 0
+        and reducers_and_searches() and named_metadata() and stable_sorting()
+        and exact_integer_division() and value_receivers() and indexed_pairing() and bulk_extension()
+        and prefix_layout() and adjacent_groups() and checked_queries() and fallible_collectors() and fallible_terminals()
+}
+
+comptime fn Bits(width: Integer) -> Type {
+    BitVec<width>
+}
+
+comptime fn prefix_layout() -> bool {
+    let sizes: meta.List<Integer> = [4, 8, 1];
+    let offsets = sizes.scan_exclusive(0, |offset, size| offset + size);
+    let ends = sizes.scan(0, |offset, size| offset + size);
+    let storage = offsets.map(Bits);
+    offsets.length() == 3 and offsets[0] == 0 and offsets[1] == 4 and offsets[2] == 12
+        and ends.length() == 3 and ends[0] == 4 and ends[1] == 12 and ends[2] == 13
+        and storage[0] == BitVec<0> and storage[1] == BitVec<4> and storage[2] == BitVec<12>
+}
+
+comptime fn exact_integer_division() -> bool {
+    let q: Integer = 1606938044258990275541962092341162602522202993782792835301376;
+    let dividend = q * 17 + 9;
+    meta.div_trunc(dividend, 17) == q and meta.rem_trunc(dividend, 17) == 9
+        and meta.div_trunc(-dividend, 17) == -q and meta.rem_trunc(-dividend, 17) == -9
+        and meta.div_trunc(dividend, -17) == -q and meta.rem_trunc(dividend, -17) == 9
+}
+
+comptime fn stable_sorting() -> bool {
+    let input: meta.List<Integer> = [12, 1, 11, 3, 2];
+    let ordered = input.sort_by(|a, b| {
+        let left = meta.rem_trunc(a, 10);
+        let right = meta.rem_trunc(b, 10);
+        left < right
+    });
+    let types: meta.List<Type> = [bool, u32, bool];
+    let retained = types.sort_by(|a, b| false);
+    input[0] == 12 and input[1] == 1
+        and ordered[0] == 1 and ordered[1] == 11 and ordered[2] == 12
+        and ordered[3] == 2 and ordered[4] == 3
+        and retained[0] == bool and retained[1] == u32 and retained[2] == bool
+        and ordered.partition_point(|value| meta.rem_trunc(value, 10) < 2) == 2
+        and ordered.lower_bound(2, |a, b| meta.rem_trunc(a, 10) < meta.rem_trunc(b, 10)) == 2
+        and ordered.upper_bound(2, |a, b| meta.rem_trunc(a, 10) < meta.rem_trunc(b, 10)) == 4
+}
+
+comptime fn named_metadata() -> bool {
+    let absent: ?Integer = null;
+    let input = {enabled: true, 'x', enabled: false, limit: absent};
+    let shadowed = {enabled: true, enabled: 'x'};
+    var draft = {enabled: false};
+    let saved = draft;
+    draft = update_metadata(draft, true);
+    (meta.Object.get<bool>(input, .enabled) matches false?)
+        and (meta.Object.get<bool>(input, .missing) matches null)
+        and (meta.Object.get<bool>(shadowed, .enabled) matches null)
+        and (meta.Object.get<?Integer>(input, .limit) match {
+            value? => value matches null, null => false,
+        })
+        and (meta.Object.get<bool>(saved, .enabled) matches false?)
+        and (meta.Object.get<bool>(draft, .enabled) matches true?)
+}
+
+comptime fn update_metadata(output: meta.Object, enabled: bool) -> meta.Object {
+    output.replace(0, enabled)
+}
+
+comptime fn reducers_and_searches() -> bool {
+    var original: meta.List<Integer> = [1, 2, 3];
+    let saved = original;
+    var calls: Integer = 0;
+    let reducer = |left: Integer, right: Integer| {
+        if right == 0 {calls + original.length()} else {
+            calls += 1;
+            original = [];
+            left * 10 + right
+        }
+    };
+    let reduced = saved.reduce(reducer);
+    let reduction_calls = reducer(0, 0);
+    let empty: meta.List<Integer> = [];
+    let absent = empty.reduce(|left, right| {
+        invalid_callback();
+        left + right
+    });
+    let singles: meta.List<Integer> = [7];
+    let singleton = singles.reduce(|left, right| {
+        invalid_callback();
+        left + right
+    });
+    let optionals: meta.List<?Integer> = [null];
+    let nested = optionals.reduce(|left, right| right);
+    var visits: Integer = 0;
+    let finder = |value: Integer| -> ?Integer {
+        if value == 0 {visits} else {
+            visits = visits * 10 + value;
+            if value == 2 { value * 10 } else { null }
+        }
+    };
+    let found: ?Integer = saved.find_map(finder);
+    let search_trace = finder(0);
+    let present_null = meta.List<bool>.find_map([false, true, false],optional);
+    let no_match = empty.find_map(|value| {
+        invalid_callback();
+        select(value)
+    });
+    reduction_calls == 2 and calls == 0 and visits == 0
+        and (search_trace match {value? => value == 12, null => false})
+        and original.length() == 3
+        and saved.length() == 3
+        and (reduced match { value? => value == 123, null => false })
+        and (absent match { null => true, _? => false })
+        and (singleton match { value? => value == 7, null => false })
+        and (nested match { value? => value match { null => true, _? => false }, null => false })
+        and (found match { value? => value == 20, null => false })
+        and (present_null match { value? => value match { null => true, _? => false }, null => false })
+        and (no_match match { null => true, _? => false })
+}
+
+test comptime_list_collectors {
+    inline if run() {
+        assumes true;
+    } else {
+        assumes false;
+    };
+}
+
+{- Direct and projected list receivers update their original slots. -}
+struct ListHolder { items: meta.List<bool>, tag: bool }
+
+comptime fn value_receivers() -> bool {
+    var values: meta.List<bool> = [false];
+    let saved = values;
+    values.append(true);
+    let holder = ListHolder {items: values, tag: false};
+    holder.items.append(false);
+    let slice = holder.items.slice(1, 3);
+    saved.length() == 1 and values.length() == 2
+        and holder.items.length() == 3 and not holder.tag
+        and (slice match { items? => items.length() == 2 and items[0] and not items[1], null => false })
+}
+
+{- Code generators can pair declaration inputs and keep their source indices. -}
+comptime fn indexed_pairing() -> bool {
+    let widths: meta.List<Integer> = [8, 16, 32];
+    let flags: meta.List<bool> = [true, false];
+    let indexed = widths.map_indexed(|index, width| index * 100 + width);
+    let paired = widths.zip_with(flags, |width, enabled| if enabled {width} else {0});
+    let found = widths.position(|width| width == 16);
+    let empty: meta.List<Integer> = [];
+    let missing = empty.position(|width| true);
+    indexed.length() == 3 and indexed[0] == 8 and indexed[2] == 232
+        and paired.length() == 2 and paired[0] == 8 and paired[1] == 0
+        and (found match { index? => index == 1, null => false })
+        and (missing match { null => true, _? => false })
+}
+
+comptime fn bulk_extension() -> bool {
+    var values: meta.List<Integer> = [1, 2];
+    let saved = values;
+    values.append_all(values);
+    values.append_all([]);
+    let holder = ListHolder {items: [true], tag: false};
+    holder.items.append_all([false, true]);
+    values.length() == 4 and values[0] == 1 and values[2] == 1
+        and values[3] == 2 and saved.length() == 2
+        and holder.items.length() == 3 and not holder.items[1] and holder.items[2]
+}
+
+
+comptime fn adjacent_groups() -> bool {
+    var original: meta.List<Integer> = [1, 1, 2, 2, 1];
+    var trace: Integer = 0;
+    let equivalent = |left: Integer, right: Integer| -> bool {
+        if left == 0 { trace == 1221 } else {
+            trace = trace * 10 + right;
+            original = [];
+            left == right
+        }
+    };
+    let groups = original.dedup_by(equivalent);
+    let observed = equivalent(0, 0);
+    let sorted = groups.sort_by(|a, b| a < b);
+    let empty: meta.List<Integer> = [];
+    let single: meta.List<Integer> = [1];
+    observed and groups.length() == 3
+        and groups[0] == 1 and groups[1] == 2 and groups[2] == 1
+        and original.length() == 5 and trace == 0
+        and not groups.is_sorted_by(|a, b| a < b)
+        and sorted.is_sorted_by(|a, b| a < b)
+        and empty.dedup_by(|a, b| invalid_callback()).length() == 0
+        and single.dedup_by(|a, b| invalid_callback()).length() == 1
+        and empty.is_sorted_by(|a, b| invalid_callback())
+        and single.is_sorted_by(|a, b| invalid_callback())
+}
+
+
+pure comptime fn QueryIdentity<T> -> Type { T }
+
+comptime fn checked_queries() -> bool {
+    let values: meta.List<Integer> = [4, 8, 16];
+    let empty: meta.List<Integer> = [];
+    let optional: meta.List<?Integer> = [null, 7];
+    let types: meta.List<Type> = [QueryIdentity<bool>, bool];
+    let huge: Integer = 340282366920938463463374607431768211456;
+    let nested: meta.List<meta.List<Integer>> = [[1, 2], []];
+    var copied = nested.first() match { value? => value, null => return false };
+    copied.append(3);
+    (values.get(0) matches 4?) and (values.last() matches 16?)
+        and (values.first() matches 4?) and (values.get(1) matches 8?)
+        and (values.get(-1) matches null) and (values.get(3) matches null)
+        and (values.get(huge) matches null) and (values.get(-huge) matches null)
+        and (empty.first() matches null) and (empty.last() matches null)
+        and (optional.first() match { value? => value matches null, null => false })
+        and (optional.last() match { value? => value matches 7?, null => false })
+        and (optional.get(2) matches null)
+        and (types.first() match { value? => value == QueryIdentity<bool>, null => false })
+        and (types.last() match { value? => value == bool, null => false })
+        and copied.length() == 3 and nested[0].length() == 2
+        and (nested.last() match { value? => value.length() == 0, null => false })
+}
+
+
+comptime fn checked_double(value: Integer) -> !Integer Integer { value * 2 }
+comptime fn checked_sum(left: Integer, right: Integer) -> !Integer Integer { left + right }
+
+comptime fn fallible_collectors() -> bool {
+    let values: meta.List<Integer> = [1, 2, 3];
+    let empty: meta.List<Integer> = [];
+    let types: meta.List<Type> = [QueryIdentity<bool>, bool];
+    let kept = types.try_map(|value: Type| -> !Integer Type { value });
+    let doubled = values.try_map(checked_double);
+    let total = values.try_fold(10, checked_sum);
+    let absent = values.try_map(|value: Integer| -> !Integer ?Integer { null });
+    let unused = empty.try_map(|value: Integer| -> !Integer Integer {
+        invalid_callback();
+        value
+    });
+    let initial = empty.try_fold(7, |left: Integer, right: Integer| -> !Integer Integer {
+        invalid_callback();
+        left
+    });
+    var visits: Integer = 0;
+    let mapper = |value: Integer| -> !Integer Integer {
+        if value == 0 { return visits; }
+        visits = visits * 10 + value;
+        if value == 2 { return error visits; }
+        value
+    };
+    let failed = values.try_map(mapper);
+    let trace = mapper(0);
+    let rejected = values.try_fold(0, |left: Integer, right: Integer| -> !Integer Integer {
+        if right == 2 { return error left; }
+        left + right
+    });
+    (doubled match { value! => value.length() == 3 and value[0] == 2 and value[2] == 6, error _ => false })
+        and (total matches 16!) and (initial matches 7!)
+        and (absent match { value! => value.length() == 3 and (value[0] matches null), error _ => false })
+        and (unused match { value! => value.length() == 0, error _ => false })
+        and (kept match { value! => value[0] == QueryIdentity<bool> and value[1] == bool, error _ => false })
+        and (failed matches error 12) and (trace matches 12!) and visits == 0
+        and (rejected matches error 1)
+}
+
+
+comptime fn fallible_terminals() -> bool {
+    let values: meta.List<Integer> = [1, 2, 3, 4];
+    let empty: meta.List<Integer> = [];
+    let singleton: meta.List<?Integer> = [null];
+    let none = empty.try_reduce(checked_sum);
+    let total = values.try_reduce(checked_sum);
+    let present = singleton.try_reduce(|left: ?Integer, right: ?Integer| -> !Integer ?Integer {
+        invalid_callback();
+        left
+    });
+    var visits: Integer = 0;
+    let visitor = |value: Integer| -> !Integer void {
+        if value == 0 { return error visits; }
+        visits = visits * 10 + value;
+        if value == 2 { return error visits; }
+    };
+    let stopped = values.try_foreach(visitor);
+    let trace = visitor(0);
+    let unused = empty.try_foreach(|value: Integer| -> !Integer void {
+        invalid_callback();
+    });
+    let complete = values.try_foreach(|value: Integer| -> !Integer void {});
+    let failed = values.try_reduce(|left: Integer, right: Integer| -> !Integer Integer {
+        if right == 3 { return error left; }
+        left + right
+    });
+    (none match { value! => value matches null, error _ => false })
+        and (total match { value! => value matches 10?, error _ => false })
+        and (present match { value! => value matches null?, error _ => false })
+        and (stopped matches error 12) and (trace matches error 12)
+        and (unused matches _!) and (complete matches _!)
+        and (failed matches error 3) and visits == 0
+}

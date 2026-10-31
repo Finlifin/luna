@@ -1,0 +1,27 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+typealias Type = .Type'builtin;
+typealias Char = 'x''type;
+
+comptime fn Select(flag: bool) -> Type {
+    if flag { bool } else { Char }
+}
+
+-- The default Type depends on this call's actual comptime flag.
+fn configured(comptime .flag: bool = true,
+              comptime .T: Type = Select(flag),
+              value: T) -> T {
+    value
+}
+
+-- Default Type values can forward earlier Type inputs without invoking code.
+fn chained(comptime .T: Type = bool, comptime .U: Type = T, value: U) -> U {
+    value
+}
+
+fn run() -> Tuple<bool, Char, Char> {
+    -- Type checking prepares flag/T before checking value. Runtime values keep
+    -- their source evaluation order, even with a trailing named Type input.
+    (configured(true), configured('x', .flag = false), chained('z', .T = Char))
+}

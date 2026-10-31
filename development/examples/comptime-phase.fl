@@ -1,0 +1,16 @@
+-- Executed only through the phase-checked comptime entrypoint.
+pure comptime fn select(flag: bool, left: .u8'builtin, right: .u8'builtin) -> .u8'builtin {
+    if flag { left } else { right }
+}
+comptime fn invert(value: .u8'builtin) -> .u8'builtin {
+    (not value'bitvec).as(.u8'builtin)
+}
+comptime fn default_value(.value: .u8'builtin = 7) -> .u8'builtin { value }
+comptime fn entry() -> .u8'builtin {
+    select(true, invert(default_value()), 0)
+}
+comptime fn finite(flag: bool) -> bool {
+    if flag { finite(false) } else { true }
+}
+comptime fn endless() -> bool { endless() }
+fn runtime_value() -> .u8'builtin { 9 }

@@ -1,0 +1,44 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
+trait Read {
+    comptime fn read(self) -> bool;
+    comptime fn inverted(self) -> bool { not self.read() }
+}
+struct Flag { value: bool }
+impl Read for Flag {
+    comptime fn read(self) -> bool { self.value }
+}
+impl Flag {
+    comptime fn direct(self) -> bool { self.value }
+}
+comptime fn generic(value: T) -> bool where T :- Read { value.read() }
+comptime fn run() -> Tuple<bool, bool, bool, bool> {
+    let value = Flag { value: true };
+    (value.direct(), value.as(Read).read(), value.as(Read).inverted(), generic(value))
+}
+comptime fn first_class() -> bool {
+    let method = Flag.as(Read).read;
+    method(Flag { value: true })
+}
+comptime fn associated() -> bool { Flag.direct(Flag { value: true }) }
+trait Echo where T {
+    comptime fn echo(self, value: T) -> T;
+}
+struct Identity {}
+impl Echo<T> for Identity where T {
+    comptime fn echo(self, value: T) -> T { value }
+}
+comptime fn parameterized() -> bool { Identity {}.as(Echo<bool>).echo(true) }
+trait Choose {
+    comptime fn choose(self, .fallback: bool = true) -> bool;
+}
+impl Choose for Flag {
+    comptime fn choose(self, .fallback: bool = false) -> bool { fallback }
+}
+comptime fn optional() -> bool { Flag { value: false }.as(Choose).choose() }
+trait Derived :- Read {
+    comptime fn inherited(self) -> bool { self.read() }
+}
+impl Derived for Flag {}
+comptime fn parent() -> bool { Flag { value: true }.as(Derived).inherited() }

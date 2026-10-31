@@ -1,0 +1,25 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
+typealias Byte = .u8'builtin;
+
+fn materialize(comptime value: bool) -> bool {
+    value
+}
+
+-- The loop runs after count is supplied; runtime code receives its result.
+fn parity(comptime count: Byte) -> bool {
+    materialize(do {
+        var remaining = count;
+        var odd = false;
+        while remaining > 0 {
+            remaining = remaining - 1;
+            odd = not odd;
+        }
+        odd
+    })
+}
+
+fn run() -> Tuple<bool, bool> {
+    (parity(7), parity(8))
+}

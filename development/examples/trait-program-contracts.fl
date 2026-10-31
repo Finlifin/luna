@@ -1,0 +1,134 @@
+typealias Byte = .u8'builtin;
+trait Step {
+    fn next(value: Byte) -> result: Byte
+    where requires value < 255,
+        ensures result == value'old + 1;
+
+    fn twice(value: Byte) -> result: Byte
+    where requires value < 254,
+        ensures result == value'old + 2 {
+        let first = Self.as(Step).next(value);
+        Self.as(Step).next(first)
+    }
+}
+struct Counter {}
+impl Step for Counter {
+    fn next(input: Byte) -> Byte { input + 1 }
+}
+struct Wide {}
+impl Step for Wide {
+    fn next(input: Byte) -> Byte
+    where requires input <= 255 {
+        if input == 255 { 0 } else { input + 1 }
+    }
+}
+fn call(value: Byte) -> result: Byte
+where requires value < 255,
+    ensures result == value'old + 1 { Counter.as(Step).next(value) }
+fn call_twice(value: Byte) -> result: Byte
+where requires value < 254,
+    ensures result == value'old + 2 { Counter.as(Step).twice(value) }
+fn generic(subject: T, value: Byte) -> result: Byte
+where T :- Step, requires value < 255,
+    ensures result == value'old + 1 { T.as(Step).next(value) }
+fn generic_call(value: Byte) -> Byte
+where requires value < 255 { generic(Counter {}, value) }
+fn wide(value: Byte) -> Byte
+where requires value < 255 { Wide.as(Step).next(value) }
+impl Counter {
+    fn bounded(input: Byte) -> result: Byte
+    where requires input < 100, ensures result == input'old { input }
+}
+fn inherent(value: Byte) -> Byte
+where requires value < 100 { Counter.bounded(value) + 156 }
+struct Box where T {}
+impl Step for Box<T> where T {
+    fn next(input: Byte) -> Byte { input + 1 }
+}
+fn generic_implementation(value: Byte) -> Byte
+where requires value < 255 { Box<bool>.as(Step).next(value) }
+trait Receiver {
+    fn next(self, value: Byte) -> result: Byte
+    where requires value < 255, ensures result == value'old + 1;
+}
+impl Receiver for Counter {
+    fn next(self, input: Byte) -> Byte { input + 1 }
+}
+fn receiver(value: Byte) -> Byte
+where requires value < 255 { Counter {}.as(Receiver).next(value) }
+trait Addition {
+    fn add(value: Byte, .delta: Byte = 1) -> result: Byte
+    where requires value <= 255 - delta,
+        ensures result == value'old + delta'old;
+}
+impl Addition for Counter {
+    fn add(input: Byte, .delta: Byte = 1) -> Byte { input + delta }
+}
+fn default_argument(value: Byte) -> Byte
+where requires value < 255 { Counter.as(Addition).add(value) }
+trait CtStep {
+    comptime fn next(value: Byte) -> result: Byte
+    where requires value < 255, ensures result == value'old + 1;
+}
+impl CtStep for Counter {
+    comptime fn next(input: Byte) -> Byte { input + 1 }
+}
+comptime fn run() -> Byte { Counter.as(CtStep).next(41) }
+comptime fn Selected(flag: bool) -> .Type'builtin {
+    let value = Counter.as(CtStep).next(1);
+    if value == 2 { Byte } else { bool }
+}
+typealias SelectedByte = Selected(true);
+comptime fn selected() -> SelectedByte { 7 }
+struct WideMatch {}
+impl Step for WideMatch {
+    fn next(input: Byte) -> Byte
+    where requires input <= 255 {
+        input match { 255 => 0, _ => input + 1 }
+    }
+}
+struct WideReturn {}
+impl Step for WideReturn {
+    fn next(input: Byte) -> Byte
+    where requires input <= 255 {
+        return if input == 255 { 0 } else { input + 1 };
+    }
+}
+fn match_call(value: Byte) -> Byte
+where requires value < 255 { WideMatch.as(Step).next(value) }
+fn return_call(value: Byte) -> Byte
+where requires value < 255 { WideReturn.as(Step).next(value) }
+trait Derived :- Step {}
+impl Derived for Counter {}
+fn parent_call(value: Byte) -> Byte
+where requires value < 255 { Counter.as(Derived).next(value) }
+trait Zero {
+    fn zero() -> result: Byte where ensures result == 0;
+}
+impl Zero for Counter {
+    fn zero() -> Byte { 0 }
+}
+fn method_value() -> Byte {
+    let callable = Counter.as(Zero).zero;
+    callable()
+}
+trait Bounded {
+    fn limit(value: Byte) -> result: Byte
+    where requires value < 100, ensures result <= value'old;
+}
+impl Bounded for Counter {
+    fn limit(input: Byte) -> result: Byte
+    where requires input < 200, ensures result == 0 { 0 }
+}
+fn strengthened_result(value: Byte) -> Byte
+where requires value < 100 { Counter.as(Bounded).limit(value) + 156 }
+trait Echo where T {
+    fn echo(value: T, enabled: bool) -> result: T
+    where requires enabled, ensures enabled == enabled'old;
+}
+impl Echo<Byte> for Counter {
+    fn echo(input: Byte, enabled: bool) -> Byte { input }
+}
+fn interface_argument(value: Byte) -> Byte {
+    Counter.as(Echo<Byte>).echo(value, true)
+}

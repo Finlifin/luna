@@ -1,0 +1,26 @@
+-- Exact-width construction preserves representations, including NaN payloads.
+typealias Byte = .u8'builtin;
+typealias SignedByte = .i8'builtin;
+typealias Single = .f32'builtin;
+typealias Double = .f64'builtin;
+fn signed(value: Byte) -> SignedByte { value'bitvec.as(SignedByte) }
+fn signed_field(value: Byte) -> SignedByte {
+    value'bitvec match { 0x(field: SignedByte) => field }
+}
+fn single(value: .u32'builtin) -> Single { value'bitvec.as(Single) }
+fn single_field(value: .u32'builtin) -> Single {
+    value'bitvec match { 0x(field: Single) => field }
+}
+fn double(value: .u64'builtin) -> Double { value'bitvec.as(Double) }
+fn double_field(value: .u64'builtin) -> Double {
+    value'bitvec match { 0x(field: Double) => field }
+}
+fn maximum(value: Byte) -> bool {
+    value'bitvec match { 0x(127: SignedByte) => true, _ => false }
+}
+fn zero(value: .u32'builtin) -> bool {
+    value'bitvec match { 0x(0.0: Single) => true, _ => false }
+}
+fn roundtrip(value: .u128'builtin) -> .u128'builtin {
+    value'bitvec.as(.i128'builtin)'bitvec.as(.u128'builtin)
+}

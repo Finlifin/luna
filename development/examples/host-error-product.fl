@@ -1,0 +1,26 @@
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+enum Failure where T { Bad(T) }
+enum Other { Bad }
+impl Duplicate for Failure<bool> {}
+impl Duplicate for Other {}
+fn record(...fields: T) -> T where T { fields }
+fn sample(failed: bool, seen: *bool) -> ![Other, Failure<bool>] bool {
+    seen.* = not seen.*;
+    if failed { error Failure<bool>.Bad(true) } else { true }
+}
+fn expected() -> ![Failure<T>, Other] bool where T { true }
+fn forward(value: (record {result: expected<T>(), flag: true})'type) -> bool where T {
+    value.result! {
+        Failure<T>.Bad(_) => value.flag,
+        Other.Bad => false,
+    }
+}
+fn run() -> bool {
+    var seen = false;
+    let first = forward(record {result: sample(true, seen.ref), flag: true});
+    let once = seen;
+    let second = forward(record {result: sample(false, seen.ref), flag: true});
+    first and second and once and not seen
+}

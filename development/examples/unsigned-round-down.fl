@@ -1,0 +1,5 @@
+typealias UInt=.u32'builtin;
+fn round_down(n:UInt,alignment:UInt)->result:UInt
+where requires alignment != 0, ensures result <= n
+{(n / alignment) * alignment}
+fn run()->UInt {round_down(20,3)}

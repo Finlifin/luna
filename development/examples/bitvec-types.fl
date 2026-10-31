@@ -1,0 +1,28 @@
+-- Explicit builtin constructor until package/prelude integration is connected.
+typealias Empty = .BitVec'builtin<0>;
+typealias Bit = .BitVec'builtin<1>;
+typealias Nine = .BitVec'builtin<9>;
+typealias Wide = .BitVec'builtin<257>;
+fn identity(value: T) -> T where T { value }
+fn nine() -> Nine { identity(511) }
+fn wide() -> Wide {
+    0x10000000000000000000000000000000000000000000000000000000000000000
+}
+fn empty() -> Empty { 0 }
+fn default_value(.value: Nine = 511) -> Nine { value }
+fn defaulted() -> Nine { default_value() }
+fn literal_pattern() -> bool {
+    nine() match { 0o777 => true, _ => false }
+}
+fn singleton() -> bool { empty() match { 0 => true } }
+fn branch(value: Bit) -> bool { value match { 0b0 => false, 0b1 => true } }
+
+trait Read { fn read(self) -> .u16'builtin; }
+impl Read for .BitVec'builtin<8> {
+    fn read(self) -> .u16'builtin { self.as(.u16'builtin) }
+}
+impl Read for Nine {
+    fn read(self) -> .u16'builtin { self.as(.u16'builtin) }
+}
+fn invoke(value: T) -> .u16'builtin where T :- Read { value.read() }
+fn protocol() -> .u16'builtin { invoke(nine()) }

@@ -1,0 +1,18 @@
+pure comptime fn Elements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:Elements<.Type'builtin>> -> .Type'builtin {bool}
+struct Outer {
+    pub struct Inner where T {pub typealias Payload = T;}
+}
+comptime fn configured(flag: bool) -> bool {
+    const packet = ((Outer, flag), flag);
+    const saved = packet;
+    const (inner, unused) = saved;
+    const (Selected, value) = inner;
+    let checked: Selected.Inner<bool>.Payload = value;
+    checked
+}
+fn run() -> bool {
+    const yes = configured(true);
+    const no = configured(false);
+    yes and not no
+}

@@ -1,132 +1,351 @@
-//! Luna compiler driver.
-//!
-//! Orchestrates the compilation pipeline:
-//!
-//! ```text
-//!   source file
-//!     → lex  → parse  → resolve          (standalone phases)
-//!     → hir_package query                 (dispatches ast_lowering provider)
-//!     → [typeck / mir / codegen — TODO]
-//! ```
+//! Source compilation, IR export and explicit bounded comptime invocation.
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use luna::{cli, frontend};
+mod output;
 
-use interface::{CompilerConfig, CompilerInstance, Session};
-use parse::parser::Parser;
+use cli::Command;
+use std::io::{self, Write};
+use std::process::ExitCode;
 
-fn main() {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let config = CompilerConfig::new("test", cwd);
-    let sess = Session::new(config);
+fn main() -> ExitCode {
+    let command = match cli::parse(std::env::args_os().skip(1)) {
+        Ok(command) => command,
+        Err(message) => {
+            report_error(&message);
+            let _ = writeln!(io::stderr().lock(), "\n{}", cli::USAGE);
+            return ExitCode::from(2);
+        }
+    };
 
-    // ── Sysroot ──────────────────────────────────────────────────────────────
-    if let Some(ref sr) = sess.sysroot {
-        println!("sysroot: {}", sr.root.display());
-    } else {
-        println!("warning: sysroot not found – builtin/std unavailable");
-    }
+    let result = match command {
+        Command::PackageStream { capacity } => {
+            luna::package_stream::serve(&mut io::stdin().lock(), &mut io::stdout().lock(), capacity)
+        }
+        Command::Host {
+            host_fma,
+            host_sqrt,
+            host_copysign,
+            host_intrinsics,
+            options,
+            entry,
+            fuel,
+            output_kind,
+            discard_result,
+            inline_functions,
+            optimization,
+            protocols,
+        } => frontend::compile_bound_for_native_host(
+            &options,
+            protocols.as_ref().map(|(copy, _)| copy.as_str()),
+            protocols.as_ref().map(|(_, drop)| drop.as_str()),
+            host_fma.as_deref(),
+            host_sqrt.as_deref(),
+            host_copysign.as_deref(),
+            &host_intrinsics,
+        )
+        .and_then(|(artifact, bindings)| {
+            let frontend::Artifact::Nir(package) = artifact else {
+                return Err("host pipeline requires NIR".into());
+            };
+            let ir = if discard_result {
+                luna::host::llvm_ir_discarding_result(
+                    &package,
+                    None,
+                    &entry,
+                    fuel,
+                    (
+                        bindings.copy.ok_or("host Copy binding is missing")?,
+                        bindings.drop.ok_or("host Drop binding is missing")?,
+                    ),
+                    inline_functions,
+                )?
+            } else if inline_functions
+                || protocols.is_some()
+                || bindings.copy.is_some()
+                || bindings.drop.is_some()
+            {
+                let lower = if inline_functions {
+                    luna::host::llvm_ir_inlined_with_protocols
+                } else {
+                    luna::host::llvm_ir_with_protocols
+                };
+                lower(
+                    &package,
+                    &entry,
+                    fuel,
+                    bindings.copy.ok_or("host Copy binding is missing")?,
+                    bindings.drop.ok_or("host Drop binding is missing")?,
+                )?
+            } else {
+                luna::host::llvm_ir(&package, &entry, fuel)?
+            };
+            let toolchain = luna::host::Toolchain {
+                optimization: optimization.unwrap_or_default(),
+                ..Default::default()
+            };
+            if matches!(
+                output_kind,
+                cli::HostOutput::Llvm | cli::HostOutput::Assembly
+            ) {
+                let ir = if output_kind == cli::HostOutput::Assembly {
+                    toolchain.assembly(&ir)?
+                } else if optimization.is_some() {
+                    toolchain.optimized_ir(&ir)?
+                } else {
+                    ir
+                };
+                if let Some(path) = &options.output {
+                    output::write_file(&options.input, path, &ir)
+                } else {
+                    output::write_stdout(&ir)
+                }
+            } else {
+                let kind = match output_kind {
+                    cli::HostOutput::Object => luna::host::BinaryOutput::Object,
+                    cli::HostOutput::Bitcode => luna::host::BinaryOutput::Bitcode,
+                    _ => luna::host::BinaryOutput::Executable,
+                };
+                let bytes = luna::host::binary(&ir, &toolchain, kind)?;
+                let publish = if kind == luna::host::BinaryOutput::Executable {
+                    output::write_executable
+                } else {
+                    output::write_object
+                };
+                publish(
+                    &options.input,
+                    options.output.as_ref().ok_or("host output missing")?,
+                    &bytes,
+                )
+            }
+        }),
+        Command::Help => output::write_stdout(cli::HELP),
+        Command::HelpTopic(text) => output::write_stdout(&text),
+        Command::Check(options) => frontend::compile(&options).map(|_| ()),
+        Command::CheckPackages(request) => request.compile().map(|_| ()),
+        Command::Packages(request)
+            if matches!(request.action, luna::package_cli::Action::Build { .. }) =>
+        {
+            request.build().and_then(|bytes| {
+                let publish = if matches!(
+                    request.action,
+                    luna::package_cli::Action::Build {
+                        output: luna::host::BinaryOutput::Executable,
+                        ..
+                    }
+                ) {
+                    output::write_executable
+                } else {
+                    output::write_object
+                };
+                publish(
+                    &request.options.input,
+                    request
+                        .options
+                        .output
+                        .as_ref()
+                        .ok_or("host output missing")?,
+                    &bytes,
+                )
+            })
+        }
+        Command::Packages(request) => request.run().and_then(|dump| {
+            if let Some(path) = &request.options.output {
+                output::write_file(&request.options.input, path, &dump)
+            } else {
+                output::write_stdout(&dump)
+            }
+        }),
+        Command::Invoke {
+            definition_fuel,
+            options,
+            entry,
+            fuel,
+            protocols,
+        } => frontend::invoke_comptime_with_definition_fuel(
+            &options,
+            &entry,
+            fuel,
+            definition_fuel,
+            protocols.as_ref().map(|(copy, _)| copy.as_str()),
+            protocols.as_ref().map(|(_, drop)| drop.as_str()),
+        )
+        .map(|value| value.to_string())
+        .and_then(|value| {
+            if let Some(path) = &options.output {
+                output::write_file(&options.input, path, &value)
+            } else {
+                output::write_stdout(&value)
+            }
+        }),
+        Command::Test {
+            host_fma,
+            host_sqrt,
+            host_copysign,
+            host_intrinsics,
+            timeout,
+            optimization,
+            native,
+            list_only,
+            filter,
+            options,
+            inline_functions,
+            protocols,
+            fuel,
+        } => (if native {
+            frontend::compile_bound_for_native_tests
+        } else {
+            frontend::compile_bound_with_host_protocols
+        })(
+            &options,
+            protocols.as_ref().map(|(copy, _)| copy.as_str()),
+            protocols.as_ref().map(|(_, drop)| drop.as_str()),
+            host_fma.as_deref(),
+            host_sqrt.as_deref(),
+            host_copysign.as_deref(),
+            &host_intrinsics,
+        )
+        .and_then(|(artifact, bindings)| {
+            luna::package_cli::Action::Tests {
+                host_fma,
+                host_sqrt,
+                host_copysign,
+                host_intrinsics,
+                timeout,
+                optimization,
+                native,
+                list_only,
+                filter,
+                fuel,
+                inline: inline_functions,
+                protocols,
+            }
+            .run(artifact, &bindings, 0)
+        })
+        .and_then(|dump| {
+            if let Some(path) = &options.output {
+                output::write_file(&options.input, path, &dump)
+            } else {
+                output::write_stdout(&dump)
+            }
+        }),
+        Command::Interpret {
+            options,
+            inline_functions,
+            entry,
+            protocols,
+            fuel,
+        } => frontend::compile_bound_with_resource_protocols(
+            &options,
+            protocols.as_ref().map(|(copy, _)| copy.as_str()),
+            protocols.as_ref().map(|(_, drop)| drop.as_str()),
+        )
+        .and_then(|(artifact, bindings)| {
+            luna::package_cli::Action::Interpret {
+                entry,
+                fuel,
+                inline: inline_functions,
+                protocols,
+            }
+            .run(artifact, &bindings, 0)
+        })
+        .and_then(|value| {
+            if let Some(path) = &options.output {
+                output::write_file(&options.input, path, &value)
+            } else {
+                output::write_stdout(&value)
+            }
+        }),
+        Command::Instantiate {
+            options,
+            entry,
+            fuel,
+        } => frontend::compile(&options)
+            .and_then(|artifact| {
+                let frontend::Artifact::Nir(package) = artifact else {
+                    return Err("instantiation requires NIR".into());
+                };
+                luna::instantiation::instantiate_in_package(&package, 0, &entry, fuel)
+                    .map(|package| package.to_string())
+            })
+            .and_then(|dump| {
+                if let Some(path) = &options.output {
+                    output::write_file(&options.input, path, &dump)
+                } else {
+                    output::write_stdout(&dump)
+                }
+            }),
+        Command::AnalyzeTextRegions {
+            options,
+            entry,
+            fuel,
+            inline_functions,
+        } => frontend::compile(&options)
+            .and_then(|artifact| {
+                let frontend::Artifact::Nir(package) = artifact else {
+                    return Err("text region analysis requires NIR".into());
+                };
+                (if inline_functions {
+                    luna::text_regions::analyze_inlined_in_package(package, 0, &entry, fuel)
+                } else {
+                    luna::text_regions::analyze_in_package(&package, 0, &entry, fuel)
+                })
+                .map(|summary| summary.to_string())
+            })
+            .and_then(|dump| {
+                if let Some(path) = &options.output {
+                    output::write_file(&options.input, path, &dump)
+                } else {
+                    output::write_stdout(&dump)
+                }
+            }),
+        Command::AnalyzeResources {
+            options,
+            entry,
+            copy_protocol,
+            drop_protocol,
+            fuel,
+        } => frontend::compile_bound_with_resource_protocols(
+            &options,
+            Some(&copy_protocol),
+            drop_protocol.as_deref(),
+        )
+        .and_then(|(artifact, bindings)| {
+            luna::package_cli::Action::Analyze {
+                entry,
+                fuel,
+                copy: copy_protocol,
+                drop: drop_protocol,
+            }
+            .run(artifact, &bindings, 0)
+        })
+        .and_then(|dump| {
+            if let Some(path) = &options.output {
+                output::write_file(&options.input, path, &dump)
+            } else {
+                output::write_stdout(&dump)
+            }
+        }),
+        Command::Compile(options) => frontend::compile(&options)
+            .map(|artifact| artifact.to_string())
+            .and_then(|dump| {
+                if let Some(path) = &options.output {
+                    output::write_file(&options.input, path, &dump)
+                } else {
+                    output::write_stdout(&dump)
+                }
+            }),
+    };
 
-    let mut instance = CompilerInstance::new(&sess);
-
-    for (i, vfs) in instance.sysroot_vfs.iter().enumerate() {
-        println!(
-            "  sysroot[{}] \"{}\" – {} source file(s)",
-            i,
-            vfs.name,
-            vfs.file_count()
-        );
-    }
-
-    // ── Load & lex ──────────────────────────────────────────────────────────
-    let file_path = Path::new("test.fl");
-    let source_file = sess
-        .source_map
-        .load_file(file_path)
-        .expect("failed to load test.fl");
-    let file_id = instance
-        .vfs_mut()
-        .add_file(file_path.to_path_buf(), source_file.clone());
-
-    let src = source_file.src.as_ref().expect("source text not available");
-    let (tokens, symbols, _lex_errors) = lex::lex(src, source_file.start_pos);
-
-    // ── Parse ────────────────────────────────────────────────────────────────
-    let mut parser = Parser::new(&sess.source_map, tokens, symbols, source_file.start_pos);
-    parser.parse(&instance.diag_ctx);
-    let ast = parser.finalize();
-    instance.vfs_mut().set_ast(file_id, ast);
-
-    {
-        let ast = instance.vfs.get_ast(file_id).expect("AST not found");
-        let lisp = ast.dump_to_s_expression(ast.root, &sess.source_map);
-        std::fs::write("ast.lisp", &lisp).expect("failed to write ast.lisp");
-        println!("ast dumped to ast.lisp ({} nodes)", ast.nodes.len());
-    }
-
-    // ── Name resolution ──────────────────────────────────────────────────────
-    let module_tree =
-        resolve::build_module_tree(&sess.source_map, &instance.diag_ctx, &mut instance.vfs);
-    if !module_tree.errors.is_empty() {
-        println!("resolve: {} error(s)", module_tree.errors.len());
-        for err in &module_tree.errors {
-            println!("  {}", err.message());
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => {
+            report_error(&message);
+            ExitCode::FAILURE
         }
     }
-    println!(
-        "name resolution complete: {} def(s), {} scope(s)",
-        module_tree.def_count,
-        module_tree.scope_tree.len(),
-    );
+}
 
-    let file_scope = module_tree
-        .file_scopes
-        .get(&file_id)
-        .copied()
-        .unwrap_or(resolve::ScopeId::ROOT);
-
-    // ── Register providers ────────────────────────────────────────────────────
-    //
-    // Each compiler-pass crate registers its function-pointer implementations
-    // into the Providers dispatch table.  Must happen before any HIR queries.
-    ast_lowering::set_providers(&mut instance.db.providers);
-
-    // ── Set query inputs ──────────────────────────────────────────────────────
-    //
-    // Bundle all data needed by ast_lowering::lower_to_hir into HirQueryInput.
-    // SourceMap and DiagnosticContext are borrowed by raw pointer; they live at
-    // least as long as the `hir_package()` call below.
-    {
-        let hir_input = Arc::new(middle::HirQueryInput::new(
-            Arc::new(
-                instance
-                    .vfs
-                    .get_ast(file_id)
-                    .expect("AST not found")
-                    .clone(),
-            ),
-            Arc::new(module_tree),
-            file_scope,
-            &sess.source_map as *const rustc_span::SourceMap,
-            &instance.diag_ctx as *const diagnostic::DiagnosticContext<'_>
-                as *const diagnostic::DiagnosticContext<'static>,
-        ));
-        instance.set_hir_input(hir_input);
-    }
-
-    // ── Issue hir_package query ───────────────────────────────────────────────
-    let pkg_box = instance.enter(|compiler| compiler.hir_package());
-
-    let pkg = pkg_box.package();
-    println!(
-        "hir_package query complete: {} definition(s), {} body(ies)",
-        pkg.num_defs(),
-        pkg.num_bodies(),
-    );
-
-    // ── HIR serialization ─────────────────────────────────────────────────────
-    let hir_lisp = pkg.dump_to_lisp();
-    std::fs::write("hir.lisp", &hir_lisp).expect("failed to write hir.lisp");
-    println!("HIR dumped to hir.lisp");
-    println!("{}", hir_lisp);
+fn report_error(message: &str) {
+    // Even an unavailable stderr must not turn a user-facing error into a panic.
+    let _ = writeln!(io::stderr().lock(), "luna: error: {message}");
 }

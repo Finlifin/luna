@@ -1,0 +1,52 @@
+-- Stack-owned nodes: no allocator and no owning pointer convention is assumed.
+-- Build with --copy-protocol Duplicate --drop-protocol Retire.
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+typealias U = .u32'builtin;
+impl Duplicate for bool {}
+impl Duplicate for U {}
+
+enum Link { none, some(*Node) }
+struct Node { next: Link, value: U }
+impl Duplicate for Link {}
+impl Duplicate for Node {}
+
+fn value(node: *Node) -> U { node.value.* }
+
+fn run() -> bool {
+    var third = Node {next: Link.none, value: 3};
+    var second = Node {next: Link.some(third.ref), value: 2};
+    var first = Node {next: Link.some(second.ref), value: 1};
+    var current = Link.some(first.ref);
+    var previous = Link.none;
+    var active = true;
+    while active {
+        current match {
+            .none => { active = false; },
+            .some(node) => {
+                let next = node.next.*;
+                node.next.* = previous;
+                previous = current;
+                current = next;
+            },
+        }
+    };
+
+    -- Follow the modified links, checking order and exact length.
+    current = previous;
+    active = true;
+    var expected: U = 3;
+    while active {
+        current match {
+            .none => { active = false; },
+            .some(node) => {
+                assumes expected > 0;
+                let actual = value(node);
+                assumes actual == expected;
+                expected = expected - 1;
+                current = node.next.*;
+            },
+        }
+    };
+    expected == 0
+}

@@ -1,0 +1,41 @@
+-- One closure is called with different resource-bearing enum variants.
+use resources.Drop;
+
+struct Watch { dropped: *bool, called: *bool }
+impl Drop for Watch {
+    fn drop(*self) {
+        assumes not self.dropped.*.*;
+        self.dropped.*.* = true;
+    }
+}
+
+enum Choice { none, some(Watch) }
+
+fn scenario(select: bool) -> bool {
+    var retired = false;
+    var called = false;
+    let enabled = true;
+    let first = |value: Choice| value match {
+        .none => false,
+        .some(item) => do {
+            assumes not item.dropped.*;
+            item.called.* = true;
+            enabled
+        },
+    };
+    let second = |value: Choice| value match {
+        .none => false,
+        .some(item) => do {
+            assumes not item.dropped.*;
+            item.called.* = true;
+            not enabled
+        },
+    };
+    let consume = if select { first } else { second };
+    let empty = consume(Choice.none);
+    assumes not empty and not called and not retired;
+    let full = consume(Choice.some(Watch { dropped: retired.ref, called: called.ref }));
+    full == select and called and retired
+}
+
+fn run() -> bool { scenario(false) and scenario(true) }

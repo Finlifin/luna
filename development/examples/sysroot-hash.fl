@@ -1,0 +1,56 @@
+{-
+  Exercise the public Hash protocol from the complete sysroot. Runtime and
+  comptime members remain separate implementations with matching results.
+-}
+comptime fn wide_digest() -> u64 {
+    let value: u128 = 18446744073709551616;
+    value.as(ComptimeHash).hash()
+}
+
+comptime fn symbol_digest() -> u64 {
+    let value: Symbol = .foobar;
+    value.as(ComptimeHash).hash()
+}
+
+test scalar_representations {
+    let unsigned: u8 = 255;
+    let signed: i8 = -128;
+    let character: char = '🦀';
+    let unsigned_hash = unsigned.as(Hash).hash();
+    let signed_hash = signed.as(Hash).hash();
+    let character_hash = character.as(Hash).hash();
+    let true_hash = true.as(Hash).hash();
+    let false_hash = false.as(Hash).hash();
+    assumes unsigned_hash == 255 and signed_hash == 128;
+    assumes character_hash == 129408 and true_hash == 1 and false_hash == 0;
+}
+
+test wide_values_and_comptime_phase {
+    let wide: u128 = 18446744073709551616;
+    let signed: i128 = -170141183460469231731687303715884105728;
+    let actual = wide.as(Hash).hash();
+    let signed_hash = signed.as(Hash).hash();
+    inline if wide_digest() == 1 {
+        assumes actual == 1;
+    } else {
+        assumes false;
+    };
+    assumes signed_hash == 9223372036854775808;
+}
+
+test symbol_runtime_and_comptime_phases {
+    let first: Symbol = .foobar;
+    let second: Symbol = .foobar;
+    let different: Symbol = .a;
+    assumes first == second and first != different;
+    let first_hash = first.as(Hash).hash();
+    let second_hash = second.as(Hash).hash();
+    let different_hash = different.as(Hash).hash();
+    assumes first_hash == second_hash;
+    assumes different_hash == 12638187200555641996;
+    inline if symbol_digest() == 9625390261332436968 {
+        assumes first_hash == 9625390261332436968;
+    } else {
+        assumes false;
+    };
+}

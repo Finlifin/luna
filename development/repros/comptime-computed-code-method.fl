@@ -1,0 +1,2 @@
+struct Ops {pub comptime fn build()-><|-bool> {'(true)}}
+fn run()->bool {~<do {Ops}.build()>}

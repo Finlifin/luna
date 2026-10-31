@@ -1,0 +1,22 @@
+trait Read {
+    fn read(self) -> bool;
+}
+trait Left :- Read {}
+trait Right :- Read {}
+trait Summary :- Left + Right {
+    fn summary(self) -> bool { self.as(Read).read() }
+}
+
+struct Flag { value: bool, }
+
+-- Declaration order does not supply or hide parent implementations.
+impl Summary for Flag {}
+impl Right for Flag {}
+impl Left for Flag {}
+impl Read for Flag {
+    fn read(self) -> bool { self.value }
+}
+
+fn run() -> bool {
+    Flag { value: true }.as(Summary).summary()
+}

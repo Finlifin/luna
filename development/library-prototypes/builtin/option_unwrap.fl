@@ -1,0 +1,14 @@
+{-
+    Panic-dependent extraction of a language optional value. The total value
+    operations remain usable independently of the panic implementation.
+-}
+pub trait OptionalUnwrap where T {
+    fn unwrap(self) -> T;
+}
+
+impl OptionalUnwrap<T> for ?T where T {
+    fn unwrap(self) -> T = self match {
+        value? => value,
+        null => panic("called unwrap() on an absent optional value"),
+    };
+}

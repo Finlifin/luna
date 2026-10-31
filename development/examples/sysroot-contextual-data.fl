@@ -1,0 +1,105 @@
+{-
+    Contextual code is a comptime input, independent of the function's result
+    category. Build storage for its runtime result through the public meta API.
+    The quote checks the supplied program; constructing the slot does not run
+    that program or install it as a field default.
+-}
+comptime fn SlotFor(code: <|-T>) -> Type
+where T
+{
+    var builder = meta.StructBuilder.new(.name = .CodeResultSlot);
+    builder.add_field(.value, T);
+    builder.Build()
+}
+
+comptime fn ForwardSlot(code: <|-T>) -> Type
+where T
+{
+    SlotFor(code)
+}
+
+typealias BooleanSlot = ForwardSlot('(true));
+
+test contextual_data_builder {
+    let slot = BooleanSlot { value: true };
+    assumes slot.value;
+}
+
+comptime fn inspect() -> bool {
+    let names = BooleanSlot.struct_field_names();
+    let types = BooleanSlot.struct_field_types();
+    let pair_names = BooleanPair.struct_field_names();
+    let pair_types = BooleanPair.struct_field_types();
+    let method_names = BooleanMethodSlot.struct_field_names();
+    let method_types = BooleanMethodSlot.struct_field_types();
+    let trait_names = BooleanTraitSlot.struct_field_names();
+    let trait_types = BooleanTraitSlot.struct_field_types();
+    names.length() == 1 and names[0] == .value and types[0] == bool
+        and pair_names.length() == 2 and pair_names[0] == .left
+        and pair_names[1] == .right and pair_types[0] == bool
+        and pair_types[1] == bool
+        and method_names.length() == 1 and method_names[0] == .value
+        and method_types[0] == bool
+        and trait_names.length() == 1 and trait_names[0] == .value
+        and trait_types[0] == bool
+}
+
+
+{-
+    Data collections retain their Tuple type while the code input remains a
+    separate contextual value. A computed packet can forward the field names.
+-}
+comptime fn PairFor(code: <|-T>, ...names: Tuple<Symbol, Symbol>) -> Type
+where T
+{
+    let (first, second) = names;
+    var builder = meta.StructBuilder.new(.name = .CodeResultPair);
+    builder.add_field(first, T);
+    builder.add_field(second, T);
+    builder.Build()
+}
+
+typealias BooleanPair = PairFor('(true), ...do { (.left, .right) });
+
+test contextual_data_variadic_builder {
+    let pair = BooleanPair { left: true, right: false };
+    assumes pair.left and not pair.right;
+}
+
+
+{-
+    A static contextual method can capture its generic container's type and
+    forward the quoted input to a data-producing construction function.
+-}
+struct CodeSchema where T {}
+
+impl CodeSchema<T> where T {
+    comptime fn Build(code: <|-T>) -> Type {
+        SlotFor(code)
+    }
+}
+
+typealias BooleanMethodSlot = CodeSchema<bool>.Build('(true));
+
+test contextual_data_method_builder {
+    let slot = BooleanMethodSlot { value: true };
+    assumes slot.value;
+}
+
+
+trait SchemaFactory where T {
+    comptime fn Make(code: <|-T>) -> Type;
+}
+
+impl SchemaFactory<T> for CodeSchema<T> where T {
+    comptime fn Make(code: <|-T>) -> Type {
+        SlotFor(code)
+    }
+}
+
+typealias BooleanTraitSlot = CodeSchema<bool>.as(SchemaFactory<bool>).Make('(true));
+
+test contextual_data_trait_builder {
+    let slot = BooleanTraitSlot { value: true };
+    assumes slot.value;
+}

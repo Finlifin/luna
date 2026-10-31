@@ -1,0 +1,25 @@
+-- python3 -B development/host_examples.py generic-iteration --compare-optimization
+-- A bounded Newton iteration, exercising generic defaults and compound writes.
+-- sqrt from the math library remains the target intrinsic wrapper.
+pure fn newton(value: T, .estimate: T = 1.0) -> T
+where T, requires T == .f32'builtin or T == .f64'builtin {
+    var current = estimate;
+    var steps: .u8'builtin = 0;
+    while steps < 12 {
+        current += value / current;
+        current *= 0.5;
+        steps += 1;
+    }
+    current
+}
+
+pure fn close(value: T, expected: T) -> bool
+where T, requires T == .f32'builtin or T == .f64'builtin {
+    let difference = value - expected;
+    difference > -0.00001 and difference < 0.00001
+}
+
+pure fn run() -> bool {
+    close<.f32'builtin>(newton<.f32'builtin>(81.0), 9.0)
+        and close<.f64'builtin>(newton<.f64'builtin>(16.0, .estimate = 2.0), 4.0)
+}

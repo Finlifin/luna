@@ -1,0 +1,38 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+-- Ordinary comptime values may index opaque types in trait requirements.
+typealias Type = .Type'builtin;
+
+trait Source {
+    assoc Item: Type;
+}
+impl Source for bool {
+    assoc Item: Type = Type;
+}
+
+pure comptime fn Tagged<T, value: T> -> Type { T }
+trait Allowed where T {}
+impl Allowed<Tagged<Type, bool>> for bool {}
+
+fn accept(comptime A: Type, comptime value: A.as(Source).Item,
+          comptime .copy: A.as(Source).Item = value) -> bool
+where requires A :- Source,
+      requires bool :- Allowed<Tagged<A.as(Source).Item, copy>> {
+    true
+}
+
+fn forward(comptime A: Type, comptime value: A.as(Source).Item) -> bool
+where requires A :- Source,
+      requires bool :- Allowed<Tagged<A.as(Source).Item, value>> {
+    accept(A, value)
+}
+
+fn generic(comptime value: T, extra: G) -> G
+where T, G, requires bool :- Allowed<Tagged<T, value>> {
+    extra
+}
+
+fn run() -> Tuple<bool, bool, bool> {
+    (accept(bool, bool), forward(bool, bool), generic(bool, true))
+}

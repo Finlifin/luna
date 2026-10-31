@@ -1,0 +1,44 @@
+-- python3 -B development/host_examples.py generic-integers --compare-optimization
+-- The same runtime algorithms are checked for every allowed integer width.
+pure fn gcd(left: T, right: T) -> T
+where T, requires T == .u8'builtin or T == .u16'builtin
+    or T == .u32'builtin or T == .u64'builtin or T == .u128'builtin
+    or T == .usize'builtin {
+    var a = left;
+    var b = right;
+    while b != 0 {
+        let remainder = a % b;
+        a = b;
+        b = remainder;
+    }
+    a
+}
+
+pure fn distance(left: T, right: T) -> T
+where T, requires T == .u8'builtin or T == .u16'builtin
+    or T == .u32'builtin or T == .u64'builtin or T == .u128'builtin
+    or T == .usize'builtin {
+    if left >= right { left - right } else { right - left }
+}
+
+-- A portable bound excludes the minimum signed value at every allowed width.
+-- The library's Neg protocol is bound, but these remain native scalar operations.
+pure fn negate(value: T) -> result: T
+where T, requires T == .i8'builtin or T == .i16'builtin
+    or T == .i32'builtin or T == .i64'builtin or T == .i128'builtin
+    or T == .isize'builtin,
+    requires value >= -127,
+    ensures result == -value'old {
+    -value
+}
+
+fn run() -> bool {
+    gcd<.u32'builtin>(48, 18) == 6
+        and gcd<.u128'builtin>(340282366920938463463374607431768211455, 255) == 255
+        and distance<.u16'builtin>(9, 42) == 33
+        and negate<.i8'builtin>(-127) == 127
+        and negate<.i128'builtin>(42) == -42
+        and gcd<.usize'builtin>(48, 18) == 6
+        and distance<.usize'builtin>(9, 42) == 33
+        and negate<.isize'builtin>(-127) == 127
+}

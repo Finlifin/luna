@@ -1,0 +1,15 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+typealias Type = .Type'builtin;
+pure comptime fn TupleElements<T> -> Type { T }
+pure comptime fn Tuple<...Es: TupleElements<Type>> -> Type { bool }
+typealias Byte = .u8'builtin;
+
+pure comptime fn Tagged<T, value: T> -> Type { T }
+
+comptime fn packet() -> Tuple<Type, Byte> { (Byte, 7) }
+
+typealias Chosen = Tagged<...packet()>;
+
+comptime fn Run() -> Type {
+    Tagged<...packet()>
+}

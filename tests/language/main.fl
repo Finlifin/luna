@@ -1,0 +1,166 @@
+-- Standalone source tests: no unfinished sysroot APIs are assumed.
+typealias Byte = .u8'builtin;
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+
+fn identity(value: T) -> T where T { value }
+fn select(flag: bool, first: T, second: T) -> T where T {
+    if flag { first } else { second }
+}
+fn defaulted(.value: Byte = 7) -> Byte { value }
+fn mark(target: *bool) -> bool { target.* = true; true }
+fn build(...properties: T) -> T where T { properties }
+comptime fn ready() -> bool { true }
+quote fn quoted(value: bool) -> bool { value }
+struct Pair { first: bool, second: bool }
+struct Box where T { value: T }
+enum Choice { empty, some(bool) }
+impl Duplicate for Choice {}
+comptime fn rejected_choice(code: <flag: bool |- bool>) -> <Choice -|> {
+    '<not .some(value if ~[flag=value]<code>)>
+}
+fn generated_complement(value: Choice) -> bool {
+    const code: <flag: bool |- bool> = '(flag);
+    const pattern = rejected_choice(code);
+    value match { ~<pattern> => true, .some(true) => false }
+}
+fn computed_complement(value: bool) -> bool {
+    value match {
+        flag and not flag is true => true,
+        flag and not flag is false => false,
+    }
+}
+trait Read { fn read(self) -> bool; }
+impl Read for Box<bool> { fn read(self) -> bool { self.value } }
+fn read(value: T) -> bool where T :- Read { value.as(Read).read() }
+struct Ticket { closed: *bool }
+impl Retire for Ticket { fn drop(*self) { self.closed.*.* = true; } }
+fn own(closed: *bool) { let ticket = Ticket { closed: closed }; }
+
+test boolean_logic {
+    let result = true and not false or false;
+    assumes result;
+}
+test generic_identity {
+    let flag = identity(true);
+    let input: Byte = 7;
+    let byte = identity(input);
+    assumes flag and byte == 7;
+}
+test generic_selection {
+    let first: Byte = 3;
+    let second: Byte = 9;
+    let value = select(false, first, second);
+    assumes value == 9;
+}
+test tuple_destructuring {
+    let (first, second) = (true, false);
+    assumes first and not second;
+}
+test named_fields {
+    let pair = Pair { first: true, second: false };
+    let {second: other, first: flag} = pair;
+    assumes flag and not other;
+}
+test enum_payload {
+    let result = Choice.some(true) match { .some(flag) => flag, .empty => false };
+    assumes result;
+}
+test alternatives {
+    let input: Byte = 7;
+    let result = input match { 3 or 7 => true, _ => false };
+    assumes result;
+}
+test negation {
+    let result = false match { not true => true, _ => false };
+    assumes result;
+}
+test generated_pattern_complements {
+    let empty = generated_complement(.empty);
+    let disabled = generated_complement(.some(false));
+    let enabled = generated_complement(.some(true));
+    assumes empty and disabled and not enabled;
+}
+test computed_pattern_coverage {
+    let disabled = computed_complement(false);
+    let enabled = computed_complement(true);
+    assumes disabled and not enabled;
+}
+test guarded_candidate {
+    let result = (true, true) match { (a, (b if a == b)) => b, _ => false };
+    assumes result;
+}
+test let_else {
+    let .some(flag) = Choice.some(true) else { assumes false; return; };
+    assumes flag;
+}
+test closure_capture {
+    let flag = true;
+    let closure = || flag;
+    let result = closure();
+    assumes result;
+}
+test default_argument {
+    let first = defaulted();
+    let second = defaulted(.value = 9);
+    assumes first == 7 and second == 9;
+}
+test trait_dispatch {
+    let result = read(Box<bool> { value: true });
+    assumes result;
+}
+test comptime_branch {
+    inline if ready() { assumes true; } else { assumes false; }
+}
+test quoted_call {
+    let result = quoted(true);
+    assumes result;
+}
+test short_circuit {
+    let touched = false;
+    let result = false and mark(touched.ref);
+    assumes not result and not touched;
+}
+test pointer_write {
+    let touched = false;
+    let result = mark(touched.ref);
+    assumes result and touched;
+}
+test loop_state {
+    var count: Byte = 0;
+    while count < 3 { count = count + 1; }
+    assumes count == 3;
+}
+test extended_arguments {
+    let {flag, nested: {value}} = build {flag: true, nested: build {value: false}};
+    assumes flag and not value;
+}
+test cleanup {
+    let closed = false;
+    own(closed.ref);
+    assumes closed;
+}
+
+-- Imported templates use the public CLI's ordinary test discovery and runner.
+use fixtures.flag_case;
+use fixtures.typed_case;
+
+test template_default_flag use flag_case { assumes not flag; }
+test template_explicit_flag use flag_case<.initial = true> { assumes flag; }
+test template_boolean_result use typed_case { true }
+test template_byte_result use typed_case<.T = Byte> { 9 }
+
+typealias V = .void'builtin;
+struct PreparedTicket { ready: bool }
+impl Retire for PreparedTicket { fn drop(*self) { assumes self.ready.*; } }
+
+template test prepared_resource
+where body: < ticket: *PreparedTicket |- V >
+{
+    var value = PreparedTicket { ready: false };
+    let ticket = value.ref;
+    ~<body>;
+}
+
+test template_cleanup use prepared_resource { ticket.ready.* = true; }
+test template_early_cleanup use prepared_resource { ticket.ready.* = true; return; }

@@ -1,0 +1,34 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
+typealias Flag = bool;
+
+enum Entry {
+    missing,
+    found(Flag),
+}
+
+fn lookup(flag: Flag) -> Entry {
+    if flag { .found(false) } else { .missing }
+}
+
+fn accept(input: Flag) -> Flag {
+    input match {
+        first and lookup(first) is .found(second)
+              and not second is true => first,
+        _ => false,
+    }
+}
+
+fn keep(value: T) -> T where T {
+    value
+}
+
+fn forward(value: T) -> T where T {
+    let first and keep<T>(first) is result = value;
+    result
+}
+
+fn run() -> Tuple<Flag, Flag> {
+    (forward(accept(true)), accept(false))
+}

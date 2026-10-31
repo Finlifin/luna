@@ -1,0 +1,26 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+-- Whole-value transfer preserves responsibility without granting Copy or Clone.
+-- Run with: luna pure-transfers.fl --interpret run
+struct Ticket { enabled: bool }
+
+pure fn keep(value: T) -> T where T {
+    let forwarded = value;
+    forwarded
+}
+
+pure fn reorder(first: T, second: T, reverse: bool) -> Tuple<T, T>
+where T
+{
+    if reverse { (second, first) } else { (first, second) }
+}
+
+fn run() -> bool {
+    let (disabled, enabled) = reorder(
+        keep(Ticket { enabled: true }),
+        Ticket { enabled: false },
+        true,
+    );
+    not disabled.enabled and enabled.enabled
+}

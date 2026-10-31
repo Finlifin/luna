@@ -1,0 +1,23 @@
+-- Preserve abstract member identity until the implementation is selected.
+trait Flag {
+    assoc enabled: bool = true;
+
+    fn flag(self) -> bool {
+        Self.as(Flag).enabled
+    }
+}
+
+impl Flag for bool {
+    assoc enabled: bool = false;
+}
+
+impl Flag for 'x''type {}
+
+fn query(value: T) -> bool where T :- Flag {
+    T.as(Flag).enabled
+}
+
+fn entry() -> bool {
+    not query(true) and query('x')
+        and not true.as(Flag).flag() and 'x'.as(Flag).flag()
+}

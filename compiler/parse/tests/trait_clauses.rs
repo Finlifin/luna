@@ -1,0 +1,153 @@
+use ast::{Ast, NodeIndex, NodeKind};
+use lex::TokenKind;
+use parse::parser::Parser;
+use rustc_span::source_map::FilePathMapping;
+use rustc_span::{FileName, SourceMap};
+
+fn declaration(source: &str) -> Result<(Ast, NodeIndex), String> {
+    let map = SourceMap::new(FilePathMapping::empty());
+    let file = map.new_source_file(FileName::Custom("trait-clauses.fl".into()), source.into());
+    let (tokens, symbols, errors) = lex::lex(source, file.start_pos);
+    assert!(errors.is_empty(), "{source}: {errors:?}");
+    let mut parser = Parser::new(&map, tokens, symbols, file.start_pos);
+    let root = parser
+        .try_statement_or_definition()
+        .map_err(|error| format!("{error:?}"))?;
+    if root == 0 || parser.peek_next_token().kind != TokenKind::Eof {
+        return Err("incomplete declaration".into());
+    }
+    Ok((parser.finalize(), root))
+}
+
+#[test]
+fn declaration_sugar_and_explicit_requires_keep_distinct_ast_forms() {
+    for (source, kinds) in [
+        (
+            "fn next() where T :- A + B {}",
+            vec![NodeKind::TraitBoundDeclClause],
+        ),
+        (
+            "fn next() where T, requires T :- A + B {}",
+            vec![NodeKind::TypeDeclClause, NodeKind::Requires],
+        ),
+    ] {
+        let (ast, root) = declaration(source).unwrap();
+        let clauses = ast
+            .get_multi_child_slice(ast.get_children(root)[3])
+            .unwrap();
+        assert_eq!(
+            clauses
+                .iter()
+                .map(|&node| ast.get_node_kind(node).unwrap())
+                .collect::<Vec<_>>(),
+            kinds
+        );
+    }
+    declaration("trait IndexMut :- Index<Idx> where Idx {}").unwrap();
+    declaration("impl Iterator for MapIterator where I :- Iterator, U {}").unwrap();
+    declaration("impl Iterator for MapIterator where I, U, requires I :- Iterator {}").unwrap();
+    declaration(
+        "fn from_iter(iter: I) where I :- Iterator, requires I.as(Iterator).Item == T, T {}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn requires_is_not_a_bound_declaration_operator() {
+    for source in [
+        "fn next() where T requires Iterator {}",
+        "impl Iterator for MapIterator where I requires Iterator, U {}",
+        "trait Copy requires Clone {}",
+    ] {
+        assert!(declaration(source).is_err(), "accepted: {source}");
+    }
+}
+
+#[test]
+fn delimited_defaults_accept_constructors_without_consuming_definition_bodies() {
+    for source in [
+        "fn run(.config:Config=Config {flag:true}) {}",
+        "fn run(.config:Config=Config {flag:true},.next:bool=false) {}",
+        "pure comptime fn Packet<.enabled:bool=true,.config:Config<enabled> = Config<enabled>{flag:true}>->Type {bool}",
+        "pure comptime fn Packet<.config:Config=Config {flag:true}>->Type = bool",
+        "fn run() where .flag:bool=true {}",
+        "pure comptime fn Packet<.flag:bool=true>->Type where .other:bool=false {bool}",
+    ] {
+        declaration(source).unwrap_or_else(|error| panic!("{source}: {error}"));
+    }
+    for source in [
+        "fn run(.config:Config=Config {flag:}) {}",
+        "pure comptime fn Packet<.config:Config=Config {flag:}>->Type {bool}",
+        "pure comptime fn Packet<.config:Config=>->Type {bool}",
+    ] {
+        assert!(declaration(source).is_err(), "accepted: {source}");
+    }
+}
+
+#[test]
+fn predicate_clauses_preserve_infix_spacing_across_layout_variations() {
+    for separator in [", ", ",\n            "] {
+        for expression in [
+            "x * x + y * y + x + y >= 0",
+            "x\t*\tx + y\n*\ny + x + y >= 0",
+        ] {
+            let source = format!(
+                "fn checked(x:Int,y:Int)->result:bool\n        where requires (x >= -1000 and x <= 1000 and y >= -1000 and y <= 1000){separator}ensures result {{{expression}}}"
+            );
+            declaration(&source).unwrap_or_else(|failure| panic!("{source}\n{failure}"));
+        }
+        for expression in ["x*x", "x *x", "x* x", "x/y", "x+y", "x-y"] {
+            let source = format!(
+                "fn checked(x:Int,y:Int)->result:Int where requires true{separator}ensures true {{{expression}}}"
+            );
+            let failure = declaration(&source).unwrap_err();
+            assert!(
+                failure.contains("requires whitespace on both sides"),
+                "{source}\n{failure}"
+            );
+        }
+    }
+}
+
+#[test]
+fn infix_spacing_diagnostics_preserve_prefix_types_and_statement_boundaries() {
+    for source in [
+        "fn run(value:*T)->*T {value}",
+        "fn run(value:Int)->Int { -value }",
+        "fn run(ready:bool,value:Int) {if ready {} -value;}",
+        "fn run(ready:bool) {if ready {} *T;}",
+        "fn run(value:*T)->T {value.*}",
+        "fn run(value:List<T>)->List<T> {value}",
+        "fn run(value:Int)->Int {value * -value}",
+        "fn run()->#relay *bool {relay()#}",
+        "fn run()->!Failure *bool {value}",
+        "fn run()->#relay !Failure *bool {value}",
+    ] {
+        declaration(source).unwrap_or_else(|failure| panic!("{source}\n{failure}"));
+    }
+}
+
+#[test]
+fn comptime_only_trait_is_a_paired_declaration_modifier() {
+    for source in [
+        "pure comptime trait Stage {}",
+        "pub pure comptime trait Stage :- Parent + Other where T { comptime fn run(self)->T; }",
+    ] {
+        let (ast, mut root) = declaration(source).unwrap();
+        if ast.get_node_kind(root) == Some(NodeKind::Pub) {
+            root = ast.get_children(root)[0];
+        }
+        assert_eq!(ast.get_node_kind(root), Some(NodeKind::AttributeSetTrue));
+        let inner = ast.get_children(root)[1];
+        assert_eq!(ast.get_node_kind(inner), Some(NodeKind::TraitDef));
+    }
+    for source in [
+        "comptime trait Stage {}",
+        "pure trait Stage {}",
+        "comptime pure trait Stage {}",
+        "pure pure comptime trait Stage {}",
+        "unsafe pure comptime trait Stage {}",
+    ] {
+        assert!(declaration(source).is_err(), "accepted: {source}");
+    }
+}

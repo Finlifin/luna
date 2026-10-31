@@ -1,0 +1,76 @@
+use builtin.{bool, char, str, Symbol, u8, u16, u32, u64, u128,
+    i8, i16, i32, i64, i128, usize, isize};
+
+{-
+    Comptime equality has its own protocol identity. Ordinary method discovery
+    prefers this interface in comptime contexts; cache consumers bind it
+    explicitly and still validate equality after hash collisions.
+-}
+pub pure comptime trait ComptimeEq {
+    comptime fn eq(self, other: Self) -> bool;
+    comptime fn ne(self, other: Self) -> bool = not self.eq(other);
+}
+
+comptime impl ComptimeEq for u8 {
+    comptime fn eq(self, other: Self) -> bool { self == other }
+}
+
+comptime impl ComptimeEq for u16 {
+    comptime fn eq(self, other: Self) -> bool { self == other }
+}
+
+comptime impl ComptimeEq for u32 {
+    comptime fn eq(self, other: Self) -> bool { self == other }
+}
+
+comptime impl ComptimeEq for u64 {
+    comptime fn eq(self, other: Self) -> bool { self == other }
+}
+
+comptime impl ComptimeEq for u128 {
+    comptime fn eq(self, other: Self) -> bool { self == other }
+}
+
+comptime impl ComptimeEq for i8 {
+    comptime fn eq(self, other: Self) -> bool { self == other }
+}
+
+comptime impl ComptimeEq for i16 {
+    comptime fn eq(self, other: Self) -> bool { self == other }
+}
+
+comptime impl ComptimeEq for i32 {
+    comptime fn eq(self, other: Self) -> bool { self == other }
+}
+
+comptime impl ComptimeEq for i64 {
+    comptime fn eq(self, other: Self) -> bool { self == other }
+}
+
+comptime impl ComptimeEq for i128 {
+    comptime fn eq(self, other: Self) -> bool { self == other }
+}
+
+comptime impl ComptimeEq for bool {
+    comptime fn eq(self, other: Self) -> bool { self == other }
+}
+
+comptime impl ComptimeEq for char {
+    comptime fn eq(self, other: Self) -> bool { self == other }
+}
+
+comptime impl ComptimeEq for Symbol {
+    comptime fn eq(self, other: Self) -> bool { self == other }
+}
+
+comptime impl ComptimeEq for usize {
+    comptime fn eq(self, other: Self) -> bool { self == other }
+}
+
+comptime impl ComptimeEq for isize {
+    comptime fn eq(self, other: Self) -> bool { self == other }
+}
+
+comptime impl ComptimeEq for str {
+    comptime fn eq(self, other: Self) -> bool { self == other }
+}

@@ -1,0 +1,63 @@
+typealias Byte = .u8'builtin;
+typealias Int = .Integer'builtin;
+
+fn narrowed(value: Byte) {
+    assumes value < 200;
+    assumes value >= 5;
+}
+fn branch_ranges(value: Byte, flag: bool) {
+    if flag {
+        assumes value < 100;
+    } else {
+        assumes value >= 200;
+    }
+    assumes true;
+}
+fn reassigned(value: Byte) {
+    var current = value;
+    assumes current < 100;
+    current = 250;
+    assumes current >= 200;
+}
+fn touch() {}
+fn call_boundary(value: Byte) {
+    assumes value < 100;
+    touch();
+    assumes true;
+}
+fn early_return(value: Byte) -> Byte {
+    if value >= 100 { return 0; }
+    assumes value < 100;
+    value
+}
+fn alternatives(value: Byte) {
+    assumes value < 100 or value >= 200;
+}
+fn reversed(value: Byte) {
+    assumes 100 > value and not (value < 5);
+}
+comptime fn exact_arithmetic() -> Int {
+    let x: Int = 2;
+    let y: Int = 5;
+    x + y * x
+}
+fn impossible(value: Byte) {
+    assumes value > 255;
+    assumes value < 1;
+}
+fn loop_boundary(value: Byte) {
+    var current = value;
+    assumes current < 100;
+    while current < 200 {
+        assumes current < 150;
+        current = 250;
+    }
+    assumes true;
+}
+comptime fn exact_guard() -> Int {
+    var value: Int = 2;
+    assumes value > 1 and value < 3;
+    value = -value;
+    assumes value < 0;
+    value
+}

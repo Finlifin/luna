@@ -1,0 +1,14 @@
+-- Build with --copy-protocol Duplicate --drop-protocol Retire.
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+
+fn choose(value: bool, .fallback: bool = value) -> bool {
+    value and fallback
+}
+
+fn run() -> bool {
+    var active = true;
+    while active { active = false; }
+    choose(not active)
+}

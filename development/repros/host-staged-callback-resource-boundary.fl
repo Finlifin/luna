@@ -1,0 +1,13 @@
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+typealias Type=.Type'builtin;
+typealias Callback=fn(comptime T:Type,value:T)->bool;
+fn selected(comptime T:Type,value:T)->bool where answer:bool {answer}
+fn trial(flag:bool)->bool {
+    var callback:Callback=if flag {selected<true>} else {selected<false>};
+    let alias=callback;
+    callback=selected<false>;
+    alias(bool,true) == flag and not callback(bool,true)
+}
+fn run()->bool {trial(true) and trial(false)}

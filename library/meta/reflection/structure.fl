@@ -1,0 +1,46 @@
+use bindings;
+use builtin.{Symbol, Type};
+use List;
+
+{-
+    Observe declaration order through the checked Type value. Reflection grants
+    neither field access nor layout permission and does not unfold opaque heads.
+    Enum paths consist of Symbol segments, not encoded discriminants.
+-}
+pub use bindings.struct_field_names;
+pub use bindings.struct_field_types;
+pub use bindings.enum_group_paths;
+pub use bindings.enum_variant_paths;
+pub use bindings.enum_variant_shapes;
+pub use bindings.enum_variant_field_names;
+pub use bindings.enum_variant_field_types;
+
+impl Type {
+    pub pure comptime fn struct_field_names(self) -> List<Symbol> {
+        bindings.struct_field_names(self)
+    }
+
+    pub pure comptime fn struct_field_types(self) -> List<Type> {
+        bindings.struct_field_types(self)
+    }
+
+    pub pure comptime fn enum_group_paths(self) -> List<List<Symbol>> {
+        bindings.enum_group_paths(self)
+    }
+
+    pub pure comptime fn enum_variant_paths(self) -> List<List<Symbol>> {
+        bindings.enum_variant_paths(self)
+    }
+
+    pub pure comptime fn enum_variant_shapes(self) -> List<Symbol> {
+        bindings.enum_variant_shapes(self)
+    }
+
+    pub pure comptime fn enum_variant_field_names(self) -> List<List<Symbol>> {
+        bindings.enum_variant_field_names(self)
+    }
+
+    pub pure comptime fn enum_variant_field_types(self) -> List<List<Type>> {
+        bindings.enum_variant_field_types(self)
+    }
+}

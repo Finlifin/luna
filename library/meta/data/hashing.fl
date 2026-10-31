@@ -1,0 +1,160 @@
+use builtin.{bool, char, str, Symbol, u8, u16, u32, u64, u128,
+    i8, i16, i32, i64, i128, usize, isize};
+use builtin.compiler.{str_byte_length as hash_str_byte_length, str_byte as hash_str_byte,
+    symbol_byte_length as hash_symbol_byte_length, symbol_byte as hash_symbol_byte,
+    integer_representation as hash_integer_representation};
+
+{-
+    The same representation/content hashes as builtin.Hash, with independent
+    comptime implementations. Hash collisions require ComptimeEq comparison;
+    these hashes are not cryptographic and never establish logical type equality.
+-}
+pub pure comptime trait ComptimeHash {
+    comptime fn hash(self) -> u64;
+}
+
+comptime impl ComptimeHash for bool {
+    comptime fn hash(self) -> u64 {
+        if self { 1 } else { 0 }
+    }
+}
+
+comptime impl ComptimeHash for u8 {
+    comptime fn hash(self) -> u64 {
+        self'bitvec.as(u64)
+    }
+}
+
+comptime impl ComptimeHash for u16 {
+    comptime fn hash(self) -> u64 {
+        self'bitvec.as(u64)
+    }
+}
+
+comptime impl ComptimeHash for u32 {
+    comptime fn hash(self) -> u64 {
+        self'bitvec.as(u64)
+    }
+}
+
+comptime impl ComptimeHash for u64 {
+    comptime fn hash(self) -> u64 {
+        self'bitvec.as(u64)
+    }
+}
+
+comptime impl ComptimeHash for i8 {
+    comptime fn hash(self) -> u64 {
+        self'bitvec.as(u64)
+    }
+}
+
+comptime impl ComptimeHash for i16 {
+    comptime fn hash(self) -> u64 {
+        self'bitvec.as(u64)
+    }
+}
+
+comptime impl ComptimeHash for i32 {
+    comptime fn hash(self) -> u64 {
+        self'bitvec.as(u64)
+    }
+}
+
+comptime impl ComptimeHash for i64 {
+    comptime fn hash(self) -> u64 {
+        self'bitvec.as(u64)
+    }
+}
+
+comptime impl ComptimeHash for u128 {
+    comptime fn hash(self) -> u64 {
+        let bits = self'bitvec;
+        let low = bits[0..64];
+        let high = bits[64..128];
+        ((low and not high) or (not low and high)).as(u64)
+    }
+}
+
+comptime impl ComptimeHash for i128 {
+    comptime fn hash(self) -> u64 {
+        let bits = self'bitvec;
+        let low = bits[0..64];
+        let high = bits[64..128];
+        ((low and not high) or (not low and high)).as(u64)
+    }
+}
+
+comptime impl ComptimeHash for char {
+    comptime fn hash(self) -> u64 {
+        self'bitvec.as(u64)
+    }
+}
+
+comptime impl ComptimeHash for str {
+    comptime fn hash(self) -> u64 {
+        let name = self;
+        let length = hash_str_byte_length(name);
+        var index: u64 = 0;
+        var state: u64 = 14695981039346656037;
+        while index < length {
+            let byte = hash_str_byte(name, index) match {
+                value? => value,
+                null => return state,
+            };
+            let bits = state'bitvec;
+            let widened = byte'bitvec.as(u64);
+            let input = widened'bitvec;
+            let mixed = ((bits and not input) or (not bits and input)).as(u128);
+            assumes mixed <= 18446744073709551615;
+            let product = mixed * 1099511628211;
+            state = product'bitvec[0..64].as(u64);
+            index = index + 1;
+        }
+        state
+    }
+}
+
+comptime impl ComptimeHash for Symbol {
+    comptime fn hash(self) -> u64 {
+        let name = self;
+        let length = hash_symbol_byte_length(name);
+        var index: u64 = 0;
+        var state: u64 = 14695981039346656037;
+        while index < length {
+            let byte = hash_symbol_byte(name, index) match {
+                value? => value,
+                null => return state,
+            };
+            let bits = state'bitvec;
+            let widened = byte'bitvec.as(u64);
+            let input = widened'bitvec;
+            let mixed = ((bits and not input) or (not bits and input)).as(u128);
+            assumes mixed <= 18446744073709551615;
+            let product = mixed * 1099511628211;
+            state = product'bitvec[0..64].as(u64);
+            index = index + 1;
+        }
+        state
+    }
+}
+
+comptime impl ComptimeHash for usize {
+    comptime fn hash(self) -> u64 {
+        let widened = hash_integer_representation(self);
+        let bits = widened'bitvec;
+        let low = bits[0..64];
+        let high = bits[64..128];
+        ((low and not high) or (not low and high)).as(u64)
+    }
+}
+
+comptime impl ComptimeHash for isize {
+    comptime fn hash(self) -> u64 {
+        let widened = hash_integer_representation(self);
+        let bits = widened'bitvec;
+        let low = bits[0..64];
+        let high = bits[64..128];
+        ((low and not high) or (not low and high)).as(u64)
+    }
+}

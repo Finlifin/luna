@@ -1,0 +1,37 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
+typealias Type = .Type'builtin;
+typealias Int = .Integer'builtin;
+typealias Pair<T> = Tuple<T, T>;
+typealias Reader<T: Type> = %{saved: T} fn() -> T;
+typealias Transformer<T> = comptime fn(T) -> T;
+
+struct Box where T { value: T }
+typealias Boxed<T> = Box<T>;
+typealias Repeated<T> = Pair<Boxed<T>>;
+
+comptime fn IdentityType(value: Type) -> Type { value }
+typealias Computed<T> = IdentityType(T);
+typealias Nested<T> = Computed<T>;
+typealias Twice<T> = IdentityType(Nested<T>);
+pure comptime fn Opaque<T> -> Type { T }
+typealias Preserved<T> = Opaque<T>;
+
+fn keep(value: T) -> Reader<T> where T { || value }
+fn pair(value: T) -> Pair<T> where T { (value, value) }
+fn read_pair() -> Pair<bool> {
+    let left = keep(true);
+    let right = keep(false);
+    (left(), right())
+}
+fn boxed(value: bool) -> Repeated<bool> {
+    pair(Boxed<bool> { value: value })
+}
+fn computed(value: Twice<bool>) -> bool { value }
+fn preserve(value: Preserved<bool>) -> Opaque<bool> { value }
+
+comptime fn run() -> Int {
+    let identity: Transformer<Int> = |value| value;
+    identity(9)
+}

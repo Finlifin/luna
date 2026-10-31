@@ -1,0 +1,34 @@
+{-
+  Reflect a concrete generic enum application, retain its logical payload and
+  group structure, and extend the resulting draft before native construction.
+-}
+use primitives.Type;
+
+enum Source where T {
+    net.{ idle, nested.{ data(T), record { value: T } } },
+    stopped,
+}
+
+comptime fn Mirror() -> Type {
+    var builder = meta.EnumBuilder.from_type(Source<bool>, .name = .Mirrored);
+    builder.add_unit(.extra);
+    builder.Build()
+}
+
+typealias Mirrored = Mirror();
+
+fn read(value: Mirrored) -> bool {
+    value match {
+        .net.idle => false,
+        .net.nested.data(value) => value,
+        .net.nested.record { value: value } => value,
+        .stopped => false,
+        .extra => true,
+    }
+}
+
+fn run() -> bool {
+    read(Mirrored.net.nested.data(true))
+        and read(Mirrored.net.nested.record { value: true })
+        and read(.extra) and not read(.stopped)
+}

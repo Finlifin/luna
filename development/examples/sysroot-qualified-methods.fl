@@ -1,0 +1,47 @@
+{- Native qualified types expose runtime operations through traits. -}
+fn good() -> !u8 bool { true }
+fn bad() -> !u8 bool { error 7 }
+fn absent(value: bool) -> ?bool { null }
+
+fn run() -> bool {
+    let present: ?bool = true;
+    let missing: ?bool = null;
+    let nested = present.as(OptionalOps<bool>).map(absent);
+    let flat = present.as(OptionalOps<bool>).and_then(absent);
+    let recovered = bad().as(ErrorResultOps<bool, u8>).or_else(|code: u8| {
+        let result: !bool bool = code == 7;
+        result
+    });
+    present.as(OptionalOps<bool>).is_some() and missing.as(OptionalOps<bool>).is_none()
+        and (nested match { inner? => inner.as(OptionalOps<bool>).is_none(), null => false })
+        and flat.as(OptionalOps<bool>).is_none()
+        and missing.as(OptionalOps<bool>).unwrap_or_else(|| true)
+        and good().as(ErrorResultOps<bool, u8>).map(|value: bool| not value).as(ErrorResultOps<bool, u8>).is_ok()
+        and bad().as(ErrorResultOps<bool, u8>).map_err(|code: u8| code == 7).as(ErrorResultOps<bool, bool>).is_err()
+        and recovered.as(ErrorResultOps<bool, bool>).unwrap_or_else(|failure: bool| false)
+}
+
+pure comptime fn text_at_comptime() -> bool {
+    let value = "a🦀";
+    value.starts_with("a") and value.ends_with("🦀")
+        and value.contains("🦀") and (value.find("🦀") matches 1?)
+        and ("aaaab".find("aab") matches 2?)
+        and ("".find("") matches 0?) and ("a".find("long") matches null)
+        and not value.starts_with("🦀") and not value.ends_with("a")
+        and value.byte_length() == 5
+        and (value.byte(1) matches 240?)
+        and (value.byte(5) matches null)
+        and ("".byte(18446744073709551615) matches null)
+}
+
+const checked_text = text_at_comptime();
+
+
+test {
+    inline if checked_text {
+        let passed = run();
+        assumes passed;
+    } else {
+        assumes false;
+    };
+}

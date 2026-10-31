@@ -1,0 +1,48 @@
+{- No custom protocol declaration or driver binding is needed for meta.List. -}
+comptime fn values() -> bool {
+    let input: meta.List<Integer> = [1, 2, 3];
+    let prefix = input match { [first, (second if second > first), ..._] => true, _ => false };
+    let exact = input match { [1, 2] => false, [1, 2, 3] => true, _ => false };
+    let empty: meta.List<bool> = [];
+    let empty_match = empty match { [] => true, _ => false };
+    let optional: meta.List<?Integer> = [null, 3];
+    let layers = optional match { [null, number?] => number == 3, _ => false };
+    let first = input.as(ComptimeListPatternView).list_pattern_view_get_element(0);
+    let last = input.as(ComptimeListPatternView).list_pattern_view_get_element(2);
+    let producer = Producer {calls: 0};
+    let produced = producer.produce().as(ComptimeListPatternView).list_pattern_view_get_element(0);
+    prefix and exact and empty_match and layers and first == 1 and last == 3
+        and input.as(ComptimeListPatternView).list_pattern_view_get_len() == 3
+        and produced == 9 and producer.calls == 1
+}
+
+struct Producer {calls: Integer}
+
+impl Producer {
+    comptime fn produce(self) -> meta.List<Integer> {
+        self.calls += 1;
+        [9]
+    }
+}
+
+pure comptime fn Identity<T> -> Type { T }
+
+comptime fn types() -> bool {
+    let input: meta.List<Type> = [Identity<bool>, bool];
+    let matched = input match { [first, second] => first == Identity<bool> and second == bool, _ => false };
+    matched and input.as(ComptimeListPatternView).list_pattern_view_get_element(0) == Identity<bool>
+}
+
+test comptime_list_value_patterns {
+    inline if values() { assumes true; } else { assumes false; };
+}
+
+test comptime_list_type_patterns {
+    inline if types() { assumes true; } else { assumes false; };
+}
+
+test public_size_conversion {
+    inline if meta.from_usize(meta.to_usize(2147483647)) == 2147483647 {
+        assumes true;
+    } else { assumes false; };
+}

@@ -1,0 +1,26 @@
+{- A staged descriptor carries Type data without exposing it at runtime. -}
+struct Descriptor {
+    kind: Type,
+}
+
+comptime fn describe(T: Type) -> meta.List<Descriptor> {
+    [Descriptor {kind: T}]
+}
+
+pure comptime fn Layout<fields: meta.List<Descriptor>> -> Type { bool }
+
+fn preserve(comptime T: Type,
+    comptime .schema: meta.List<Descriptor> = defer describe(T), value: T) -> T
+where requires Layout<describe(T)> == Layout<[Descriptor {kind: T}]>
+{
+    value
+}
+
+test {
+    let flag = preserve(bool, true);
+    let number = preserve(u32, 23);
+    let letter = preserve(char, 'x');
+    assumes flag;
+    assumes number == 23;
+    assumes letter == 'x';
+}

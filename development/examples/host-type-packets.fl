@@ -1,0 +1,122 @@
+-- These normal-form heads are explicitly registered by the example runner.
+-- Their bodies do not define the Tuple representation or unfold its identity.
+pure comptime fn Elements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: Elements<.Type'builtin>> -> .Type'builtin { bool }
+
+struct Outer {
+    pub comptime fn bind_flag()-><bool -| enabled:bool> {'<enabled>}
+    pub comptime fn flag_code()-><|-bool> {'(true)}
+    pub fn passthrough(value:bool)->bool {value}
+    pub struct Inner where T {
+        pub typealias Payload = T;
+    }
+}
+
+comptime fn Make() -> .Type'builtin { Outer }
+
+fn configured(comptime flag: bool) -> bool {
+    const Container = Make();
+    const Selected = if flag {
+        -- Carry a Type alongside ordinary comptime data, then recover it.
+        const packet = ((Container, flag), false);
+        const saved = packet;
+        const ((Local, enabled), unused) if enabled = saved else {
+            while true {}
+        };
+        Local.Inner<bool>
+    } else {
+        Container.Inner<bool>
+    };
+    let value: Selected.Payload = flag;
+    value
+}
+
+-- flag is an ordinary invocation input, not a specialization argument.
+-- Its unknown value does not erase the neighboring Type identity.
+comptime fn from_packet(flag: bool) -> bool {
+    const packet = ((Outer, flag), flag);
+    const saved = packet;
+    const (inner, unused) = saved;
+    const (Selected, value) = inner;
+    let checked: Selected.Inner<bool>.Payload = value;
+    checked
+}
+
+struct Fields where T {
+    selected: .Type'builtin = T,
+    value: bool,
+}
+
+enum Packet {
+    other(bool, .Type'builtin),
+    pair(.Type'builtin, bool),
+}
+
+comptime fn from_fields(flag: bool) -> bool {
+    const packet = Fields<Outer> {value: flag};
+    const saved = packet;
+    const Selected = saved.selected;
+    let checked: Selected.Inner<bool>.Payload = saved.value;
+    let direct: saved.selected.Inner<bool>.Payload = checked;
+    direct
+}
+
+comptime fn from_variant(flag: bool) -> bool {
+    const packet = Packet.pair(Outer, flag);
+    const saved = packet;
+    const .other(value, Selected) or .pair(Selected, value) = saved;
+    let checked: Selected.Inner<bool>.Payload = value;
+    checked
+}
+
+comptime fn from_enumeration(flag: bool) -> bool {
+    const input = ((bool, flag), (.str'builtin, "value"));
+    const saved_input = input;
+    inline for (index, (T, value)) in saved_input'tuple_enumerate {
+        const packet = (T, flag);
+        const saved = packet;
+        const (Selected, unused) = saved;
+        let checked: Selected = value;
+        checked;
+    }
+    flag
+}
+
+-- A completed call result can supply a Type field directly to an annotation.
+comptime fn completed_fields() -> Fields<bool> {
+    Fields<bool> {value: true}
+}
+
+comptime fn completed_outer() -> Fields<Outer> {
+    Fields<Outer> {value: true}
+}
+
+struct TypedField where T {selected:T}
+
+comptime fn field(value:T) -> TypedField<T> where T {
+    TypedField<T> {selected:value}
+}
+
+fn run() -> bool {
+    const flag_pattern=do {Outer}.bind_flag();
+    let ~<flag_pattern> = true;
+    let generated=~<do {Outer}.flag_code()>;
+    let static_result=do {Outer}.passthrough(true);
+    let direct: do {Outer}.Inner<bool>.Payload = true;
+    let completed: completed_fields().selected = true;
+    let nested: completed_outer().selected.Inner<bool>.Payload = true;
+    let inferred: field(Outer).selected.Inner<bool>.Payload = true;
+    let composite: (if true {field(Outer)} else {field(Outer)}).selected.Inner<bool>.Payload = true;
+    const yes = from_packet(true);
+    const no = from_packet(false);
+    const fields_yes = from_fields(true);
+    const fields_no = from_fields(false);
+    const variant_yes = from_variant(true);
+    const variant_no = from_variant(false);
+    const enumerated_yes = from_enumeration(true);
+    const enumerated_no = from_enumeration(false);
+    enabled and generated and static_result and direct and completed and nested and inferred and composite and enumerated_yes and not enumerated_no
+        and yes and not no and fields_yes and not fields_no
+        and variant_yes and not variant_no
+        and configured(true) and not configured(false)
+}

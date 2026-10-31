@@ -1,0 +1,35 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+typealias Type = .Type'builtin;
+typealias Byte = .u8'builtin;
+
+fn increment(comptime T: Type, value: T) -> T
+where requires T == Byte {
+    let outer = |item: T| {
+        let inner = |value: T| {
+            assumes value < 255;
+            value + 1
+        };
+        inner(item)
+    };
+    outer(value)
+}
+
+fn identity(value: T) -> result: T
+where T, requires T == bool, requires value, ensures result {
+    value
+}
+
+fn keep(comptime T: Type, value: T) -> T
+where requires T == bool {
+    let apply = |item: T| {
+        assumes item;
+        identity(item)
+    };
+    apply(value)
+}
+
+fn run() -> Tuple<Byte, bool> {
+    (increment(Byte, 8), keep(bool, true))
+}

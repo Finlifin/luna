@@ -1,0 +1,36 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
+typealias Bits = .BitVec'builtin<2>;
+typealias Byte = .i8'builtin;
+
+comptime fn bit_partition(value: T) -> bool where T, requires T == Bits {
+    value match {
+        value if (value match {
+            0b00 => value matches 0b00,
+            other => not (other matches 0b00),
+        }) => true,
+    }
+}
+
+comptime fn signed_partition(value: T) -> bool where T, requires T == Byte {
+    value match {
+        value if (if value < 0 { value < 0 } else { value >= 0 }) => true,
+    }
+}
+
+fn select(comptime enabled: bool, value: bool) -> bool {
+    enabled and value
+}
+
+comptime fn evidence() -> Tuple<bool, bool, bool, bool> {
+    (bit_partition<Bits>(0), bit_partition<Bits>(3),
+     signed_partition<Byte>(-128), signed_partition<Byte>(127))
+}
+
+fn run() -> Tuple<bool, bool, bool, bool> {
+    (select(bit_partition<Bits>(0), true),
+     select(bit_partition<Bits>(3), false),
+     select(signed_partition<Byte>(-128), true),
+     select(signed_partition<Byte>(127), false))
+}

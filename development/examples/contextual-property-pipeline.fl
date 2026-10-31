@@ -1,0 +1,39 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
+typealias Byte = .u8'builtin;
+
+fn packet(...properties: T) -> T where T { properties }
+
+fn apply(values: Tuple<fn(Byte) -> T, Byte>) -> T where T {
+    let (callback, value) = values;
+    callback(value)
+}
+
+fn mark(state: *bool) -> bool {
+    state.* = true;
+    true
+}
+
+fn observe(state: *bool) -> bool {
+    let previous = state.*;
+    state.* = false;
+    previous
+}
+
+fn inspect(flag: bool) -> Tuple<bool, bool, bool, bool> {
+    var state = false;
+    let result = packet {
+        first: mark(state.ref),
+        selected: apply(flag match {
+            true => (|value| value match { not 0 => true, _ => false }, 9),
+            false => (|value| value match { not 0 => true, _ => false }, 0),
+        }),
+        last: observe(state.ref),
+    };
+    (result.first, result.selected, result.last, state)
+}
+
+fn run() -> Tuple<Tuple<bool, bool, bool, bool>, Tuple<bool, bool, bool, bool>> {
+    (inspect(true), inspect(false))
+}

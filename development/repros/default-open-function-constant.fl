@@ -1,0 +1,15 @@
+-- Regression: expected result (bool true).
+-- Retain an open function declaration as const, then instantiate each staged call.
+fn invert(comptime mode: bool, value: bool) -> bool {
+    inline if mode { not value } else { value }
+}
+fn take(comptime mode: bool, value: bool, .next: bool = do {
+    const operation = invert;
+    const selected = not mode;
+    operation(selected, value)
+}) -> bool {
+    next
+}
+fn run() -> bool {
+    take(false, false) and not take(true, false)
+}

@@ -1,0 +1,18 @@
+typealias Type = .Type'builtin;
+typealias Int = .Integer'builtin;
+typealias Flag = bool;
+pure comptime fn Select<flag: Flag> -> Type {
+    if flag { .u8'builtin } else { .u16'builtin }
+}
+pure comptime fn Packet<T: Type, width: Int, enabled: Flag> -> Type { T }
+pure comptime fn Forward<enabled: Flag, width: Int, T: Type> -> Type { Packet<T, width, enabled> }
+comptime fn enabled() -> Flag { not false }
+typealias A = Packet<.u8'builtin, 4 * 2, enabled()>;
+typealias B = Packet<.u8'builtin, 8, true>;
+fn same(value: A) -> B { value }
+comptime fn Observed() -> Type { Select<true> }
+comptime fn Disabled() -> Type { Packet<.u16'builtin, -1, false> }
+pure comptime fn Octet<N: .u8'builtin> -> Type { .u8'builtin }
+pure comptime fn Signed<N: .i8'builtin> -> Type { .i8'builtin }
+comptime fn Maximum() -> Type { Octet<255> }
+comptime fn Minimum() -> Type { Signed<-128> }

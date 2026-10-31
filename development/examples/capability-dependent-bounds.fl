@@ -1,0 +1,29 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+-- Evidence dependencies determine preparation order, not clause position.
+typealias Type = .Type'builtin;
+trait Source { assoc Item: Type; }
+trait Allowed {}
+trait Accepts where T {}
+
+impl Source for bool { assoc Item: Type = bool; }
+impl Allowed for bool {}
+impl Accepts<bool> for bool {}
+
+fn ordinary(comptime A: Type, value: A.as(Source).Item) -> bool
+where requires A.as(Source).Item :- Allowed,
+      requires A :- Accepts<A.as(Source).Item> + Source {
+    true
+}
+
+fn generic(value: A.as(Source).Item) -> bool
+where A,
+      requires A.as(Source).Item :- Allowed,
+      requires A :- Accepts<A.as(Source).Item> + Source {
+    true
+}
+
+fn run() -> Tuple<bool, bool> {
+    (ordinary(bool, true), generic<bool>(true))
+}

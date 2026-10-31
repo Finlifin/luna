@@ -1,0 +1,25 @@
+{-
+  Load library/builtin/numeric/math_intrinsics.fl as an isolated math test package
+  with a direct dependency. Bind all Scalar operations listed in
+  library/README.md, including those in unused generic bodies.
+-}
+
+typealias F32 = .f32'builtin;
+typealias F64 = .f64'builtin;
+
+pure fn single(a: F32, b: F32, c: F32) -> F32 {
+    math.fma(a, b, c)
+}
+
+pure fn run() -> bool {
+    let narrow = single(3.0, 4.0, 5.0);
+    let wide = math.fma<F64>(3.0, 4.0, 5.0);
+    let root32 = math.sqrt<F32>(81.0);
+    let root64 = math.sqrt<F64>(16.0);
+    let network_word: .u32'builtin = 16909060;
+    let swapped = math.byte_swap(network_word);
+    let rotated = math.rotate_left<.u32'builtin>(network_word, 40);
+    let recovered = math.rotate_right<.u32'builtin>(rotated, 8);
+    let funnel = math.funnel_shift_right<.u8'builtin>(18, 52, 4);
+    rotated == 33752065 and recovered == network_word and funnel == 35 and swapped == 67305985 and narrow == 17.0 and wide == 17.0 and root32 == 9.0 and root64 == 4.0
+}

@@ -1,0 +1,17 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+typealias UInt = .u32'builtin;
+
+fn index_in_ring(index: UInt, capacity: UInt) -> result: UInt
+where requires capacity != 0,
+    ensures result < capacity,
+    ensures result <= index
+{
+    index % capacity
+}
+
+fn run() -> Tuple<UInt, bool> {
+    let position = index_in_ring(20, 3);
+    (position, position % 2 == 0)
+}

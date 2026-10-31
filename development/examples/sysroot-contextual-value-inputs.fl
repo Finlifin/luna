@@ -1,0 +1,308 @@
+{- Ordinary construction values feed nested required computations without
+   expanding opaque normal-form heads or replacing runtime local reads.
+-}
+comptime fn identity(value: T) -> T where T {
+    value
+}
+
+comptime fn build_tuple() -> <|- bool> {
+    let fields: meta.List<Type> = [bool, u8];
+    let Product = Tuple<.Es = fields>;
+    let pair: Product = (true, 17);
+    let (flag, number) = identity<Tuple<.Es = fields>>(pair);
+    '(flag and number == 17)
+}
+
+struct Description {
+    enabled: bool,
+    kind: Type,
+}
+
+pure comptime fn Marker<description: Description> -> Type {
+    bool
+}
+
+comptime fn inspect() -> bool where T {
+    T == Marker<Description {enabled: true, kind: bool}>
+}
+
+comptime fn build_record() -> <|- bool> {
+    let description = Description {enabled: true, kind: bool};
+    let result = inspect<Marker<description>>();
+    '(result)
+}
+
+test {
+    let tuple_ok = ~<build_tuple()>;
+    let record_ok = ~<build_record()>;
+    assumes tuple_ok;
+    assumes record_ok;
+}
+
+pure comptime fn Indexed<T, ...items: meta.List<T>> -> Type {
+    bool
+}
+
+struct Holder where T {
+    flag: bool,
+}
+
+comptime fn inspect_holder(value: Holder<T>) -> Holder<T> where T {
+    value
+}
+
+comptime fn apply(lambda action: comptime fn(T) -> bool, value: T) -> <|- bool> where T {
+    let result = action(value);
+    '(result)
+}
+
+comptime fn build_indexed() -> <|- bool> {
+    let bits: meta.List<bool> = [true, false];
+    apply(_0.flag, inspect_holder<Indexed<bool, .items = bits>>(
+        Holder<Indexed<bool, .items = [true, false]>> {flag: true}))
+}
+
+test {
+    let indexed_ok = ~<build_indexed()>;
+    assumes indexed_ok;
+}
+
+pure comptime fn Collection<.T: Type = bool, ...items: meta.List<T>> -> Type {
+    bool
+}
+
+fn empty_collection() -> Holder<Collection<>> {
+    Holder<Collection<.items = []>> {flag: true}
+}
+
+comptime fn collection_identity() -> bool {
+    var trace: Integer = 0;
+    let actual = Collection<
+        do {trace = trace * 10 + 1; true},
+        ...[do {trace = trace * 10 + 2; false}],
+        .T = do {trace = trace * 10 + 3; bool}>;
+    trace == 123 and actual == Collection<.items = [true, false]>
+}
+
+test {
+    const identity_ok = collection_identity();
+    assumes identity_ok;
+    let empty_ok = empty_collection().flag;
+    assumes empty_ok;
+}
+
+{- Generic collection assembly retains its domain while its pieces are still
+   clause parameters. Substitution completes the same operation for ordinary
+   values and Type values; neither Indexed body is invoked for identity.
+-}
+typealias Surround<T, values: meta.List<T>, prefix: T, suffix: T> =
+    Indexed<T, prefix, ...values, suffix>;
+
+fn keep_surrounded(value: Holder<Surround<bool, [false], true, true>>)
+    -> Holder<Indexed<bool, .items = [true, false, true]>>
+{
+    value
+}
+
+fn keep_type_list(value: Holder<Surround<Type, [u8], bool, bool>>)
+    -> Holder<Indexed<Type, .items = [bool, u8, bool]>>
+{
+    value
+}
+
+test {
+    let flags = keep_surrounded(Holder<Surround<bool, [false], true, true>> {flag: true});
+    let types = keep_type_list(Holder<Surround<Type, [u8], bool, bool>> {flag: true});
+    assumes flags.flag and types.flag;
+}
+
+fn recover_description(value: Holder<Marker<Description {enabled: true, kind: T}>>)
+    -> Holder<T>
+where T
+{
+    Holder<T> {flag: value.flag}
+}
+
+test {
+    let recovered = recover_description(
+        Holder<Marker<Description {enabled: true, kind: bool}>> {flag: true});
+    assumes recovered.flag;
+}
+
+{- Implementation inputs are ordinary comptime values. The selected method
+   keeps the list's element domain through dispatch and invocation.
+-}
+struct Catalog where T, items: meta.List<T> {}
+
+trait FirstItem where T {
+    comptime fn first() -> T;
+}
+
+impl FirstItem<T> for Catalog<T, items>
+where T, items: meta.List<T>
+{
+    comptime fn first() -> T {
+        items[0]
+    }
+}
+
+test {
+    const flag = Catalog<bool, [true, false]>.as(FirstItem<bool>).first();
+    const type_ok = Catalog<Type, [bool, u8]>.as(FirstItem<Type>).first() == bool;
+    const nested = Catalog<meta.List<bool>, [[true], [false]]>
+        .as(FirstItem<meta.List<bool>>).first()[0];
+    assumes flag and type_ok and nested;
+}
+
+fn selected_flag(value: bool) -> bool
+where flags: meta.List<bool>
+{
+    value
+}
+
+test {
+    let first = selected_flag<[true, false]>;
+    let second = selected_flag<[false, true]>;
+    let first_value = first(true);
+    let second_value = second(false);
+    assumes first_value and not second_value;
+}
+
+
+fn selected_constant() -> bool
+where flags: meta.List<bool>
+{
+    const flag = flags[0];
+    flag
+}
+
+test {
+    let first = selected_constant<[true, false]>;
+    let second = selected_constant<[false, true]>;
+    let first_value = first();
+    let second_value = second();
+    assumes first_value and not second_value;
+}
+
+struct Flags where bits: meta.List<bool> {
+    enabled: bool,
+}
+
+comptime fn inspect_flags(value: Flags<[true, false]>) -> bool {
+    value.enabled
+}
+
+test {
+    const enabled = inspect_flags(Flags<[true, false]> {enabled: true});
+    assumes enabled;
+}
+
+impl Clone for Flags<[true, false]> {
+    fn clone(*self) -> Self {
+        Flags<[true, false]> {enabled: self.enabled.*}
+    }
+}
+impl Copy for Flags<[true, false]> {}
+
+fn inspect_flag_pattern(value: Flags<[true, false]>) -> bool {
+    value match {
+        not {enabled: true} => true,
+        {enabled: true} => false,
+    }
+}
+
+test {
+    let clear = inspect_flag_pattern(Flags<[true, false]> {enabled: false});
+    let set = inspect_flag_pattern(Flags<[true, false]> {enabled: true});
+    assumes clear and not set;
+}
+
+fn inspect_tuple_pattern(value: Tuple<.Es = [bool, bool]>) -> bool {
+    value match {
+        (true, flag) => flag,
+        (false, _) => false,
+    }
+}
+
+test {
+    const Fields: meta.List<Type> = [bool, bool];
+    let pair: Tuple<.Es = Fields> = (true, true);
+    let result = inspect_tuple_pattern(pair);
+    assumes result;
+}
+
+comptime fn tuple_data_code(value: Tuple<.Es = [bool, bool]>) -> <|- bool> {
+    let (left, right) = value;
+    let result = left and right;
+    '(result)
+}
+
+test {
+    let result = ~<tuple_data_code((true, true))>;
+    assumes result;
+}
+
+fn inspect_tuple_type_inline() -> bool {
+    inline if Tuple<.Es = [bool, u8]> is do {
+        ('bool, 'u8) => true,
+        _ => false,
+    }
+}
+
+test {
+    let result = inspect_tuple_type_inline();
+    assumes result;
+}
+
+trait TupleReady {
+    fn ready(self) -> bool;
+}
+impl TupleReady for bool {
+    fn ready(self) -> bool { self }
+}
+impl TupleReady for u8 {
+    fn ready(self) -> bool { self == 7 }
+}
+
+fn tuple_ready(values: Tuple<.Es = [A, B]>) -> bool
+where A :- TupleReady, B :- TupleReady
+{
+    var result = false;
+    inline for (index, element) in values'tuple_enumerate {
+        result = element.ready();
+    }
+    result
+}
+
+fn tuple_shape(value: T)
+where T, A, B, requires T == Tuple<.Es = [A, B]>
+{
+    inline for (index, element) in value'tuple_enumerate {
+        let held = element;
+    }
+}
+
+test {
+    let number: u8 = 7;
+    let forward = tuple_ready((false, number));
+    let reverse = tuple_ready((number, false));
+    tuple_shape<Tuple<.Es = [bool, u8]>, bool, u8>((true, number));
+    assumes forward and not reverse;
+}
+
+comptime fn packet_fields() -> meta.List<Type> {
+    [bool, u8]
+}
+const PacketFields = packet_fields();
+
+fn typed_packet() -> Tuple<.Es = PacketFields> {
+    (true, 7)
+}
+fn consume_packet(flag: bool, number: u8) -> bool {
+    flag and number == 7
+}
+
+test {
+    let result = consume_packet(...typed_packet());
+    assumes result;
+}

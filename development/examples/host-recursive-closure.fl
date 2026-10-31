@@ -1,0 +1,30 @@
+-- luna host-recursive-closure.fl --build run --copy-protocol Duplicate --drop-protocol Retire --output /tmp/flurry-recursive-closure
+-- The native entry reports (unsigned-integer 4).
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+typealias Count = .u32'builtin;
+
+struct Counted { target: *Count }
+impl Retire for Counted {
+    fn drop(*self) {
+        let value = self.target.*.*;
+        if value < 100 { self.target.*.* = value + 1; }
+    }
+}
+
+typealias Action = %{target: *Count} fn() -> .void'builtin;
+
+fn repeat(action: Action, remaining: Count) {
+    action();
+    if remaining != 0 { repeat(action, remaining - 1); }
+}
+
+fn run() -> Count {
+    let count: Count = 0;
+    let target = count.ref;
+    let action = || {
+        let counted = Counted {target: target};
+    };
+    repeat(action, 3);
+    count
+}

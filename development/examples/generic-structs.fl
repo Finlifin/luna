@@ -1,0 +1,30 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
+typealias Flag = bool;
+typealias Character = 'x''type;
+
+struct Box where T {
+    value: T,
+    ready: Flag = true,
+}
+
+fn change(value: Box<Flag>) -> Flag {
+    value.value = not value.value;
+    value.value
+}
+
+fn build(value: T) -> Box<T> where T {
+    Box<T> { value: value }
+}
+
+fn read(value: Box<T>) -> T where T {
+    value.value
+}
+
+fn run() -> Tuple<Flag, Character> {
+    let flag = build(true);
+    let character = Box<Character> { value: 'y' };
+    let result = read(character);
+    (change(flag), result)
+}

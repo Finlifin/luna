@@ -1,0 +1,17 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+-- Execute with --interpret run --copy-protocol Copy --drop-protocol Drop.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+trait Copy {}
+trait Drop { fn drop(*self); }
+
+struct Flag { value: bool }
+impl Copy for Flag {}
+
+pure fn duplicate(value: Flag) -> Tuple<Flag, Flag> {
+    (value, value)
+}
+fn run() -> bool {
+    let (first, second) = duplicate(Flag { value: true });
+    first.value and second.value
+}

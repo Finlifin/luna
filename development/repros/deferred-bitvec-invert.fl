@@ -1,0 +1,9 @@
+-- Regression: contextual literal inversion waits for the deferred result.
+-- Covered by pure_bitvec and the staged-bitvec native example.
+fn ones() -> defer .BitVec'builtin<N> where N: .Integer'builtin {
+    not 0
+}
+
+fn run() -> bool {
+    ones<8>() == 255
+}

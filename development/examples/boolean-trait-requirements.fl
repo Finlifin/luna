@@ -1,0 +1,36 @@
+trait Read {}
+trait Write {}
+trait Disabled {}
+impl Read for bool {}
+
+-- A disjunction is a logical requirement, not permission to call either
+-- interface's methods without establishing which one is available.
+comptime fn available() -> bool where T,
+    requires ((T :- Read) or (T :- Write)) and not (T :- Disabled)
+{
+    true
+}
+
+comptime fn forward() -> bool where U,
+    requires ((U :- Read) or (U :- Write)) and not (U :- Disabled)
+{
+    available<U>()
+}
+
+trait Result {
+    assoc value: bool = forward<bool>();
+}
+impl Result for bool {}
+
+struct Box where T, requires not (T :- Disabled) {
+    value: T,
+}
+
+fn entry() -> bool {
+    let boxed = Box<bool> {value: bool.as(Result).value};
+    boxed.value
+}
+
+comptime fn invoke() -> bool {
+    forward<bool>()
+}

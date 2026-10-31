@@ -13,35 +13,17 @@ pub const RESOLVE_ERROR_BASE: u32 = 4000;
 #[derive(Debug, Clone)]
 pub enum ResolveError {
     /// A scope could not be created (e.g. duplicate module name).
-    ScopeCreationFailed {
-        message: String,
-        span: Span,
-    },
+    ScopeCreationFailed { message: String, span: Span },
     /// A module referenced in a path could not be found.
-    ModuleNotFound {
-        message: String,
-        span: Span,
-    },
+    ModuleNotFound { message: String, span: Span },
     /// An unexpected AST node kind was encountered.
-    InvalidNodeType {
-        message: String,
-        span: Span,
-    },
+    InvalidNodeType { message: String, span: Span },
     /// File reading or lexing failed.
-    FileParsingFailed {
-        message: String,
-        span: Span,
-    },
+    FileParsingFailed { message: String, span: Span },
     /// An identifier could not be resolved in the current scope chain.
-    UnresolvedName {
-        name: String,
-        span: Span,
-    },
+    UnresolvedIdentifier { name: String, span: Span },
     /// A cyclic import was detected.
-    CyclicImport {
-        message: String,
-        span: Span,
-    },
+    CyclicImport { message: String, span: Span },
     /// Duplicate definition of the same name in the same namespace.
     DuplicateDefinition {
         name: String,
@@ -49,8 +31,13 @@ pub enum ResolveError {
         second_span: Span,
     },
     /// An `use` path segment could not be resolved.
-    UnresolvedImportSegment {
-        segment: String,
+    UnresolvedImportSegment { segment: String, span: Span },
+    /// Invalid caller-supplied package identities or dependency edges.
+    InvalidPackageGraph(String),
+    /// Ambiguous lexical spelling; trait identities support member relevance checks.
+    AmbiguousGlob {
+        name: String,
+        traits: Vec<symbol::DefId>,
         span: Span,
     },
     /// Generic internal error.
@@ -60,35 +47,37 @@ pub enum ResolveError {
 impl ResolveError {
     pub fn message(&self) -> String {
         match self {
+            Self::AmbiguousGlob { name, .. } => format!("ambiguous glob name `{name}`"),
             Self::ScopeCreationFailed { message, .. } => message.clone(),
             Self::ModuleNotFound { message, .. } => message.clone(),
             Self::InvalidNodeType { message, .. } => message.clone(),
             Self::FileParsingFailed { message, .. } => message.clone(),
-            Self::UnresolvedName { name, .. } => {
-                format!("unresolved name `{}`", name)
+            Self::UnresolvedIdentifier { name, .. } => {
+                format!("Unresolved identifier `{}`", name)
             }
             Self::CyclicImport { message, .. } => message.clone(),
             Self::DuplicateDefinition { name, .. } => {
-                format!("duplicate definition of `{}`", name)
+                format!("Duplicate definition of `{}`", name)
             }
             Self::UnresolvedImportSegment { segment, .. } => {
-                format!("unresolved import path segment `{}`", segment)
+                format!("Unresolved import path segment `{}`", segment)
             }
-            Self::InternalError(msg) => msg.clone(),
+            Self::InternalError(msg) | Self::InvalidPackageGraph(msg) => msg.clone(),
         }
     }
 
     pub fn span(&self) -> Span {
         match self {
-            Self::ScopeCreationFailed { span, .. }
+            Self::AmbiguousGlob { span, .. }
+            | Self::ScopeCreationFailed { span, .. }
             | Self::ModuleNotFound { span, .. }
             | Self::InvalidNodeType { span, .. }
             | Self::FileParsingFailed { span, .. }
-            | Self::UnresolvedName { span, .. }
+            | Self::UnresolvedIdentifier { span, .. }
             | Self::CyclicImport { span, .. }
             | Self::UnresolvedImportSegment { span, .. } => *span,
             Self::DuplicateDefinition { second_span, .. } => *second_span,
-            Self::InternalError(_) => rustc_span::DUMMY_SP,
+            Self::InternalError(_) | Self::InvalidPackageGraph(_) => rustc_span::DUMMY_SP,
         }
     }
 }
@@ -100,11 +89,13 @@ impl FlurryError for ResolveError {
             Self::ModuleNotFound { .. } => RESOLVE_ERROR_BASE + 2,
             Self::InvalidNodeType { .. } => RESOLVE_ERROR_BASE + 3,
             Self::FileParsingFailed { .. } => RESOLVE_ERROR_BASE + 4,
-            Self::UnresolvedName { .. } => RESOLVE_ERROR_BASE + 5,
+            Self::UnresolvedIdentifier { .. } => RESOLVE_ERROR_BASE + 5,
             Self::CyclicImport { .. } => RESOLVE_ERROR_BASE + 6,
             Self::DuplicateDefinition { .. } => RESOLVE_ERROR_BASE + 7,
             Self::UnresolvedImportSegment { .. } => RESOLVE_ERROR_BASE + 8,
             Self::InternalError(_) => RESOLVE_ERROR_BASE + 9,
+            Self::InvalidPackageGraph(_) => RESOLVE_ERROR_BASE + 10,
+            Self::AmbiguousGlob { .. } => RESOLVE_ERROR_BASE + 11,
         }
     }
 
@@ -114,11 +105,13 @@ impl FlurryError for ResolveError {
             Self::ModuleNotFound { .. } => "module_not_found",
             Self::InvalidNodeType { .. } => "invalid_node_type",
             Self::FileParsingFailed { .. } => "file_parsing_failed",
-            Self::UnresolvedName { .. } => "unresolved_name",
+            Self::UnresolvedIdentifier { .. } => "unresolved_name",
             Self::CyclicImport { .. } => "cyclic_import",
             Self::DuplicateDefinition { .. } => "duplicate_definition",
             Self::UnresolvedImportSegment { .. } => "unresolved_import_segment",
             Self::InternalError(_) => "internal_error",
+            Self::InvalidPackageGraph(_) => "invalid_package_graph",
+            Self::AmbiguousGlob { .. } => "ambiguous_glob",
         }
     }
 

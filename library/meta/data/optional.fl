@@ -1,0 +1,73 @@
+{- Comptime operations on native optional/error values use value references
+   for self and value parameters for callbacks; no comptime pointers. -}
+
+use builtin.{Type, bool};
+
+pub pure comptime trait ComptimeOptionalOps where T {
+    comptime fn is_some(self) -> bool;
+    comptime fn is_none(self) -> bool;
+    comptime fn unwrap_or(self, fallback: T) -> T;
+    comptime fn unwrap_or_else(self, fallback: %c comptime fn() -> T) -> T where c: Type.vars.Closure;
+    comptime fn map(self, f: %c comptime fn(T) -> U) -> ?U where U, c: Type.vars.Closure;
+    comptime fn and_then(self, f: %c comptime fn(T) -> ?U) -> ?U where U, c: Type.vars.Closure;
+    comptime fn filter(self, pred: %c comptime fn(T) -> bool) -> ?T where c: Type.vars.Closure;
+    comptime fn inspect(self, observer: %c comptime fn(T)) -> ?T where c: Type.vars.Closure;
+    comptime fn or_else(self, fallback: %c comptime fn() -> ?T) -> ?T where c: Type.vars.Closure;
+    comptime fn zip_with(self, other: ?U, combine: %c comptime fn(T, U) -> V) -> ?V where U, V, c: Type.vars.Closure;
+}
+
+comptime impl ComptimeOptionalOps<T> for ?T where T {
+    comptime fn is_some(self) -> bool = self match {
+        _? => true,
+        null => false,
+    };
+
+    comptime fn is_none(self) -> bool = not self.as(ComptimeOptionalOps<T>).is_some();
+
+    comptime fn unwrap_or(self, fallback: T) -> T = self match {
+        value? => value,
+        null => fallback,
+    };
+
+    -- Construct a fallback only when this layer is absent.
+    comptime fn unwrap_or_else(self, fallback: %c comptime fn() -> T) -> T where c: Type.vars.Closure = self match {
+        value? => value,
+        null => fallback(),
+    };
+
+    comptime fn map(self, f: %c comptime fn(T) -> U) -> ?U where U, c: Type.vars.Closure = self match {
+        value? => f(value),
+        null => null,
+    };
+
+    comptime fn and_then(self, f: %c comptime fn(T) -> ?U) -> ?U where U, c: Type.vars.Closure = self match {
+        value? => f(value),
+        null => null,
+    };
+
+    -- Retain the payload only when the comptime predicate accepts it.
+    comptime fn filter(self, pred: %c comptime fn(T) -> bool) -> ?T where c: Type.vars.Closure = self match {
+        value? => if pred(value) {value} else {null},
+        null => null,
+    };
+
+    comptime fn inspect(self, observer: %c comptime fn(T)) -> ?T where c: Type.vars.Closure = self match {
+        value? => do {observer(value); value},
+        null => null,
+    };
+
+    -- Invoke the alternative only when this outer optional layer is absent.
+    comptime fn or_else(self, fallback: %c comptime fn() -> ?T) -> ?T where c: Type.vars.Closure = self match {
+        value? => value,
+        null => fallback(),
+    };
+
+    -- Both inputs are evaluated eagerly; invoke combine only when both exist.
+    comptime fn zip_with(self, other: ?U, combine: %c comptime fn(T, U) -> V) -> ?V where U, V, c: Type.vars.Closure = self match {
+        left? => other match {
+            right? => combine(left, right),
+            null => null,
+        },
+        null => null,
+    };
+}

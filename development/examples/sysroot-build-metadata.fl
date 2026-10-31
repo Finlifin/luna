@@ -1,0 +1,14 @@
+{-
+    The embedding driver supplies metadata for the direct build dependency.
+    Runtime receives checked branch results, never the metadata Object.
+-}
+const enabled = build.package_metadata("build").features.get(.enabled, bool);
+const absent = build.package_metadata("build").features.get(.absent, bool);
+
+test metadata_enabled {
+    inline if enabled matches true? { assumes true; } else { assumes false; };
+}
+
+test metadata_absent {
+    inline if absent matches null { assumes true; } else { assumes false; };
+}

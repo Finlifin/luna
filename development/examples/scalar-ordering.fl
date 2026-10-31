@@ -1,0 +1,30 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
+typealias Byte = .u8'builtin;
+typealias Signed = .i128'builtin;
+typealias Char = 'a''type;
+comptime fn byte(a: Byte, b: Byte) -> Tuple<bool, bool, bool, bool> {
+    (a < b, a <= b, a > b, a >= b)
+}
+comptime fn signed(a: Signed, b: Signed) -> Tuple<bool, bool, bool, bool> {
+    (a < b, a <= b, a > b, a >= b)
+}
+comptime fn character(a: Char, b: Char) -> Tuple<bool, bool, bool, bool> {
+    (a < b, a <= b, a > b, a >= b)
+}
+comptime fn left() -> Byte { 255 }
+comptime fn right() -> Byte { 0 }
+comptime fn less() -> bool { left() < right() }
+comptime fn less_equal() -> bool { left() <= right() }
+comptime fn greater() -> bool { left() > right() }
+comptime fn greater_equal() -> bool { left() >= right() }
+comptime fn run() -> Tuple<bool, bool, bool, bool> {
+    let value: Byte = 255;
+    (0 < value, value >= 255, 'a' <= 'z',
+     1000000000000000000000000000000000000000000000 > 999999999999999999999999999999999999999999999)
+}
+comptime fn early() -> bool { (do { return true; }) < right() }
+comptime fn early_right() -> bool { 0 < (do { return true; }) }
+comptime fn generic(a: T, b: T) -> bool where T, requires T == Byte { a < b }
+comptime fn specialized() -> bool { generic<Byte>(0, 255) }

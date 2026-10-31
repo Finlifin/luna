@@ -1,0 +1,58 @@
+{-
+    Once-constrained forwarding moves native wrappers without introducing a
+    library enum or duplicating the selected payload's cleanup responsibility.
+-}
+use resources.{Once, Drop};
+
+struct Token {drops: *.u32'builtin}
+impl Drop for Token {
+    fn drop(*self) {
+        assumes self.drops.*.* < 4294967295;
+        self.drops.*.* = self.drops.*.* + 1;
+    }
+}
+
+fn forward(value: T) -> T where T :- Once {value}
+
+fn optional_trial(present: bool) -> bool {
+    var drops: .u32'builtin = 0;
+    let original: ?Token = if present {Token {drops: drops.ref}} else {null};
+    let moved = forward(original);
+    let found = moved match {token? => true, null => false};
+    found == present and drops == if present {1} else {0}
+}
+
+fn nested_trial(present: bool) -> bool {
+    var drops: .u32'builtin = 0;
+    let inner: ?Token = if present {Token {drops: drops.ref}} else {null};
+    let outer: ??Token = inner;
+    let moved = forward(outer);
+    let found = moved match {
+        inner? => inner match {token? => true, null => false},
+        null => false,
+    };
+    found == present and drops == if present {1} else {0}
+}
+
+fn result_trial(ok: bool) -> bool {
+    var drops: .u32'builtin = 0;
+    let original: !Token Token = if ok {
+        Token {drops: drops.ref}
+    } else {
+        error Token {drops: drops.ref}
+    };
+    let moved = forward(original);
+    let success = moved match {token! => true, error token => false};
+    success == ok and drops == 1
+}
+
+fn run() -> bool {
+    optional_trial(true) and optional_trial(false)
+        and nested_trial(true) and nested_trial(false)
+        and result_trial(true) and result_trial(false)
+}
+
+test forwarded {
+    let passed = run();
+    assumes passed;
+}

@@ -1,0 +1,128 @@
+{-
+    Start from a reflected layout, edit its ordered fields, then construct and
+    use the generated type through the complete sysroot and resource checker.
+-}
+struct Source { old: bool, removed: bool }
+
+comptime fn Edited() -> Type {
+    var builder = meta.StructBuilder.from_type(Source, .name = .Edited);
+    let replaced = builder.replace_field(0, .value, u8);
+    let removed = builder.remove_field(1);
+    let inserted = builder.insert_field(0, .ready, bool);
+    let appended = builder.insert_field(2, .tail, bool);
+    let negative = builder.remove_field(-1);
+    let past_end = builder.replace_field(3, .wrong, u64);
+    let too_far = builder.insert_field(4, .wrong, u64);
+    assumes replaced and removed and inserted and appended;
+    assumes not negative and not past_end and not too_far;
+    builder.Build()
+}
+
+typealias Record = Edited();
+
+test edited_fields {
+    let record = Record { ready: true, value: 42, tail: false };
+    assumes record.ready and record.value == 42 and not record.tail;
+}
+
+comptime fn inspect() -> bool {
+    let names = Record.struct_field_names();
+    let types = Record.struct_field_types();
+    let original = Source.struct_field_names();
+    names.length() == 3 and names[0] == .ready and names[1] == .value
+        and names[2] == .tail and types[0] == bool and types[1] == u8
+        and types[2] == bool and original[0] == .old and original[1] == .removed
+        and Column<bool>.struct_field_types()[0] == bool
+}
+
+test edited_reflection {
+    inline if inspect() { assumes true; } else { assumes false; };
+}
+
+{- Batch composition consumes reflection lists through the public sysroot API. -}
+comptime fn Combined() -> Type {
+    var builder = meta.StructBuilder.new(.name = .Combined);
+    let reflected = builder.add_fields(Source.struct_field_names(),
+        Source.struct_field_types());
+    let replaced = builder.replace_fields(0, 2, [.enabled, .count], [bool, u8]);
+    let rejected = builder.add_fields([.invalid], []);
+    assumes reflected and replaced and not rejected;
+    builder.Build()
+}
+
+typealias BatchRecord = Combined();
+
+test batch_fields {
+    let record = BatchRecord { enabled: true, count: 7 };
+    assumes record.enabled and record.count == 7;
+}
+
+{-
+    Transform reflected field Types into concrete column storage. The builder
+    preserves the generic normal-form heads; runtime layout and field access
+    must still resolve the applied Column definitions.
+-}
+struct Row { active: bool, count: u8 }
+struct Column where T { first: T, second: T }
+
+comptime fn Columns(subject: Type) -> Type {
+    let names = (if true {subject} else {bool}).struct_field_names();
+    let types = (do {subject}).struct_field_types().map(|field| Column<field>);
+    var builder = meta.StructBuilder.new(.name = .Columns);
+    let added = builder.add_fields(names, types);
+    assumes added;
+    builder.Build()
+}
+
+typealias ColumnStore = Columns(Row);
+
+impl ColumnStore {
+    fn second_count(self) -> u8 { self.count.second }
+}
+
+test transformed_fields {
+    let columns = ColumnStore {
+        active: Column<bool> { first: true, second: false },
+        count: Column<u8> { first: 10, second: 20 },
+    };
+    assumes columns.active.first and not columns.active.second;
+    let second = columns.second_count();
+    assumes second == 20;
+}
+
+{-
+    A runtime-like comptime branch selects an ordinary list value. Its exact
+    contents supply both a direct field Type and the named input of an opaque
+    Tuple head; publication must keep those two layouts in agreement.
+-}
+comptime fn SelectedRecord(flag: bool) -> Type {
+    let fields: meta.List<Type> = if flag { [bool, u8] } else { [u32, bool] };
+    let builder = meta.StructBuilder.new(.name = .SelectedRecord);
+    builder.add_field(.first, fields[0]);
+    builder.add_field(.packet, Tuple<.Es = fields>);
+    builder.Build()
+}
+
+typealias FlagRecord = SelectedRecord(true);
+typealias CountRecord = SelectedRecord(false);
+
+test selected_layouts {
+    let flag = FlagRecord { first: true, packet: (false, 17) };
+    let count = CountRecord { first: 29, packet: (31, true) };
+    assumes flag.first and count.first == 29;
+    let (enabled, byte) = flag.packet;
+    let (number, ready) = count.packet;
+    assumes not enabled and byte == 17 and number == 31 and ready;
+}
+
+comptime fn selected_layouts_match() -> bool {
+    let left = FlagRecord.struct_field_types();
+    let right = CountRecord.struct_field_types();
+    left[0] == bool and left[1] == Tuple<.Es = [bool, u8]>
+        and right[0] == u32 and right[1] == Tuple<.Es = [u32, bool]>
+        and FlagRecord != CountRecord
+}
+
+test selected_reflection {
+    inline if selected_layouts_match() { assumes true; } else { assumes false; };
+}

@@ -1,0 +1,23 @@
+-- luna host-direct-effect-cleanup.fl --build run --copy-protocol Duplicate --drop-protocol Retire --output /tmp/flurry-direct-cleanup
+-- Expected native output: (bool true), including the destructor's writeback.
+trait Duplicate {}
+trait Retire {fn drop(*self);}
+impl Duplicate for bool {}
+impl Duplicate for *T where T {}
+struct Watch {target:*bool}
+impl Retire for Watch {
+    fn drop(*self) {self.target.*.* = not self.target.*.*;}
+}
+effect get()->bool;
+fn run()->bool {
+    let seen=false;
+    -- Establish the pointer before installation; the handler captures it.
+    let target=seen.ref;
+    let result=(get()# {get() if false=>false,})# {
+        get()=>do {
+            let watch=Watch {target:target};
+            resume true;
+        },
+    };
+    result and seen
+}

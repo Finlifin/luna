@@ -1,0 +1,25 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
+typealias Type = .Type'builtin;
+typealias Char = 'a''type;
+struct Box where T { value: T }
+enum Entry where T { Some(T), None }
+struct Checked where T, requires T == bool { value: T }
+comptime fn IdentityType(value: Type) -> Type { value }
+comptime fn BoxType(value: Type) -> Type { Box<value> }
+comptime fn EntryType(value: Type) -> Type { Entry<value> }
+comptime fn CheckedType(value: Type) -> Type { Checked<value> }
+typealias ComputedBox<T> = Box<IdentityType(T)>;
+typealias ComputedEntry<T> = Entry<IdentityType(T)>;
+typealias BoolBox = BoxType(bool);
+typealias CharBox = BoxType(Char);
+typealias BoolEntry = EntryType(bool);
+typealias BoolChecked = CheckedType(bool);
+fn read(value: ComputedBox<bool>) -> bool { value.value }
+fn run() -> Tuple<bool, Char> {
+    let flag: BoolBox = BoolBox { value: true };
+    let character: CharBox = CharBox { value: 'z' };
+    (read(flag), character.value)
+}
+fn check(value: BoolChecked) -> bool { value.value }

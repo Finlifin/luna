@@ -1,0 +1,36 @@
+{- Generate the fixed-width ADD/SUB encoding with named register payloads. -}
+typealias RegisterBits = BitVec<5>;
+
+comptime fn ArithmeticInstruction() -> Type {
+    var builder = meta.EnumBuilder.new(.name = .ArithmeticInstruction);
+    builder.add_named(.add, [.rs2, .rs1, .rd], [RegisterBits, RegisterBits, RegisterBits]);
+    builder.add_named(.sub, [.rs2, .rs1, .rd], [RegisterBits, RegisterBits, RegisterBits]);
+    builder.BuildBits(32,
+        [0xfe00707f, 0xfe00707f], [0x00000033, 0x40000033],
+        [[20, 15, 7], [20, 15, 7]], .base_type = u32)
+}
+
+typealias Instruction = ArithmeticInstruction();
+
+fn destination(instruction: Instruction) -> RegisterBits {
+    instruction match {
+        .add { rd: value, rs1: _, rs2: _ } => value,
+        .sub { rd: value, rs1: _, rs2: _ } => value,
+    }
+}
+
+fn relay(instruction: Instruction) -> Instruction { instruction }
+
+test generated_instruction_bits {
+    let add = Instruction.add { rd: 1, rs1: 2, rs2: 3 };
+    let sub = Instruction.sub { rs2: 3, rd: 1, rs1: 2 };
+    let add_word = (add'bitvec).as(u32);
+    let sub_word = (sub'bitvec).as(u32);
+    assumes add_word == 0x003100b3 and sub_word == 0x403100b3;
+}
+
+test generated_instruction_payload {
+    let value = destination(relay(Instruction.add { rd: 7, rs1: 2, rs2: 3 }));
+    let other = destination(relay(Instruction.sub { rd: 4, rs1: 1, rs2: 6 }));
+    assumes value == 7 and other == 4;
+}

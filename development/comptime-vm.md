@@ -1,0 +1,9675 @@
+# Comptime invocation execution and definition builders
+
+## Scope and current boundary
+
+Invocation now has a linear engine-code path alongside the migration tree
+interpreter. `comptime_compiler` lowers supported closed function bodies before
+execution; `comptime_interpretor::bytecode` runs a program counter, fixed dense
+registers and explicit lexical scope records. Mixed-stage interpretation and
+scheduled runtime cleanup continue to use the existing interpreter. This is not
+yet a complete bytecode VM: trait calls, general primitives, effect/query suspension,
+specialized-code caching and the unified value representation remain outstanding.
+
+Compilation traverses control with a bounded heap worklist, including untaken
+branches. A function body or default expression selects its carrier before that
+execution unit starts. A suspended caller is never replayed when a default or
+callee needs tree interpretation; execution errors never trigger fallback.
+Constants, type descriptors and default templates own bounded copies of immutable
+NIR data; active frames retain
+the code through Arc. These are not frozen query-cache artifacts. Immutable
+package-body code can be reused within one interpreter.
+No opcode delegates a child expression tree back to `eval`.
+
+Supported bodies include existing literal/frozen-value/Type leaves, reads,
+record/variant construction, local initialization, whole-slot/record-field assignment and
+field reads, blocks,
+boolean short circuit,
+boolean/BitVec negation, branches, loops, break/continue and return. Integer
+arithmetic, exact/machine floating arithmetic, scalar comparisons and admitted
+comptime scalar intrinsics execute linear instructions,
+using the same checked primitive operations as tree interpretation. Ordinary
+calls to named functions, function instances and local callable values
+suspend the caller and run the callee on an explicit activation stack. Temporary
+registers are allocated densely independent of LocalId values. Scope exit and
+loop transfers clear introduced bindings; imported inputs are restored on both
+success and failure so later contract checks retain prior mutations.
+
+Reads reuse the checked invocation value-copy/value-reference mechanism.
+Whole receiver updates use the same comptime value-reference storage writes;
+they do not introduce pointers or require runtime Copy. Phase admission,
+parameter binding, requirements, preconditions and postconditions remain at the
+ordinary invocation boundary. Runtime IIR cleanup is not silently bypassed.
+
+Compilation uses the caller's remaining invocation budget. Traversal, worklist
+scheduling, metadata copying, instruction fixups and register allocation consume
+that budget, including work before unsupported or failed compilation. Stable-code
+cache hits do not repeat compilation charges; cache storage remains independently
+bounded at 100,000 weight units. Execution charges frame storage, each opcode and
+existing scalar/value operations against the same invocation budget.
+`bytecode_compilation_steps()` reports cumulative compilation charges separately
+from total work so observation-cost measurements do not hide code generation.
+Cost counts can differ between the two carriers, as
+allowed by docs/comptime/normalization-and-instantiation.md. There is no speedup
+claim: input-dependent specialized bodies and closure bodies still compile per call;
+package-body reuse does not establish a persistent cross-query code identity.
+
+`bytecode_invocations()` exposes actual route selection for verification. Tests
+must inspect this counter in addition to result equality, so a successful tree
+fallback cannot masquerade as bytecode delivery. The compiler's S-expression
+Display preserves source ranges, local-slot mapping, jumps and constant dumps.
+
+On the remaining tree path, ordinary single-owner locals use directly indexed slots. Mixed-owner captures,
+out-of-order identities, and sufficiently sparse indices transition to an
+ordered map. The numeric size of a LocalId cannot request an equally large
+allocation. A scope snapshot records binding presence, not a copy of values:
+assignments to existing bindings survive scope exit; newly introduced bindings
+do not. Up to 64 register slots use an inline liveness bitmap; other frames use
+sorted identities. Snapshots remain valid after a frame changes representation.
+
+Without a cleanup schedule, successful/ordinary failed evaluation can return
+without dispatching empty cleanup hooks. Effect-control transfer still passes
+through its scope handler. Scheduled IIR continues through the existing delivery
+and cleanup machinery.
+
+## Builtin list-pattern extraction (2026-10-28)
+
+The shipped `meta.List` comptime pattern contribution now binds the converted
+usize index before indexing `self`. This uses the VM's existing local-list leaf
+read: only the selected element is copied at the indexing operation. Passing
+the list to the contribution and immutable input validation still have costs;
+this does not make the entire pattern match constant-time. Index conversion
+retains its target-width check and ordinary once-only evaluation.
+
+The `meta_list_pattern_cost` integration test elaborates the actual shipped
+contribution and a baseline with its previous inline conversion expression.
+For `[first, ..._]` over a `List<Type>`, invocation steps are identical on the
+32- and 64-bit targets tested:
+
+| Elements | Previous | Local index |
+| --- | --- | --- |
+| 1 | 304 | 309 |
+| 512 | 11,546 | 10,529 |
+
+The large case saves 1,017 charged steps (8.8%); the small case pays five steps
+for the extra binding. These are deterministic VM work counters, not elapsed
+time or a general compiler speedup. The regression checks a size-dependent
+saving rather than pinning exact tick totals. Empty input and budget exhaustion
+are also covered. No copy admission, resource check or general index evaluator
+was disabled.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna --test meta_list_pattern_cost --test comptime_integer_conversion --test list_patterns -- --nocapture`:
+  exit 0, 2 cost tests, 5 conversion tests and 41 pattern tests passed;
+  `/tmp/luna-tools-0l2xu64l/result.json`.
+- `python3 -B development/library_check.py --release --timeout 900 --stage sysroot-meta-patterns`:
+  exit 0, three real-sysroot native tests passed, including optional payloads,
+  failed pattern candidates and preserved normal-form Type heads;
+  `/tmp/luna-library-rbz7j2wc/summary.json`.
+
+The initial unqualified method-call probe was not a valid interface-selection
+test: importing `ListPatternView` alone does not supply its capability in the
+current proposition context. Direct calls must use `.as(ListPatternView)` or
+an appropriate capability assumption. The subsequent method-subject repair
+keeps the original normal-form type when structural probing returns
+`UnvalidatedModel`, then performs ordinary implementation selection. Other
+solver failures still propagate; no normal-form body is unfolded.
+
+The regression now covers explicit interface calls, out-of-bounds errors and
+recovery on both target widths. `normal_form_methods` covers static trait
+selection and rejects inheriting bool's interface through `Identity<bool>`.
+Real-sysroot tests also verify a generated receiver runs exactly once. This
+does not grant arbitrary opaque heads implementation eligibility or permit
+inherent implementations outside the existing local-nominal ownership rule.
+
+Method-subject repair validation, from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna --test meta_list_pattern_cost --test normal_form_methods --test trait_phases --test extended_calls --test enum_groups --test temporary_method_cleanup -- --nocapture`:
+  exit 0, all 80 tests passed; `/tmp/luna-tools-yll_25h1/result.json`.
+- `python3 -B development/library_check.py --release --timeout 900 --stage sysroot-meta-patterns`:
+  exit 0, all three native tests passed; `/tmp/luna-library-pm4k_j92/summary.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-ue6oyl1g/result.json`. `git diff --check` passed.
+
+## Repeatable measurement
+
+From the repository root:
+
+```sh
+python3 -B development/comptime_bench.py --repeat 5
+```
+
+The entrypoint builds the release benchmark through the managed Cargo cache and
+runs each sample with a deadline and saved evidence. `--binary PATH` measures a
+saved executable without rebuilding. `LUNA_BENCH_ITERATIONS` selects the number
+of invocations per workload (default 20,000).
+
+The benchmark constructs NIR and an interpreter before timing. It checks results
+and reports nanoseconds, allocator calls, and consumed steps per invocation for
+0/1/8/64 parameters, with either no extra reads or 256 local reads. Inputs are
+Bool values. Allocator counting is enabled for both versions; timings include
+that instrumentation and argument-vector construction. The benchmark does not
+measure package admission, parsing, elaboration, complex Type computation,
+builder activity, or end-to-end compilation. It is evidence for these invocation
+workloads only, not a whole-compiler speedup claim.
+
+### 2026-10-25 comparison
+
+Five process samples per version, 20,000 invocations per workload; median ns:
+
+| Extra local reads | Parameters | Before | After | Reduction | Allocations before → after | Steps (both) |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0 | 0 | 105 | 98 | 7% | 0 → 0 | 2 |
+| 0 | 1 | 231 | 184 | 20% | 7 → 5 | 7 |
+| 0 | 8 | 702 | 508 | 28% | 7 → 5 | 28 |
+| 0 | 64 | 4849 | 2944 | 39% | 22 → 5 | 196 |
+| 256 | 1 | 6176 | 5405 | 12% | 7 → 5 | 519 |
+| 256 | 8 | 6906 | 5700 | 17% | 7 → 5 | 540 |
+| 256 | 64 | 11346 | 8139 | 28% | 22 → 5 | 708 |
+
+The baseline used the same workspace/compiler and benchmark with only the new
+frame, scope-snapshot, and cleanup fast-path changes disabled. It was built before
+the optimized version. These are sequential local samples, not CPU-pinned or
+statistically controlled measurements. Empty-call differences are small enough
+that system noise may explain them. The allocation reductions are deterministic.
+
+Build evidence: `/tmp/luna-tools-4w86_lj8/result.json` (baseline) and
+`/tmp/luna-tools-stxa6wew/result.json` (optimized), both exit 0.
+Per-run evidence and full workload output (`stdout.log` beside `result.json`):
+
+- Baseline: `/tmp/luna-tools-09xm2ufo/`, `/tmp/luna-tools-wfox93k5/`,
+  `/tmp/luna-tools-dhknt46e/`, `/tmp/luna-tools-ok_y8l9k/`, `/tmp/luna-tools-_rm3bpff/`.
+- Optimized: `/tmp/luna-tools-29xjue77/`, `/tmp/luna-tools-qukxnnnj/`,
+  `/tmp/luna-tools-tciem5g4/`, `/tmp/luna-tools-si733c2j/`, `/tmp/luna-tools-sq5mwsxk/`.
+
+The initial attempt to run all interpreter tests failed during linking with a
+disk-quota error and an evidence-write error (`/tmp/luna-tools-9u6vb09g/result.json`,
+Cargo exit 101 / wrapper 125). It is not counted as passing validation. Subsequent
+validation uses selected groups after the cache's automatic recovery.
+
+### Validation
+
+Working directory: `/home/fin/luna`.
+
+- `python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor --lib --test abstract_values --test instance_budget --test function_types --test environment_types --test type_list_inputs`: exit 0, **121 passed**;
+  `/tmp/luna-tools-wnuq_23p/result.json`. This run includes sparse/owner identities,
+  64/65-slot snapshots, disappearance of dead-register tails, representation
+  transitions, budget failures, abstract inputs, and existing memory/closure tests.
+- The first selected attempt found a test still constructing `BTreeMap` directly
+  (`/tmp/luna-tools-3cacbwn6/result.json`, exit 101). It now constructs `Environment`;
+  the budget/storage-identity assertions are unchanged. The successful run above
+  supersedes that compile failure.
+- The first combined Luna group (`comptime_memory`, `resources`,
+  `effect_memory_transfers`, `pure_bitvec`, `cmtt`) failed with storage quota and
+  evidence-write errors. Terminal evidence for `/tmp/luna-tools-9o13vp8x/result.json`
+  reports Cargo 101, wrapper 125, `report_saved: false`; the on-disk result may
+  still say running. This failed attempt is not passing integration evidence.
+- Retrying the end-to-end path separately:
+  `python3 -B development/check.py --timeout 900 -- test --release -p luna --test comptime_memory`
+  exited 0, **17 passed**, `/tmp/luna-tools-75lqvh9f/result.json`.
+- The next group run, `/tmp/luna-tools-vtycqhz0/result.json`, completed **523 CMTT
+  tests successfully**, then failed one effect-memory test (90 passed / 1 failed).
+  The failed expectation rejected a scalar lexical return. That expectation was
+  stale: [direct passing](../docs/algebraic-effect-and-delimited-continuation/direct-passing.md)
+  preserves lexical return targets, and the existing resources test
+  `handler_lexical_data_return_keeps_parameter_accesses_separate_from_completion`
+  already checks that a scalar lexical result contributes accesses without
+  becoming the operation's normal completion result. The test now checks this
+  accepted behavior and adds a pointer-valued exit that still requires a separate
+  exit summary. No production effect/memory admission rule was relaxed.
+- `python3 -B development/check.py --timeout 900 -- test --release -p luna --test resources --test effect_memory_transfers --test pure_bitvec --no-fail-fast`:
+  exit 0, **365 + 91 + 29 = 485 passed**, `/tmp/luna-tools-_oovaltl/result.json`.
+  Together with the interpreter, CMTT, and comptime-memory groups, **1,146 distinct
+  tests passed** for this work. This is targeted validation, not a full workspace run.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`
+  exited 0 after the final test correction, `/tmp/luna-tools-y885s07x/result.json`;
+  `git diff --check` passed.
+
+Removal/retention compacts a register frame once dead slots exceed the bounded
+slack, so iteration cost follows live bindings rather than the largest historical
+frame. This preserves the intended resource-accounting bound for repeated scope
+snapshots after large temporary scopes.
+
+## Definition-builder gap
+
+The common HIR registration substrate is now implemented and used for generated
+module definitions; its checks and remaining VM/elaboration work are tracked in
+[definition-builders.md](definition-builders.md). This does not yet expose a
+source-level definition builder.
+
+The author's SoA example is
+`/home/fin/vilya/examples/2026-8-5-typed-Soa.fl`, starting at `StructOfArray`.
+Its `StructBuilder.new`, `add_field`, and `build` operations are not implemented
+in the compiler/library. `library/meta/lib.fl` currently exposes the foundational
+`List<Type>` head. Existing CMTT expression/pattern/arm generation and internal
+materialization of already-declared nominals do not implement definition builders.
+
+The author's intended scope is that most kinds of definition can be constructed
+through builders. Therefore the implementation boundary must support a common
+definition-registration/elaboration path, with per-kind payloads for structs,
+enums, functions, traits, implementations, and other supported definitions. Do
+not implement an isolated SoA-only struct shortcut and report this feature done.
+
+Required integration work:
+
+- Separate mutable, invocation-owned builder state from completed definition
+  descriptions. An unfinished builder is not a frozen Type or completed definition.
+- Feed generated declarations through normal name binding, signature/body
+  elaboration, phase checks, contracts, and applicable coherence checks. Preserve
+  hygienic identities and source/expansion diagnostics; reject incomplete or
+  invalid definitions rather than manufacturing executable IR.
+- Preserve normal-form heads and the distinction between type identity and an
+  internal structural view. Builder output must not make `Identity<T>` equal to T.
+- Support generated bodies through the established CMTT machinery, including
+  contexts and ordinary-argument single evaluation. Do not freeze active inference
+  variables, candidate transactions, or waiters into VM values.
+- First acceptance: inspect input fields, generate SoA column fields/defaults in
+  a comptime loop, finalize the struct, attach methods, and compile/use the result.
+  Cover duplicate names, invalid field types/defaults, failed finalization and
+  recovery, scope escape, and repeat instantiation. Broader definition kinds need
+  their own acceptance cases against the shared path.
+
+These are implementation requirements and a recorded gap, not newly introduced
+source APIs or a claim that the SoA example can currently run.
+
+## Associated type observation during invocation
+
+Selected type views now traverse FunctionValue and ClosureSnapshot instance
+arguments, retaining declaration/factory identities. The previous fallback cloned
+these aggregate terms without resolving nested associated Type queries or charging
+their traversal. Normalization now matches every Term variant explicitly so future
+aggregate variants cannot silently enter that fallback.
+
+The interpreter shares one metered selected-type-view entrypoint between reflection,
+Type-value evaluation, record/variant construction, associated-value lookup and
+method dispatch-key construction. Query work uses the current invocation allowance
+instead of a fresh independent view allowance at each explicit transformation.
+Failure retains consumed work and reports its original error category and source.
+This does not yet replace the separate bounded views inside immutable has_type,
+capability and identity-comparison predicates with a fully metered admission API.
+
+Verification in `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor --lib --test nominal_types --test type_equality --test normal_values --test function_types --test record_values --test instance_budget
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+```
+
+178 tests passed, exit 0, `/tmp/luna-tools-hp90ehse/result.json`. Two regressions
+failed before the fix (`/tmp/luna-tools-8dg5aaee/result.json`): nested selected inputs
+remained unresolved and a 100-input callable value fit a three-step view budget.
+Final tests additionally exercise a real TypeValue evaluation with a 20-selection
+chain, exhaustion and retry, and missing-evidence diagnostics retaining the source.
+Formatting passed at `/tmp/luna-tools-k726hsld/result.json`; `git diff --check`
+passed. No source reflection API or builder publication behavior is added here.
+
+## Indexed declaration-world admission
+
+Interpreter construction now builds the function index before checking body-free
+runtime identities, reusing it for collision checks. Phase validation separately
+indexes body and runtime-identity membership for retained quote templates and
+runtime identities. Dispatch admission reuses an implementation-ID map instead
+of scanning all implementations for each instance and again for capabilities.
+Duplicate identities, missing implementations and omitted demanded methods keep
+their rejection behavior. No function body, type contract or phase check is
+removed. Indices add linear storage and replace repeated linear membership scans
+with logarithmic lookup; other world-validation work retains its existing costs.
+
+`compiler/comptime_interpretor/examples/world_construction.rs` measures only
+`Interpreter::for_comptime` construction, including its phase checks. Package
+allocation and VM destruction are outside the timed interval. Each row uses one
+warmup and the median of seven measured runs. Each world has equally many simple
+comptime functions and distinct body-free runtime identities. No timing assertion
+is used as a test gate.
+
+```sh
+python3 -B development/check.py --timeout 900 -- run --release -p comptime_interpretor --example world_construction
+```
+
+Same-host release measurements, microseconds:
+
+| Total declarations | Before | VM index only | VM and phase indices |
+| --- | ---: | ---: | ---: |
+| 2,000 | 1,319 | 759 | 232 |
+| 8,000 | 25,502 | 11,232 | 1,042 |
+| 32,000 | 387,470 | 198,505 | 4,393 |
+
+Reports: `/tmp/luna-tools-2ajlzndp/result.json` (baseline),
+`/tmp/luna-tools-zx2ug_dj/result.json` (intermediate), and
+`/tmp/luna-tools-6ispd10o/result.json` (final), all exit 0. The largest fixture is
+about 88x faster at world construction; this is not a whole-compiler or invocation
+execution speedup, nor a benchmark of implementation-rich dispatch worlds.
+
+Verification in `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor -p nir --test runtime_function_identities --test phases --test nominal_types --test normal_inputs --test instance_budget
+python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor --lib
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+```
+
+85 targeted tests passed at `/tmp/luna-tools-kqcdbw5c/result.json`; 119 VM library
+tests passed at `/tmp/luna-tools-03jtgu97/result.json` (204 total). New checks cover
+collisions at the end of a larger function catalog, duplicate bodies, successful
+lookup, missing/duplicate implementation identities and repair. The first dispatch
+fixture omitted its demanded method and correctly produced UnmaterializedDispatch;
+the final test asserts that rejection before installing the explicit method and
+checking success. Existing phase tests retain quote/runtime/body collision and
+wrong-phase coverage. Formatting passed at `/tmp/luna-tools-osgt43d6/result.json`;
+`git diff --check` passed. Live sessions still borrow a fixed immutable NIR world;
+this optimization does not add active invocation suspension or world replacement.
+
+## Local type-list indexing
+
+Comptime reads from a local `meta.List<Type>` now borrow its immutable payload
+when the index is an integer literal or a local integer. This also applies to
+locals backed by mutable storage. Each read retains its execution ticks and
+charges the selected type's description before cloning it; unrelated elements
+are not copied again. Initial argument admission still validates the whole list.
+
+Effectful index expressions retain the general evaluation path: the list value
+is obtained before the index executes, even if the index replaces that local.
+Cleanup-scheduled execution also retains the general path. This optimization
+does not change normal-form identity or the representation of Tuple inputs.
+
+Validation in `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor --test type_list_index --test type_list_inputs --test instance_budget
+```
+
+All 21 tests passed (`/tmp/luna-tools-wiul9qbr/result.json`). The cost regression
+compares one and 64 reads from 4096 elements, for literal/local indices and
+ordinary/storage-backed bindings; the 63 extra reads consume fewer than 2000
+steps in each case. This is a deterministic VM work-budget bound, not a measured
+wall-clock speedup. Bounds failures, subsequent invocation recovery and
+source-list replacement during index evaluation are checked separately.
+
+### Paired indexing measurements
+
+`python3 -B development/comptime_bench.py --bench type_list_index --iterations 100 --repeat 5`
+measures three index forms on the same VM build. The general form wraps the
+literal index in an empty block, selecting snapshot evaluation; it includes that
+extra block's execution overhead. This comparison is not a historical binary
+comparison. Each process warms up five invocations per workload. Initial argument
+allocation, admission and invocation are timed; package and VM construction are
+outside the measured region. The allocator counts allocation/reallocation calls
+and requested bytes, not live or peak memory. Every result is checked.
+
+Five-process medians on the current workspace after `f9a92c53`, 4096 elements:
+
+| Index form | Reads/call | ns/call | Allocations/call | Requested bytes/call | VM steps/call |
+|---|---:|---:|---:|---:|---:|
+| Literal | 1 | 493,636 | 28,706.04 | 1,936,092 | 20,508 |
+| Literal | 64 | 516,913 | 29,213.04 | 2,004,304 | 21,642 |
+| Local | 64 | 560,874 | 29,169.04 | 2,234,580 | 21,265 |
+| General block | 64 | 8,488,573 | 553,693.04 | 33,485,136 | 546,250 |
+
+The 64-read literal workload is about 16.4x faster than its general-path pair,
+with about 18.9x fewer allocation calls. These ratios describe this microbenchmark,
+not whole compilation. Input admission still dominates a single leaf read and
+is a separate optimization opportunity. Primitive type elements do not represent
+the cost of copying deeply structured selected types.
+
+Build report: `/tmp/luna-tools-pi_p2vly/result.json`. All five runs exited 0:
+`/tmp/luna-tools-i05nyx0n/result.json`, `/tmp/luna-tools-ibehgv41/result.json`,
+`/tmp/luna-tools-8yltm80h/result.json`, `/tmp/luna-tools-5a2haqsm/result.json`,
+`/tmp/luna-tools-s0ffjald/result.json`.
+
+### Lazy validation traversal state
+
+Type-description validation now keeps its initial node and empty binder context
+off the heap. It creates a pending-node vector only when visiting children and
+shared binder frames only when entering function telescopes. Empty function
+telescopes still introduce a frame; sibling nodes retain independent scope
+contexts. Structural/scope validation and logical work charges are unchanged.
+
+The same five-process benchmark command after this change gives these medians
+for 4096 elements (the preceding table is the baseline):
+
+| Index form | Reads/call | ns/call | Allocations/call | Requested bytes/call | VM steps/call |
+|---|---:|---:|---:|---:|---:|
+| Literal | 1 | 290,838 | 4,126.04 | 1,149,532 | 20,508 |
+| Literal | 64 | 312,167 | 4,507.04 | 1,213,712 | 21,642 |
+| Local | 64 | 356,129 | 4,463.04 | 1,443,988 | 21,265 |
+| General block | 64 | 3,842,583 | 4,699.04 | 15,917,328 | 546,250 |
+
+All 18 workload step counts exactly match the baseline. The literal single-read
+case is about 1.70x faster and the general 64-read case about 2.21x faster; the
+general path still copies the full list and requests substantially more bytes.
+Remaining input admission, traversal and cloning costs are not eliminated.
+
+The targeted command below passed 181 tests, including empty-frame scope,
+sibling binder isolation, depth 128/129 and work 100,000/100,001 boundaries:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor --lib --test type_list_index --test type_list_inputs --test instance_budget --test function_types --test environment_types --test normal_values --test type_equality
+```
+
+Test report: `/tmp/luna-tools-skgdmtqz/result.json`. Benchmark build:
+`/tmp/luna-tools-hvy3hvcu/result.json`. All five runs exited 0:
+`/tmp/luna-tools-97zpyz2b/result.json`, `/tmp/luna-tools-7jt7guge/result.json`,
+`/tmp/luna-tools-yp74_5cn/result.json`, `/tmp/luna-tools-4iep_uuu/result.json`,
+`/tmp/luna-tools-iku3sfei/result.json`.
+
+### Allocation-free disposal of leaf descriptions
+
+Freezing an invocation input releases the old type descriptions through
+`Term::drop_iteratively`. That routine now handles its root before allocating a
+pending-child vector. Leaf disposal therefore performs no allocation, including
+owned scalar payloads and empty containers. Descendant disposal is still
+iterative; rejection cleanup does not fall back to recursive host-stack drops.
+
+The same five-process benchmark after this change, 4096 elements:
+
+| Index form | Reads/call | ns/call | Allocations/call | Requested bytes/call | VM steps/call |
+|---|---:|---:|---:|---:|---:|
+| Literal | 1 | 265,908 | 30.04 | 920,156 | 20,508 |
+| Literal | 64 | 285,273 | 411.04 | 984,336 | 21,642 |
+| Local | 64 | 329,487 | 367.04 | 1,214,612 | 21,265 |
+| General block | 64 | 3,854,703 | 603.04 | 15,687,952 | 546,250 |
+
+Across all 18 workloads, allocation calls fall by exactly the list length and
+VM steps remain identical. Fast-path times improve by about 8–9% in the rows
+above; the general-path time is effectively unchanged. Remaining bytes include
+input and frozen-list storage, which this change does not remove.
+
+71 targeted tests passed: 33 NIR disposal/error-result tests at
+`/tmp/luna-tools-m7az___k/result.json`, and 38 VM list/budget/normal-value tests at
+`/tmp/luna-tools-vryat_lr/result.json`. The disposal tests count allocations on
+the current thread and separately release a 65,536-level mixed tree on a bounded
+host stack. Commands ran in `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p nir --test type_disposal --test type_disposal_allocations --test error_results
+python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor --test type_list_index --test type_list_inputs --test instance_budget --test normal_values
+```
+
+Benchmark build: `/tmp/luna-tools-1gie_dyk/result.json`. All five runs exited 0:
+`/tmp/luna-tools-dlz4nte5/result.json`, `/tmp/luna-tools-yl5cph9d/result.json`,
+`/tmp/luna-tools-9dd42r38/result.json`, `/tmp/luna-tools-q0bap4rb/result.json`,
+`/tmp/luna-tools-v_77sh16/result.json`.
+
+## Value-reference append measurement (2026-10-29)
+
+The append benchmark now uses `ArgumentPassing::ComptimeReference` and ordinary
+assignment, matching the current receiver model. It no longer measures the
+legacy source-pointer path. This measurement adds no invocation result cache.
+`memoization::Invocation::prepare` is an explicit opt-in API requiring a pure
+comptime function; production callers do not automatically route every call
+through it. Purity alone is not an economic reason to cache cheap invocations.
+Validation of unchanged data and reuse of an entire invocation result are
+separate optimization questions.
+
+Command, run from `/home/fin/luna` against `7a739c9e` plus this benchmark change:
+
+```sh
+python3 -B development/comptime_bench.py --bench list_append --iterations 3 --repeat 3
+```
+
+Each process warms up five times per case, then measures three invocations.
+The table gives medians across three processes. Package construction, parser,
+elaboration and LLVM are outside the timer. Execution, final result reading,
+length assertions and VM event recording remain inside. Allocated MB means
+cumulative requested bytes divided by 1,000,000, not peak live memory. Small
+sample sizes support identifying allocation paths, not stable speedup promises.
+
+- **Batch** passes the receiver once, then performs all writes in that callee.
+- **Per append** makes a distinct value-reference call for every write.
+- **Fused** uses the simple suffix recognized by the in-place optimization.
+- **General** wraps the same suffix in a block to retain ordinary snapshot
+  evaluation. Both cases assert the final list length after every invocation.
+
+| Elements | Count | Calls | Path | ms/invocation | Allocated MB/invocation |
+|---|---:|---|---|---:|---:|
+| Bool | 256 | Batch | Fused | 1.118 | 1.937 |
+| Bool | 256 | Per append | Fused | 2.072 | 13.765 |
+| Bool | 1024 | Batch | Fused | 10.746 | 7.730 |
+| Bool | 1024 | Batch | General | 15.014 | 184.994 |
+| Bool | 1024 | Per append | Fused | 22.393 | 189.264 |
+| Bool | 1024 | Per append | General | 26.039 | 366.527 |
+| Type | 256 | Batch | Fused | 2.050 | 1.175 |
+| Type | 256 | Per append | Fused | 3.086 | 3.549 |
+| Type | 1024 | Batch | Fused | 27.963 | 4.689 |
+| Type | 1024 | Batch | General | 23.748 | 91.619 |
+| Type | 1024 | Per append | Fused | 42.659 | 36.211 |
+| Type | 1024 | Per append | General | 38.510 | 123.141 |
+
+In-place extension reduces allocated bytes but does not remove quadratic work.
+The Type workload is slower on the fused path in this sample, despite allocating
+less memory. There is also substantial allocation outside the extension itself:
+`Interpreter::bind_invocation_inputs` calls `read_value_reference`, which creates
+a checkpoint snapshot before checking the parameter domain. Repeating that
+operation for a growing list copies the prefix again at every call boundary.
+The batch/per-append comparison includes all call overhead, so it is not a
+precise attribution of every byte or nanosecond to that one function.
+
+The next implementation target is bounded borrowed input validation without
+an unnecessary full snapshot, retaining type admission, representation/depth
+limits and dependent-input materialization where needed. It should be measured
+against both element domains and both calling patterns. Neither skipping
+impure calls nor caching cheap results is required for this work.
+
+Build evidence: `/tmp/luna-tools-w1pu3ibm/result.json` (exit 0). Three final
+measurement runs exited 0: `/tmp/luna-tools-gnu74gr3/result.json`,
+`/tmp/luna-tools-4retdt5m/result.json`, `/tmp/luna-tools-ty4ftwkw/result.json`.
+All 24 cases per process completed; no global test-suite run was needed for a
+benchmark-only execution change.
+
+The existing memoization phase/failure regression was also rerun successfully:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test execution memoized_invocation_failures_and_phase_checks_do_not_publish_results
+```
+
+`/tmp/luna-tools-ju14y54l/result.json` exited 0 (one selected test). It rejects
+impure and runtime functions at preparation and checks failure publication;
+it is not evidence of an automatic cost-based cache admission policy.
+
+## Borrowed receiver admission without list snapshots (2026-10-29)
+
+Following the measurement above, ordinary (`Sort::Runtime`) comptime
+value-reference arguments now retain a short storage borrow while checking the
+parameter domain and embedded type descriptions. Their List/TypeList checkpoint
+work is traversed without allocating a new list buffer. This is not cached
+admission: every call still validates its current contents. Type and comptime
+value inputs that materialize dependent terms retain the original snapshot
+path, as do explicit program-contract snapshots. Other representations retain
+the existing checkpoint implementation as a fallback.
+
+The borrowed walker shares checkpoint depth checking and charges the same work
+as copying. Differential unit tests sweep fuel and depth limits across plain,
+nested, malformed and symbolic lists; they compare error kind, source and
+remaining fuel. A separate input-binding regression verifies that an incorrect
+payload is rejected without changing the receiver's storage.
+
+Baseline: `0566877b`. Optimized: that revision plus this receiver-binding change.
+The same benchmark command, three processes, three timed iterations and five
+warmups were used; entries below are medians, not a general performance promise.
+All 24 workload VM step counts are unchanged. Requested MB remains cumulative
+allocation, not peak resident memory.
+
+| 1024 elements | Calls | Path | Before ms | After ms | Before MB | After MB |
+|---|---|---|---:|---:|---:|---:|
+| Bool | Batch | Fused | 10.746 | 10.324 | 7.730 | 7.730 |
+| Bool | Per append | Fused | 22.393 | 18.762 | 189.264 | 11.034 |
+| Bool | Per append | General | 26.039 | 23.032 | 366.527 | 188.297 |
+| Type | Batch | Fused | 27.963 | 28.158 | 4.689 | 4.689 |
+| Type | Per append | Fused | 42.659 | 40.279 | 36.211 | 6.880 |
+| Type | Per append | General | 38.510 | 36.237 | 123.141 | 93.810 |
+
+Repeated Bool append requests about 94% fewer allocated bytes in the fused
+case. Full validation still scales with list length, and the Type fused path
+remains slower than general evaluation in these samples. No invocation result
+cache, purity inference, or automatic cache admission policy was added.
+
+Build: `/tmp/luna-tools-chvplrr3/result.json`; measurements:
+`/tmp/luna-tools-85os5wg0/result.json`, `/tmp/luna-tools-acroitmj/result.json`,
+`/tmp/luna-tools-5wtxkuo5/result.json` (all exit 0). VM unit tests:
+`/tmp/luna-tools-39tlx1i7/result.json` (195 passed).
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor --lib
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test comptime_receivers --test comptime_list_operations --test comptime_clause_inputs --test builder_invocations
+```
+
+The second command passed 164 tests, report
+`/tmp/luna-tools-f05rd9tw/result.json`. The rebuilt release CLI also passed
+`sysroot-meta-lists.fl`, `sysroot-edited-struct.fl`, and `sysroot-edited-enum.fl`
+using `development/reproduce.py --timeout 120 --binary
+/tmp/luna-dev-002/target/release/luna -- development/examples/<name>.fl
+--sysroot library --test-native`. Reports respectively:
+`/tmp/luna-tools-ii5j9ekx/result.json`, `/tmp/luna-tools-5fsy39sf/result.json`,
+`/tmp/luna-tools-izvznfdb/result.json` (all exit 0).
+
+## Borrowed aggregate admission (2026-10-29)
+
+Ordinary comptime reference inputs now walk tuples, anonymous/nominal records,
+variants, optional/error/newtype wrappers and nested Type descriptions without
+constructing a discarded checkpoint value. Instance-argument work checking is
+shared with the copying path. Resource representations retain their existing
+checkpoint behavior. Input-domain and embedded-type admission still execute on
+every invocation; this change adds no result or validation cache.
+
+The differential checkpoint test covers valid and malformed nested values,
+nominal arguments, multibyte field names, both phase settings, fuel 0–99 and
+depth limits 1, 2 and 128. It compares error kind, source location and remaining
+fuel against actual checkpoint copying. All 196 VM unit tests passed:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor --lib
+```
+
+Report: `/tmp/luna-tools-ooclq9t5/result.json` (exit 0).
+
+A new invocation-only benchmark performs 16 reference calls per invocation on
+an aggregate containing N four-boolean tuples. It includes ordinary input
+cloning, binding and execution, but excludes parsing, elaboration and VM setup.
+Its structural tuples exercise internal representation, not source Tuple type
+identity. Run from `/home/fin/luna`:
+
+```sh
+python3 -B development/comptime_bench.py --bench borrowed_aggregate --repeat 3 --iterations 100
+```
+
+Baseline is `b86a30af` plus the benchmark; after is the same benchmark with the
+borrowed aggregate walker. Each process runs five warmups. Times below are
+medians of three processes; allocations are allocator calls, not retained bytes.
+
+| Width | Before ms | After ms | Before allocations | After allocations | VM steps |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 0.0113 | 0.0099 | 189.04 | 157.04 | 421 |
+| 64 | 0.2528 | 0.1946 | 2530.04 | 1426.04 | 16486 |
+| 1024 | 4.2260 | 2.9110 | 36266.04 | 19738.04 | 261286 |
+
+Step counts are identical before and after. The largest case requests about
+46% fewer allocations and takes about 31% less time in these samples. Full
+validation remains linear in aggregate size on every call; these numbers do
+not establish a general compiler speedup or remove repeated admission work.
+
+Baseline measurement reports: `/tmp/luna-tools-mi33o5r4/result.json`,
+`/tmp/luna-tools-uugzo08p/result.json`, `/tmp/luna-tools-wk7lu39g/result.json`.
+Optimized reports: `/tmp/luna-tools-0och76or/result.json`,
+`/tmp/luna-tools-9vn8jd1x/result.json`, `/tmp/luna-tools-3vxmcnc9/result.json`.
+All six exited 0.
+
+Source integration also passed all 26 tests (17 memory, 9 receivers):
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test comptime_receivers --test comptime_memory
+```
+
+Report: `/tmp/luna-tools-sq896ebw/result.json` (exit 0). Workspace format check
+and `git diff --check` passed; no full workspace test run was performed.
+
+## Ordinary value input admission (2026-10-29)
+
+The borrowed representation walker now also checks ordinary by-value arguments
+in place before binding the original argument into the invocation environment.
+Previously this path constructed and immediately discarded a full checkpoint.
+The value is already owned by the invocation; it does not need another snapshot
+solely for representation and domain checks. Dependent comptime inputs still
+materialize their terms, and owned Storage still uses its checked read path.
+No invocation result or admission result is cached.
+
+A domain regression supplies a Type input followed by an ordinary bool/char
+input, through both value and reference transport. Correct domains bind;
+incorrect domains fail without binding the rejected value. The checkpoint
+failure/fuel differential tests and malformed list/object admission tests remain
+active. All 197 VM unit tests passed:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor --lib
+```
+
+Report: `/tmp/luna-tools-ansixmss/result.json`, exit 0.
+
+The aggregate benchmark now measures both ordinary value and reference calls,
+with the same 16 calls per invocation, five warmups and 100 measured invocations
+per process. Baseline is `fdc1bf4f` plus the extended benchmark. Before and after
+use three processes each:
+
+```sh
+python3 -B development/comptime_bench.py --bench borrowed_aggregate --repeat 3 --iterations 100
+```
+
+| Transport / width | Before median ms | After median ms | Before allocations | After allocations | Steps, unchanged |
+|---|---:|---:|---:|---:|---:|
+| Value / 1 | 0.01347 | 0.01255 | 235.04 | 201.04 | 549 |
+| Value / 64 | 0.40948 | 0.34678 | 4656.04 | 3483.04 | 26694 |
+| Value / 1024 | 7.93760 | 5.74580 | 69176.04 | 51615.04 | 425094 |
+| Reference / 1024 | 2.85387 | 2.79485 | 19738.04 | 18705.04 | 261286 |
+
+Reference calls also benefit from eliminating the outer caller's by-value input
+checkpoint. Input production, argument transfer and type rebinding still allocate;
+full validation remains per call. These samples show about 28% less elapsed time
+and 25% fewer allocations for the largest by-value workload, not an end-to-end
+compiler performance claim.
+
+Before reports: `/tmp/luna-tools-0hb4lbon/result.json`,
+`/tmp/luna-tools-1c7csmcq/result.json`, `/tmp/luna-tools-ufzob628/result.json`.
+After reports: `/tmp/luna-tools-wloeys6o/result.json`,
+`/tmp/luna-tools-x1a9sbn8/result.json`, `/tmp/luna-tools-2oq58xql/result.json`.
+All six exited 0. Work directory: `/home/fin/luna`.
+
+Source integration passed with the current library and builder implementations:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test comptime_receivers --test comptime_list_operations --test comptime_clause_inputs --test builder_invocations
+```
+
+Report: `/tmp/luna-tools-958d_d5e/result.json` (exit 0). Formatting check report:
+`/tmp/luna-tools-iic5b8mz/result.json` (exit 0); `git diff --check` passed.
+
+## Owned list append and direct library operation binding (2026-10-29)
+
+The VM can now fuse `Assign(local, ListConcat(Local(local), suffix))` for an
+owned List or TypeList. Eligibility requires comptime execution without a runtime
+cleanup schedule, an unprojected owned slot, matching list domains and a suffix
+made only of literals, Type values or local reads. Storage and value references
+retain their existing separate paths. A suffix that can call user code retains
+the general snapshot path, because it could replace the receiver after the left
+read. Self-append obtains its suffix snapshot before mutating the destination.
+
+The borrowed left inspection preserves representation validation and its work
+charge without allocating the discarded copy. RHS/local evaluation preserves
+depth boundaries. Combined size/work checks remain active; failed combined
+validation truncates the tentative append, retains spent budget and restores VM
+depth. This is not a linear-time list builder: repeated complete validation still
+costs work proportional to the growing value.
+
+The typed library methods concat, append and append_all now call the named
+compiler operation binding directly. The ordinary bindings.list_concat wrapper
+remains available, but no longer hides append's read/concatenate/write shape
+behind an additional function invocation. Raw builtin spelling remains only at
+the central binding declaration. This reconnects the existing value-reference
+fusion to real source library methods. The new owned-local benchmark measures
+direct NIR assignment, not automatic inlining of every source `xs.concat(...)`
+method call.
+
+Measurement from `/home/fin/luna`:
+
+```sh
+python3 -B development/comptime_bench.py --bench list_append --iterations 3 --repeat 3
+```
+
+Build report: `/tmp/luna-tools-8h3ok5yq/result.json`. Three process reports:
+`/tmp/luna-tools-2t8mix_7/result.json`, `/tmp/luna-tools-_dg7qj1_/result.json`,
+`/tmp/luna-tools-xviwhe5p/result.json`; all exit 0. Each process warms up five
+invocations per case, then measures three. Tables give process medians for 1024
+appends. General wraps the same suffix in a transparent block to select snapshot
+evaluation; it has two extra charged steps per append on these owned cases.
+These are paired paths in one build, not historical whole-compiler speedups.
+The timer includes invocation, final result reading, assertions and VM events;
+package construction/elaboration are excluded. No invocation result cache runs.
+Allocated MB means cumulative requested bytes, not peak live memory.
+
+| Owned element | Path | ms/invocation | Allocations/invocation | Allocated MB/invocation |
+| --- | --- | ---: | ---: | ---: |
+| Bool | Fused | 12.290 | 57389 | 6.597 |
+| Bool | General | 14.912 | 67624 | 184.990 |
+| Type | Fused | 21.050 | 31764 | 3.573 |
+| Type | General | 24.048 | 34826 | 91.617 |
+
+Reference-receiver batch cases remain in the benchmark. For Bool at 1024 items,
+fused/general medians were 10.755/14.864 ms and 7.730/184.993 allocated MB.
+Short sampling supports identifying the allocation path, not a stable speedup
+promise. Different fuel totals reflect the separately charged paths, not cache
+hits or elided user effects.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test --release -p comptime_interpretor --lib
+python3 -B development/check.py --timeout 900 -- test --release -p luna --test comptime_list_operations --test builder_invocations --test compiler_operation_bindings
+python3 -B development/reproduce.py --timeout 120 --binary /tmp/luna-dev-002/target/release/luna -- development/examples/sysroot-edited-struct.fl --sysroot library --test-native
+python3 -B development/reproduce.py --timeout 120 --binary /tmp/luna-dev-002/target/release/luna -- development/examples/sysroot-meta-lists.fl --sysroot library --test-native
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+All exited 0: 201 VM tests (`/tmp/luna-tools-clkpmrjc/result.json`), 54 List,
+72 builder and five operation-binding tests (`/tmp/luna-tools-wfz3ncs3/result.json`),
+four native struct cases (`/tmp/luna-tools-o5m_wj4z/result.json`) and one native
+meta list case (`/tmp/luna-tools-deztbnu7/result.json`). The budget sweep now also
+covers owned literal/local suffixes and self-append, checking unchanged values
+on failure and successful retry. Existing source tests cover saved snapshots,
+projected receiver updates, optional/nested/Type lists, incompatible domains,
+readonly rebinding and effectful suffix ordering. Formatting passed at
+`/tmp/luna-tools-ad5qnvyj/result.json`; whitespace checks passed.
+
+## Bounded normal-term freezing on the dev test stack
+
+During contextual code transport work, the unoptimized VM regression run
+aborted in `normal_input_data_tests::invocation_aggregates_retain_named_callables_without_exporting_them_as_data`
+while freezing the existing 130-level tuple input. The host stack overflowed
+before the depth guard returned (`/tmp/luna-tools-8lrj794o/result.json`). This
+run did not establish whether the overflow predated the transport changes.
+
+Normal-term export now lives in `normal_terms.rs`. Its small recursive
+dispatcher selects separate, non-inlined aggregate handlers; scalar temporary
+storage no longer occupies every aggregate recursion frame. The depth-128
+boundary, node/payload charging, traversal order, callable identity handling,
+and iterative release of rejected data remain unchanged. No stack-size override
+or release-profile workaround was used.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib
+python3 -B development/reproduce.py --timeout 120 --binary /tmp/luna-dev-002/target/debug/build/comptime_interpretor/574bc1b682d8916e/out/comptime_interpretor-574bc1b682d8916e -- normal_input_data_tests
+```
+
+The full VM target passed in the working tree (208 tests, including the code
+transport work committed separately; `/tmp/luna-tools-vu_lm4tw/result.json`).
+The focused existing normal-input group also passed independently through the
+same built harness (`/tmp/luna-tools-5yw5t_ey/result.json`). The source CMTT,
+phase-boundary and comptime-memory groups passed all 547 tests
+(`/tmp/luna-tools-59p4z5mr/result.json`).
+
+## Bounded canonical-input decoding on the dev test stack
+
+The execution regression `canonical_comptime_arguments_validate_shapes_and_recover`
+previously overflowed the host stack while decoding a 140-level canonical tuple.
+The decoder's large recursive frame exhausted the stack before its depth guard.
+
+Decoding now uses a small shared dispatcher and separate non-inlined scalar and
+container handlers in `normal_values`. The depth-128 boundary, budget charging,
+field traversal, callable reconstruction and final type checks are preserved.
+This complements normal-term freezing above; no thread-stack override or release
+build is needed. Tests accept 127 nested tuples, reject 128 and 140 with
+`DepthExhausted`, and check budget exhaustion, malformed fields and subsequent
+successful decoding in the same interpreter.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib normal_values
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib
+python3 -B development/check.py --timeout 900 -- test -p luna --test execution --test builder_invocations
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+git diff --check
+```
+
+All completed successfully: two focused cases (`/tmp/luna-tools-lmo8ec2l/result.json`),
+210 VM tests (`/tmp/luna-tools-b15ta7rg/result.json`), 1365 execution and 73 builder
+cases (`/tmp/luna-tools-j401lu05/result.json`). The formerly aborting canonical-input
+case is included without a skip. Formatting passed at
+`/tmp/luna-tools-5hn11z7j/result.json`. These checks validate decoding and its
+consumers; they do not establish completion of the entire comptime subsystem.
+
+## Linear invocation validation (2026-10-29)
+
+Working directory: `/home/fin/luna`.
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p luna --test control --test comptime_bytecode`:
+  passed; `/tmp/luna-tools-cnrruz1s/result.json`. Source invocation checks actual
+  bytecode routing, Type values, mutation, loops, early return, receiver storage
+  updates without runtime Copy and resource exhaustion. Compiler tests check
+  unsupported/invalid control admission, deterministic dumps and 2,048 nested
+  blocks without recursive compiler traversal. This is not evidence that all
+  interpreter admission or value walkers now support that nesting depth.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --test instance_budget --test function_types --test environment_types --test type_list_inputs --test abstract_values`:
+  passed; `/tmp/luna-tools-bfax1k35/result.json`. Covers existing contract,
+  abstract-value, instance-budget and immutable collection boundaries.
+
+Initial source test failure used an illegal reassignment of `let`; the fixture
+now uses `var`. A second failure showed that short-circuit classification must
+use the boolean operand domain, since an early-returning expression can have a
+bottom result type. Lowering was corrected rather than removing the early-return
+case or counting its fallback as success.
+
+Final stage checks:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  passed; `/tmp/luna-tools-c5etb30j/result.json`. Includes failed bytecode-frame
+  recovery in the same interpreter, preservation of prior writes, lexical local
+  removal and dense allocation for sparse/mixed-owner LocalIds.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p luna --test control --test comptime_bytecode --test comptime_receivers --test comptime_local_types --test library_protocols`:
+  passed; `/tmp/luna-tools-f3zhy1y2/result.json`. Includes real library operations
+  and native tuple affine-field checks alongside source bytecode assertions.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  passed; `/tmp/luna-tools-1c0hukc1/result.json`. `git diff --check` passed.
+
+## Shared scalar execution (2026-10-30)
+
+Integer arithmetic (arbitrary precision and target machine integers), negation,
+and scalar comparisons now compile into explicit operand registers and checked
+operations. The tree interpreter calls the same signature, operand and value
+implementation. Invalid signatures fail before evaluating operands; integer
+operand validation precedes the next operand's effects. Comparisons preserve
+their evaluate-both-then-check behavior. Target widths, overflow, zero division,
+abstract values and primitive work budgets keep their existing semantics.
+
+The compiler emits operand-free descriptors with S-expression dumps; no scalar
+instruction recursively evaluates a child tree. Source tests assert the actual
+bytecode route for arithmetic loops and ordered operand effects. Target-integer
+checks compare both execution paths and require bytecode even on failed calls.
+This does not yet provide bytecode calls, float arithmetic, container operations
+or a persistent compiled-code cache; no wall-time speedup is claimed.
+
+Validation from `/home/fin/luna` (all exit 0):
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --test target_integers --test scalar_equality --test exact_floats --test abstract_values`: `/tmp/luna-tools-3ukl6uvp/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p luna --test control --test comptime_bytecode --test comptime_integer_division --test comptime_integer_conversion`: `/tmp/luna-tools-918yvt4x/result.json`.
+- After adding explicit failure-order coverage: `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib bytecode::tests`: `/tmp/luna-tools-ldgagel8/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: `/tmp/luna-tools-e8wc5f09/result.json`. `git diff --check` passed.
+
+## Immutable package-code reuse (2026-10-30)
+
+The interpreter now retains lowered code for immutable, unspecialized package
+functions, identified by declaration within that interpreter's fixed function
+table. This cache borrows NIR for the interpreter lifetime and stores neither
+results nor environments. Impure calls and cheap operations may reuse code,
+but execute on every invocation; the Type-only result-cache policy is unchanged.
+Input binding, phase admission, requirements, pre/postconditions and execution
+budgets remain outside the code-cache decision.
+
+Temporary input-specialized bodies and closures are deliberately excluded until
+their code ownership and stable identity are represented. A closure's origin is
+not sufficient identity for its specialized body. Unsupported lowering decisions
+are retained for stable package bodies; invalid control and compile-budget errors
+are not. The cache admits at most 100,000 combined entries, instructions, local
+mappings and register slots. It clears when the next admission exceeds that
+limit, and declines to retain an oversized program. This bounds retained code
+without making any cache hit a semantic requirement.
+
+`bytecode_compilations()` reports lowering attempts independently of executed
+bodies. Tests verify reuse across different arguments, repeated impure receiver
+writes, unsupported callers, repeatable arithmetic failures and bounded eviction.
+This is interpreter-local reuse, not persistent query caching or a replacement
+for the forthcoming VM call stack.
+
+Validation from `/home/fin/luna` (all exit 0):
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode --test comptime_receivers --test comptime_local_types`: `/tmp/luna-tools-2o3slpkb/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --test target_integers --test function_types --test instance_budget`: `/tmp/luna-tools-0rtl3w_7/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: `/tmp/luna-tools-lh5szs5h/result.json`; `git diff --check` passed.
+
+## Floating scalar instructions (2026-10-30)
+
+Float negation and arithmetic now use the shared scalar instruction pipeline.
+The tree interpreter calls the same operand-free implementation. Exact `Float`
+retains decimal add/subtract/multiply and negation; no implicit exact-division
+rounding policy is introduced. f16/bf16/f32/f64 retain their existing arithmetic
+implementations and bit-preserving sign negation (including zero and NaN).
+Signature checks precede operand evaluation, unresolved abstract operands stop
+evaluation in order, and concrete operand types are checked after evaluation.
+
+Tests require actual bytecode execution and code reuse while asserting known
+round-to-even results, NaN payload/sign preservation, exact decimal results and
+rejection of exact division. Source nested arithmetic checks different input
+values against one retained code object. `meta.math` wrappers still route through
+their intrinsic calls; scalar instruction support does not imply those calls
+have been migrated into the bytecode engine.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --test exact_floats --test scalar_equality --test abstract_values`: exit 0, `/tmp/luna-tools-qhivl28m/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test exact_floats --test comptime_bytecode`: exit 0, `/tmp/luna-tools-jzpt2iy2/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: exit 0, `/tmp/luna-tools-15_4nvxi/result.json`; `git diff --check` passed.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test frontend_cli sysroot_half_float_arithmetic_rounds_once_and_preserves_special_values -- --exact`: exit 0, `/tmp/luna-tools-tcpztxaz/result.json`. Real sysroot f16/bf16 computation passed comptime invocation, runtime interpretation, and LLVM O0/O3 native execution.
+
+## Checked scalar intrinsic instructions (2026-10-30)
+
+Linear code now admits the registered comptime scalar intrinsic family through
+one generic path. Signature validation accepts operand types without retaining
+operand expression trees, sharing NIR's existing tag/arity/domain/result checks.
+Execution first checks that a concrete comptime binding exists, then evaluates
+inputs once in source order, then invokes the same scalar operation implementation
+as the tree interpreter. Host bindings remain rejected. An unsafe lexical wrapper
+passes through to its body after source admission; it grants no new VM capability.
+
+Half-format FMA still calls the bounded exact fused implementation with one
+rounding. Target integer widths still come from the consuming package. Execution
+failures never restart in the tree interpreter. Calls to library wrappers still
+use existing call preparation, but their intrinsic bodies can now execute linear
+code; actual bytecode routing is asserted for the shipped meta math wrappers.
+An additional direct intrinsic fixture checks three operand mutations in one
+bytecode frame, across two executions of retained code.
+
+A first dump assertion incorrectly expected a bare `void` type. It now checks
+the existing NIR `(primitive void)` rendering; neither type formatting nor
+intrinsic semantics were changed to satisfy that assertion.
+
+Validation from `/home/fin/luna` (final checks exit 0):
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test library_meta_math`: `/tmp/luna-tools-w7hobhv3/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test library_meta_math intrinsic_operands_execute_in_order_inside_one_bytecode_frame -- --exact`: `/tmp/luna-tools-k2ncikzd/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor -p nir -p comptime_compiler --lib --test control`: `/tmp/luna-tools-i3kjfibs/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: `/tmp/luna-tools-bf4pnhex/result.json`; `git diff --check` passed.
+
+## Owned invocation activations (2026-10-30)
+
+Invocation lifecycle now lives in `comptime_interpretor::invocation`. Admission,
+entry, input/contract preparation, result delivery and caller restoration are
+separate operations. `begin_invocation` returns a heap-owned activation holding
+the callable, input environment, body ownership, instantiated return type, input
+substitution and saved caller state. `complete_invocation` performs delivery and
+restores the caller after either success or failure. Preparation failures also
+restore an already-entered activation.
+
+Immutable package bodies remain borrowed. Closure bodies retain their existing
+Arc; specialized bodies acquire owned storage, with no reference into a temporary
+preparation stack frame. Effect identity allocation remains monotonic across
+restoration; transfer state remains engine-owned. Runtime cleanup, call context,
+phase admission, pre/postconditions and result validation remain in their original
+order. The recursive call driver and its existing depth limit are unchanged.
+This creates the owned lifecycle boundary needed for explicit call-stack work;
+it does not yet claim stack-independent invocation.
+
+New tests suspend a prepared closure activation, reject a child's wrong return
+type, then resume the parent with its captured environment intact. Other tests
+cover nested context restoration, monotonic effect identities, failed entry and
+failed preparation.
+
+The broad execution suite exposed five elaboration failures in generic method
+values. An isolated archive of HEAD `0ddcb2ba` at
+`/tmp/luna-invocation-baseline-ey2lstdq` reproduced the same five failures and
+1,360 passes (`/tmp/luna-tools-jxz9y5db/result.json`), using
+`python3 -B development/check.py --timeout 900 -- test -p luna --test execution`.
+No fixture or expected result was relaxed. The affected cases are:
+
+- `associated_callable_values_retain_interface_and_method_type_arguments`
+- `computed_associated_trait_method_values_preserve_origins_and_generic_arguments`
+- `generic_associated_method_values_infer_remaining_parameters_from_context`
+- `generic_method_values_accept_explicit_method_type_arguments`
+- `generic_trait_method_values_use_context_or_explicit_arguments`
+
+They fail before execution with the diagnostic that a generic function value
+requires instantiation through a call or function type context. This remains an
+open frontend issue, not evidence that the execution suite fully passes.
+
+Final targeted validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --test instance_budget --test function_types --test environment_types --test abstract_values`: exit 0, `/tmp/luna-tools-d4k05lki/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test effect_contracts --test snapshot_contracts --test comptime_bytecode --test comptime_receivers --test comptime_local_types`: exit 0, `/tmp/luna-tools-h78_9lan/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: exit 0, `/tmp/luna-tools-p0glcb66/result.json`; `git diff --check` passed.
+- Final `python3 -B development/check.py --timeout 900 -- test -p luna --test execution`: exit 101, 1,360 passed and the same five baseline failures, `/tmp/luna-tools-lqej_gyj/result.json`.
+
+## Generic method-value application repair (2026-10-30)
+
+The five baseline failures above are now resolved. Normal-form application
+probing previously elaborated a projected head as a complete standalone value
+before supplying its explicit clause inputs. Generic method projections therefore
+failed with a missing-context diagnostic even when `<...>` provided the inputs.
+The application boundary now resolves a callee, then dispatches either a stored
+normal-form callable or a declaration-side method packet with its supplied inputs.
+Method origin, fixed receiver/interface arguments, bounds and expected function
+type validation continue through the existing method-instantiation machinery.
+There is no head unfolding, fallback after a semantic failure, or test expectation
+relaxation. This follows the function-value input/identity contracts in
+`docs/functions/comptime_fn.md` and `docs/traits/declarations.md`.
+
+Validation from `/home/fin/luna` (all exit 0):
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test execution`: all 1,365 passed, including the five previously failing cases; `/tmp/luna-tools-kjm9dim_/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test elaboration generic`: 51 passed, including explicit method-value missing-bound and conflicting-context rejection; `/tmp/luna-tools-fgr183pf/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test normal_form_methods --test normal_form_inference --test comptime_clause_inputs`: passed, `/tmp/luna-tools-rzby59po/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: passed, `/tmp/luna-tools-k0c6a58s/result.json`; `git diff --check` passed.
+
+## Resumable linear execution frames (2026-10-30)
+
+Bytecode frames now retain their code reference, PC, register slots, lexical
+scopes, imported-binding map and remaining environment across returns from the
+instruction driver. Initialization, bounded instruction execution and environment
+restoration are separate operations. The ordinary invocation path uses the same
+resume API in 1,024-instruction batches; this is an internal execution boundary,
+not language-level yielding, asynchronous cancellation or an effect handler.
+
+Completion and errors make the frame terminal. Resuming a terminal frame fails
+without executing instructions or charging more work. Earlier storage writes
+remain observable after environment restoration; introduced locals do not leak.
+A zero-sized batch makes no progress or budget charge. Tests compare execution
+in batches of 1, 2, 7 and 1,024 instructions, requiring identical final values,
+restored bindings, scope cleanup and remaining budgets. Failed frames retain
+their state unchanged on a rejected resume. Frame dumps use S-expressions with
+PC, terminal state, live slots, scopes and imported bindings.
+
+This is a resumable instruction driver, not yet a bytecode CALL/RETURN stack.
+Code references still obey their existing package or invocation-body lifetime;
+no active frame is frozen or entered in a query cache. Invocation contracts and
+runtime scheduled cleanup remain on their established paths.
+
+Validation from `/home/fin/luna` (all exit 0):
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`: 220 passed, `/tmp/luna-tools-gchzklmu/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode --test library_meta_math --test comptime_receivers --test comptime_local_types`: passed, `/tmp/luna-tools-avfhkxz7/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: passed, `/tmp/luna-tools-vas6rugn/result.json`; `git diff --check` passed.
+
+## Independent compiled-code ownership (2026-10-30)
+
+Compiled programs no longer borrow the original function expression. Constants
+own copies of their NIR leaves; scalar descriptors and intrinsic binding evidence
+are shared between the instructions that validate and execute them. Execution
+frames retain the whole immutable program through Arc, so removing its cache
+entry or releasing the temporary source body cannot invalidate a suspended PC.
+This removes the self-reference obstacle to storing invocation and execution
+frames together in an explicit call stack. No unsafe lifetime extension is used.
+
+Every owned payload is preflighted through the existing NIR copy-work and depth
+checks. Pending intrinsic evidence includes its signature type in that charge.
+The code cache uses a conservative retention charge that includes copied payloads
+and lowering work, rather than counting only instruction slots. These units are
+not byte sizes or wall-time measurements. Type-depth exhaustion retains the
+shared preflight's resource-budget error classification. Compilation still has
+the existing 100,000-work limit, which now also covers the owned copies.
+
+Tests compile a 4 KiB constant, reject insufficient copy fuel, release the input
+and inspect retained code. Deep type constants are rejected before recursive
+copying. A suspended frame resumes successfully after releasing both source NIR
+and the code cache. The current declaration-keyed cache policy is unchanged;
+closure/specialization reuse and CALL/RETURN dispatch remain separate work.
+
+Validation from `/home/fin/luna` (final checks exit 0):
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor -p comptime_compiler -p nir --lib --test control`: `/tmp/luna-tools-ax_aqnnv/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test builder_invocations`: all 73 passed, `/tmp/luna-tools-d9d9nd4p/result.json`. The first run exposed 40 fixture-loading errors because real meta code used `attrs.comptime_phase` but the fixture omitted the attrs package. Commit `20d53dc2` supplies the real package and dependency edges, without changing compiler checks or builder expectations.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode --test library_meta_math --test comptime_local_types`: `/tmp/luna-tools-y0j2xnnx/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: `/tmp/luna-tools-u3qd42ae/result.json`; `git diff --check` passed.
+
+## Explicit call and return stack (2026-10-30)
+
+Ordinary by-value calls now lower to callee selection, call preparation,
+per-argument validation/storage and invocation instructions. Each argument is
+checked for a valid unfilled destination before its expression executes; argument
+expressions execute in source order, independent of parameter positions. Nested
+argument calls retain separate pending argument slots. Compiler output and live
+frames include these states in their S-expression dumps.
+
+The invocation driver owns a stack of activations and suspended bytecode frames.
+A call suspends after its invocation instruction; only delivery of the callee's
+checked result makes the parent resumable. Returning, failing preparation,
+failing contracts and exhausting budgets all restore the entered activations in
+reverse order. The implementation shares callable parameter resolution and the
+existing invocation admission, specialization, binding and delivery checks with
+the tree carrier. Generic function-instance leaves use their existing checked
+instantiation path. Normal-form application is not reinterpreted as body invocation.
+
+A compiled parent can call a body that still requires tree interpretation, and
+that body can call compiled functions. Carrier selection happens before each
+body starts; no already-executed parent work is replayed. The native recursion
+limit remains because contracts and migration boundaries still use native calls.
+This does not establish unrestricted-depth execution or a performance speedup.
+
+Trait-method call plans, effect environments and IIR/scheduled cleanup remain
+on the migration path. In particular an active
+effect environment selects tree evaluation before body execution: scope-targeted
+control transfer has not yet been implemented for suspended bytecode frames.
+These execution restrictions do not change language-level call semantics.
+
+Regression coverage includes nested source-order argument effects, recursive
+calls, generic instances, contract rejection and recovery, mixed carrier calls,
+invalid slots rejected before argument effects, and the single-delivery frame
+protocol. Deliberately malformed NIR tests check dynamic contract enforcement;
+the source verifier still rejects unproven contracts.
+
+Validation from `/home/fin/luna`, all commands exited 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor --lib`:
+  222 interpreter tests, including pending-call delivery and invalid-slot checks;
+  report `/tmp/luna-tools-ealltweb/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler --test control`:
+  six compiler tests, including normal-form application exclusion and dumps;
+  report `/tmp/luna-tools-kmwvqbph/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode --test library_meta_math --test comptime_local_types --test execution`:
+  bytecode, meta math, local types and 1,365 execution cases passed;
+  report `/tmp/luna-tools-pnigxly_/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode --test builder_invocations`:
+  six bytecode tests (including the added mixed-carrier and depth-recovery checks)
+  and 73 builder tests passed; report `/tmp/luna-tools-61t9fq9m/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  report `/tmp/luna-tools-nxizh3sv/result.json`.
+
+During test development, source fixtures with deliberately unproven contracts
+were correctly rejected by elaboration. They were replaced with valid source
+followed by explicit NIR corruption, so the VM tests exercise the intended
+boundary without weakening source verification. The deep-recursion comparison
+also exposed the existing tree expression-depth limit; shallow inputs still
+compare both carriers, while deeper inputs check the explicit frame path and
+recovery after its own invocation-depth limit.
+
+## Suspended default-expression evaluation (2026-10-30)
+
+Default arguments now participate in compiled call preparation. Their checked
+NIR templates are retained by the code with bounded copying; the invocation
+driver selects and runs each default in its own environment and execution frame.
+That environment contains prepared declaration-parameter bindings, not the
+caller's locals. Returning a default value restores the environment for later
+defaults before resuming the caller. A default can invoke functions and nested
+defaults without adding native call frames on supported compiled paths.
+
+The shared driver distinguishes invocation completion (which checks function
+contracts and restores activation state) from default completion (which retains
+the enclosing invocation identity). Default errors and control flow propagate
+through suspended frames without entering the pending callee or repeating
+explicit argument effects. Unsupported default expressions select tree execution
+independently; the enclosing compiled caller remains suspended.
+
+The call plan still requires all explicit arguments before defaults and defaults
+in increasing parameter order, with unique valid slots and the matching
+parameter-binding list. Package phase validation rejects malformed plans; the
+executor also checks each step before evaluating its expression. Calls without
+defaults do not copy argument values into an unused default environment.
+
+A local selected generic instance substitutes its declaration inputs into the
+default through the same budgeted helper used by tree evaluation. This supports
+the existing dynamic-instance preparation carrier; it does not add new source
+function-value default protocols. Trait-interface defaults remain on the tree path with their existing semantics.
+Value-reference argument migration is described below.
+
+The separate `bytecode_default_evaluations()` counter records actual compiled
+default executions; `bytecode_invocations()` continues to count function bodies
+only. Default code is currently compiled per evaluation, not persistently cached.
+No invocation result cache eligibility changes, and no speedup claim, follow
+from this migration.
+
+Validation from `/home/fin/luna`, all commands exited 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  223 tests passed, including defensive default-order checks before evaluating
+  the next expression; report `/tmp/luna-tools-6brxjbe6/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler --test control`:
+  seven tests passed, including bounded owned default templates and escaped
+  S-expression dumps; report `/tmp/luna-tools-9giivlgb/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_defaults --test comptime_bytecode --test comptime_clause_inputs --test execution --test builder_invocations --test library_meta_math`:
+  seven default-frame tests, six ordinary bytecode tests, 43 clause-input tests,
+  1,365 execution cases, 73 builder cases and nine shipped meta-math tests passed;
+  report `/tmp/luna-tools-psw1x2ev/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  report `/tmp/luna-tools-owjlk_2f/result.json`.
+
+The failure/recovery source test uses valid recursive default computation and
+checks that exhaustion prevents callee entry. Unproven machine arithmetic stays
+rejected by source verification. Malformed ordering is tested both at package
+admission and directly at the executor boundary; the latter is an internal test,
+not a new public validation bypass. Selected-instance substitution and early
+control-flow tests construct NIR carriers explicitly and do not claim new source
+syntax support.
+
+## Compiled value-reference argument transport (2026-10-30)
+
+Compiled calls now support comptime receiver references, including whole locals,
+nominal/anonymous field paths and computed temporary bases. The lowering keeps
+local-slot identity instead of reading a snapshot. Computed bases execute once
+and receive private invocation storage. Reference argument plans are checked
+before evaluating their expressions and remain restricted to an explicit,
+non-default receiver at parameter zero.
+
+Both execution carriers share promotion of a binding to invocation storage and
+checked field projection. Existing reference handles keep their rebind permission
+when forwarded. Whole-value replacement through a no-rebind handle is rejected;
+projecting a field retains the existing rule permitting mutation of that field.
+The per-call permission can further prohibit replacing the selected receiver.
+This adds no source pointer type or runtime Copy/Drop obligation.
+
+Receiver selection precedes later arguments. Aliases therefore observe updates
+made by later arguments, and structural paths are revalidated before entry and
+on subsequent access. Invalidating a path does not roll back effects that already
+ran, and failure still restores the suspended invocation state. Reference paths
+and permissions have stable S-expression dumps and bounded lowering/runtime work.
+
+The source tests exercise compiled callers as well as callees: whole-value writes,
+field receivers, forwarding, reading through a let receiver, field updates
+through a no-rebind root, a default reading self, and temporary receivers.
+An internal malformed-NIR test invalidates an acquired path in a later argument
+and verifies rejection before entry while preserving the completed storage write.
+Record-field access and record construction are covered by the following steps;
+this does not introduce new trait-call or effect support.
+
+Validation from `/home/fin/luna`, all commands exited 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  224 tests passed, including later-argument path invalidation and rejecting
+  reference defaults/non-receiver references before their expressions execute;
+  report `/tmp/luna-tools-vrhtcbkd/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler --test control`:
+  eight tests passed, including reference path and permission dumps;
+  report `/tmp/luna-tools-ye_opow4/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_references --test comptime_bytecode --test comptime_bytecode_defaults --test comptime_memory --test execution --test builder_invocations`:
+  reference, ordinary call, default, comptime memory, 1,365 execution and 73
+  builder cases passed; report `/tmp/luna-tools-21zabtal/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  report `/tmp/luna-tools-41l6stgr/result.json`.
+
+## Compiled record-field access and assignment (2026-10-30)
+
+Nominal and anonymous record fields now have bytecode reads. Direct local reads
+borrow the existing value/storage/reference and copy only the selected field;
+computed bases execute once and their temporary aggregate is released after
+selection. The shared reader retains nominal owner checks, anonymous field name
+and index checks, result-type validation for anonymous fields, and bounded value
+copying. This is the same local-reader mechanism used by builder interpretation,
+without embedding builder-specific rules in the VM.
+
+Assignments now validate root binding presence before evaluating the RHS, then
+resolve their complete field path after RHS evaluation. The tree and bytecode
+paths share comptime writes for plain values, promoted storage and forwarded
+references. This preserves sibling writes and receiver mutations performed by
+the RHS, including promotion of a previously plain root to reference storage.
+Runtime pointer and scheduled cleanup paths retain their existing implementation.
+
+Regression cases check compiled field getters/setters, computed bases, writes to
+siblings during RHS evaluation, invalid anonymous names/indices/result types,
+and missing assignment roots rejecting before RHS effects. The following step
+adds record construction; the complete aggregate and collection instruction
+families are not yet migrated.
+
+Validation from `/home/fin/luna`, all commands exited 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  226 tests passed, including anonymous-field rejection and pre-RHS binding
+  validation; report `/tmp/luna-tools-t6ced0tn/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler --test control`:
+  eight tests passed; report `/tmp/luna-tools-fc2tvzts/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_references --test comptime_bytecode --test comptime_bytecode_defaults --test execution --test builder_invocations`:
+  reference/field, call and default groups, 1,365 execution cases and 73 builder
+  cases passed; report `/tmp/luna-tools-8nxkhm_u/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  report `/tmp/luna-tools-yzkbz3eh/result.json`.
+
+## Compiled record construction (2026-10-30)
+
+Named and anonymous records now construct values through bytecode after their
+field computations complete. Their final assembly and validation use the same
+helper as tree evaluation, retaining generic arguments, nominal declaration
+identity, anonymous labels, selected associated types and complete-value checks.
+Fields are ordinary values; no library-specific or tuple normal-form rules were
+added. Runtime interpretation keeps its prepared-value cleanup boundaries.
+
+Struct initialization follows declaration order, as specified by
+`docs/type/user-defined-types/structs.md`, regardless of the spelling order of
+named inputs. Lowering preserves the checked NIR initialization plan. This is
+different from ordinary function argument source order. The first regression
+fixture incorrectly expected source order; checking the formal struct contract
+showed that the existing initialization plan was correct, so its assertion now
+requires the documented declaration order without changing production semantics.
+
+A construction input that exits early skips remaining fields and final assembly.
+A failed complete-value check does not publish a partial record or replay field
+effects. Compiler templates own bounded type metadata, register inputs preserve
+nested computations, and the record instruction has an S-expression dump.
+
+Source tests cover reverse-spelled fields, generic record arguments, nested
+anonymous records collected by a generic callable, and the complete constructor /
+receiver mutation / field-read path. Other aggregate and collection families,
+trait calls, active effects and scheduled cleanup remain separate migration work.
+
+Default-override tests additionally confirm that an explicit field skips the
+default computation, while an omitted field invokes it once. Empty records retain
+their nominal identity and complete-value validation.
+
+Validation from `/home/fin/luna`, all commands exited 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  227 tests passed, including constructor rejection after completed effects and
+  early exit before later fields; report `/tmp/luna-tools-izisphp0/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler --test control`:
+  eight tests passed; report `/tmp/luna-tools-810poenn/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_records --test comptime_bytecode --test comptime_bytecode_references --test comptime_bytecode_defaults --test builder_invocations --test execution`:
+  record/call/reference/default groups, 73 builders and 1,365 execution cases
+  passed; report `/tmp/luna-tools-5pn9srb0/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_records`:
+  all three final record tests passed, including the added default-override and
+  empty-record cases; report `/tmp/luna-tools-4nq1larg/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  report `/tmp/luna-tools-dgyabdvq/result.json`.
+
+## Compiled enum variant construction (2026-10-30)
+
+Enum payload computations now lower to registers and a checked variant
+construction instruction. The instruction retains the declaration, generic
+arguments, selected member index and payload values. Its completion path shares
+associated-type selection and complete-value validation with tree interpretation.
+The member index is logical identity; target encoding and layout continue to
+follow the existing enum representation rules.
+
+Payload evaluation preserves the checked initialization plan and ordinary early
+control flow. An early return from one payload expression skips the remaining
+payloads and construction. Invalid member indices, missing payloads and wrong
+payload domains are rejected; failure does not poison subsequent invocations.
+Source tests check nullary, positional and named variants, generic arguments,
+initialization order and actual bytecode routing alongside tree results.
+
+Record and variant evaluators and their completion checks now live together in
+`compiler/comptime_interpretor/src/aggregate_values.rs`. Tree evaluation retains
+its prepared-value cleanup scopes; the compiled path reuses assembly without
+re-entering expression-tree evaluation. S-expression dumps preserve nested enum
+heads and selected members.
+
+Enum matching, remaining aggregate/collection operations, trait call plans and
+active effect environments are still separate migration work. This step does not
+change their semantics or claim new layout/ABI support.
+
+Validation from `/home/fin/luna`, all commands exited 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_variants --test comptime_bytecode_records --test comptime_bytecode_references --test builder_invocations --test execution`:
+  variant, record, reference, 73 builder and 1,365 execution cases passed before
+  extracting the shared aggregate module;
+  report `/tmp/luna-tools-zd8ngqu6/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  227 tests passed after extraction; report `/tmp/luna-tools-mgjfv38d/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_variants --test comptime_bytecode_records --test builder_invocations`:
+  both variant tests, three record tests and 73 builder tests passed after
+  extraction; report `/tmp/luna-tools-j_hnb38s/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler --test control`:
+  nine tests passed, including nested variant dumps;
+  report `/tmp/luna-tools-l7w0hi25/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  report `/tmp/luna-tools-o3owwu6c/result.json`.
+
+## Compiled optional and error construction (2026-10-30)
+
+Optional absence/presence and error success/failure injection, row embedding and
+product representation transport now have bytecode instructions. Preparation
+checks the conversion plan and admits the target type before evaluating inputs;
+completion validates the actual payload after evaluation. Both carriers share
+these checks. Invalid metadata therefore cannot run operand effects, while a
+wrong actual payload does not undo effects that already occurred.
+
+Optional construction preserves every absence layer. Error transport preserves
+full label identity and payloads even when branch indices change. Product
+transport preserves field types and does not introduce aggregate covariance:
+reordering equivalent error rows inside a record is supported; widening a
+record field's error row through product transport is rejected. The first new
+product test incorrectly requested widening and failed on both carriers; it was
+corrected to test reordering, with widening retained as a rejection case and its
+operand separately checked to be valid.
+
+Preparation and completion appear separately in S-expression dumps. Bytecode
+still excludes scheduled cleanup and active effect environments; the tree path
+keeps its prepared-value scopes. Error propagation and pattern matching remain
+separate migration work. Invocation result-cache eligibility and error ABI are
+unchanged. No performance speedup is claimed without measurement.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_qualified --test execution --test builder_invocations`:
+  exit 0; two source-level routing/identity tests, 1,365 execution cases and 73
+  builder cases passed; report `/tmp/luna-tools-01krofsn/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  exit 0; 229 tests passed, including pre-input rejection, post-input failure and
+  record transport; report `/tmp/luna-tools-2ecpqgn1/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler --test control`:
+  exit 0; nine compiler/control tests passed;
+  report `/tmp/luna-tools-xtq0ekvp/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib bytecode::tests::product_error_transport_preserves_labels_and_payloads_inside_records`:
+  exit 0 after strengthening the rejection fixture with a valid-operand check;
+  report `/tmp/luna-tools-apf6xs6e/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; report `/tmp/luna-tools-f6h587sg/result.json`.
+
+## Compiled structural matching and error propagation (2026-10-30)
+
+NIR error propagation is ordinary matching followed by a return, so the VM now
+compiles general match control flow rather than adding an error-only evaluator.
+The subject is evaluated once. Structural candidate matching shares the existing
+pattern journal, including alternative rollback, binding remapping, nominal and
+normal-form head identity, optional layers and error labels. Candidate bindings
+are published to registers only after the whole structural pattern succeeds.
+Each arm has a lexical scope. Guard failure removes its new bindings while
+retaining already completed outer mutations; return, break and continue use the
+existing control-transfer machinery.
+
+Outer pattern guard wrappers execute from the innermost outward, followed by an
+explicit arm guard, using normal compiled expressions. Their calls can suspend
+and return through the VM's invocation stack. Pattern-local computation within a
+structural child or alternative (`Then` or nested `Guard`) still selects the tree
+carrier before execution starts. This is an implementation boundary, not a
+restriction on source-language patterns. Scheduled cleanup and active effects
+also retain their existing tree carrier.
+
+Owned structural pattern copies are bounded before cloning. Exceeding the
+representation's safe clone depth selects the tree carrier; it must not be
+reported as exhaustion of execution steps. The existing small-host-stack depth
+regression exposed that distinction during this change, and its original
+`DepthExhausted` expectation is preserved. Actual compilation fuel exhaustion
+remains a separate failure. Matching instructions, bindings, branches and the
+non-exhaustive trap all have stable S-expression dumps.
+
+Validation from `/home/fin/luna`, all final commands exited 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  230 tests passed, including invalid guard/exhaustion diagnostics, binding
+  cleanup and subsequent recovery; report `/tmp/luna-tools-chm57pwr/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_matching --test execution --test builder_invocations`:
+  four matching/propagation source tests, 1,365 execution cases and 73 builders
+  passed; report `/tmp/luna-tools-m8n3fj2u/result.json`. Source tests assert actual
+  bytecode invocation counts as well as results and tree-carrier agreement.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler --test control`:
+  11 tests passed, including guard branches, binding dumps, bounded copies and
+  refusal of unsupported pattern computations before execution;
+  report `/tmp/luna-tools-so1ami_d/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  report `/tmp/luna-tools-twh07q9f/result.json`.
+
+## Compiled destructuring declarations (2026-10-30)
+
+`LetPattern` now uses the same structural candidate and compiled guard preparation
+as match arms. Its initializer executes before the candidate scope is opened.
+Successful declarations commit new bindings into the enclosing lexical scope;
+failed candidates discard their new bindings before entering `else`, retaining
+writes to outer places. This permits mutable destructured bindings to be used
+and updated by subsequent statements and releases them at the enclosing exit.
+
+A rejected declaration without `else` reports non-exhaustive matching. A malformed
+NIR `else` which completes normally reports invalid control flow; valid return,
+break and continue transfers retain their existing semantics. Source tests cover
+enum/optional declarations, guard effects, early return and continue, with actual
+bytecode routing checked against the tree carrier. Internal tests cover both
+rejection diagnostics without weakening the front-end rule that `else` must exit.
+
+Pattern preparation is shared with match lowering. Nested executable pattern
+children, active effects and scheduled cleanup retain the same migration limits.
+An initial test also encountered unsupported `TypedWith` AST lowering for
+`(null: ?bool)`; the declaration/continue test supplies its type using a separate
+typed declaration. Subsequent review found that the grammar retains this syntax
+but does not establish its result semantics, while historical HIR classifies it
+as a proposition. Author clarification is pending; this is not evidence that
+value-preserving type ascription is a confirmed missing feature.
+
+Default-template regression coverage now keeps both routes: a structural match
+is compiled, while sequential pattern computation uses the tree carrier. Both
+must preserve the caller's single evaluation of explicit arguments.
+
+Validation from `/home/fin/luna`, all final commands exited 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  231 tests passed; report `/tmp/luna-tools-2i80r44m/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_bindings --test comptime_bytecode_matching --test comptime_bytecode_defaults --test comptime_bytecode_references --test execution --test builder_invocations`:
+  two declaration, four matching, seven default, four reference, 1,365 execution
+  and 73 builder cases passed; report `/tmp/luna-tools-mh1w653f/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler --test control`:
+  12 tests passed, including declaration scope/diagnostic dumps;
+  report `/tmp/luna-tools-eavlxbuo/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  report `/tmp/luna-tools-eeoj3vol/result.json`.
+
+## Compiled tuple and ordered Object assembly (2026-10-30)
+
+Tuple value assembly now follows the existing NIR element order and ordinary
+control transfers. This does not construct or unfold a Tuple type, change its
+normal-form head, or privilege type-list inputs. Tuple construction followed by
+destructuring can remain in one compiled invocation.
+
+Object construction retains ordered positional/property entries, duplicate keys
+and each entry's declared domain. A preparation instruction checks the phase,
+result type and metadata arity before evaluating entries. Each evaluated entry
+is validated and charged before the next entry starts. Completion assembles the
+owned Object without sorting or merging keys. An early return skips later
+entries and assembly. Tree interpretation uses the shared preparation and cost
+checks while retaining its existing prepared-value cleanup order.
+
+Object edits and queries still have their original evaluators; active effects,
+scheduled cleanup and nested executable patterns remain separate migration work.
+The Object constructor descriptor and instructions provide escaped S-expression
+dumps, including duplicate property names and positional entries.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  exit 0, 232 tests passed, including metadata rejection before effects and
+  per-entry validation before later effects;
+  report `/tmp/luna-tools-drnxsb1a/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_aggregates --test library_meta_objects --test comptime_object_storage --test execution --test builder_invocations`:
+  exit 101. Both new source tests, four Object snapshot tests, 1,365 execution
+  cases and 73 builders passed. The meta Object suite passed 24 of 25 cases;
+  `repository_package_exports_object_for_user_attribute_constructors` failed
+  during multi-package attribute elaboration with `6877..6882: expression
+  elaboration requires a protocol or construct not yet implemented`.
+  Report `/tmp/luna-tools-9f_ykvjn/result.json`.
+- Baseline reproduction: temporarily restored the three modified implementation
+  files to commit `76c18b52`, ran
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test library_meta_objects repository_package_exports_object_for_user_attribute_constructors`,
+  then restored all in-progress contents in a `finally` block. The baseline
+  failed with the same diagnostic (exit 101);
+  report `/tmp/luna-tools-gq79hgby/result.json`. This pre-existing integration
+  failure remains open; it is not counted as a passing library check.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler --test control`:
+  exit 0, 13 tests passed, including Object key escaping and ordering;
+  report `/tmp/luna-tools-u088sq4_/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; report `/tmp/luna-tools-rkm6its8/result.json`.
+
+## Resolve the meta.Object package integration baseline (2026-10-30)
+
+The previously recorded attribute-inspection failure was an incomplete explicit
+package fixture, not an Object invocation failure. Its unresolved HIR expression
+was `attrs`: the real meta optional/error protocols use `attrs.comptime_phase`,
+but this fixture supplied only meta and builtin. It now supplies the real attrs
+package and both dependency edges (meta to attrs, attrs to builtin). The user
+attribute still must appear exactly once; library phase attributes are checked
+separately rather than suppressed to preserve the old total count.
+
+Elaboration now reports an unresolved expression's name and points to lexical
+imports/package dependencies instead of treating it as an unimplemented
+construct. Existing negative attribute/configuration tests check the actual
+missing names. Deferred HIR inspection continues to retain unresolved names;
+executable elaboration still rejects them. No implicit package injection or
+name-based dependency inference was added.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test library_meta_objects repository_package_exports_object_for_user_attribute_constructors`:
+  exit 0; the previously failing explicit-package integration now succeeds;
+  report `/tmp/luna-tools-r8yr0vpw/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test library_meta_objects --test frontend_cli`:
+  exit 101; frontend CLI had 240 passes and 12 failures. Both updated missing-name
+  diagnostic tests passed. The remaining failures expose fixture issues outside
+  this change: three direct-written sources lack bool bindings, six assertions
+  compare source bytes without the fixture-added bool alias, two copied library
+  paths no longer exist, and one sysroot fixture defines bool twice. Their
+  diagnostics occur in source resolution, filesystem reads or source-byte
+  assertions, not the changed unresolved-expression branch. Full failure names
+  and output: `/tmp/luna-tools-hj397x34/stdout.log`. They remain open; no full
+  frontend-suite pass is claimed. Cargo stopped before the Object suite, so that
+  suite was scheduled separately.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test library_meta_objects`:
+  exit 0; all 25 public Object tests passed;
+  report `/tmp/luna-tools-cjbsa1zf/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; report `/tmp/luna-tools-5wy2bw2_/result.json`.
+
+## Restore frontend source-protection checks (2026-10-30)
+
+Nine of the recorded frontend fixture failures are corrected without changing
+compiler behavior or weakening their success/rejection requirements. Three
+comptime CLI fixtures now use the existing standalone primitive-binding writer,
+so their bool signatures reach invocation and contract checks. Source-protection
+and observed-input assertions capture the complete written source before running
+the compiler, including those explicit fixture bindings. They continue to check
+exact bytes after attempted overwrites and exact escaped contents in reports;
+artifact preservation, hard-link protection, native execution and type-contract
+failure checks remain intact.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test frontend_cli explicit_package_cli`:
+  exit 0; report `/tmp/luna-tools-3lwoqh7s/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test frontend_cli -- --exact comptime_invocation_executes_real_closures_defaults_and_writes_complete_values comptime_invocation_rejects_wrong_entries_and_preserves_output_on_failure comptime_invocation_uses_type_solver_and_preserves_outputs_on_contract_failure explicit_package_cli_compiles_cross_package_calls_and_preserves_outputs explicit_package_cli_exports_observed_inputs_with_the_selected_result explicit_package_cli_input_envelope_is_published_only_after_success explicit_sysroot_protects_dependency_sources_and_reports_invalid_packages package_llvm_dump_selects_primary_identity_and_preserves_inputs package_native_build_preserves_identity_resources_and_previous_artifacts`:
+  exit 0; all nine selected tests passed, 243 filtered out;
+  report `/tmp/luna-tools-ig048hap/result.json`.
+
+The remaining three recorded frontend failures concern shipped-library fixture
+paths/dependencies and a duplicated primitive binding; they are not addressed by
+this source-protection correction. No full frontend-suite rerun was needed for
+these bounded fixture changes.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; report `/tmp/luna-tools-zxlthwpb/result.json`.
+
+## Exercise the remaining fixtures against the real sysroot (2026-10-30)
+
+The three remaining recorded failures now use a raw copy of the repository's
+library source hierarchy and language-item manifest. They no longer flatten old
+module paths or inject standalone bool aliases into library files. Semantic runs
+supply an explicit x86_64/Linux/64-bit target, required by the full library's
+runtime integer proxies. The HIR dump is written to a file and checked there so
+the test runner's bounded stdout capture cannot truncate the tree.
+
+Operator checks use local user types with the actual builtin Add protocol,
+covering its default Self input and named Rhs input without a foreign-trait /
+foreign-type implementation. Clone tests obtain Once from the library's blanket
+implementation and retain both source-preserving cloning and resource-checked
+execution. Their rejection cases actually request a missing Clone implementation
+or supply an incompatible receiver; lack of a redundant Once impl is no longer
+incorrectly treated as failure. Comparison and Hash behavior remain checked.
+
+The List/Tuple test uses public primitive names from the prelude. It alters only
+the tuple selector when testing explicit CLI overrides, preserving unrelated
+library registrations, and still rejects replacing the registered tuple head
+with an unrelated source definition. This closes the previously recorded three
+fixture failures without changing compiler semantics.
+
+Validation from `/home/fin/luna`, final commands exited 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test frontend_cli -- --exact shipped_operator_protocols_execute_with_default_and_named_types shipped_clone_protocol_preserves_noncopy_sources sysroot_language_items_bind_real_list_and_tuple_definitions_by_default`:
+  all three passed, 249 filtered out;
+  report `/tmp/luna-tools-74qdbwjp/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test frontend_cli sysroot_language_items_bind_real_list_and_tuple_definitions_by_default`:
+  passed after replacing legacy primitive accesses with prelude names;
+  report `/tmp/luna-tools-mfg4dnt3/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  report `/tmp/luna-tools-pfq_lkt4/result.json`.
+
+Together with the preceding nine-case run, every failure from the recorded
+12-case frontend list has now passed its focused regression. The entire 252-case
+suite has not been rerun after these fixture corrections; no new full-suite
+result is claimed.
+
+## Object query and edit bytecode
+
+Object Length, Key, EntryType, Value, NamedValue and Concat, Append, Replace,
+Remove now compile into checked operation metadata plus ordinary operand code.
+The prepare instruction validates phase and result/input contracts before any
+operand runs. Completion consumes the evaluated packet through the same helpers
+as the tree interpreter; no instruction evaluates a NIR expression tree.
+Metadata has bounded copying and an S-expression Display.
+
+Ordered duplicate keys, last-key domain mismatch, nested optionals, checked
+indices, replacement domains and functional snapshots retain their existing
+rules. Computed selectors run after taking the receiver snapshot. Failed edits
+cannot publish a partially modified receiver; receiver writeback remains the
+ordinary assignment path used by meta.Object.set.
+
+A source regression asserts actual bytecode invocation counts for all operation
+families and for EntryType. Its initial combined body exposed the existing
+TypeEqual fallback: the correct result alone did not prove bytecode execution.
+The final regression observes EntryType separately and checks its exact Type
+value in the harness; the library integration tests still cover type comparison.
+TypeEqual compilation remains unimplemented. The VM currently uses evaluated
+packets, not the tree interpreter's borrowed local-query optimization; migration
+of that optimization and wall-clock performance measurements remain outstanding.
+No speedup is claimed from instruction coverage alone.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  233 passed, including a tree/bytecode matrix for every operation, wrong payloads,
+  missing keys, bounds, duplicate domains, recovery, phase and pre-input checks.
+  Exit 0, `/tmp/luna-tools-ynmardig/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler`:
+  13 passed, exit 0, `/tmp/luna-tools-nnztdibu/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test library_meta_objects --test comptime_object_storage --test comptime_bytecode_aggregates --test execution --test builder_invocations`:
+  builder_invocations passed all 73 cases; the initial aggregate regression failed
+  its bytecode-count assertion on TypeEqual, stopping the remaining suites.
+  Exit 101, `/tmp/luna-tools-kjew2mvt/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_aggregates --test library_meta_objects --test comptime_object_storage --test execution`:
+  final source aggregates 3, storage 4, execution 1365 and real-library Object 25
+  passed. Exit 0, `/tmp/luna-tools-a16iqp4s/result.json`.
+
+An earlier command named a nonexistent `comptime_builders` target and ran no
+tests (`/tmp/luna-tools-tmm7ub7x/result.json`); the correct target above is
+`builder_invocations`. These checks do not establish full language completion.
+
+- Final `cargo fmt --all -- --check` through `development/command.py`: exit 0,
+  `/tmp/luna-tools-36yph1kc/result.json`.
+- Final `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_aggregates`
+  after binding Type explicitly in the bootstrap fixture: 3 passed, exit 0,
+  `/tmp/luna-tools-ymi01ja5/result.json`.
+
+## Type equality in bytecode
+
+TypeEqual now has explicit contract preparation, operand-to-Type-description
+validation and proof instructions. The left value is validated before the right
+operand executes. Both carriers share `type_equality.rs`, retaining the existing
+host solver interface and metered proof work: structural identity proves true;
+otherwise equality and its negation are asked separately. Neither Unknown nor
+Rejected alone proves inequality. An unresolved comparison reports
+TypeContractUnresolved, and exhausted proof fuel stops before another query.
+Normal-form heads remain opaque; no body unfolding or value-cache expansion was
+introduced. The Object source regression now includes EntryType equality in the
+same bytecode invocation.
+
+Normal-form construction itself still uses its existing input-plan interpreter.
+An initial source test incorrectly expected its caller and comparison callee to
+both compile; the count exposed the caller fallback. The final test constructs
+an opaque Type first and directly verifies that its comparison compiles, remains
+unresolved, and permits subsequent successful invocations. Existing factory
+integration tests also retain the construction-plus-comparison path. New compiler
+metadata uses the ordinary bounded copy mechanism and S-expression Display.
+
+Validation from `/home/fin/luna`, final commands exited 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  existing 233 tests passed after implementation extraction;
+  `/tmp/luna-tools-6w7zi4oa/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib bytecode::type_equality_tests`:
+  3 new tests passed across both carriers, including proof query order, rejection
+  versus negation, malformed operands, budget exhaustion and recovery;
+  `/tmp/luna-tools-_wocfq37/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler`:
+  14 passed, including instruction ordering, bounded compilation and stable dump;
+  `/tmp/luna-tools-r6_f3rs5/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_types --test comptime_bytecode_aggregates --test execution --test library_meta_objects`:
+  source types 1, aggregates 3, execution 1365 and Object library 25 passed;
+  `/tmp/luna-tools-_e924lbn/result.json`.
+
+Initial test-only failures were corrected: Rust enum/assignment field spelling
+(`/tmp/luna-tools-v1cfsd2r/result.json`), an expected dump missing primitive nodes
+(`/tmp/luna-tools-okhdl0zu/result.json`), and the normal-form caller's execution
+count (`/tmp/luna-tools-dkz8upix/result.json`). No semantic checks were relaxed.
+- Final `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0, `/tmp/luna-tools-xbf_o692/result.json`; `git diff --check` also passed.
+
+## Explicit continuations for delayed normal-form inputs
+
+Normal-form construction cannot be treated as eager untyped argument assembly:
+its source order can put a contextual value before the Type that checks it.
+`stage_normal_argument` and `finish_staged_normal_argument` now traverse those
+inputs with explicit work stacks. Staging handles lists, tuples, selected
+branches, blocks and matches; completion combines values after contextual
+preparation supplies the required domains. List traversal schedules one child
+at a time, avoiding a work queue proportional to the entire unevaluated width.
+
+Logical depth limits, per-node ticks, late-domain validation, literal identities
+and head opacity remain unchanged. Scopes unwind on error, return and exhausted
+fuel while preserving mutations of bindings that existed on entry. Type-list
+spread checks still run before advancing to the next item; tuple interpretation
+still follows the prepared contextual domain. No special Tuple head or package
+name was added to dispatch.
+
+This removes host recursion through staged input containers, not all recursion
+from comptime invocation: ordinary expressions and guards still use shared
+evaluation, and normal-form input plans are not yet bytecode. Pending values are
+invocation-local and are not eligible for freezing into code/result caches.
+
+Validation from `/home/fin/luna`, all commands exited 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  236 existing tests passed, `/tmp/luna-tools-akuikzah/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib normal_inputs::tests`:
+  2 new tests passed. A 512 KiB thread stack exercises nesting through the
+  128-node limit and subsequent recovery. A fuel sweep verifies nested scope
+  cleanup on values, errors and returns, retaining outer binding effects.
+  `/tmp/luna-tools-65dfw743/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test execution --test builder_invocations --test comptime_bytecode_types`:
+  execution 1365, builder invocations 73 and bytecode Type equality 1 passed;
+  `/tmp/luna-tools-5ib8arju/result.json`. Execution coverage includes late Type
+  inputs, checked unselected branches, tuple/match staging, list spreads,
+  source-order effects, defaults and early transfers.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed, `/tmp/luna-tools-qyx46qj7/result.json`; `git diff --check` passed.
+
+## Structural Type constructors in bytecode
+
+Computed FunctionType, FunctionResultType, ClosureType, OptionalType and
+PointerType now compile with owned, bounded metadata and ordinary operand
+instructions. Preparation checks output/input domains and parameter-flag arity
+before evaluation. Each operand is converted to a Type description immediately;
+FunctionResultType also validates its signature before evaluating its output.
+Construction retains callable wrappers, invocation phase, runtime/Type/comptime
+value parameter sorts, closure environments and empty-environment elimination.
+
+The tree evaluator and VM share the checked operations in `type_constructors.rs`.
+This extracts the two former construction evaluators from the interpreter root;
+there is no tree-evaluation opcode and no package/name-specific shortcut.
+Metadata and instructions have stable S-expression displays. Type construction
+is independent of runtime pointer values: PointerType creates a Type value, not
+a comptime pointer or reference storage.
+
+Validation from `/home/fin/luna`, all commands exited 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  existing 238 tests passed, `/tmp/luna-tools-9sm5mx5v/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib bytecode::type_constructor_tests`:
+  the new two-carrier validation test passed, covering malformed output/flags,
+  non-Type payloads, non-callable signatures, suppressed later effects and
+  successful reuse after failure; `/tmp/luna-tools-zv_544y_/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler`:
+  15 passed, including metadata staging/phase display and interleaved operand
+  checking; `/tmp/luna-tools-gbic8v6z/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_types --test function_type_dependencies --test execution`:
+  source bytecode types 2, function dependencies 37 and execution 1365 passed;
+  `/tmp/luna-tools-pffao6ci/result.json`. The new source test asserts actual
+  bytecode counts, exact Type values and agreement with tree interpretation for
+  each constructor family and both comptime input sorts.
+
+Normal-form input-plan and nominal-type construction compilation remain separate
+unfinished work. This stage does not claim wall-clock speedups or completion of
+all type factories.
+- Final `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed, `/tmp/luna-tools-q4_06plr/result.json`; `git diff --check` passed.
+
+## Borrowed Object queries in bytecode
+
+Object queries with a local receiver and a local/literal selector now compile
+to a dedicated read instruction. Owned scalar selectors and literals can be
+read while observing the receiver; the entire Object representation is still
+checked, but no receiver snapshot is retained. Only the selected result is
+copied. Local selectors backed by storage/references take the snapshot path,
+releasing the receiver lock before reading a possibly aliased sibling. Computed
+receivers/selectors keep their ordinary operand code and snapshot semantics.
+
+This is a generic local-read optimization, independent of library names. Phase,
+output-domain, payload, last-key, bounds and representation checks remain in the
+shared Object helpers. The instruction carries bounded literal metadata and
+source locations and has an escaped, stable S-expression display.
+
+Validation from `/home/fin/luna`, final commands exited 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  239 passed, `/tmp/luna-tools-rx9mwe5e/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib bytecode::object_borrow_tests`:
+  sibling-reference reads, locked-receiver rejection and recovery passed;
+  `/tmp/luna-tools-2byjqe10/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler`:
+  16 passed, including local versus computed selector routing and escaped dumps;
+  `/tmp/luna-tools-3zmdsbyc/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test library_meta_objects --test comptime_object_storage --test comptime_bytecode_aggregates`:
+  Object library 25, storage 4 and aggregates 3 passed;
+  `/tmp/luna-tools-1bz9lodd/result.json`.
+- `LUNA_BENCH_ITERATIONS=10 python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --bench object_queries`:
+  all measured results matched expectations;
+  `/tmp/luna-tools-exo4haox/result.json`.
+
+The allocation-counting benchmark warms compilation before measurement. For a
+1024-entry Object read 32 times per invocation, measured requested bytes were:
+
+| Receiver / query | Snapshot path | Borrowed path |
+| --- | ---: | ---: |
+| Value / length | 7,902,890 | 242,026 |
+| Value / indexed value | 7,914,210 | 249,250 |
+| Reference / length | 7,907,994 | 247,130 |
+| Reference / indexed value | 7,919,370 | 254,410 |
+
+These totals include the benchmark's input cloning and invocation overhead.
+The control path wraps the receiver in a transparent block to force snapshots;
+this is a same-build path comparison, not a historical-version baseline.
+Timing came from the managed development profile and ten iterations; no release
+speedup claim is made. Representation validation still scales with Object size.
+An initial compile used the u64 rewrite-budget API with a usize compiler budget;
+it was corrected to the existing bounded substitution-copy API before testing
+(`/tmp/luna-tools-irgce4m_/result.json`).
+- Final managed `cargo fmt --all -- --check` passed:
+  `/tmp/luna-tools-_kn0wfr8/result.json`; `git diff --check` passed.
+
+## List construction, concatenation and length in bytecode
+
+TypeList (the existing NIR name for generic list construction), ListConcat and
+ListLength now compile into ordinary operand code with checked list descriptors.
+Construction retains the registered head and actual element domain. Type-valued
+inputs are converted immediately; ordinary payload validation remains at the
+completed aggregate boundary. Concatenation validates its left input before the
+right expression runs, retains both source snapshots and enforces element and
+structural work limits before returning a result. No List spelling or Tuple head
+is used for dispatch.
+
+Shared helpers in `list_construction.rs` and `list_operations.rs` serve both
+execution carriers. A local length observation reuses the existing borrowed
+length helper and exact declared-domain check; it does not copy or scan every
+element. Computed operands retain their ordinary evaluation path. Descriptors
+and operations have bounded copying and stable S-expression displays.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  240 existing tests passed, exit 0, `/tmp/luna-tools-vschfyxk/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib bytecode::list_tests`:
+  2 new two-carrier tests passed for domain rejection before suffix effects,
+  immutable input preservation, length identity and distinct Type-conversion /
+  ordinary aggregate validation boundaries; `/tmp/luna-tools-vgdq26gr/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler`:
+  17 passed, `/tmp/luna-tools-f6u_nrju/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_lists --test comptime_list_operations --test type_lists --test dependent_list_collectors --test execution`:
+  the new source bytecode test passed, then 53 of 54 real-library list tests
+  passed. The explicit-package CLI fixture failed before VM execution because
+  it omitted the public bool import and current attrs dependency; exit 101,
+  `/tmp/luna-tools-tr3kp3ny/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_list_operations ordinary_package_uses_public_list_operations_without_builtin_access`:
+  the fixture passed with public `builtin.bool` and explicit package dependencies,
+  preserving the original result assertion; `/tmp/luna-tools-b5_dvfp0/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_lists --test dependent_list_collectors --test execution`:
+  type lists 28, dependent collectors 1 and execution 1365 passed, exit 0;
+  `/tmp/luna-tools-kpw63s59/result.json`.
+
+The initial source test incorrectly compared comptime lists through the public
+runtime-only Interpreter::new entry, which rejects their transport. The source
+regression instead checks exact list values and actual bytecode counts; the new
+internal tests compare both carriers in comptime mode. Initial extraction also
+required fixing macro scope and an iterator spelling error before tests ran.
+
+List indexing is not yet compiled. Self-append currently follows compiled
+concatenation plus assignment where eligible, rather than the tree evaluator's
+fused append optimization; porting that optimization remains necessary for
+allocation-sensitive builders. No general list speedup is claimed by this stage.
+- Final managed `cargo fmt --all -- --check` passed:
+  `/tmp/luna-tools-dvnp8igb/result.json`; `git diff --check` passed.
+
+## List indexing in bytecode and shared borrowed reads
+
+TypeListIndex (the existing generic list-index NIR node) now compiles with a
+checked result/list/index contract. Computed receivers and indices evaluate
+through ordinary code, checking the list identity before index effects and
+preserving the receiver snapshot. Local receivers with a literal/local index
+use a borrowed read and copy only the selected value. Negative, oversized and
+out-of-range indices fail without authorizing a different element.
+
+The former separate type-list and value-list local evaluators are consolidated
+in `list_index.rs`. Their old lock order could reject a valid index reference
+into a sibling field of the same storage: it tried reading the index while still
+holding the receiver lock. Both carriers now snapshot and release that receiver
+before reading a storage-backed selector. Owned integer selectors keep the
+borrowed path. Representation kind and declared list domain are checked before
+index evaluation, including deliberately malformed internal carriers; domain
+inspection is metered without scanning unrelated elements.
+
+Read-only local/literal selector metadata and evaluation are now shared with
+Object queries in `leaf_inputs.rs`; no selector opcode evaluates a general NIR
+tree. Metadata and instructions have bounded copying and S-expression Display.
+
+Validation from `/home/fin/luna`, all commands exited 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  242 existing tests passed, `/tmp/luna-tools-8d5lu7gy/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib bytecode::list_tests`:
+  4 passed, including the new sibling-reference and domain-before-index-effects
+  tests across both carriers; `/tmp/luna-tools-lrbaq5k0/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler`:
+  18 passed, including literal/local versus computed index routing;
+  `/tmp/luna-tools-ju2m0opw/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_lists --test comptime_list_operations --test type_lists --test execution`:
+  source bytecode lists 2, real meta.List 54, type lists 28 and execution 1365
+  passed; `/tmp/luna-tools-qyijh35j/result.json`. Source regressions assert actual
+  bytecode invocation counts for bounds errors, recovery, old-snapshot selection,
+  early return and Type-valued elements.
+- `LUNA_BENCH_ITERATIONS=10 python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --bench type_list_index`:
+  all benchmark results matched; `/tmp/luna-tools-vyklvjr4/result.json`.
+
+For 4096 Type elements and 64 reads per invocation, the allocation-counting
+benchmark requested 1,182,656 bytes with a literal index and 1,395,412 with a local
+index, versus 15,978,432 on its computed-index snapshot control path. Input
+cloning and invocation costs remain included. This is a warmed same-build path
+comparison in the managed development profile, not a historical or release
+speedup result. Existing list-loop cost regressions also passed. Fused append
+and normal-form input-plan bytecode migration remain outstanding.
+
+- Final managed `cargo fmt --all -- --check` passed, exit 0:
+  `/tmp/luna-tools-6ipfkx2u/result.json`; `git diff --check` passed.
+
+## Transactional list append in bytecode
+
+Root-local self-concatenating assignments now compile to a borrowed admission
+check, ordinary suffix code, and a transactional append. Fusion requires a local
+suffix, a constant list, or a list of local/type/literal leaves; that eligibility
+scan consumes compilation fuel. Computed suffixes retain concatenation snapshots.
+No library name, Type-list identity exception or recursive tree opcode is used.
+
+Owned locals retain their allocation. Shared root storage and projected comptime
+receivers resolve the target after the suffix has been copied and all read locks
+have been released. Checked extension rolls back its appended range on budget or
+representation failure. Input admission and combined structural work are still
+charged; avoiding copying does not remove repeated validation scans. Runtime
+pointer writes retain the existing tree path and are not covered by this change.
+
+Validation from `/home/fin/luna`:
+
+- Managed `test -p comptime_interpretor --lib bytecode::list_tests`: seven tests
+  passed after final additions, exit 0, `/tmp/luna-tools-esdc00ae/result.json`.
+  Coverage includes buffer reuse for Bool/Type lists, root/projected references,
+  aliased suffixes, malformed suffix domains/payloads, budget rollback and recovery.
+- Managed `test -p luna --test comptime_bytecode_lists --test comptime_list_operations --test type_lists --test execution`:
+  3, 54, 28 and 1365 passed, exit 0, `/tmp/luna-tools-xhelgubc/result.json`.
+  Source tests preserve saved copies and a callback that overwrites the receiver
+  during suffix evaluation. This preceded the final compiler eligibility fuel
+  charge and final unit-test additions; no source behavior was changed afterward.
+- Managed `test -p comptime_compiler -p comptime_interpretor --lib --tests`:
+  compiler 19 and interpreter unit 246 passed, along with earlier integration
+  groups, but the run exited 101 on
+  `type_list_inputs::local_list_length_still_charges_large_element_type_descriptions`;
+  `/tmp/luna-tools-biwn5zqs/result.json`. Do not describe the whole suite as passed.
+- A temporary diagnostic in that unchanged test compiled its body explicitly
+  with 100,000 fuel before invocation. Width 1 with 64/1 reads compiled; width
+  4096 with 64 reads returned `Error::Budget`, before executing a length read.
+  Managed `test -p comptime_interpretor --test type_list_inputs local_list_length_still_charges_large_element_type_descriptions -- --nocapture`
+  exited 101, `/tmp/luna-tools-mibhd7f4/result.json`. The diagnostic was removed;
+  the test has no diff. Repeated type metadata copies hit the fixed compiler
+  budget in the unchanged ListLength lowering. No baseline checkout run was
+  performed. This remains a follow-up, not a reason to raise the test budget or
+  omit representation checks.
+- `LUNA_BENCH_ITERATIONS=5 python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --bench list_append`:
+  exit 0, `/tmp/luna-tools-5wgaha8g/result.json`. Existing benchmark, five warmups,
+  five measured invocations, development profile, same-build snapshot control.
+  For 1024 owned Bool appends: fused 7,254,472 bytes/invocation versus snapshot
+  185,877,448; Type appends: 4,533,744 versus 92,807,200. This is allocation
+  evidence, not a historical/release speedup or linear-time construction claim.
+- Managed `cargo fmt --all -- --check`: exit 0,
+  `/tmp/luna-tools-ogrftw_k/result.json`; `git diff --check` passed.
+
+Remaining priorities include repeated-metadata compilation costs, normal-form
+plan bytecode, and eliminating redundant admission walks through sound reusable
+validation evidence rather than bypassing checks.
+
+## Charge bytecode compilation to the invocation budget
+
+The large-element ListLength failure above exposed an unrelated fixed compiler
+ceiling: a caller with ten million remaining steps still received StepsExhausted
+at 100,000 compilation units. Meanwhile every successful or unsupported
+compilation probe was free to the caller. Compilation now uses the remaining
+invocation budget and deducts the compiler's consumed work on all outcomes.
+Resource failure does not select another carrier or publish code. Stable-code
+cache hits avoid repeated compilation; the independent cache storage bound is
+unchanged. `bytecode_compilation_steps()` exposes cumulative charged work for
+profiling (saturating at u64::MAX).
+
+The original 4096-wide, 64-read length test retains its budget and bounds and now
+also requires actual bytecode execution. Three observation-cost tests retain
+their original read-cost thresholds but subtract the separately measured compile
+work; compilation itself has budget-sweep, failure/recovery and cache-hit tests.
+These functions have comptime inputs and currently specialize/recompile per call,
+so warming them does not establish a reusable compiled body. An initial warmed
+measurement assumption was rejected by the compilation counters and removed.
+The next optimization must address redundant specialization and metadata copies,
+not pretend those costs disappeared.
+
+The source infinite-loop test retains the 80-step rejection (now before execution)
+and additionally verifies execution exhaustion with the default budget. A separate
+stale source assertion expected bool matching to use the tree carrier; structural
+matching was already compiled, so it now requires bridge, pattern and digits to
+execute exactly once each.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --tests`:
+  all 22 groups passed (455 tests including 250 library tests), exit 0,
+  `/tmp/luna-tools-9xqg0x4b/result.json`. Includes the formerly failing large-element
+  test, index/length costs, instance budgets, representation admission and recovery.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode --test comptime_bytecode_lists --test comptime_list_operations --test execution`:
+  6, 3, 54 and 1365 passed, exit 0, `/tmp/luna-tools-h3qxjibz/result.json`.
+- Initial targeted budget runs exposed compile cost in the observation metrics;
+  `/tmp/luna-tools-gve8hysx/result.json` and `/tmp/luna-tools-k45oomt9/result.json`
+  exited 101. A missing telemetry-field initialization in the IIR constructor
+  was fixed after `/tmp/luna-tools-e7usqlwq/result.json`. The AddressOf carrier
+  expectation was corrected after `/tmp/luna-tools-7isbjnoo/result.json`.
+- The first source run exposed the two test boundaries described above, exit 101,
+  `/tmp/luna-tools-mm5r1l_d/result.json`; the successful source rerun is listed above.
+- Managed `cargo fmt --all -- --check`: `/tmp/luna-tools-_w8knakq/result.json`;
+  `git diff --check` passed. No test budget or observation threshold was increased.
+
+This fixes caller-controlled resource accounting; it does not reduce metadata
+copy work. Cold calls can now exhaust their supplied budget earlier because
+compilation is no longer uncharged. Specialization/normal-form bytecode work
+remains outstanding; this is not a completed VM claim.
+
+## Reuse input-independent prepared bodies
+
+A comptime input no longer automatically forces a fresh body clone, type rewrite
+and compilation on every call. A bounded structural scan identifies package
+bodies with no Bound or Hole terms. It enters every embedded type payload,
+patterns, normal-form inputs, captures and shared closure bodies without unfolding
+normal-form heads. Nested binders conservatively count as dependent; this is not
+a complete free-variable minimization pass.
+
+The first preparation still performs the original type rewrite and scope checks,
+including pattern-domain completion. Only its successful immutable result can
+enter the per-interpreter prepared-body cache. Dependencies are recorded as a
+classification only; input-dependent bodies still specialize separately. Bodies
+and classification entries share a 100,000-work storage bound, independent of
+the existing code-cache bound. Eviction cannot invalidate active Arc-owned bodies.
+Closures have no declaration cache key. Parameter admission, signature/result
+binding, requirements, pre/postconditions and actual body effects still run for
+every invocation. This is code reuse, not result memoization.
+
+The bytecode cache compiles the prepared body supplied by the invocation boundary
+rather than reopening the raw declaration. Prepared input-independent package
+bodies are stable code; bodies containing active holes or input references are
+not. Copy preflight now traverses type payloads before cloning input bodies,
+replacing the old expression-only count. The shared walk also exposed a missing
+intrinsic payload: pending scalar evidence is now inspected and charged, so a
+hidden dependent intrinsic cannot become a shared specialization.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir --lib --test copy_budget`:
+  8 library and 16 copy-budget tests passed, exit 0,
+  `/tmp/luna-tools-kwo7miiy/result.json`. Includes hidden pattern, closure,
+  normal-form and intrinsic types, traversal failure and non-mutating scans.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --tests`:
+  all 457 tests passed (252 library plus integration groups), exit 0,
+  `/tmp/luna-tools-7v6hl52x/result.json`. New cases distinguish shared bodies
+  from dependent Type results, reject publication on failure, and verify eviction
+  with a live body. Repeated observation tests retain their original thresholds,
+  now measure warmed calls, and require zero recompilation plus one cached code
+  decision. The first cold-cost run failed the observation threshold at
+  `/tmp/luna-tools-fi0iibqm/result.json`; no threshold was increased.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode --test comptime_bytecode_lists --test comptime_list_operations --test function_type_dependencies --test execution`:
+  6, 4, 54, 37 and 1365 passed, exit 0,
+  `/tmp/luna-tools-cb1d9e63/result.json`. This preceded the pending-intrinsic
+  traversal addition and explicit comptime annotation in the new source case.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_lists`:
+  all 4 passed after those changes, exit 0,
+  `/tmp/luna-tools-z8z4p5v4/result.json`. The new case asserts the parameter is
+  ComptimeValue, supplies true/false/true lists, observes distinct results, and
+  requires three executions with one compilation.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test library_meta_math --test comptime_clause_inputs --test function_type_dependencies`:
+  9, 43 and 37 passed on the final implementation, exit 0,
+  `/tmp/luna-tools-i255o4n_/result.json`.
+- `LUNA_BENCH_ITERATIONS=10 python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --bench type_list_index`:
+  exit 0, `/tmp/luna-tools-c4ccr8z8/result.json`. Five warmups, ten measured
+  invocations, development profile, unchanged benchmark. For 4096 Type elements
+  and 64 literal-index reads: 959,840 allocated bytes and 408.10 allocations per
+  invocation. The earlier indexing-stage log recorded 1,182,656 bytes and
+  1522.10 allocations, but that is a historical revision comparison, not a
+  controlled release timing claim. Input binding and admission costs remain.
+
+Remaining work includes dependent-body specialization/code reuse, reducing
+repeated input binding and type metadata copies, and normal-form plan bytecode.
+The cache deliberately keeps no mutable environments, invocation values or
+active inference state.
+
+- Final managed `cargo fmt --all -- --check` passed, exit 0:
+  `/tmp/luna-tools-r6ezrx36/result.json`; `git diff --check` passed.
+
+## Export owned comptime inputs without an intermediate Value copy
+
+Input binding formerly checkpoint-copied every staged argument before forming a
+dependent Term. The consuming exporter itself traversed that copy by reference
+and cloned its payloads into the resulting Term, so immutable owned arguments
+paid for an avoidable intermediate Value representation.
+
+Owned comptime inputs now use the existing borrowed checkpoint validation and
+export directly into an independent Term. Type inputs likewise avoid copying the
+Value wrapper and its entire type payload before the actual binding. This is a
+general representation path, not a List/Type-list head rule. Storage and projected
+reference inputs retain checked snapshots; runtime input handling is unchanged.
+
+`normal_terms` has one borrowed conversion core. Consuming export still wraps it
+with the original iterative release, including on failure for deeply nested host
+data. Owned storage snapshots use that consuming path. Abstract declaration-domain
+authority, shape checks, depth/size limits and spent-budget accounting are shared;
+a borrowed value does not authorize a storage handle or unknown abstract input as
+a normal term. No invocation result is cached.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --tests`:
+  all 457 existing tests passed, exit 0, `/tmp/luna-tools-lzavjd5t/result.json`.
+  This preceded the two new tests and the explicit consuming path for owned
+  snapshots, which restores their original iterative-release behavior.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib normal_terms::borrowed_input_tests`:
+  two tests passed on the final implementation, exit 0,
+  `/tmp/luna-tools-t2139asp/result.json`. Budget sweeps compare borrowed/consuming
+  outcomes and work while preserving the input, reject unauthorized abstract
+  inputs and storage export, and verify that subsequent owned/shared/projected
+  writes cannot change already-bound substitution terms.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_clause_inputs --test function_type_dependencies --test comptime_list_operations --test builder_invocations --test execution`:
+  clause inputs 43, function dependencies 37, list operations 54, builders 73
+  and execution 1365 passed, exit 0, `/tmp/luna-tools-6lm2hkeb/result.json`.
+- `LUNA_BENCH_ITERATIONS=10 python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --bench type_list_index`:
+  exit 0, `/tmp/luna-tools-bbnsxm8h/result.json`. Unchanged development-profile
+  benchmark, five warmups and ten measurements. The 4096-element, 64-literal-read
+  case allocates 730,336 bytes/invocation versus 959,840 in the immediately prior
+  recorded revision (`/tmp/luna-tools-c4ccr8z8/result.json`); both charge 21,644
+  steps. This is a reduction in allocated bytes without removing validation
+  charges, not a controlled release timing result. Benchmark input clones and
+  remaining telescope/substitution copies are still included.
+- An initial extraction incorrectly left consuming cleanup in the borrowed
+  method; Rust rejected it before tests ran, `/tmp/luna-tools-ylufke1p/result.json`.
+  Cleanup was restored to the consuming wrapper before the successful runs.
+- Managed `cargo fmt --all -- --check` passed, exit 0,
+  `/tmp/luna-tools-yyz6pi3r/result.json`; `git diff --check` passed.
+
+Repeated telescope preparation, substitution-term copies, dependent-body code
+reuse and normal-form plan bytecode remain separate work. This change removes
+one intermediate immutable representation, not all input copying.
+
+## Bind invocation inputs incrementally
+
+`FunctionInputBuilder` now carries a completed substitution prefix through one
+invocation. It prepares each parameter domain on demand, moves each staged input
+into the substitution once and constructs the residual signature at completion.
+The borrowed whole-input and type-view APIs share this implementation. Failed
+pushes preserve the completed prefix; retained parameters, Type-domain refinement,
+callable phase wrappers and variadic positions retain their existing contracts.
+The builder has a deterministic S-expression Display.
+
+The interpreter creates the builder only at the first materialized static input,
+then supplies any preceding ordinary parameters as retained slots. Ordinary-only
+calls do not allocate builder state. Representation admission, abstract-input
+authority, storage snapshots and per-argument checks remain in place. No invocation
+result caching or library-head specialization is introduced.
+
+Validation from `/home/fin/luna` (all listed runs exited 0):
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir --lib --tests`:
+  `/tmp/luna-tools-q5mnxnqq/result.json`. Includes refinement failure/recovery,
+  opaque NF results, retained indices and phase/variadic wrapper checks.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-f9fmp31e/result.json`, after lazy builder initialization.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_clause_inputs --test function_type_dependencies --test dependent_list_collectors --test builder_invocations`:
+  `/tmp/luna-tools-arq2jc8n/result.json`, after lazy initialization; all four
+  source-level suites passed.
+- Before lazy initialization, the same source suites plus
+  `--test comptime_list_operations --test execution` passed:
+  `/tmp/luna-tools-85648og7/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib staged_binding_after_ordinary_prefix_preserves_dependent_domains`:
+  `/tmp/luna-tools-vwpr06p7/result.json`. Additional regression covers an ordinary
+  prefix before a static Type argument, dependent suffix admission/rejection,
+  owned and storage-backed inputs, and the final retained signature.
+- `LUNA_BENCH_ITERATIONS=10 python3 -B development/check.py --timeout 900 -- test -p nir --bench input_binding`:
+  `/tmp/luna-tools-94te7st_/result.json`. Same-build comparison of incremental
+  binding against repeated whole-prefix binding, with three warmups and ten
+  measurements. Both produce equal bindings. Each Type input carries a
+  64-element structural type payload; this is an internal representation probe,
+  not a new language-level Tuple identity rule.
+
+| Inputs | Repeated-prefix allocated bytes/bind | Incremental allocated bytes/bind |
+| --- | ---: | ---: |
+| 1 | 7,561 | 3,921 |
+| 16 | 588,744 | 58,912 |
+| 64 | 8,457,096 | 234,928 |
+
+This isolates allocation costs in telescope binding; it is not a historical
+compiler or release-profile end-to-end timing comparison. Complex dependent
+domains still require substitution and scope checking, including retained-prefix
+work. Dependent-body code reuse and normal-form plan bytecode remain unfinished.
+
+Final managed `cargo fmt --all -- --check` passed:
+`/tmp/luna-tools-jmdo_0v2/result.json`; `git diff --check` passed.
+
+## Execute sequential normal-form constructors as bytecode
+
+Normal-form construction without an input-reordering plan now compiles when its
+inputs are ordinary expression arguments (including the existing spread-value
+wrapper). Begin/prepare/bind/finish instructions retain per-constructor state in
+the invocation frame. Nested constructors use distinct registers; all operand
+expressions use the ordinary bytecode compiler and invocation machinery. No opcode
+calls the NIR evaluator and no definition body is unfolded.
+
+Tree and bytecode paths share constructor preflight and input-domain checks.
+Before operand effects, the interpreter validates the head, arity, result kind
+and the next instantiated input domain. Each completed input is exported through
+the existing normal-term admission path. Final construction uses the existing
+representation validation and instantiated requirements. Early control transfer
+exits without completing the constructor. Metadata and pending state have
+S-expression dumps. Compilation work and owned type copies remain budgeted.
+
+Validation from `/home/fin/luna`, all successful runs below exited 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-vfzc0cyn/result.json`, after shared domain checking and the
+  initial differential identity/effect-order regression.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib normal_type_tests`:
+  `/tmp/luna-tools-zw4sp6p1/result.json`, final three tests. Tree/bytecode cases
+  check dependent domains before effects, final requirements and recovery,
+  unknown heads, bad arity/result kinds, and early return propagation.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_types --test normal_form_inference --test normal_form_methods --test execution`:
+  `/tmp/luna-tools-4vbn8axm/result.json`. Source-level wrappers and nested
+  `Identity` applications preserve opaque heads for changing Type inputs;
+  invocation counters prove that these constructors actually use bytecode.
+  The type-bytecode, inference, method and execution suites all passed.
+- Initial test scaffolding failed Rust compilation because a sibling module
+  could not access the private bytecode test runner, then because Flow does not
+  implement PartialEq (`/tmp/luna-tools-fmn_6gx9/result.json` and
+  `/tmp/luna-tools-30fuqmk2/result.json`). Tests were placed beneath the bytecode
+  module and destructure Flow before comparing values; production visibility and
+  Flow semantics were not changed. An initial formatter run preceded creation
+  of the test module and failed; subsequent formatting completed successfully.
+
+Contextual literals, contextual containers and explicit preparation/reordering
+plans still select the tree path before execution. This is the sequential
+constructor foundation, not completion of normal-form plan bytecode. Their
+staging, late domain resolution and temporary binding cleanup remain required.
+
+Final managed `cargo fmt --all -- --check` passed, exit 0,
+`/tmp/luna-tools-zjt6k2op/result.json`; `git diff --check` passed.
+
+## Compile contextual scalar normal inputs
+
+Sequential normal-form inputs now retain integer spelling/sign and unit markers
+in bytecode metadata until preceding inputs establish their domain. The prepare
+instruction calls the same contextual literal conversion used by tree execution;
+a separate load moves the prepared value into its operand register. This supports
+arbitrary-precision integers, signed/unsigned fixed-width integers and BitVec
+conversion without treating any named type constructor as special. Unit retains
+its existing distinction between a Void type value and a void value. Owned
+spelling copies are charged during compilation; conversion remains budgeted.
+
+Inspection also found that a malformed ordinary input annotated Never could
+produce a value and reach bytecode NF completion. Binding now rejects that
+fallthrough, matching the tree argument boundary; genuine return/other transfer
+never reaches binding. A differential regression deliberately constructs such
+malformed NIR rather than relaxing its annotation or accepting the value.
+
+Validation from `/home/fin/luna`, all exit 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib normal_type_tests`:
+  `/tmp/luna-tools-v6gwqebh/result.json`, five tests. New cases cover dependent
+  scalar domains, signed/unsigned limits, a large Integer, BitVec, incompatible
+  domains, both unit interpretations and Never fallthrough rejection.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_types`:
+  `/tmp/luna-tools-xmb69zcm/result.json`. Source `Shape<input, 17>` agrees with
+  tree evaluation, preserves the opaque head and increments bytecode execution
+  counters for distinct type arguments.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-2vnt0uq2/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test normal_form_inference --test normal_form_methods --test builder_invocations --test execution`:
+  `/tmp/luna-tools-dobt0rah/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  `/tmp/luna-tools-tosgo9gt/result.json`; `git diff --check` passed.
+
+Contextual containers/control and explicit preparation/reordering plans remain
+on the preselected tree path. This stage extends scalar contextual inputs only;
+it does not claim complete normal-form plan compilation or a timing speedup.
+
+## Compile contextual normal-form containers
+
+Owned input-shape metadata now describes scalar, list and tuple nodes with stable
+registers and source locations. A bounded worklist builds the metadata and
+operand tasks without recursively compiling expressions. Invocation-local
+preparation checks the complete input against its instantiated domain before any
+operand runs; the existing list-domain helper is shared with tree preparation.
+
+Container append instructions follow each child immediately. Spread validation,
+Type-list conversion and size checks therefore precede later operand effects.
+Tuple type-description conversion remains after all children, matching tree
+ordering. Completion reuses existing list validation and contextual tuple
+construction, including the registered Tuple NF head. Preparation stores literals,
+domains and accumulators only in the current frame, never the code cache. Metadata
+and pending state retain S-expression dumps. Compilation accounts for shape width,
+node work, copied types and spelling; excessive contextual depth selects the tree
+path before execution, where the existing depth error applies.
+
+Validation from `/home/fin/luna`, successful runs exit 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib normal_type_tests`:
+  `/tmp/luna-tools-6rbc5vcj/result.json`. Nested lists, heterogeneous tuples,
+  registered tuple type heads, failed spreads before later effects and invalid
+  contextual literals before any effects agree between tree and bytecode in
+  comptime mode; existing scalar and failure/recovery cases remain covered.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-o47b_6lt/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler --lib normal_types::tests`:
+  `/tmp/luna-tools-weka7w_4/result.json`. Additional compiler test checks fuel
+  exhaustion, nested depth admission/rejection and escaped dump spelling.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_types`:
+  `/tmp/luna-tools-jmk9vo0u/result.json`, final source fixtures. Explicit expected
+  NF terms and execution counters cover nested list payloads, named whole Tuple
+  collection and a contextual list whose Integer/u8 element domain arrives only
+  during invocation.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_clause_inputs --test dependent_list_collectors --test builder_invocations --test execution`:
+  `/tmp/luna-tools-c7maikd_/result.json`.
+
+Initial source-fixture failures were corrected against the language contract:
+`named_arg -> .id = expr` requires a leading dot; ordinary anchored parameters
+are positional, unlike whole variadic supplies (`docs/functions/parameters.md`,
+explicit named supply). Tuple keeps `.Es=...`. Results containing ordinary
+meta.List values require comptime admission, so a runtime `Interpreter::new`
+was not a valid tree oracle. The source test now asserts complete expected NF
+payloads; differential container tests explicitly use comptime mode for both
+engines. Failure evidence: `/tmp/luna-tools-d9_vj3rl/result.json`,
+`/tmp/luna-tools-p5xc4un_/result.json`, `/tmp/luna-tools-be4u07g3/result.json`,
+`/tmp/luna-tools-5vmw_k1m/result.json`. No production grammar, admission rule or
+semantic expectation was weakened to make those fixtures pass.
+
+Contextual if/match/block arguments and explicit preparation/reordering plans
+still select tree execution before effects. Their staging and cleanup remain the
+next NF compilation work; this does not claim complete plan support or a measured
+performance gain.
+
+Final managed `cargo fmt --all -- --check` passed, exit 0,
+`/tmp/luna-tools-27rpqgl6/result.json`; `git diff --check` passed.
+
+## Compile contextual normal-form choices and blocks
+
+Input shapes now include if and block nodes. Their domain preparation validates
+both branches, condition types and empty-block result contracts before operand
+execution, retaining the existing contextual typing order. The compiler emits
+ordinary branch labels and scope tasks via the bounded worklist. Only the selected
+branch executes. Result-transfer instructions move values between registers and
+reject malformed Never fallthrough at contextual boundaries.
+
+Blocks use the VM's existing scope/unwind machinery, including normal completion
+and early return. Local bindings do not become part of reusable shape metadata.
+Shape dumps include branch domains and children, and code dumps retain explicit
+branch/result/scope instructions. No opcode evaluates an NIR tree.
+
+Validation from `/home/fin/luna` (successful runs exit 0):
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-2ntjus0z/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_types`:
+  `/tmp/luna-tools-n9sjb1in/result.json`. Dynamic-domain conditional literals,
+  nested blocks and early return execute as bytecode and produce explicit
+  expected NF terms. An unselected overflowing u8 branch is still rejected.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_clause_inputs --test builder_invocations --test execution`:
+  `/tmp/luna-tools-gl7ro80a/result.json`.
+- After strengthening overflow checks to assert ErrorKind::Type, reran
+  `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib contextual_choices_prepare`
+  and `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_types contextual_normal_control_flow`:
+  `/tmp/luna-tools-wsgxjgy1/result.json` and
+  `/tmp/luna-tools-_3h02qs_/result.json`. Differential cases verify condition
+  effects, selected branch effects, rejection before effects, local cleanup,
+  void block completion and early transfer.
+- The initial integration check found a missing label-table argument at the
+  compile_input caller (`/tmp/luna-tools-14mx2nms/result.json`); it was connected
+  before successful compiler/interpreter and source checks.
+
+Contextual match and explicit preparation/reordering plans remain unsupported
+by bytecode and select tree execution before effects. No complete-plan support
+or measured performance gain is claimed by this stage.
+
+Final managed `cargo fmt --all -- --check` passed, exit 0,
+`/tmp/luna-tools-cky4cgee/result.json`; `git diff --check` passed.
+
+## Compile contextual normal-form matches
+
+Contextual matches now use the same bounded structural-pattern preparation,
+pattern instruction, guard code and scope machinery as ordinary VM matches.
+Input-shape metadata retains arm domains and explicit guard types; preparation
+checks every arm before the subject executes. The subject is evaluated once,
+failed candidates leave their scope, and only the selected contextual body runs.
+Result transfer preserves Never fallthrough rejection without completing an NF
+after early control transfer. Match shape dumps retain arm/guard/body structure.
+
+Validation from `/home/fin/luna`, successful runs exit 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-1stgwqyk/result.json`. New differential cases cover outer
+  pattern guards and explicit arm guards, subject/guard effects, rejected-arm
+  binding cleanup, skipped body effects, prechecking unselected overflowing
+  literals, non-exhaustive matches, early guard return, invalid guard types and
+  Never-annotated subjects incorrectly returning ordinary values.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_types`:
+  `/tmp/luna-tools-7abip1w3/result.json`. Invocation counters and explicit NF
+  expectations verify dynamic-domain guarded matching, unselected overflow
+  rejection and early arm return in source programs.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_matching --test comptime_clause_inputs --test builder_invocations --test execution`:
+  `/tmp/luna-tools-h6ba15f1/result.json`.
+- Initial integration checks found the new local-register map was not yet
+  passed by the compile_input caller (`/tmp/luna-tools-pyejdh7z/result.json`,
+  `/tmp/luna-tools-azm7of42/result.json`). The caller was connected and the now
+  unreachable NormalFormArgument fallback removed before successful runs.
+
+Explicit preparation/reordering plans still choose tree execution before effects.
+The ordinary pattern compiler's existing exclusions (nested executable pattern
+forms) also apply to contextual matches; they are not silently interpreted by a
+bytecode opcode. This completes lowering for the current contextual argument
+node kinds only when their contained expressions and patterns are compilable,
+not full NF plan support.
+
+Final managed `cargo fmt --all -- --check` passed, exit 0,
+`/tmp/luna-tools-2mvtq7rf/result.json`; `git diff --check` passed.
+
+## Shared normal-form binding state
+
+Tree evaluation (including reordered and pending inputs) and sequential bytecode
+now use the same invocation-local binder. It records declaration slots separately
+from completion-order substitutions. Slots hold indices into owned terms, so the
+tree path no longer clones each completed residual input to maintain both orders.
+Finalization restores declaration order by moving terms; already ordered inputs
+return their existing vector. Duplicate/out-of-range binding fails before state
+mutation, and incomplete inputs cannot produce a completed normal form. State
+has an S-expression Display including pending slots.
+
+This is the shared-state foundation for VM input plans, not bytecode support for
+preparations or deferred-input continuations. Those plans still select the tree
+path before executing any effects. Opaque head identity and pending literal
+staging remain unchanged.
+
+Validation from `/home/fin/luna`, successful runs exit 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-5h3w7n09/result.json`. Includes out-of-order binding,
+  duplicate and missing slots, deferred overflow followed by successful reuse,
+  declaration-order output and plan-local cleanup.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_types --test comptime_clause_inputs --test builder_invocations`:
+  `/tmp/luna-tools-sd0uq48l/result.json`.
+- After strengthening the deferred-input test to check the complete NF argument
+  vector, `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib planned_contextual_inputs_recover_after_deferred_literal_failure`:
+  `/tmp/luna-tools-ym_25d7s/result.json`.
+- Managed `cargo fmt --all`: `/tmp/luna-tools-vktlo6x5/result.json`;
+  `git diff --check` passed.
+- Initial test compilation failed because the test module needed the qualified
+  `normal_types::Bindings` path (`/tmp/luna-tools-9p5czfpp/result.json`);
+  corrected before the successful runs above.
+
+## Deferred contextual tuples retain abstract Type authority
+
+While preparing VM input-plan work, a differential regression exposed a mismatch:
+sequential tree/bytecode construction accepted an authorized `TypeParameter`,
+but the staged tuple finisher accepted only `Value::Type`. Consequently a tuple
+input arriving before its contextual Type rejected a valid abstract Type that
+was accepted in declaration order. This contradicted the caller-scope preservation
+in `docs/type/comptime-gradual-dependent-type.md` and the order-independent
+normal-form argument binding contract.
+
+All three paths now share `finish_contextual_tuple`. It observes Type operands
+through `type_description_term`, including its existing authority check, and
+uses the registered opaque tuple constructor with its formation requirements.
+Value tuples retain their ordinary behavior; this does not introduce a new
+Tuple type identity or source syntax. All operands are still evaluated before
+completion, and completion never evaluates an expression again.
+
+Validation from `/home/fin/luna`:
+
+- The new regression initially failed only for the deferred input order,
+  `/tmp/luna-tools-ke9d1yg7/result.json`, exit 101. Sequential tree, bytecode and
+  declaration-order plan cases passed before the failing case.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-ghy7fy0i/result.json`, exit 0. The regression checks exact
+  opaque head and argument identity in all four paths, repeated rejection of
+  foreign Type parameters, recovery and temporary-binding cleanup.
+- Managed `cargo fmt --all`: `/tmp/luna-tools-0bsfi6kj/result.json`, exit 0;
+  `git diff --check` passed.
+
+VM lowering of preparation/reordering plans remains unfinished. The corrected
+finisher is shared groundwork, not a claim that those plans now use bytecode.
+
+Source regression check also passed (exit 0):
+`python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_types --test comptime_clause_inputs --test builder_invocations`,
+`/tmp/luna-tools-8lni84lz/result.json`.
+
+## Bytecode evaluation of deferred contextual operands
+
+`stage_normal_argument` now compiles and executes supported comptime operands as
+linear staged fragments before their contextual domain arrives. This is connected
+to existing NF and nominal input-plan evaluation, not a test-only entrypoint.
+The compiler reuses contextual control lowering and ordinary expression opcodes;
+staged instructions retain literal placeholders, list spread flags, tuple children
+and selected branch results separately from language Values. No opcode evaluates
+an NIR tree or re-executes a staged operand during final assembly.
+
+Compiled metadata uses register keys. After execution a bounded adapter translates
+those keys to the boxed invocation-owned NIR identities expected by the migration
+finisher. No NIR address or invocation value enters reusable code. State and code
+have S-expression dumps; ordinary frames allocate no staged state until needed.
+The existing abstract Type authority and opaque normal-form head checks remain in
+shared completion helpers.
+
+Fragment calls enter the existing invocation driver. Compilable default expressions
+use an explicit stack of VM frames; unsupported defaults retain their normal
+migration boundary. Unsupported operand compilation selects the tree path before
+that operand executes, while compile failures and execution failures propagate
+without replay. Compilation, key translation and execution consume the caller's
+budget. Logical contextual depth and imported environment mutations are restored
+on completion, transfer and error.
+
+Validation from `/home/fin/luna`, final successful runs exit 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-3rz7lvvn/result.json`. Covers owned staged code and exact
+  compilation-work bounds, small-stack/depth limits, abstract Type inputs,
+  selected branches and guarded matches, deferred literal rejection, list
+  spreads, effect timing, scope cleanup, recovery and unsupported-code selection.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_types --test comptime_clause_inputs --test builder_invocations --test execution`:
+  `/tmp/luna-tools-1olk58z9/result.json`. New source cases assert staged-fragment
+  and default-frame counters, exact NF/list identity across u8 and Integer,
+  one-time mutation before a late Type input observes it, and an early return
+  skipping a nonterminating later Type expression.
+- Managed `cargo fmt --all`: `/tmp/luna-tools-7n8ioai3/result.json`;
+  `git diff --check` passed.
+
+Intermediate checks found two incomplete initialization sites while integrating
+state (`/tmp/luna-tools-8idahs2m/result.json`, missing IIR telemetry initializer;
+`/tmp/luna-tools-tzjezrri/result.json`, optional staged-state access), both fixed.
+The original fixed-budget scope test failed at 39 steps because compilation now
+exhausted its budget before executing the assignment
+(`/tmp/luna-tools-c8dz64w7/result.json`). It now derives its range from measured
+compilation work, requires exhaustion both before and after the effect, and keeps
+exact final mutation, flow and cleanup assertions. This reflects budgeted
+compilation rather than weakening operand behavior.
+
+Remaining work: outer preparation/reordering scheduling and domain specialization
+still use the migration evaluator. Staged fragments are compiled per invocation;
+no end-to-end speedup or complete input-plan bytecode support is claimed. The next
+integration should move outer plan scheduling into VM continuations while retaining
+this distinct staged-result channel and the shared normal-form binding state.
+
+## Bytecode fragments for inputs with known contextual domains
+
+A separate `compile_contextual_input` entrypoint now emits whole-shape preflight
+followed by ordinary contextual input code. The value exits through the usual
+fragment result channel. NF and nominal input plans use this path for ready inputs,
+complementing staged fragments for inputs whose domains are still pending.
+Unsupported code is selected before that operand executes; execution errors never
+replay the operand through the tree path.
+
+Invocation-local construction state now separates optional NF head/binding state
+from prepared contextual values. A standalone fragment has no synthetic head,
+parameter declaration or normal-form identity. Nested real NF constructors retain
+independent state and opaque identity. The compiler owns the contextual domain
+and shape, charges their copies, and dumps the preflight in S-expression form.
+
+Validation from `/home/fin/luna`, successful runs exit 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-nkpyxsh8/result.json`. New cases verify preflight precedes
+  operand effects even for an invalid unselected branch, valid literal formation,
+  nested opaque NF identity and owned compiler metadata with bounded work.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_types --test comptime_clause_inputs --test builder_invocations --test execution`:
+  `/tmp/luna-tools-13o6z1xw/result.json`. Source cases compare ready and deferred
+  argument orders across u8 and Integer, assert actual fragment/default counters,
+  and check early return from a ready input as well as a staged input.
+- Managed `cargo fmt --all`: `/tmp/luna-tools-zr0zsz_9/result.json`;
+  `git diff --check` passed.
+- The initial compiler dump assertion expected bare `u8` rather than NIR's
+  `(primitive u8)` rendering (`/tmp/luna-tools-q7bxx10w/result.json`); corrected
+  the assertion to use the established Term display, without changing semantics.
+
+Outer input-plan scheduling, binding export from preparation expressions and
+specialization still use the migration path. Ready and staged fragments currently
+compile per invocation; this is execution coverage, not a measured speedup or a
+claim that complete input plans are now linear VM programs.
+
+## Input preparation fragments export only committed packet bindings
+
+NF, nominal and alias plans now send supported packet-preparation expressions
+through the VM fragment driver. `NormalFormPreparation::local_bindings` supplies
+the same outer tuple-pattern contract to plan validation and export selection.
+The VM resolves export registers before execution, rejects binding collisions,
+and moves committed values back only after successful completion. Producer-local
+variables are not exported. Errors and transfers retain caller mutations without
+leaking packet bindings; the enclosing plan still removes its bindings on exit.
+Empty and trailing-empty packets execute even though they export no values.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir --test free_bindings`:
+  `/tmp/luna-tools-p7nv6jyu/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-e7i6srxd/result.json`, exit 0. New differential tests cover
+  successful export, temporary scope cleanup, return, missing input, failed
+  pattern match, collision rejection/recovery, budgets exhausted before and
+  after effects, enclosing NF cleanup and trailing-empty packet execution.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_spreads --test comptime_clause_inputs --test comptime_bytecode_types`:
+  `/tmp/luna-tools-ysuoovsz/result.json`, exit 0. Preparation counters verify
+  mixed packets, late Type inputs, repeated loop activations and empty tails.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters`:
+  final `/tmp/luna-tools-jg3pttgc/result.json`, exit 101: 254 passed, 11 failed.
+  The added dynamic alias preparation counter passed. All 11 failures report
+  `unknown trait method` in associated-value/capability elaboration.
+- The same nominal suite on baseline `2b908d71` produced the identical 11 failing
+  test names and 11 `unknown trait method` diagnostics:
+  `/tmp/luna-tools-5h4ne1fj/result.json`, exit 101. For this comparison only the
+  six task-owned tracked source/test files were temporarily replaced with their
+  HEAD contents; all were restored before the final check. Unrelated worktree
+  modifications were preserved throughout. This suite is not reported as green.
+- Final managed `cargo fmt --all`: `/tmp/luna-tools-knw8qfx6/result.json`, exit 0;
+  `git diff --check` passed.
+
+Initial test development found that a zero-step budget exhausted interpreter
+initialization rather than the tested fragment; the sweep now sets its budget
+immediately before evaluation (`/tmp/luna-tools-hpk4pplo/result.json` failure,
+subsequent checks above pass). Some initially chosen pure-Type/empty packet
+examples were already lowered to ordinary blocks and therefore had no preparation
+nodes. Their counter assertions were replaced with cases confirmed to use plans;
+NIR inspection established the distinction, without altering existing semantic
+assertions (`/tmp/luna-tools-g7a976dc/result.json`,
+`/tmp/luna-tools-47cow62z/result.json`, `/tmp/luna-tools-qclh2ecw/result.json`).
+
+Outer input-plan orchestration and specialization remain in the migration
+evaluator, and fragment compilation is still per invocation. The next VM step is
+to suspend/resume the plan itself using the existing ready, staged and preparation
+fragment channels. Separately, the confirmed baseline trait-method failures remain
+unfinished frontend work; this stage does not repair or mask them.
+
+## Explicit normal-form input-plan continuations
+
+Normal-form plans now keep preparation position, source input order, pending boxed
+inputs, completed substitutions and outstanding fragment requests in a resumable
+frame. The driver evaluates preparation, contextual-ready and staged requests and
+supplies a matching completion before advancing. Pending literal storage remains
+stable when the frame moves. Semantic failures terminate the frame; protocol
+misuse cannot advance an outstanding request or resume a completed frame. The
+frame has a stable S-expression dump. Binding snapshots use the bounded value
+representation copier before committing either the substitution or local export.
+
+This is the scheduling-state migration, not complete plan bytecode support. The
+plan driver still runs inside the migration evaluator; connecting these frames
+to the invocation driver's stack, migrating nominal/alias scheduling and compiling
+reusable plan templates remain unfinished. No speedup is claimed.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-f258yejx/result.json`, exit 0. Includes resume protocol,
+  movement of a suspended frame with pending literals, budget-failure atomicity,
+  terminal failure behavior, existing preparation exports and cleanup tests.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_spreads --test comptime_clause_inputs --test comptime_bytecode_types --test nominal_value_parameters`:
+  `/tmp/luna-tools-1zm1usyi/result.json`, exit 0 after the terminal-state
+  guard addition. Covers argument order, deferred
+  domains, transfers, trailing empty packets and repeated plan activation.
+- Managed `cargo fmt --all`: `/tmp/luna-tools-mp2nw1qm/result.json`, exit 0;
+  `git diff --check` passed.
+
+The 11 associated-call failures recorded in the preceding stage were separately
+fixed by `17d321f4`; the nominal-value suite now passes all 265 cases. This does
+not imply that all frontend or VM work is complete.
+
+## One driver for compiled fragments, defaults and invocations
+
+The fragment evaluator no longer recursively enters a second invocation driver
+when a compiled operand calls a function. `run_executions` now drives both ordinary
+invocations and borrowed fragment roots using the same activation/default stack.
+Completion restores every child environment and invocation context before delivery;
+fragment roots retain their frame so staged results and preparation exports remain
+available to their callers. Unsupported bodies still select the migration route
+before their execution. No new opcode interprets NIR recursively.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-nct9e88q/result.json`, exit 0. Added a fragment-root regression
+  with nine compiled closure activations, alternating failed result delivery and
+  success on the same interpreter. It checks root mutations, caller effect state,
+  logical depth, pattern state and activation cleanup after both outcomes.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode --test comptime_bytecode_defaults --test comptime_bytecode_types --test comptime_bytecode_references --test type_spreads --test comptime_clause_inputs`:
+  `/tmp/luna-tools-5sm31wv0/result.json`, exit 0. Covers nested defaults, failed
+  default entry, early returns, references and contextual input fragments.
+- Managed `cargo fmt --all`: `/tmp/luna-tools-y0qpbufe/result.json`, exit 0;
+  `git diff --check` passed.
+
+The outer normal-plan scheduler is still driven from the migration evaluator;
+nominal/alias scheduling and a stack-integrated plan continuation are unfinished.
+This change removes a duplicate driver and a native call boundary between compiled
+fragments and compiled invocations, not every native recursion boundary. Contract
+and unsupported-body evaluation still use their existing migration paths.
+
+## Normal-plan requests run on the shared activation stack
+
+A normal-form plan can now serve as a root of the invocation driver. Its compiled
+preparation, ready and staged inputs become stack entries with explicit completion
+state, so the plan no longer calls a nested fragment driver for each operand.
+Function calls and defaults inside those inputs use the same stack. Input completion
+centralizes preparation export, staged-result extraction, logical-depth restoration
+and caller-environment recovery. Nominal/alias callers reuse the same start/finish
+entrypoints without maintaining a second version of those rules. Input frames and
+completion state expose S-expression dumps.
+
+The entry into a normal-form plan is still the migration evaluator. Compiling a
+function that contains a plan still selects that carrier before body execution;
+a bytecode plan-suspension instruction and nested plan activation remain unfinished.
+Nominal/alias outer scheduling is also still on its existing migration path. No
+whole-VM completion or performance improvement is claimed by this stage.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_defaults --test comptime_bytecode_types --test type_spreads --test comptime_clause_inputs --test nominal_value_parameters`:
+  `/tmp/luna-tools-wdegx_il/result.json`, exit 0. Covers default calls and transfers,
+  contextual domains, source-ordered/reordered inputs and nominal/alias consumers.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-qo5bpl3u/result.json`, exit 0. Extended packet cleanup coverage
+  to value-before-Type staging, and checked that compiled-input budget failure
+  restores caller state and leaves the suspended plan terminal.
+- Managed `cargo fmt --all`: `/tmp/luna-tools-t0y2a4yc/result.json`, exit 0;
+  `git diff --check` passed.
+
+## Bytecode suspension for nested normal-form plans
+
+Compiled bodies now emit a `NormalPlan` suspension instruction for planned NF
+construction. It owns an immutable, bounded-copy template and registers the
+plan's free value bindings. Execution moves live caller locals into the plan
+activation, preserving other registers and lexical scopes in the suspended caller.
+The unified stack interleaves owned plan activations, input fragments, defaults
+and function calls. Completion removes only plan-local bindings and restores the
+borrowed caller locals before returning a value, transfer or error. An opcode never
+recursively evaluates its plan.
+
+This removes the body-wide migration fallback solely caused by a normal-form input
+plan. The existing migration entry remains available for mixed/tree interpretation.
+Nominal/alias outer plans, unsupported operand bodies and contract evaluation still
+retain migration paths. Per-input specialization and fragment compilation remain;
+no end-to-end speedup is claimed.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-5z1shhpv/result.json`, exit 0. New compiler coverage checks
+  owned templates, free-versus-plan-local bindings, deterministic dumps, copy
+  budget exhaustion and malformed-plan fallback. Packet tests compare tree and
+  bytecode execution for ready/deferred order, failure cleanup and empty tails.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode --test comptime_bytecode_defaults --test comptime_bytecode_types --test type_spreads --test comptime_clause_inputs --test nominal_value_parameters`:
+  `/tmp/luna-tools-z1xt515e/result.json`, exit 0 for the implementation before the
+  final malformed-plan diagnostic mapping and additional regression assertions.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_types`:
+  `/tmp/luna-tools-taa7m0hv/result.json`, exit 0 on the final implementation.
+  A nested reordered-plan example checks opaque identity, caller mutation,
+  repeated invocation and actual compiled-root/staged-fragment counters. Existing
+  early-return cases now also require the enclosing function to execute bytecode.
+- Managed `cargo fmt --all`: `/tmp/luna-tools-w4s66g1v/result.json`, exit 0;
+  `git diff --check` passed.
+
+## Resumable nominal and alias input collection
+
+Nominal/newtype and typealias inputs now use an explicit collection frame and the
+same fragment/activation driver as NF plans. The scheduler retains source order,
+preparation position, stable pending input storage, completed declaration slots
+and terminal state. Nominal capture domains keep fixed-point wakeup: own inputs
+may precede the captured Type inputs needed to finish them. Typealias value-domain
+checks remain distinct. The driver returns a separate input-completion signal;
+it does not manufacture a language value before declaration admission.
+
+The original newtype capture-first admission, type requirements, capability checks
+and transparent alias expansion still run after collection. These final steps and
+the nominal/alias bytecode suspension entry are not migrated yet. NF plan semantics
+and opaque normal-form heads are unchanged.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-yypnk2wp/result.json`, exit 0. Added a suspended-input test
+  with a trailing captured Type, frame movement, deferred integer formation,
+  input completion distinct from expression results, and terminal-state rejection.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test type_spreads --test comptime_bytecode_types`:
+  `/tmp/luna-tools-wr1wedpe/result.json`, exit 0. Includes nominal/alias early
+  returns, dependent domains, alias packet effects and captured newtype admission.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test newtypes`:
+  `/tmp/luna-tools-j4gnj61f/result.json`, exit 0, all 211 cases.
+- The first combined source run (`/tmp/luna-tools-57vcantx/result.json`) passed
+  `comptime_clause_inputs` but stopped in `newtypes`: its standalone fixture
+  writer omitted the ordinary bool binding, causing HIR errors before semantic
+  execution. It now uses the shared primitive-binding fixture helper; existing
+  expectations were retained. No production primitive lookup was changed.
+- Managed formatting check: `/tmp/luna-tools-13jk9h2s/result.json`, exit 0;
+  `git diff --check` passed.
+
+## Nominal and alias plans on the activation stack
+
+`TypeInputPlan` now suspends compiled callers for NF, nominal/newtype and alias
+plans. Nominal input collection, declaration admission and alias-body execution
+have explicit boundaries on the shared driver. Admission retains capture-first
+newtype validation, type requirements and capabilities; alias specialization and
+body execution start only after admission succeeds. A compiled alias body can
+suspend for nested plans and calls without recursively starting another VM driver.
+Plan completion restores caller bindings and removes plan-local bindings on both
+success and failure. Tree entrypoints borrow their original expressions; compiled
+plans retain immutable templates. Frame dumps use S-expressions.
+
+Template copying now charges the work performed by `Expr::clone`, which shares
+closure bodies. Alias specialization separately charges type rewriting, including
+those shared bodies, after admission. The existing low-budget rejection test
+caught premature charging of specialization work; its expectations were retained.
+Unsupported bodies and contract evaluation still have migration paths. Input
+fragments and specialized alias bodies are still compiled per use; this change
+makes execution resumable, but does not establish an end-to-end speedup.
+
+A new source case combines an opaque NF head, transparent alias expansion,
+value-indexed nominal construction, reordered inputs, one caller mutation and
+an early return before a divergent later input. It compares tree/bytecode results,
+repeats invocation and requires the enclosing function to execute as bytecode.
+
+An independent unresolved issue was found while constructing that case:
+`value: T` remains a `ComptimeValue` binder when T becomes Type, while its supplied
+Type value has Type sort. Nominal admission rejects it before alias expansion.
+Both tree and bytecode paths exhibit this mismatch. The retained reproducer is
+`development/repros/nominal-type-valued-index.fl`; it requires a general dependent
+binder/residual-value solution, not an exception for any particular library type.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-9xzd83ly/result.json`, exit 0. Includes alias admission before
+  body specialization under a tight budget, rejection recovery, input cleanup,
+  dependent nominal captures and malformed input order.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test type_spreads --test comptime_clause_inputs --test newtypes --test comptime_bytecode_types`:
+  `/tmp/luna-tools-jvzn6q3i/result.json`, exit 0, including the new nested-plan
+  and early-return source regression.
+- Managed `cargo fmt --all`: `/tmp/luna-tools-uh_pai9b/result.json`, exit 0;
+  `git diff --check` passed.
+
+## Domain-admitted Type-valued nominal inputs
+
+Nominal declaration admission now resolves parameter domains using completed
+inputs before choosing their instance sorts. This implements the rule documented
+in `docs/type/comptime-gradual-dependent-type.md`: a completed Type domain takes a
+Type input, even when the definition could only represent it as a dependent value
+binder. Captured suffixes are resolved by dependency rather than source position;
+cycles, mismatched domains and budget exhaustion remain distinct failures.
+
+`AdmittedArguments` retains checked inputs and provides bounded substitution for
+terms, type predicates and trait requirements. Definition occurrences must still
+match their declared sorts. Ordinary fixed-sort substitution remains strict; no
+blanket permission to replace a value binder by a Type was added. Opaque heads
+remain opaque. This evidence now guards nominal/alias VM contract substitution,
+alias-body specialization and later inputs whose domains use already completed
+Type-valued inputs. Unchanged sorts retain the existing substitution path.
+
+The saved Type-valued nominal repro now succeeds. Source coverage checks both VM
+paths, a trailing bool input, rejection/recovery through an injected NIR alias
+contract with the real PTC solver, repeated invocation and actual bytecode entry.
+The injected contract isolates VM admission from elaboration's static discharge;
+it is not evidence for all source constraint elaboration paths.
+
+A prior NIR test incorrectly rejected `[bool, Type]` for a value followed by its
+captured Type domain. It is now an explicit positive case based on the documented
+completed-domain rule. Wrong-domain, unauthorized symbolic-value, malformed-sort
+and budget cases remain negative. New NIR coverage also verifies opaque identity,
+checked predicate substitution and the unchanged strict substitution API.
+
+This stage covers type formation and VM contracts. General layout substitution,
+function/NF dependent binder completion and open caller scopes have other consumers
+of the fixed-sort APIs and are not claimed migrated here. The sort-changing input
+path currently reconstructs admission evidence while specializing later inputs;
+its performance still needs measurement and incremental evidence reuse.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-49o94x_c/result.json`, exit 0, including completed/captured
+  domains, alias budget ordering, nested aggregate admission and failure recovery.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_types --test nominal_value_parameters --test type_spreads --test newtypes --test comptime_clause_inputs`:
+  `/tmp/luna-tools-9q0k68s1/result.json`, exit 0, including the Type-valued
+  nominal/alias regression with a subsequent bool parameter.
+- Managed formatting: `/tmp/luna-tools-91ubdqpg/result.json`, exit 0;
+  `git diff --check` passed.
+
+## Domain-aware nominal layout substitution
+
+`DeclarationSubstitution` checks the argument scope and completed parameter sorts
+for structural queries. A dependent domain equal to Type requires a Type input;
+a domain that stays an opaque head is not unfolded to justify a sort change.
+Its caller frames are explicit, and substitution shifts references beneath nested
+function binders. The checked context has an S-expression dump. This is structural
+substitution, not full value admission: scalar ranges, aggregate payload evidence,
+formation requirements and capabilities retain their own owning boundaries.
+
+Struct fields, enum payloads, newtype representations and nominal frozen-value
+layout queries now use this context. Budgeted queries charge domain completion and
+replacement payloads before copying; representation checks preserve budget failure
+and retry behavior. Elaborated field reads, multi-level type observation, direct
+writes, pointer projections/writes and declaration-owned field defaults use the
+same domain-aware substitution. Ordinary fixed-sort substitution remains strict.
+
+The initial source regression formed `Key<Type, bool>` successfully but failed
+on construction with `expected comptime-value, got type`. After layout migration,
+a nested `Outer<Type, bool>.inner.payload` case exposed the remaining fixed-sort
+field-observation path; that path was corrected without removing the regression.
+The final source cases instantiate and execute IIR for nested struct construction,
+field reads/writes, pointer writes, defaults, enum payload matching and newtype
+conversion. Wrong-domain Type/value exchanges remain rejected. These are compiler
+and IIR execution checks, not LLVM host execution benchmarks.
+
+General function/NF binder completion and declaration contract consumers beyond
+the previously migrated nominal/alias VM path are still separate migration work.
+This stage does not claim every fixed-sort consumer or all dependent language
+features have been migrated.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-soq1v6nd/result.json`, exit 0. Includes new concrete/open-scope
+  layout cases, nested binder capture avoidance and preserved budget errors.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test newtypes --test comptime_bytecode_types --test type_spreads --test comptime_clause_inputs`:
+  `/tmp/luna-tools-qc98up3k/result.json`, exit 0 on the final implementation.
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --test representations --test checked_definition_publisher --test checked_struct_publisher`:
+  `/tmp/luna-tools-ho77fa12/result.json`, exit 0, including the added Type-valued
+  struct/enum budget-failure recovery test and existing publication atomicity tests.
+- Managed formatting: `/tmp/luna-tools-a76zxsuk/result.json`, exit 0;
+  `git diff --check` passed.
+
+## Completed domains in NF and ordinary callable instances
+
+NF input preparation, stored-type admission and formation requirements now use
+source domains when substituting completed arguments. An input declared as
+`value: T` can receive a Type when T completes to Type, including when subsequent
+inputs contain a nominal type indexed by that value. Opaque NF heads remain
+opaque. This uses the same structural substitution evidence as nominal layouts;
+it does not authorize arbitrary Type/value sort exchanges.
+
+NF domain checks collect the transitive dependency closure of the current input,
+not the entire earlier telescope. The first implementation revisited every prefix
+and failed the existing 100-independent-bool-input budget test. That test remains
+unchanged and now passes. Substitution, domain copying and predicate expansion
+consume the shared invocation budget.
+
+Ordinary callable admission, signature/body specialization, default arguments,
+formation predicates, deferred capabilities and invocation conditions use declared
+domains as well. Predicate substitution retains the ordinary input frame from the
+function signature, so a requirement on an ordinary Type argument still waits for
+that argument. Cached callable bodies do not suppress current contract checks;
+rejected formation does not populate the instance cache. Frozen callable recovery
+and explicit host invocation use the same domain-aware specialization.
+
+Source regressions cover VM/tree results, repeated calls, a nominal default and
+field read, wrong-domain rejection, and dynamic formation rejection with the PTC
+solver installed. The real sysroot regression stores `Key<Type, bool>` through
+`Object.append`, recovers it with `Object.value`, then constructs and compares an
+opaque normal form. It specifies an explicit build target because the shipped
+sysroot also contains target-dependent runtime definitions.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-h85qvoh8/result.json`, exit 0 on the final implementation.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_clause_inputs --test comptime_bytecode_types --test default_calls --test nominal_value_parameters --test type_spreads --test newtypes`:
+  `/tmp/luna-tools-e6nh4qy7/result.json`, exit 0, including formation rejection
+  with an installed PTC solver and repeated failed formation without caching.
+- Managed formatting: `/tmp/luna-tools-8559v_cw/result.json`, exit 0.
+
+The broader sysroot run `/tmp/luna-tools-d9mzuda0/result.json` failed. Three old
+fixture tests omit the ordinary bool binding; the tuple/optional/math/iteration
+integration fails with `field projection requires a supported struct`. The new
+Object test initially lacked target pointer-width information; its invocation
+now supplies `--build-target x86_64 linux 64`. The other four failures remain
+separate unresolved work; no clean-baseline run was made to attribute them to a
+particular historical commit. This stage does not claim the full sysroot suite
+passes, nor that all trait/IIR substitution consumers have been migrated.
+
+- Final sysroot check:
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_meta_object_preserves_type_valued_indices_in_normal_inputs`:
+  `/tmp/luna-tools-r76hdp6c/result.json`, exit 0. `git diff --check` passed.
+
+## Sysroot fixture follow-up
+
+The four outstanding sysroot failures are resolved. Minimal builtin fixtures now
+bind bool as an ordinary builtin symbol and export it through their preludes;
+the iterator fixture also exports its existing primitive bindings. The composite
+native case selects `OptionalOps<bool>` explicitly, reflecting the author's
+runtime/comptime trait split instead of the superseded inherent optional method.
+The tuple, optional, LLVM math and inline iteration checks remain intact.
+
+`python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes`
+from `/home/fin/luna` completed with exit 0; all eight cases passed, including
+native host execution and the real meta Object/NF integration. Evidence:
+`/tmp/luna-tools-_1k2pcrb/result.json`. `git diff --check` passed. This corrects
+stale fixtures, not compiler semantics or expected program behavior.
+
+## Completed domains in runtime function materialization
+
+Runtime functions now specialize dependent clause inputs by their completed
+source domains. The new source regression first failed at IIR formation with
+`expected comptime-value, got type`. It now executes ordinary, inline and staged
+runtime calls taking `Key<Type, bool>`, with a retained formation requirement and
+field access. The function template transformation keeps its ordinary input frame
+for body annotations, defaults and contracts, and copies each output field once.
+
+Declaration-world queries expose bounded domain copies. Concrete materialization
+admits value inputs before specializing templates; Type-only declarations reuse
+strict substitution and the already completed instance-key Type checks. This
+avoids redundantly traversing large unused Type arguments. The original phantom
+input/copy-expansion regression still fits its unchanged 3000-step budget while
+the repeated-type body still exhausts it. No special library-name path was added.
+
+Open runtime identities and finite template-storage tables use the same completed
+domain rule. The table regression covers Type-valued dependent indices, malformed
+inputs, budget failure, and successful construction after failure. Trait method
+selection and other independent fixed-sort consumers remain separate migration
+work; this stage does not claim all dependent declarations are implemented.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p iir -p materialization --lib --tests -- --skip nested_scalar_comparisons_and_blocks_reach_logical_depth_limits`:
+  `/tmp/luna-tools-0ivzitms/result.json`, exit 0. One known failing deep-fold test
+  was excluded only for this follow-up run, not deleted or ignored in source.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test instantiation instance_copy_budget_counts_expanded_parameter_occurrences_and_recovers -- --nocapture`:
+  `/tmp/luna-tools-ver86xlu/result.json`, exit 0 with the original budget assertions.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test default_calls --test comptime_clause_inputs --test sysroot_preludes`:
+  `/tmp/luna-tools-r79z0j2q/result.json`, exit 0 before the final Type-only fast-path
+  optimization. Includes the real sysroot and runtime specialization regressions.
+- Managed formatting: `/tmp/luna-tools-hp6l0i7s/result.json`, exit 0.
+
+Expanded checks exposed additional failures, retained for follow-up:
+
+- The unrestricted NIR/IIR/materialization run
+  `/tmp/luna-tools-t2mzoq05/result.json` aborted in
+  `staging::tests::nested_scalar_comparisons_and_blocks_reach_logical_depth_limits`
+  with a host stack overflow. The staging folder was not changed in this stage.
+- The unrestricted instantiation run `/tmp/luna-tools-wb5ht9aw/result.json`
+  aborted in `concrete_graph_executes_without_source_templates` with a host stack
+  overflow. It also exposed the redundant-input budget regression fixed above.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test instantiation --test staged_aggregate_contracts --test test_templates -- --skip concrete_graph_executes_without_source_templates`:
+  `/tmp/luna-tools-2wz2egw5/result.json`, exit 101 overall. The remaining 56
+  instantiation tests and all 31 staged aggregate tests passed; test_templates
+  had 67 failures, with missing ordinary bool bindings in its old fixture path.
+  No template tests were changed to suppress these failures. No clean-baseline
+  run was made to attribute the stack failures to a historical commit.
+
+Final source regression:
+`python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters type_valued_indices_specialize_runtime_function_instances`:
+`/tmp/luna-tools-_tblahne/result.json`, exit 0. `git diff --check` passed.
+
+## Staged folding reaches its logical depth limit without stack overflow
+
+The previously failing IIR scalar/block/discard depth regression now passes on
+the unchanged test-thread stack. General folding used one large match containing
+all branch-local Expr temporaries. In the unoptimized x86_64 test binary,
+`objdump -Cd` showed a 0x2ff8-byte (12280-byte) general-fold frame, compounded by
+recursive dispatch and local preparation. A depth limit alone could not prevent
+host stack exhaustion before reaching that limit.
+
+Node-specific general folding now lives in `staging/general.rs`, separated from
+dispatch and final validation. The dispatcher forwards result slots instead of
+retaining temporaries for unrelated branches. The measured block path uses a
+0x6c8-byte validation frame, 0x3b8-byte dispatch frame and 0x10a8-byte block frame
+(6952 bytes together). Other recursion frames remain unchanged; these are frame
+sizes for this build, not a release performance benchmark.
+
+No stack-size override, reduced language depth limit, budget change or test skip
+was introduced. Symbol conversion, field/scalar operations, block local binding,
+discarded evaluation, result-type validation and source propagation retain their
+existing behavior. The runtime IIR execution stack overflow is still separate.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p iir --lib nested_scalar_comparisons_and_blocks_reach_logical_depth_limits -- --nocapture`:
+  `/tmp/luna-tools-6vezg22u/result.json`, exit 0, including depths 16, 64, 127,
+  128 and 160 and successful recovery after depth rejection.
+- `python3 -B development/check.py --timeout 900 -- test -p iir --lib --tests`:
+  `/tmp/luna-tools-b1o2jct3/result.json`, exit 0 without exclusions.
+- Managed formatting: `/tmp/luna-tools-xmsl_0nc/result.json`, exit 0;
+  `git diff --check` passed.
+
+## Runtime tree execution preserves depth failure and recovery
+
+The second recorded stack overflow had two causes. Runtime tree invocations
+entered the linear bytecode driver even when its existing eligibility rules
+could never select bytecode. The tree recursion retained that driver's large
+frame at every call. The shared eligibility query now selects tree evaluation
+after ordinary invocation admission and preparation, and rejoins the same
+completion/restoration boundary. Cleanup schedules, effects, phase checks and
+bytecode eligibility are unchanged.
+
+This restored the original 20-level runtime regression. Extending it to require
+normal rejection at the default 128-call depth budget exposed a second oversized
+frame: metadata, enum/text observations and integer conversions had accumulated
+inside the common expression dispatcher. Those evaluators now live in
+`observations.rs`, retaining their original checks and behavior. In the same
+unoptimized x86_64 binary, objdump reports the common eval_inner frame changing
+from 0x4548 bytes (17736) to 0x48 bytes (72). These are build-specific stack-frame
+measurements, not a throughput claim.
+
+The source IIR test now attempts 200 recursive calls, checks DepthExhausted, then
+successfully reuses the same interpreter for its original entry. It still checks
+execution after discarding the source package and absence of runtime template
+instantiation events. Neither host stack size nor default depth budget changed.
+Tree execution still uses native recursion; this is not a claim that arbitrary
+user-configured depth limits or every unsupported-bytecode path are stackless.
+
+Validation from `/home/fin/luna`:
+
+- The isolated original failure was reproduced in
+  `/tmp/luna-tools-sv8c7iwj/result.json`; the stronger depth case initially
+  overflowed in `/tmp/luna-tools-k_ua2dov/result.json` after the routing fix alone.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test instantiation concrete_graph_executes_without_source_templates -- --nocapture`:
+  `/tmp/luna-tools-jb2w64n_/result.json`, exit 0 with the added depth/recovery check.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --tests`:
+  `/tmp/luna-tools-7dorjura/result.json`, exit 0 on the complete implementation.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test instantiation --test staged_aggregate_contracts --test sysroot_preludes`:
+  `/tmp/luna-tools-e37e3zpr/result.json`, exit 0 without exclusions: all 57
+  instantiation, 31 staged aggregate and 8 sysroot cases passed.
+- Managed formatting: `/tmp/luna-tools-62uq4jx5/result.json`, exit 0;
+  `git diff --check` passed. The earlier template fixture failures remain separate.
+
+## Template fixture bindings restored
+
+The test_templates compile entry now uses the existing standalone fixture writer
+for both its main source and sibling modules. This appends an ordinary bool
+binding when needed, retaining source offsets and existing explicit bindings.
+Production primitive lookup and all test expectations are unchanged.
+
+`python3 -B development/check.py --timeout 900 -- test -p luna --test test_templates`
+from `/home/fin/luna`: `/tmp/luna-tools-fzhxygw6/result.json`, exit 0, all 81 cases
+passed without exclusions. This resolves the 67 earlier fixture failures rather
+than changing template semantics. `git diff --check` passed.
+
+### Implementation argument admission follows completed domains
+
+Implementation head admission now uses bounded `DeclarationSubstitution` for
+parameter domains. A dependent input completed to `Type` can carry a type value
+without making later parameter substitution fail the original fixed-sort check.
+Value/layout admission and captured-domain evidence remain mandatory. Regression
+coverage includes later parameters, wrong sorts, budget exhaustion and recovery.
+
+Validation in `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution`: exit 0,
+  `/tmp/luna-tools-6fr6bhcg/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: exit 0,
+  `/tmp/luna-tools-upa5yo_6/result.json`.
+
+The source regressions for `Key<Type, bool>` inherent/trait method selection still
+fail before admission: head inference creates fixed-sort metavariables and leaves
+head obligations unsettled (`/tmp/luna-tools-54lpr6cz/result.json`). These pending
+source tests remain outside this admission commit. Head inference and proof replay
+still need completed-domain integration; this stage does not claim source support.
+
+### Domain-aware implementation evidence replay
+
+Implementation requirement specialization, head-match replay, and final type
+evidence replay now use bounded declaration-domain substitution. Replay checks
+completed domains rather than comparing actual arguments to source binder sorts.
+The regression builds independent reflexive proofs for a nominal subject, trait
+argument, and requirement containing a Type-valued dependent input; it also rejects
+forged argument sorts, changed type identity, missing requirements, and exhausted
+budgets, then verifies recovery. No value equations are introduced into PTC.
+
+Validation in `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution`: exit 0,
+  `/tmp/luna-tools-dmjwa9ec/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test trait_phases --test trait_purity`:
+  exit 0, `/tmp/luna-tools-n7rbjoj5/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: exit 0,
+  `/tmp/luna-tools-6i4u3jgv/result.json`; `git diff --check`: exit 0.
+
+Remaining: implementation head inference still allocates source-sort metavariables.
+The fixed-sort `InferenceTerm::Instantiate` and matching decomposition cannot yet
+represent a dependent input whose completed domain changes its sort to Type. The
+two pending source regressions remain uncommitted; replay support alone does not
+establish end-to-end implementation selection.
+
+### Staged dependent-domain implementation inference
+
+Head inference can now resume when provisional assignments complete the domain
+of an unresolved input and change its argument sort. A bounded, candidate-local
+inspection supplies the known inputs; declaration-domain substitution specializes
+the remaining head. Each round removes known parameters and consumes the existing
+inference budget, reserving a separate replay share. The original declaration's
+head proofs and completed requirements are checked before returning the match.
+Fixed-sort inference variables and ordinary substitutions remain strict.
+
+Inherent method signature specialization now uses the same domain-aware input
+substitution as ordinary calls. Both pending source regressions execute
+`Key<Type,bool>` methods through IIR: inherent selection and explicit trait
+selection. Solver coverage additionally checks reversed dependency order, repeated
+input conflicts, invalid sorts/domains, budget exhaustion and subsequent recovery.
+No constructor-name exceptions or program-value PTC equations were added.
+
+Validation in `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution`: exit 0,
+  `/tmp/luna-tools-1ctngd0d/result.json`.
+- Final affected suites after removing an unnecessary domain clone:
+  `python3 -B development/check.py --timeout 900 -- test -p type_resolution -p luna --test implementation --test nominal_value_parameters --test trait_phases --test trait_purity`:
+  exit 0, 78 implementation, 272 nominal input, 30 phase, and 21 purity tests;
+  `/tmp/luna-tools-ez103db4/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0, `/tmp/luna-tools-b6fgyah8/result.json`; `git diff --check`: exit 0.
+
+This closes the two source selection failures recorded above. Unresolved domains
+remain pending; staging does not invert opaque normal-form heads or authorize
+export of incomplete candidate state. Other fixed-sort consumers still need their
+own contract audit; this is not a claim that all dependent-type paths are complete.
+
+### Type-valued trait interface indices reach runtime dispatch
+
+Trait argument admission now completes declared domains (including `Self`) before
+checking argument sorts. Structural/value admission remains separate. Direct
+interface inputs whose declared value sort awaits domain completion retain a
+pending relation; staged head matching must establish and replay that relation.
+Elaboration, NIR phase checks, dispatch specialization, and retained runtime
+interface signatures now use declaration-domain substitution. Program contracts
+have a bounded domain-aware substitution entrypoint retaining ordinary input
+frames, predicate expressions and snapshot identities.
+
+The source regression executes `Read<Type,bool>` on `Key<Type,bool>` and rejects
+`Read<Type,char>`. The real-sysroot regression uses `Object.append` and typed
+`Object.value`, reads the payload in a function-local comptime declaration, then
+constructs the runtime value and dispatches the parameterized trait method. This
+does not claim implicit splicing of arbitrary comptime nominal values: the initial
+file-scope constant transfer was rejected for lacking a Splice protocol.
+
+Validation in `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p type_resolution -p luna --test calls --test trait_parameters --test implementation --test nominal_value_parameters --test trait_phases --test trait_purity --test sysroot_preludes`:
+  exit 0, `/tmp/luna-tools-9qxumqei/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p type_resolution -p materialization`:
+  exit 0, `/tmp/luna-tools-ot5qpbtt/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: exit 0,
+  `/tmp/luna-tools-yfz8dogh/result.json`; `git diff --check`: exit 0.
+
+Remaining audits include capability/parent traversal, staged method contracts and
+program-summary consumers still using fixed-sort substitutions. Passing this
+ordinary runtime dispatch path does not establish those paths.
+
+Final source recheck after adding the mismatched interface rejection and reusing
+the elaboration substitution inputs:
+`python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test sysroot_preludes --test trait_phases --test trait_purity`: exit 0,
+`/tmp/luna-tools-o6is6dk4/result.json` (273 + 9 + 30 + 21 cases).
+
+### Parent interfaces and capability propagation preserve dependent domains
+
+Added a structural trait-input substitution entrypoint for `Self` followed by the
+interface inputs, plus bounded interface/requirement mapping. Inherited member
+lookup, capability lookup roots, subject-guarantee propagation, given-evidence
+traversal, trait formation, impl qualification and materialized impl capabilities
+now use completed declaration domains. Value admission and formation obligations
+remain independent; parent traversal does not promote a parent to a lookup root.
+
+A source regression executes both explicit `Child<Type,bool>` parent-method
+lookup and a generic `K :- Child<Type,bool>` call through IIR. Solver regressions
+cover parent-to-capability propagation, exact type identity, subject guarantees,
+low-budget rejection/recovery, and impl qualification with/without its required
+capability. The original source failure was fixed-sort member lookup
+(`/tmp/luna-tools-qaaz6kop/result.json`).
+
+Validation in `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution -p nir -p materialization`:
+  exit 0, `/tmp/luna-tools-pz9e6rja/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: exit 0,
+  `/tmp/luna-tools-7wlfb4ys/result.json`; `git diff --check`: exit 0.
+
+Remaining: staged method/program-summary consumers and other fixed-sort contract
+paths require separate audits. This change establishes these traversal paths,
+not arbitrary runtime/comptime dispatch completion.
+
+Final source verification:
+`python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test trait_phases --test trait_purity --test sysroot_preludes`:
+exit 0, `/tmp/luna-tools-_jqbk15q/result.json`.
+
+### Runtime trait program summaries retain dependent domains and scope
+
+Added a bounded method-summary constructor using declaration input domains. It
+instantiates the callable signature in caller scope, then shifts substituted
+caller inputs beneath the method's ordinary input frame for program predicates,
+type requirements and capabilities. Program contracts, local/result identities,
+snapshots and retained method parameters survive summary construction. Flow
+analysis now uses these summaries and distinguishes exhausted substitution fuel
+from malformed signatures.
+
+The source regression exercises `Read<Type,bool>` with a runtime precondition:
+`read(true)` executes through IIR and `read(false)` is rejected for its
+precondition. Previously the valid call failed with `invalid-signature`
+(`/tmp/luna-tools-3tgeadzt/result.json`). The NIR regression checks that a caller
+Type input and a method-local Type input remain distinct in the actual predicate
+expression as well as capability arguments, with scope rejection and budget
+recovery. No program-state proposition is routed through PTC.
+
+Validation in `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p program_verification`:
+  exit 0, `/tmp/luna-tools-y6vifml_/result.json`.
+- After the flow budget diagnostic mapping:
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test trait_purity --test staged_aggregate_contracts --test sysroot_preludes`:
+  exit 0, `/tmp/luna-tools-n9a8286g/result.json` (275 + 21 + 31 + 9 cases).
+- Final predicate capture regression:
+  `python3 -B development/check.py --timeout 900 -- test -p nir --test calls`:
+  exit 0, `/tmp/luna-tools-6yt1tlrs/result.json`.
+
+Remaining: staged method specialization and memory-method contract consumers
+still need domain-aware substitution audits; this stage closes the ordinary
+runtime flow-summary failure.
+
+Final formatting: `python3 -B development/command.py --timeout 120 -- cargo fmt --all`,
+exit 0, `/tmp/luna-tools-w9m33d4x/result.json`; `git diff --check`: exit 0.
+
+### Staged entry contracts and memory inference use completed input domains
+
+Staged trait materialization now specializes requirements, capabilities and
+program predicates through declaration-domain evidence before the existing local
+binding alignment. The source regression executes a Type-valued interface with
+a comptime ordinary input and rejects its false precondition. The original
+materialization failure is recorded in `/tmp/luna-tools-54ydaxg7/result.json`.
+
+Composed memory method contracts now use the same domain evidence. Their named
+body and callable/closure signatures, immutable value observations, operation
+identities and text-region body specialization no longer impose source binder
+sorts on completed Type-valued inputs. A memory query caches immutable declared
+domains, not argument-derived sorts. Its regression alternates scalar and Type
+inputs in the same query, rejects mismatched arguments, and checks failed scans
+and subsequent queries cannot reuse incomplete or stale evidence.
+
+The composed-method source regression removes the implementation's inherited
+precondition and still observes the interface's pointer read and rejection edge,
+without modifying the package. The text regression preserves the caller's backing
+region through `echo<Type,bool>` and checks budget recovery. The direct composed
+query originally failed (`/tmp/luna-tools-3trf0m3w/result.json`); merely executing a
+pointer call had not exposed that missing analysis path.
+
+Validation in `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 900 -- test -p program_verification -p materialization`:
+  exit 0, `/tmp/luna-tools-03fgnugt/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test method_memory_contracts --test staged_aggregate_contracts --test captured_memory --test effect_memory_transfers --test text_regions --test instantiation --test sysroot_preludes`:
+  exit 0, `/tmp/luna-tools-8ldq5d9t/result.json`, no exclusions.
+- Final additional text-origin regression:
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test text_regions type_valued_dependent_inputs -- --nocapture`:
+  exit 0, `/tmp/luna-tools-bhmrnraq/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: exit 0,
+  `/tmp/luna-tools-dsqud678/result.json`; `git diff --check`: exit 0.
+
+These results close the staged and composed-memory failures above. They do not
+claim every declaration-substitution consumer elsewhere in the compiler has
+been migrated or that arbitrary dependent program verification is complete.
+
+### Associated items specialize through declaration domains
+
+Associated defaults and selected implementation values now use their declared
+input domains, allowing a dependent value parameter to receive a Type value.
+The associated query engine applies the same bounded substitution to member
+types, requirements, capabilities, selected templates and preserved projections.
+Selection evidence, member identity, scope checks and completed-value validation
+remain required. Normal-form heads are not unfolded.
+
+NIR expression rewriting now represents a completed Type-valued dependent input
+as TypeValue, rather than leaving a ComptimeValue node around a Type term. This
+also supports an ordinary `assoc data:T=index` when T becomes Type.
+
+Source regressions execute concrete and generic defaults, inherited lookup, and
+the same dependent associated declaration with both boolean and Type inputs.
+They reject a mismatched nominal index. Independent NIR and solver regressions
+cover representation, exact selected arguments, invalid domains, budget failure
+and recovery. Initial source failures are preserved in
+`/tmp/luna-tools-jec50f_f/result.json` (default substitution),
+`/tmp/luna-tools-5fa2synr/result.json` (generic selected value), and
+`/tmp/luna-tools-cjuv1uxe/result.json` (dependent Type-value representation).
+
+Validation in `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p type_resolution`:
+  exit 0, `/tmp/luna-tools-piqix059/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test trait_phases --test trait_purity --test sysroot_preludes`:
+  exit 0, `/tmp/luna-tools-shlfshrt/result.json`, no exclusions.
+- `python3 -B development/check.py --timeout 900 -- test -p materialization -p program_verification`:
+  exit 0, `/tmp/luna-tools-29lv_trn/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-75u0awz7/result.json`; `git diff --check`: exit 0.
+
+Other declaration-substitution consumers still require audit. This stage does
+not claim all associated initializer or dependent specification paths complete.
+
+### Chained associated initializers and explicit method overrides
+
+Checker input-domain substitution is now reusable across type terms and
+interface queries. A selected associated initializer uses that context for Self
+and interface inputs, so a dependent default can read another associated member
+from the same selected implementation, including an explicit override.
+
+Explicit method compatibility now specializes the public signature, clause
+input domains, type requirements and capabilities using completed declaration
+domains. Candidate associated equations use the interface domain context.
+Program-contract inheritance separately specializes predicates in the actual
+method's ordinary input frame; predicates still belong to program verification.
+The source regressions execute chained defaults and overrides, reject a stale
+associated result type, execute an explicit method with an associated signature,
+reject a false inherited precondition, and reject a strengthened precondition.
+
+Initial failures: `/tmp/luna-tools-vid6t9xu/result.json` (chained initializer),
+`/tmp/luna-tools-nhng6axy/result.json` (override signature), and
+`/tmp/luna-tools-lq8myl9g/result.json` (program-contract inheritance).
+
+Validation in `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test trait_phases --test trait_purity --test method_memory_contracts --test staged_aggregate_contracts --test sysroot_preludes`:
+  exit 0, `/tmp/luna-tools-gr6fhg0g/result.json`, no exclusions.
+- `python3 -B development/check.py --timeout 900 -- test -p program_verification`:
+  exit 0, `/tmp/luna-tools-2keg4ll3/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-svz2g8pj/result.json`; `git diff --check`: exit 0.
+- Expanded `python3 -B development/check.py --timeout 900 -- test -p elaboration -p program_verification`:
+  exit 101, `/tmp/luna-tools-9vnhr__t/result.json`. It stops at
+  `failed_effect_inference_does_not_unfold_opaque_inputs_or_mutate_scheme`:
+  inference succeeds where the test expects failure. This test directly uses
+  the Scheme re-export from type_resolution. `git diff --exit-code HEAD --
+  compiler/type_resolution compiler/nir compiler/elaboration/tests/effect_inference.rs
+  compiler/elaboration/src/lib.rs` exits 0 against the pre-stage HEAD ed391bd2.
+  The inference implementation, its dependencies and this test were not changed
+  in this stage; no separate baseline build was run. Its semantic expectation
+  and implementation still need investigation; the expanded suite is not green.
+
+Remaining declaration-only and contextual-code substitution consumers are not
+claimed complete by this stage.
+
+### Retained effect heads: inference proposals versus inverse equations
+
+The effect-inference failure from the previous stage was an obsolete rejection
+expectation, not a missing requirement to forbid all matching below a normal-form
+head. The authority is docs/type/type-identity.md (retained head identity and the
+separate matching relation), docs/type/type-patterns.md (observing retained head
+arguments), and docs/compilation/elaboration.md (call-local inference variables
+versus rigid definition inputs). No language rule was changed for a test.
+
+The matcher already proposes substitutions from syntactically equal retained
+heads and keeps the original application equality as an obligation. It does not
+unfold a body or assert an inverse theorem. The repaired regression distinguishes
+that valid proposal from three failures: a bare result type, a different head,
+and an incompatible expected result. It also checks that an assumed equality
+between two head applications does not prove equality of their rigid arguments.
+The original scheme remains unchanged after both successful and failed queries.
+
+A source integration regression infers a user-defined normal-form input through
+a callback's effect signature, executes the matching handler through IIR, and
+rejects replacing the retained handler label with the function body's bare type.
+No compiler implementation or semantic documentation needed modification.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --test effect_inference`:
+  exit 0, `/tmp/luna-tools-2xfiu9yw/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test normal_form_inference`:
+  exit 0, `/tmp/luna-tools-wrnnnv5v/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration`:
+  exit 0, `/tmp/luna-tools-dn5x_plh/result.json`, no exclusions. This closes
+  the expanded-suite failure recorded in the previous stage.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-gr7qgzqm/result.json`; `git diff --check`: exit 0.
+
+### Declaration projections and concrete parent obligations
+
+Declaration-only member-domain lookup and inherited interface traversal now use
+completed input domains while retaining the caller telescope. These paths still
+read declaration contracts without manufacturing implementation evidence.
+Concrete implementation checks specialize parent and Self-capability obligations
+through the same bounded trait input context before proving them.
+
+Source coverage includes public function signatures returning associated types,
+lookup through a value-indexed child trait, and a default method whose declared
+parent fixes Type-valued inputs. Missing parent implementations, a different
+parent instance and a wrong associated argument type remain rejected.
+The original combined public/inherited regression failed at the concrete child
+implementation (`/tmp/luna-tools-bwoyzx7d/result.json`); a temporary diagnostic
+trace identified check_interfaces as the remaining failure after declaration
+substitution was migrated. The trace code was removed before final validation.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test trait_phases --test trait_purity --test sysroot_preludes`:
+  exit 0, `/tmp/luna-tools-x64ytm5z/result.json`, no exclusions.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-16dxwph4/result.json`; `git diff --check`: exit 0.
+
+The remaining contextual-code and ordinary-argument requirement substitution
+paths still require their own audit; this is not a blanket completion claim.
+
+### Ordinary argument requirements retain declaration domains
+
+Ordinary-input type requirements and capability checks now specialize the callee
+signature and obligations through declaration input domains. The ordinary frame
+and the existing shift of caller arguments remain explicit before substituting
+ordinary argument bindings. A Type-valued declaration index therefore no longer
+causes unrelated ordinary Type requirements to fail with a source-sort mismatch.
+
+Regressions cover equality and trait requirements, generic forwarding, and a
+caller ordinary Type binding used both as a declaration index and as an ordinary
+argument (`keep<Type,U>(U,value)`). False equality inputs and missing trait
+implementations remain rejected. Both initial positive cases failed in
+`/tmp/luna-tools-39dcdee4/result.json`; the final forwarding coverage passes.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test instantiation --test trait_phases --test trait_purity --test sysroot_preludes`:
+  exit 0, `/tmp/luna-tools-k_z7bzps/result.json`, no exclusions.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-2wleg9h7/result.json`; `git diff --check`: exit 0.
+
+Contextual-code method contracts and other unreviewed substitution consumers
+remain outside this stage's completion claim.
+
+### Contextual-code contracts and generator captures complete input domains
+
+Contextual-code method program refinement now specializes predicates with
+bounded declaration-domain substitution, charging the required-invocation
+budget before continuing data-only implication checking. Generator signature
+substitution uses the same domain context. Inference schemes explicitly supply
+their external generic frame: validating these open signatures as closed terms
+caused nine regressions, now fixed without weakening scope validation.
+
+Captured value clauses are classified after completing their domains. A clause
+whose domain becomes Type retains its original declaration identity and receives
+the ordinary Type-value representation; it does not gain a fabricated rigid Type
+binder. Source type lookup likewise checks the completed domain before accepting
+a captured clause as a Type. The new cases execute code methods with public
+preconditions, reject strengthening and invalid invocation, generate nominal
+values with both Type and scalar indices, and reject a wrong nominal index.
+Initial failures: `/tmp/luna-tools-5c9a4f5j/result.json`,
+`/tmp/luna-tools-1mpwwuk8/result.json`, `/tmp/luna-tools-9hjbsuf9/result.json`,
+and `/tmp/luna-tools-zqidwfm_/result.json`. The closed-scope regression is recorded
+in `/tmp/luna-tools-3s9v57d1/result.json` and resolved by explicit scheme frames.
+
+The broad CMTT suite also contained an obsolete rejection of inference through
+a retained normal-form pattern subject. As established in the preceding effect
+inference audit, this is a candidate proposal, not head unfolding or an inverse
+equality theorem. That test now accepts matching retained heads while rejecting
+conflicting indices and a bare body-result type.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt_methods`:
+  exit 0, `/tmp/luna-tools-m5zqyswr/result.json`, all 144 cases.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --test cmtt_phase_boundaries --test quote_functions --test nominal_value_parameters --test trait_phases --test trait_purity --test sysroot_preludes`:
+  exit 101, `/tmp/luna-tools-rgt2wl9s/result.json`. CMTT (580), phase boundaries
+  (3), and nominal parameters (288) pass. quote_functions then fails 100 of 104
+  cases during HIR lowering because its standalone fixture omits primitive
+  bindings, notably bool. This happens before the modified elaboration paths;
+  that test entrypoint still needs migration. Do not report this command green.
+- Remaining groups run explicitly:
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test trait_phases --test trait_purity --test sysroot_preludes`:
+  exit 0, `/tmp/luna-tools-ee4d56c9/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-koj69jek/result.json`; `git diff --check`: exit 0.
+
+Quote-function expansion has separate substitution consumers; this stage does
+not claim that every contextual-code pathway has been migrated.
+
+### Standalone quote fixtures load primitive bindings
+
+The quote_functions entrypoint now uses the shared standalone primitive-binding
+fixture writer, matching other no-sysroot compiler tests. Production primitive
+lookup remains ordinary builtin.prelude lookup; no compiler keyword or fallback
+was restored. Existing quote expectations and compiler implementation are unchanged.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test quote_functions`:
+  exit 0, `/tmp/luna-tools-8p_b8c5z/result.json`, all 104 cases without exclusions.
+- `git diff --check`: exit 0.
+This resolves the fixture failures recorded in the previous stage.
+
+### Quote expansion specializes declaration domains
+
+Quote expansion now caches immutable declaration input domains instead of source
+sorts. Template specialization uses the bounded Function domain substitution,
+and public trait program contracts are specialized in the completed method's
+ordinary input frame before existing binding remapping. Domain collection,
+selected domain copies and substitutions consume the expansion budget.
+
+The new source cases cover default and explicit quote implementations with
+Type-valued interface indices, nonempty inherited preconditions, and a direct
+quote function that references an ordinary input twice. IIR event observations
+show one evaluation of that input and no quote runtime call. Invalid input
+domains and false interface preconditions remain rejected. The original template
+failure is `/tmp/luna-tools-6yo_x2_k/result.json`.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test quote_functions --test cmtt_methods --test cmtt_phase_boundaries --test nominal_value_parameters --test sysroot_preludes`:
+  exit 0, `/tmp/luna-tools-rfopj35w/result.json`, no exclusions.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-kt2kvfrz/result.json`; `git diff --check`: exit 0.
+
+This closes the exercised quote expansion paths, not all remaining declaration
+substitution consumers or the full CMTT implementation.
+
+### Partial enum contexts complete dependent index domains
+
+Enum payload inference now consumes known contextual arguments in declaration
+order, completing each later domain before assigning its inference sort. Only
+unknown inputs become open inference slots. Payload field types use declaration
+domains when specialized; final constructor admission and field compatibility
+checks remain unchanged. The shared trait-domain prefix substitution also uses
+bounded domain evidence, so a later Type parameter can follow an index whose
+completed domain is Type.
+
+The source regression first exposed the prefix error in
+`/tmp/luna-tools-o6v2ezz_/result.json`; fixing that revealed the unresolved partial
+constructor context in `/tmp/luna-tools-dgcimokp/result.json`. Final cases execute
+complete and partial enum contexts, tuple payload spreads and record defaults,
+and reject a distinct nominal index. No concrete enum name is recognized by the
+implementation, and normal-form heads remain opaque.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test cmtt_methods --test quote_functions --test sysroot_preludes`:
+  exit 0, `/tmp/luna-tools-we46dsbe/result.json`, no exclusions.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-xyn5t139/result.json`; `git diff --check`: exit 0.
+
+### Inherited declaration inputs complete method type defaults
+
+Type-clause default completion now uses declaration-domain substitution in the
+saved caller scope. A method can inherit `T, index:T` from its owner and complete
+its own default when `T` is Type and `index` is a Type value. Previously the final
+substitution still required the source comptime-value sort; the executable
+reproduction failed with `expected comptime-value, got type` in
+`/tmp/luna-tools-9h16uys4/result.json`.
+
+Regression coverage executes nominal defaults, explicitly supplied function
+inputs, inherited method defaults, defaults containing the inherited nominal
+index, and explicit overrides. It also checks ordinary scalar indices and
+rejects mismatched nominal identities. Default evaluation order, cyclic/default
+reference checks, and declaration admission remain in place.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test cmtt_methods --test sysroot_preludes`:
+  exit 0, `/tmp/luna-tools-1ecicncb/result.json`, no exclusions.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-9z5ra111/result.json`; `git diff --check`: exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test default_calls`:
+  exit 0, `/tmp/luna-tools-dp82id8n/result.json`, no exclusions.
+
+Separate open inference gap: removing `<Type,bool>` from the call in
+`type_valued_indices_complete_function_type_defaults` reports `NeedsContext`
+(`/tmp/luna-tools-h0d_64te/result.json`). Explicit inputs work. Ordinary call
+Scheme inference retains fixed parameter sorts; unlike implementation matching,
+it still needs domain staging when solving a preceding input changes a later
+input's sort. This change fixes default substitution, not that inference path.
+
+### Ordinary call inference stages dependent declaration domains
+
+The previously recorded `read(Tagged<Type,bool>{...})` inference gap is closed
+for ordinary generic calls. A declaration-aware Scheme entrypoint observes
+candidate-local proposals, completes input domains in declaration order, and
+rebuilds the candidate if a dependent input changes sort. It retains inference
+slot identities, including provisional ordinary Type inputs, and replays actual
+argument/result relations against the domain-specialized signature. Previously
+known proposals are constrained again. Candidate completion still discharges
+all relations; the caller still performs declaration admission and requirements.
+
+This path is connected to independent ordinary input preparation, final generic
+call checking and generic call descriptions used by deferred signatures.
+Domain completion uses the shared DeclarationSubstitution, preserves the caller
+scope, and does not unfold normal-form heads. Staging and observations have
+bounded work; exhausted candidates do not mutate the reusable Scheme.
+
+Tests cover Type-valued and scalar indices, defaults, deferred forwarding,
+ordinary comptime Type inputs, shared-index conflicts, invalid input domains,
+and declaration requirements. Solver tests additionally cover provisional slots,
+caller-bound Type values, scope escape, expected-result conflicts, insufficient
+information, budget failure and recovery using the unchanged Scheme.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution`:
+  exit 0, `/tmp/luna-tools-9h7hyw2c/result.json`, no exclusions.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test default_calls --test open_functions --test sysroot_preludes`:
+  exit 0, `/tmp/luna-tools-nbpgjdwo/result.json`, no exclusions.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-9j3485zj/result.json`; `git diff --check`: exit 0.
+
+Remaining scope: effect input inference, spread-specific inference and CMTT
+entrypoints still contain fixed-sort Scheme consumers. This is not a claim that
+all dependent inference paths are complete.
+
+### Effect formation and inference complete dependent Type inputs
+
+Effect request inference now uses declaration-domain staging. Formation admits
+arguments against completed domains and specializes signatures, type predicates
+and capability requirements through DeclarationSubstitution; it no longer rejects
+Type-valued indices solely because their source binder was comptime-value.
+
+A shared bounded effect-signature specialization method is used by IIR
+materialization and memory/move effect analysis. Formation, allowed-row identity,
+handler routing, ABI restrictions and resource obligations remain distinct
+checks. The initial source reproduction failed during formation in
+`/tmp/luna-tools-wi4stvme/result.json`; after fixing formation it reached the
+fixed-sort materialization failure in `/tmp/luna-tools-nphe29u1/result.json`.
+
+Defaults now wait for parameter-domain dependencies as well as expression reads.
+The effect-group result-context case exposed the missing T dependency of a
+`.copy:T=index` default in `/tmp/luna-tools-hdq_r4mn/result.json`. Completing the
+shared dependency calculation fixes this without treating the installed handler
+row as an inference source.
+
+Source cases execute inferred and explicit operations, effect groups, scalar
+indices, result context and dependent group defaults. They reject a different
+handler identity and a false declaration requirement. Formation tests check
+completed signature identity, invalid domains, false predicates, exhausted
+budgets and recovery. This does not integrate spread-specific or CMTT inference
+consumers with domain staging.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p elaboration -p materialization -p program_verification`:
+  exit 0, `/tmp/luna-tools-xy5j590t/result.json`, no exclusions.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test default_calls --test effect_contracts --test effect_spreads --test effect_memory_transfers --test sysroot_preludes`:
+  exit 0, `/tmp/luna-tools-49f0s0iu/result.json`, no exclusions.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-up0nigo1/result.json`; `git diff --check`: exit 0.
+
+### CMTT generator calls share dependent-domain inference
+
+Generator call candidates now use declaration-domain staging. Deferred Type and
+value defaults both retain inference slots; dependency availability is inspected
+in declaration form, while default values constrain their candidate slots only
+after preparation. This removes the separate rigid-value replacement path that
+lost domain evidence when a default completed to a Type value.
+
+Generator inference views use the candidate's completed input sort for unresolved
+placeholders. Definition checking retains abstract deferred inputs of either
+sort without executing defaults; real invocations still require completion.
+The initial Type-indexed generator failed in
+`/tmp/luna-tools-8byw7rxe/result.json`; the deferred index default failed in
+`/tmp/luna-tools-liywpirl/result.json`. Broader checks exposed a definition-side
+forwarding regression (`/tmp/luna-tools-0u416hh6/result.json`), fixed by extending
+the existing abstract-default handling to value slots rather than executing or
+inventing defaults during definition checking.
+
+Source regressions execute data-input and quoted-code-input inference,
+Type-valued defaults in generated nominal types and scalar-index equivalents.
+A conflicting generated result type remains rejected. Existing generator tests
+cover default ordering, forwarding, invocation effects and phase boundaries.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --test cmtt_methods --test cmtt_phase_boundaries --test nominal_value_parameters --test sysroot_preludes`:
+  exit 0, `/tmp/luna-tools-77inh35c/result.json`, no exclusions.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-acyknh6u/result.json`; `git diff --check`: exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution --test calls`:
+  exit 0, `/tmp/luna-tools-k6cam0w_/result.json`, no exclusions.
+
+Remaining consumers include spread-specific inference and the speculative
+CMTT data-result hint path. This does not claim all inference entrypoints are
+integrated with domain staging.
+
+### Packet and speculative inference use completed declaration domains
+
+Ordinary functions, methods, deferred signatures and effect requests now pass
+input declaration identities through packet evidence collection. Packet and
+property collector candidates use the shared domain-staging entrypoint, including
+open-call input preparation. Enum packet contexts retain their already prepared
+fixed-sort frame. The original simple callback/packet case already passed via
+final ordinary-call checking (`/tmp/luna-tools-_yl2cx1h/result.json`); this change
+makes the intermediate contexts use the same domain evidence instead of relying
+on that later recovery.
+
+CMTT generic data-result hints and contextual property selection also use domain
+staging. Static value hints whose completed domain is Type now delegate to static
+Type evidence with the same depth limit. The nested ordinary comptime producer
+case failed with NeedsContext in `/tmp/luna-tools-jpawr6g7/result.json`; this
+fix supplies its completed nominal result without executing the producer.
+
+Initial parameter registration now includes positional value clauses for
+contextual data consumers (quoted input, ordinary data output). Previously their
+signature domain table contained the value domain but their parameter identity
+list omitted that input, causing `normal-form value argument is not an available
+declaration input` (`/tmp/luna-tools-kajwitn5/result.json`). The source regression
+uses a direct comptime binding and then consumes its data value.
+
+Source cases cover callback contexts from computed packets, ordinary and method
+calls, deferred result annotations, exact effect identities and nested ordinary
+comptime producers. An IIR event assertion verifies before/packet/after execute
+once each in source order. Temporary diagnostic instrumentation was removed.
+
+Remaining separate limitation: a contextual data consumer called directly inside
+another generator's ordinary argument, for example
+`~<build(inspect('(Tagged<Type,bool>{value:false})))>`, still reports that nested
+ordinary-expression scheduling is unsupported. This is recorded by
+`/tmp/luna-tools-fx9paypv/result.json`; accepting its declaration and direct
+binding does not close that scheduling gap.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test extended_calls --test effect_spreads --test open_functions --test cmtt --test cmtt_methods --test sysroot_preludes`:
+  exit 0, `/tmp/luna-tools-1u27a69a/result.json`, no exclusions.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-0b3og_ud/result.json`; `git diff --check`: exit 0.
+
+### Nested contextual data arguments and dependent result contexts
+
+The direct argument example recorded above now executes at the shared
+source-ordered generator input boundary, including when the caller provides a
+partial result context. Contextual consumers pass that context into their normal
+call candidate; ordinary expression checking still never executes these calls.
+The original failure is reproduced by the new source test in
+`/tmp/luna-tools-7lswj5xi/result.json` (exit 101).
+
+Completing this path exposed a distinct inference issue: a partial context for
+`Tagged<T,index:T>` exported the same unknown-value marker as a fixed value
+domain. When the nested call inferred `T=Type`, importing that marker created a
+stale comptime-value constraint against a Type argument and left inference
+waiting (`/tmp/luna-tools-hw9vor5f/result.json`, exit 101).
+Domain staging now records inputs whose domain remains an unresolved clause
+input. Only those slots export a dependent unknown-value context. Importing the
+context uses a settled candidate component's sort when available, preserving
+nested shape and all known evidence. Fixed-domain unknown values retain their
+original sort; the existing rejection regression remains unchanged. Failed
+context constraints and budget exhaustion do not mutate the candidate.
+
+Source regressions cover dependent Type indices, incompatible expected indices,
+source-order mutation with each nested argument evaluated once, postcondition
+failure, and unused definitions that must not execute their calls. Solver tests
+cover optional, tuple, and record nesting, budget failure/recovery, and rejection
+of conflicting known values. This is not general scheduling for contextual calls
+inside arbitrary ordinary expressions, nor a replacement of construction
+interpretation by the eventual unified invocation VM; those remain open work.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution --test calls`:
+  exit 0, `/tmp/luna-tools-m_eyrl2p/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test cmtt --test cmtt_methods --test cmtt_phase_boundaries --test sysroot_preludes`:
+  exit 0, `/tmp/luna-tools-3np6ano2/result.json`, no exclusions.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-f945ch2u/result.json`; `git diff --check`: exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution`:
+  exit 0, `/tmp/luna-tools-6klgr5oj/result.json`.
+
+### Dynamic normal-form callable bytecode
+
+Type-directed `Call` nodes whose callee has a normal-form callable signature now
+compile through the linear call protocol. Callee selection runs before arguments;
+each source-ordered argument is frozen to its ordinary residual input term before
+the next expression runs. Completion uses the existing normal-form domain and
+requirement checks and returns the opaque head application, never a head-body
+invocation. Computed callee expressions are compiled through the same expression
+worklist. No new AST evaluator or normal-form argument language was added.
+
+Call instructions retain the normal-form signature and expected input count.
+Pending bytecode calls distinguish ordinary argument values from frozen normal
+inputs, with S-expression dumps for both. Arity is checked before arguments;
+duplicate slots and illegal defaults fail at their source-order boundary. Invalid
+input domains are still rejected by the common completion routine. Existing
+ordinary call handling and fallback for other unsupported constructs remain.
+This closes dynamic normal-form application fallback, not the whole invocation
+VM migration. Source routing of dynamic named/default clauses is unchanged.
+
+The compiler regression previously required this construct to return Unsupported;
+it now checks the distinct, deterministic normal-form call dump. Differential
+execution tests cover computed callee effects, argument effects, duplicate slots,
+arity, illegal defaults, invalid domains and recovery. Source tests assert exactly
+one compiled invocation per wrapper and no head entry events, including failed
+and successful requires checks. The real shipped sysroot test passes List and
+Tuple as callable arguments and checks their original identities.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-n_hj10gm/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_types --test sysroot_preludes --test normal_form_inference --test normal_form_methods --test library_meta_objects`:
+  exit 0, `/tmp/luna-tools-b1mq67fh/result.json`.
+- After extending the source case with requires rejection/recovery:
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_types dynamic_type_factories_execute_in_bytecode_without_entering_their_heads`:
+  exit 0, `/tmp/luna-tools-w8olpj3k/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-rtllj14d/result.json`; `git diff --check`: exit 0.
+
+### Computed ordinary callees in invocation bytecode
+
+Ordinary Call lowering no longer restricts the callee to a function declaration,
+static instance, or local binding. The expression worklist compiles the callee
+first, followed by source-ordered arguments and the existing call suspension.
+Unsupported callee expressions still reject the whole compiled carrier before
+execution, so this does not silently omit unsupported operations.
+
+A callee obtained through a block, branch, field, or another call can retain a
+selected declaration instance. When an existing prepared call carries declaration
+default templates, both tree interpretation and bytecode now substitute those
+templates from the selected instance for all computed callee forms. Direct static
+instances and trait methods keep their existing preparation. This does not grant
+parameter names or default protocols to ordinary function values; source routing
+still follows docs/functions/calls-and-returns.md.
+
+Source tests require compiled invocation counts for blocks, nested selector
+calls, callable struct fields, conditional selection, and early return that skips
+argument evaluation. The existing selected-instance default regression exercises
+both local and computed carriers, comparing bytecode with interpretation.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode --test comptime_bytecode_defaults`:
+  exit 0, `/tmp/luna-tools-qjgppebl/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-129w2a34/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-sd3vxpfu/result.json`; `git diff --check`: exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_references --test comptime_bytecode_types --test library_meta_objects --test comptime_clause_inputs`:
+  exit 0, `/tmp/luna-tools-r8nmy0sx/result.json`.
+
+### Closure construction in invocation bytecode
+
+Closure construction now emits a checked constructor, source-ordered capture
+instructions, and a completion instruction. Explicit capture expressions use the
+ordinary instruction worklist; implicit captures read lexical slots through the
+same snapshot operation as interpretation. The closure body stays an owned Arc
+and enters the existing invocation compiler when called. No instruction evaluates
+its body or a capture expression with the tree evaluator.
+
+The interpreter and bytecode share callable/capture shape validation. Each
+construction allocates fresh capture cells, while repeated calls retain that
+closure's updates. Type failures, duplicate capture bindings, and early exits
+preserve capture order and do not publish a partial closure. Constructor metadata
+and pending capture environments have deterministic S-expression dumps. Runtime
+cleanup and mixed-stage interpretation retain their existing execution paths.
+
+Source regressions require compiled construction and callback invocations for
+returned closures, independent instances, local mutable captures and empty
+captures. Differential tests exercise explicit capture effects, shape failures,
+per-slot rejection, duplicate identities, early return and recovery. A shipped
+sysroot example folds a List with a privately captured counter and verifies both
+callback state retention and isolation from the outer binding.
+
+Remaining performance work: `invocation_code` caches stable declaration bodies,
+but an owned closure body currently compiles on every invocation. Reusing its
+immutable code must remain separate from invocation-result caching and must not
+retain captured environments as cache entries.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-jz5f761j/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_closures --test comptime_list_operations --test sysroot_preludes`:
+  closure and List groups passed (1 and 54 cases); overall exit 101 due to the
+  new sysroot fixture's missing whitespace before assignment,
+  `/tmp/luna-tools-5827anrv/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_closures --test sysroot_preludes --test comptime_bytecode_defaults --test comptime_bytecode_references`:
+  closure, defaults and references groups passed. Overall exit 101 because the
+  new sysroot fixture transported its comptime result into runtime without a
+  bound Splice protocol, `/tmp/luna-tools-eeykqzz_/result.json`. The fixture now
+  invokes its comptime entry directly; it does not change cross-stage semantics.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_list_fold_retains_comptime_callback_state`:
+  exit 0, `/tmp/luna-tools-9ptfjsoz/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-s35snhmc/result.json`; `git diff --check`: exit 0.
+
+### Reuse immutable owned invocation code
+
+Owned invocation bodies now share a bounded compilation cache alongside immutable
+package declarations. The owned lookup uses a process-local Arc address only as
+an index and validates a live weak identity before reusing code. It is not a
+language type identity or a persistent cache key. The cache does not hold a strong
+source-body reference or any live captured environment; copy-on-write replacement
+receives its own code. Unsupported lowering can be remembered, while compilation
+errors and budget exhaustion are never published as cache entries.
+
+Both entry classes share the existing work-weight quota. Replacement subtracts
+the old weight, and capacity eviction clears both classes. Invocation results,
+argument admission, contracts, effects and capture cells are not cached. Default
+expression execution retains its existing compilation path; this change routes
+owned invocation frames, including closure bodies, through code reuse.
+
+The callback-loop regression executes two rounds of 100 state-changing callback
+calls. It observes 202 compiled invocation frames but only two compilations
+(the wrapper and callback), with fresh capture cells on the second round. The
+independent-closure case also checks sharing of body code without sharing cells.
+Cache tests cover live identity, copy-on-write separation, source lifetime,
+unsupported-code reuse, exhausted compilation/retry, replacement accounting and
+joint declaration/owned capacity eviction. These are compilation-work results,
+not a wall-clock speedup claim or evidence of package-level world reuse.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-c7xvfpl8/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_closures --test comptime_bytecode_defaults --test comptime_bytecode_types --test comptime_list_operations`:
+  exit 0, `/tmp/luna-tools-qm2sb36z/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-4u2w4wrj/result.json`; `git diff --check`: exit 0.
+
+### Reuse prepared default-expression code
+
+Default execution frames now enter the same owned-code compilation cache as
+closure invocation frames. The immutable template Arc is the code identity;
+every evaluation still creates its current declaration-side environment, reads
+the prepared inputs, calls producers, checks contracts and delivers a new value.
+Dynamically specialized templates with distinct Arc identities remain distinct.
+This does not cache defaults' results or change the Type-only invocation-result
+cache policy.
+
+A two-round source loop supplies 100 different explicit arguments per round.
+All 200 default evaluations enter their producer, compute the per-input result
+and contribute to the expected sum. The four code bodies (wrapper, callee,
+producer and default expression) compile once each. Existing default failure,
+early-control-flow, source-order and selected-instance cases remain in the
+same focused suite.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_defaults`:
+  exit 0, `/tmp/luna-tools-83c4wozk/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-9zxt0nmi/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-ip0zjlbp/result.json`; `git diff --check`: exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test default_calls --test comptime_clause_inputs --test comptime_bytecode_closures --test library_meta_objects`:
+  exit 0, `/tmp/luna-tools-yr08jax3/result.json`.
+
+### Compile BitVec selections and concatenation
+
+BitSlice, BitIndex, BitWindow and BitConcat now lower to linear bytecode.
+Operand preparation remains source ordered: a non-bit first operand fails
+before later expressions execute, while range checks follow endpoint evaluation.
+Tree interpretation and bytecode share value-level width, bounds and budget
+checks. Opcodes contain typed registers and immutable operation descriptors,
+with S-expression dumps; they do not recursively interpret source expressions.
+
+Source tests require actual bytecode entry and explicit expected values for
+indexing, windows, concatenation, zero-width values and a 512-bit input. Negative
+and excessive endpoints are compared with tree interpretation, followed by
+successful calls on the same interpreter. Direct NIR tests cover early operand
+failure and side effects. This stage does not compile BitConvert, TakeBits or
+bit-place writeback, and does not complete symbolic-width support.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-0hr41s1w/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_bits --test comptime_bytecode_closures --test comptime_bytecode_defaults`:
+  exit 0, `/tmp/luna-tools-pu2askh4/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test execution bitvec_runtime_`:
+  exit 0, 10 selected tests, `/tmp/luna-tools-8sg3q8fd/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-es20h1kg/result.json`; `git diff --check`: exit 0.
+
+### Compile BitVec equality and representation conversion
+
+BitEqual and BitConvert now use the typed-register bit-operation instructions.
+Tree interpretation shares the same value implementation. Equality checks both
+widths and charges comparison work; conversion preserves the existing target
+layout checks, zero extension and exact signed/IEEE representations. Neither
+path evaluates an expression tree from an opcode. Operand preparation preserves
+early type failure before subsequent effects.
+
+Source coverage checks actual compiled entry for widening, unsigned delivery,
+signed reinterpretation, signed zero, infinity, NaN payloads and equality.
+Direct NIR coverage rejects narrowing even for a small stored value, mismatched
+float width and restricted bool representations, then successfully converts on
+the same interpreter. TakeBits and bit-place writeback remain separate work;
+this does not expand which resource-bearing representations may be constructed.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_bits`:
+  exit 0, `/tmp/luna-tools-i22jidgh/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-gzvd1zsx/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test execution reinterpretation`:
+  exit 0, two selected tests, `/tmp/luna-tools-rj534srk/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-7pl4s5up/result.json`; `git diff --check`: exit 0.
+
+### Compile defined representation reads
+
+TakeBits now lowers its operand to a register and invokes the shared value-level
+representation reader. Scalar reads retain target-specific width and domain
+checks; encoded enums retain nominal identity, declared layout and payload
+construction checks. Reading a representation produces a value, not a retained
+place. The helper is separated from the tree dispatcher and consumes no Expr.
+
+Source tests require compiled entry for encoded signed payloads, f16/bf16 raw
+encodings and BitVec identity. NIR tests reject output-width mismatches, an
+out-of-domain scalar, unsupported bool reading and a non-BitVec output, then
+accept a valid read on the same interpreter. Existing encoded-enum tests cover
+NIR/IIR metadata checks and generic wide payloads. Bit-place writeback remains
+uncompiled; this step does not add general object representation reading.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_bits --test encoded_enums`:
+  exit 0, `/tmp/luna-tools-2m81o7ix/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-lmxr6jea/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-8g8ykqfs/result.json`; `git diff --check`: exit 0.
+
+### Compile fixed-range bit writeback
+
+BitAssign now lowers binding admission, RHS evaluation and final writeback to
+separate linear instructions. The write instruction resolves the current root
+and field path after the RHS. It shares checked value replacement with tree
+interpretation and commits only after width/domain checks and bounded value
+construction succeed. Storage cells remain shared; a previously read BitVec
+remains a snapshot. Dumps include the storage/output types, range and field path.
+
+Source coverage requires compiled entry for overlapping and nested ranges,
+empty ranges, snapshots and RHS writes to both the target and sibling fields.
+Malformed NIR cases verify that failed replacement retains completed RHS writes
+without a partial bit update, then successfully update on the same interpreter.
+Dynamic BitUpdate selections and runtime pointer writes are not compiled here;
+this stage provides their reusable final value-write operation.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_bits`:
+  exit 0, `/tmp/luna-tools-iyew8yfh/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-1gh__dm3/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test execution writeback`:
+  exit 0, 16 selected tests, `/tmp/luna-tools-x2ihouf6/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-chy6_xai/result.json`; `git diff --check`: exit 0.
+
+### Compile dynamic bit selections and writeback
+
+BitUpdate now compiles to an immutable typed-register plan plus begin, select
+and finish instructions. Admission checks the binding and the complete selection
+shape before endpoint effects. Each selection evaluates its endpoints in source
+order, checks the range, then composes the relative offset before the next
+selection runs. The RHS runs only after selection succeeds. Final writeback
+uses the frozen range and rereads current storage through the shared checked
+replacement helper, preserving RHS mutations without reevaluating indices.
+
+NIR exposes an expression-free BitSelectionLayout and common admission checker;
+existing NIR validation and the VM use the same width/type rules. Plans own
+registers, types and source locations, not expression trees. Layouts, inputs,
+plans and instructions all have structured S-expression displays. Frame-local
+range state does not enter code/result caches.
+
+Source coverage requires bytecode entry for dynamic windows, nested static/index
+selection, empty windows, RHS index/storage mutation and failure/recovery. NIR
+coverage observes endpoint order, preflight rejection without effects, range
+failure before later selections/RHS and successful nested offset composition.
+Runtime pointer writeback stays on its existing runtime path; comptime does not
+acquire pointer semantics from this implementation.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_bits`:
+  exit 0, `/tmp/luna-tools-jlb_w72k/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-lsmdf42v/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test execution writeback`:
+  exit 0, `/tmp/luna-tools-7axc13rv/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-1pw0d97i/result.json`; `git diff --check`: exit 0.
+
+### Compile text and name observations
+
+TextQuery, SymbolName and EnumName now lower to a typed admission check followed
+by operand bytecode and a value observation. Tree execution shares both helpers;
+it borrows input/output types rather than copying them on each observation.
+Enum observations retain nominal checks, residual delivery and name-copy budget.
+Text queries retain UTF-8 byte indexing and optional out-of-range results.
+
+Source coverage invokes the shipped text wrappers and checks compiled frame
+counts, empty/multibyte strings, maximum indices, symbol/enum names and early
+return. NIR tests check that invalid observation shapes fail before operand
+effects. The hash fixture now supplies the primitives module imported by the
+shipped comparison module, rather than flattening those declarations at root.
+
+The full shipped text-hash compilation regression remains explicitly ignored:
+its result is correct, but both wrapper and method fall back, with zero compiled
+frames. Diagnostic lowering identified TraitMethod and BitVec And/Or as the
+remaining unsupported nodes. The expectation of two compiled frames is retained
+for the next implementation stage, not weakened to count fallback as completion.
+Temporary lowering diagnostics were removed.
+
+Validation in /home/fin/luna:
+- Initial observation test selected the runtime byte wrapper because of a
+  duplicate leaf name; renamed the new entry to read_byte. Initial library_hash
+  run failed on the fixture's missing primitives module. After fixing that
+  dependency, 11 existing tests passed and the new compilation regression failed
+  with 0 rather than 2 compiled frames (`/tmp/luna-tools-8rfc5cjy/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-grjzpamh/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_observations --test library_hash`:
+  exit 0, `/tmp/luna-tools-jtlvuad0/result.json`; observation suite and 11 hash
+  tests passed, one known incomplete compilation regression ignored as above.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-_i_ldog3/result.json`; `git diff --check`: exit 0.
+
+### Compile eager bitwise operations and checked program predicates
+
+BitVec And/Or now evaluate both operands in source order and share bounded
+value operations with tree execution. Boolean And/Or retain their existing
+short-circuit branches. Program Check/Require/EnsurePredicate nodes compile
+shape admission, condition evaluation and checked delivery separately. Shape
+inspection is charged during compilation; failed conditions record their check
+and reject through the shared predicate completion helper. Runtime cleanup
+continues through the original scheduled interpreter path.
+
+The shipped string-hash body now compiles as a whole and produces the documented
+FNV-1a values for empty, UTF-8 and embedded-NUL strings. A direct invocation of
+that actual library declaration asserts one compiled frame per call. Source
+regressions distinguish eager zero/all-ones bit operations from Boolean short
+circuiting and exercise predicate rejection followed by successful reuse.
+
+The outer trait-call regression remains ignored. Investigation confirmed that
+simply treating TraitMethod as a function constant is insufficient: interface
+program conditions, declaration-side argument bindings and default environments
+must survive dispatch. Next work must integrate that public contract into call
+preparation and continuation delivery, not bypass it for the hash example.
+Initial hash-body testing exposed the additional unsupported CheckPredicate;
+it was implemented rather than deleting the library's assumes. Temporary
+lowering diagnostics were removed.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test library_hash shipped_text_hash_body_uses_bytecode_for_all_bytes`:
+  exit 0 after bitwise/predicate support, `/tmp/luna-tools-qpsw9z5v/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-l6d_zuak/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_bits --test library_hash`:
+  exit 0, `/tmp/luna-tools-py_lpzx5/result.json`; one known outer trait-call
+  compilation regression remains ignored, not reported as completed.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-lw4oari8/result.json`; `git diff --check`: exit 0.
+
+### Compile static trait calls with public interface contracts
+
+Direct TraitMethod callees now preserve their immutable identity in call
+preparation. The VM obtains the public interface program and declaration-side
+bindings before resolving the implementation. Defaults therefore observe the
+interface's parameter names, even when the implementation uses different names.
+Standalone method values retain the existing admission/erasure restrictions.
+Interface contract lookup is shared with the tree path.
+
+Nonempty interface programs suspend through a boxed caller-local continuation:
+entry observations and snapshots, entry checks, implementation invocation, exit
+checks, then result delivery. Checks execute as ordinary contract fragments via
+the invocation driver, not recursively from a bytecode instruction. Contract
+fragments are distinct from default evaluations in execution accounting. Live
+argument, snapshot and result environments remain in the frame, never in a code
+cache. Bytecode remains restricted to invocation paths without runtime cleanup
+schedules; scheduled runtime execution retains its existing cleanup behavior.
+
+Source tests cover different interface/body parameter names, dependent defaults,
+explicit overrides, method values, specialized interfaces, precondition failure
+before body entry, postcondition failure after body completion, successful reuse
+and nested independent entry snapshots. To test the retained precondition itself,
+the test elaborates a checked assumes then removes that caller proof from NIR;
+it does not weaken source proof admission. A runtime Interpreter::new comparison
+was inappropriate for a comptime self reference, so the source test checks actual
+compiled entry and explicit expected values in the correct comptime mode.
+
+The complete shipped string-hash regression is enabled and passes: both wrapper
+and library implementation enter bytecode. Dynamic ComptimeFunctionInstance
+callee construction still uses its existing migration path; this stage does not
+claim all staging expressions have linear lowering.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-d_u6f13l/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_traits --test library_hash`:
+  exit 0, `/tmp/luna-tools-59vqbmyp/result.json`; 13 hash tests, none ignored.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_traits --test comptime_bytecode_defaults --test library_comptime_comparison`:
+  exit 0, `/tmp/luna-tools-jgt71us9/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test execution trait_optional_arguments`:
+  exit 0, four selected tests, `/tmp/luna-tools-gfa1_iwd/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test execution staged_trait_calls`:
+  exit 0, five selected tests, `/tmp/luna-tools-_6svghld/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-hipxfp2v/result.json`; `git diff --check`: exit 0.
+
+### Compile dynamic function and trait instances
+
+ComptimeFunctionInstance now lowers to admission, ordinary linear clause-input
+code, and instance completion. The immutable descriptor contains declaration and
+packet/result types, never executable child expressions or invocation values.
+Admission runs before clause effects; completion validates current packet values
+and uses the existing declaration-domain and requirement checks on cache hits.
+The tree and bytecode paths share admission and packet residualization.
+
+Direct dynamic trait callees retain their interface identity until BeginCall.
+This preserves interface programs, declaration-side parameter bindings and the
+frozen clause inputs used to specialize defaults. Stored method values retain
+the existing contract-erasure restrictions. Clause return/control transfer skips
+completion and invocation. New descriptors and suspended instance state have
+S-expression dumps.
+
+A source test exposed an existing elaboration boundary: saving a callable with
+optional parameters as an ordinary function value still reports missing parameter
+protocol metadata. This change does not fix that boundary. Source tests separately
+exercise ordinary stored instances and direct dynamic calls with optional inputs;
+no source-admission check was weakened. Another initial test incorrectly required
+an arbitrary explicit argument to equal a clause input; its interface contract was
+corrected to describe the actual returned argument.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_traits --test dynamic_trait_clauses --test comptime_clause_inputs`:
+  exit 0, 61 tests, `/tmp/luna-tools-3hhhbu3l/result.json`. New source tests
+  assert compiled entry counts, not just computed values.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-0yie8zjn/result.json`, including effect-free rejection
+  of malformed instance metadata in both execution routes and recovery.
+  An earlier unit build exposed a private test helper; its visibility is now
+  shared within the crate under cfg(test), without changing the runtime API.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test library_hash --test library_comptime_comparison`:
+  exit 0, `/tmp/luna-tools-btm_gg6m/result.json`; library comparisons and
+  hash behavior remain valid, including compiled hash wrapper/body coverage.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0, `/tmp/luna-tools-duzcp96s/result.json`; `git diff --check`: exit 0.
+
+### Linear sequential pattern computations
+
+The pattern compiler now flattens Then and Guard chains with a metered heap
+worklist. First-pattern success precedes expression execution and matching of
+its result; each failure branches to the enclosing candidate's existing scope
+rollback. Completed external effects are retained. Expressions use ordinary
+invocation continuations, including calls, defaults and control transfers.
+The same lowering serves expression matches, let patterns and contextual/NF
+input matches. No instruction recursively executes a pattern expression.
+
+Structural patterns remain atomic. Executable patterns nested under structural
+fields, Observe, Remap or Or still select the tree path before any execution;
+this stage does not claim complete pattern linearization. CodeEvidence remains
+non-executable. Previous unsupported-code cache tests now use CodeEvidence;
+the staged-input test covers both linear Then and a still unsupported Observe
+wrapper, checking that neither route replays an operand effect.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-ckrigjdp/result.json`. Earlier runs identified the
+  second pattern-lowering consumer in normal_types and two obsolete fallback
+  assertions; all consumers and independent fallback checks were updated.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_patterns --test comptime_bytecode_defaults --test comptime_bytecode_types`:
+  exit 0, `/tmp/luna-tools-dwzosu2l/result.json`. Tests assert compiled frame
+  counts as well as results, ordering, early return and successful bindings.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-z65ex58l/result.json`; `git diff --check`: exit 0.
+
+Separate open design boundary: docs/functions/higher-order-functions.md and
+parameters.md define default evaluation and ordinary higher-order identities,
+but do not settle whether different default computations can inhabit the same
+optional-parameter callable type. Asked the author; no local-source tracking or
+implicit protocol erasure was introduced while that decision is pending.
+
+### Compile candidate-local alternatives, observations and binding remaps
+
+Pattern lowering now linearizes Or, Binding, Observe and Remap around sequential
+computations. Each alternative gets its own scope; failure restores candidate
+bindings before the next alternative, while success commits into the containing
+candidate. An outer guard failure goes to the next arm, never back into an
+already successful Or. Remap validates duplicate sources/targets before inner
+computation, then requires actual exports of that successful candidate and
+performs simultaneous replacement. Ambient locals cannot impersonate exports.
+Observation aliases are admitted only when absent and are removed on every exit.
+
+VM scopes now journal old pattern bindings separately from ordinary local
+initialization. Commit merges the journal into its parent; failure, scope unwind,
+early transfer and frame restoration roll it back. Ordinary assignment effects
+are not journaled. This also fixes restoration of an existing local temporarily
+shadowed by a pattern. The bytecode route remains comptime-only without runtime
+cleanup schedules; runtime origin/rank responsibility stays in its own matcher.
+Instructions, rollback state and export registers appear in S-expression dumps.
+
+Structural fields still use atomic structural matching. Computation nested inside
+those fields remains a whole-body fallback before effects. The staged fallback
+regression now uses a Tuple field containing Then, since Observe is supported.
+Deep Or chains use the metered worklist; deeply owned structural patterns keep
+the existing representation-depth fallback. No semantic acceptance was weakened.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-2h_a4nly/result.json`. Earlier compiler assertions
+  describing Binding as an owned leaf and Or as a recursive carrier were updated
+  alongside independent structural depth and fuel checks.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib bytecode::pattern_tests`:
+  exit 0, `/tmp/luna-tools-k9965asv/result.json`; four tests compare tree and VM
+  rollback, effects, simultaneous remaps, illegal exports, aliases and abnormal
+  exits, including recovery in the same interpreter.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_patterns --test comptime_bytecode_defaults --test comptime_bytecode_types --test negated_nominal_patterns`:
+  exit 0, `/tmp/luna-tools-i7_qmwwp/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_patterns --test comptime_bytecode_bindings --test comptime_bytecode_matching --test comptime_bytecode_closures`:
+  exit 0, `/tmp/luna-tools-g6kuzduw/result.json`; includes the explicit outer-guard
+  no-retry regression and checks actual compiled entry counts.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-93wi7eyn/result.json`; `git diff --check`: exit 0.
+
+### Compile computations inside value-structure patterns
+
+Value tuple, struct, variant, anonymous-record, optional-present and error-result
+patterns now lower to shape admission followed by ordered field observations and
+child code. NIR carries a shallow structure descriptor, with a borrowed view for
+the tree matcher and a metered owned copy for bytecode. Both engines use the same
+shape/identity/arity checks and per-field observation routines. Anonymous-record
+labels are checked when their field is reached: failure of an earlier field
+skips later label validation as well as later computation.
+
+Projected pattern registers retain only a parent register and field index. The
+VM follows these read-only paths with metered traversal against the current
+activation's subject. It does not clone every aggregate on the path; wildcard
+fields have no value destination at all. Actual pattern bindings retain the
+existing value-copy semantics. Projections never enter immutable code caches.
+S-expression dumps include shallow shapes, escaped names and projection links.
+No benchmark speedup is claimed by this structural change.
+
+TypeTuple, nominal Type and normal-form argument patterns keep their existing
+parameter-domain conversion and provenance checks. Computations nested in those
+type patterns still select the tree path before execution. The depth/fallback
+regressions now exercise TypeTuple; deep value tuple and Or patterns are linear.
+This is value decomposition, not a special Tuple type-identity or NF rule.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-82p3iqqh/result.json`; includes ordered malformed-label
+  rejection, prior-effect preservation, shape dumps and independent fallback.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_patterns --test comptime_bytecode_matching --test comptime_bytecode_qualified --test comptime_bytecode_types --test library_comptime_comparison`:
+  exit 0, `/tmp/luna-tools-ju1tv758/result.json`. An initial source test omitted
+  whitespace between the success-pattern suffix and arrow, lexing as !=; the
+  fixture spelling was corrected without changing parsing rules.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_patterns --test negated_nominal_patterns --test normal_patterns`:
+  exit 0, `/tmp/luna-tools-loczbr7b/result.json`; includes nested alternatives,
+  cross-field bindings, all supported value shapes and compiled entry counts.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-0flzwp6v/result.json`; `git diff --check`: exit 0.
+
+### Compile computations inside Type patterns
+
+TypeTuple, nominal Type and retained normal-form patterns now lower to explicit
+admission, ordered field conversion and completion instructions. Child patterns
+use the ordinary expression worklist, so calls, alternatives and early returns
+inside a Type pattern no longer force whole-body tree fallback. The two engines
+share admission and conversion routines. Nominal domains use the completed
+parameter telescope; NF domains use the preceding input prefix, preserving head
+identity without inspecting the head's body. Prefix arguments are borrowed,
+not cloned into a growing temporary vector. Domain substitution is budgeted.
+
+Active conversion state belongs to the invocation frame and candidate scope.
+Rollback removes that state and restores bindings; already executed assignments
+remain visible. Completion releases conversion state, and code caches retain
+neither subjects nor environments. State and instructions have S-expression
+Display implementations. Wildcards retain each existing domain-validation rule.
+Generated struct/enum metadata uses its shared owner while a domain is converted,
+so runtime-generated definitions do not require a borrowed package lifetime.
+
+CodeEvidence is still definition-only and cannot execute. Its fallback regression
+checks that the earlier operand effect occurs exactly once before rejection.
+Deep TypeTuple lowering now uses the metered worklist instead of owned recursive
+pattern copying. This extends the existing checked Type views; it does not add
+library-name matching or change Tuple/NF identity. No benchmark speedup is claimed.
+
+Source coverage uses a stable Type equality guard before a dependent NF value
+pattern. An unconstrained Type binder alone does not establish that domain in the
+current elaborator; contextual pattern elaboration remains a separate gap. The
+nominal Type decomposition is internal NIR and is tested there, not by inventing
+nominal source pattern syntax. The source test compares tree and VM results and
+requires both the containing function and nested call to execute as bytecode.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-_qalynql/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib bytecode::pattern_tests`:
+  exit 0, `/tmp/luna-tools-ygqz1haj/result.json`; includes dependent nominal
+  domains and TypeTuple failure/early-return recovery in tree and VM.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_patterns --test normal_patterns --test comptime_bytecode_types --test negated_nominal_patterns --test library_comptime_comparison`:
+  exit 0, `/tmp/luna-tools-7q880ugo/result.json`. Initial source fixtures exposed
+  the contextual-domain limitation and incorrectly used NF syntax for a nominal
+  head; corrected coverage uses supported source evidence plus direct NIR tests.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-c5tvyian/result.json`; `git diff --check`: exit 0.
+
+### Compile checked structure observations
+
+Struct field names/types and all five enum structure queries now use the shared
+observation admission/value path. The compiler emits admission, the subject's
+ordinary expression code, and one observation. Subject calls therefore suspend
+and resume on the invocation stack instead of forcing the containing body to the
+tree evaluator. Queries preserve declaration order, applied parameter domains,
+opaque field Types and the existing live generated-definition world.
+
+Admission still checks comptime phase and the exact nested result-list domains
+before subject evaluation. Never operands preserve early return. Reflection and
+immutable result admission retain their budgets, formation constraints, selected
+associated-type checks and diagnostics. No reflected result or declaration-world
+snapshot is embedded in cached code; this is not layout or access authorization.
+The new observation kinds have S-expression dumps through the existing adapter.
+
+The compiler publisher and BuildStruct/BuildEnum operations themselves still use
+the tree path. This stage accelerates their reflection inputs and consumers; it
+does not claim that the whole definition-builder pipeline is compiled.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-u_uvlsl7/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib reflection`:
+  exit 0, `/tmp/luna-tools-gqsu0pxf/result.json`; struct-node domain rejection,
+  budget exhaustion and recovery exercise both tree and bytecode execution.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test source_reflection --test comptime_bytecode_observations`:
+  exit 0, `/tmp/luna-tools-1khnt0sh/result.json`; all seven structure queries
+  and subject calls are counted as compiled invocations, including early return
+  and recovery. The outdated manual package fixture omitted ordinary bool/attrs
+  dependencies; it now uses the actual sysroot with an explicit target.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test builder_invocations enum_reflection`:
+  exit 0, `/tmp/luna-tools-2etenclp/result.json`; live generated enum observation,
+  subject effects, phase rejection and early return.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-ug11qhkt/result.json`; `git diff --check`: exit 0.
+
+### Compile checked struct and enum publication
+
+BuildStruct and BuildEnum now lower to explicit definition-build admission and
+publication instructions. The packet is ordinary expression code: nested calls
+resume on the invocation stack, and early return leaves before any publisher
+request. Tree execution shares the same admission and value-publication helpers.
+The descriptors carry only the construction kind and result Type, with stable
+S-expression dumps; no request values, publisher closures, prepared candidates or
+published identities enter the immutable code cache.
+
+This preserves the existing two-step host publication contract. Request decoding,
+duplicate/path/shape/encoding checks and Type admission precede host preparation.
+The host receives reserved remaining work and cannot refund it. Returned metadata
+must match the request before installation/commit; rejected descriptors, failed
+commits and abandoned candidates do not publish a partial definition. Symbol and
+fixed-width enum encodings retain their distinct validation and identities.
+
+The host publisher remains a synchronous compiler service using ordinary checked
+elaboration; it is not arbitrary source evaluation inside a VM instruction.
+This closes the previously recorded BuildStruct/BuildEnum tree fallback. It does
+not implement new fn/trait/impl builders or claim a measured performance gain.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-2w8_rm9_/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib enum_build`:
+  exit 0, `/tmp/luna-tools-f7fqa05y/result.json`; the existing 13 publisher-boundary
+  tests now run with fresh fixtures in both tree and bytecode modes, including
+  forged host metadata, commit failure, encoding checks and budget reservation.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test source_reflection --test builder_invocations`:
+  exit 0, `/tmp/luna-tools-9kg0ed3a/result.json`; 73 builder and 14 reflection
+  cases, covering live publication and downstream use of generated declarations.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test source_reflection source_struct_build_uses_checked_publication_without_replaying_argument_effects`:
+  exit 0, `/tmp/luna-tools-rha8r3m6/result.json`; the strengthened input-packet
+  test executes one nested Type-returning call, retains argument effect order,
+  and counts every entered function as a compiled invocation.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-pmxwtz0u/result.json`; `git diff --check`: exit 0.
+- `python3 -B development/library_check.py --stage sysroot-builders --stage sysroot-enum-builder --timeout 900`:
+  exit 0, `/tmp/luna-library-t40jvoi5/summary.json`; all four struct and three
+  enum native cases pass through the actual sysroot, including field transforms,
+  reflection and batch composition of generated definitions.
+
+### Compile source-owned build metadata reads
+
+BuildMetadata now lowers to phase admission, ordinary selector expression code,
+and one lookup/decode instruction. Nested selector calls run on the invocation
+stack, while return exits before lookup. Both engines share selected-entry decode
+and the exact owner/provider/alias diagnostics for unknown aliases versus known
+dependencies with unavailable inputs. Malformed unselected values remain unread.
+
+Compiled descriptors retain only the immutable snapshot already present in NIR;
+alias strings and stored terms are charged before copying. They contain neither
+selector results nor decoded metadata values. Saved/forwarded callables retain
+their defining package's dependency mapping. Repeated calls still evaluate their
+selector and decode the selected value. Dump output includes escaped aliases,
+owner/provider identities and explicit unavailable entries.
+
+The build-context fixtures now supply the real primitive package and import bool
+as an ordinary alias, including resident CLI frames. build's TargetFeatures also
+imports builtin.bool explicitly; no keyword fallback is introduced.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-mvzvejgy/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor metadata`:
+  exit 0, `/tmp/luna-tools-ggsddpye/result.json`; includes descriptor copy budgets
+  and dump escaping, selected-only decoding, distinct missing-input diagnostics,
+  selector effects exactly once, phase rejection, early return and recovery.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test build_context`:
+  exit 0, `/tmp/luna-tools-yrjsatif/result.json`; all 33 cases, including saved
+  origin, resident invalidation/recovery, explicit compiled activation counts,
+  and real-sysroot metadata/target execution at LLVM O0 and O3. Compiled entry
+  counts include the anonymous saved-callable initializer, not just named events.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-6pxvedvj/result.json`; `git diff --check`: exit 0.
+
+### Compile concrete dynamic BitVec construction
+
+The existing BitVecType primitive now lowers to domain admission, ordinary width
+expression code and checked Type construction. Width values stay ordinary Integer
+values in VM registers; they are not packed into the structural Type operand
+channel. Tree and bytecode paths share the original width conversion and budget
+checks. Invalid input/result domains reject before operand effects; negative or
+unrepresentable widths reject after once-only operand evaluation. Return skips
+construction, and later invocations recover after errors or exhausted budgets.
+
+This covers the existing concrete-width representation, including zero width.
+It does not introduce symbolic widths, change normal-form identity, or replace
+ordinary Tuple/List definitions with special type constructors. No result-cache
+policy changes or measured speedup are claimed.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-udfav44t/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib bitvec_type_tests`:
+  exit 0, `/tmp/luna-tools-nz3iv20a/result.json`; tree/VM effect ordering, width
+  range, domain rejection, early return, budget exhaustion and recovery.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_types --test comptime_bytecode_bits`:
+  exit 0, `/tmp/luna-tools-_l5n8o6e/result.json`; ordinary typealias application
+  resumes the width callback, and both named calls are counted as compiled.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-a2flqn5n/result.json`; `git diff --check`: exit 0.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- development/examples/sysroot-meta-lists.fl --sysroot library --test-native`:
+  exit 0, `/tmp/luna-tools-8r7dey4b/result.json`; the native collector case now
+  includes mapping computed prefix offsets through the public BitVec binding.
+
+### Compile exact integer conversions and representation reads
+
+ComptimeIntegerConvert and IntegerRepresentation now use the shared scalar
+instruction path. Their operand expressions execute on the VM invocation stack;
+these primitives no longer force the enclosing function back to recursive tree
+interpretation. Both carriers share signature admission and final value checks.
+Phase and signature rejection precede operand effects; exact conversion checks
+range after evaluating the operand once and never truncates overflowing values.
+Representation reads mask using the selected target width, not host pointer size.
+Early return bypasses conversion, and errors do not poison later calls.
+
+Scalar dumps identify both operations explicitly. Code caching retains operation
+descriptors only; invocation result caching is unchanged. This removes a fallback
+path without claiming a measured speedup or completing other unsupported nodes.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-t_xsplgb/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib scalar_conversion`:
+  exit 0, `/tmp/luna-tools-thndcwq2/result.json`; tree/VM admission, operand
+  effects, overflow, missing target, phase rejection and recovery.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_integer_conversion`:
+  exit 0, `/tmp/luna-tools-t9gfk9u0/result.json`; six source cases, including
+  compiled activation counts, signed exact conversion, single evaluation, early
+  return, runtime residual rejection and representation widths 8/32/64/128.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-b2o1lnqi/result.json`.
+- `python3 -B development/library_check.py --stage hash-protocols --stage sysroot-hash --timeout 900`:
+  exit 0, `/tmp/luna-library-8bvbgrsz/summary.json`; 13 Hash protocol cases
+  and three real-sysroot native cases, including runtime/comptime agreement.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- development/examples/sysroot-meta-bindings.fl --sysroot library --build-target x86_64 linux 64 --invoke-comptime run`:
+  exit 0 with `(bool true)`, `/tmp/luna-tools-ail7xc_t/result.json`; public
+  meta.to_usize/from_usize compose with List mapping and checked struct building.
+- `git diff --check`: exit 0. Existing unrelated unreachable-pattern warnings
+  remain; no full-workspace test claim is made.
+
+### Compile checked newtype payload transfers
+
+NewtypeConvert now emits a preparation instruction followed by ordinary operand
+code and a completion instruction. Preparation checks the direct representation
+edge in the current declaration world and charges the existing plan budget before
+operand effects. The invocation frame owns that plan; cached code holds only
+bounded copies of the input/output types. Completion moves the whole payload,
+checks its input/output domains and exact wrapper identity, and consumes the plan.
+No field view, transitive cast, inherited method or resource capability is added.
+Tree interpretation and bytecode share both checks, including IIR's instantiated
+representation lookup. S-expression dumps expose the preparation and transfer.
+
+The integration cases exposed two frontend defects, fixed in the same path:
+- A generic comptime call used as a field receiver must establish its result
+  domain without capturing unavailable invocation-time locals. Speculative
+  expression checking now instantiates that domain in the current phase; the
+  eventual expression still performs the producer's work.
+- An explicit method receiver cast selects a trait view only when its target
+  resolves to a trait declaration. A Type-producing binding such as meta.List
+  instead yields an ordinary converted receiver. Both ordinary and CMTT method
+  selection use this distinction, without a library-name exception.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-m0vj9spr/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib newtype_vm`:
+  exit 0, `/tmp/luna-tools-p_98d8we/result.json`; tree/VM live-edge revalidation,
+  pre-operand rejection, forged identity/payload rejection after effects,
+  recovery and dump operation names.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test newtypes`:
+  exit 0, `/tmp/luna-tools-1ha5i__z/result.json`; 212 cases. The new regression
+  counts every compiled helper activation through nested generic wrappers and
+  struct payload projection, and verifies early return skips the helper call.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- development/examples/sysroot-meta-bindings.fl --sysroot library --build-target x86_64 linux 64 --invoke-comptime run`:
+  exit 0 with `(bool true)`, `/tmp/luna-tools-pab55u8t/result.json`. The actual
+  sysroot List is wrapped, passed through a comptime function, unwrapped and
+  mapped before composing with integer conversion and StructBuilder reflection.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-aoaxd_hb/result.json`; `git diff --check`: exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test newtypes --test comptime_receivers --test source_reflection --test comptime_list_operations --test cmtt_methods`:
+  `/tmp/luna-tools-4xycfeck/result.json`; CMTT methods passed all 144 cases,
+  then List tests exposed a fixture missing the ordinary BitVec binding used by
+  its shared example (57 passed, one failed before elaboration). Added the same
+  BitVec alias as builtin.primitives; no compiler fallback or expectation changed.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_receivers --test source_reflection --test newtypes --test comptime_list_operations`:
+  exit 0, `/tmp/luna-tools-0wc4twn_/result.json`; 58 List, nine receiver,
+  212 newtype and 14 reflection cases passed after the fixture correction.
+- Final formatting: `/tmp/luna-tools-vo65d5vu/result.json`, exit 0. Existing
+  unrelated unreachable-pattern warnings remain; no full-workspace or measured
+  performance claim is made.
+
+### Ordered Object interval editing
+
+ObjectEdit now includes Slice, with two exact Integer endpoints in the ordinary
+operand packet. The shared tree/VM operation validates both endpoint domains
+before evaluating the packet, then checks 0 <= start <= end <= entry count.
+Selection moves complete typed entries, retaining positional entries, duplicate
+keys and payload identity. Work is charged against the existing invocation budget;
+this remains a functional value operation, not a writable or zero-copy view.
+
+meta.Object.slice exposes that checked primitive through a bound compiler symbol.
+meta.Object.replace_range composes slices and concat, supporting insertion and
+removal without changing either input snapshot. Bounds failure is an invocation
+error, consistent with existing single-entry Object edits. Evaluation order and
+early returns follow normal call rules. No new opcode interpreter or result-cache
+policy is introduced; ObjectEdit's existing S-expression Display names Slice.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-qpoegwbv/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib object_slice`:
+  exit 0, `/tmp/luna-tools-315vwln_/result.json`; both carriers check malformed
+  domains before effects, bad bounds/values after effects, and recovery without
+  mutation of the input snapshot.
+- `python3 -B development/check.py --timeout 900 -- test -p nir --test phases --test type_rewrite --test copy_budget`:
+  exit 0, `/tmp/luna-tools-98dqufh_/result.json`; Slice is included in operation
+  enumeration for phase checks, bounded copying, rewriting and Display.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test library_meta_objects`:
+  `/tmp/luna-tools-ltlm_i7_/result.json`; 27 cases passed, one new evaluation-order
+  fixture failed parsing because its bare trailing Object was parsed as a block.
+  Corrected it to bind the Object before returning it, without changing the case.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test library_meta_objects object_range_arguments`:
+  exit 0, `/tmp/luna-tools-b0yo1llg/result.json`; the corrected case checks receiver,
+  endpoints and replacement order (1234), single evaluation, and early return.
+  The preceding passing range cases include negative/reversed/oversized bounds,
+  recovery, declared domains, duplicate-key shadowing, optional layers, retained
+  normal-form heads and exact compiled activation counts for both public methods.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-q43t6gwd/result.json`; `git diff --check`: exit 0.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- development/examples/sysroot-meta-object-methods.fl --sysroot library --test-native`:
+  exit 0, `/tmp/luna-tools-y5hzmze3/result.json`; the public methods execute in
+  the actual sysroot, and their comptime observations stage into a passing native
+  test. Existing unrelated compiler warnings remain; no full-workspace claim.
+
+### Borrow Object intervals without materializing discarded entries
+
+The local Object instruction now handles queries and Slice with up to two leaf
+selectors. It retains complete signature/representation validation. Only owned
+scalar or literal selectors may be read while the receiver is borrowed; selectors
+that can reference the same storage retain the snapshot fallback and release the
+receiver lock before reading. Computed selectors remain ordinary packet code, so
+user effects never execute under a receiver lock. Runtime selector transport uses
+a fixed two-slot array, without adding per-query vector allocations.
+
+Slice copies only selected entries after the full input check. Selected payloads
+use the existing checkpoint rules, preserving nested identity and scope checks.
+Even an empty slice rejects invalid unselected Type payloads. The public Object
+method invokes its bound primitive directly, avoiding an extra by-value forwarding
+wrapper; no definition-name exception, result caching or view semantics is added.
+
+Validation in /home/fin/luna:
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`:
+  exit 0, `/tmp/luna-tools-n07fxdvc/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor object`:
+  exit 0, `/tmp/luna-tools-fue7f39e/result.json`; includes compiler selection of
+  leaf versus computed boundaries, dump shape, Object validation and edits.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test library_meta_objects --test comptime_bytecode_aggregates`:
+  exit 0, `/tmp/luna-tools-acz6aj3w/result.json`; public range cases now count
+  two compiled activations for slice and ten for composed replacement, reflecting
+  removal of the forwarding activation. Query side effects retain snapshots.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib local_object`:
+  exit 0, `/tmp/luna-tools-udtbtrk2/result.json`; shared-storage bound references,
+  locked receiver rejection, bounds/budget failure recovery, and invalid
+  unselected Type rejection on both tree and compiled carriers.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-bz9wkatx/result.json`; `git diff --check`: exit 0.
+
+Measurement command:
+`python3 -B development/comptime_bench.py --bench object_queries --repeat 3 --iterations 10`.
+Release build: `/tmp/luna-tools-hyup91ux/result.json`; measurement reports:
+`/tmp/luna-tools-s0snizif/result.json`, `/tmp/luna-tools-q8ky4a90/result.json`,
+`/tmp/luna-tools-avk_apr3/result.json`, all exit 0.
+
+The added Slice workload is printed as query=None. It performs 32 one-entry
+slices per invocation, with five warmups and ten timed invocations per process.
+Below are medians across three processes for a reference receiver. Both paths
+use the same build; a transparent receiver block forces the general snapshot
+path and adds evaluation ticks. This is a path comparison, not a historical
+baseline. Parsing, elaboration and setup are excluded; invocation input copying,
+execution, result checking and allocator instrumentation are included.
+
+| Input entries | Borrowed ms | Snapshot ms | Borrowed allocations | Snapshot allocations | Borrowed bytes | Snapshot bytes |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 0.007824 | 0.010876 | 118.1 | 182.1 | 19719 | 58375 |
+| 64 | 0.051737 | 0.114596 | 181.1 | 2261.1 | 34326 | 540406 |
+| 1024 | 0.726964 | 1.724899 | 1141.1 | 33941.1 | 257994 | 7921450 |
+
+For 1024 entries, the measured path takes about 42% of snapshot time and requests
+about 3.4% of its allocations. These are allocator calls and requested bytes, not
+retained memory. VM steps remain close: 452208 versus 452400. Full representation
+checking is still linear in input size on every read; this work does not fix
+quadratic repeated List admission or imply a whole-compiler speedup.
+
+Final sysroot check:
+`python3 -B development/check.py --timeout 900 -- run -p luna -- development/examples/sysroot-meta-object-methods.fl --sysroot library --test-native`:
+exit 0, `/tmp/luna-tools-stqodfdf/result.json`; public Object edits still stage
+into a passing native test. Existing unrelated compiler warnings remain.
+
+
+## Invocation depth independent of native recursion (2026-10-30)
+
+Compiled invocation frames now count against the caller's original `Budget.depth`
+without retaining a native evaluation depth charge while suspended on the heap.
+Entry and preparation still carry the native charge; tree fallback retains it
+until delivery. Both counters unwind on preparation, execution and delivery
+errors. Nested compiled calls no longer look like top-level invocations when
+resetting cleanup failure and pending effect transfer state.
+
+This does not increase the native evaluator or recursive representation limits.
+The migration tree evaluator remains bounded independently of a large requested
+invocation budget. IIR construction initializes the same invocation accounting;
+it retains its existing native depth policy and execution path.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode --test comptime_bytecode_defaults`:
+  passed, `/tmp/luna-tools-k_2530iq/result.json`. Includes a 2 MiB thread running
+  1,001 simultaneous compiled activations, budget exhaustion and reuse of the
+  same VM; tree execution rejects deep recursion and remains reusable.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  308 passed, `/tmp/luna-tools-7hgg145u/result.json`, including caller state
+  restoration and execution failure paths.
+
+Remaining limits include recursive value/type inspection and native execution of
+unsupported bodies and contract boundaries. This change does not make every
+comptime operation iterative or remove invocation and instruction budgets.
+
+The final boundary assertion (1,024 active calls allowed, 1,025 rejected) passed
+with `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode heap_activations_honor_requested_depth_and_recover_on_small_host_stack`:
+`/tmp/luna-tools-14aqcsm5/result.json`, exit 0. Formatting and `git diff --check`
+also passed.
+
+## Ordinary List carriers for Type elements (2026-10-30)
+
+The VM now admits `Value::List { ty, values: Vec<Value::Type> }` against the
+ordinary bound List<Type> domain. The declared list identity and each Type value
+are checked using the same List admission and element traversal as other domains.
+Length/index observations, concatenation, receiver append and normal-input
+spreads accept this carrier. Mixed compact/ordinary append preserves the target
+carrier and restores its original contents if the final check fails.
+
+Struct and enum construction decode either carrier at the checked host boundary;
+malformed element domains still fail before commit. This is preparatory consumer
+migration: source Type-list literals and reflection still commonly produce
+`Value::TypeList`, and the legacy enum variant has not been removed.
+
+Freezing an ordinary Type-element list deliberately uses the existing canonical
+`Term::TypeListValue` encoding. It must not introduce a second identity for the
+same normal-form argument. The generic frozen NominalValue decoder continues to
+reject a second Type-list encoding. Moving all producers and subsequently the
+frozen representation requires a coordinated change to the remaining NIR
+consumers, equality and tuple layout views; this stage does not claim that work
+is complete.
+
+Checks from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  310 passed, `/tmp/luna-tools-l153uznw/result.json`. Includes both builder
+  execution paths, host-metadata rejection before commit, malformed element
+  recovery and mixed-carrier append rollback.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_list_type_evidence ordinary_type_lists`:
+  passed, `/tmp/luna-tools-frkdrj2c/result.json`. Exercises actual ordinary-list
+  inputs through public List methods and equal NF identities for named/spread
+  inputs in both representations, followed by malformed-input recovery.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_list_type_evidence --test comptime_list_operations --test comptime_bytecode_lists`:
+  all three groups passed, `/tmp/luna-tools-l4icv3f8/result.json`, exit 0.
+- Formatting check and `git diff --check` passed.
+
+## Type-element list producers use ordinary values (2026-10-30)
+
+List literals, constant list nodes, normal-input collection, frozen list decoding,
+struct/enum field reflection and test-template collection now produce
+`Value::List { ty, values }` with ordinary Type elements. This preserves the
+registered List identity in every produced value. Normal-input collectors use
+one value buffer for all element domains, with the same Type authority checks
+and operand ordering; the prepared-container S-expression no longer has a
+separate Type-elements buffer.
+
+The three list benchmarks now feed ordinary lists, so future measurements follow
+the source execution representation. Their benchmark targets were checked; this
+change does not assert a measured speedup.
+
+Compatibility input handling for `Value::TypeList` remains, as does canonical
+`Term::TypeListValue` freezing. Removing that NIR encoding still requires migrating
+identity, substitution and tuple-layout consumers together. The VM's external
+compact-input compatibility is not used by the migrated source producers.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_lists --test comptime_bytecode_lists --test comptime_list_type_evidence --test library_protocols`:
+  all groups passed, `/tmp/luna-tools-og6xaejw/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --test type_list_inputs --test normal_values --test abstract_values --test type_list_index`:
+  all groups passed, `/tmp/luna-tools-80z06b7h/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test test_templates --test builder_invocations`:
+  81 template and 76 builder cases passed, `/tmp/luna-tools-46jh3kug/result.json`.
+- `python3 -B development/check.py --timeout 900 -- check -p comptime_interpretor --benches`:
+  passed, `/tmp/luna-tools-mnt2jxwl/result.json`.
+- After unifying collector buffers, `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --test type_list_inputs`:
+  passed, `/tmp/luna-tools-5egnxf9c/result.json`.
+
+The two historical comptime constant/decode tests now use `for_comptime` rather
+than the runtime migration entrypoint. Their complete-domain, wrong-element,
+substitution and tuple-identity assertions are retained. Output assertions check
+ordinary lists including their registered type; they do not equate list and
+tuple carriers or hide the representation change through Value equality.
+- Final collector integration also passes
+  `python3 -B development/check.py --timeout 900 -- run -p luna -- development/examples/sysroot-object-struct-builder.fl --sysroot library --test-native`:
+  one native test passed, `/tmp/luna-tools-qume3n8_/result.json`. This checks
+  reflection and generated runtime construction through the actual sysroot.
+- After the final collector change,
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test type_lists --test comptime_list_type_evidence --test test_templates`:
+  all groups passed, `/tmp/luna-tools-f9meyot6/result.json`.
+- Final formatting check and `git diff --check` passed.
+
+
+### Remove the VM Type-list carrier
+
+The VM no longer has `Value::TypeList`. Type elements use `Value::List` with
+its declared list identity and ordinary `Value::Type` children. Admission,
+indexing, concatenation, in-place append, cleanup, reflection, definition
+builders, materialization and host fixtures now share that representation.
+Appending a list with a different declaration identity fails without changing
+storage; exhausted validation restores the previous elements and snapshots.
+
+Required invocation restoration now recursively restores list domains and
+elements into the caller's telescope. Scoped normal-input freezing follows
+that telescope rather than treating restored Type children as closed exports.
+IIR canonical input checking accepts an ordinary list of Type constants and
+retains domain, element and fuel checks. Runtime tests use the public
+instantiation pipeline; comptime invocation tests use `for_comptime`, avoiding
+the retired carrier's runtime admission exception.
+
+The final VM checks preserve invalid-element rejection, abstract-domain
+validation, exact freezing budget exhaustion, append rollback and bounded
+incremental indexing cost. List setup costs now include the ordinary domain
+and child value nodes. The representation-limit test constructs a list at the
+actual work boundary and verifies that one extra element fails atomically.
+
+Evidence (working directory `/home/fin/luna`, all commands exit 0):
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --test normal_values --test abstract_values --test type_list_inputs --test type_list_index`:
+  310 unit tests and all four integration suites passed;
+  `/tmp/luna-tools-z8obhgyn/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_spreads --test type_lists --test comptime_list_type_evidence --test meta_list_pattern_cost --test builder_invocations --test test_templates`:
+  all six suites passed, including 76 builder and 81 template cases;
+  `/tmp/luna-tools-up7opvuw/result.json`.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- development/examples/sysroot-object-struct-builder.fl --sysroot library --test-native`:
+  one native test passed using the real sysroot;
+  `/tmp/luna-tools-mkoqij25/result.json`.
+
+- Final `python3 -B development/check.py --timeout 900 -- test -p iir --lib staging::tests`:
+  passed, `/tmp/luna-tools-xe0msfd9/result.json`; includes ordinary staged
+  Type lists, invalid elements, unknown heads and exhausted fuel.
+- Final `python3 -B development/check.py --timeout 900 -- test -p luna --test execution type_list`:
+  all 17 selected cases passed, `/tmp/luna-tools-ri31z701/result.json`.
+- Workspace formatting and `git diff --check` passed.
+
+Remaining boundary: NIR still has the specialized frozen `Term::TypeListValue`
+and collection nodes. Their removal requires migrating normal-form identity,
+substitution and structural views together; this stage does not claim that
+ordinary NF argument representation is finished. No source-language exception
+for `meta.List<Type>` is authorized by the remaining encoding.
+
+
+### Restore scoped aggregate invocation results
+
+Required invocation preparation no longer chooses whether a Type input may be
+transported by looking at a small whitelist of result domains. A struct, enum,
+newtype, optional, error result or nested data container can retain that Type
+input. The result restorer recursively rewrites both retained domains and child
+Type values into the original caller telescope, including Object entry domains.
+Mutable cells and executable capture graphs are not silently traversed: scoped
+results retaining those representations report an explicit unsupported boundary.
+
+Scoped normalization lives in `program/normal/values.rs`; result restoration
+lives in `program/required/restore.rs`. Freezing admitted aggregate data retains
+nominal identity and enum tags, checks scope, and meters recursion and output
+terms. The immutable closed-export boundary is unchanged. Unknown type
+observations still produce `TypeContractUnresolved`, and runtime Type inputs do
+not gain compile-time availability.
+
+A dependent nominal result also exposed a VM instance bug: declaration
+substitution rewrote body types in an empty frame, although those types live
+under the function's parameter telescope. Function-instance creation now retains
+that frame with bounded substitution; cached instances still enforce their
+invocation obligations.
+
+Source coverage compares restored signatures after independent bool and char
+substitutions against concrete invocations. Cases cover ordinary and generic
+structs, enums, newtypes, optional and error values, and nested optional fields.
+Runtime default specialization retains the descriptor as a nominal value in
+the instance key. The real-sysroot example uses `meta.List<Descriptor>` as a
+staged default and leaves only ordinary values at runtime.
+
+Evidence (cwd `/home/fin/luna`):
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  310 passed, `/tmp/luna-tools-jl_xqgcx/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test scoped_comptime_aggregates --test nominal_staging --test normal_patterns --test type_spreads`:
+  all four groups passed, `/tmp/luna-tools-_ge4g7yy/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib program::required`:
+  12 passed, `/tmp/luna-tools-zi2py879/result.json`.
+
+Remaining limits: scoped executable/mutable result restoration is not
+implemented. In addition, an explicit Type parameter used inside a descriptor
+invocation within a `requires` expression can still be unavailable during
+clause elaboration; for example `Carrier<describe(T)> ==
+Carrier<Descriptor {item:T}>` reports required input unavailable. Signature
+normalization and deferred default specialization are covered here, not a fix
+for that earlier clause-binding path. NIR's specialized frozen Type-list
+encoding remains a separate pending migration.
+
+- Real-sysroot `python3 -B development/check.py --timeout 900 -- run -p luna -- development/examples/sysroot-scoped-descriptors.fl --sysroot library --test-native`:
+  one native test passed for bool, u32 and char specializations;
+  `/tmp/luna-tools-6wdj3l2g/result.json`.
+- Final required-invocation unit checks passed again after module extraction
+  and the exact-budget assertion, `/tmp/luna-tools-7sune5og/result.json`.
+- Formatting and `git diff --check` passed.
+
+
+### Staged Type inputs in declaration contracts
+
+The descriptor-invocation limitation recorded above is fixed. Contract checking
+runs after signature publication, when `active_signatures` no longer contains
+the declaration. `signature_comptime_input` now also recognizes the current
+contract-checking scope, while retaining the owner check and requiring an
+existing staged binding. This is shared by expression reads, projections and
+normal input observations. It does not provide a value for a runtime parameter
+or bypass the program/type predicate classifier.
+
+Coverage exercises descriptor-producing calls in Type equality, disjunction,
+negation of primitive Type equality, multiple independent Type inputs and a
+method receiver preceding the staged inputs. Invalid applications are rejected;
+unknown Type observations cannot assume the condition they are computing.
+Opaque factories remain non-injective: different descriptor arguments do not
+prove unequal result types. This follows `docs/type/propositional-constraints/
+theory-solvers.md` and is checked as an Unknown rejection, not implemented as
+an additional structural disequality rule.
+
+Evidence (cwd `/home/fin/luna`):
+
+- The original reproducer failed with required input unavailable in
+  `/tmp/luna-tools-kjwmx7kk/result.json`, then passed after the scope fix.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test scoped_comptime_aggregates --test staged_aggregate_contracts --test snapshot_contracts`:
+  all three groups passed (8, 31 and 2 tests),
+  `/tmp/luna-tools-7oz1cfrq/result.json`.
+
+The real-sysroot descriptor example now combines staged defaults with a
+requires Type equality over `meta.List<Descriptor>` inputs. Scoped executable
+and mutable result restoration and the NIR Type-list encoding migration remain
+separate unfinished work.
+
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- development/examples/sysroot-scoped-descriptors.fl --sysroot library --test-native`:
+  one native test passed, `/tmp/luna-tools-2dieep85/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test execution contract`:
+  all 76 selected contract cases passed, `/tmp/luna-tools-kg44ak3c/result.json`.
+- Formatting and `git diff --check` passed.
+
+### Callable evidence for normal-form inputs (2026-10-30)
+
+NIR now recognizes ordinary callable domains in NF input metadata, including
+runtime, comptime, unsafe and normal-form function signatures. Runtime payload
+domains (for example pointer parameters) are allowed inside these signatures:
+transporting a function identity at comptime does not invoke its runtime code.
+Signature scope still has to be valid with respect to earlier Type parameters.
+
+`Head::check_arguments_in_scope_with_callables_budgeted_in` admits a frozen
+`FunctionValue` only with declaration-world signature evidence. The resolver
+must validate the function's generic inputs and formation contracts, instantiate
+its signature in the caller's frames, and share the input checker's fuel.
+The checker validates scope and compares the full signature without erasing
+phase, safety or collector metadata. Nested aggregate fields use the same
+resolver and budget. Existing callers without callable evidence reject these
+values; a permissive abstract-variable evidence callback cannot admit them.
+
+This is the NIR admission interface, not completed source-level support for
+function-valued NF inputs. Remaining integration includes VM admission and
+scoped type-work validation, materialization, and scoped freezing/restoration
+of callable results. Do not replace declaration evidence with nominal layout
+queries or accept a function solely because its declaration ID exists.
+An end-to-end target is `Carrier<T, callback(T)>` where `Carrier` is a pure
+Type-returning definition and `callback` returns a generic function identity;
+the callable's signature and input contracts must survive every admission path.
+
+Ordinary runtime/comptime function defaults already worked before this change.
+`scoped_comptime_callables` records that baseline separately: a descriptor
+returns `identity<T>`, a defaulted callable receives it, and dispatch executes
+in the correct phase. The comptime case must be observed through invocation;
+consuming its constant from runtime without Splice tests a different boundary.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir --test normal_callable_inputs --test normal_inputs`:
+  declaration authority, qualifier mismatch, ordered generic input domains,
+  malformed and escaped signatures, nested values, exact budget and recovery;
+  exit 0, 27 tests passed; report `/tmp/luna-tools-7d32etl1/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test scoped_comptime_callables --test scoped_comptime_aggregates --test normal_patterns`:
+  exit 0, 52 tests passed; report `/tmp/luna-tools-3rkawdy_/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0; report `/tmp/luna-tools-8llopq85/result.json`.
+
+### Callable values across normalization, admission and IIR (2026-10-30)
+
+Final-language position: functions are ordinary comptime values when used as
+inputs to an opaque definition. This follows `docs/comptime/purity-and-normal-form.md`:
+NF parameters receive ordinary values, runtime functions cannot be invoked at
+comptime, and opaque heads do not unfold. The implementation must preserve a
+function's declaration inputs, phase, safety and contracts as its value moves
+between elaboration, invocation and the completed artifact. It must not invent
+an NF-specific function category or turn an identity appearing in a Type into
+an executable body dependency. This work leaves opaque-head non-injectivity
+and PTC equality rules unchanged.
+
+The first source reproducer failed because normalization sent a restored
+runtime function identity through closed export. Its generic inputs correctly
+contained the caller's Bound Type, which closed export must reject. Scoped
+normalization now retains the existing FunctionValue representation, meters it,
+and checks it under the caller's telescope. Closed export remains strict.
+
+The VM now obtains callable signatures from its declaration world during NF
+construction, immutable admission and scoped type-description checks. Generic
+input validation shares the signature resolver's budget. Source function phase
+and unsafe qualifiers are reconstructed from their declaration metadata;
+transport-only runtime signatures retain their existing qualifiers. Signature
+matching is representation evidence only. Immutable admission separately
+checks formation predicates and capabilities, and does not run function bodies.
+Runtime identity metadata still relies on its documented producer-side formation
+checks; it grants no comptime execution permission.
+
+Materialization resolves the same evidence from DeclarationWorld. IIR retains
+completed CallableIdentity entries with an InstanceKey and a qualified signature,
+including S-expression Display. The signature's nominal/type dependencies are
+closed without materializing a body. IIR validates identity links and rejects
+missing or duplicate evidence. The reference VM uses this retained evidence for
+cleanup/effect-context type and instance checks, without looking up source bodies.
+This is distinct from runtime template tag storage, which has execution-specific
+contracts and does not represent comptime callable identities.
+
+The source tests cover scoped runtime descriptors, VM construction with runtime,
+comptime and unsafe identities, nested nominal fields, IIR dependency closure,
+and rejection of missing/duplicate retained evidence. Immutable host-input tests
+reject unknown declarations, wrong signatures/phase/safety, generic arity errors
+and failed formation contracts, and confirm that admission emits no execution
+events. The real-sysroot example is
+`development/examples/sysroot-callable-type-inputs.fl`.
+
+Remaining boundary: directly returning a scoped comptime Closure still requires
+restoration of its executable/capture environment; it is not reclassified as a
+runtime identity by this change. Capturing closures and quoted code are not
+silently frozen as declaration-only FunctionValue terms. Completing those paths
+must preserve their own environment/context semantics.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test scoped_comptime_callables --test scoped_comptime_aggregates --test normal_patterns`:
+  exit 0, 57 tests passed; `/tmp/luna-tools-mutx0774/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p iir`:
+  exit 0, 91 tests passed; `/tmp/luna-tools-anoi229o/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --test immutable_normal_inputs`:
+  exit 0, 318 tests passed; `/tmp/luna-tools-hgc9qasg/result.json`.
+  The earlier run caught a regression that allowed scoped types through closed
+  representation copy. Separate closed/scoped helpers fixed that regression;
+  the existing rejection test now passes without changing its expectation.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0; `/tmp/luna-tools-qg20zxwf/result.json`.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- development/examples/sysroot-callable-type-inputs.fl --sysroot library --test-native`:
+  exit 0, one native test passed with zero failures;
+  `/tmp/luna-tools-snows9t7/result.json`.
+
+
+### Callable evidence indexes (2026-10-30)
+
+Callable identities are ordinary comptime inputs whose representation evidence
+must remain available through materialization. Looking up that evidence must not
+rescan every unrelated declaration for each nested input. DeclarationWorld now
+indexes borrowed functions, runtime identities and normal-form heads once during
+construction. Materialization shares those indexes for function selection and
+formation-contract lookup. Index construction consumes preparation allowance;
+ambiguous duplicate entries are rejected before publishing the world.
+
+The IIR reference VM likewise indexes retained signatures by declaration and
+complete instance arguments. Keys and signatures borrow the immutable graph;
+the index is private to that VM. Construction and queries charge argument
+structure before hashing, and signature copies remain budgeted. No invocation
+result or predicate outcome is cached, and metadata cannot authorize execution.
+The existing policy restricting invocation-result caching to Type outputs is
+unchanged.
+
+Regression tests vary unrelated catalogs from zero to 2,000 declarations and
+retained identities from two to 2,002 entries. Fixed queries consume the same
+lookup allowance at every size. They also cover world isolation, missing or
+incorrect inputs, duplicate declarations, bounded hashing and recovery after
+budget rejection. This demonstrates removal of catalog scans on these paths;
+it is not a wall-clock speedup claim or a claim that all VM lookup work is now
+constant-time. Input validation, substitution and signature copying still scale
+with the structures they process.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution --test callable_world --test associated`:
+  exit 0, 27 tests passed; `/tmp/luna-tools-3_kud6r9/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  exit 0, 312 tests passed; `/tmp/luna-tools-psltihkr/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test scoped_comptime_callables`:
+  exit 0, 7 tests passed; `/tmp/luna-tools-axp6id6d/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-ci84lu2n/result.json`.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- development/examples/sysroot-callable-type-inputs.fl --sysroot library --test-native`:
+  exit 0, one native test passed; `/tmp/luna-tools-j7qaan6w/result.json`.
+
+
+### Scoped named comptime results (2026-10-30)
+
+Named callable identity and a captured closure environment have different
+transport requirements. A capture-free named instance needs its declaration and
+ordinary comptime arguments; it must not carry a specialized body containing the
+producer invocation's temporary Type identities. The VM identity value is now
+phase-neutral `FunctionInstance` (formerly `RuntimeFunction`). Its S-expression
+is `(function-instance ... (arguments ...))`. Runtime-only declaration metadata
+remains runtime-only; renaming the value does not grant execution authority.
+
+Required-result restoration converts capture-free named Closure instances into
+this descriptor and substitutes their inputs back into the caller's telescope.
+The same recursive packet restoration handles nominal fields. A captured or
+anonymous Closure is not reduced to a named descriptor. `declaration_instance`
+now explicitly requires an empty environment as well as a declaration origin.
+
+The receiving source VM resolves a named comptime descriptor through its own
+checked declarations and ordinary generic specialization and contract path.
+Tree and bytecode call preparation both resolve it before preparing defaults;
+host invocation uses the same boundary. A runtime identity or an IIR signature
+with no executable comptime declaration still cannot be invoked. Type evidence,
+argument validation, phase and safety qualifiers remain separate from execution
+permission. No invocation-result cache policy changes.
+
+Source coverage includes scoped bool/char substitutions, nominal descriptor
+fields, callable type dependencies and the real-sysroot example's additional
+comptime callbacks. VM coverage invokes a host descriptor through both tree and
+bytecode routes, rejects malformed generic inputs and failed formation contracts,
+recovers after rejection, and confirms that a new VM uses its own body rather
+than a producer's specialization. Existing runtime identity rejection cases
+continue to run.
+
+Remaining boundary: captured closures, quoted code and mutable state returned
+across abstract Type scopes still need full environment/context restoration.
+This change deliberately does not rewrite just a closure's signature while
+leaving stale body or capture bindings behind. The older limitation above is
+now narrowed to these environment-bearing results, not named comptime instances.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test scoped_comptime_callables --test function_type_dependencies`:
+  exit 0, 45 tests passed; `/tmp/luna-tools-9taau99h/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --test immutable_normal_inputs --test runtime_function_identities`:
+  exit 0, 357 tests passed; `/tmp/luna-tools-5d8qtv3w/result.json`.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- development/examples/sysroot-callable-type-inputs.fl --sysroot library --test-native`:
+  exit 0, one native test passed; `/tmp/luna-tools-ran7lmro/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-1z1492ps/result.json`.
+
+
+### Ordered Object traversal in meta (2026-10-30)
+
+Object now provides inherent comptime foreach, fold, filter and flat_map methods.
+Each callback receives one complete entry as an Object, preserving its optional
+name, domain and value. Ordinary snapshot and closure-capture rules apply;
+callbacks do not receive a writable view into the original Object. Traversal is
+ordered and bounded by the initial snapshot, empty inputs skip callbacks, and
+errors propagate without becoming empty results. Construction composes existing
+checked slice/concat operations; no new intrinsic or linear-time claim is made.
+The sysroot example filters heterogeneous schema data, expands fields, publishes
+a struct with StructBuilder and constructs it in a native test.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test library_meta_objects`:
+  exit 0, 33 tests passed; `/tmp/luna-tools-i7xlilq3/result.json`.
+  Covers duplicate keys, optional layers, opaque Type identity, private persistent
+  callback state, input snapshots, callback counts, empty inputs, runtime rejection
+  and VM recovery after callback failure. Type inequalities use the invocation
+  driver's solver; a bare VM's Unknown is never treated as false.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- development/examples/sysroot-object-traversal.fl --sysroot library --test-native`:
+  exit 0, one native test passed; `/tmp/luna-tools-k5gbrjvz/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-jjqtels8/result.json`.
+
+### Comptime-only trait declaration identity (2026-10-30)
+
+The paired `pure comptime trait` prefix now lowers to `TraitDef.comptime_only`.
+The HIR dump and definition assembly API retain this identity independently of
+member function purity and execution stage. Lone/reordered/duplicated keyword
+prefixes are rejected. Generated and source interfaces use the same descriptor.
+
+This is the declaration foundation, not executable support. Interface admission
+explicitly rejects this identity until NIR phase identity, member source priority,
+implementation/derivation checks and library migration are connected. Generated
+publication rejects atomically as well; it cannot erase the flag and publish an
+ordinary trait. No library declarations have been migrated prematurely.
+
+Validation from `/home/fin/luna` (all following commands exited 0):
+
+- `python3 -B development/check.py --timeout 900 -- test -p parse --test trait_clauses`:
+  `/tmp/luna-tools-z0tzj3lz/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p hir --test definition_interfaces`:
+  `/tmp/luna-tools-mt8vmryh/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p hir --test display item_definitions_include_fields_variants_nested_owners_and_import_styles`:
+  `/tmp/luna-tools-7lifunpt/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test trait_phases`:
+  `/tmp/luna-tools-2umgvp5s/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --test generated_traits --test attribute_phases --test derivation`:
+  `/tmp/luna-tools-8zf1m2rp/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  `/tmp/luna-tools-2voell5r/result.json`; `git diff --check` also passed.
+
+The broader `test -p parse -p hir` attempt exited 101 at the existing empty-package
+HIR dump expectation (`/tmp/luna-tools-2lila6wq/result.json`). HEAD already emits
+`source-origins` while that assertion omits it; this change does not alter package
+dumping. The focused declaration/dump checks above pass. Initial local failures
+in the new parser fixture and Rust test harness were corrected before these runs.
+
+### Comptime-only trait phase admission (2026-10-31)
+
+NIR now retains the declaration's comptime-only identity. Attribute phase planning
+provides implicit comptime membership for its members even without attributes;
+redundant true metadata is idempotent and false metadata is rejected. Function
+execution and purity remain unchanged. Explicit interface calls, default methods
+and associated defaults use the ordinary comptime implementation path. Ordinary
+impl is rejected even for an empty interface. Concrete parent implementations
+must provide the comptime contribution. Generated declarations publish through
+the same checks and retain the identity.
+
+NIR phase validation rejects forged runtime members or implementation availability
+and runtime use of an ordinary fn through a comptime-only interface. This replaces
+the previous blanket unsupported-declaration diagnostic. Unqualified member-source
+priority and builtin protocol migration are still outstanding; callers in this
+stage use explicit interface views. Abstract parent capability assumptions retain
+the existing evidence representation; phase-aware deferred capability evidence
+needs further work along with source resolution.
+
+Validation from `/home/fin/luna`, exit 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test trait_phases`:
+  37 tests, `/tmp/luna-tools-s8u9dcfj/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --test generated_traits --test attribute_phases --test derivation`:
+  `/tmp/luna-tools-kkmd8waz/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p nir --test trait_parameters`:
+  `/tmp/luna-tools-k8dqs56s/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution --test capabilities --test associated`:
+  `/tmp/luna-tools-v1qiaipm/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  `/tmp/luna-tools-vb42j4jk/result.json`; `git diff --check` passed.
+
+### Capability-source priority and qualified-value protocols (2026-10-31)
+
+Unqualified member lookup from declared capability evidence now prefers
+comptime-only interfaces in comptime expressions. Runtime expressions exclude
+those sources. The stage includes closure capture frames, required computations,
+and quoted-runtime boundaries, rather than just the enclosing function modifier.
+Inherited sources are collected before tier selection; explicit views still
+require a unique inherited source without applying implicit priority. Same-tier
+ambiguity and complete interface-instance identity remain intact. Unknown subject
+matching retains a pending source instead of authorizing fallback; source query
+errors and budgets propagate. Once selected, signature errors do not trigger
+another source search. Generic instantiation retains definition-time selection.
+
+Meta's ComptimeOptionalOps and ComptimeErrorResultOps are now pure comptime traits,
+without redundant member attributes. The actual sysroot example exercises both
+interfaces through generic functions with both runtime and comptime bounds,
+plus explicit views, callback behavior and native execution. No compiler special
+case identifies these library protocols by name.
+
+This implements priority among declared capability sources. Concrete receiver
+lookup still needs a visibility-aware trait candidate collection and interface
+argument inference path; direct calls there still need an explicit view. Deferred
+parent-phase evidence remains separate unfinished work. No claim is made that
+all unqualified trait lookup or the whole feature is complete.
+
+Validation from `/home/fin/luna`, exit 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test trait_phases`:
+  45 tests; `/tmp/luna-tools-1uw2fm9s/result.json`. Includes bound order, same-tier
+  ambiguity, ordinary member attributes, explicit views, definition stability,
+  signature failure, inherited sources and quoted runtime stage selection.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test elaboration inherited_`:
+  four tests; `/tmp/luna-tools-kc5izsm0/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test elaboration capability`:
+  five tests; `/tmp/luna-tools-_grqi8v_/result.json`.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- development/examples/sysroot-qualified-phases.fl --sysroot library --test-native`:
+  one native test; `/tmp/luna-tools-4mwvgwo2/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes complete_shipped_sysroot_invokes_comptime_qualified_type_traits`:
+  one test; `/tmp/luna-tools-jkta3ypq/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  `/tmp/luna-tools-kx30t884/result.json`; `git diff --check` passed.
+
+During development, inherited ambiguity initially lost its specific diagnostic;
+source grouping now preserves it after tier filtering. Initial fixture failures
+used an unavailable assert API and a call directly inside assumes; the final
+example evaluates the runtime call first and checks its bound result. These
+failures were repaired before the passing native and sysroot checks above.
+
+### Receiver-driven interface input discovery (2026-10-31)
+
+ImplementationHead now exposes infer_interface_from_subject for the next stage
+of concrete receiver member lookup. It matches a local receiver projection with
+the ordinary typed input matcher, including declared value domains and dependent
+domain staging. It then substitutes the inferred inputs into the original
+interface arguments. The output is only an InterfaceInstance, never applicability
+evidence or permission to dispatch. Callers must run full interface formation,
+requirements, capabilities and implementation competition through the existing
+world. In particular an unsatisfied requires clause may still yield a candidate
+source, which normal applicability correctly excludes.
+
+Input traversal and cloning are bounded before inference. Matching and output
+substitution have separate partitions of the remaining allowance. Unresolved
+parameters, opaque factory inputs and exhausted budgets stay pending. Output
+scope checks prevent malformed holes from escaping. No candidate-local bindings
+are installed in shared state. Names such as Tuple, List, OptionalOps or meta
+protocols have no special role.
+
+This API is not yet called by the frontend's concrete member lookup. The next
+integration must collect visible trait identities with lexical/import provenance,
+then infer each candidate's full interface and resolve applicability before
+applying source tiers. Public declarations in unrelated modules must not become
+candidates merely because they exist in the package. Missing interface inputs
+must remain pending rather than being guessed from the requested method.
+
+Validation from `/home/fin/luna`, exit 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution --test receiver_sources --test implementation --test inherent`:
+  9 discovery, 78 implementation and 7 inherent tests passed;
+  `/tmp/luna-tools-2eelxy2f/result.json`.
+  Includes Type/scalar receiver inputs, reordered outputs, ordinary record values,
+  unsatisfied requirements, opaque NF identity, unresolved inputs, budget failure
+  and recovery, independent interface identities and malformed output scope.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  `/tmp/luna-tools-u07rmf71/result.json`; `git diff --check` passed.
+
+### Lexical trait source plans (2026-10-31)
+
+Resolver now collects potential trait-name resolution plans at a lexical position.
+A per-resolver index covers only immutable module-tree trait spellings; decisions
+involving local ribs are always recomputed. The collection considers enclosing
+scopes and active ribs, not all public traits in the package. Normal deferred
+name resolution retains import origin, entry permission, shadowing, glob ambiguity
+and errors. Alias spellings retain the same declaration identity; their plans stay
+separate because a generated scope may shadow only one spelling.
+
+TraitSourcePlan also records pending generated export sites even when no known
+trait name is currently present. Such a snapshot cannot authorize fallback or be
+considered complete. The caller must wait and recollect after generated bindings
+are available. Names are sorted by spelling and the plan has a deterministic
+S-expression Display. This is name-source discovery, not implementation evidence.
+
+The API is not yet attached to HIR member sites. Next, lowering must preserve these
+source plans with their unresolved state, then concrete lookup must combine them
+with receiver inference and full implementation checks. Do not replace the plan
+with a package-global list or discard ambiguity before the relevant member query.
+
+Validation from `/home/fin/luna`, exit 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p resolve`:
+  all 39 tests passed; `/tmp/luna-tools-b63oatys/result.json`.
+  Eight new cases cover lexical visibility, alias identity, transitive and
+  duplicate globs, ambiguous imports, ordinary/local/clause shadowing, pending
+  generated exports, dynamic aliases and original declaration privacy.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  `/tmp/luna-tools-m6852vqn/result.json`; `git diff --check` passed.
+
+## Concrete receiver trait sources (2026-10-31)
+
+Member projection lowering now carries the resolver's lexical trait-source plan
+into HIR. Equal adjacent plans share storage. Generated definition publication
+keeps this evidence transactional; function-template rebinding remaps local
+trait identities, while original pending-export sites retain their provenance.
+The new metadata has deterministic S-expression Display and bounded validation.
+
+Concrete method discovery uses visible declaration identities, receiver-derived
+interface arguments, and the full capability world. Inherent/context sources
+retain their preceding lookup position. Comptime-only sources form the first
+comptime tier; runtime lookup excludes them. Duplicate aliases do not create
+competing interfaces, explicit views bypass discovery, and uncertain applicable
+sources reject fallback. No protocol name or optional/error type is special-cased.
+The shipped qualified-phase example now calls its comptime optional/error methods
+directly, including map and lazy recovery callbacks.
+
+Remaining work: discovery currently considers directly declared methods, not
+inherited-only or associated callable sources. Pending generated exports retain
+an explicit diagnostic rather than a resumable recollection. Visibility errors
+are conservatively propagated before member filtering. Inference and capability
+queries reserve bounded sub-budgets rather than returning unused fuel; large
+candidate sets can therefore exhaust the current allowance conservatively. These
+are implementation gaps, not language restrictions or permission to fall back.
+
+Validation from `/home/fin/luna`, exit 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p hir -p luna --test trait_phases --test definitions --test display`:
+  23 definition publication, 19 Display, and 51 trait-phase tests passed;
+  `/tmp/luna-tools-s7f0tsot/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes complete_shipped_sysroot_invokes_comptime_qualified_type_traits`:
+  actual sysroot direct-method invocation passed;
+  `/tmp/luna-tools-ovtrlt25/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  `/tmp/luna-tools-w1k6y6t0/result.json`.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- development/examples/sysroot-qualified-phases.fl --sysroot library --test-native`:
+  one native test passed; `/tmp/luna-tools-ergrhy7l/result.json`.
+
+## Inherited concrete method sources (2026-10-31)
+
+Concrete receiver discovery now traverses visible traits' parent contracts.
+A declaration-edge prepass identifies relevant member tiers before attempting
+receiver inference. The instantiated traversal shares the outer search fuel,
+transports parent arguments and preserves child-member shadowing. The full
+capability query must establish the visible child instance before any inherited
+origin becomes eligible. A parent implementation by itself cannot grant the
+child view. Priority is attached to the actual declaring interface; diamond
+paths to the same complete interface instance are deduplicated, while distinct
+same-tier origins remain ambiguous.
+
+The preceding inherited-only method discovery limitation is now resolved.
+Associated callable discovery, pending-export resumption, and query fuel
+reservation remain outstanding as described above.
+
+Validation from `/home/fin/luna`, exit 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test trait_phases`:
+  all 57 tests passed; `/tmp/luna-tools-bn_g6dox/result.json`. Six new source
+  cases cover generic parent substitution, diamond deduplication, absent child
+  evidence, declaring-interface priority, distinct inherited ambiguity and
+  child-member shadowing. Positive cases execute actual comptime invocations.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  `/tmp/luna-tools-03sncj6o/result.json`; `git diff --check` passed.
+
+## Implicit type-side associated callables (2026-10-31)
+
+Type-side projections now retain lexical source evidence even when AST lowering
+leaves a nominal member unresolved. A shared recording helper serves both value
+projections and these type-side sites. Associated projection accepts an implicit
+source, first preserving a fixed capability source and otherwise applying the
+same visible-interface discovery used by methods. Inherent method lookup still
+precedes implicit trait discovery. Explicit views retain their original path.
+
+Methods and associated values participate in the same member-source namespace.
+An associated callable remains an ordinary stored value: invocation uses its
+function type, not parameter names/defaults recovered from its initializer's
+function declaration. A selected noncallable associated value produces a call
+error rather than allowing a lower-tier method to win. Inherited sources keep
+parent substitution and the visible child's capability checks.
+
+This closes type-side associated callable discovery. Value-side associated
+projection is not introduced here; pending-export resumption and query budget
+accounting remain open. No language documentation was changed for this wiring.
+
+Validation from `/home/fin/luna`, exit 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test trait_phases --test associated_signatures`:
+  62 phase/source tests and 9 associated signature tests passed;
+  `/tmp/luna-tools-16rg5we2/result.json`. New cases exercise actual comptime
+  callable values, generic and concrete inherited sources, rejected named
+  arguments, and rejection without fallback from a noncallable selected value.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  `/tmp/luna-tools-mnswg9mz/result.json`; `git diff --check` passed.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes complete_shipped_sysroot_invokes_comptime_qualified_type_traits`:
+  real sysroot invocation passed; `/tmp/luna-tools-fxcbgoen/result.json`.
+
+## Return unused member-discovery fuel (2026-10-31)
+
+Member discovery now uses the capability world's existing metered resolver
+rather than discarding a fixed 10,000-step reservation per capability query.
+Receiver-interface inference exposes a metered API as well; its old by-value
+entrypoint delegates to the same implementation. Validation, substitution and
+failure paths debit the shared allowance, and the caller receives unused fuel.
+Failure cannot reset the allowance or be reclassified as an absent candidate.
+
+Receiver head matching still reserves a bounded subquery (half its remaining
+allowance), and the underlying capability solver retains bounded candidate
+allowances. This change removes the extra discovery-layer reservation waste;
+it does not claim exact instruction-level accounting throughout the solver.
+The earlier pending-export recovery gap is unaffected.
+
+Validation from `/home/fin/luna`, exit 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution -p luna --test receiver_sources --test trait_phases`:
+  10 receiver discovery tests and 63 trait phase/source tests passed;
+  `/tmp/luna-tools-lrk19moy/result.json`. The new tests verify unused fuel,
+  charged unsuccessful inference, zero-budget Pending, and eight simple
+  competing sources reaching the real ambiguity diagnostic instead of an
+  artificial unresolved result from repeated fixed reservations.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  `/tmp/luna-tools-ryf9g3oa/result.json`; `git diff --check` passed.
+
+## Concrete parent phase evidence for generic comptime traits (2026-10-31)
+
+Investigation of pending generated exports found that production lowering does
+not yet install `Rib.pending_outputs`; current uses are resolver tests, while
+existing template ports are bound directly as ExpandedLocal. Trait-source
+recollection needs the general deferred-export producer/publication path first.
+Clearing a pending flag in member discovery would not implement that path.
+
+The capability world now validates comptime-only interfaces' parent phases
+AFTER selecting the implementation relationship. This closes the concrete-use
+hole left by generic implementation admission: an ordinary `Given Parent`
+previously bypassed the declaration's parent phase check, and a later concrete
+query could select a runtime-only parent. Phase validation now resolves the
+instantiated parent interface and checks the selected relationship's comptime
+contribution. It never filters out a more specific runtime-only relationship to
+select a less specific comptime implementation. Recursive parent queries remain
+under the same active-goal guard and shared budget.
+
+A Given capability of a parent declared pure comptime trait does certify its
+phase, so it remains usable without a concrete parent implementation in the
+current world. A Given ordinary parent provides no such guarantee; absence of
+a concrete phase witness remains unresolved rather than silently sufficient.
+Generic declaration admission can still defer ordinary-parent phase evidence;
+this change enforces it when the relationship is concretely resolved, rather
+than adding a new source-language phase-bound syntax.
+
+Validation from `/home/fin/luna`, exit 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution -p luna --test capabilities --test trait_phases`:
+  46 capability and 65 phase/source tests passed;
+  `/tmp/luna-tools-b8n8iy_8/result.json`. New source cases reject a concrete
+  runtime-only parent, execute the comptime-parent counterpart and reject
+  fallback to a less specific parent implementation. A world-level test
+  distinguishes ordinary Given evidence from comptime-only Given evidence.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  `/tmp/luna-tools-_h3yfqel/result.json`; `git diff --check` passed.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes complete_shipped_sysroot_invokes_comptime_qualified_type_traits`:
+  real sysroot invocation passed; `/tmp/luna-tools-tatcql84/result.json`.
+
+## Member-relevant ambiguous imports (2026-10-31)
+
+Lexical glob ambiguity now retains its conflicting trait declaration identities
+instead of only a diagnostic string. Lowering carries these identities into HIR;
+publication validates them, query budgets charge them, S-expression dumps expose
+them, and template cloning remaps local identities with other resolution evidence.
+
+Concrete member discovery checks these declarations and their inherited members
+within the active phase tier. A spelling collision that cannot supply this member
+no longer blocks an unrelated legal call. Runtime lookup excludes comptime-only
+interfaces, and an ordinary-tier spelling collision does not defeat an already
+selected comptime-only source. Relevant ambiguity remains a lexical error; this
+change does not make either ambiguous binding visible or select between them by
+implementation specificity. Errors without complete structured evidence and
+pending generated exports remain blocking. Private access checks are unchanged.
+
+Validation from `/home/fin/luna`, exit 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test trait_phases -p resolve --test trait_sources -p hir --test definitions`:
+  70 phase/source, 8 resolver and 24 HIR publication tests passed;
+  `/tmp/luna-tools-zyj8oyc0/result.json`. Cases include unrelated and inherited
+  relevant ambiguity, phase tiers, non-trait shadowing, invalid identities,
+  atomic publication and metered evidence.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  `/tmp/luna-tools-b0yxdf5f/result.json`; `git diff --check` passed.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes complete_shipped_sysroot_invokes_comptime_qualified_type_traits`:
+  real sysroot invocation passed; `/tmp/luna-tools-rodbu7zs/result.json`.
+
+## Checked List queries (2026-10-31)
+
+The public List implementation now provides pure comptime get/first/last.
+Ordinary Integer comparisons guard indexing, with no new intrinsic or machine
+index conversion. Missing elements return an outer null; nested optional values,
+Type heads and list snapshots retain their normal identities. The receiver is
+read after ordinary argument evaluation, and argument failures still propagate.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_list_operations`:
+  59 passed, one new fixture had invalid block syntax (exit 101);
+  `/tmp/luna-tools-99cgun84/result.json`. This includes the expanded collection
+  example's boundary, nested optional, snapshot and opaque Type cases.
+- After correcting the fixture to `do { ... }`,
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_list_operations checked_list_query`:
+  both argument-order/failure-recovery tests passed, exit 0;
+  `/tmp/luna-tools-jxwg6jzx/result.json`.
+- `python3 -B development/library_check.py --stage sysroot-meta --timeout 300`:
+  the real sysroot native test passed, exit 0 and value_matches true;
+  `/tmp/luna-library-0sikoxc8/summary.json`.
+- Formatting completed via development/command.py cargo fmt --all;
+  `/tmp/luna-tools-jul0ajw7/result.json`; git diff --check passed.
+
+## Scoped closure result transport (2026-10-31)
+
+Required-result restoration now delegates to the VM's bounded value-graph
+transport. It substitutes the closure signature, executable body, instance
+arguments and every captured value together. Capture cells and repeated closure
+objects are memoized by producer identity, so the restored graph retains its
+internal sharing but never aliases producer-owned cells. A failed substitution,
+invalid ownership state or exhausted budget cannot partially update the producer.
+Named capture-free instances keep their identity-only FunctionInstance transport;
+anonymous/capturing closures retain their actual body and environment.
+
+This closes the earlier boundary for acyclic owned capture graphs returned from
+abstract Type scopes. Quoted code, pointers, active comptime references, runtime
+trait-method identities and cyclic capture graphs still reject transport. No
+invocation-result cache policy changes, runtime execution permission or source
+pointer semantics are introduced. Type restoration still preserves normal-form
+heads and checks the caller telescope. This is graph transport, not serialization
+of arbitrary interpreter state.
+
+Source regressions call generic defaults returning closures, restore bool/char
+Type captures and T-dependent callable bodies, and observe mutable captured
+state across repeated calls. VM regressions check shared cells, repeated closure
+identity, producer isolation, budget failure/retry, cycles and nesting limits.
+Splitting body substitution and variant handlers also prevents the large closure
+transport stack frame from overflowing on deeply nested ordinary result packets.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test scoped_comptime_callables`:
+  10 tests passed; `/tmp/luna-tools-m0a57gz8/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor -p elaboration --lib scoped`:
+  9 VM and 3 elaboration scoped tests passed;
+  `/tmp/luna-tools-7ctb415r/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib required::restore`:
+  both restoration regressions passed; `/tmp/luna-tools-16vx4z0k/result.json`.
+- The first real-sysroot native fixture used comptime constants directly in a
+  runtime assumes and correctly failed the Splice boundary. The fixture now
+  performs its check through inline if; no cross-stage rule was relaxed.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-callable-type-inputs.fl --sysroot library`:
+  both real sysroot native tests passed, exit 0;
+  `/tmp/luna-tools-d33ag46p/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test function_type_dependencies --test scoped_comptime_callables`:
+  37 dependency and 10 scoped-callable tests passed, exit 0;
+  `/tmp/luna-tools-rbjmw44o/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed, `/tmp/luna-tools-su7kr3pj/result.json`; git diff --check passed.
+
+## Scoped quoted-code payload transport (2026-10-31)
+
+VM scoped restoration now handles complete ExpressionCode and PatternCode
+witnesses. It substitutes expression bodies, runtime context/result domains,
+pattern subjects, output domains and embedded pattern observation expressions.
+Runtime LocalIds, explicit port names/default connections and successful pattern
+binding identities stay unchanged. Repeated references to the same code object
+reuse one restored witness within the result graph. The producer remains intact.
+
+This is transport, not a splice certificate: no code body executes, no runtime
+storage is synthesized, and code remains outside ordinary Type/value identities.
+The existing completeness/port checks run before cloning; phase, contextual
+substitution and resource checks still belong to consumers. Pending code bodies
+and malformed port mappings fail. Type substitution and copying share the caller
+budget, including failure and retry.
+
+A source probe uncovered a separate frontend gap. Both expression and pattern
+code generator signatures collect ordinary data inputs without installing an
+earlier `comptime T: Type` input in the dependent annotation telescope. The
+reproducer fails with `type annotation requires an earlier comptime Type
+parameter` before VM transport. The expected-success test
+`generic_code_defaults_preserve_expression_context_and_pattern_outputs` is
+explicitly ignored pending that implementation. It must not be counted as a
+working source feature. Relevant entrypoints are form_contextual_generator in
+program/cmtt/generators.rs and ensure_pattern_generator in patterns/generators.rs;
+fixing admission alone is insufficient without invocation-time dependent input
+substitution. Existing clause-generic generation remains operational.
+
+Validation from `/home/fin/luna`, exit 0 unless noted:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib scoped_restore`:
+  6 tests passed, including code metadata/body restoration, identity sharing,
+  invalid ports, pending bodies and budget failure/retry;
+  `/tmp/luna-tools-sr0vvsjd/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt generic_code_defaults`:
+  initial probe failed at the dependent annotation boundary (exit 101);
+  `/tmp/luna-tools-ubcrwv23/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt code_defaults`:
+  clause-generic expr/pattern defaults passed; the above ordinary-parameter
+  probe was explicitly ignored; `/tmp/luna-tools-c4rbgmqs/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt_phase_boundaries`:
+  all 3 tests passed, including the matrix of forbidden comptime storage in
+  runtime code interfaces; `/tmp/luna-tools-kkvt3ihu/result.json`.
+- Formatting: `/tmp/luna-tools-bolpp_64/result.json`; git diff --check passed.
+
+## Ordinary dependent inputs in contextual signatures (2026-10-31)
+
+Before admitting ordinary dependent Type parameters in generators, contextual
+method contracts need to represent their binders. CodeFunctionSignature now
+retains a sparse parameter-position map of DeclarationParameter identities and
+sorts. These are ordinary data-input binders, not extra clause arguments or
+inference variables. Expression, pattern and data-returning contextual signatures
+share the representation, its S-expression dump and metered validation.
+
+Validation rejects code-category binders, wrong positions/sorts, duplicate
+identities and use of a binder in clause domains or its own/earlier input domains.
+`specialize_input` consumes one already evaluated input, substitutes all domain
+occurrences under the caller telescope and removes just that binder. It retains
+runtime context/port identities and opaque normal-form heads. Wrong sorts,
+invalid scopes and budget exhaustion leave the source signature unchanged;
+value-domain admission and source evaluation order remain caller responsibilities.
+
+The three contextual method-equivalence paths alpha-align these binders before
+comparing type leaves. A changed binder position or omitted binder cannot be
+hidden by otherwise identical code interfaces. Signatures without ordinary
+binders use a borrowed fast path, avoiding new signature clones on existing
+method comparisons. General signature mapping preserves binder ownership.
+
+This is a representation and contract-comparison stage, NOT frontend feature
+completion. Current source generator constructors still emit an empty binder
+map. The ignored expected-success ordinary-Type generator test remains pending.
+Next work must install earlier staged input bindings during signature formation,
+carry them through both generator representations and definition checking, and
+specialize from source-ordered evaluated arguments/defaults in the shared input
+preparation path. That path currently builds inference contexts before evaluating
+arguments; it cannot be fixed by eagerly executing Type arguments in a prepass.
+Stable source binders must also remain distinct from invocation-local Type
+stand-ins and inference variables.
+
+Validation from `/home/fin/luna`, all final checks exit 0:
+
+- `python3 -B development/check.py --timeout 900 -- check -p elaboration`:
+  `/tmp/luna-tools-8p0uc59t/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p nir --test code_interfaces`:
+  20 tests passed; `/tmp/luna-tools-mlwpy60t/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib interfaces::signatures`:
+  11 tests passed, including all three contextual signature categories;
+  `/tmp/luna-tools-_b60rd4p/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p iir --test types -p comptime_interpretor --test runtime_function_identities`:
+  9 IIR and 36 VM identity tests passed; `/tmp/luna-tools-qfw5ong0/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt_methods`:
+  all 144 source method tests passed; `/tmp/luna-tools-52fb3r7e/result.json`.
+- Formatting: `/tmp/luna-tools-evwvx0x4/result.json`; git diff --check passed.
+
+## Capture-free contextual input substitution (2026-10-31)
+
+The new dependent-signature boundary now rejects capture of free declarations.
+Alpha-aligning an implementation binder B to an interface binder A must not
+merge an existing outer A in the implementation with that local binder. Before
+renaming, alignment checks target declarations against the source's free type
+occurrences. Legitimate simultaneous permutations of local binders remain valid.
+The membership set avoids repeatedly scanning every binder for each rename;
+inspection of type terms remains charged to the shared query budget.
+
+Specializing an evaluated input similarly rejects a caller value containing an
+identity still owned by another callee input binder. The caller must establish
+fresh binder identities before transport when such scopes collide; substitution
+must never silently reclassify a caller's declaration. Rejection leaves the
+source signature intact. This is a correctness prerequisite for frontend input
+admission, which remains pending as recorded above.
+
+Validation from `/home/fin/luna`, exit 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir --test code_interfaces`:
+  23 tests passed; `/tmp/luna-tools-1nqiyjxy/result.json`. New cases cover free
+  declaration capture, caller-value capture under an opaque head and a legal
+  simultaneous permutation of two local binders.
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib interfaces::signatures`:
+  12 tests passed; `/tmp/luna-tools-ytwnhe54/result.json`. A contract regression
+  rejects the false equivalence between (B, outer A) and (A, A).
+- Formatting: `/tmp/luna-tools-m5a4g0v4/result.json`; git diff --check passed.
+
+## Shared pattern-generator argument preparation (2026-10-31)
+
+Pattern-producing calls now use the same `prepare_contextual_inputs` entry as
+expression-code generators and contextual data consumers. The former separate
+routing, inference, collection, clause-default completion and argument evaluation
+implementation has been removed. All three result categories now extend one
+source-ordered call-preparation path when ordinary dependent inputs are wired.
+
+The pattern adapter retains the full subject/success-output inference shape.
+Its return conversion preserves the original pattern-local output identities;
+only interface types are replaced. Default evaluation, body execution, contract
+checks and failure recovery remain inside the existing pattern generator frame.
+Constructing an adapter signature is charged before copying the interface,
+captures and clause values. No source syntax or language contract changed.
+
+Ordinary `comptime Type` inputs remain unsupported by source generator signature
+formation. The existing ignored regression is still ignored: this refactor is
+prerequisite integration, not a claim that the dependent-input feature works.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --test cmtt_methods --test cmtt_phase_boundaries --no-fail-fast`:
+  final modified tree `/tmp/luna-tools-53poub33/result.json`, exit 101;
+  579 CMTT tests passed, 3 failed, 1 ignored; all 144 method and 3 phase-boundary
+  tests passed. The same command against HEAD versions of the three changed
+  implementation files reproduced exactly the same three failures and all
+  other counts: `/tmp/luna-tools-8xfa48dm/result.json`, exit 101. Only this
+  task's edits were temporarily saved/restored; unrelated work was untouched.
+- The unchanged baseline failures are
+  `generator_explicit_registered_tuple_results_determine_layout`,
+  `generator_local_type_lists_drive_registered_tuple_instantiation`, and
+  `static_normal_tuple_evidence_uses_completed_type_lists`. They concern
+  completed Type-list values in normal-form input/layout evidence. Their
+  original expected behavior is retained; no assertion or test was weakened.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt pattern`:
+  `/tmp/luna-tools-hjxiutnq/result.json`, exit 0; 136 passed, 1 existing ignored.
+  These cover pattern output hygiene, partial subject/output inference,
+  expression-code inputs, lambdas, properties, variadics, dependent clause
+  defaults, source order, storage aliasing, contracts and failure boundaries.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  `/tmp/luna-tools-2guf6pxj/result.json`, exit 0. Final format and diff checks
+  accompany the commit. No full workspace test run was requested or performed.
+
+## Ordinary Type inputs in contextual generators (2026-10-31)
+
+Expression-code generators, pattern generators and contextual data consumers
+now bind ordinary `comptime T: Type` parameters during signature formation.
+Later data domains, quoted runtime contexts, results and pattern success outputs
+can depend on these inputs. They are ordinary supplied values, not additional
+clause arguments. The original `generic_code_defaults_preserve_expression_context_and_pattern_outputs`
+regression is enabled and passes.
+
+Each cached source signature owns declaration binders from the shared identity
+allocator. Copies freshen those binders before nested calls or recursive
+invocation can transport caller identities into them. The caller's type scope
+is retained through generator frames without importing caller runtime locals.
+Completed Type inputs also enter the callee's staged-value environment, so
+annotations and forwarded Type expressions refer to the same identity.
+
+The common argument pipeline uses provisional inference slots for contextual
+checking, then constrains them to the Type values actually obtained at each
+source position. Inferred interface evidence never fabricates a supplied Type
+value. The existing NIR specialization boundary rewrites all signature types
+while retaining runtime binding identities. Named argument order, single
+evaluation, ordinary function calls producing Type, literal spreads, code
+parameter defaults and trait implementation dispatch are covered by source
+regressions. Runtime data still cannot enter a required Type computation.
+
+Open definitions now route local code constants through their contextual
+binding checker and publish pattern-splice success bindings into subsequent
+expression descriptions. Code witnesses are restored across open-definition
+frames. Fragment phase-check snapshots retain callable clause domains and
+newtype representations: omitting them made a full-sysroot check reject the
+Iterator callback context even though the contextual example did not call it.
+A focused declaration-domain regression reproduces that boundary.
+
+Remaining work: omission/evaluation of defaults for the ordinary Type parameter
+itself is not yet wired into shared prefix completion. Code-valued parameter
+defaults depending on an explicitly supplied Type are supported. Type evidence
+from nonliteral data packets also needs the same source-ordered transport;
+current rejection must not be replaced by inferring a value from its domain.
+General suspended Type computations remain subject to the existing definition
+checking limits. This stage does not claim complete CMTT or language support.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt_type_inputs --test cmtt --test cmtt_methods --test cmtt_phase_boundaries --test open_functions --test function_type_dependencies --test scoped_comptime_callables --no-fail-fast`:
+  `/tmp/luna-tools-z4s8x8xd/result.json`, exit 101. CMTT: 580 passed and the same
+  three previously established Type-list baseline failures; no ignored tests.
+  Methods: 144 passed; phase boundaries: 3; open functions: 389; function type
+  dependencies: 37; scoped callables: 10. One newly written test had used the
+  reserved name `lift`; its declaration and calls were corrected to
+  `select_value`, without changing expected behavior.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt_type_inputs`:
+  `/tmp/luna-tools-f4djwtrs/result.json`, exit 0; all nine new tests passed.
+- After the full-sysroot snapshot fix,
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt_type_inputs --test open_functions --no-fail-fast`:
+  `/tmp/luna-tools-yz3gr89q/result.json`, exit 0; ten contextual Type-input tests
+  and all 389 open-function tests passed.
+- The existing real-sysroot callable example was also checked during diagnosis:
+  `python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-callable-type-inputs.fl --sysroot library`:
+  `/tmp/luna-tools-4px66_66/result.json`, exit 0. No library reduction or phase
+  validation bypass was used to resolve the new example's snapshot failure.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-type-inputs.fl --sysroot library`:
+  `/tmp/luna-tools-h_othkcn/result.json`, exit 0; the native test passed for
+  bool and char instances, including both code-parameter defaults, local code
+  constants and pattern output use. This is the complete real sysroot and the
+  LLVM host pipeline, not an inline imitation of its primitive bindings.
+- Formatting: `/tmp/luna-tools-jywad5mo/result.json`, exit 0; final format and
+  diff checks accompany the commit. No full workspace test run was performed.
+
+## Type evidence in contextual spread packets (2026-10-31)
+
+Contextual calls now retain known Type fields in checked spread packets. The
+same argument pipeline feeds expression generators, pattern generators and
+data consumers. Immutable aggregate initializers retain partial structural
+observations: an unknown ordinary-data sibling does not erase a known Type
+identity. Packet extraction reads these observations without invoking the
+producer or treating the field's Type domain as its value. The actual packet
+still executes once at its source position during invocation.
+
+Observations use the existing bounded partial-value analysis and are discarded
+with schema snapshots at writes, calls and address escape. This is conservative
+until alias-sensitive observations exist. A packet whose Type result remains
+unknown during definition checking is still rejected; inference from a peer
+argument cannot supply that missing value. Ordinary Type parameter default
+completion remains a separate unfinished stage.
+
+Validation from `/home/fin/luna`:
+
+- Before the fix, the two new expression/pattern/data packet tests failed with
+  `dependent contextual input requires a completed Type value`:
+  `/tmp/luna-tools-cdoy26a9/result.json`, exit 101.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt_type_inputs --test cmtt packet --no-fail-fast`:
+  `/tmp/luna-tools-zyda2yd5/result.json`, exit 0; 37 existing packet tests and
+  four new tests passed, including single evaluation and unknown-value refusal.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt_type_inputs --test cmtt --no-fail-fast`:
+  `/tmp/luna-tools-6tertmuf/result.json`, exit 101; 14 Type-input tests passed,
+  with 580 existing CMTT tests passing and only the same three documented
+  Type-list/layout baseline failures. No expectation or ignore was weakened.
+- The first real-sysroot example attempt rejected an undeclared quote context:
+  `/tmp/luna-tools-37o7hp02/result.json`, exit 1. The example now declares its
+  runtime context and supplies the substitution at the runtime use site.
+- Corrected public-interface example:
+  `python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-type-inputs.fl --sysroot library`:
+  `/tmp/luna-tools-xkobdik1/result.json`, exit 0; both LLVM native tests passed
+  against the complete sysroot, covering bool and char expression contexts
+  and pattern output bindings.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  `/tmp/luna-tools-r2ldjmm2/result.json`, exit 0. `git diff --check` passed.
+  No full workspace test run was performed.
+
+## Ordinary Type defaults in contextual calls (2026-10-31)
+
+Missing ordinary Type inputs now complete through the shared contextual
+argument pipeline. All explicit inputs are obtained first in source order.
+A callee prefix frame then prepares omitted defaults through the last missing
+Type slot in parameter order. Earlier code, pattern and data inputs are
+available to those computations. Prepared defaults and post-default data
+state transfer to the invocation frame rather than executing again.
+
+Clause inference can provide checking context, but it does not supply an
+ordinary Type value. Each supplied or default Type value specializes subsequent
+input interfaces and constrains the final call candidate. Code defaults retain
+their provenance so forwarding preserves caller associations. The new prefix
+uses the existing capture environment, storage checkpoint and fuel machinery;
+interface copies are charged before default evaluation. Cached definitions
+remain unspecialized; prepared-default metadata is invocation-local and has an
+S-expression display.
+
+A prefix may bind several names to one caller Type slot. Required invocation
+now registers one restoration parameter per slot, retaining all local bindings;
+previously duplicate restoration declarations rejected a generic A -> T -> U
+default chain. This preserves caller scope rather than expanding normal forms.
+
+Validation from `/home/fin/luna`:
+
+- The initial dependent-default regression failed with unresolved call inference
+  before implementation: `/tmp/luna-tools-5cm4gmk2/result.json`, exit 101. The
+  companion fixture initially needed whitespace between `>` and `=` and was
+  corrected. An intermediate run exposed duplicate scoped restoration inputs:
+  `/tmp/luna-tools-ro7b7htb/result.json`, exit 101; that mechanism is fixed.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt_type_inputs --test cmtt --test cmtt_methods --test scoped_comptime_callables --test function_type_dependencies --test open_functions --no-fail-fast`:
+  `/tmp/luna-tools-08s98qfw/result.json`, exit 101. Type inputs: 21 passed;
+  methods: 144; scoped callables: 10; function type dependencies: 37;
+  open functions: 389. CMTT: 580 passed, with only the same three documented
+  Type-list/layout baseline failures. Existing expectations remain unchanged.
+- After adding explicit prefix-copy budget charging,
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt_type_inputs`:
+  `/tmp/luna-tools-xnbsddsq/result.json`, exit 0; all 21 tests passed. New tests
+  cover expression/pattern/data defaults, generic dependency chains, preserved
+  updates and evaluation counts, skipped overrides, incompatible inferred
+  contexts, caller code associations and selected trait implementations.
+
+Type computations whose identities remain unknown during definition checking
+still require the broader suspended-elaboration work. This stage does not
+claim complete CMTT, arbitrary default-dependent inference or whole-language
+support.
+
+The first expanded sysroot example reached the predicate checker and rejected
+an ordinary call inside `assumes` (`/tmp/luna-tools-4wpcz6ll/result.json`, exit 1).
+The example now binds the call result before checking its predicate, matching
+the existing supported verification boundary; no predicate rule was weakened.
+Format check: `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`,
+`/tmp/luna-tools-3anvu8z3/result.json`, exit 0. `git diff --check` passed.
+Final public-interface/native check:
+`python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-type-inputs.fl --sysroot library`,
+`/tmp/luna-tools-f83njyss/result.json`, exit 0. All three LLVM native tests
+passed with the complete sysroot, including bool/char generic default chains
+and pattern Type defaults. No full workspace test run was performed.
+
+## Completed construction values in nested required invocations (2026-10-31)
+
+A generator's data-update frame temporarily removes its stored expressions so
+ordinary reads and updates use owned VM cells. Nested required computations
+inside that expression still need their comptime inputs. The missing path
+rejected a local list value used in an explicit normal-form argument during
+actual invocation, despite definition checking having completed successfully.
+
+Invocation frames now observe complete immutable initialization values before
+checking the expression. Required computations capture only referenced,
+complete observations not already supplied through explicit or live inputs.
+Domains and values are transported through the existing invocation/scoped-Type
+boundary. Ordinary local reads and the executable expression are preserved;
+there is no List/Tuple name test, new normal-form argument kind or head unfolding.
+Writes, address escape and calls invalidate observations; the frame clears
+these temporary observations on exit. Runtime locals and unknown aggregate
+parts are not promoted to comptime inputs. Observation copying is budgeted;
+this stage does not claim constant-cost snapshotting of large construction data.
+
+Validation from `/home/fin/luna`:
+
+- `generator_local_type_lists_drive_registered_tuple_instantiation` reproduced
+  the missing input on the original implementation; the diagnostic run is
+  `/tmp/luna-tools-we0n9nq1/result.json`, exit 101. The same regression passed
+  after the invocation-input fix: `/tmp/luna-tools-30478ply/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --test cmtt_type_inputs --test open_functions --test scoped_comptime_callables --no-fail-fast`:
+  `/tmp/luna-tools-qywfc0ch/result.json`, exit 101. CMTT: 581 passed and two
+  remaining static tuple-evidence/layout failures; open functions: 389 passed;
+  scoped callables: 10 passed. The new record probe initially used the wrong
+  declaration syntax for ordinary function clauses and was corrected to
+  `fn inspect() -> bool where T` without changing expected behavior.
+- After the bounded invalidation and capture guards,
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt_type_inputs`:
+  `/tmp/luna-tools-s5fj20_a/result.json`, exit 0; all 22 passed, including a
+  record-valued ordinary normal-form argument in a nested required call.
+
+The initial full-sysroot probe also asked whether an opaque Marker application
+was unequal to bool. Normal-form opacity supplies no such inequality proof;
+PTC correctly returned Unknown (`/tmp/luna-tools-6lks18t6` and the record-only
+isolation `/tmp/luna-tools-vm4v08eb`, both exit 1). The probe now checks equality
+of the same head and ordinary argument value, following
+`docs/comptime/purity-and-normal-form.md`; no equality rule was changed.
+Formatting: `/tmp/luna-tools-5pauwks7/result.json`, exit 0, for
+`python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`.
+`git diff --check` passed. No full workspace test run was performed.
+Final complete-sysroot verification:
+`python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`,
+`/tmp/luna-tools-_wjizzrk/result.json`, exit 0; LLVM native test passed for both
+named Tuple Es input and ordinary record-valued normal-form arguments.
+
+## Signature-directed contextual normal-form evidence (2026-10-31)
+
+Contextual producer inference no longer recognizes the Tuple declaration to
+construct its arguments. All source normal-form heads use their declared clause
+telescope, including dependent collector domains, positional collection, list
+spread, named whole-list inputs and empty collections. Static evidence reads
+immutable construction snapshots and constant initializer syntax; it does not
+invoke a producer or unfold a normal-form body. Equal branches can contribute
+evidence without selecting or executing either branch. Ordinary call checking
+still validates the full argument expressions, phases and constraints.
+
+The annotation formation path now constructs collection elements under the
+instantiated element domain, rather than calling type_expr on every element.
+List literals preserve declaration inputs structurally, as tuple-valued inputs
+already did. The shared collector retains symbolic Type-list concatenation in
+the existing internal representation. This is not completion of the larger
+removal of legacy TypeListValue/TypeListConcat and untyped NIR collection nodes.
+In particular, collect_known_normal_argument still assumes Type elements;
+its expression-path collection representation needs a subsequent generalization.
+Routing all annotations through that path was rejected after it lost symbolic
+inputs and confused empty non-Type collections with empty Type collections.
+The committed annotation path avoids that route and preserves those inputs.
+
+The new regression uses a user-defined Indexed<T, ...items: List<T>> head with
+an intentionally nonterminating body. It verifies bool collection, spread,
+named lists, immutable local lists and empty lists, and rejects mismatched
+value indices. The real-sysroot example uses the same public meta.List interface.
+The two previously recorded CMTT failures now pass without changing expectations.
+
+Validation from /home/fin/luna:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --test cmtt_type_inputs --test normal_form_inference --test comptime_clause_inputs --test normal_form_methods --no-fail-fast`:
+  exit 0, 659 tests passed; `/tmp/luna-tools-xispw396/result.json`.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
+  exit 0, both LLVM native tests passed;
+  `/tmp/luna-tools-bnt6p24b/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0; `/tmp/luna-tools-gmuxu4f4/result.json`. `git diff --check` passed.
+
+No full workspace suite was run. The remaining legacy collection representation
+is an implementation gap, not a restriction of Flurry normal-form arguments.
+
+## Contextual collection domains and source-order preparation (2026-10-31)
+
+NormalFormArgument now calls its contextual collection nodes List and ListSpread.
+The bytecode compiler, staged interpreter, NIR traversal, free-binding/copy-budget
+walks and program-verification consumers use the same generic nodes. Their dumps
+are `(contextual-list-input ...)` and `(contextual-list-spread ...)`; no new
+language syntax or parser-specific list category was introduced. The enclosing
+head signature supplies the list domain, as it already did in interpretation.
+
+Static normal-form observation now obtains that signature and applies bounded
+ordinary declaration substitution. A collected value is formed under the full
+list domain, including the empty case. Collection observations wait for their
+Type-domain inputs when those explicit/default inputs occur later in the source
+plan. This reorders only bounded reads of immutable evidence; it neither runs
+producers nor changes the execution plan. Unknown inputs remain unknown. Scalar
+applications do not scan the head registry or build a domain telescope unless
+they contain a contextual collection.
+
+Literal list spreads already routed to the variadic tail are normalized to
+ordinary positional inputs before preparation. This gives their elements the
+same source-order preparation as non-spread operands, including expressions
+whose Type context is supplied later. It does not flatten computed producers,
+execute a list to discover its width, or bypass the completed domain checks.
+The source-order regression records 1, 2 and 3 from an element, a spread element
+and a later Type input, respectively, and requires the final trace to be 123.
+
+The empty-list regression reproduced a real baseline identity mismatch:
+`Indexed<>` was observed with an empty TypeListValue while an equivalent named
+List<bool> input retained its nominal value domain. Baseline evidence:
+`/tmp/luna-tools-finehrq1/result.json`, exit 101. The regression now also covers
+nonempty bool inputs, mixed spreads, dependent u8 inputs and comptime invocation;
+normal-form bodies deliberately do not terminate, so unfolding cannot pass it.
+Unit checks cover missing/unregistered list domains, distinct empty list domains,
+wrong-domain spreads and bounded copy exhaustion.
+
+Validation from /home/fin/luna:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test normal_form_inference --test cmtt --test cmtt_type_inputs --test comptime_clause_inputs --test normal_form_methods --no-fail-fast`:
+  exit 0, 661 passed; `/tmp/luna-tools-wrhawb89/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p comptime_compiler -p comptime_interpretor --no-fail-fast`:
+  exit 0, 1018 passed across these crates and their integration targets;
+  `/tmp/luna-tools-j3o7pel8/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib known_`:
+  exit 0, 13 passed; `/tmp/luna-tools-ikmtuicp/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test execution normal_`:
+  59 passed, two existing failures; `/tmp/luna-tools-m04mc_pk/result.json`.
+  Both failures reproduced after restoring just this stage's owned source files
+  to commit 1bb8d3e7 (`/tmp/luna-tools-3i9sywxc/result.json`, exit 101):
+  late_normal_form_input_staging_limits_depth_on_a_small_stack reports
+  StepsExhausted rather than DepthExhausted, and
+  variadic_normal_type_collection_evaluates_each_input_once_in_source_order
+  rejects Interpreter::new invocation with ErrorKind::Type. Their expectations
+  were not changed. All 15 temporarily replaced owned files were restored
+  byte-for-byte; pre-existing worktree changes were not included in the swap.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0, `/tmp/luna-tools-lg19aurp/result.json`; `git diff --check` passed.
+
+The first sysroot probe put a function call directly inside assumes, outside the
+currently supported effect-free program-predicate subset
+(`/tmp/luna-tools-qnedkpb1/result.json`, exit 1). The example now evaluates the
+call normally and supplies its local boolean result to the same predicate.
+
+The previous section's contextual-expression observer gap is addressed here.
+Legacy TypeListValue/TypeListConcat term storage still remains; this stage does
+not claim complete removal of that internal representation or completion of all
+normal-form elaboration. No full workspace suite was run.
+
+Final sysroot validation:
+`python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
+exit 0, all three LLVM native tests passed;
+`/tmp/luna-tools-pkfzao80/result.json`. This includes the new empty-collection
+identity and source-order checks through the public meta.List binding.
+
+
+## Ordinary frozen list input decoding (2026-10-31)
+
+Frozen List<Type> inputs now use the same domain admission and recursive
+container decoder as other lists. Nominal payloads require the exact declared
+list domain, registered layout authority, no variant, and valid elements in the
+current Type scope. Nested lists reconstruct through this same mechanism.
+The legacy TypeListValue reader also delegates to the container decoder.
+
+Tuple layout inspection can borrow fields from an ordinary typed list argument
+using its declared collector domain, without unfolding a normal-form head.
+Shape-only queries require separate registered list-layout evidence. Opaque or
+wrong-domain heads do not acquire layout authority from their shape.
+
+This is the read-side migration. Canonical producers, including Value freezing,
+still emit the existing TypeListValue representation for Type elements; this
+stage does not equate different raw term encodings. Coordinated producer and
+remaining consumer migration, including TypeListConcat, remains necessary.
+The prior nominal Type-list rejection assertion now checks ordinary domain
+admission; writer identity expectations remain unchanged. Regression coverage
+includes empty/nested inputs, malformed fields, wrong domains/variants, scoped
+Type parameters, invalid inputs followed by recovery, and typed tuple layouts.
+
+Validation from /home/fin/luna:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p comptime_interpretor --no-fail-fast`:
+  exit 0, 996 passed; `/tmp/luna-tools-1fcc0znu/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test builder_invocations --test reflected_definitions --test normal_form_inference --test comptime_clause_inputs --test type_spreads --test cmtt --no-fail-fast`:
+  804 passed, one existing reflected_definitions failure; exit 101,
+  `/tmp/luna-tools-4q5spzu0/result.json`. The failing test is
+  source_comptime_selection_drives_generated_field_layouts_without_reparsing:
+  expected one callback, observed zero. Restoring the four implementation files
+  to ca335a39 and running `test -p luna --test reflected_definitions` through
+  the same check wrapper reproduced that failure (exit 101,
+  `/tmp/luna-tools-mnqujdx5/result.json`). All four files were restored
+  byte-for-byte; the failing test was not modified.
+- `python3 -B development/library_check.py --stage sysroot-builders --stage sysroot-object-enum-builder --timeout 300`:
+  both public sysroot builder stages passed;
+  `/tmp/luna-library-83ylwmm1/summary.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`
+  and `git diff --check` were run before commit. No full workspace suite.
+
+
+## Shared clause list input contracts (2026-10-31)
+
+Ordinary function specialization no longer has a TypeListValue-only admission
+branch. List clause arguments use the same registered collection-domain
+contract as other ordinary values and normal-form inputs. This removes a second
+implementation of list authority, element-sort and scope checks. The contract
+accepts both the legacy encoding and ordinary typed list payloads without
+changing canonical writers or normal-form identity.
+
+A direct specialization-contract regression checks both representations with
+empty/nonempty inputs, malformed elements, bound Type variables under valid,
+missing and wrong-sort frames, budget exhaustion and a subsequent successful
+check. The interpreter suite and source clause/spread tests exercise existing
+invocation paths as well; no test expectation was weakened.
+
+Validation from /home/fin/luna:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --no-fail-fast`:
+  exit 0, 530 passed; `/tmp/luna-tools-g9t7ftyt/result.json`.
+- Source integration command:
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_clause_inputs --test type_spreads --test normal_form_inference --no-fail-fast`;
+  exit 0, 142 passed; `/tmp/luna-tools-lmjau6jg/result.json`.
+- Formatting: `python3 -B development/command.py --timeout 120 -- cargo fmt --all`,
+  exit 0, `/tmp/luna-tools-ziwez6fl/result.json`; `git diff --check` passed.
+
+Canonical storage migration remains outstanding. No full workspace suite.
+
+
+## Declaration-owned completed tuple layouts (2026-10-31)
+
+Completed value reconstruction now has a layout-evidence entrypoint borrowing
+fields from the owning declaration, rather than parsing TypeListValue itself.
+The interpreter uses its validated normal-form metadata when admitting both
+original and instantiated associated values. Head::tuple_elements checks the
+exact collector domain for ordinary typed list payloads.
+
+Product/error-row transport accepts the same borrowed layout evidence, recurses
+through fields, and retains the same-head requirement. It does not unfold heads
+or infer type equality from equal layouts. Legacy boolean-head APIs delegate to
+the shared traversal but remain limited to their old representation.
+
+Regression coverage reconstructs ordinary typed tuple inputs, rejects missing
+layout authority, wrong list domains, field counts/types and malformed Type
+payloads, checks budget failure/recovery, and remaps an error row inside a typed
+tuple. The existing representation plan Display is reused.
+
+Validation from /home/fin/luna:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p comptime_interpretor --no-fail-fast`:
+  exit 0, 998 passed; `/tmp/luna-tools-b54adxha/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test associated_signatures --test associated_purity --test builder_invocations --test normal_form_methods --no-fail-fast`:
+  exit 0, 96 passed; `/tmp/luna-tools-536v8eyi/result.json`.
+- Formatting used `python3 -B development/command.py --timeout 120 -- cargo fmt --all`;
+  exit 0, `/tmp/luna-tools-uhdnumzg/result.json`; `git diff --check` passed.
+
+This does not complete storage migration. The type-resolution and elaboration
+callers remained on legacy adapters at this stage. Correction after inspecting
+Index::set_normal_form_metadata and DeclarationWorld::new: the index already
+stores normal-form metadata and invalidates its revision on changes; the earlier
+claim that it lacked this metadata was incorrect. Consumers still need to use
+that evidence before switching canonical frozen list storage. No full workspace
+suite was run.
+
+
+## Associated layout evidence across resolution and elaboration (2026-10-31)
+
+Associated completed-value resolution now reads the implementation index's
+existing, sorted normal-form metadata. It requires both the registered tuple
+role in the type context and a unique owning declaration, then borrows fields
+through Head::tuple_elements. Missing metadata, duplicate heads, opaque roles
+and mismatched list domains cannot provide reconstruction authority. The
+existing metadata revision mechanism continues to invalidate selection evidence.
+
+Elaboration now passes its bound tuple view to completed-value validation. That
+view accepts ordinary list payloads through the current declaration signature;
+legacy payloads retain their existing path during migration. Both callers pass
+the actual target through recursive completed-value checks.
+
+The resolution regression exercises actual associated-value queries across
+metadata removal/replacement/restoration, wrong collector domains, duplicate
+head identities, and unchanged metadata revision stability. It uses a typed
+ordinary list payload rather than a legacy TypeListValue input.
+
+Validation from /home/fin/luna:
+
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution --test associated`:
+  exit 0, 25 passed; `/tmp/luna-tools-shyl1ysq/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution --no-fail-fast`:
+  exit 0, 299 passed; `/tmp/luna-tools-sy3c10ey/result.json`.
+- Source integration command:
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test associated_signatures --test associated_purity --test builder_invocations --test normal_form_methods --test type_spreads --no-fail-fast`;
+  exit 0, 188 passed; `/tmp/luna-tools-exh3e_3r/result.json`.
+- Formatting: `python3 -B development/command.py --timeout 120 -- cargo fmt --all`,
+  exit 0, `/tmp/luna-tools-_dhi7uzf/result.json`; `git diff --check` passed.
+
+The completed-value production callers now use layout evidence. Other term
+consumers and canonical writers still require coordinated storage migration;
+this is not a complete removal of TypeListValue/TypeListConcat. No full workspace
+suite was run.
+
+
+## Product/error transport with ordinary tuple inputs (2026-10-31)
+
+Production error-conversion callers now supply declaration-owned tuple field
+views: interpreter preparation/execution, IIR validation and constant folding,
+elaboration layout adaptation, LLVM emission, and memory/purity analysis. The
+shared conversion validator uses the same scalar row checks and delegates
+product layout transport to the metadata-aware traversal. Legacy role-only APIs
+remain compatibility entries for existing low-level tests, not production calls.
+
+New tests execute success and both failure labels through a tuple whose single
+collector input is an ordinary typed list. Physical row order changes inside
+the function; the target returned by the function uses the normally formed row.
+An initial test instead returned an explicit noncanonical row in its signature:
+transport completed successfully, but the final result failed signature
+normalization checks. The fixture was corrected to isolate internal layout
+transport; no existing expected result or admission rule was relaxed.
+
+The IIR regression checks frozen values and rebuilt syntax, preserved tuple
+identity, missing/wrong collector evidence, budget exhaustion and recovery.
+No new IR variant was added; existing transport-plan Display remains in use.
+
+Validation from /home/fin/luna:
+
+- Targeted new tests:
+  `python3 -B development/check.py --timeout 900 -- test -p iir -p comptime_interpretor typed_tuple --no-fail-fast`:
+  exit 0, two passed; `/tmp/luna-tools-cxamklm6/result.json`.
+- Low-level integration:
+  `python3 -B development/check.py --timeout 900 -- test -p nir -p iir -p comptime_interpretor -p program_verification --no-fail-fast`;
+  exit 0, 1195 passed; `/tmp/luna-tools-c0y_7skl/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test error_surface --no-fail-fast`:
+  117 passed, one failure in
+  generic_error_labels_do_not_choose_ambiguous_permutations_or_unfold_heads;
+  `/tmp/luna-tools-9n77ph44/result.json`, exit 101. The failure expects rejection
+  of inferring T from Wrap<bool>, unrelated to the tuple transport fixture.
+  Restoring this stage's 11 implementation files to ee7c73ed and running
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test error_surface generic_error_labels_do_not_choose_ambiguous_permutations_or_unfold_heads`
+  reproduced the same failure at line 1166 (exit 101,
+  `/tmp/luna-tools-46z5611k/result.json`). All 11 files were restored
+  byte-for-byte afterward; the test was not changed.
+- Formatting: `python3 -B development/command.py --timeout 120 -- cargo fmt --all`,
+  exit 0, `/tmp/luna-tools-84m6_8kw/result.json`; `git diff --check` passed.
+
+Other term consumers and canonical list writers still need coordinated storage
+migration. This stage does not change Type-list output encoding or make the
+legacy and ordinary raw encodings equal. No full workspace suite was run.
+
+Final native validation:
+`python3 -B development/check.py --timeout 900 -- test -p luna --test host product --no-fail-fast`:
+exit 0, 11 native integration tests passed;
+`/tmp/luna-tools-r409hxhj/result.json`. These cover existing source-level product
+flows through LLVM (including the shipped example at every optimization level);
+the new ordinary typed list payload is directly exercised by the VM/IIR tests.
+Final `cargo fmt --all -- --check` through development/command.py exited 0:
+`/tmp/luna-tools-ns50ekxh/result.json`.
+
+
+## Closed ordinary inputs in tuple-kind witnesses (2026-10-31)
+
+PTC already classified registered tuple heads independently of their collector
+encoding, but concrete counterexample verification only recognized legacy
+TypeListValue inputs. Kind witness checks now inspect closure of immutable
+input trees, including ordinary nominal list values and closed opaque Type
+values. This is a kind-classification precondition, not evaluation of producers,
+normal-form equality, injectivity, or a new category of value propositions.
+Formation/domain admission remains the caller's responsibility.
+
+Pending projections, symbolic inputs and concatenations remain unavailable to
+this concrete witness path. Existing type-model equality/reification is
+unchanged. Regression cases cover empty/nonempty lists, a closed opaque Type
+field, witness replay and forged goals, removed tuple authority, unresolved
+inputs, budget recovery and rejection of standalone value equality.
+
+Validation from /home/fin/luna:
+
+- `python3 -B development/check.py --timeout 900 -- test -p ptc -p type_resolution --no-fail-fast`:
+  exit 0, 384 passed; `/tmp/luna-tools-sk_cp6_g/result.json`.
+- Source integration command:
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test normal_form_methods --test normal_form_inference --test type_spreads --no-fail-fast`;
+  exit 0, 101 passed; `/tmp/luna-tools-nm0hii1q/result.json`.
+- Formatting: `python3 -B development/command.py --timeout 120 -- cargo fmt --all`,
+  exit 0, `/tmp/luna-tools-v4rgnaz1/result.json`; `git diff --check` passed.
+
+This removes the remaining kind-counterexample dependency on legacy list
+payloads. It does not switch canonical list writers or remove all legacy term
+variants. No full workspace suite was run.
+
+
+## Signature-directed staged list operations (2026-10-31)
+
+Staged list construction and indexing now share one element-domain path for
+Type and ordinary value elements. Completed expression lists retain ordinary
+list syntax. A single reader decodes legacy compact Type-list syntax into
+ordinary Type-valued element expressions; length, concatenation and indexing
+operate on those expressions rather than inspecting a frozen TypeListValue.
+All fields are completed before selection, preserving failure behavior and
+preventing indexing from skipping an unavailable later element.
+
+The canonical constant writer is unchanged: frozen Type lists still use the
+legacy encoding during coordinated migration. One old IIR assertion expected
+ordinary construction to be rewritten into the compact syntax node; it now
+expects the ordinary completed construction. Existing constant identity and
+invalid-domain checks remain in place. New tests cover both mixed input orders,
+nested selection, empty concatenation, element/collector mismatches, unavailable
+fields, out-of-bounds access and budget failure followed by recovery.
+
+Validation from /home/fin/luna:
+
+- `python3 -B development/check.py --timeout 900 -- test -p iir --no-fail-fast`:
+  exit 0, 93 passed; `/tmp/luna-tools-c3w1xynu/result.json`.
+- Source integration command:
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test type_spreads --test comptime_clause_inputs --test cmtt --no-fail-fast`;
+  exit 0, 721 passed; `/tmp/luna-tools-61oisnln/result.json`.
+- Formatting: `python3 -B development/command.py --timeout 120 -- cargo fmt --all`,
+  exit 0, `/tmp/luna-tools-6c9s7483/result.json`; `git diff --check` passed.
+
+This removes a staged-operation dependency on the frozen Type-list encoding,
+not the canonical writer itself. Other producers/consumers and legacy term
+variants remain to migrate. No full workspace suite was run.
+
+Final public-library validation:
+`python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
+exit 0, three native tests passed; `/tmp/luna-tools-91od9u7m/result.json`.
+
+
+## Ordinary payloads in elaboration's known-list observer (2026-10-31)
+
+Known-list indexing and normal-form spread collection now share a reader for
+ordinary nominal payloads and legacy compact Type-list values. Callers first
+establish the registered collection domain; the reader requires its exact
+identity, no variant, the expected element sort and a bounded payload traversal.
+Symbolic collection assembly also converts completed ordinary Type-list pieces
+through this reader before joining its still-legacy deferred representation.
+
+The ordinary list expression observer now follows the declared element domain
+for every list, checking child expression types and preserving observation
+order. A shared canonical writer retains the existing frozen encoding for Type
+elements; it is not a second identity scheme. Ordinary non-Type collection
+identity remains domain-qualified, including empty inputs.
+
+Regression coverage mixes nominal and compact Type-list spreads, retains their
+source order and checks domain mismatches, malformed fields/variants, budget
+failure and subsequent recovery. Existing unknown-input and no-body-unfolding
+checks remain unchanged.
+
+Validation from /home/fin/luna:
+
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib known_`:
+  exit 0, 14 passed; `/tmp/luna-tools-nogexebz/result.json`.
+- Source integration command:
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test normal_form_inference --test type_spreads --test comptime_clause_inputs --test cmtt --test builder_invocations --no-fail-fast`;
+  exit 0, 804 passed; `/tmp/luna-tools-tv3ouij6/result.json`.
+- Formatting: `python3 -B development/command.py --timeout 120 -- cargo fmt --all`,
+  exit 0, `/tmp/luna-tools-hhk06yy0/result.json`; `git diff --check` passed.
+
+Deferred TypeListConcat and canonical Type-list producers remain to migrate.
+This is observer compatibility with ordinary values, not complete storage
+migration. No full workspace suite was run.
+
+Final public-library validation:
+`python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
+exit 0, three native tests passed; `/tmp/luna-tools-z3vjzfdr/result.json`.
+
+
+## Shared admitted-list freezing boundary (2026-10-31)
+
+VM export, staged IIR constants, known-expression observation and scoped
+invocation-result normalization now use `comptime_values::freeze_admitted_list`.
+The representation decision no longer lives separately in these consumers.
+Element recursion remains producer-owned; list authority, full element-domain
+admission and scope checking remain with the existing owning phase. The shared
+boundary checks the declared domain shape and element sorts and charges domain
+copying and payload inspection before publishing a frozen value.
+
+This is preparation for changing the canonical storage once all symbolic
+producers and readers support it, not completion of that migration. Type inputs
+still use the existing compact encoding; ordinary values preserve the exact
+list domain, including empty and nested lists. The helper does not establish
+layout authority from an opaque head's shape or equate the two raw encodings.
+Deferred TypeListConcat and contextual call reconstruction remain outstanding.
+
+New regression checks cover empty, nested and scoped values, substitution,
+wrong sorts and malformed domains, exhausted budgets and subsequent recovery.
+Existing VM, IIR and source tests exercise the actual connected exporters.
+
+Validation from /home/fin/luna:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p iir -p comptime_interpretor --no-fail-fast`:
+  exit 0, 1094 passed; `/tmp/luna-tools-ehs_nihd/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test normal_form_inference --test type_spreads --test comptime_clause_inputs --test cmtt --test builder_invocations --no-fail-fast`:
+  exit 0, 804 passed; `/tmp/luna-tools-shp7og8m/result.json`.
+  The initial build reported an elaboration u64/usize budget mismatch; it was
+  fixed with the existing bounded budget adapter before this successful run.
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib known_`:
+  exit 0, 14 passed; `/tmp/luna-tools-ioc911sh/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-o_e5h5v1/result.json`; `git diff --check` passed.
+
+No full workspace test suite was run.
+
+Public-library validation:
+`python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
+exit 0, three native tests passed; `/tmp/luna-tools-n7bgurd6/result.json`.
+
+
+## Domain-carrying deferred list concatenation (2026-10-31)
+
+`Term::TypeListConcat` and its Type-only constructor have been removed.
+`Term::ListConcat { ty, parts }` retains the exact collection domain while
+ordered pieces await substitution. Its structural normalizer handles ordinary,
+nested and compact legacy list payloads, rejects foreign domains, variants,
+wrong sorts and scalar operands, merges adjacent completed pieces and preserves
+unknown pieces. It never unfolds an opaque head or grants list layout authority.
+The existing frozen-value encoding decision is shared with VM/IIR exporters.
+
+Elaboration no longer has a separate collected-Type-list observer. Every
+registered list collector follows the declared element domain, accumulates
+adjacent scalar entries together and retains symbolic spreads through the same
+operation. This avoids constructing a separate one-element list for every
+adjacent input. The owning phases still validate domains and precharge retained
+structure; substitution is structural normalization, not program verification.
+
+All former concatenation walkers now include the domain child: scope and binder
+rewriting, runtime and declaration dependencies, disposal, resource budgets,
+associated normalization, implementation matching, materialization and PTC
+structural traversal. PTC does not gain value propositions or evaluation of
+normal-form heads. Pending concatenation remains inadmissible as completed IIR
+or a completed immutable value. Dumps use `(list-concat (type ...) (parts ...))`.
+
+Metadata wire v1 uses new descriptor tag 36. Tag 35 continues to identify
+normal-form callable signatures; legacy tag 32 is rejected because it lacks a
+collection domain. Existing unrelated descriptor encodings remain unchanged.
+The new round-trip regression initially exposed a tag collision, which was
+corrected before the final successful run; no test expectation was weakened.
+
+New tests cover bool/nested-list substitution, empty pieces, source order,
+foreign domains, invalid operands, domain-only dependencies, scope and budget
+boundaries. Source tests inspect both Type-list and ordinary bool-list residuals
+in unspecialized function annotations, then substitute empty/nonempty inputs and
+check exact opaque identities. The real-sysroot native example also checks
+`Surround<T, values: meta.List<T>, prefix: T, suffix: T>` for bool and Type inputs.
+
+Canonical `TypeListValue` storage and remaining contextual-call reconstruction
+still need migration. This stage removes the special deferred operation; it does
+not assert that all frozen list representations are unified yet.
+
+Validation from /home/fin/luna:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test normal_form_inference --test type_spreads --test comptime_clause_inputs --test cmtt --test builder_invocations --test metadata_wire --test build_metadata --no-fail-fast`:
+  exit 0, 824 passed; `/tmp/luna-tools-_nx85p72/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test execution spreads_in_annotations_specialize_without_unfolding`:
+  exit 0, two passed; `/tmp/luna-tools-42n3cd5o/result.json`.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
+  exit 0, four native tests passed; `/tmp/luna-tools-bngpmdhe/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-f45x68qm/result.json`; `git diff --check` passed.
+
+No full workspace suite was run.
+
+Final underlying-crate validation:
+`python3 -B development/check.py --timeout 900 -- test -p nir -p iir -p comptime_interpretor -p ptc -p type_resolution --no-fail-fast`:
+exit 0, 1481 passed; `/tmp/luna-tools-0ybj0y3p/result.json`.
+
+After batching adjacent collector inputs and sharing the owned list encoder,
+the public-library command above was repeated on the final implementation:
+exit 0, four native tests passed; `/tmp/luna-tools-x1rmnvif/result.json`.
+
+
+## Ordinary aggregate inputs in contextual call inference (2026-10-31)
+
+Partial tuple checking contexts now retain the declared domain of an ordinary
+frozen list payload. Context reconstruction and settled-field hints read that
+payload as well as the legacy compact form, then preserve the original input
+representation when rebuilding a candidate. A source-syntax context without a
+retained domain can use the settled tuple's domain. Missing list authority,
+non-Type collection domains and malformed payloads do not yield tuple hints.
+Copied domains and field inspection are charged to the candidate's budget.
+
+These are hints from already stage-authorized signatures, not independent
+formation certificates. Declaration formation and full value admission remain
+with their existing owners. No layout registry, value evaluation, or new
+injectivity theorem was added to PTC. Raw compact and ordinary payload encodings
+are not silently equated.
+
+The new round-trip regression exposed a separate matching gap: ordinary
+immutable aggregate fields could not propose clause substitutions. Matching now
+walks nominal values with equal variant/arity, tuple values and consistently
+labelled record values, retaining the domain and original complete equality
+obligation. This applies to ordinary descriptions as well as list values. A
+Type-valued field can supply a candidate without discarding a mismatched scalar
+field or changing the enclosing opaque head. Unknown or incompatible remaining
+obligations still prevent `finish` from exporting an instance; the contextual
+checking call is not itself the export boundary.
+
+Tests cover partial-field hints, reconstruction with and without a retained
+domain, inference, budget failure/recovery, missing list authority, foreign
+domains and complete aggregate identity checks. Source tests infer a Type from
+`Description.kind` without an explicit type argument or expected result type,
+reject changed boolean fields and foreign heads, and use nonterminating opaque
+head bodies to ensure they are not invoked for inference. The public-library
+native example now includes the same description-driven call path.
+
+The compact Type-list writer convention remains in source syntax contexts.
+This stage makes the call path representation-aware; canonical frozen storage
+still needs a coordinated producer migration.
+
+Validation from /home/fin/luna:
+
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution --no-fail-fast`:
+  exit 0, 302 passed; `/tmp/luna-tools-mt_9g1er/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test normal_form_inference --test normal_form_methods --test nominal_value_parameters --test type_spreads --test comptime_clause_inputs --test cmtt --no-fail-fast`:
+  exit 0, 1038 passed; `/tmp/luna-tools-buwuws8c/result.json`.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
+  exit 0, five native tests passed; `/tmp/luna-tools-9u7vtsvp/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-ho4rbpwh/result.json`; `git diff --check` passed.
+
+No full workspace test suite was run.
+
+
+## Immutable list construction in residual calls (2026-10-31)
+
+`Invocation::from_call` can capture elaborated immutable list construction,
+including nested lists and references to unresolved comptime inputs. The
+captured payload retains its declared domain, uses the shared admitted-list
+freezer, and preserves input dependencies. Type-valued inputs use the same
+capture path. Element domains, type-value sorts, traversal depth and allocation
+fuel are checked before exporting the residual.
+
+This is extraction from already elaborated list nodes, not a rule granting
+list formation authority to an arbitrary opaque head. Source tests explicitly
+exercise extraction and the existing invocation session: wait on an inference
+input, supply its value, resume to the expected result, and leave the saved
+residual unchanged. Calls, effects and control flow inside elements are not
+folded into immutable payloads; these still require the complete saved-body
+path. This stage does not add automatic selection of the extraction fast path.
+
+Elaboration now shares one budget adapter for scoped VM list results, literal
+normal-form arguments and tuple collector construction. Tuple construction gets
+the collector domain from its validated declaration signature. The known-value
+observer also uses the shared freezer for legacy typed-list nodes. Canonical
+Type-list storage still uses `TypeListValue`; producer/consumer migration is
+not complete, and raw ordinary and legacy encodings are not equated.
+
+Validation from /home/fin/luna:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir --no-fail-fast`:
+  exit 0, 474 passed; `/tmp/luna-tools-fzpkb4_b/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test normal_form_inference --test type_spreads --test comptime_clause_inputs --test cmtt --test builder_invocations --no-fail-fast`:
+  exit 0, 805 passed; `/tmp/luna-tools-d4gddxb9/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test execution residual`:
+  exit 0, 10 passed; `/tmp/luna-tools-rykvq84v/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0; `/tmp/luna-tools-8x9ndbwb/result.json`; `git diff --check` passed.
+
+No full workspace test suite was run.
+
+Public-library validation on the final implementation:
+`python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
+exit 0, five native tests passed; `/tmp/luna-tools-64i4x8sm/result.json`.
+
+
+## Tuple representation traversal through declaration layouts (2026-10-31)
+
+Finite-storage checking now borrows the configured Tuple head metadata rather
+than retaining only its identity and decoding `TypeListValue` itself. The
+shared `Head::tuple_elements` view accepts ordinary frozen collector payloads
+under their exact declared domain, as well as the legacy compact encoding.
+Source declaration checking supplies that metadata from its existing normal
+parameters; incremental builder worlds borrow it from the immutable package.
+Tentative worlds retain the same layout evidence without copying field trees.
+
+Previously a nominal declaration embedding itself in an ordinary Tuple payload
+could skip the recursive field walk. It now fails the same by-value cycle
+check as the legacy form. Pointer indirection still permits finite storage,
+unregistered heads remain opaque, and budget failures remain retryable.
+A regression exercises both baseline and tentative builder worlds, optional
+nesting, a rejected candidate followed by a successful candidate at the same
+identity, and subsequent reuse of the published finite declaration.
+
+This is representation checking over admitted descriptions. Formation, input
+domain admission and symbolic specialization retain their existing owners; no
+opaque head is unfolded or granted a layout by its input shape. Canonical list
+storage migration and other remaining direct consumers are separate work.
+
+Validation from /home/fin/luna:
+
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --test representations`:
+  exit 0, 20 passed; `/tmp/luna-tools-0hxitioz/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0; `/tmp/luna-tools-ik5rb20e/result.json`; `git diff --check` passed.
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test builder_invocations --test tuple_examples --test tuple_type_syntax --test newtypes --no-fail-fast`:
+  builder_invocations 79, newtypes 212 and tuple_type_syntax 8 passed.
+  tuple_examples failed on the existing anonymous-record-patterns.fl example:
+  unresolved `bool` during name resolution. Combined exit 101;
+  `/tmp/luna-tools-3enoswnd/result.json`.
+- Baseline isolation: temporarily restored only the two owned elaboration
+  implementation files from HEAD `fe324028`, ran
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test tuple_examples`,
+  and restored both files byte-for-byte in a finally block. The same unresolved
+  `bool` diagnostics occurred, exit 101; `/tmp/luna-tools-hgeh8ofo/result.json`.
+  This is an existing example binding failure, not a representation regression.
+  No test expectations or implicit primitive resolution rules were changed.
+
+No full workspace test suite was run.
+
+
+## Purity uses declared Tuple collector layouts (2026-10-31)
+
+The purity analysis now retains borrowed Tuple head metadata in its existing
+identity index. Its structural Copy shortcut reads fields through the shared
+`Head::tuple_elements` view instead of destructuring the legacy Type-list
+payload. Ordinary immutable collector values therefore receive the same
+recursive scalar/aggregate check as compact payloads. The declared collector
+domain must match; arbitrary normal-form heads do not acquire a Tuple layout.
+
+This changes the representation reader, not the resource protocol. An affine
+nominal field still prevents the structural shortcut. Existing Copy/Drop
+acquisition and resource-aware paths retain their responsibility for explicit
+protocol evidence. P3 finite-default and P4 runtime-purity distinctions remain
+unchanged, and opaque heads are not evaluated.
+
+A public `validate_defaults` regression discards constructed empty, scalar and
+nested tuples in a block before returning a boolean, covering both payload
+encodings. It rejects a foreign collector domain, a tuple containing an affine
+nominal value and an unregistered head. Re-registering the head allows the
+valid input again. These are typed-IR tests; canonical source storage still
+uses the legacy Type-list encoder.
+
+Validation from /home/fin/luna:
+
+- `python3 -B development/check.py --timeout 900 -- test -p program_verification --test purity`:
+  exit 0, 2 passed; `/tmp/luna-tools-t09bt0t2/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0; `/tmp/luna-tools-zgz_m7k6/result.json`; `git diff --check` passed.
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test runtime_purity --test default_calls --test optional_purity --test associated_purity --test trait_purity --no-fail-fast`:
+  exit 0, 133 source tests passed; `/tmp/luna-tools-5yvgw75w/result.json`.
+
+No full workspace test suite was run.
+
+
+## Contextual Tuple construction shares the admitted-list writer (2026-10-31)
+
+The VM no longer constructs a compact Type-list directly when contextual
+argument evaluation delivers a Tuple type. It retrieves the Tuple head's
+single value-input domain, checks the existing registered list layout, and
+freezes the collected values through `freeze_admitted_list` with the current
+invocation budget. The resulting application still passes through
+`complete_normal_type`, including the inner head's formation requirements.
+Headless legacy syntax retains its existing structural tuple behavior.
+
+The contextual-input regression now covers empty and populated tuples under
+two different registered List identities and both input evaluation orders.
+It continues to reject violated inner formation requirements and unregistered
+Tuple heads. No runtime effects are evaluated by the freezing step, and no
+normal-form head body is unfolded. This removes another independent writer;
+it does not change the shared encoder's legacy Type-list storage convention.
+
+Validation from /home/fin/luna:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --no-fail-fast`:
+  exit 0, 531 passed; `/tmp/luna-tools-ej30gjsx/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0; `/tmp/luna-tools-3z04vs6g/result.json`; `git diff --check` passed.
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test normal_form_inference --test comptime_clause_inputs --test type_spreads --no-fail-fast`:
+  exit 0, 143 passed; `/tmp/luna-tools-z9u24_2t/result.json`.
+
+No full workspace test suite was run.
+
+Public-library validation on the final implementation:
+`python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
+exit 0, five native tests passed; `/tmp/luna-tools-_7shvh4h/result.json`.
+
+
+## Collection-valued implementation inputs (2026-10-31)
+
+Declaration-value admission now accepts an optional collection-layout callback.
+It supplies an independently registered element domain, with lookup and copying
+charged to the same budget. Ordinary and legacy collection payloads use the
+shared exact-domain view, then recursively admit each element. This composes
+with record, optional, error and nominal fields and preserves scalar-domain,
+scope and symbolic declaration evidence checks. Existing callers without this
+callback gain no collection authority from a value's tag or head shape.
+
+Implementation matching uses this general admission path instead of directly
+accepting `TypeListValue`. Its separate record traversal was also redundant:
+the common recursion now checks symbolic leaves and nominal fields through the
+same evidence callbacks. A shared package metadata lookup rejects duplicate
+collection identities, missing roles and invalid domains without invoking heads
+or adding program-value propositions to PTC.
+
+Source invocation exposed a downstream gap: VM dispatch-instance setup used
+layout-free declaration admission even after implementation selection. It now
+provides the same nominal and collection evidence, retaining typed budget
+failure. The source test executes methods whose implementation inputs contain
+boolean lists, Type lists and nested boolean lists, and rejects wrong element
+domains and trait arguments. The public-library example adds the same path.
+The source fixture uses a nominal receiver; an attempted opaque normal-form
+receiver was rejected by existing subject-eligibility checking, which remains
+outside this change and needs separate semantic assessment.
+
+Unit coverage includes both encodings, empty values, nested collections,
+records, optionals, symbolic elements with and without declaration evidence,
+wrong domains/sorts, escaping bound inputs, absent and duplicate layouts, and
+budget failure followed by a successful fresh attempt. Frozen storage is still
+canonicalized by the existing encoder; this does not equate raw ordinary and
+legacy encodings or finish the Type-list representation migration. The callable
+input helper in `nir::function_parameters` still has a legacy-only branch to
+migrate separately.
+
+Validation from /home/fin/luna:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p type_resolution -p comptime_interpretor --no-fail-fast`:
+  exit 0, 1308 passed; `/tmp/luna-tools-78qbbuyy/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test normal_form_methods --test nominal_value_parameters --test normal_form_inference --test type_spreads --no-fail-fast`:
+  exit 0, 410 passed; `/tmp/luna-tools-kkq0e92p/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0; `/tmp/luna-tools-_wlsik39/result.json`; `git diff --check` passed.
+
+No full workspace test suite was run.
+
+Public-library validation on the final implementation:
+`python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
+exit 0, six native tests passed; `/tmp/luna-tools-62nacpnt/result.json`.
+
+
+## Callable instance inputs use general value admission (2026-10-31)
+
+`function_parameters::validate_arguments` now delegates to recursive declaration
+admission with registered nominal and collection layouts. The prior direct
+Type-list branch and separate per-input loop are removed. Concrete callable
+inputs are checked in dependency order, including domains supplied by later
+parameters; scope, scalar ranges, collection fields and budget failures use the
+same checks as other admitted declaration values. Body contracts remain with
+invocation and are not inferred from successful input admission.
+
+This helper is consumed by materialization and IIR template storage. A new
+storage regression selects the same runtime declaration with two different
+ordinary boolean-list inputs and verifies distinct retained target identities.
+Missing layout authority rejects both entries; exhaustion can be retried with
+a fresh budget. NIR tests cover ordinary Type lists, nested boolean lists,
+forward dependent domains, integer range boundaries and escaping bound values.
+Existing compact-list evidence tests remain unchanged.
+
+The public-library example additionally stores two runtime callable instances
+with different list clause inputs and invokes both with ordinary runtime boolean
+arguments. IIR coverage checks that the two clause vectors retain separate tag
+identities. This stage migrates the callable input boundary, not the canonical
+frozen list encoder or extraction of list elements into runtime function bodies.
+
+Validation from /home/fin/luna:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p iir -p materialization --no-fail-fast`:
+  exit 0, 588 passed; `/tmp/luna-tools-wk0qyqci/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0; `/tmp/luna-tools-pd2fy0nw/result.json`; `git diff --check` passed.
+
+An independent deferred-constant gap was observed while constructing the native
+case: inside `fn selected_flag() -> bool where flags: meta.List<bool>`, the body
+`{ const flag = flags[0]; flag }` requests required evaluation before the clause
+input has a concrete value. The sysroot command failed with interpretation Type
+at `flags[0]`; `/tmp/luna-tools-wi1w2l3f/result.json`. The direct body `{ flags[0] }` then
+reached the comptime-only runtime-storage restriction, as recorded in
+`/tmp/luna-tools-jtd9ke2q/result.json`. The original local-const form is retained
+in `development/repros/runtime-list-clause-constant.fl` and still needs deferred
+required-evaluation work. The final native callable-storage case returns an
+ordinary runtime boolean parameter; it proves collection-bearing instance
+transport, not evaluation of the list inside that runtime function. The pending
+reproduction has not been converted into a passing expectation.
+
+Final public-library validation:
+`python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
+exit 0, seven native tests passed; `/tmp/luna-tools-ntfmesq4/result.json`.
+No full workspace test suite was run. The pending local-constant reproduction
+is explicitly outside this passing native example.
+
+
+## Required local constants wait for runtime clause instances (2026-10-31)
+
+The preceding local-constant reproduction exposed a staging classification gap:
+body work was suspended for ordinary comptime parameters, but not for declaration
+clause inputs. Runtime free functions with clause inputs and staged body work now
+enter the existing open-definition checking and concrete instantiation path.
+This is independent of List or any particular initializer shape. Comptime bodies
+already evaluate their local constants per invocation and keep that path; receiver
+definitions retain their separate existing checking path because open receiver
+instantiation is not yet supported by this machinery.
+
+A second gap appeared when such a definition was stored in a local callable.
+Known signature metadata previously allowed a body-free runtime identity to
+escape to IIR. In runtime value contexts, an open callable with no outstanding
+ordinary staged inputs now materializes its executable instance even when its
+signature was already complete. Explicit and fully inferred clause selections
+share the same decision. Staged contexts can still transport pending identities;
+this does not supply missing ordinary comptime arguments.
+
+The source regression checks list and scalar clause constants across separate
+instances, stored callable invocation, out-of-range and empty inputs, rejection
+of runtime reads in required constant initializers, and preservation of existing
+generic receiver Type constants and comptime body checking. Both reference
+execution and IIR construction succeed. The original local-const reproduction
+is retained as a regression, and the public-library example now includes its
+actual body and expected results rather than the earlier transport-only case.
+
+Validation from /home/fin/luna:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test clause_staged_constants --test open_functions --test comptime_clause_inputs --test runtime_purity --no-fail-fast`:
+  exit 0, 501 passed; `/tmp/luna-tools-ked8i0jz/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0; `/tmp/luna-tools-5axkfcd3/result.json`; `git diff --check` passed.
+
+No full workspace test suite was run. Canonical list storage migration remains
+unfinished; this stage fixes the concrete free-function staging gap found during
+that migration, not every form of deferred definition body.
+
+Final public-library validation:
+`python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
+exit 0, eight native tests passed, including the formerly failing local-const
+body; `/tmp/luna-tools-nxv7876y/result.json`.
+
+### Nominal layouts and VM admission for ordinary collection inputs
+
+Package-backed nominal value layouts now obtain list element domains from
+registered normal-form metadata and pass that evidence through recursive
+struct, enum and newtype argument admission. Newtypes retain capture-first
+checking without changing stored argument order or nominal identity. The
+lookup-only layout API intentionally supplies no collection authority: a
+caller that supplies only nominal declarations cannot certify an opaque
+collection head from its payload shape.
+
+The same evidence callback is now used by VM nominal construction plans,
+immutable type admission, nominal value membership and declaration argument
+checking. The original native reproduction constructed
+`Flags<[true, false]> {enabled: true}` and passed it to a comptime function;
+fixing package layout queries alone still failed with interpretation Type.
+Connecting the VM construction and receiving checks is part of this change.
+No normal-form body is unfolded and no special parameter category is added.
+
+Regression coverage includes all three nominal declaration kinds, a list
+whose element domain comes from a later captured Type parameter, nested
+nominal values, wrong element/domain/variant rejection, missing or duplicate
+collection metadata, and budget failure followed by recovery. This does not
+finish the canonical TypeListValue representation migration. Elaboration
+consumers that only supply nominal lookup evidence still require explicit
+collection evidence wiring before they can use this expanded layout path.
+
+Validation in `/home/fin/luna` (all final commands exited 0):
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p comptime_interpretor`:
+  1007 tests passed; `/tmp/luna-tools-s07wx3ux/result.json`.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
+  9 native tests passed; `/tmp/luna-tools-5k37q4rp/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  `/tmp/luna-tools-cyl3p82h/result.json`; `git diff --check` passed.
+
+The first source run after changing only NIR failed with interpretation Type
+(`/tmp/luna-tools-2rvbczs0/result.json`); the VM changes above resolve that
+failure. No full language suite was run.
+
+### Elaboration collection evidence for nominal observations
+
+The explicit collection-evidence nominal layout API is now available without
+constructing a temporary package. Elaboration supplies the already resolved
+meta.List protocol identity and charges element-domain copying to the caller's
+budget. It is used for negated nominal patterns, computed-pattern scalar
+export checks and nominal effect-value layouts. Coverage complement queries
+carry the same callback, including coverage used to subtract handled error
+labels. These queries remain program/pattern analyses, not PTC propositions.
+The lookup-only API continues to deny collection authority by default.
+
+The sysroot contextual-values example now matches `Flags<[true, false]>`
+with `not {enabled: true}` and `{enabled: true}`, without a wildcard fallback.
+The explicit Copy implementation is still required; layout evidence alone
+does not authorize duplication or cleanup. Ordinary TypeListValue migration
+and coverage's remaining tuple representation view are separate pending work.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib coverage`:
+  69 passed, exit 0; `/tmp/luna-tools-guofbnfx/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test negated_nominal_patterns --test normal_patterns --test effect_contracts --no-fail-fast`:
+  85 passed, exit 0; `/tmp/luna-tools-fc051yk9/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-puitkf93/result.json`.
+
+The native fixture initially omitted Clone, a required Copy parent, and then
+put calls directly in assumes. These fixture mistakes were corrected using
+the actual library hierarchy and local result bindings; no protocol or
+program-specification rules were weakened. No full language suite was run.
+
+Native lowering exposed one more consumer after elaboration succeeded:
+materialization's concrete struct/enum/newtype instance checks still used
+layout-only admission. They now supply package collection metadata, as does
+nominal value index admission. The failure was
+`nominal value index has a different nominal identity` in the new native
+test (`/tmp/luna-tools-cvl6xmcd/result.json`). This is a compiler fix, distinct
+from the two fixture corrections above. Materialization's test suite passes
+with the expanded admission (`/tmp/luna-tools-nitkcsi_/result.json`, command
+`python3 -B development/check.py --timeout 900 -- test -p materialization`).
+
+Final native run:
+`python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`
+passed all 10 tests, exit 0 (`/tmp/luna-tools-66g4_rmn/result.json`). Final
+format check also exited 0 (`/tmp/luna-tools-72qk6fkm/result.json`), and
+`git diff --check` passed.
+
+### Tuple coverage reads declaration layout evidence
+
+Coverage now receives the resolved Tuple head metadata rather than only its
+identity. Both direct domains and domains discovered through scoped type
+equality borrow fields using `Head::tuple_elements`, which checks the
+collector's exact declared list domain and handles ordinary list payloads as
+well as the transitional TypeListValue encoding. The structural tuple is a
+local coverage view; normal-form identity remains unchanged. Head bodies are
+not evaluated or unfolded to establish coverage.
+
+Elaboration's structural tuple query and representation-cycle check share
+one metadata lookup. The previous TypeListValue shortcut in the structural
+query is removed. Match coverage and error-handler coverage pass the same
+metadata contract, including through contextual type-equality queries.
+
+Tests cover both payload encodings, empty tuples, exact and missing boolean
+coverage, absent/opaque metadata, a list from a different domain, budget
+exhaustion and recovery, and scoped equality without leaking assumptions.
+The real sysroot example constructs `Tuple<.Es = Fields>` and exhaustively
+matches both possible first-field boolean values. Canonical list-value
+migration is still unfinished; this change removes consumer assumptions,
+not the transitional encoding itself.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib coverage`:
+  70 passed, exit 0; `/tmp/luna-tools-1ap61x8o/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test tuple_type_syntax --test normal_patterns --test negated_nominal_patterns --test effect_contracts --no-fail-fast`:
+  93 passed, exit 0; `/tmp/luna-tools-kigwk1gy/result.json`.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
+  11 native tests passed, exit 0; `/tmp/luna-tools-g31gezeb/result.json`.
+
+After this native run, the structural tuple helper regained its early
+non-Tuple return to avoid metadata lookup/copying on unrelated types. The
+same 93 source tests were rerun for this final guard; the change does not
+alter the metadata-backed Tuple path. No full language suite was run.
+
+Final source rerun: `/tmp/luna-tools-g5mnkapa/result.json`, exit 0, all 93
+passed. Final formatting: `python3 -B development/command.py --timeout 120 -- cargo fmt --all`,
+exit 0 (`/tmp/luna-tools-_xqhn052/result.json`); `git diff --check` passed.
+
+### Staged tuple inspection uses declared layout views
+
+Known immutable pattern inspection now carries Tuple head metadata and calls
+its exact-domain tuple field view. Inline selection uses the same inspector;
+ordinary frozen list payloads no longer become Unknown merely because they
+are not encoded as TypeListValue. Missing, opaque or foreign-domain metadata
+still returns Unknown, and an earlier unknown alternative cannot be skipped
+to select a later wildcard or bind its names. Length mismatches under valid
+metadata remain definite mismatches. Budget exhaustion stays distinct from
+mismatch and does not poison later independent inspection.
+
+CMTT generator data-domain checking also uses the shared bound tuple field
+view. It retains the existing recursion/work bound, input-domain checks and
+normal-form identity. The sysroot example exercises both a typed tuple data
+argument to a code generator and inline inspection of a Tuple Type value.
+Canonical TypeListValue migration remains pending.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib known_patterns`:
+  5 passed, exit 0; `/tmp/luna-tools-nm1h4sdd/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt_type_inputs --test inline_control --test comptime_inline_loops --test normal_patterns --no-fail-fast`:
+  324 passed, 2 failed, exit 101; `/tmp/luna-tools-poblc6eo/result.json`.
+  The failures are `tuple_iteration_resolves_each_generic_elements_trait_evidence`
+  and `tuple_iteration_uses_generic_shape_evidence_without_unfolding_heads`,
+  both runtime VM Type errors at inline_control.rs:4832/4851.
+- Baseline isolation restored only this change's three implementation files
+  temporarily to HEAD `f9fbbdab`, ran
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test inline_control tuple_iteration_`,
+  then restored the exact worktree bytes in a finally block. Both failures
+  reproduce unchanged; 5 pass, 2 fail, exit 101,
+  `/tmp/luna-tools-m99zc13a/result.json`. Expectations were not changed.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
+  13 native tests passed, exit 0; `/tmp/luna-tools-452n78ii/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-oh5z303v/result.json`; `git diff --check` passed.
+
+The two baseline generic tuple-iteration VM failures remain follow-up work;
+no full language suite was run.
+
+### Runtime reference invocation checks residual formation clauses
+
+The two generic tuple-iteration failures above came from direct runtime
+invocation, not tuple projection or pattern selection. Both generated `walk`
+bodies had no remaining type parameters. One retained the now-concrete
+`Tuple<bool, u8> == Tuple<bool, u8>` requirement; the other retained concrete
+Ready capabilities for bool and u8. `prepare_invocation` rejected every
+runtime function with any retained requirement or capability before checking
+that evidence.
+
+Direct runtime invocation now uses ordinary callable admission for constrained
+bodies and closes/checks invocation requirements after input binding. The VM
+uses its own dispatch/type-contract evidence; it does not erase clauses or
+assume that a source-produced body is authorized. Uninstantiated generic
+functions still fail, missing trait evidence still fails, false requirements
+are rejected, unknown requirements remain unresolved, and comptime invocation
+still cannot execute runtime bodies. Unconstrained direct calls avoid the
+additional callable-admission step.
+
+Regression tests invoke rejected and accepted functions repeatedly in the
+same VM to check recovery. Distinct primitive types without a supplied type
+solver still produce Unknown, consistent with the pre-existing equality
+contract; the new test does not manufacture a disequality proof. The two
+original generic tuple-iteration tests now pass unchanged, including their
+call-order and IIR-instantiation assertions. The sysroot example exercises
+trait-constrained tuple iteration in both field orders and a generic tuple
+shape equality.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor`:
+  532 passed, exit 0; `/tmp/luna-tools-fk7pyd98/result.json`. This was before
+  retaining the unconstrained-call fast path; the constrained path is unchanged.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor -p luna --test type_equality --test inline_control --test cmtt_type_inputs --test comptime_inline_loops --test normal_patterns --no-fail-fast`:
+  final implementation passed all selected groups, exit 0;
+  `/tmp/luna-tools-ksgq1_s8/result.json`.
+
+Temporary tracing used to locate the failure was removed. No full language
+suite was run; canonical collection representation migration is still pending.
+- Final selected source/VM groups: 330 tests passed in total.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
+  14 native tests passed, exit 0; `/tmp/luna-tools-tdfmpkk2/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-42j58g6_/result.json`; `git diff --check` passed.
+
+### Spread width hints accept ordinary immutable list carriers
+
+The explicit packet return-type probe previously read completed list widths
+only from K::TypeListValue. It now also accepts a fixed ordinary list
+constructor and a frozen ordinary list value with the exact declared domain.
+The caller still establishes the meta.List<Type> domain before querying this
+hint, and mutable generator bindings remain excluded. This is context-layout
+information, not element admission or a replacement for checking the packet.
+
+The query charges its inspection budget, verifies constructor element domains,
+and does not execute element expressions or follow producer calls. Calls
+inside a fixed constructor do not hide its arity; a call returning a list
+remains unknown. Foreign frozen domains are not reused. Tests include empty
+lists, all three carriers, budget exhaustion/recovery and unknown producers.
+The sysroot example uses a comptime-produced list as a named Tuple input,
+returns that tuple from a function, and spreads it into ordinary parameters.
+Canonical TypeListValue migration remains unfinished.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib list_width_tests`:
+  passed, exit 0; `/tmp/luna-tools-55q_10be/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_spreads --test contextual_spreads --test spread_control --no-fail-fast`:
+  all selected groups passed, exit 0; `/tmp/luna-tools-sjublo8_/result.json`.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
+  15 native tests passed, exit 0; `/tmp/luna-tools-9cc7txln/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-aebo_3du/result.json`; `git diff --check` passed.
+
+The three source groups contain 114 passing tests. No full language suite was
+run; mutable/unknown producer widths intentionally remain deferred.
+
+### Freeze Type-element lists as ordinary values with their declared domain
+
+The admitted-list encoder now emits `NominalValue { ty, variant: None, fields }`
+for every element domain. Type elements no longer select a domainless compact
+encoding. This preserves distinct declared list identities, including empty
+lists, and retains opaque normal-form heads in list elements. Element sorts,
+scope, rewriting and budget checks remain in their existing admission paths.
+
+Partial call contexts now obtain the collection domain from the bound Tuple
+head's declared parameter. This covers ordinary calls, effects, spreads and
+CMTT generator inputs. A context with missing domain information must not
+manufacture a different completed identity from a later admitted value. The
+change does not equate legacy and ordinary payloads or unfold normal-form
+heads. Source expectations independently construct the ordinary carrier from
+the registered list declaration rather than calling the production encoder.
+
+Legacy `TypeListValue` readers and IR variants remain during migration;
+this is not complete deletion of the old representation. Existing raw legacy
+terms are not asserted equal to freshly frozen values. Unknown-domain legacy
+context support in type_resolution also remains to be removed separately.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test contextual_spreads --test cmtt --no-fail-fast`:
+  exit 0; `/tmp/luna-tools-5il1y45p/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_lists --test tuple_type_syntax --test comptime_bytecode_types --test comptime_bytecode_lists --test library_protocols --test normal_form_inference --test normal_form_methods --test cmtt_type_inputs --test cmtt --test contextual_spreads --test type_spreads --test newtypes --no-fail-fast`:
+  1,117 passed and one existing fixture failure, exit 101;
+  `/tmp/luna-tools-v3m2bp3q/result.json`. The conversion-protocol fixture embeds
+  host-library-conversion.fl, which imports builtin.{bool,u8}, without defining
+  that module. Both the import and missing module are present at HEAD a70e0889;
+  the failure occurs during name resolution, before list encoding.
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p iir -p comptime_interpretor -p type_resolution -p materialization -p elaboration --no-fail-fast`:
+  all selected core tests passed, exit 0;
+  `/tmp/luna-tools-64nf2_0_/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_spreads normal_form_type_list_requirements_keep_the_collected_input_kind`:
+  exit 0 after making the ordinary carrier/domain assertion explicit;
+  `/tmp/luna-tools-t38env2r/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-q31c7hps/result.json`; `git diff --check` passed.
+- `python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-contextual-value-inputs.fl --sysroot library`:
+  15 native sysroot tests passed, exit 0;
+  `/tmp/luna-tools-d7co1jqt/result.json`.
+
+No full language suite was run. The conversion fixture import failure is
+separate from the ordinary-list migration and is not counted as a pass.
+
+### Partial call contexts no longer synthesize domainless lists
+
+Removed the remaining TypeListValue constructor in type_resolution's partial
+context import. A NormalTuple context supplies its declared collector domain
+or borrows the exact domain of an already settled ordinary input. If neither
+exists, import fails before publishing inference facts instead of selecting a
+legacy representation. This removes the unknown-domain construction exception
+noted in the preceding migration. It does not remove legacy decoding elsewhere.
+
+The new regression exercises empty and nonempty contexts, checks that missing
+domain evidence leaves the parameter unresolved, then supplies the domain and
+finishes the same candidate with the correct ordinary value identity. Existing
+checks retain settled-domain borrowing, foreign-domain rejection and budget
+recovery. No language syntax or normal-form equality rule changes.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution --test calls`:
+  53 passed, exit 0; `/tmp/luna-tools-oshslih4/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --test contextual_spreads --test type_spreads --test spread_control --no-fail-fast`:
+  697 passed, exit 0; `/tmp/luna-tools-cq1hly78/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-jpl9kyoa/result.json`; `git diff --check` passed.
+
+No full language suite or native backend rebuild was needed for this
+context-import-only change; source checks cover its CMTT and spread consumers.
+
+### Branch-selected list inputs feed checked struct publication
+
+The reflected-definition test failed before invoking the publication callback
+because its standalone source did not bind bool. Its primitive references now
+use explicit local bindings, and an early callback-count failure includes the
+underlying compilation error. Both selected layouts, invalid input and retry
+are again exercised; no compiler semantic workaround was needed.
+
+The real sysroot struct-builder example now selects a List<Type> through a
+comptime branch, indexes that value for one field, and passes it by named Es
+input to a Tuple field. Two published types exercise different layouts with
+runtime construction, projection and tuple destructuring. Reflection checks
+both field identities and distinct generated declarations. The selected
+library stage requires six native tests, so omitting the added cases cannot
+silently satisfy its acceptance count.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test reflected_definitions --test builder_invocations --no-fail-fast`:
+  79 builder tests passed; the initial reflected fixture failed before its
+  callback. `/tmp/luna-tools-6kw0p5g1/result.json`, exit 101.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test reflected_definitions`:
+  corrected fixture passed, exit 0; `/tmp/luna-tools-10hii0ux/result.json`.
+- `python3 -B -m unittest discover -s development -p test_library_check.py`:
+  13 runner tests passed, exit 0.
+- `python3 -B development/library_check.py --stage sysroot-builders --timeout 300`:
+  six native tests passed, exit 0; `/tmp/luna-library-r9sikw_0/summary.json`.
+
+This establishes the tested branch-selected publication path, not complete
+coverage of every definition builder or arbitrary dependent field layout.
+
+Formatting: `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`
+exited 0; `/tmp/luna-tools-dndmez0y/result.json`. `git diff --check` passed.
+
+### IIR staging reconstructs ordinary frozen collection inputs
+
+The new ordinary list encoding exposed an unconnected consumer: IIR's static
+constant folder recognized list constructor expressions and legacy Type-list
+nodes, but not ComptimeValue payloads. Its canonical-input boundary now decodes
+supported immutable frozen data into the existing ordinary constructor nodes.
+Both direct canonical admission and folding share that path.
+
+Reconstruction requires exact collection domains and registered list/tuple
+layouts. All elements pass the existing constructor checks before selection,
+so indexing cannot discard a malformed or unresolved sibling. Opaque Type
+heads remain intact. Nested lists, structural tuples/records, optionals and
+scalar data use their declared domains. Machine integer range/target checks
+and exact floating bit patterns are preserved. Reads never run a function,
+resolve a local or authorize a layout from a library name.
+
+Work is charged before copying the payload and separately for each copied
+field domain; depth and budget exhaustion remain recoverable. New tests cover
+length, concat, nested indexing, Type identity, domain mismatches, unfinished
+siblings, machine bounds, empty lists, canonical-input admission and retry.
+Unsupported frozen forms still reject at the static boundary; this does not
+add arbitrary nominal layout discovery or remove the legacy IR variant yet.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p iir -p materialization --no-fail-fast`:
+  all tests passed, exit 0; final `/tmp/luna-tools-rf1in_jd/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_lists --test type_lists --test normal_form_methods --test cmtt_type_inputs --no-fail-fast`:
+  61 passed, exit 0; `/tmp/luna-tools-tifv6v4j/result.json`. This preceded the
+  final per-field domain-copy budget charge; the final core suites above
+  include that charge and the expanded canonical-input/scalar regressions.
+
+No full language suite or native rebuild was run for this static staging change.
+
+Formatting: `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`
+exited 0; `/tmp/luna-tools-z7hhxz9_/result.json`. `git diff --check` passed.
+The final IIR/materialization run contains 117 passing tests.
+
+### Frozen suffixes participate in list append fusion
+
+Reference and bytecode execution now classify ComptimeValue suffixes (and
+frozen fields in literal list constructors) as inert reads. The existing
+append path still validates destination and suffix domains before mutation;
+this classification is not value admission. Blocks/callbacks keep ordinary
+snapshot evaluation, including blocks whose final value happens to be frozen.
+
+The paired interpreter/bytecode regression covers Bool and Type elements,
+local and frozen suffixes, owned buffers, projected value references and root
+storage. An owned list with spare capacity must retain its allocation. The
+complete-expression budget sweep checks malformed suffix rejection, atomic
+old-or-complete contents and same-VM recovery. Existing operation-level tests
+continue to require rollback when append itself fails. Invocation failure is
+not a transaction: bytecode may exhaust its budget after an append commits,
+while emitting its Unit result; the test explicitly preserves this distinction.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --test type_list_inputs`:
+  27 passed, exit 0; `/tmp/luna-tools-0_kwixqf/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_lists --test type_lists --no-fail-fast`:
+  32 passed, exit 0; `/tmp/luna-tools-vzwy2wgd/result.json`.
+
+An initial VM filter named bytecode_lists selected zero tests; it is not
+validation evidence. An attempted source target library_meta did not exist
+and was replaced with the actual type_lists target. The first complete budget
+sweep incorrectly assumed invocation-wide rollback; inspection of the trailing
+Unit instruction corrected that expectation without changing execution semantics.
+
+Final targeted runs:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib bytecode::list_tests`:
+  eight passed, exit 0; `/tmp/luna-tools-txuu6jx8/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler --test control`:
+  23 passed, exit 0; `/tmp/luna-tools-m539h2vz/result.json`.
+
+No full language suite was run. This restores allocation reuse for the new
+carrier; it does not claim linear-time append validation or measured wall-time
+speedup. Existing full-value validation costs remain.
+
+Formatting: `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`
+exited 0; `/tmp/luna-tools-nd2_lach/result.json`. `git diff --check` passed.
+
+### Observe Type projections without replacing generator storage
+
+Generator update/guard frames keep ordinary records and lists as local reads.
+A let binding can still own mutable fields: retaining a frozen aggregate in
+`generator_data` substitutes old values, loses sibling updates and removes
+addressable places. That attempted frame change was removed before delivery.
+
+Type-position observation now follows mixed record-field and ordinary-list
+index paths rooted in an observed local. Checked index expressions must have
+a statically known integer value; protocol calls and effectful/dynamic indices
+retain required invocation. The existing partial-value observer selects the
+Type identity, while existing write/call/escape invalidation remains in force.
+No aggregate becomes a specialization input or a replacement for ordinary reads.
+
+The local Type and completed dependency materializers no longer contain legacy
+Type-list-as-Type branches. Value::Type is admitted only in the Type domain;
+lists use ordinary list values and preserve their declared domain. Legacy IR
+readers elsewhere still exist; this is not completion of their removal.
+
+Regression coverage includes list/record annotations inside assignment frames,
+a failed guard whose mutation must reach the next arm, nested field/index paths,
+a static conditional index and mutation of a separate let-owned record.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --test cmtt_type_inputs --test contextual_spreads --test type_lists --test inline_control --no-fail-fast`:
+  901 passed, exit 0; `/tmp/luna-tools-2qg_k_57/result.json`.
+- After expanding the regression variants,
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt_type_inputs --test type_lists --no-fail-fast`:
+  52 passed, exit 0; `/tmp/luna-tools-mwp41dh2/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0; `/tmp/luna-tools-djs6ed08/result.json`. `git diff --check` passed.
+
+The earlier frozen-aggregate frame attempt caused 17 CMTT regressions; the final
+901-test run includes those cases and resolves them. No full language suite or
+performance benchmark was run. General dynamic Type computations in symbolic
+nested frames remain subject to the existing completed-input requirement.
+
+### Retire the specialized completed Type-list expression
+
+`nir::program::ExprKind::TypeListValue` has been removed. Production elaboration
+already emits ordinary lists; frozen list data now has only the general
+`ComptimeValue(NominalValue { ty, variant: None, fields })` carrier, with the
+exact declared list domain retained. The reference interpreter, bytecode
+compiler, staging, substitution, copy budgeting, materialization and resource
+analysis no longer maintain a second leaf-node path for Type elements.
+
+IIR still rejects unmaterialized ComptimeValue nodes. Its tests use the ordinary
+post-materialization list constructor, whose children are TypeValue expressions.
+Every IIR TypeValue now checks both its Type domain and the Type sort of its
+payload, preserving rejection of data masquerading as a type without relying
+on the removed container-specific validation. Frozen-list staging tests compare
+against reconstructed ordinary expressions and keep metadata, bounds, budget,
+substitution and invalid-element coverage. Dump tests use the ordinary frozen
+carrier's existing S-expression Display.
+
+This removes an expression representation, not all legacy normal-form terms:
+`Term::TypeListValue` and its metadata/read compatibility paths remain for a
+separate migration. Normal-form heads are still opaque. No source language
+syntax or public library API changed.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p iir -p materialization -p comptime_compiler -p comptime_interpretor -p elaboration -p program_verification --no-fail-fast`:
+  1,581 passed, exit 0; `/tmp/luna-tools-v00k2ahr/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --test cmtt_type_inputs --test inline_control --test type_lists --test comptime_bytecode_lists --test builder_invocations --test reflected_definitions --test generated_definitions --test library_protocols --no-fail-fast`:
+  996 passed and two generated-definition fixture failures, exit 101;
+  `/tmp/luna-tools-lb_bp_zd/result.json`. Those fixtures omitted bool bindings
+  before invoking their definition callbacks; the independent fixture repair
+  is commit 0613d31a. Its rerun passed both tests, including native O0/O3
+  execution, at `/tmp/luna-tools-9626bpym/result.json`.
+
+Initial migration checks exposed stale dump expectations, an IIR fixture using
+unmaterialized frozen data, and an invalid-domain case now rejected during VM
+preparation instead of invocation. The final checks preserve the rejection
+requirements and exercise the correct stage; no admission checks were relaxed.
+
+The CLI sysroot integration test was attempted with
+`python3 -B development/check.py --timeout 900 -- test -p luna --test frontend_cli sysroot_language_items_bind_real_list_and_tuple_definitions_by_default`.
+It hit the harness's fixed 15-second child-process deadline before its dump
+assertions (exit 101; `/tmp/luna-tools-gzzbq7b4/result.json`). This is not counted
+as a pass; the deadline was not relaxed. Real sysroot native library acceptance
+uses the existing longer-deadline runner instead.
+
+Final targeted evidence:
+
+- `python3 -B development/library_check.py --stage sysroot-meta --stage sysroot-builders --stage sysroot-enum-builder --timeout 300`:
+  exit 0; all three stages matched expected output (10 native tests total),
+  `/tmp/luna-library-997kk07q/summary.json`.
+- After correcting the known-input fixture's expression domain,
+  `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib known_type_list_collection_preserves_order_and_stops_at_unknowns`:
+  one passed, exit 0; `/tmp/luna-tools-ogs89daf/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-8a7sz8_3/result.json`. `git diff --check` passed.
+
+No full workspace/source-language suite was run. Unrelated working changes,
+including the existing resource-effects implementation, were not staged.
+
+### Require the original list domain at composition and transport boundaries
+
+Residual list composition and known-list expansion no longer accept the
+legacy domainless TypeListValue payload. Even an empty list must retain its
+original declaration domain; an expected domain cannot be used to relabel it.
+Ordinary frozen inputs continue through the same element-sort, scope and exact
+domain checks. Substitution rejects a missing/foreign domain without changing
+the template, then accepts a valid input on the same template.
+
+Metadata wire v1 now rejects retired tag 19 on both encoding and decoding,
+including legacy values nested inside opaque normal-form arguments. Tag 19
+stays reserved. Ordinary lists use the existing nominal-value tag 20 with their
+exact domain, and residual concatenations use tag 36. The wire documentation
+also corrects the already-retired tag 32 and documents existing tags 35/36.
+This is an intentional compatibility break for old domainless packets; producers
+must regenerate them with their original domain. It does not infer a domain
+from a field's expected type or unfold a normal-form head.
+
+The resident stream regression sends a retired-tag packet between valid
+requests, checks parse rejection with no cached fallback, then successfully
+reuses a subsequent valid request. Round-trip tests retain distinct list heads,
+empty/nonempty values, and opaque enclosing identities. Other legacy internal
+readers and the Term::TypeListValue variant remain for later removal.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p iir -p ptc -p elaboration --no-fail-fast`:
+  984 passed, exit 0; `/tmp/luna-tools-81g5vnhv/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test metadata_wire --test build_context --test compilation_cache --test type_lists --test extended_calls --test contextual_spreads --test comptime_bytecode_lists --no-fail-fast`:
+  126 passed outside compilation_cache. That target had one pass and ten
+  failures from missing primitive fixture bindings/build dependencies;
+  exit 101, `/tmp/luna-tools-xp8v41eg/result.json`. Independent fixture commit
+  8e4ce6c4 repairs them; its compilation_cache rerun passed all 11 tests,
+  `/tmp/luna-tools-lafnkwje/result.json`. No cache implementation changed.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor -p type_resolution --no-fail-fast`:
+  792 tests passed in fully passing targets. Two additional targets had 43
+  passes and two failures while constructing old domainless concatenation
+  fixtures; `/tmp/luna-tools-es9rlg13/result.json`, exit 101. Those fixtures
+  now use explicit domains and preserve their original incomplete/reduced
+  boundary assertions.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --test normal_values --test type_list_inputs --no-fail-fast`:
+  all 45 tests passed, exit 0; `/tmp/luna-tools-1tfqr3vr/result.json`.
+
+No full language suite or performance benchmark was run. Source-level tests
+include the real build library, but this phase did not rerun native sysroot
+builder acceptance from the preceding representation migration.
+
+Final formatting: `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`
+exited 0; `/tmp/luna-tools-82gt_z2g/result.json`. `git diff --check` passed.
+
+### Require declared collection domains throughout admission and tuple views
+
+Normal-form input checking and the shared frozen-list payload view no longer
+admit `Term::TypeListValue`. A registered list head cannot supply the missing
+value domain, including for an empty payload or a list nested inside another
+input. Ordinary `NominalValue` inputs still use the same recursive admission
+for Type elements, Boolean elements, dependent domains and nested collections.
+
+`Head::tuple_elements` now requires the owning parameter metadata and an exact
+payload-domain match. Missing parameters no longer gain layout authority from
+the legacy encoding. Tuple input hints in call inference retain a mandatory
+list domain; they do not reconstruct one from domainless fields. This does not
+unfold a normal-form head or establish equality between distinct declarations.
+
+The obsolete boolean-head transport adapter was removed. Error product
+transport and completed-value validation take borrowed fields supplied by
+owning declaration metadata. The VM decoder no longer routes legacy values
+into list reconstruction. Coverage, known-pattern inspection, callable cleanup,
+staging, representation-cycle checking and inference fixtures now exercise the
+ordinary domain-carrying representation. Negative tests cover missing metadata,
+foreign domains, domainless empty/nonempty lists and failed-budget recovery.
+
+The legacy Term variant and remaining generic visitors/test fixtures are not
+removed in this stage. Its final retirement remains work; this stage closes
+admission and layout compatibility paths, rather than declaring that migration
+complete. No language syntax, NF identity or public library interface changed.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p type_resolution -p ptc -p comptime_interpretor -p elaboration -p iir --no-fail-fast`:
+  final run 1,822 passed, exit 0; `/tmp/luna-tools-hfkea3j0/result.json`.
+  The initial run (`/tmp/luna-tools-22eec9c3/result.json`) had 1,811 passes and
+  ten failures in fixtures still accepting the legacy domainless encoding.
+  Those positive fixtures now provide declaration-owned domains, and explicit
+  rejection cases protect the stricter boundary.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_lists --test extended_calls --test contextual_spreads --test comptime_list_type_evidence --test comptime_bytecode_lists --test builder_invocations --test generated_definitions --test cmtt_type_inputs --test tuple_type_syntax --no-fail-fast`:
+  211 passed, exit 0; `/tmp/luna-tools-xt5166dh/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-m54loifs/result.json`; `git diff --check` passed.
+- `python3 -B development/library_check.py --stage sysroot-meta --stage sysroot-builders --timeout 300`:
+  both real-sysroot native stages passed (seven source tests), exit 0;
+  `/tmp/luna-library-un2xmmde/summary.json`. This exercises shipped list
+  methods and builder-generated structs, including selected list/Tuple layouts.
+
+No full language suite was run. The pre-existing unrelated working-tree
+changes were left outside this change.
+
+### Retire the domainless Term representation
+
+`Term::TypeListValue` is removed. List inputs now have the same ordinary
+`NominalValue` carrier as other frozen aggregates, including their complete
+declared domain. Scope checking, substitution, dependency collection, disposal,
+PTC congruence, implementation indexing and S-expression dumps use the generic
+value paths. No NF head unfolds as part of this migration.
+
+Partial staged observation no longer invents a `List<Type>` domain from the
+currently registered list head. It decomposes an ordinary frozen list only
+when its own domain carries the registered layout identity. Metadata tag 19
+remains reserved and rejected; deleting the in-memory enum does not change
+other wire tags or make old domainless bytes admissible.
+
+The migration exposed an implementation-index bug: opaque Type-valued leaves
+inside ordinary frozen aggregates were compared syntactically and could prune
+potentially applicable implementations. Candidate filtering now uses generic
+positive value-difference evidence. Unknown Type relations retain candidates;
+known scalar or structural differences can still exclude them. This applies
+to nominal aggregates, optional values and error results, not only lists.
+
+The value comparison now has a budgeted Result entrypoint. Its conservative
+boolean wrapper remains for callers asking only for positive refutation, while
+candidate enumeration propagates exhaustion. Failure to charge a long payload
+can leave nonzero fuel; checking `fuel == 0` cannot replace an explicit result.
+Regression tests cover this case, repeated payload costs, type/domain
+uncertainty and fresh searches after exhaustion.
+
+Raw `Term` scope checks do not infer collection element contracts. Those
+contracts remain with declaration-owned admission, which already rejects
+wrong element domains. The old scope-specific list test was adjusted to this
+boundary; malformed runtime leaves still fail scope checks. Source fixtures
+now obtain expected list domains from registered metadata. Ambiguous fixture
+worlds must select a domain explicitly rather than silently picking one head.
+The variadic evaluation-order fixture now uses `Interpreter::for_comptime`
+for its comptime functions; its invocation-count and order assertions remain.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p iir -p ptc -p type_resolution -p comptime_interpretor -p elaboration -p program_verification -p materialization --no-fail-fast`:
+  `/tmp/luna-tools-cuaseu7d/result.json` recorded 1,944 passes and two failures:
+  the obsolete PTC scope-specific list expectation and the real candidate
+  pruning bug above. An earlier compile attempt found a misplaced test helper
+  (`/tmp/luna-tools-lk6j1cgy/result.json`); it was corrected before this run.
+- `python3 -B development/check.py --timeout 900 -- test -p ptc --test solver -p type_resolution --no-fail-fast`:
+  only the selected `solver` integration target ran: 60 passed, exit 0;
+  `/tmp/luna-tools-o0t2k_oq/result.json`. This is not evidence for all
+  type_resolution tests.
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p type_resolution --no-fail-fast`:
+  after the budgeted-comparison correction, 785 passed, exit 0;
+  `/tmp/luna-tools-3pqq0jtb/result.json`. Earlier type_resolution runs
+  (`/tmp/luna-tools-wsxr4np7/result.json` and
+  `/tmp/luna-tools-31c2tlsn/result.json`) exposed the repeated-payload budget
+  regression; they were not treated as passing validation.
+- Affected execution tests: 33 passed, exit 0;
+  `/tmp/luna-tools-af_q6ywq/result.json`. The initial run
+  (`/tmp/luna-tools-at7gxkp5/result.json`) had 32 passes and the comptime
+  entrypoint fixture failure described above. Exact final command:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p luna --test execution -- --exact \
+  comptime_type_values_select_forward_observe_and_construct_bit_widths \
+  generic_comptime_instances_form_types_and_execute_nested_calls \
+  normal_form_tuple_values_preserve_shape_types_contracts_and_order \
+  explicit_tuple_types_and_value_packets_preserve_late_inputs_and_effect_order \
+  alias_type_value_arguments_are_bound_once_even_when_repeated_or_unused \
+  alias_argument_order_failures_and_invocation_isolation_are_preserved \
+  variadic_normal_heads_collect_type_lists_without_replacing_the_head \
+  variadic_normal_type_collection_evaluates_each_input_once_in_source_order \
+  variadic_normal_heads_forward_named_whole_type_lists_once \
+  normal_type_list_named_supply_preserves_order_around_positional_anchors \
+  normal_type_list_spreads_preserve_elements_order_and_single_evaluation \
+  bound_tuple_values_keep_normal_form_identity_through_nested_patterns \
+  type_list_constants_reconstruct_and_specialize_without_tuple_coercion \
+  symbolic_type_list_spreads_in_annotations_specialize_without_unfolding \
+  partial_enum_payload_spreads_infer_literal_fields_and_evaluate_packets_once \
+  partial_enum_spreads_propagate_known_fields_into_generic_packets \
+  partial_enum_spreads_share_peer_types_without_rechecking_values \
+  partial_enum_peer_packets_settle_before_numeric_defaults \
+  partial_enum_packet_widths_come_from_checked_generic_results \
+  bound_tuple_dynamic_syntax_checks_independent_formation_requirements \
+  bound_tuple_deferred_list_contracts_check_values_and_recover \
+  comptime_type_list_indexing_preserves_elements_and_checks_bounds \
+  pending_type_computations_wait_resume_and_publish_opaque_types_once \
+  compact_residual_entries_preserve_tuple_head_and_single_collected_type_list \
+  completed_source_type_refinements_keep_tuple_identity_and_lexical_subjects \
+  abstract_compound_type_descriptions_preserve_tuple_heads_and_scope \
+  abstract_type_admission_preserves_nested_formation_requirements \
+  scoped_type_computations_resume_with_declaration_evidence_without_replay \
+  deferred_signature_tasks_wait_resolve_tuple_types_and_preserve_execution_order \
+  explicit_comptime_type_signature_computations_preserve_slots_and_nested_binders \
+  explicit_comptime_type_inputs_support_predicates_and_type_list_results \
+  deferred_signature_caller_substitution_preserves_nested_tuple_identity_and_guards \
+  deferred_runtime_signatures_wait_admit_and_erase_staged_inputs
+```
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test metadata_wire --test text_regions --test library_protocols --test type_lists --test extended_calls --test contextual_spreads --test comptime_bytecode_lists --test cmtt_type_inputs --test builder_invocations --test generated_definitions --no-fail-fast`:
+  275 passed, exit 0; `/tmp/luna-tools-pt5m6pnn/result.json`. An earlier compile
+  attempt (`/tmp/luna-tools-tgqjwx2m/result.json`) found a fixture helper using
+  the wrong local package variable; that reference was corrected.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-0sqcf6ds/result.json`; `git diff --check` passed.
+- `rg -n 'TypeListValue' compiler --glob '*.rs'`: no matches (exit 1), including
+  production code and tests. The reserved wire-tag rejection is tested as bytes.
+- `python3 -B development/library_check.py --stage sysroot-meta --stage sysroot-builders --stage native-tuple --stage native-conversion --timeout 300`:
+  all four native stages passed (14 source tests), exit 0;
+  `/tmp/luna-library-aqv9hymg/summary.json`. This covers shipped list methods,
+  builder-generated layouts, empty/nested tuples, single evaluation, affine
+  field transfer and conversion protocols.
+
+No full language suite or performance benchmark was run. The unrelated
+pre-existing worktree changes remain outside this migration.
+
+## Fallible comptime collection callbacks
+
+`meta.List<T>.try_map` and `try_fold` now use ordinary comptime callbacks and
+error results. Each captures its input snapshot, invokes callbacks in order,
+and returns the first error without visiting the remaining suffix. Empty input
+returns a successful empty list or unchanged initial accumulator. Partial
+mapping output is private; error return does not roll back callback effects.
+Optional element layers and opaque Type identities are preserved. The methods
+use value-reference self and existing list operations, with no pointer API,
+new intrinsic, runtime Copy requirement or special error representation.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_list_operations`:
+  62 passed, exit 0; `/tmp/luna-tools-0s1da3xf/result.json`.
+- After adding callback rejection cases, `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_list_operations fallible_list`:
+  three passed, exit 0; `/tmp/luna-tools-2aptkor7/result.json`. Both positive
+  cases were rerun; negative inputs compile their callback declarations first,
+  then reject wrong callback phases/domains even with an empty receiver.
+- `python3 -B development/library_check.py --stage sysroot-meta --timeout 300`:
+  the public sysroot native acceptance passed, exit 0;
+  `/tmp/luna-library-u9szc022/summary.json`. Its comptime checks now also cover
+  successful and failed mapping/folding, preserved optional/Type payloads,
+  empty inputs, and persistent callback capture state after short-circuiting.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-gb56r1a4/result.json`; `git diff --check` passed.
+
+No full language suite was run. These methods inherit current immutable list
+construction costs; no linear-time output builder is claimed. General
+heterogeneous error-row inference remains separate unfinished work.
+
+## Unified VM list-domain admission
+
+The interpreter no longer has an `is_type_list_input` admission route. List
+construction, indexing, concatenation, append and immutable storage all query
+the registered list declaration's ordinary element domain. Normal-form list
+inputs use the same path. The removed fallback was redundant with successful
+`list_element` lookup, but obscured this boundary and could scan all registered
+normal-form declarations. Lookup now goes directly through the retained head.
+
+Definition-builder Type lists, contextual tuple element collection and Type
+input normalization still require element Type at their actual interface
+boundary; they express this as the result of ordinary list-element inspection.
+An opaque head with one Type argument does not gain list representation. No new
+NF parameter category, value representation, name-based recognition, or runtime
+Copy permission was introduced. Legacy internal pointer transport remains
+separate work; simplifying its list-domain check does not authorize comptime
+source pointers. No invocation speedup is claimed without measurement.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --no-fail-fast`:
+  533 passed, exit 0; `/tmp/luna-tools-63ku77l1/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_lists --test comptime_bytecode_lists --test comptime_list_type_evidence --no-fail-fast`:
+  32 + 4 + 13 passed, exit 0; `/tmp/luna-tools-50rduao9/result.json`.
+- `python3 -B development/library_check.py --stage sysroot-meta --stage sysroot-builders --timeout 300`:
+  both stages passed, seven native source cases total, exit 0;
+  `/tmp/luna-library-64q612z5/summary.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-bl6o3mnz/result.json`; `git diff --check` passed.
+- Source search confirms no `is_type_list_input` references remain in the VM.
+
+Existing tests cover ordinary and nested element domains, forged identities,
+scoped Type inputs, representation/budget failures and recovery, bytecode paths,
+contextual tuple construction and public definition builders. No full language
+suite or performance benchmark was run for this admission-path refactor.
+
+
+## Fallible list terminals and optional success adaptation
+
+`meta.List<T>.try_foreach` and `try_reduce` complete the fallible terminal
+operations alongside map/fold. Traversal reads a fixed input snapshot and
+stops on the first callback error. Empty foreach succeeds without visiting;
+reduction seeds from the first element without calling the callback, returns
+successful absence for empty input, and preserves nested optional presence.
+The methods use ordinary comptime callbacks and value-reference receivers.
+They add no source pointers, compiler intrinsics or special list type rules.
+
+This exposed a general elaboration gap: a synthesized plain value delivered
+to `!E ?T` was checked directly against `?T`, skipping optional injection.
+Elaboration now adapts a plain success payload through the existing optional
+injection rules before wrapping the error success tag. Already error-qualified
+values continue through checked row embedding; incompatible errors and success
+payloads are not silently reinterpreted. Generic returns, ordinary calls and
+nested optional values use the same path. No normal-form head unfolds.
+
+The public sysroot list example exercises empty, singleton, successful and
+failed terminal calls without directly accessing builtin symbols. Isolated
+fixtures supply explicit primitive bindings as before. Captured callback state
+remains private to its closure environment; callback errors do not roll it back.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_list_operations --test error_surface --no-fail-fast`:
+  65 list tests and 120 error-result tests passed, exit 0;
+  `/tmp/luna-tools-0edqb4p4/result.json`.
+- `python3 -B development/library_check.py --stage sysroot-meta --timeout 300`:
+  the public sysroot list test passed through native compilation and execution,
+  exit 0; `/tmp/luna-library-wpj4rk7c/summary.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-14gcjou6/result.json`; `git diff --check` passed.
+
+No full language suite or performance benchmark was run. Existing immutable
+list validation costs and the remaining runtime resource/trait gaps are not
+changed by this delivery.
+
+
+## Compiled leaf pattern tests (2026-10-31)
+
+The invocation instruction set no longer carries `Arc<Pattern>` through
+`MatchPattern`. The final leaves of pattern lowering are explicit `MatchLeaf`
+operands: wildcard, unit, optional absence and a literal. Structural traversal,
+bindings, alternatives, guards and remapping retain their existing linear
+instructions and candidate scopes. A leaf neither creates a temporary local
+environment nor invokes the recursive pattern matcher.
+
+Literal comparison is an operand-level operation shared with reference execution.
+It retains variable-size comparison charges, numeric representation semantics,
+and the distinction between Symbol and str. Non-wildcard tests still reject
+unresolved data/type inputs; wildcard tests do not inspect them. Definition-only
+CodeEvidence remains non-executable. Pending numeric literals report an unresolved
+type contract instead of reaching a pattern-dispatch panic.
+
+This removes one tree carrier and callback from production comptime bytecode.
+It does not finish the IIR execution migration or remove other expression-bearing
+instruction descriptors. No throughput improvement is claimed without measurement.
+
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor --lib --tests`:
+  561 tests passed, exit 0; `/tmp/luna-tools-498_0vr6/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_patterns --test comptime_bytecode --test comptime_list_operations`:
+  all three source-level groups passed, exit 0;
+  `/tmp/luna-tools-bc11p2v3/result.json`. Includes public library list operations,
+  dependent patterns, side effects and failed-candidate binding rollback.
+- Formatting and `git diff --check` passed. No full language suite was run.
+
+The initial compile exposed unhandled pending numeric literal variants after
+making literal dispatch exhaustive; these now report unresolved contracts.
+An initial source-test command named a nonexistent `meta_list` target and ran
+no tests; the corrected command above supplies the actual list test target.
+
+
+## Typed constant operands (2026-10-31)
+
+`Op::Constant` owns a typed, operand-only descriptor for literals, frozen comptime
+values, Type descriptions and direct function identities. It no longer embeds
+an `Expr` or calls an expression evaluator. The reference engine and bytecode
+share operand-level literal formation, frozen-value admission and Type transport.
+Pending numeric literals form directly against the target domain without
+constructing a temporary expression. Copy limits apply before descriptor ownership;
+loading still charges value formation and validates the declared domain.
+
+`CallableReference` explicitly retains the separate generic-function and trait
+selection path. It is not a frozen constant: selected identities, instance
+requirements and interface contracts must still be checked at the invocation
+boundary. This phase does not eliminate that expression descriptor or complete
+IIR-based VM execution. Constant displays use stable S-expressions and escaped
+literal displays. No measured speedup is claimed.
+
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor --lib --tests`:
+  563 tests passed, exit 0; `/tmp/luna-tools-_2bz63bs/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode --test literals --test type_lists --test builder_invocations`:
+  146 tests passed, exit 0; `/tmp/luna-tools-ejxx0os6/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-5ktleomg/result.json`; `git diff --check` passed.
+
+The source groups cover public definition builders, frozen list/type arguments,
+phase rejection and invocation effects. No full language suite or benchmark was run.
+
+
+## Function-instance operands and computed clauses (2026-10-31)
+
+Static generic function references now lower to `FunctionInstance` with an owned
+signature, declaration identity and completed clause arguments. The instruction
+calls the same operand-level formation service as reference execution. The
+service lives in `function_instances.rs`; it admits input domains, substitutes
+the signature/body under the correct telescope and checks current requirements
+before returning an existing or new instance. Its S-expression dump exposes
+the declaration, arguments and output type.
+
+Dynamic non-trait clause packets freeze their checked values directly into
+arguments, then call that service. Neither execution engine constructs an
+intermediate FunctionInstance expression for this path. Packet validation still
+precedes body formation; clause computations retain their existing order and
+control-flow effects. Failed formation cannot be made successful by an earlier
+cached body. The regression now covers static and computed arguments in both
+engines and checks recovery reuses the same body after requirements are restored.
+
+Trait selection retains its interface-aware expression path and contracts;
+this is not yet the completion of callable lowering or IIR VM migration.
+No throughput claim is made.
+
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor --lib --tests`:
+  563 tests passed, exit 0; `/tmp/luna-tools-73wfo5ma/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_clause_inputs --test clause_staged_constants --test dynamic_trait_clauses --test comptime_bytecode_traits --test comptime_bytecode_defaults`:
+  71 tests passed, exit 0; `/tmp/luna-tools-bmi4en05/result.json`.
+- Formatting and `git diff --check` passed. No full language suite was run.
+
+
+## Interface method operands (2026-10-31)
+
+Bytecode stores a method descriptor containing the interface, member, subject,
+interface and method arguments, result signature and source location. Both a
+first-class method value and an immediate call use that descriptor. Dynamic
+trait clause packets retain the same descriptor in the frame until call
+preparation. These paths no longer carry TraitMethod expressions or enter
+`eval_in_position` / `eval_trait_method` from bytecode.
+
+Selection is shared with reference execution, independently of evaluation and
+delivery. It checks interface capabilities and requirements before selecting the
+implementation; a value cannot erase a required program precondition. Calls
+retain the public interface program contract and parameter bindings, while
+dynamic defaults use the original interface's instantiated inputs. The bytecode
+path forms selected generic function instances through their checked operand
+service. Reference execution keeps its normal delivery/cleanup hooks. The
+existing bytecode eligibility restrictions for IIR, cleanup and effect contexts
+are unchanged.
+
+Descriptor copying is bounded before ownership and dumps retain explicit
+S-expression structure. This removes method-expression carriers from the VM
+call path, but default expressions, staged type plans and other remaining
+carriers still require work. Full IIR VM migration is not claimed complete.
+
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor --lib --tests`:
+  563 tests passed, exit 0; `/tmp/luna-tools-6q5dfx1s/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler --test control -p luna --test comptime_bytecode_traits --test dynamic_trait_clauses --test trait_phases --test comptime_bytecode_defaults`:
+  118 tests passed, exit 0; `/tmp/luna-tools-hsge7qap/result.json`.
+  Includes the new owned-descriptor budget check and reference/bytecode method
+  equivalence, plus forged interface contracts, defaults and phase selection.
+- Formatting and `git diff --check` passed. No full language suite was run.
+
+
+## Reusing specialized default code (2026-10-31)
+
+Dynamic function and trait defaults previously allocated a new substituted Expr
+on every call. The owned-code cache therefore saw a new identity each time and
+recompiled the same specialized default. A session-local default-code cache now
+retains the immutable substituted expression, allowing its compiled program to
+be reused by the existing code cache.
+
+Keys use a live weak template identity and exact substitution inputs. Interface
+keys contain the declaration binders and arguments; function keys also contain
+the declaration and its parameter domains. These are structural transformation
+keys, not source-value Eq/Hash or invocation-result keys. No result, capture or
+runtime environment is cached. Every default still runs with that call's prepared
+arguments, and call admission plus interface contracts remain outside the cache.
+
+Key copying and comparisons consume budget before recursive work. Publication
+occurs only after successful substitution. Dead templates are pruned; at most
+64 entries and 100,000 units of accounted key/substitution work are retained.
+Oversize entries execute without publication and capacity eviction drops only
+rebuildable code. Static defaults keep their existing shared identity directly.
+
+This removes repeated substitution/compilation for repeated specializations;
+it does not yet remove the template expression carrier or complete IIR VM
+migration. A source regression warms both Boolean specializations and checks
+that compilation counts stay fixed while default executions and their callee
+observations continue on every call, with results changing with current inputs.
+No wall-clock speedup or general linear-time claim is made.
+
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib default_code`:
+  three cache identity, budget/failure recovery and capacity tests passed,
+  exit 0; `/tmp/luna-tools-gbmhzjnh/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_defaults --test comptime_bytecode_traits --test dynamic_trait_clauses --test comptime_clause_inputs`:
+  70 tests passed, exit 0; `/tmp/luna-tools-e5a_2ub_/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-mm23m5i8/result.json`; `git diff --check` passed.
+
+No full language suite was run for this cache change.
+
+
+## Bytecode execution of concrete IIR comptime bodies (2026-10-31)
+
+A validated IIR graph no longer disables bytecode by itself. Concrete comptime
+instances can use the existing linear compiler and invocation stack without a
+source declaration world. Function operands resolve against graph instance keys;
+trait method operands resolve against the graph's concrete dispatch evidence.
+Reference and bytecode execution share these operand-level graph lookups and
+signature checks. Retained runtime templates remain identities, not authority to
+execute during comptime. Invocation admission continues checking actual graph
+function phases, including nested calls.
+
+Interface pre/postconditions still come from the graph's public method contract.
+Defaults, captured closures and structural data use the existing frame and value
+operations. Different specializations retain separate body identities in the code
+cache. `from_iir_for_comptime_tree` provides a phase-checked reference path for
+differential validation; ordinary `from_iir` runtime execution is unchanged.
+
+This connects concrete IIR bodies to bytecode execution, not a completed
+replacement of all VM carriers. The bytecode compiler still lowers the high-level
+body representation retained by IIR. Unsupported operations retain their existing
+fallback, and scheduled cleanup or active effect contexts still exclude bytecode.
+No performance ratio is claimed.
+
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_iir_bytecode`:
+  four tests passed, exit 0; `/tmp/luna-tools-nhrxjz8o/result.json`.
+  Tests assert actual bytecode invocation counts and warmed code reuse; compare
+  defaults, distinct generic instances, closures and structural values against
+  the reference graph engine; reject forged contracts and runtime callees.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test execution memoized_invocation`:
+  11 tests passed, exit 0; `/tmp/luna-tools-yv0_owxm/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --test runtime_function_identities`:
+  36 tests passed, exit 0; `/tmp/luna-tools-94ob6lai/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test execution iir`:
+  10 tests passed, exit 0; `/tmp/luna-tools-h2itngfc/result.json`.
+- Formatting check exited 0 (`/tmp/luna-tools-qdprbmfb/result.json`) and
+  `git diff --check` passed. No full language suite was run.
+
+## Sparse environments for staged Type plans
+
+`TypeInputPlan` now carries an explicit `(LocalId, Register)` import table,
+computed from lexical free bindings. Suspending a compiled caller transfers only
+those live registers into the plan environment, instead of iterating over every
+local in the function. Completion uses the existing borrowed-slot restoration
+path, retaining mutations and early transfers. Unrelated locals remain in place.
+The bytecode dump includes the import table as an S-expression.
+
+Plan-owned bindings that collide with caller registers are also included, so
+plan admission still rejects live identity collisions. These checks are linked
+after register allocation; ordinary plan-local bindings do not acquire caller
+registers merely to support the check. Import construction and transfer remain
+budgeted. Tests verify one imported dependency in a function with 200 unrelated
+locals, collision visibility, mutation writeback and early return against the
+reference engine.
+
+This reduces environment traversal at this suspension boundary; it does not
+remove the plan's expression carrier, complete IIR-only lowering, or establish a
+wall-clock speedup for arbitrary workloads.
+
+Validation in `/home/fin/luna`, all exit 0:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p luna --test control --test comptime_bytecode_types`:
+  25 compiler and 15 source tests; `/tmp/luna-tools-q50bh63i/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_clause_inputs --test comptime_iir_bytecode`:
+  46 clause-input and four IIR tests; `/tmp/luna-tools-irdooq1m/result.json`.
+- After refining collision-scan budget accounting,
+  `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler --test control`:
+  25 tests; `/tmp/luna-tools-6vdgjw_v/result.json`.
+- Formatting via command.py: `/tmp/luna-tools-073pr2bw/result.json`;
+  `git diff --check` passed. No full suite or timing benchmark was run.
+
+## Retained snapshot wrappers in bytecode
+
+`Snapshot` now lowers to a typed preflight instruction followed by its operand's
+ordinary instructions in the destination register. The instruction owns bounded
+input/output type descriptions and prints `(prepare-snapshot ...)`; it does not
+carry or evaluate a source expression tree. Tree and bytecode execution share
+the exact-type preflight check before evaluating the operand. Value capture
+continues to use ordinary operand reads; this marker does not add a second copy
+or replace the separate function-entry machinery for old-state contracts.
+
+Tests cover mismatched types before operand side effects, explicit return
+propagation, and snapshots of storage remaining independent of later writes.
+An elaborated two-function package is wrapped in retained NIR Snapshot nodes;
+both calls must enter bytecode and agree with reference execution. This avoids
+depending on source normalization retaining the marker.
+
+Validation from `/home/fin/luna`, all exit 0:
+
+```sh
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+python3 -B development/check.py --timeout 900 -- test -p comptime_compiler
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib
+python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_observations --test comptime_iir_bytecode --test comptime_memory
+```
+
+Reports: `/tmp/luna-tools-n2mvslgr/result.json` (formatting),
+`/tmp/luna-tools-m7n461hf/result.json` (28 compiler tests),
+`/tmp/luna-tools-1hcgeaus/result.json` (341 interpreter tests), and
+`/tmp/luna-tools-yvlg4_xn/result.json` (observation, IIR and memory integration).
+`git diff --check` passed. Other unsupported operations, active effect handlers
+and cleanup scheduling can still require tree execution; this is not full VM
+unification or a new snapshot language rule.
+
+## Associated values on the explicit execution stack
+
+Associated member reads now compile to a typed `read-associated` instruction.
+Its descriptor retains interface arguments, subject, member identity and result
+type, with bounded copying and S-expression Display; it contains no initializer
+AST. The VM resolves the prepared dispatch evidence, schedules the selected
+initializer on its existing explicit execution stack, and delivers the checked
+value back to the suspended destination register. The initializer receives an
+empty lexical environment, not the caller's bindings.
+
+Tree and bytecode paths share selection, type admission and cycle detection.
+Normal errors, invalid non-value exits and exhausted budgets clear active
+initializer keys before unwinding, allowing the same VM to recover. A 65-member
+chain executes with native evaluation depth limited to eight. Source integration
+covers default and overridden associated members through both prepared NIR and
+materialized IIR, comparing reference results and actual bytecode invocation
+counts. An initial integration harness incorrectly omitted dispatch preparation;
+it was corrected to use the production materialization APIs, without weakening
+interpreter admission.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler`:
+  28 passed, `/tmp/luna-tools-xr0w2ocy/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  343 passed, `/tmp/luna-tools-lvmfi87r/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_traits --test comptime_iir_bytecode --test dynamic_trait_clauses`:
+  20 passed, `/tmp/luna-tools-8x_jtq21/result.json`.
+- Associated purity (3) and signature (9) tests passed in
+  `/tmp/luna-tools-jl6vi5ui/result.json`; that combined command subsequently
+  failed in the earlier, unprepared integration harness described above.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`:
+  exit 0, `/tmp/luna-tools-c3sbv75c/result.json`.
+
+Selected initializer expressions still compile on demand without their own code
+cache. Unsupported initializer operations may still use reference evaluation;
+active effects and cleanup scheduling remain outside this bytecode path. This
+change does not claim full VM unification or host-panic transaction recovery.
+
+## Reuse borrowed initializer code within a VM
+
+Associated initializer execution now uses a bounded cache of compiled immutable
+borrowed fragments. Keys retain the actual expression reference for the VM's
+source lifetime and use reference identity, not source coordinates, member IDs,
+structural type equality or a naked integer address. Distinct expressions with
+identical locations and result types cannot share code accidentally. This cache
+is interpreter-local and is deliberately excluded from CodeSession exchange;
+no borrowed source may escape into another package world.
+
+Entries contain only compiled programs or a completed unsupported-lowering
+decision. Compilation budget failures and malformed control are not inserted.
+The cache is bounded to 100,000 weighted code units using the existing program
+storage accounting; oversized entries are not retained and capacity pressure
+clears the local table. This is code reuse, not invocation result memoization.
+Each read still selects dispatch evidence, checks result types and cycles, runs
+the initializer with a fresh lexical environment, and consumes execution fuel.
+
+Tests check repeated selection, replacing the selected body while preserving
+member/location/type, revisiting an earlier body, current cycle/missing-evidence
+rejection after warming, compilation-budget recovery and disabled-bytecode
+routing. The existing prepared-source and IIR differential test now requires no
+new compilation during its second invocation. This closes the earlier
+initializer recompilation limitation within a VM; cross-VM initializer code
+reuse and unsupported-operation migration remain open.
+
+Validation from `/home/fin/luna`, final commands exited 0:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib
+python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_traits --test comptime_iir_bytecode --test associated_purity --test associated_signatures
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+git diff --check
+```
+
+Reports: `/tmp/luna-tools-fphzzm7t/result.json` (345 interpreter tests),
+`/tmp/luna-tools-i73jtnqp/result.json` (22 integration tests), and
+`/tmp/luna-tools-ns44rlp8/result.json` (formatting). An initial compile check
+caught the missing new field in the IIR constructor; both constructors now
+initialize independent local caches. No timing speedup or full-suite claim.
+
+## Generic associated-code isolation and captured-value IIR gap
+
+Cross-path integration now alternates generic trait value arguments, different
+subjects implementing the same trait instance, and dependent associated value
+domains (`bool` versus `char`). Prepared NIR and materialized IIR each run with
+reference and bytecode execution. Repeated visits to both branches must preserve
+the results without increasing the bytecode compilation count after warming.
+A second test reads stateful associated closures twice, interleaves mutations,
+and repeats the whole invocation in the same source VM. Reused initializer code
+must create independent capture states; it must not reuse invocation results.
+
+Attempting the same stateful closure case through IIR exposed an unimplemented
+path, not a cache collision. `materialization/src/staged.rs::freeze_staged_value`
+accepts anonymous `Value::Closure` only when `captured_values().len() == 0`.
+Calling `elaboration::materialization::instantiate(&package, &roots,
+Default::default(), Default::default())` on the prepared package in
+`cached_associated_code_creates_independent_stateful_closure_values` fails with
+`staged invocation result cannot yet be frozen as an instance input`.
+The failing run is `/tmp/luna-tools-o2nmoq4y/result.json`; the final test only
+claims prepared-source coverage for this stateful case. No IIR success or
+language restriction is inferred from that exclusion.
+
+The existing constant materializer in `elaboration/src/program/constants.rs`
+restores captures using `nir::program::Capture::value`, private bindings for
+shared closures and cycle detection. The staged materializer needs equivalent
+graph-preserving behavior, preferably through shared infrastructure rather than
+another divergent conversion. Naively cloning each capture recursively can
+split a shared nested closure's mutable state. Preparation must also meter body
+and capture copying, preserve declared capture domains, reject invalid storage
+and handle failure without publishing a partial snapshot. This remains an
+implementation task; the current test commit does not implement it.
+
+Validation from `/home/fin/luna`, final commands exited 0:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters generic_associated
+python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_traits
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+git diff --check
+```
+
+Reports: `/tmp/luna-tools-pmg45ig7/result.json` (13 existing generic cases),
+`/tmp/luna-tools-2tlg1bno/result.json` (eight bytecode trait tests), and
+`/tmp/luna-tools-n0w8bc7a/result.json` (formatting).
+
+## Materialize staged closure captures and shared closure subgraphs
+
+The captured-value IIR gap recorded above is now fixed for supported acyclic
+value representations. Staged freezing walks borrowed values instead of first
+cloning their owned payloads. A per-freeze graph table retains closure Arcs as
+identity keys, detects active cycles and emits private let bindings before the
+root result. Repeated closure occurrences reference the same binding; distinct
+reads of the frozen root reconstruct independent graphs. Capture initializers
+use existing `Capture::value` nodes, so no producer storage handle or caller
+lexical binding escapes into IIR. Existing S-expression node Displays cover the
+resulting block, lets and closure captures.
+
+`Storage::inspect_owned` holds readable-ownership and payload guards while the
+materializer walks the current capture value. It charges ownership traversal
+before access, avoids eager payload copying, rejects recursive lock acquisition
+and drops guards after returned errors. Body/type copying and capture widths
+are charged before copying or allocating their representations. Freezer state
+is local to one attempted snapshot; failure cannot publish partial bindings.
+
+The previously source-only stateful associated-closure test now also runs through
+materialized IIR, in both tree and bytecode modes. It tests two independent reads,
+repeated whole invocations, a nested closure whose two captures refer to the same
+mutable closure, and a nominal record whose two fields share that closure. These
+cases distinguish preserving shared state from copying each occurrence. The
+storage unit test covers exhausted budget, recursive inspection, error recovery
+and invalid ownership. Existing scalar/generic/dependent-domain tests remain.
+
+Validation from `/home/fin/luna`, final commands exited 0:
+
+```sh
+python3 -B development/check.py --timeout 900 -- check -p materialization
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib
+python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test comptime_iir_bytecode --test comptime_bytecode_traits --test function_type_dependencies
+python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_traits --test nominal_value_parameters
+python3 -B development/check.py --timeout 900 -- test -p materialization
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+git diff --check
+```
+
+Reports: `/tmp/luna-tools-_0vtygkn/result.json` (crate check),
+`/tmp/luna-tools-m6ccud51/result.json` (346 interpreter tests),
+`/tmp/luna-tools-tvqb_n78/result.json` (356 integration tests),
+`/tmp/luna-tools-rnoc3bm8/result.json` (315 integration tests rerun after adding
+Type payload/result wrapper copy charges), `/tmp/luna-tools-fd66p4zp/result.json`
+(materialization tests), and `/tmp/luna-tools-rlr9sapw/result.json` (formatting).
+
+This corrects the staged IIR closure-result rejection; it does not complete
+closure freezing as NF arguments, cyclic value graphs, or unify the separate
+constant-expression and staged materializers. Other previously unsupported
+value representations remain rejected. No language restriction is inferred from
+these remaining implementation boundaries.
+
+## Preserve ordinary Objects and exact Float values through staged freezing
+
+The completed-value checker now admits ordered Object reconstruction, checking
+its Object domain, key/field counts, every independently typed child and copy
+budget. Positional entries and duplicate names remain distinct. It still rejects
+mismatched payload types, unbound locals and arbitrary initializer execution.
+The staged freezer now handles Object recursively through the same graph state
+as aggregates and closures, and exact Float through its metered decimal literal
+serialization, without conversion to a target binary floating type.
+
+The initial Object integration failed before IIR creation because completed
+Object reconstruction was absent from `nir::completed_values`. A second boundary
+was the missing Object and Float cases in staged freezing. New source tests
+exercise source/IIR and tree/bytecode execution, repeated invocations, mutable
+exact-decimal captures, typed Object queries, nested Objects, optional layers,
+Type identity, positional/duplicate keys and shared closure entries. The Object
+case runs both direct association and a generic captured call returning Object,
+so admission and actual staged-result freezing are both covered.
+
+A controlled coverage check temporarily used the HEAD staged freezer with the
+new Object admission in place, restored the working file in a finally block,
+and ran the new integration group. Exact Float then failed with `staged
+invocation result cannot yet be frozen as an instance input`
+(`/tmp/luna-tools-o0dbsnna/result.json`). The initial direct Object case passed
+that check, prompting the additional captured-call Object variant. The final
+implementation and expanded tests passed together. No unrelated worktree edits
+were included in the coverage check.
+
+Validation from `/home/fin/luna`, final commands exited 0:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p nir --test completed_values
+python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_staged_values --test library_meta_objects
+python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_staged_values
+python3 -B development/check.py --timeout 900 -- test -p materialization
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+git diff --check
+```
+
+Reports: `/tmp/luna-tools-g_yog1x0/result.json` (17 completed-value tests),
+`/tmp/luna-tools-katxspns/result.json` (two staged-value and 34 Object tests),
+`/tmp/luna-tools-wic6qm89/result.json` (expanded staged-value coverage),
+`/tmp/luna-tools-p98_x423/result.json` (19 materialization tests), and
+`/tmp/luna-tools-5t4p9zup/result.json` (formatting). An earlier decimal fixture
+accidentally spelled a negative branch as a block-comment opener; whitespace
+was corrected before the successful runs. Runtime Object admission, NF capture
+graph freezing and full materializer unification are not added by this change.
+
+## Share metered scalar literal materialization
+
+Constant-expression and staged-expression materialization now use
+`Value::freeze_literal` for Boolean/character/text/symbol values, fixed-width
+integer and floating bit payloads, exact Integer/Float, and BitVec. The shared
+serializer borrows its input, accounts for inspection and variable payload
+copying before allocation, and returns no representation for non-scalars.
+It preserves exact decimal/integer spelling and machine floating bit patterns;
+it neither executes code nor admits a declared type. Each materializer retains
+its existing phase, domain and structural checks and propagates consumed fuel
+on failure.
+
+This removes duplicated scalar conversion arms and closes a concrete budget
+difference: constant-expression BitVec materialization previously copied words
+without charging the copy there. Both consumers now charge word copying and
+respect the supplied magnitude-buffer limit. Failed attempts leave inputs
+unchanged and can retry with a larger allowance. Result memoization is unchanged.
+
+Unit checks round-trip every supported scalar representation through the VM,
+including Unicode/NUL/escaping, i128/u128 extremes, IEEE NaN payloads and negative
+zero, a long exact decimal, and a 65-bit vector with nontrivial limb values.
+Separate cases check exhausted copy fuel, BitVec size limits, recovery, and
+non-scalar fallback. Source regressions exercise both materializers.
+
+Validation from `/home/fin/luna`, all commands exited 0:
+
+```sh
+python3 -B development/check.py --timeout 900 -- check -p elaboration -p materialization
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib
+python3 -B development/check.py --timeout 900 -- test -p luna --test exact_floats --test pure_bitvec --test literals --test comptime_staged_values --test comptime_bytecode_traits
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+git diff --check
+```
+
+Reports: `/tmp/luna-tools-yhvjdy23/result.json` (crate checks),
+`/tmp/luna-tools-gofgoqa4/result.json` (348 interpreter tests),
+`/tmp/luna-tools-f9ivzk3x/result.json` (91 integration tests), and
+`/tmp/luna-tools-rnydyf8u/result.json` (formatting). Aggregate/closure graph
+construction and NF term encoding remain separate consumers and are not unified
+by this scalar extraction. No whole-language completion or timing claim.
+
+## Share owning closure identities and borrow capture validation
+
+Constant and staged snapshot tables now share `ClosureIdentity`, an opaque
+owning Arc key with pointer equality and hashing. A key retains its closure
+allocation for the snapshot's full lifetime, including across multiple values
+materialized with the same table. This replaces the constant materializer's
+unowned integer-address keys and the staged materializer's private duplicate
+key implementation. Keys are graph identities only: they do not enter terms,
+persistent caches, dumps or type equality. Output binding order still follows
+the explicit vector of encounter-ordered bindings, not hash-table iteration.
+
+Closure snapshot validation now inspects owned capture storage through the same
+metered guard as staged freezing. It no longer clones each storage payload before
+checking it. Ownership failure, recursive lock acquisition and budget exhaustion
+propagate without abandoning consumed fuel; returned errors release the guards.
+The existing source tests cover shared mutable closures, independent snapshots,
+nested sharing, callback rejection and CMTT staging.
+
+Validation from `/home/fin/luna`, all commands exited 0:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt local_constant
+python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt_methods --test comptime_bytecode_traits --test comptime_staged_values
+python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt snapshot
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+git diff --check
+```
+
+Reports: `/tmp/luna-tools-43plnqy_/result.json` (15 local-constant tests),
+`/tmp/luna-tools-v6_692wq/result.json` (CMTT methods and VM integration),
+`/tmp/luna-tools-67okc3tq/result.json` (snapshot tests), and
+`/tmp/luna-tools-ifeagnt7/result.json` (formatting).
+Constant expression construction itself still has an owned capture conversion;
+this commit removes eager copies from validation, not from every materialization
+consumer. Full graph conversion and NF freezing remain separate work.
+
+## Borrow constant capture construction
+
+Constant expression reconstruction now traverses borrowed values, including
+generator-data fields. Owned entrypoints retain their callers' API while
+recursive aggregate traversal no longer copies the input payload. Capture
+storage uses `inspect_owned` through construction, not only validation; fuel
+consumed inside the guard is propagated on success and failure. Closure graph
+identity and encounter order remain shared across recursive fields. Newly
+required owned copies of Type values, Object field domains and callable
+arguments are charged before copying. This is not a complete audit of existing
+type-tree copies or a unification with NF freezing. Cyclic capture graphs remain
+unsupported. No benchmark speedup is claimed.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --test cmtt_methods --test comptime_bytecode_traits --test comptime_staged_values --test library_meta_objects --test exact_floats -- --skip generator_data_rejects_runtime_inputs_wrong_identities_and_opaque_domains
+git diff --check
+```
+
+All three commands exited 0; 795 integration tests passed. Reports:
+`/tmp/luna-tools-ruof626c/result.json` (formatting) and
+`/tmp/luna-tools-63ii5s2v/result.json` (integration). The initial unfiltered run
+(`/tmp/luna-tools-4e2bo2s9/result.json`) passed 582 CMTT tests and failed the
+existing opaque-domain rejection expectation. Repeating only that test with
+`constants.rs` restored temporarily to HEAD reproduced the same failure
+(`/tmp/luna-tools-dt5wowh3/result.json`); the working change was restored
+afterward. The test expects a declaration using `Identity<bool>` to be rejected,
+but the current baseline accepts it. This pre-existing expectation was excluded
+from the subsequent regression run, not changed to make this refactor pass.
+
+## Reuse immutable exact-Float representation sizes during export
+
+Exact Float literal serialization and NF export previously reparsed the entire
+canonical decimal significand into an Integer only to check its limb limit.
+This repeated arithmetic with quadratic digit/limb work even though the value
+was already immutable. DecimalValue now retains its exact coefficient limb
+count when construction already computed it. Arithmetic normalization that
+removes trailing zeros computes that metadata lazily on the first successful
+representation check; subsequent checks reuse only the count. No failed check,
+invocation result, domain admission or type equality outcome is memoized.
+
+Each export still checks the current coefficient and exponent limits and charges
+payload copying/serialization. Metadata is excluded from equality, hashing,
+Debug and Display, preserving canonical identity and signed zero. Limits can
+therefore become stricter after an earlier successful check; failure leaves the
+value reusable. The change does not add captured-closure or Code NF encoding,
+remove the first parse of a new significand, or complete the Float algebra.
+
+Regression tests cover a 2048-digit value with linear export fuel, cold arithmetic
+metadata, failures followed by recovery, lower limits after warming, coefficient
+and exponent boundary sizes, zero, hash stability and unchanged dumps. NF tests
+exercise both ordinary and invocation export. This is a bounded-work regression,
+not a wall-clock speedup measurement.
+
+Validation from `/home/fin/luna`, all commands exited 0:
+
+```sh
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+python3 -B development/check.py --timeout 900 -- test -p comptime_runtime --test decimal
+python3 -B development/check.py --timeout 900 -- test -p comptime_runtime -p comptime_interpretor
+python3 -B development/check.py --timeout 900 -- test -p luna --test exact_floats --test comptime_staged_values --test literals
+git diff --check
+```
+
+Reports: `/tmp/luna-tools-ouomeggp/result.json` (formatting),
+`/tmp/luna-tools-s1u944cj/result.json` (18 decimal tests),
+`/tmp/luna-tools-ib7fnbm2/result.json` (631 runtime/interpreter tests), and
+`/tmp/luna-tools-73ju3z1a/result.json` (54 source integration tests).
+
+## Split shipped list pattern protocols by execution phase
+
+The default library no longer packs comptime list observation into the runtime
+ListPatternView through ElementComptime and suffixed methods. Meta now owns
+`pure comptime trait ComptimeListPatternView` and its `comptime impl` for List.
+Both phase protocols expose Element, list_pattern_view_get_len and
+list_pattern_view_get_element. Comptime self remains a value reference, with an
+ordinary index; runtime self remains a pointer with a comptime index. The trait
+and methods use the existing pure-comptime-trait contract rather than a new
+phase marker. Source methods continue to perform checked usize conversions.
+
+A separate driver identity (`comptime_list_pattern`) and source selector flow
+through standalone/package CLI, sysroot configuration and elaboration. The
+selected phase controls the protocol identity before ordinary method selection.
+Quoted runtime bodies keep runtime selection. Explicit comptime bindings reject
+runtime methods before any pattern is used. Drivers with only the old selector
+can still bind their own previously supported single/mixed-phase protocol;
+this does not reintroduce legacy members into the shipped library.
+
+Repository consumers, complete sysroot examples, isolated module fixtures and
+API documentation migrate together. The regression with a single subject and
+same-named methods deliberately returns different elements in each phase. Other
+checks retain candidate retry, owned-resource cleanup, target width, local-index
+copy costs and failed-invocation recovery. This does not remove all legacy
+comptime pointer nodes from the compiler or implement TuplePatternView.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- check -p luna --tests
+python3 -B development/check.py --timeout 900 -- test -p luna --lib
+python3 -B development/check.py --timeout 900 -- test -p luna --test list_patterns --test meta_list_pattern_cost
+python3 -B development/check.py --timeout 900 -- test -p luna --test library_meta_objects --test meta_list_pattern_cost --test library_protocols
+python3 -B development/check.py --timeout 900 -- test -p luna --test meta_list_pattern_cost
+python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-list-patterns.fl --sysroot library
+python3 -B development/check.py --timeout 900 -- run -p luna -- test development/examples/sysroot-meta-list-patterns.fl --sysroot library
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+The initial all-test-target compilation exited 0 (`/tmp/luna-tools-kmnmx07k`).
+Final behavioral evidence: 85 luna unit tests (`/tmp/luna-tools-70gdmd4a`),
+42 list-pattern tests (`/tmp/luna-tools-cvqhuxv6`), 34 Object and 27 library
+protocol tests (`/tmp/luna-tools-_mc3ntlt`), and 3 index-cost/recovery tests
+(`/tmp/luna-tools-xo42k3lo`). The combined Object/library/cost run exited 101
+because the isolated cost fixture imported primitive aliases into its defining
+scope twice; moving that contribution into its own module fixed the fixture,
+and its separate final run exited 0. Earlier migration errors in old fixture
+modules/impls and the CLI test's command-variant expectation were also corrected.
+Both complete sysroot runs exited 0: `/tmp/luna-tools-x1lb16iw` (runtime, 3 tests)
+and `/tmp/luna-tools-lcm40qvb` (final comptime, 3 tests). Report directories contain
+result.json, stdout.log and stderr.log. No whole-workspace test claim.
+
+## Preserve CMTT value-reference receivers through generator frames
+
+Migrating the old comptime `*self` receiver fixtures to `self` exposed five real
+writeback failures. Generator arguments had been materialized as independent
+values, while trait-body/default forwarding read live cells into copied values.
+The generator's storage table now distinguishes owned cells from value references.
+Ordinary fields preserve the original receiver path; computed receivers are
+evaluated once into private storage. Entry contract snapshots copy the observed
+value, whereas live forwarding retains reference identity. Checkpoints include
+reference owners and restore them on failure. No runtime Copy/Clone permission
+is introduced for these operations.
+
+Prepared VM invocation now admits typed value references only in comptime and
+checks their current payload before executing any argument factory/body. The
+same reference supports ordinary reads and independently copied entry values.
+Source receiver mutability is retained across calls: var allows whole replacement,
+let disallows it but permits field updates. Trait forwarding keeps this permission.
+Quoting self snapshots its current ordinary value; it does not leave the internal
+receiver as a runtime free variable or expose a reference in generated code.
+
+Comptime method declarations reject `*self` in ordinary, trait, expression-code,
+pattern-code and contextual-data entrypoints; runtime declarations are unchanged.
+CMTT receiver fixtures now use self and direct fields. Existing explicit pointer
+parameters/operations elsewhere remain migration work; this is not a claim that
+all comptime pointers have been removed. Receiver preparation still uses the
+existing checked data frame and can allocate an intermediate value snapshot;
+this commit establishes identity and phase semantics, not a speedup claim.
+
+Additional tests cover projected receivers while later arguments update siblings,
+trait defaults making repeated updates through one receiver, rebind permission,
+contract rejection/recovery, quote-before-mutation snapshots and prepared VM
+input preflight plus checkpoint restoration in tree and bytecode modes.
+
+Final validation from `/home/fin/luna`, all commands exited 0:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib
+python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --test cmtt_methods --test comptime_receivers --test comptime_bytecode_references --test list_patterns -- --skip generator_data_rejects_runtime_inputs_wrong_identities_and_opaque_domains
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+Reports: `/tmp/luna-tools-_z6143d5/result.json` (350 interpreter unit tests),
+`/tmp/luna-tools-um64sm_v/result.json` (786 source tests), and
+`/tmp/luna-tools-fobvdknw/result.json` (formatting). The one excluded CMTT test is
+the previously reproduced baseline rejection of an ordinary opaque NF domain,
+not a newly skipped receiver failure. Initial receiver failures, prepared-input
+admission failures, forwarding failures and a quote context leak were fixed,
+not converted into expected failures. No full-workspace test claim.
+
+
+### Borrowed inspection accounting versus owned copies
+
+The representation walker now returns two costs: the full bounded size of an
+owned copy and the description work actually inspected. A closed list payload
+summary can avoid revisiting its contents, but never reduces the cost of
+copying those contents. Mutable access still invalidates the summary; scoped
+value/type evidence does not populate the closed summary.
+
+Immutable input admission and fused append result checks consume inspection
+work instead of charging a nonexistent full copy. Admission still checks the
+current type domain and visits embedded type descriptions. Limits on complete
+representation size and nesting remain enforced, including on summary hits.
+This is not result memoization and stores no type proof or solver outcome.
+
+Tests compare cold and warm 512-element admission, require continued element
+admission work, reject a warmed payload with the wrong element type, and check
+recovery. Separate tests keep full copy cost unchanged and reject a mutated
+payload containing live storage. Existing append budget/representation failure
+and rollback cases exercise both execution engines.
+
+Remaining costs: append still charges the combined element count; current
+admission still traverses elements. This change removes duplicate representation
+charges but does not establish linear total list construction or a wall-time
+speedup. The CMTT opaque-domain exclusion recorded above is now retired by
+`b5eedb9d`, with explicit wrong-identity rejection and spread-receiver coverage.
+
+
+Validation in `/home/fin/luna`:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --test type_list_inputs
+python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_lists --test comptime_list_operations --test comptime_list_type_evidence --test meta_list_pattern_cost --test type_lists
+python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_list_operations comptime_list_view_rejects_pointer_receivers_before_use
+python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_list_type_evidence --test meta_list_pattern_cost --test type_lists
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+```
+
+Interpreter unit (352) and input integration (27) checks exited 0:
+`/tmp/luna-tools-uv9q2670/result.json`, `/tmp/luna-tools-9m76uy4s/result.json`.
+The first source invocation exited 101 after 4 bytecode-list and 64 list-operation
+passes: an old pointer-receiver test expected the former protocol diagnostic,
+where the existing receiver validation now rejects `*self` earlier. Updated
+only that diagnostic assertion; its isolated rerun exited 0
+(`/tmp/luna-tools-r620n5rx/result.json`). The remaining three source suites
+passed 13, 3 and 32 tests, exit 0 (`/tmp/luna-tools-85hwdmdm/result.json`).
+Original source report: `/tmp/luna-tools-l1co1iet/result.json`; formatting:
+`/tmp/luna-tools-8hrvbwd_/result.json`, exit 0. `git diff --check` passed.
+
+
+### Capacity-aware fused append work
+
+The owned payload extension now reports a conservative slot-movement cost:
+suffix slots alone when capacity is sufficient, plus prefix slots when growth
+may relocate the buffer. Nested values move as owners rather than being deep
+copied. The transactional append callback carries this cost through both owned
+locals and value-reference projections. This removes the previous unconditional
+combined-length charge from their fused append path.
+
+The rollback guard still restores the logical prefix and its previous summary
+on failure or unwind. Capacity may remain enlarged after a rejected append;
+capacity is an internal allocation detail, not source-visible value state.
+The complete result retains structural size limits and current type admission.
+This does not change ordinary non-fused concatenation or legacy pointer-path
+accounting. Per-element admission remains, so total repeated append is still
+not proven linear.
+
+Regression coverage checks equal append costs for pre-reserved prefixes of 8
+and 512 elements through owned values and storage references. A growth case
+uses the smaller in-place budget, requires failure and unchanged contents, and
+then succeeds after budget recovery. Existing tests retain tree/bytecode
+coverage, snapshot independence, invalid suffix rejection, projection
+permissions, representation limits and rollback during unwinding.
+
+Validation in `/home/fin/luna`, final commands exited 0:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --test type_list_inputs
+python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_lists --test meta_list_pattern_cost
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+Reports: `/tmp/luna-tools-nvsyy6e1/result.json` (354 interpreter unit tests),
+`/tmp/luna-tools-gcer_o7s/result.json` (27 list input tests), and
+`/tmp/luna-tools-00g6vx2l/result.json` (source bytecode-list and pattern-cost
+suites). The initial unit build found an unannotated Rust closure parameter in
+the new test; it was fixed before this final run. No wall-time speedup or
+whole-workspace validation claim.
+
+
+### Uniform scalar structure at list admission and call boundaries
+
+Closed list representation summaries now retain an optional uniform scalar
+value discriminant. It is computed while inspecting the payload, composed on
+append (with empty payloads as the identity), and invalidated before mutable
+access. It records neither an expected domain nor the success of a type query.
+Only carriers with content-independent type membership participate: Integer,
+Float, fixed floating-point carriers, bool, char, void, str and Symbol. Machine
+integer carriers, BitVec, Type, live storage, code and aggregates retain their
+ordinary per-value checks.
+
+List membership still checks the current declaration identity and resolves the
+current element domain. A uniform scalar payload can use its first element as
+a representative for this check. Embedded-type admission still checks the list
+head, but these leaves contain no embedded type descriptions to inspect. The
+borrowed call-boundary representation check uses the same fact while rechecking
+current nesting and invocation depth. Actual copies, entry snapshots, and
+representation-size limits retain their full costs and checks.
+
+Tests cover mismatched declared domains, mixed carriers, out-of-range narrow
+machine integers, mutable invalidation, clone independence and empty/nonempty
+append composition. A warm scalar list is checked under a solver that changes
+from Satisfied to Rejected to Unknown and back to Satisfied; every admission
+must consult the current solver and recovery must succeed.
+
+Source-level loops test both engines at 64 and 256 elements. Besides direct
+concatenation, the repository meta source fixture calls the shipped generic
+List.append method with Integer elements and checks every returned value.
+The latter originally exposed a remaining full borrowed checkpoint scan in
+method argument binding; that scan was removed for the same uniform scalar
+case, not bypassed in the test. Final recorded VM steps:
+
+| Elements | Tree | Bytecode |
+| --- | ---: | ---: |
+| 64 | 11,693 | 13,258 |
+| 256 | 46,445 | 52,042 |
+
+Measurement command: `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_list_operations repository_scalar_append_loop -- --nocapture`.
+Report: `/tmp/luna-tools-hht7kc6r/result.json`, exit 0. This measures VM work,
+not elapsed-time performance. It covers scalar payloads with bounded element
+size; Type lists, nested aggregates, machine-integer range checks and explicit
+snapshot-heavy algorithms can still perform repeated linear traversals.
+The source fixture uses shipped meta code but does not by itself establish a
+new full-sysroot API or whole-compiler performance result.
+
+
+Final validation from `/home/fin/luna`, all exited 0:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --test type_list_inputs
+python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_list_operations --test comptime_bytecode_lists --test meta_list_pattern_cost --test comptime_receivers --test comptime_list_type_evidence
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+Reports: `/tmp/luna-tools-x0l23dib/result.json` (356 unit tests),
+`/tmp/luna-tools-i07oe_6n/result.json` (27 list input tests),
+`/tmp/luna-tools-8t96usp2/result.json` (97 source tests),
+`/tmp/luna-tools-dpoem79q/result.json` (format check).
+Initial source fixtures had ambiguous tightly spaced `<`/`>` syntax; corrected
+spacing before evaluating their behavior. The intermediate library cost failure
+is preserved in `/tmp/luna-tools-s5qpz43r/result.json`; its cost threshold was
+not relaxed. No tests were excluded in the final commands.
+
+
+## Structural identities for contextual input preparation
+
+The noon audit's eleven `NormalFormArgument` address keys have been removed
+from preparation, reference execution, staged traversal, and bytecode rekeying.
+`InputKey::Node` identifies a node by its child-index path within one input.
+Fields and match arms use source order, choices use then/else indices, and a
+block's contextual result uses child zero. Bytecode slots remain explicitly
+`InputKey::Register` until rekeying connects them to those paths. Both variants
+have deterministic S-expression displays.
+
+This identity is local to an input tree and survives an exact clone. It is not
+a global declaration identity, an incremental fingerprint, or permission to
+reuse prepared values after changing the input program. No runtime state,
+candidate transaction, or inferred type is cached by this key. The existing
+bounded traversal, preparation of unselected contextual literals, selected
+operand execution, and scope rollback remain in place. This removes the
+allocation-identity dependency without claiming that the remaining parallel
+`NormalFormArgument` representation or the full IIR VM migration is complete.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --test immutable_normal_inputs`
+  passed: 357 unit tests and 9 immutable-input tests;
+  `/tmp/luna-tools-futcjkbf/result.json` exited 0.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test normal_form_domains --test nominal_value_parameters --test nominal_staging --test comptime_clause_inputs`
+  passed: 367 source tests;
+  `/tmp/luna-tools-4_owapys/result.json` exited 0.
+- The cloned-tree regressions use identical source ranges at every node, so
+  neither allocation addresses nor source positions can supply the identity.
+  Both staged engines preserve selected branches across cloning, still reject
+  an invalid literal in an unselected branch at domain preparation, and the
+  reference evaluator consumes only the selected prepared literals.
+
+
+### Compiled shape ownership at staged input completion
+
+Staged bytecode completion now reconstructs structural paths solely from its
+compiled `Shape`, without revisiting a `NormalFormArgument` tree. Normal and
+nominal invocation frames use that same completion boundary. Duplicate shape
+slots, excessive shape depth, missing registers, and budget failures reject
+before changing any operand key; the final rewrite has no fallible semantic
+work. This permits a fresh-budget retry without mixed register/path identities.
+The remaining delayed-domain preparation still specializes and checks NIR;
+this does not claim removal of that parallel path.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  359 passed; `/tmp/luna-tools-wzl8e2cr/result.json`, exit 0. Added standalone
+  compiled-shape tests with no source tree, each budget exhaustion point,
+  retry, missing register, duplicate slots, and exact S-expression output.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_clause_inputs --test nominal_staging --test nominal_value_parameters`:
+  364 passed; `/tmp/luna-tools-_uonopxz/result.json`, exit 0.
+
+
+### Shared contextual input domain preparation
+
+`input_domains` supplies a borrowed view of NIR input descriptions and compiled
+shape metadata. One preparation algorithm now checks scalar domains, contextual
+integer/unit literals, conditions and guards, absent block results, list spread
+domains, and tuple layouts. The two callers only adapt prepared results to
+structural-path or register-indexed storage. Preparation executes no operand
+expressions and does not clone source trees or unfold normal-form heads.
+
+This removes duplicated semantic traversal from `prepare_normal_argument` and
+`prepare_normal_shape`. It does not remove NIR specialization from delayed-domain
+frames, nor migrate the whole VM to IIR. Preparation failure remains terminal
+for those frames; partially prepared internal maps are not published as values.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --test immutable_normal_inputs`:
+  360 unit and 9 immutable-input tests passed;
+  `/tmp/luna-tools-k_ip558k/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_clause_inputs --test nominal_staging --test nominal_value_parameters --test normal_form_domains`:
+  367 source tests passed; `/tmp/luna-tools-j38m20n8/result.json`, exit 0.
+- A differential test compiles source input shapes and compares preparation
+  diagnostics, source positions, and remaining work across five budgets for
+  valid/overflowing literals, invalid unselected branches, wrong condition
+  types, absent block results, and tuple domain mismatches.
+
+
+### Contextual input bytecode in concrete IIR graphs
+
+The residual `contextual_code_available` gate still required `graph.is_none()`
+after ordinary invocation bytecode had already admitted concrete graphs.
+A source-produced IIR regression returned correct values in both engines but
+recorded zero contextual bytecode inputs on the baseline
+(`/tmp/luna-tools-t1pj2z_u/result.json`, exit 101 at the execution-count assertion).
+
+Contextual and deferred input fragments now use the ordinary invocation gate.
+Comptime phase, bytecode enablement, cleanup scheduling, and active effect
+restrictions remain shared; simply having a concrete IIR graph no longer forces
+these fragments through the reference evaluator. Callees continue to resolve
+from retained graph instances. Corrupting a retained callee phase is rejected
+at graph admission, before operand execution.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_iir_bytecode --test comptime_bytecode_types --test comptime_staged_values`:
+  23 passed; `/tmp/luna-tools-fy0ndj2p/result.json`, exit 0.
+- The new IIR cases check actual contextual/staged fragment counters,
+  equivalent results against the tree evaluator across two input domains,
+  source-ordered mutation before domain formation, single evaluation,
+  rejection of an invalid domain followed by recovery in the same VM,
+  and rejection of inconsistent phase metadata.
+
+This removes a remaining IIR-specific fallback gate. It does not claim an
+independent IIR bytecode compiler, nor support for active cleanup/effect frames.
+
+
+### Reuse compiled contextual and staged input fragments
+
+Input fragment compilation now uses a bounded cache keyed by the complete
+contextual input description and optional expected domain. Staged compilation
+and known-domain compilation are distinct entries. Source positions are only a
+lookup filter: structural input equality and the domain both participate. Key
+inspection, comparisons, and owned key copies consume the invocation budget;
+failed compilation or cache preparation does not publish an entry. Entries are
+limited to 64 and a combined preparation-work weight of 100,000.
+
+Entries contain only immutable `Program` and shared `Shape` metadata (or a
+completed unsupported-compilation decision). Every execution constructs a fresh
+frame and repeats value/domain admission and operand effects. This is code reuse,
+not invocation result memoization; the Type-output result-cache policy is
+unchanged. `CodeSession` transfers this cache only within its exact immutable
+source snapshot. IIR interpreters also reuse input code within their own VM.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  362 passed before adding the session regression;
+  `/tmp/luna-tools-8w3pehgb/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib contextual_code`:
+  3 passed, including the added cross-VM session test;
+  `/tmp/luna-tools-3ts7uos3/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_iir_bytecode --test comptime_bytecode_types --test nominal_staging --test comptime_clause_inputs`:
+  78 passed; `/tmp/luna-tools-y2wn0o65/result.json`, exit 0.
+
+Checks cover cloned inputs, same-position different contents, changed domains,
+staged versus contextual identity, failed-budget retry, fresh environments in
+new VMs, source-world isolation, and stable compilation counters after IIR
+warmup while execution counters continue increasing. No wall-clock speedup is
+claimed. Structural key comparison still has a bounded inspection cost; this
+is not persistent module-level bytecode or the end of NIR specialization.
+
+
+## First production TypeCore/TypeRef consumer: frozen callable signatures
+
+Concrete IIR `CallableIdentity.signature` now stores `nir::TypeRef`. Its
+constructor meters structural work, requires a completed environment-free
+callable signature, then interns an immutable core and binds an empty
+substitution. The materialization builder owns a shared interner, so distinct
+callable identities with identical signatures share that core. Cloning the IIR
+graph clones references, not each retained signature tree. The VM's retained
+signature index borrows the core body after graph validation.
+
+Callable declaration/instance keys remain separate. A core sharing hit does
+not prove callable identity equality, skip formation requirements, or grant
+invocation authority. The IIR validator still checks signature scope, type
+completion and links. Non-IIR annotation/dispatch exploration does not publish
+these completed references: it may still contain declaration binders.
+
+This is the first production integration of the two-layer representation, not
+a whole-compiler migration. Expression annotations, function signatures and
+other type consumers still use Term. Runtime-hole abstraction and
+EnvironmentPlan remain unconnected; this boundary specifically represents
+immutable, environment-free callable evidence carried inside type values.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p iir --test callable_type_cores`:
+  passed; `/tmp/luna-tools-99o7fbkw/result.json`, exit 0. Exhausted budgets and
+  unresolved declaration parameters publish no core; distinct keys share
+  signatures and the dump includes the TypeRef representation.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test scoped_comptime_callables --test comptime_iir_bytecode --test normal_form_domains`:
+  20 passed; `/tmp/luna-tools-7i6_au7h/result.json`, exit 0. Source-to-IIR
+  coverage checks core sharing across distinct functions and graph clones,
+  retained dependencies without executable bodies, and ordinary/comptime/unsafe
+  callable identities inside normal-form inputs.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib retained_signature`:
+  2 passed; `/tmp/luna-tools-kk5wjh16/result.json`, exit 0. Checks source-world
+  isolation and bounded lookup in catalogs up to 2,002 identities. The initial
+  run exposed an old test mutating a Term field; it now constructs replacement
+  immutable signature evidence through the checked constructor.
+
+
+## Borrow retained signature cores through type admission
+
+The VM now exposes a borrowed-or-owned callable signature view. Retained IIR
+signatures borrow their interned core through NF argument checks, scoped type
+admission and function-value type checks. Source signature specialization still
+produces an owned value; callers constructing expressions retain an explicit
+owned adapter. The NIR checker shares one implementation for both APIs.
+
+This removes the retained-signature tree clone at the query boundary without
+changing scope checks, contract checks or structural work accounting. A regression
+checks that the view points at the interned core and that insufficient fuel still
+rejects the query, followed by a successful retry. No wall-clock speedup is claimed.
+This does not complete TypeRef propagation or runtime-hole environment handling.
+
+Validation in `/home/fin/luna` (all exit 0):
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --test immutable_normal_inputs`:
+  364 unit and 9 immutable-input tests passed;
+  `/tmp/luna-tools-s0qyg34b/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p nir --test normal_inputs`:
+  24 passed; `/tmp/luna-tools-hfvkthku/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test scoped_comptime_callables --test comptime_iir_bytecode --test normal_form_domains`:
+  20 passed; `/tmp/luna-tools-22upghab/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed; `/tmp/luna-tools-kfzkpysw/result.json`.
+
+
+## Shared logical types in IIR template storage
+
+TemplateStorage now retains its completed logical signature as TypeRef, with
+an empty telescope and substitution enforced by private construction. Template
+storage materialization uses one TypeInterner across its tables. Equal logical
+signatures share cores, while selected target identities, table order and tag
+numbering remain independent. Existing logical-type consumers borrow the core
+body without materializing another Term. Display exposes the type-ref.
+
+Declaration input checks, runtime phase restrictions, signature matching and
+completion checks still precede publication. A bounded structural preflight
+covers recursive core validation and hashing. Failed target admission or fuel
+exhaustion publishes no signature core. Tests exercise every fuel boundary up
+to the first successful construction, sharing across reversed tag domains and
+clones, and a source program capturing two distinct templates of the same type.
+
+Validation in `/home/fin/luna` (exit 0):
+
+- `python3 -B development/check.py --timeout 900 -- test -p iir --lib template_storage`:
+  5 passed; final run `/tmp/luna-tools-x4171ea6/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test function_type_dependencies`:
+  38 passed; `/tmp/luna-tools-ulfjx31g/result.json`. This includes source-level
+  template capture, selected method contracts, entry snapshots and recovery.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed; `/tmp/luna-tools-0h4lpy2j/result.json`.
+
+The template-storage pool is local to this materialization phase, separate from
+retained callable evidence. General function/expression annotations still use
+Term; runtime-dependent type environments remain a separate unfinished path.
+
+
+## One type interner across IIR dependency and template storage phases
+
+The materialization builder now transfers its immutable TypeInterner to the
+captured-template storage pass. Retained callable evidence and template tables
+can therefore share one core, instead of recreating equal cores in separate
+phase-local pools. BuildResult names the result fields and owns the transferred
+pool; analysis and staged-dispatch consumers explicitly take their dispatch and
+remaining budget. No active inference state crosses this boundary.
+
+A source regression places the same dependent runtime function in an opaque
+normal-form input and a closure's template capture. The final IIR graph proves
+that callable evidence and template storage point to the same core, validates,
+and executes successfully. Sharing does not remove declaration/contract checks.
+General annotations and runtime-dependent environment handling are still pending.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test function_type_dependencies --test scoped_comptime_callables`:
+  50 passed; `/tmp/luna-tools-m_xd8ja7/result.json`, exit 0. The first build
+  exposed a staged-dispatch consumer of the old positional tuple; it was updated
+  to named fields before the successful run.
+- `python3 -B development/check.py --timeout 900 -- test -p materialization --test expansion_boundary`:
+  3 passed; `/tmp/luna-tools-p4qupoe7/result.json`, exit 0.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed; `/tmp/luna-tools-bmqgu9_6/result.json`, exit 0.
+
+
+## Close IIR completion and link traversal gaps in closure contexts
+
+IIR completion now visits ClosureContextValue capture types and both sides of
+ContextualClosure. Link validation visits these nodes and ClosureSnapshot
+arguments. The previous wildcard branches silently accepted unresolved rigid
+parameters, unavailable runtime dependencies and dangling nominal references
+hidden there. Both traversals now match Term exhaustively so new variants
+require an explicit decision. This does not provide missing runtime access-path
+or lifetime evidence; availability remains a separate, narrower obligation.
+
+completed_type now charges structure and bounds depth before recursive scope
+validation. Retained callable validation uses that guarded path instead of an
+extra unguarded scope traversal. Existing signature-construction copy guards
+remain, because they also cover frozen expression payloads before interning.
+
+Validation in `/home/fin/luna`:
+
+- New closure-context rejection tests failed on the old implementation because
+  completion and package validation returned Ok for invalid inputs:
+  `/tmp/luna-tools-qtdjguwo/result.json`, exit 101.
+- `python3 -B development/check.py --timeout 900 -- test -p iir`:
+  104 tests passed; `/tmp/luna-tools-1694_0ub/result.json`, exit 0. Regressions
+  cover unresolved contexts, dangling links in contexts and snapshots, runtime
+  availability, depth rejection and successful validation after failure.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test function_type_dependencies --test scoped_comptime_callables --test comptime_iir_bytecode`:
+  56 passed; `/tmp/luna-tools-xw2fhl6k/result.json`, exit 0.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed; `/tmp/luna-tools-1b16d2mn/result.json`, exit 0.
+
+
+## Materialize dependencies carried by ordinary closure-context inputs
+
+Dependency discovery now visits ClosureContextValue capture types,
+ContextualClosure components and ClosureSnapshot arguments. The type-task
+match is exhaustive, matching the IIR validation boundary instead of silently
+ignoring new composite terms. Context values remain ordinary comptime inputs;
+no name-based Carrier or closure-specific nominal admission rule was added.
+
+A materialization regression passes a closure context as an ordinary nominal
+parameter, with a capture layout reachable only through that context. Before
+the fix the producer omitted the layout and final validation rejected its own
+output as a dangling nominal. The repaired producer retains the layout. A
+source regression also infers a callback's context, passes it to a nominal
+constructor, validates the graph and executes the callback.
+
+Validation in `/home/fin/luna`:
+
+- Baseline regression: `/tmp/luna-tools-0nlg02ga/result.json`, exit 101,
+  `IIR nominal reference is dangling`.
+- `python3 -B development/check.py --timeout 900 -- test -p materialization --test expansion_boundary`:
+  4 passed; `/tmp/luna-tools-3qqstto9/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test closure_environment_parameters --test scoped_comptime_callables --test function_type_dependencies`:
+  73 passed; `/tmp/luna-tools-p4fcr72y/result.json`, exit 0. The initial source
+  fixture incorrectly used named routing for a positional clause; it now uses
+  its declared positional input. No routing semantics were changed.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed; `/tmp/luna-tools-vij4nwab/result.json`, exit 0.
+
+This closes a producer/validator dependency mismatch. It does not complete
+TypeRef migration or runtime environment access and lifetime planning.
+
+
+## Check contextual closure contents during immutable VM admission
+
+The shared scoped-term admission walker now enters ContextualClosure's context
+and signature. Previously its default branch treated the entire composite as
+completed, allowing unresolved context parameters and runtime identities hidden
+in its signature to pass snapshot representation checks. Both children now
+retain the surrounding binder frame and depth/work accounting. Child-count
+preflight also includes ContextualClosure and UnsafeFunction. The semantic
+traversal matches Term exhaustively to prevent silent acceptance of new nodes.
+
+The public snapshot validator regression rejects unresolved contexts and hidden
+runtime dependencies while admitting concrete contexts and a context parameter
+bound by the enclosing function telescope. This is representation admission,
+not declaration domain checking or runtime environment/lifetime proof.
+
+Validation in `/home/fin/luna`:
+
+- The new rejection test failed on the old implementation:
+  `/tmp/luna-tools-gszvyt48/result.json`, exit 101 (pending context accepted).
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib --test immutable_normal_inputs`:
+  364 unit and 10 immutable-input tests passed;
+  `/tmp/luna-tools-3sviwp7q/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --test immutable_normal_inputs`:
+  10 passed after adding the bound-context acceptance case;
+  `/tmp/luna-tools-clquxdj2/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test closure_environment_parameters --test scoped_comptime_callables --test comptime_iir_bytecode`:
+  40 passed; `/tmp/luna-tools-ns9h70tt/result.json`, exit 0.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed; `/tmp/luna-tools-fe1uaks5/result.json`, exit 0.
+
+
+## Share immediate Term edges across materialization and IIR verification
+
+NIR now exposes Term::visit_children, a borrowing, fallible immediate-child
+visitor. One exhaustive match defines structural edges, including closure
+contexts and snapshots. It allocates no traversal worklist and does not clone
+terms; callers own budgets, depth and binder contexts. The callback can stop
+before later children are visited. Its stable order preserves the existing IIR
+validation worklist order.
+
+IIR completion and link validation now keep only their semantic decisions and
+use the common visitor for children. Materialization uses it for ordinary
+structural nodes while retaining declaration admission, formation requirements,
+effect retention and other specialized handling. This removes duplicated edge
+lists that caused the preceding closure-context omissions. The VM's binder-aware
+admission and other traversals remain separate; this is not a general solver or
+TypeRef migration.
+
+Validation in `/home/fin/luna` (all exit 0):
+
+- `python3 -B development/check.py --timeout 900 -- test -p iir`:
+  104 passed; `/tmp/luna-tools-nv6ji06x/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p nir --test type_children`:
+  borrowing identity, telescope order and callback short-circuit test passed;
+  `/tmp/luna-tools-c_w9c2r0/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p materialization --test expansion_boundary`:
+  4 passed; `/tmp/luna-tools-gfmnwkfy/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test closure_environment_parameters --test scoped_comptime_callables --test function_type_dependencies`:
+  73 passed; `/tmp/luna-tools-9qyxo6j6/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed; `/tmp/luna-tools-wheji6zj/result.json`.
+
+
+## Index retained type links once per validation world
+
+IIR validation now builds borrowed indexes for callable instance keys, nominal
+instances and normal-form heads, then passes them through type, expression and
+effect validation. Effect contract tables and installation-value plans retain
+their own graph-bound index for subsequent queries. Index construction charges
+entries and structural keys before hashing; queries charge their actual keys
+instead of scanning/charging the complete callable catalog. Keys retain full
+structural equality, and graph integrity checks still reject duplicate entries.
+No index crosses an immutable graph's lifetime or changes exposed ordering.
+
+A regression with 256 callable identities repeatedly referring to one identity
+exhausted the old lookup budget even with 64 units per entry. It now validates
+within that budget. Removing the referenced evidence still fails, and an
+exhausted attempt does not poison a later retry. This is bounded-work evidence,
+not a wall-clock performance measurement. Other graph integrity work, including
+the existing standalone validate_index pass, has not been comprehensively
+budgeted by this change.
+
+Validation in `/home/fin/luna`:
+
+- Baseline regression: `/tmp/luna-tools-gkr9s7o6/result.json`, exit 101,
+  `IIR callable identity lookup budget exhausted`.
+- `python3 -B development/check.py --timeout 900 -- test -p iir`:
+  105 passed; `/tmp/luna-tools-h4c0lyru/result.json`, exit 0. Includes effect
+  ABI/environment, installation delivery, duplicate evidence and type links.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib retained_signature`:
+  3 passed; `/tmp/luna-tools-_zsdu3nn/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test closure_environment_parameters --test scoped_comptime_callables --test comptime_iir_bytecode`:
+  40 passed; `/tmp/luna-tools-8euqcpqy/result.json`, exit 0.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed; `/tmp/luna-tools-b22rsg_q/result.json`, exit 0.
+
+
+## Meter IIR structural index admission before recursive key work
+
+Package::validate now passes its budget into validate_index_with_budget before
+building the later type-link indexes. The convenience validate_index entry uses
+a finite 100,000-unit budget. Index admission preflights instance arguments,
+nominal keys, signatures, interface/dispatch keys and compared method inputs
+before hashing, cloning or recursive callable inspection. Entries, parameter
+bindings and enum logical/encoding metadata are charged as well. Template
+identity collection now retains borrowed logical types in a map, eliminating
+the additional template catalog scan when checking dispatch bodies.
+
+New regressions check zero-budget refusal, deep key rejection before hashing,
+duplicate identity rejection and successful retry after failures. This is a
+structural validation budget, not a timing guarantee or a complete compiler-wide
+resource audit. Declaration semantics, target-dependent enum checks and selected
+calling conventions remain independently enforced.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p iir`:
+  106 passed; `/tmp/luna-tools-btfbkxtd/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test target_integers --test closure_environment_parameters --test scoped_comptime_callables --test comptime_iir_bytecode`:
+  the latter three suites passed (40 tests). Target integer fixtures initially
+  had 10 HIR failures due to unbound bool, before reaching IIR;
+  `/tmp/luna-tools-93xdiqu0/result.json`, exit 101.
+- The standalone target fixture entry now uses the existing primitive binding
+  helper; expectations and compiler primitive semantics are unchanged.
+  `python3 -B development/check.py --timeout 900 -- test -p luna --test target_integers`:
+  all 27 passed; `/tmp/luna-tools-ez6hoqcr/result.json`, exit 0.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed after formatting the fixture imports;
+  `/tmp/luna-tools-awsmka8a/result.json`, exit 0.
+
+
+## Reclaim expired owned code before evicting live cache entries
+
+CodeCache holds owned expression identities weakly. Previously an expired body
+was reclaimed only if lookup revisited that exact allocation address; otherwise
+its code/unsupported marker occupied retention weight until pressure cleared the
+whole cache. reserve now removes expired owned entries first when the next entry
+would exceed the limit. If that recovers enough weight, live closure code and
+named declaration entries survive. With no sufficient dead entries, the existing
+bounded full-eviction policy still applies. Normal hits and inserts below the
+limit do not scan the table. No invocation values or captured environments are
+cached, and result memoization policy is unchanged.
+
+The pressure regression reproduced loss of a live declaration entry before the
+fix. Its final version also checks Arc identity of retained compiled closure
+code, exact weight after reclaiming an unsupported marker, and eventual eviction
+when all remaining entries are live. This is cache lifecycle evidence, not a
+wall-clock speedup claim or a completed bytecode migration.
+
+Validation in `/home/fin/luna`:
+
+- Baseline pressure regression: `/tmp/luna-tools-1q60chco/result.json`, exit 101.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  365 passed; `/tmp/luna-tools-mc48idvd/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib cache_pressure_reclaims`:
+  passed with the compiled-body retention assertions;
+  `/tmp/luna-tools-2bxl8mu0/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_closures --test comptime_iir_bytecode`:
+  passed; `/tmp/luna-tools-h6icod6k/result.json`, exit 0.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed; `/tmp/luna-tools-_xpm9ti1/result.json`, exit 0.
+
+
+## Evict retained code by recency instead of clearing the session
+
+The session CodeCache now orders declaration and owned-body entries together.
+Successful lookups (including stable unsupported markers) refresh recency. Under
+pressure, expired owned bodies are reclaimed first, then the oldest live entries
+are removed individually until the new entry fits the existing 100000 weight
+limit. Replacing an entry removes its previous weight and ordering record.
+Recency metadata contains exactly one record per retained entry in each index;
+repeated hits cannot grow a stale-entry queue. Counter exhaustion compacts the
+ordering without changing relative recency.
+
+Only immutable compiled code and unsupported markers participate. Captured
+values, environments and invocation results are not added to this cache, and
+Type-output-only result memoization remains unchanged. Borrowed fragment and
+contextual-input caches retain their separate policies. Pressure still scans
+owned bodies for expired identities; this change does not establish wall-clock
+speedups or complete the VM migration.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  366 passed; `/tmp/luna-tools-lnbc16s2/result.json`, exit 0. Regression coverage
+  includes mixed declaration/owned eviction, live compiled-code retention,
+  expired identities, replacement accounting, negative entries, repeated hits,
+  and clock exhaustion.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed; `/tmp/luna-tools-q6n17r7r/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_closures --test comptime_iir_bytecode`:
+  passed; `/tmp/luna-tools-k3749mpw/result.json`, exit 0.
+
+
+## Centralize bounded TypeCore construction
+
+TypeInterner now owns resource admission for both direct interning and runtime
+identity abstraction. `intern_with_budget` charges the complete hole telescope,
+body and immutable payloads before recursive validation or hashing.
+`abstract_runtime_with_budget` charges inputs before rewriting, then passes the
+same remaining budget to core admission. Convenience entrypoints use a finite
+100000-unit budget. Budget or depth exhaustion returns ConstructionBudget and
+publishes no new core; existing cores remain reusable on a later admitted call.
+
+The two existing production consumers, IIR frozen callable signatures and
+selected template storage, now pass their operation budget into the interner.
+Their semantic completion and target checks still run before publication.
+Sharing remains structural: different runtime substitutions do not become equal
+merely because their cores are shared. No runtime data is read by abstraction.
+
+This centralizes a requirement for further TypeRef adoption; it does not replace
+all IIR annotations or connect runtime environment acquisition. Reference-side
+substitution/materialization still has its existing APIs, and no complete
+compiler resource audit or speedup is claimed.
+
+Validation in `/home/fin/luna`:
+
+- Initial regression-test compilation failed because the test omitted the
+  NormalForm sort field; corrected before runtime checks.
+  `/tmp/luna-tools-zjujtvor/result.json`, exit 101.
+- `python3 -B development/check.py --timeout 900 -- test -p nir --test type_core_budget --test types --test closure_contexts --test computations --test associated_types --test optional_types`:
+  94 passed; `/tmp/luna-tools-6sdh19ri/result.json`, exit 0. New tests cover deep
+  bodies/contracts, oversized immutable payloads, zero-budget cache hits,
+  exhaustion at each construction boundary, retry and distinct substitutions.
+- `python3 -B development/check.py --timeout 900 -- test -p iir`:
+  106 passed; `/tmp/luna-tools-fr8mq7ln/result.json`, exit 0.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed; `/tmp/luna-tools-zslqyjpe/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test function_type_dependencies --test closure_environment_parameters`:
+  passed; `/tmp/luna-tools-3_ocr6ao/result.json`, exit 0.
+
+
+## Complete the shared projection and memory type preflight
+
+Inspection of TypeRef consumers exposed a separate production preflight gap:
+`nir::type_budget::charge_structure`, used by associated projection copying and
+memory summary admission, omitted ClosureContextValue, ContextualClosure,
+ClosureSnapshot and FunctionValue children. Its wildcard treated these compound
+terms as leaves. Payloads such as record names were not charged by memory
+admission; projection copying maintained a second incomplete payload traversal.
+
+The shared entry now delegates to the complete bounded term walk while retaining
+its 64-level depth policy. The complete walk itself uses Term::visit_children,
+whose exhaustive structural match prevents new compound variants from silently
+becoming leaves. Payload charging and bounded worklist growth remain in that
+walk. Projection copy admission no longer repeats a separate payload traversal;
+its existing diagnostic remains stable. This is structural resource admission,
+not normalization, type equality, environment validity or PTC reasoning.
+
+The baseline regression demonstrated incorrectly accepted deep closure context
+input. Coverage now includes all four previously omitted compound variants,
+large retained payloads, the depth boundary, insufficient fuel followed by retry,
+and direct projection/memory consumer entrypoints. TypeRef replacement and
+runtime environment acquisition remain separate unfinished work.
+
+Validation in `/home/fin/luna`:
+
+- Before the fix, `test -p nir --lib type_budget` failed the new regression;
+  `/tmp/luna-tools-5ce3gf6y/result.json`, exit 101.
+- `python3 -B development/check.py --timeout 900 -- test -p nir --lib`:
+  passed; `/tmp/luna-tools-5a4rt1ur/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p nir --test type_computations --test type_children --test type_core_budget`:
+  passed; `/tmp/luna-tools-lfnesc0p/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution --test associated --test projection_copy_budget`:
+  passed; `/tmp/luna-tools-69u6l3vx/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p program_verification --test memory_type_budget --test associated_resources`:
+  passed; `/tmp/luna-tools-_5egtnm2/result.json`, exit 0.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed; `/tmp/luna-tools-y4zruvei/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test associated_signatures --test associated_purity`:
+  passed; `/tmp/luna-tools-oafktyi6/result.json`, exit 0.
+
+
+## Bound reference-side expansion before allocating repeated inputs
+
+TypeRef now exposes budgeted binding, materialization, substitution composition
+and contract checking. Convenience entrypoints use finite default budgets.
+Binding checks complete argument structure before recursive scope validation.
+Expansion preflight accounts for every inserted occurrence, including immutable
+payloads, and bounds the combined output depth rather than inspecting the core
+and replacement in isolation. Simultaneous substitution does not recursively
+substitute newly inserted terms. Binder depth selects only the surrounding frame;
+ordinary capture-avoiding rewriting still performs the actual composition.
+
+Contract expansion is preflighted across the full telescope before invoking any
+semantic callbacks. Resource refusal therefore cannot expose a partial callback
+prefix; semantic contract errors retain ordinary ordered short-circuit behavior.
+Retries preserve the shared core and original reference. Runtime abstraction
+uses the internal shape binder only after its own operation-budget preflight,
+avoiding a second unrelated default limit after core publication.
+
+These APIs complete another resource boundary of the shared representation.
+NormalFormArgument still represents contextual inputs whose domains depend on
+previous inputs; it has not been removed or generalized into an elaboration
+suspension protocol here. General IIR annotations and runtime environment plans
+also remain unfinished. Existing IIR frozen signatures and template storage use
+closed references; this change does not claim a newly connected runtime path.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir --test type_reference_budget --test type_core_budget --test types --test closure_contexts --test computations --test associated_types --test optional_types`:
+  passed; `/tmp/luna-tools-qzrc3w18/result.json`, exit 0. New cases cover repeated
+  large inputs, combined depth, binding refusal, nested binders, unchanged cores
+  and substitutions after failure, retry, and contract callback ordering.
+- `python3 -B development/check.py --timeout 900 -- test -p iir`:
+  passed; `/tmp/luna-tools-sc33uonr/result.json`, exit 0.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed; `/tmp/luna-tools-jp_bmnsl/result.json`, exit 0.
+
+
+## Edit StructBuilder ranges from ordered Object descriptions
+
+StructBuilder now accepts Object descriptions for insertion and half-open range
+replacement, including deletion with an empty Object. Append delegates to the
+same path. FieldDescription still parses all entries before either parallel
+field list changes, and the existing edit operation prepares both snapshots
+before assignment. Invalid descriptions or ranges return false without changing
+the draft. Order, exact Type identities and duplicate names are retained; Build
+still performs checked publication and rejects invalid storage or duplicate
+fields. No new builtin or compiler exception was added.
+
+The existing Object struct-builder example now exercises edits, rejection,
+normal-form identity retention and saved drafts. It is registered as the
+`sysroot-object-struct-builder` library-check stage with an expected native test
+count, so missing execution cannot silently count as success. This is a library
+editing feature, not generic/function/trait definition publication. Inspection
+also confirms CheckedDefinitionPublisher already uses incremental admission and
+representation checking rather than the old whole-package clone path described
+in the noon report.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/library_check.py --timeout 900 --stage sysroot-object-struct-builder --stage sysroot-builders`:
+  passed both real-sysroot/native stages (1 and 6 tests);
+  `/tmp/luna-library-xcsjstjf/summary.json`, exit 0.
+- `git diff --check`: passed. No Rust sources changed in this stage.
+
+
+## Share frozen IIR instance input frames
+
+InstanceKey now retains its ordinary comptime inputs in Arc<[Term]> rather than
+Vec<Term>. Cloning an instance identity, template target or graph snapshot shares
+the frozen input frame instead of recursively copying each term. Equality and
+hashing still compare declaration identity and input contents; independently
+allocated equal inputs remain equal, and different inputs remain distinct.
+This applies uniformly to ordinary immutable values, with no List<Type>, Tuple
+or normal-form-head special case.
+
+Materialization, staging, VM execution, verification and host consumers use slice
+views for observation. Boundaries that reconstruct NIR or populate existing
+mutable Vec-based call data explicitly materialize an owned vector. Existing
+semantic admission and payload/depth guards remain active; sharing does not
+prove type equality, runtime availability or contracts. Display remains the same
+S-expression. This does not migrate all type annotations to TypeRef, implement
+runtime environment acquisition, or establish a wall-clock speedup.
+
+The new regression verifies shared allocation across identity and package
+clones, content equality/hash lookup across independent allocations, and
+copy-on-write isolation. The source template test also checks sharing across
+materialized function and template-target graph snapshots.
+
+Validation in `/home/fin/luna`:
+
+- Intermediate compile checks identified Vec/slice boundary and test-fixture
+  migration errors; these were corrected before behavioral validation.
+- `python3 -B development/check.py --timeout 900 -- check --tests --keep-going -p luna -p iir -p materialization -p comptime_interpretor -p program_verification -p elaboration`:
+  passed all affected crates' test targets;
+  `/tmp/luna-tools-k5i_9o84/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p iir -p materialization -p comptime_interpretor --lib`:
+  passed; `/tmp/luna-tools-pi9z92t6/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p iir`:
+  107 passed; `/tmp/luna-tools-6mlxwks3/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test function_type_dependencies --test scoped_comptime_callables --test comptime_iir_bytecode`:
+  56 passed; `/tmp/luna-tools-0iz8203t/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p program_verification --lib`:
+  passed; `/tmp/luna-tools-fd0n4cm4/result.json`, exit 0.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed; `/tmp/luna-tools-h2babd5h/result.json`, exit 0.
+
+
+## Retain shared instance frames through VM caches and closure copies
+
+The VM's invocation-local instance cache now indexes declaration identity first,
+then performs content-based lookup using a borrowed &[Term]. Source generic
+formation no longer constructs a deep-copied tuple key before a cache hit. On a
+miss it creates one shared frame used by the closure, local cache and retained
+prepared-code cache. IIR callable construction keeps the graph's existing shared
+frame. Representation copies validate instance inputs before sharing that frame;
+mutable environments still follow their existing copy rules. Scoped restoration
+that substitutes input terms allocates a new frame rather than rebinding the old
+one in place.
+
+Input admission, requirements, capabilities and output-domain checks still run
+in the ordinary order. No invocation result or mutable execution environment is
+added to code caches. Type-output-only result memoization policy is unchanged.
+Hashing and validation still inspect term contents; this is removal of redundant
+owned input copies, not a claim that invocation or type comparison is constant
+time. Event payloads and other Vec-based representations remain separate.
+
+Validation in `/home/fin/luna`:
+
+- Intermediate compilation checks caught representation changes in scoped
+  restoration and old test constructors; corrected before behavioral checks.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  367 passed; `/tmp/luna-tools-s7rf1vj3/result.json`, exit 0. This includes current
+  contract rechecking, failed-input recovery, scope restoration, representation
+  copying, and new borrowed lookup/shared frame assertions.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test scoped_comptime_callables --test comptime_iir_bytecode --test closure_environment_parameters --test function_type_dependencies`:
+  79 passed; `/tmp/luna-tools-3p57b6a1/result.json`, exit 0.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed; `/tmp/luna-tools-cij6cbuz/result.json`, exit 0.
+
+
+## Index retained generic instance code by declaration and inputs
+
+The CodeSession prepared-instance cache now uses declaration buckets and
+content-keyed shared input frames, replacing the linear retained-entry scan.
+Lookup borrows the current input slice. The caller supplies the structural work
+computed by its already bounded input preflight; lookup charges that work before
+hashing/comparing inputs in an existing declaration bucket. Unrelated declarations
+and other specializations no longer require a linear charged scan.
+
+The existing 64-entry and 100000-weight retention policy remains. Replacement
+removes the old count and weight before checking pressure; an oversized insertion
+leaves existing entries intact. All cache keys remain structural, session scope
+still requires the exact immutable source world, and current invocation contracts
+are checked independently of cache reuse. This is a prepared-code cache, not a
+result cache. Type-only result memoization remains unchanged.
+
+Tests exercise borrowed lookup, 64 declaration buckets, 64 specializations of
+one declaration, differing inputs, replacement accounting, oversized refusal,
+retention pressure and budget exhaustion followed by successful retry. Hashing
+still costs input work; no wall-clock timing claim is made.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`:
+  367 passed; `/tmp/luna-tools-hg75ri_2/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test scoped_comptime_callables --test comptime_staged_values --test comptime_iir_bytecode`:
+  19 passed; `/tmp/luna-tools-rq2eicv1/result.json`, exit 0.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed; `/tmp/luna-tools-sd2vyjvv/result.json`, exit 0.
+
+
+### Nominal record input budget boundary test
+
+The nominal-record value-index test assumed an invocation would succeed below
+512 steps. The assumption no longer holds on the committed implementation: an
+isolated run with `lib.rs` and `list_append.rs` restored temporarily to HEAD
+failed at `failed && succeeded`, with no list optimization present. The test now
+first measures a successful invocation, then checks each allowance from one
+through that measured work plus one. It still requires both exhausted and
+successful outcomes and rejects any non-budget error. No VM budget or admission
+rule changed. Task-owned implementation files were restored after both probes.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --test nominal_types nominal_record_index_budget_boundaries_do_not_report_type_errors`: old test failed on HEAD (`/tmp/luna-tools-w5wh2_yh/result.json`); updated test passed with the same HEAD implementation (`/tmp/luna-tools-pw5xmzyr/result.json`).
+- Workspace formatting passed (`/tmp/luna-tools-ll674zef/result.json`); `git diff --check` passed.

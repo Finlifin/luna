@@ -1,0 +1,22 @@
+-- 固有方法与 trait impl 共用条件查询，仍按成员名限定候选。
+trait Disabled {}
+trait Enabled {}
+trait Missing {}
+impl Enabled for T where T, requires not (T :- Disabled) {}
+
+struct Box where T { value: T }
+impl Box<T> where T,
+    requires (T :- Enabled) or (T :- Missing)
+{
+    fn read(self) -> T { self.value }
+    comptime fn ready() -> bool { true }
+}
+
+trait Result { assoc value: bool = Box<bool>.ready(); }
+impl Result for bool {}
+
+fn entry() -> bool {
+    let action: fn(Box<bool>) -> bool = Box<bool>.read;
+    action(Box<bool> { value: true }) and bool.as(Result).value
+}
+comptime fn invoke() -> bool { Box<bool>.ready() }

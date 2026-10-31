@@ -1,0 +1,24 @@
+{-
+    Ordinary value inputs may depend on an earlier comptime type-list input.
+    Formation preserves the Key head; its body is not invoked to identify it.
+-}
+pure comptime fn Key<Es: meta.List<Type>, value: Tuple<.Es = Es>> -> Type {
+    bool
+}
+
+pure comptime fn Forward() -> Type
+where Es: meta.List<Type>, value: Tuple<.Es = Es>
+{
+    Key<Es, value>
+}
+
+pure comptime fn verify() -> bool {
+    let first = Key<[bool, u8], (true, 7)>;
+    let forwarded = Forward<[bool, u8], (true, 7)>();
+    -- Opaque heads are not assumed injective for unequal inputs.
+    first == forwarded and Key<[], ()> == Forward<[], ()>()
+}
+
+pure comptime fn Result() -> Type {
+    Forward<[bool, u8], (true, 7)>()
+}

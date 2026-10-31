@@ -1,0 +1,11 @@
+{-
+  Regression: ordinary comptime locals supply clause inputs to a generic
+  function during invocation. The invocation of run must return true.
+  Previously rejected as unavailable during definition checking.
+  Command: luna comptime-local-clause-input.fl --emit nir
+-}
+comptime fn first() -> bool where flag:bool { flag }
+comptime fn run() -> bool {
+    let flag = true;
+    first<flag>()
+}

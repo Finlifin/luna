@@ -1,0 +1,8 @@
+-- Ordinary signature templates and staged type inputs disappear before codegen.
+typealias Type = .Type'builtin;
+template fn identity(comptime T: Type, value: T) -> T;
+fn keep use identity { value }
+
+fn run() -> bool {
+    keep(bool, true)
+}

@@ -15,6 +15,9 @@ pub struct Parser<'a> {
     pub(crate) ast: Ast,
     pub(crate) cursor: usize,
     pub(crate) cursor_stack: Vec<usize>,
+    /// Each entry belongs to a quote's runtime subtree. Splice operands are
+    /// parsed outside that subtree and may construct their own quote.
+    pub(crate) quote_holes: Vec<Option<rustc_span::Span>>,
     pub start_pos: BytePos,
 
     errors: Vec<ParseError>,
@@ -27,24 +30,40 @@ impl<'a> Parser<'a> {
         symbols: std::collections::HashMap<usize, Symbol>,
         start_pos: BytePos,
     ) -> Parser<'a> {
+        // Trivia has no grammar role. Reindex symbols along with tokens so
+        // identifiers after a block comment keep their original spelling.
+        let mut significant = Vec::with_capacity(tokens.len());
+        let mut significant_symbols = std::collections::HashMap::new();
+        for (old_index, token) in tokens.into_iter().enumerate() {
+            if token.kind == TokenKind::Comment {
+                continue;
+            }
+            if let Some(&symbol) = symbols.get(&old_index) {
+                significant_symbols.insert(significant.len(), symbol);
+            }
+            significant.push(token);
+        }
         let mut result = Parser {
             source_map,
-            tokens,
-            symbols,
+            tokens: significant,
+            symbols: significant_symbols,
             cursor: 0,
             cursor_stack: Vec::new(),
+            quote_holes: Vec::new(),
             errors: Vec::new(),
-            ast: Ast::new(),
+            ast: Ast::new(start_pos),
             start_pos,
         };
         result.enter();
         result
     }
 
-    pub fn parse(&mut self, diag_ctx: &DiagnosticContext) {
+    /// Report whether this file parsed, independently of earlier diagnostics.
+    pub fn parse(&mut self, diag_ctx: &DiagnosticContext) -> bool {
         match self.try_file_scope() {
             Ok(node_index) => {
                 self.ast.root = node_index;
+                true
             }
             Err(error) => {
                 // Handle parse error
@@ -53,6 +72,7 @@ impl<'a> Parser<'a> {
                     .lookup_source_file(self.current_span().lo())
                     .start_pos;
                 error.emit(diag_ctx, base_pos);
+                false
             }
         }
     }
@@ -204,7 +224,7 @@ impl<'a> Parser<'a> {
                 self.start_pos + rustc_span::BytePos(end_offset as u32),
             )
         } else {
-            println!("Warning: cursor stack is empty, returning dummy span");
+            eprintln!("Warning: cursor stack is empty, returning dummy span");
             rustc_span::DUMMY_SP
         }
     }

@@ -1,0 +1,234 @@
+use bindings;
+use builtin.{Integer, Symbol, Type};
+
+use List;
+use bindings.Object;
+use definitions.fields.FieldDescription;
+
+{-
+  A concrete enum draft. Variant paths and groups retain declaration order;
+  Build checks payload Types and publishes one fresh nominal identity.
+-}
+pub struct EnumBuilder {
+    name: Symbol,
+    groups: List<List<Symbol>>,
+    variant_names: List<List<Symbol>>,
+    shapes: List<Symbol>,
+    field_names: List<List<Symbol>>,
+    field_types: List<List<Type>>,
+}
+
+impl EnumBuilder {
+    pub comptime fn new(.name: Symbol = .Generated) -> Self {
+        Self { name: name, groups: [], variant_names: [], shapes: [], field_names: [], field_types: [] }
+    }
+
+    pub comptime fn from_type(subject: Type, .name: Symbol = .Generated) -> Self {
+        Self {
+            name: name,
+            groups: subject.enum_group_paths(),
+            variant_names: subject.enum_variant_paths(),
+            shapes: subject.enum_variant_shapes(),
+            field_names: subject.enum_variant_field_names(),
+            field_types: subject.enum_variant_field_types(),
+        }
+    }
+
+    pub comptime fn add_group(self, name: Symbol, .parent: List<Symbol> = []) {
+        self.groups.append(parent.concat([name]));
+    }
+
+    pub comptime fn add_unit(self, name: Symbol, .group: List<Symbol> = []) {
+        self.variant_names.append(group.concat([name]));
+        self.shapes.append(.unit);
+        self.field_names.append([]);
+        self.field_types.append([]);
+    }
+
+    pub comptime fn add_tuple(self, name: Symbol, fields: List<Type>, .group: List<Symbol> = []) {
+        self.variant_names.append(group.concat([name]));
+        self.shapes.append(.tuple);
+        self.field_names.append([]);
+        self.field_types.append(fields);
+    }
+
+    pub comptime fn add_named(self, name: Symbol, names: List<Symbol>, fields: List<Type>, .group: List<Symbol> = []) {
+        self.variant_names.append(group.concat([name]));
+        self.shapes.append(.named);
+        self.field_names.append(names);
+        self.field_types.append(fields);
+    }
+
+    {-
+        Named payloads can use ordered Object field descriptions. Parse the
+        entire description before editing the draft. Invalid descriptions or
+        indices leave it unchanged; Build still checks duplicate field names,
+        group paths and runtime storage admissibility.
+    -}
+    pub comptime fn add_named_from_object(self, name: Symbol, fields: Object,
+        .group: List<Symbol> = []) -> bool {
+        let end = self.variant_names.length();
+        self.insert_named_from_object(end, name, fields, .group = group)
+    }
+
+    pub comptime fn insert_named_from_object(self, index: Integer, name: Symbol,
+        fields: Object, .group: List<Symbol> = []) -> bool {
+        let description = FieldDescription.from_object(fields) match {
+            value? => value,
+            null => return false,
+        };
+        self.insert_named(index, name, description.names, description.types, .group = group)
+    }
+
+    pub comptime fn replace_named_from_object(self, index: Integer, name: Symbol,
+        fields: Object, .group: List<Symbol> = []) -> bool {
+        let description = FieldDescription.from_object(fields) match {
+            value? => value,
+            null => return false,
+        };
+        self.replace_named(index, name, description.names, description.types, .group = group)
+    }
+
+    {-
+        Indices refer to logical declaration order, never encoded tags. Editing
+        validates bounds; Build validates paths, payloads and group references.
+        Prepare all parallel lists before committing any part of a variant.
+    -}
+    pub comptime fn insert_unit(self, index: Integer, name: Symbol,
+        .group: List<Symbol> = []) -> bool {
+        self.edit_variants(index, index, [group.concat([name])], [.unit], [[]], [[]])
+    }
+
+    pub comptime fn insert_tuple(self, index: Integer, name: Symbol, fields: List<Type>,
+        .group: List<Symbol> = []) -> bool {
+        self.edit_variants(index, index, [group.concat([name])], [.tuple], [[]], [fields])
+    }
+
+    pub comptime fn insert_named(self, index: Integer, name: Symbol, names: List<Symbol>, fields: List<Type>,
+        .group: List<Symbol> = []) -> bool {
+        self.edit_variants(index, index, [group.concat([name])], [.named], [names], [fields])
+    }
+
+    pub comptime fn replace_unit(self, index: Integer, name: Symbol,
+        .group: List<Symbol> = []) -> bool {
+        self.edit_variants(index, index + 1, [group.concat([name])], [.unit], [[]], [[]])
+    }
+
+    pub comptime fn replace_tuple(self, index: Integer, name: Symbol, fields: List<Type>,
+        .group: List<Symbol> = []) -> bool {
+        self.edit_variants(index, index + 1, [group.concat([name])], [.tuple], [[]], [fields])
+    }
+
+    pub comptime fn replace_named(self, index: Integer, name: Symbol, names: List<Symbol>, fields: List<Type>,
+        .group: List<Symbol> = []) -> bool {
+        self.edit_variants(index, index + 1, [group.concat([name])], [.named], [names], [fields])
+    }
+
+    pub comptime fn remove_variant(self, index: Integer) -> bool {
+        self.edit_variants(index, index + 1, [], [], [], [])
+    }
+
+    {-
+        Compose reflection results without unpacking them into individual calls.
+        Parallel outer lists must agree in length. Invalid input leaves the
+        draft unchanged; Build validates each shape, path and payload layout.
+    -}
+    pub comptime fn add_variants(self, paths: List<List<Symbol>>, shapes: List<Symbol>,
+        names: List<List<Symbol>>, types: List<List<Type>>) -> bool {
+        let end = self.variant_names.length();
+        self.replace_variants(end, end, paths, shapes, names, types)
+    }
+
+    pub comptime fn replace_variants(self, start: Integer, end: Integer,
+        paths: List<List<Symbol>>, shapes: List<Symbol>,
+        names: List<List<Symbol>>, types: List<List<Type>>) -> bool {
+        let count = paths.length();
+        if shapes.length() != count or names.length() != count or types.length() != count {
+            return false;
+        };
+        self.edit_variants(start, end, paths, shapes, names, types)
+    }
+
+    comptime fn edit_variants(self, start: Integer, end: Integer,
+        paths: List<List<Symbol>>, shapes: List<Symbol>,
+        names: List<List<Symbol>>, types: List<List<Type>>) -> bool {
+        let next_paths = self.variant_names.replace_range(start, end, paths) match {
+            value? => value, null => return false,
+        };
+        let next_shapes = self.shapes.replace_range(start, end, shapes) match {
+            value? => value, null => return false,
+        };
+        let next_names = self.field_names.replace_range(start, end, names) match {
+            value? => value, null => return false,
+        };
+        let next_types = self.field_types.replace_range(start, end, types) match {
+            value? => value, null => return false,
+        };
+        self.variant_names = next_paths;
+        self.shapes = next_shapes;
+        self.field_names = next_names;
+        self.field_types = next_types;
+        true
+    }
+
+    {-
+        Group edits change only the group declaration list. Descendant paths
+        remain explicit; repair them before Build if a parent was renamed or
+        removed. This permits coordinated edits without silently moving cases.
+    -}
+    pub comptime fn insert_group(self, index: Integer, name: Symbol,
+        .parent: List<Symbol> = []) -> bool {
+        self.edit_groups(index, index, [parent.concat([name])])
+    }
+
+    pub comptime fn replace_group(self, index: Integer, name: Symbol,
+        .parent: List<Symbol> = []) -> bool {
+        self.edit_groups(index, index + 1, [parent.concat([name])])
+    }
+
+    pub comptime fn remove_group(self, index: Integer) -> bool {
+        self.edit_groups(index, index + 1, [])
+    }
+
+    pub comptime fn add_groups(self, paths: List<List<Symbol>>) -> bool {
+        let end = self.groups.length();
+        self.replace_groups(end, end, paths)
+    }
+
+    pub comptime fn replace_groups(self, start: Integer, end: Integer,
+        paths: List<List<Symbol>>) -> bool {
+        self.edit_groups(start, end, paths)
+    }
+
+    comptime fn edit_groups(self, start: Integer, end: Integer,
+        paths: List<List<Symbol>>) -> bool {
+        let next = self.groups.replace_range(start, end, paths) match {
+            value? => value, null => return false,
+        };
+        self.groups = next;
+        true
+    }
+
+    pub comptime fn Build(self) -> Type {
+        bindings.BuildEnum(self.name, self.groups, self.variant_names, self.shapes, self.field_names, self.field_types)
+    }
+
+    {- Codes correspond to leaf variants in declaration order. Symbol encoding
+       requires unit variants and rejects repeated codes during BuildSymbol. -}
+    pub comptime fn BuildSymbol(self, codes: List<Symbol>) -> Type {
+        bindings.BuildSymbolEnum(self.name, self.groups, self.variant_names,
+            self.shapes, self.field_names, self.field_types, codes)
+    }
+
+    {-
+        Fixed bits and payload slots must partition each variant's representation.
+        Offsets follow payload declaration order and count from the least bit.
+    -}
+    pub comptime fn BuildBits(self, width: Integer,
+        masks: List<Integer>, values: List<Integer>,
+        offsets: List<List<Integer>>, .base_type: ?Type = null) -> Type {
+        bindings.BuildBitsEnum(self.name, self.groups, self.variant_names,
+            self.shapes, self.field_names, self.field_types, width, base_type, masks, values, offsets)
+    }
+
+}

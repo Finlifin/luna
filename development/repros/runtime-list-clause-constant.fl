@@ -1,0 +1,17 @@
+{- Regression: required local constants wait for the callable's clause
+   inputs. Run with the real sysroot; each callable keeps its own list input.
+-}
+fn selected_flag() -> bool
+where flags: meta.List<bool>
+{
+    const flag = flags[0];
+    flag
+}
+
+test {
+    let first = selected_flag<[true, false]>;
+    let second = selected_flag<[false, true]>;
+    let first_value = first();
+    let second_value = second();
+    assumes first_value and not second_value;
+}

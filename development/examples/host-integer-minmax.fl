@@ -1,0 +1,17 @@
+-- The runner supplies the math package and the min/max target bindings.
+typealias Signed = .i32'builtin;
+
+fn clamp(value: Signed, lower: Signed, upper: Signed) -> Signed
+where requires lower <= upper {
+    math.min(math.max(value, lower), upper)
+}
+
+fn run() -> bool {
+    let low = math.min<.i128'builtin>(-170141183460469231731687303715884105728, 1);
+    let high = math.max<.u128'builtin>(340282366920938463463374607431768211455, 1);
+    low == -170141183460469231731687303715884105728
+        and high == 340282366920938463463374607431768211455
+        and clamp(-20, -10, 10) == -10
+        and clamp(20, -10, 10) == 10
+        and clamp(3, -10, 10) == 3
+}

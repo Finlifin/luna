@@ -1,0 +1,38 @@
+typealias Byte = .u8'builtin;
+typealias Word = .u16'builtin;
+typealias Bits = .BitVec'builtin<16>;
+typealias Nibble = .BitVec'builtin<4>;
+
+pure fn rotate(bits: Bits) -> Bits {
+    bits[0..4] ++ bits[4..16]
+}
+pure fn select(bits: Bits, position: Byte) -> Nibble
+    where requires position <= 12
+{
+    bits[position..(position + 4)]
+}
+pure fn masked(bits: Bits) -> Bits {
+    (bits and 0xFF00) or (not bits and 0x00FF)
+}
+pure fn replace(position: Byte) -> Word where requires position <= 12 {
+    var word: Word = 0x1234;
+    word'bitvec[position..(position + 4)] = do {
+        word = 0xABCD;
+        0b1010
+    };
+    word
+}
+pure fn empty_update() -> Word {
+    var word: Word = 0;
+    let end: Byte = 16;
+    word'bitvec[end..end] = do { word = 0xABCD; 0 };
+    word
+}
+fn run() -> bool {
+    rotate(0xABCD).as(Word) == 0xDABC
+        and select(0xABCD, 4).as(Word) == 12
+        and select(0xABCD, 12).as(Word) == 10
+        and masked(0xABCD) == 0xAB32
+        and replace(4) == 0xABAD
+        and empty_update() == 0xABCD
+}

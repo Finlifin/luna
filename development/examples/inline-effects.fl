@@ -1,0 +1,23 @@
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+
+struct Ticket { ready: bool }
+impl Retire for Ticket {
+    fn drop(*self) { assumes self.ready.*; }
+}
+
+inline effect inspect(ticket: Ticket) -> bool;
+inline fn inspect_ticket(ticket: Ticket) -> #inspect bool {
+    inspect(ticket)#
+}
+
+fn entry() -> bool {
+    var observed = false;
+    let result = inspect_ticket(Ticket { ready: true })# {
+        inspect(ticket) => {
+            observed = ticket.ready;
+            resume observed;
+        },
+    };
+    result and observed
+}

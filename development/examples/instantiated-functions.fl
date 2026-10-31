@@ -1,0 +1,22 @@
+typealias Byte = .u8'builtin;
+fn identity(value: T) -> T where T { value }
+trait Read {
+    fn read(self) -> result: Byte where ensures result < 100;
+}
+struct Box where T { value: T }
+impl Read for Box<Byte> {
+    fn read(self) -> Byte { 41 }
+}
+fn read(value: T) -> Byte where T :- Read { value.as(Read).read() }
+fn recurse(value: Byte) -> Byte {
+    if value == 0 { 0 } else { recurse(value - 1) }
+}
+fn defaults(.value: Byte = 3) -> Byte { value }
+fn entry() -> Byte {
+    let bytes = identity(Box<Byte> { value: 41 });
+    let flag = identity(true);
+    let closure = || read(bytes);
+    let result = closure();
+    if flag { result } else { let ignored = recurse(2); identity(defaults()) }
+}
+fn unreachable(value: T) -> T where T { unreachable(value) }

@@ -1,0 +1,14 @@
+{-
+    The primary package's mode is explicit. Import aliases retain the contextual
+    declaration, and the ordinary constant stores this definition's selection.
+-}
+use build.mode as selected;
+const debugging = selected matches .debug;
+
+test selected_build_mode {
+    inline if debugging {
+        assumes true;
+    } else {
+        assumes false;
+    };
+}

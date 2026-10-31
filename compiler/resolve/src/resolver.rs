@@ -1,9 +1,13 @@
-use symbol::{DefId, PathAnchor, Symbol};
+mod trait_sources;
+use trait_sources::TraitSourceIndex;
+pub use trait_sources::TraitSourcePlan;
+
+use std::{collections::HashMap, sync::Arc};
+use symbol::{DefId, Symbol};
 
 use crate::binding::{Binding, Resolution};
 use crate::error::{ResolveError, ResolveResult};
 use crate::ids::ScopeId;
-use crate::import::ResolvedImport;
 use crate::module_builder::ModuleTree;
 use crate::rib::RibStack;
 use crate::scope::ScopeTree;
@@ -22,135 +26,100 @@ use crate::scope::ScopeTree;
 pub struct Resolver<'a> {
     /// The pre-built module tree (scope tree + def names).
     tree: &'a ModuleTree,
+    trait_sources: TraitSourceIndex,
     /// Rib stack for ordered (lexical) scopes.
     ribs: RibStack,
+    /// Scope-sensitive results over the immutable module tree. Shared with HIR
+    /// so repeated projections do not duplicate complete candidate lists.
+    type_members: HashMap<(ScopeId, Symbol), Arc<[(DefId, DefId)]>>,
 }
 
 impl<'a> Resolver<'a> {
+    /// The source scan frontier includes clause parameters and all input files.
+    pub fn next_definition_index(&self) -> u32 {
+        self.tree.def_count
+    }
+
     /// Create a resolver that queries against `tree`.
     pub fn new(tree: &'a ModuleTree) -> Self {
         Self {
             tree,
+            trait_sources: TraitSourceIndex::new(tree),
             ribs: RibStack::new(),
+            type_members: HashMap::new(),
         }
     }
 
-    /// Resolve a simple name starting from `scope_id`, walking up the scope
-    /// chain.
-    ///
-    /// Returns `Err(ResolveError::UnresolvedName)` if the name cannot be
+    /// Returns `Err(ResolveError::UnresolvedIdentifier)` if the name cannot be
     /// found in any enclosing scope.
     pub fn resolve_name(
         &self,
-        name: &str,
+        name: Symbol,
         scope_id: ScopeId,
         span: rustc_span::Span,
     ) -> ResolveResult<Resolution> {
-        // 1. Check the rib stack first (lexical / ordered bindings).
-        if let Some(binding) = self.ribs.lookup(name) {
-            return Ok(Resolution::from_binding(binding));
+        let plan = self.resolve_name_deferred(name, scope_id, span);
+        if plan.pending_outputs.is_empty() {
+            plan.fallback
+        } else {
+            Err(ResolveError::InvalidNodeType {
+                message: format!("name `{name}` awaits generated pattern outputs"),
+                span,
+            })
         }
-
-        // 2. Walk up the scope tree.
-        for scope in self.scope_tree().ancestors(scope_id) {
-            if let Some(binding) = self.lookup_in_scope(name, scope.id) {
-                return Ok(Resolution::from_binding(&binding));
-            }
-        }
-
-        Err(ResolveError::UnresolvedName {
-            name: name.to_string(),
-            span,
-        })
     }
 
-    /// Resolve a dotted path (e.g. `a.b.c`) starting from `scope_id`.
-    ///
-    /// Each segment is resolved to the scope it names; the **last** segment
-    /// is resolved as a name within the final scope and returned as a
-    /// `Resolution`.
-    ///
-    /// Returns an error if any segment cannot be resolved.
-    pub fn resolve_path(
+    /// Preserve pending lexical exports and the exact ordinary lookup result.
+    /// This query neither executes generators nor guesses their output names.
+    pub fn resolve_name_deferred(
         &self,
-        segments: &[String],
+        name: Symbol,
         scope_id: ScopeId,
         span: rustc_span::Span,
-    ) -> ResolveResult<Resolution> {
-        if segments.is_empty() {
-            return Err(ResolveError::InternalError(
-                "empty path in resolve_path".into(),
-            ));
-        }
-
-        if segments.len() == 1 {
-            return self.resolve_name(&segments[0], scope_id, span);
-        }
-
-        // Resolve the prefix segments to a scope.
-        let (prefix, tail) = segments.split_at(segments.len() - 1);
-        let target_scope = self.resolve_scope_path(prefix, scope_id, span)?;
-
-        // Resolve the final name in that scope (direct only, no ancestor walk).
-        let name = &tail[0];
-        let binding = self.lookup_in_scope(name, target_scope).ok_or_else(|| {
-            ResolveError::UnresolvedName {
-                name: name.clone(),
-                span,
-            }
-        })?;
-
-        Ok(Resolution::from_binding(&binding).with_import_source(target_scope))
-    }
-
-    /// Resolve a sequence of path segments to a scope (for qualified access).
-    ///
-    /// Unlike `resolve_path`, this returns the *scope* rather than a
-    /// `Resolution`, and is useful when you need to enter a module scope.
-    pub fn resolve_scope_path(
-        &self,
-        segments: &[String],
-        mut scope_id: ScopeId,
-        span: rustc_span::Span,
-    ) -> ResolveResult<ScopeId> {
-        for (i, segment) in segments.iter().enumerate() {
-            if segment == "super" {
-                let parent = self
-                    .scope_tree()
-                    .get(scope_id)
-                    .and_then(|s| s.parent)
-                    .ok_or_else(|| ResolveError::UnresolvedImportSegment {
-                        segment: "super".into(),
-                        span,
-                    })?;
-                scope_id = parent;
-                continue;
-            }
-
-            // First segment: walk up the scope chain. Subsequent segments:
-            // look only in the current scope.
-            let binding = if i == 0 {
-                self.resolve_name_to_binding(segment, scope_id)
-            } else {
-                self.lookup_in_scope(segment, scope_id)
-            };
-
-            let binding = binding.ok_or_else(|| ResolveError::UnresolvedImportSegment {
-                segment: segment.clone(),
-                span,
-            })?;
-
-            let child_scope = self.find_scope_for_def(binding.def_id).ok_or_else(|| {
-                ResolveError::UnresolvedImportSegment {
-                    segment: segment.clone(),
-                    span,
+    ) -> crate::deferred::NameResolutionPlan {
+        let mut pending_outputs = Vec::new();
+        let fallback = (|| {
+            // Ordered locals and block declarations share lexical precedence:
+            // an inner block's declaration must beat an outer parameter/local.
+            for rib in self.ribs.inner_to_outer() {
+                if let Some(binding) = rib.get(name) {
+                    return Ok(Resolution::from_binding(binding));
                 }
-            })?;
+                if let Some(site) = rib.pending_outputs {
+                    pending_outputs.push(site);
+                }
+                if let Some(scope) = self.scope_tree().get(rib.scope_id) {
+                    if scope.items.ambiguous_glob(name) {
+                        return Err(self.ambiguous_trait_glob(name, scope.id, span));
+                    }
+                    if let Some(binding) = self.lookup_in_scope(name, scope.id) {
+                        self.check_access(&binding, scope_id, span)?;
+                        return Ok(Resolution::from_binding(&binding));
+                    }
+                }
+            }
 
-            scope_id = child_scope;
+            // 2. Walk up the scope tree.
+            for scope in self.scope_tree().ancestors(scope_id) {
+                if scope.items.ambiguous_glob(name) {
+                    return Err(self.ambiguous_trait_glob(name, scope.id, span));
+                }
+                if let Some(binding) = self.lookup_in_scope(name, scope.id) {
+                    self.check_access(&binding, scope_id, span)?;
+                    return Ok(Resolution::from_binding(&binding));
+                }
+            }
+
+            Err(ResolveError::UnresolvedIdentifier {
+                name: name.to_string(),
+                span,
+            })
+        })();
+        crate::deferred::NameResolutionPlan {
+            name,
+            pending_outputs,
+            fallback,
         }
-
-        Ok(scope_id)
     }
 
     /// Access the rib stack (e.g. to push / pop ribs during lowering).
@@ -165,7 +134,7 @@ impl<'a> Resolver<'a> {
 
     /// Look up a name by walking up the scope tree (no rib stack).
     /// Returns `None` if not found.
-    fn resolve_name_to_binding(&self, name: &str, scope_id: ScopeId) -> Option<Binding> {
+    fn resolve_name_to_binding(&self, name: Symbol, scope_id: ScopeId) -> Option<Binding> {
         for scope in self.scope_tree().ancestors(scope_id) {
             if let Some(b) = self.lookup_in_scope(name, scope.id) {
                 return Some(b);
@@ -176,7 +145,7 @@ impl<'a> Resolver<'a> {
 
     /// Look up a name in a single scope (direct declarations + resolved
     /// imports).
-    fn lookup_in_scope(&self, name: &str, scope_id: ScopeId) -> Option<Binding> {
+    fn lookup_in_scope(&self, name: Symbol, scope_id: ScopeId) -> Option<Binding> {
         let scope = self.scope_tree().get(scope_id)?;
 
         // Direct declarations (including clauses).
@@ -184,53 +153,17 @@ impl<'a> Resolver<'a> {
             return Some(b.clone());
         }
 
-        // Resolved imports.
-        for import in scope.items.imports() {
-            match import {
-                ResolvedImport::Glob(source_scope) => {
-                    if let Some(b) = self.lookup_direct(name, *source_scope) {
-                        return Some(b);
-                    }
-                }
-                ResolvedImport::Multi(source_scope, names) => {
-                    if names.iter().any(|n| n == name) {
-                        if let Some(b) = self.lookup_direct(name, *source_scope) {
-                            return Some(b);
-                        }
-                    }
-                }
-                ResolvedImport::Single(source_scope, imported_name) => {
-                    if imported_name == name {
-                        if let Some(b) = self.lookup_direct(name, *source_scope) {
-                            return Some(b);
-                        }
-                    }
-                }
-                ResolvedImport::Alias {
-                    source_scope,
-                    original,
-                    alias,
-                } => {
-                    if alias == name {
-                        if let Some(b) = self.lookup_direct(original.as_str(), *source_scope) {
-                            return Some(b);
-                        }
-                    }
-                }
-            }
-        }
-
-        None
+        scope.items.unique_glob(name).cloned()
     }
 
     /// Look up a name in direct declarations only (no imports, no ancestor walk).
-    fn lookup_direct(&self, name: &str, scope_id: ScopeId) -> Option<Binding> {
+    fn lookup_direct(&self, name: Symbol, scope_id: ScopeId) -> Option<Binding> {
         let scope = self.scope_tree().get(scope_id)?;
         scope.items.get_direct(name).cloned()
     }
 
     /// Find the scope that a DefId owns (module, ADT, etc.).
-    fn find_scope_for_def(&self, def_id: DefId) -> Option<ScopeId> {
+    pub fn find_scope_for_def(&self, def_id: DefId) -> Option<ScopeId> {
         // Linear scan – fine for now; could be indexed on ModuleTree later.
         for scope in self.scope_tree().iter() {
             if scope.owner_def == def_id {
@@ -238,6 +171,183 @@ impl<'a> Resolver<'a> {
             }
         }
         None
+    }
+
+    pub fn block_scope(&self, site: crate::ids::AstNodeRef) -> Option<ScopeId> {
+        self.scope_tree()
+            .iter()
+            .find_map(|scope| (scope.block_site == Some(site)).then_some(scope.id))
+    }
+
+    /// Anonymous implementations cannot be looked up by a spelling. Their
+    /// identity is the scanner's file-qualified AST location, including when
+    /// several source files happen to reuse the same node index.
+    pub fn implementation_scope(
+        &self,
+        file: vfs::FileId,
+        node: ast::NodeIndex,
+    ) -> Option<(DefId, ScopeId)> {
+        self.tree.impls.iter().find_map(|implementation| {
+            (implementation.file_id == file && implementation.ast_node == node)
+                .then_some((implementation.def_id, implementation.impl_scope))
+        })
+    }
+
+    /// Resolve one static member without searching the container's ancestors.
+    pub fn resolve_member(
+        &self,
+        container: DefId,
+        name: Symbol,
+        requester: ScopeId,
+        span: rustc_span::Span,
+    ) -> ResolveResult<Resolution> {
+        let scope =
+            self.find_scope_for_def(container)
+                .ok_or_else(|| ResolveError::ModuleNotFound {
+                    message: "definition is not a static container".into(),
+                    span,
+                })?;
+        if self
+            .scope_tree()
+            .get(scope)
+            .unwrap()
+            .items
+            .ambiguous_glob(name)
+        {
+            return Err(self.ambiguous_trait_glob(name, scope, span));
+        }
+        let binding = self.lookup_in_scope(name, scope).ok_or_else(|| {
+            ResolveError::UnresolvedIdentifier {
+                name: name.to_string(),
+                span,
+            }
+        })?;
+        self.check_access(&binding, requester, span)?;
+        Ok(Resolution::from_binding(&binding))
+    }
+
+    /// Locate a unique trait member for early pattern-output names. This does
+    /// not establish the receiver's trait capability or substitute any types.
+    pub fn pattern_trait_member(
+        &self,
+        container: DefId,
+        name: Symbol,
+        requester: ScopeId,
+        span: rustc_span::Span,
+    ) -> Option<DefId> {
+        use crate::binding::BindingKind;
+        use std::collections::BTreeSet;
+        let mut pending = vec![container];
+        let mut seen = BTreeSet::new();
+        let mut members = BTreeSet::new();
+        while let Some(container) = pending.pop() {
+            if !seen.insert(container) {
+                continue;
+            }
+            if seen.len() > 4096 {
+                return None;
+            }
+            let scope_id = self.find_scope_for_def(container)?;
+            let scope = self.scope_tree().get(scope_id)?;
+            if scope.kind != crate::scope::ScopeKind::TraitBody {
+                return None;
+            }
+            if scope.items.get_direct(name).is_some() {
+                let BindingKind::Definition(member, _) = self
+                    .resolve_member(container, name, requester, span)
+                    .ok()?
+                    .kind
+                else {
+                    return None;
+                };
+                members.insert(member);
+                continue;
+            }
+            for path in scope.trait_parent_paths.as_ref()? {
+                let (head, _) = path.first()?;
+                // Use the declaration telescope, never the caller's ribs.
+                let mut binding = None;
+                for parent in self.scope_tree().ancestors(scope_id) {
+                    if parent.items.ambiguous_glob(*head) {
+                        return None;
+                    }
+                    if let Some(found) = self.lookup_in_scope(*head, parent.id) {
+                        binding = Some(found);
+                        break;
+                    }
+                }
+                let BindingKind::Definition(mut parent, _) = binding?.kind else {
+                    return None;
+                };
+                for (segment, at) in path.iter().skip(1) {
+                    let BindingKind::Definition(next, _) = self
+                        .resolve_member(parent, *segment, scope_id, *at)
+                        .ok()?
+                        .kind
+                    else {
+                        return None;
+                    };
+                    parent = next;
+                }
+                pending.push(parent);
+            }
+        }
+        if members.len() == 1 {
+            members.into_iter().next()
+        } else {
+            None
+        }
+    }
+
+    /// Resolve accessible candidates for a type container not yet known to the
+    /// elaborator. Inspect each ADT scope directly instead of repeatedly scanning
+    /// the scope tree through `find_scope_for_def`.
+    pub fn accessible_type_members(
+        &mut self,
+        name: Symbol,
+        requester: ScopeId,
+    ) -> Arc<[(DefId, DefId)]> {
+        if let Some(candidates) = self.type_members.get(&(requester, name)) {
+            return Arc::clone(candidates);
+        }
+        let candidates: Arc<[(DefId, DefId)]> = self
+            .scope_tree()
+            .iter()
+            .filter_map(|scope| {
+                if scope.kind != crate::scope::ScopeKind::AdtBody
+                    || scope.items.ambiguous_glob(name)
+                {
+                    return None;
+                }
+                let binding = self.lookup_in_scope(name, scope.id)?;
+                if !binding.accessible(self.scope_tree(), requester) {
+                    return None;
+                }
+                let crate::binding::BindingKind::Definition(member, _) = binding.kind else {
+                    return None;
+                };
+                Some((scope.owner_def, member))
+            })
+            .collect();
+        self.type_members
+            .insert((requester, name), Arc::clone(&candidates));
+        candidates
+    }
+
+    fn check_access(
+        &self,
+        binding: &Binding,
+        requester: ScopeId,
+        span: rustc_span::Span,
+    ) -> ResolveResult<()> {
+        if !binding.accessible(self.scope_tree(), requester) {
+            return Err(ResolveError::InvalidNodeType {
+                message: "name entry or original declaration is not accessible from this module"
+                    .into(),
+                span,
+            });
+        }
+        Ok(())
     }
 
     /// The underlying scope tree.
@@ -253,56 +363,5 @@ impl<'a> Resolver<'a> {
     /// Look up the human-readable name for a DefId.
     pub fn def_name(&self, def_id: DefId) -> Option<&str> {
         self.tree.def_names.get(&def_id).map(|s| s.as_str())
-    }
-
-    /// Resolve a Flurry HIR path (anchor + symbol segments) to a [`DefId`].
-    ///
-    /// This is the primary entry point for AST lowering to perform early name
-    /// resolution on path nodes.  Returns `None` when the path cannot be
-    /// resolved (the caller should then emit an unresolved-name diagnostic).
-    ///
-    /// # Anchor semantics
-    /// - `PathAnchor::Local`     – start from `scope_id`, walk up as needed
-    /// - `PathAnchor::Super(n)`  – step up `n` levels before resolving
-    /// - `PathAnchor::Package`   – start from the package-root scope
-    pub fn resolve_hir_path(
-        &self,
-        anchor: PathAnchor,
-        segments: &[Symbol],
-        scope_id: ScopeId,
-        span: rustc_span::Span,
-    ) -> Option<DefId> {
-        if segments.is_empty() {
-            return None;
-        }
-
-        // Determine the starting scope based on the anchor.
-        let starting_scope = match anchor {
-            PathAnchor::Local => scope_id,
-            PathAnchor::Super(n) => {
-                let mut sid = scope_id;
-                for _ in 0..n {
-                    sid = self.scope_tree().get(sid).and_then(|s| s.parent)?;
-                }
-                sid
-            }
-            PathAnchor::Package => {
-                // Walk up to the package scope.
-                let mut sid = scope_id;
-                loop {
-                    let s = self.scope_tree().get(sid)?;
-                    if matches!(s.kind, crate::scope::ScopeKind::Package) {
-                        break sid;
-                    }
-                    sid = s.parent?;
-                }
-            }
-        };
-
-        // Build a Vec<String> for the existing resolve_path helper.
-        let seg_strings: Vec<String> = segments.iter().map(|s| s.as_str().to_owned()).collect();
-        self.resolve_path(&seg_strings, starting_scope, span)
-            .ok()
-            .map(|res| res.def_id)
     }
 }

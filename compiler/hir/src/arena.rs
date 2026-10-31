@@ -9,16 +9,17 @@
 //! `T<'hir>`. This is sound because the arena guarantees that allocations
 //! live as long as `&self`, and `'hir` is exactly that borrow lifetime.
 
+use crate::pattern::TypePatternArg;
 use std::mem;
 
 use rustc_arena_modified::typed_arena::TypedArena;
 
-use crate::body::Param;
+use crate::body::BodyParam;
 use crate::clause::{ClauseConstraint, ClauseParam};
-use crate::common::{Arg, FnSigParam, Ident, PathSegment, TyParam};
+use crate::common::{Arg, FnParam, PathSegment, TyParam};
 use crate::decl::LetDecl;
-use crate::expr::{Block, ClosureParam, CondictionArm, Expr, FieldExpr};
-use crate::item::{FieldDef, Item, Variant};
+use crate::expr::{Block, ClosureEnvironmentBinding, ClosureParam, CondictionArm, Expr, FieldExpr};
+use crate::item::{FieldDef, Item, UsePath, Variant};
 use crate::pattern::{FieldPat, Pattern, PatternArm};
 
 /// The HIR arena – owns the memory for all `&'hir` HIR nodes.
@@ -26,6 +27,8 @@ use crate::pattern::{FieldPat, Pattern, PatternArm};
 /// Created once per compilation, held by `CompilerInstance`. All HIR
 /// construction goes through the `alloc_*` methods on this struct.
 pub struct HirArena {
+    identifiers: TypedArena<crate::common::Ident>,
+    use_paths: TypedArena<UsePath<'static>>,
     exprs: TypedArena<Expr<'static>>,
     patterns: TypedArena<Pattern<'static>>,
     blocks: TypedArena<Block<'static>>,
@@ -34,16 +37,18 @@ pub struct HirArena {
     field_defs: TypedArena<FieldDef<'static>>,
     variants: TypedArena<Variant<'static>>,
     clauses: TypedArena<ClauseConstraint<'static>>,
-    params: TypedArena<Param<'static>>,
+    params: TypedArena<BodyParam<'static>>,
     let_decls: TypedArena<LetDecl<'static>>,
     closure_params: TypedArena<ClosureParam<'static>>,
+    closure_environment_bindings: TypedArena<ClosureEnvironmentBinding<'static>>,
     field_exprs: TypedArena<FieldExpr<'static>>,
     field_pats: TypedArena<FieldPat<'static>>,
+    type_pattern_args: TypedArena<TypePatternArg<'static>>,
     clause_params: TypedArena<ClauseParam<'static>>,
     path_segments: TypedArena<PathSegment<'static>>,
     args: TypedArena<Arg<'static>>,
     ty_params: TypedArena<TyParam<'static>>,
-    fn_params: TypedArena<FnSigParam<'static>>,
+    fn_params: TypedArena<FnParam<'static>>,
     cond_arms: TypedArena<CondictionArm<'static>>,
 }
 
@@ -54,8 +59,14 @@ impl Default for HirArena {
 }
 
 impl HirArena {
+    pub fn alloc_ident_slice(&self, values: Vec<crate::common::Ident>) -> &[crate::common::Ident] {
+        self.identifiers.alloc_from_iter_reg(values)
+    }
+
     pub fn new() -> Self {
         HirArena {
+            identifiers: TypedArena::new(),
+            use_paths: TypedArena::new(),
             exprs: TypedArena::new(),
             patterns: TypedArena::new(),
             blocks: TypedArena::new(),
@@ -67,8 +78,10 @@ impl HirArena {
             params: TypedArena::new(),
             let_decls: TypedArena::new(),
             closure_params: TypedArena::new(),
+            closure_environment_bindings: TypedArena::new(),
             field_exprs: TypedArena::new(),
             field_pats: TypedArena::new(),
+            type_pattern_args: TypedArena::new(),
             clause_params: TypedArena::new(),
             path_segments: TypedArena::new(),
             args: TypedArena::new(),
@@ -120,7 +133,14 @@ macro_rules! impl_arena_alloc {
 }
 
 impl HirArena {
+    impl_arena_alloc!(alloc_use_path, alloc_use_path_slice, use_paths, UsePath);
     impl_arena_alloc!(alloc_expr, alloc_expr_slice, exprs, Expr);
+    impl_arena_alloc!(
+        alloc_closure_environment_binding,
+        alloc_closure_environment_binding_slice,
+        closure_environment_bindings,
+        ClosureEnvironmentBinding
+    );
     impl_arena_alloc!(alloc_pattern, alloc_pattern_slice, patterns, Pattern);
     impl_arena_alloc!(alloc_block, alloc_block_slice, blocks, Block);
     impl_arena_alloc!(alloc_arm, alloc_arm_slice, arms, PatternArm);
@@ -128,7 +148,7 @@ impl HirArena {
     impl_arena_alloc!(alloc_field_def, alloc_field_def_slice, field_defs, FieldDef);
     impl_arena_alloc!(alloc_variant, alloc_variant_slice, variants, Variant);
     impl_arena_alloc!(alloc_clause, alloc_clause_slice, clauses, ClauseConstraint);
-    impl_arena_alloc!(alloc_param, alloc_param_slice, params, Param);
+    impl_arena_alloc!(alloc_param, alloc_param_slice, params, BodyParam);
     impl_arena_alloc!(alloc_let_decl, alloc_let_decl_slice, let_decls, LetDecl);
     impl_arena_alloc!(
         alloc_closure_param,
@@ -141,6 +161,12 @@ impl HirArena {
         alloc_field_expr_slice,
         field_exprs,
         FieldExpr
+    );
+    impl_arena_alloc!(
+        alloc_type_pattern_arg,
+        alloc_type_pattern_arg_slice,
+        type_pattern_args,
+        TypePatternArg
     );
     impl_arena_alloc!(alloc_field_pat, alloc_field_pat_slice, field_pats, FieldPat);
     impl_arena_alloc!(
@@ -157,12 +183,11 @@ impl HirArena {
     );
     impl_arena_alloc!(alloc_arg, alloc_arg_slice, args, Arg);
     impl_arena_alloc!(alloc_ty_param, alloc_ty_param_slice, ty_params, TyParam);
-    impl_arena_alloc!(alloc_fn_param, alloc_fn_param_slice, fn_params, FnSigParam);
+    impl_arena_alloc!(alloc_fn_param, alloc_fn_param_slice, fn_params, FnParam);
     impl_arena_alloc!(
         alloc_cond_arm,
         alloc_cond_arm_slice,
         cond_arms,
         CondictionArm
     );
-
 }

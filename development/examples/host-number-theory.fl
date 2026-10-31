@@ -1,0 +1,54 @@
+-- Run with: python3 -B development/host_examples.py number-theory --compare-optimization
+-- The native entry returns 1060 + 6 + 55 = 1121.
+typealias UInt = .u32'builtin;
+
+fn gcd(left: UInt, right: UInt) -> UInt {
+    var a = left;
+    var b = right;
+    while b != 0 {
+        let remainder = a % b;
+        a = b;
+        b = remainder;
+    }
+    a
+}
+
+fn is_prime(value: UInt) -> bool {
+    if value < 2 { return false; }
+    var divisor: UInt = 2;
+    -- Division avoids overflowing the square of the trial divisor.
+    while divisor != 0 and divisor <= value / divisor {
+        if value % divisor == 0 { return false; }
+        -- The verifier does not yet derive this bound from divisor <= value / divisor.
+        assumes divisor < 4294967295;
+        divisor = divisor + 1;
+    }
+    true
+}
+
+fn sum_primes(limit: UInt) -> UInt
+where requires limit <= 100 {
+    var candidate: UInt = 0;
+    var sum: UInt = 0;
+    while candidate < limit {
+        assumes sum <= 10000;
+        if is_prime(candidate) { sum = sum + candidate; }
+        candidate = candidate + 1;
+    }
+    sum
+}
+
+fn fibonacci(index: UInt) -> result: UInt
+where requires index <= 10, ensures result <= 55 {
+    let value = if index < 2 { index }
+    else { fibonacci(index - 1) + fibonacci(index - 2) };
+    assumes value <= 55;
+    value
+}
+
+fn run() -> UInt {
+    let primes = sum_primes(100);
+    let common = gcd(48, 18);
+    assumes primes <= 10000 and common <= 48;
+    primes + common + fibonacci(10)
+}

@@ -1,0 +1,38 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+trait Mapper where A {
+    fn pair(self, other: B) -> Tuple<A, B> where B;
+    fn identity(value: B) -> B where B;
+}
+
+struct Holder where X {
+    value: X,
+}
+
+impl Mapper<X> for Holder<X> where X {
+    fn pair(self, other: Y) -> Tuple<X, Y> where Y {
+        (self.value, other)
+    }
+    fn identity(value: Y) -> Y where Y {
+        value
+    }
+}
+
+fn apply(action: fn(T) -> T, value: T) -> T where T {
+    action(value)
+}
+
+fn entry() -> bool {
+    -- A is fixed by the interface; B follows the function type context.
+    let pair: fn(Holder<.u8'builtin>, bool) -> Tuple<.u8'builtin, bool> =
+        Holder<.u8'builtin>.as(Mapper<.u8'builtin>).pair;
+    let (number, flag) = pair(Holder<.u8'builtin> { value: 9 }, true);
+
+    -- Explicit method arguments supply B without repeating A.
+    let identity = Holder<.u8'builtin>.as(Mapper<.u8'builtin>).identity<bool>;
+    let (_, other) = Holder<.u8'builtin> { value: 7 }
+        .as(Mapper<.u8'builtin>).pair<bool>(...do { (true,) });
+    let inferred = apply(Holder<.u8'builtin>.as(Mapper<.u8'builtin>).identity, true);
+    number == 9 and identity(flag) and other and inferred
+}

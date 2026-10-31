@@ -1,0 +1,32 @@
+-- The runner binds comparison.Ord by declaration identity.
+use comparison.{Eq, Ord, Order};
+
+struct Version {
+    major: .u32'builtin,
+    minor: .u32'builtin,
+}
+
+impl Eq for Version {
+    fn eq(self, other: Self) -> bool {
+        self.major == other.major and self.minor == other.minor
+    }
+}
+
+impl Ord for Version {
+    fn cmp(self, other: Self) -> Order {
+        if self.major < other.major { .less }
+        else if self.major > other.major { .greater }
+        else { self.minor.as(Ord).cmp(other.minor) }
+    }
+}
+
+fn precedes(a: T, b: T) -> bool where T :- Ord { a < b }
+
+fn run() -> bool {
+    precedes(Version { major: 1, minor: 9 }, Version { major: 2, minor: 0 })
+        and Version { major: 2, minor: 0 } <= Version { major: 2, minor: 0 }
+        and Version { major: 2, minor: 1 } > Version { major: 2, minor: 0 }
+        and Version { major: 2, minor: 0 } >= Version { major: 1, minor: 9 }
+        and Version { major: 2, minor: 0 } == Version { major: 2, minor: 0 }
+        and Version { major: 2, minor: 0 } != Version { major: 2, minor: 1 }
+}

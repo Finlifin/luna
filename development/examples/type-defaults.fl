@@ -1,0 +1,38 @@
+typealias Type = .Type'builtin;
+typealias char = .char'builtin;
+
+-- An omitted second type uses the first; a named input overrides it.
+struct Pair where T, .U: Type = T {
+    first: T,
+    second: U,
+}
+
+typealias Homogeneous<.Element: Type = bool> = Pair<Element>;
+
+enum Reply where .Payload: Type = bool {
+    value(Payload),
+    empty,
+}
+
+fn keep(value: T) -> T where .T: Type = bool {
+    value
+}
+
+comptime fn Selected(value: Type) -> Type {
+    if value == bool {bool} else {char}
+}
+
+fn second(first: A, second: B) -> B where A, .B: Type = Selected(A) {
+    second
+}
+
+fn run() -> bool {
+    let same = Homogeneous {first: true, second: true};
+    let mixed = Pair<bool, .U = char> {first: true, second: 'x'};
+    let reply = Reply.value(keep(same.first) and second(same.first, same.second));
+    if reply is .value(ready) do {
+        ready and mixed.first and mixed.second == keep<.T = char>('x')
+    } else {
+        false
+    }
+}

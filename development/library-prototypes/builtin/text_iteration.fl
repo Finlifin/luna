@@ -1,0 +1,34 @@
+{-
+    Explicit UTF-8 byte iteration. A multibyte character delivers multiple u8
+    items; this is not a character or grapheme iterator. The text view remains
+    alive throughout production, including suspension at an inline delivery.
+    This draft is not exported: backing-region provenance must be implemented
+    before resource-checked execution can establish that lifetime requirement.
+-}
+use iterator.{Iterator, emit_item};
+use text_bytes.TextBytes;
+
+pub struct Bytes {
+    value: str,
+}
+
+pub fn bytes(value: str) -> Bytes {
+    Bytes {value: value}
+}
+
+impl Iterator for Bytes {
+    assoc Item: Type = u8;
+
+    inline fn iterate(self) -> #emit_item<u8> void {
+        let length = self.value.byte_length();
+        var index: u64 = 0;
+        while index < length {
+            let next = self.value.byte(index);
+            index = index + 1;
+            next match {
+                value? => emit_item<u8>(value)#,
+                null => return,
+            };
+        }
+    }
+}

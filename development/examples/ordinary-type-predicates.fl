@@ -1,0 +1,25 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+typealias Type = .Type'builtin;
+trait Forbidden {}
+
+fn identity(value: T) -> T where T { value }
+
+fn convert(comptime A: Type, comptime B: Type, value: A) -> B
+where requires A == B {
+    identity(value)
+}
+
+fn same_default(comptime A: Type, comptime .B: Type = A) -> bool
+where requires A == B { true }
+
+fn choice(comptime T: Type) -> bool
+where requires T == bool or T == 'x''type { true }
+
+fn allowed(comptime T: Type) -> bool
+where requires not (T :- Forbidden) { true }
+
+fn run() -> Tuple<bool, bool, bool, bool> {
+    (convert(bool, bool, true), same_default(bool), choice('x''type), allowed(bool))
+}

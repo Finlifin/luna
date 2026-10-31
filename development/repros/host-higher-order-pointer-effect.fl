@@ -1,0 +1,60 @@
+-- Higher-order closure invocation must unwind handler, callback, wrapper,
+-- installer and caller in order on both normal completion and lexical return.
+typealias Stage = .u8'builtin;
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+impl Duplicate for Stage {}
+impl Duplicate for *T where T {}
+
+struct Step { counter: *Stage, expected: Stage, next: Stage }
+impl Retire for Step {
+    fn drop(*self) {
+        assumes self.counter.*.* == self.expected.*;
+        self.counter.*.* = self.next.*;
+    }
+}
+
+effect select(pointer: *bool) -> *bool;
+typealias Action = %{counter:*Stage,pointer:*bool} fn()->#select *bool;
+fn apply(action: Action, counter: *Stage) -> #select *bool {
+    let wrapper = Step {counter: counter, expected: 2, next: 3};
+    action()
+}
+fn subject(pointer: *bool, counter: *Stage) -> #select *bool {
+    -- The closure keeps the request's pointer and cleanup state in its environment.
+    let action: Action = || {
+        let called = Step {counter: counter, expected: 1, next: 2};
+        select(pointer)#
+    };
+    apply(action, counter)
+}
+
+fn forward(first: *bool, second: *bool, counter: *Stage, early: bool) -> *bool {
+    let installer = Step {counter: counter, expected: 3, next: 4};
+    (subject(first, counter)# {
+        select(value) if early => do {
+            let arm = Step {counter: counter, expected: 0, next: 1};
+            return second;
+        },
+    })# {
+        select(value) => do {
+            let arm = Step {counter: counter, expected: 0, next: 1};
+            value
+        },
+    }
+}
+
+fn trial(early: bool) -> bool {
+    var stage: Stage = 0;
+    var first = false;
+    var second = false;
+    do {
+        let caller = Step {counter: stage.ref, expected: 4, next: 5};
+        let selected = forward(first.ref, second.ref, stage.ref, early);
+        selected.* = true;
+    };
+    stage == 5 and first == not early and second == early
+}
+
+fn run() -> bool { trial(false) and trial(true) }

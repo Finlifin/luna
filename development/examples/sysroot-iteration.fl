@@ -1,0 +1,581 @@
+{-
+  Run against the complete sysroot with joint inline expansion and native
+  resource checking. All types and protocols use ordinary public imports.
+-}
+struct Watch {seen: *bool, value: bool}
+impl Drop for Watch {
+    fn drop(*self) {
+        assumes not self.seen.*.*;
+        self.seen.*.* = true;
+    }
+}
+
+test rejected_prefix_keeps_chain_tail {
+    var calls: usize = 0;
+    var outputs: usize = 0;
+    let counter = calls.ref;
+    let output = outputs.ref;
+    let first: ?bool = true;
+    let stop: ?bool = false;
+    let skipped: ?bool = true;
+    let tail: ?bool = false;
+    first.as(Iterator).chain(stop).as(Iterator).chain(skipped).as(Iterator)
+        .take_while(|value| {
+            assumes counter.* == if value.* {0} else {1};
+            counter.* = counter.* + 1;
+            value.*
+        }).as(Iterator).chain(tail).as(Iterator).foreach(|value| {
+            assumes output.* == if value {0} else {1};
+            output.* = output.* + 1;
+        });
+    assumes calls == 2 and outputs == 2;
+}
+
+test early_match_retires_unproduced_items {
+    var first_retired = false;
+    var second_retired = false;
+    let first: ?Watch = Watch {seen: first_retired.ref, value: true};
+    let second: ?Watch = Watch {seen: second_retired.ref, value: false};
+    let found = first.as(Iterator).chain(second).as(Iterator).any(|value| value.value.*);
+    assumes found and first_retired and second_retired;
+}
+
+test empty_source_retires_callback_capture {
+    var retired = false;
+    let captured = Watch {seen: retired.ref, value: true};
+    let source: ?bool = null;
+    source.as(Iterator).map(|value| {
+        assumes false;
+        value and captured.value
+    }).as(Iterator).foreach(|value| {assumes false;});
+    assumes retired;
+}
+
+{-
+    reduce takes its first accumulator from the stream. Empty and singleton
+    inputs never call the combiner; nested optional payloads remain observable.
+-}
+test reduction_empty_singleton_and_nested_optional {
+    let empty: ?bool = null;
+    let none = empty.as(Iterator).reduce(|left, right| {assumes false; left});
+    let empty_ok = none matches null;
+    assumes empty_ok;
+    let singleton: ?bool = true;
+    let one = singleton.as(Iterator).reduce(|left, right| {assumes false; right});
+    let singleton_ok = one matches true?;
+    assumes singleton_ok;
+    let inner: ?bool = null;
+    let nested: ??bool = inner;
+    let result = nested.as(Iterator).reduce(|left, right| {assumes false; left});
+    let nested_ok = result match {payload? => payload matches null, null => false};
+    assumes nested_ok;
+}
+
+test reduction_transfers_affine_items {
+    var first_retired = false;
+    var second_retired = false;
+    var third_retired = false;
+    {
+        let first: ?Watch = Watch {seen: first_retired.ref, value: false};
+        let second: ?Watch = Watch {seen: second_retired.ref, value: true};
+        let third: ?Watch = Watch {seen: third_retired.ref, value: false};
+        let result = first.as(Iterator).chain(second).as(Iterator).chain(third)
+            .as(Iterator).reduce(|previous, item| item);
+        assumes first_retired and second_retired and not third_retired;
+    }
+    assumes third_retired;
+}
+
+test empty_reduction_retires_callback_capture {
+    var retired = false;
+    let captured = Watch {seen: retired.ref, value: true};
+    let empty: ?bool = null;
+    let result = empty.as(Iterator).reduce(|left, right| {
+        assumes false;
+        left and right and captured.value
+    });
+    let empty_ok = result matches null;
+    assumes empty_ok and retired;
+}
+
+test selection_preserves_optional_layers_and_empty_inputs {
+    let empty: ?bool = null;
+    let absent = empty.as(Iterator).nth(0);
+    let absent_ok = absent matches null;
+    assumes absent_ok;
+    let empty_last: ?bool = null;
+    let absent_last = empty_last.as(Iterator).last();
+    let last_ok = absent_last matches null;
+    assumes last_ok;
+    let one: ?bool = true;
+    let beyond = one.as(Iterator).nth(99);
+    let beyond_ok = beyond matches null;
+    assumes beyond_ok;
+    let payload: ?bool = null;
+    let nested: ??bool = payload;
+    let selected = nested.as(Iterator).nth(0);
+    let nested_ok = selected match {item? => item matches null, null => false};
+    assumes nested_ok;
+    let final_payload: ?bool = null;
+    let final_source: ??bool = final_payload;
+    let final_item = final_source.as(Iterator).last();
+    let final_ok = final_item match {item? => item matches null, null => false};
+    assumes final_ok;
+}
+
+test nth_stops_production_and_transfers_selected_item {
+    var first_retired = false;
+    var second_retired = false;
+    var third_retired = false;
+    var calls: usize = 0;
+    let counter = calls.ref;
+    {
+        let first: ?Watch = Watch {seen: first_retired.ref, value: false};
+        let second: ?Watch = Watch {seen: second_retired.ref, value: true};
+        let third: ?Watch = Watch {seen: third_retired.ref, value: false};
+        let selected = first.as(Iterator).chain(second).as(Iterator).chain(third)
+            .as(Iterator).inspect(|item| {
+                assumes counter.* < 2;
+                counter.* = counter.* + 1;
+            }).as(Iterator).nth(1);
+        assumes calls == 2 and first_retired and not second_retired and third_retired;
+    }
+    assumes second_retired;
+}
+
+test last_retires_replaced_items_and_transfers_final_item {
+    var first_retired = false;
+    var second_retired = false;
+    var third_retired = false;
+    {
+        let first: ?Watch = Watch {seen: first_retired.ref, value: false};
+        let second: ?Watch = Watch {seen: second_retired.ref, value: true};
+        let third: ?Watch = Watch {seen: third_retired.ref, value: false};
+        let selected = first.as(Iterator).chain(second).as(Iterator).chain(third)
+            .as(Iterator).last();
+        assumes first_retired and second_retired and not third_retired;
+    }
+    assumes third_retired;
+}
+
+test flatten_consumes_exactly_one_nested_optional_layer {
+    var count: usize = 0;
+    let counter = count.ref;
+    let first_item: ?bool = false;
+    let empty_item: ?bool = null;
+    let last_item: ?bool = true;
+    let first: ??bool = first_item;
+    let empty: ??bool = empty_item;
+    let last: ??bool = last_item;
+    first.as(Iterator).chain(empty).as(Iterator).chain(last).as(Iterator)
+        .flatten().as(Iterator).foreach(|value| {
+            assumes counter.* == if value {1} else {0};
+            counter.* = counter.* + 1;
+        });
+    assumes count == 2;
+    let inner: ?bool = null;
+    let middle: ??bool = inner;
+    let outer: ???bool = middle;
+    let result = outer.as(Iterator).flatten().as(Iterator).last();
+    let preserved = result match {value? => value matches null, null => false};
+    assumes preserved;
+}
+
+test flatten_short_circuit_retires_outer_remainder {
+    var first_retired = false;
+    var second_retired = false;
+    let first_item: ?Watch = Watch {seen: first_retired.ref, value: true};
+    let second_item: ?Watch = Watch {seen: second_retired.ref, value: false};
+    let first: ??Watch = first_item;
+    let second: ??Watch = second_item;
+    let found = first.as(Iterator).chain(second).as(Iterator).flatten()
+        .as(Iterator).any(|item| item.value);
+    assumes found and first_retired and second_retired;
+}
+
+
+{- Separators are produced lazily; no leading or trailing factory calls. -}
+test interspersed_order_and_factory_calls {
+    var calls: usize = 0;
+    var outputs: usize = 0;
+    let counter = calls.ref;
+    let output = outputs.ref;
+    let first: ?bool = true;
+    let second: ?bool = true;
+    let third: ?bool = true;
+    first.as(Iterator).chain(second).as(Iterator).chain(third).as(Iterator)
+        .intersperse_with(|| {
+            assumes counter.* < 2;
+            counter.* = counter.* + 1;
+            false
+        }).as(Iterator).foreach(|value| {
+            assumes output.* < 5;
+            assumes value == (output.* == 0 or output.* == 2 or output.* == 4);
+            output.* = output.* + 1;
+        });
+    assumes calls == 2 and outputs == 5;
+    let empty: ?bool = null;
+    empty.as(Iterator).intersperse_with(|| {assumes false; false})
+        .as(Iterator).foreach(|value| {assumes false;});
+    let singleton: ?bool = true;
+    let found = singleton.as(Iterator).intersperse_with(|| {assumes false; false})
+        .as(Iterator).last();
+    let correct = found matches true?;
+    assumes correct;
+}
+
+test separator_exit_retires_pending_items {
+    var first_retired = false;
+    var second_retired = false;
+    var third_retired = false;
+    var separator_retired = false;
+    let separator = separator_retired.ref;
+    let first: ?Watch = Watch {seen: first_retired.ref, value: false};
+    let second: ?Watch = Watch {seen: second_retired.ref, value: false};
+    let third: ?Watch = Watch {seen: third_retired.ref, value: false};
+    let found = first.as(Iterator).chain(second).as(Iterator).chain(third).as(Iterator)
+        .intersperse_with(|| Watch {seen: separator, value: true})
+        .as(Iterator).any(|value| value.value.*);
+    assumes found and first_retired and second_retired and third_retired and separator_retired;
+}
+
+test unused_separator_factory_retires_capture {
+    var retired = false;
+    let captured = Watch {seen: retired.ref, value: true};
+    let empty: ?bool = null;
+    empty.as(Iterator).intersperse_with(|| {
+        assumes false;
+        captured.value
+    }).as(Iterator).foreach(|value| {assumes false;});
+    assumes retired;
+}
+
+
+fn mapped_prefix(value: bool) -> ?bool {
+    if value {true} else {null}
+}
+
+fn present_null(value: bool) -> ??bool {
+    let inner: ?bool = null;
+    if value {inner} else {null}
+}
+
+test map_while_stops_its_source_and_keeps_chain_tail {
+    var calls: usize = 0;
+    var outputs: usize = 0;
+    let counter = calls.ref;
+    let output = outputs.ref;
+    let first: ?bool = true;
+    let stop: ?bool = false;
+    let skipped: ?bool = true;
+    let tail: ?bool = false;
+    first.as(Iterator).chain(stop).as(Iterator).chain(skipped).as(Iterator)
+        .map_while(|value| {
+            assumes counter.* < 2;
+            counter.* = counter.* + 1;
+            mapped_prefix(value)
+        }).as(Iterator).chain(tail).as(Iterator).foreach(|value| {
+            assumes output.* == if value {0} else {1};
+            output.* = output.* + 1;
+        });
+    assumes calls == 2 and outputs == 2;
+    let input: ?bool = true;
+    let nested = input.as(Iterator).map_while(present_null).as(Iterator).last();
+    let kept_null = nested match {value? => value matches null, null => false};
+    assumes kept_null;
+}
+
+fn map_watch(value: Watch) -> ?Watch {
+    if value.value {value} else {null}
+}
+
+test map_while_cleans_rejected_and_unproduced_items {
+    var first_retired = false;
+    var second_retired = false;
+    var third_retired = false;
+    let first: ?Watch = Watch {seen: first_retired.ref, value: true};
+    let second: ?Watch = Watch {seen: second_retired.ref, value: false};
+    let third: ?Watch = Watch {seen: third_retired.ref, value: true};
+    first.as(Iterator).chain(second).as(Iterator).chain(third).as(Iterator)
+        .map_while(map_watch).as(Iterator).foreach(|value| {
+            assumes value.value and not first_retired and not second_retired and not third_retired;
+        });
+    assumes first_retired and second_retired and third_retired;
+}
+
+test empty_map_while_retires_mapper_capture {
+    var retired = false;
+    let captured = Watch {seen: retired.ref, value: true};
+    let input: ?bool = null;
+    input.as(Iterator).map_while(|value| {
+        assumes false;
+        mapped_prefix(value and captured.value)
+    }).as(Iterator).foreach(|value| {assumes false;});
+    assumes retired;
+}
+
+fn scan_prefix(state: *bool, value: bool) -> ?bool {
+    if not value {return null;};
+    state.* = not state.*;
+    state.*
+}
+
+test scan_retains_state_and_keeps_chain_tail {
+    let first: ?bool = true;
+    let second: ?bool = true;
+    let stop: ?bool = false;
+    let skipped: ?bool = true;
+    let tail: ?bool = true;
+    var count: usize = 0;
+    let output = count.ref;
+    first.as(Iterator).chain(second).as(Iterator).chain(stop).as(Iterator)
+        .chain(skipped).as(Iterator).scan(false, scan_prefix).as(Iterator)
+        .chain(tail).as(Iterator).foreach(|value| {
+            assumes value == (output.* != 1);
+            assumes output.* < 3;
+            output.* += 1;
+        });
+    assumes count == 3;
+}
+
+fn scan_watch(state: *Watch, value: Watch) -> ?Watch {
+    state.value.* = not state.value.*;
+    value
+}
+
+test scan_early_exit_retires_state_and_remaining_items {
+    var state_retired = false;
+    var first_retired = false;
+    var second_retired = false;
+    let state = Watch {seen: state_retired.ref, value: false};
+    let first: ?Watch = Watch {seen: first_retired.ref, value: true};
+    let second: ?Watch = Watch {seen: second_retired.ref, value: false};
+    let found = first.as(Iterator).chain(second).as(Iterator).scan(state, scan_watch)
+        .as(Iterator).any(|value| value.value.*);
+    assumes found and state_retired and first_retired and second_retired;
+}
+
+test empty_scan_retires_state_and_callback_capture {
+    var state_retired = false;
+    var capture_retired = false;
+    let state = Watch {seen: state_retired.ref, value: false};
+    let captured = Watch {seen: capture_retired.ref, value: true};
+    let empty: ?bool = null;
+    empty.as(Iterator).scan(state, |state, value| -> ?bool {
+        assumes false;
+        captured.value and state.value.* and value
+    }).as(Iterator).foreach(|value| {assumes false;});
+    assumes state_retired and capture_retired;
+}
+
+fn scan_affine_state(state: *Watch, value: bool) -> ?bool {
+    state.value.* = value;
+    value
+}
+
+test scan_affine_state_with_scalar_items {
+    var retired = false;
+    let state = Watch {seen: retired.ref, value: false};
+    let item: ?bool = true;
+    let found = item.as(Iterator).scan(state, scan_affine_state).as(Iterator)
+        .any(|value| value.*);
+    assumes found and retired;
+}
+
+fn scan_present_null(state: *bool, value: bool) -> ??bool {
+    state.* = value;
+    present_null(value)
+}
+
+test scan_preserves_inner_null {
+    let input: ?bool = true;
+    let result = input.as(Iterator).scan(false, scan_present_null).as(Iterator).last();
+    let kept_null = result match {value? => value matches null, null => false};
+    assumes kept_null;
+}
+
+fn scan_watch_prefix(state: *Watch, value: Watch) -> ?Watch {
+    state.value.* = value.value;
+    if value.value {value} else {null}
+}
+
+test scan_absent_result_retires_rejected_item_and_remainder {
+    var state_retired = false;
+    var rejected_retired = false;
+    var remainder_retired = false;
+    let state = Watch {seen: state_retired.ref, value: true};
+    let rejected: ?Watch = Watch {seen: rejected_retired.ref, value: false};
+    let remainder: ?Watch = Watch {seen: remainder_retired.ref, value: true};
+    rejected.as(Iterator).chain(remainder).as(Iterator).scan(state, scan_watch_prefix)
+        .as(Iterator).foreach(|value| {assumes false;});
+    assumes state_retired and rejected_retired and remainder_retired;
+}
+
+struct ScanFlags {current: bool, previous: bool}
+impl Clone for ScanFlags {
+    fn clone(*self) -> Self {
+        ScanFlags {current: self.current.*, previous: self.previous.*}
+    }
+}
+impl Copy for ScanFlags {}
+struct NestedScanState {watch: Watch, flags: ScanFlags}
+
+fn scan_replace_flags(state: *NestedScanState, value: bool) -> ?bool {
+    let old = state.flags.*;
+    state.flags.* = ScanFlags {current: value, previous: old.current};
+    old.current
+}
+
+test scan_replaces_copy_substructure_of_affine_state {
+    var retired = false;
+    let state = NestedScanState {
+        watch: Watch {seen: retired.ref, value: true},
+        flags: ScanFlags {current: false, previous: false},
+    };
+    let first: ?bool = true;
+    let second: ?bool = false;
+    var count: usize = 0;
+    let output = count.ref;
+    first.as(Iterator).chain(second).as(Iterator).scan(state, scan_replace_flags)
+        .as(Iterator).foreach(|value| {
+            assumes value == (output.* == 1);
+            assumes output.* < 2;
+            output.* += 1;
+        });
+    assumes count == 2 and retired;
+}
+
+inline effect state_tick();
+inline fn state_tick_twice() -> #state_tick void {
+    state_tick()#;
+    state_tick()#;
+}
+
+fn return_from_state_handler(retired: *bool) -> bool {
+    let state = Watch {seen: retired, value: false};
+    let pointer = state.ref;
+    state_tick_twice()# {
+        state_tick() => {
+            assumes not pointer.value.*;
+            pointer.value.* = true;
+            return true;
+        },
+    };
+    false
+}
+
+test handler_lexical_return_retires_borrowed_state {
+    var retired = false;
+    let returned = return_from_state_handler(retired.ref);
+    assumes returned and retired;
+}
+
+fn error_from_state_handler(retired: *bool) -> !bool void {
+    let state = Watch {seen: retired, value: false};
+    let pointer = state.ref;
+    state_tick_twice()# {
+        state_tick() => {
+            assumes not pointer.value.*;
+            pointer.value.* = true;
+            return error true;
+        },
+    };
+}
+
+test handler_error_return_retires_state_before_catch {
+    var retired = false;
+    var caught = false;
+    error_from_state_handler(retired.ref)! {
+        true => {assumes retired; caught = true;},
+        false => {assumes false;},
+    };
+    assumes caught and retired;
+}
+
+test handler_reads_stable_pointer_field {
+    var retired = false;
+    var touched = false;
+    let expected = touched.ref;
+    {
+        let state = Watch {seen: retired.ref, value: false};
+        let pointer = state.ref;
+        state_tick_twice()# {
+            state_tick() => {
+                var observed = pointer.seen.*;
+                observed = expected;
+                observed.* = true;
+            },
+        };
+        assumes touched and not retired;
+    };
+    assumes retired;
+}
+
+struct LinkedScanState {target: *bool, watch: Watch}
+
+fn scan_through_state_pointer(state: *LinkedScanState, value: bool) -> ?bool {
+    let previous = state.target.*.*;
+    state.target.*.* = value;
+    previous
+}
+
+test scan_updates_data_through_stable_state_pointer {
+    var target = false;
+    var retired = false;
+    let state = LinkedScanState {
+        target: target.ref,
+        watch: Watch {seen: retired.ref, value: false},
+    };
+    let first: ?bool = true;
+    let second: ?bool = false;
+    var count: usize = 0;
+    let output = count.ref;
+    first.as(Iterator).chain(second).as(Iterator).scan(state, scan_through_state_pointer)
+        .as(Iterator).foreach(|value| {
+            assumes value == (output.* == 1);
+            assumes output.* < 2;
+            output.* += 1;
+        });
+    assumes count == 2 and not target and retired;
+}
+
+struct OptionalScanState {target: ?*bool, watch: Watch}
+
+fn scan_through_optional_state(state: *OptionalScanState, value: bool) -> ?bool {
+    let maybe = state.target.*;
+    maybe match {
+        target? => {
+            let previous = target.*;
+            target.* = value;
+            previous
+        },
+        null => value,
+    }
+}
+
+test scan_uses_present_optional_state_pointer {
+    var target = false;
+    var retired = false;
+    let state = OptionalScanState {
+        target: target.ref,
+        watch: Watch {seen: retired.ref, value: false},
+    };
+    let input: ?bool = true;
+    let output = input.as(Iterator).scan(state, scan_through_optional_state)
+        .as(Iterator).last();
+    let old_was_false = output match {value? => not value, null => false};
+    assumes old_was_false and target and retired;
+}
+
+test scan_skips_absent_optional_state_pointer {
+    var retired = false;
+    let state = OptionalScanState {
+        target: null,
+        watch: Watch {seen: retired.ref, value: false},
+    };
+    let input: ?bool = true;
+    let output = input.as(Iterator).scan(state, scan_through_optional_state)
+        .as(Iterator).last();
+    let kept_input = output match {value? => value, null => false};
+    assumes kept_input and retired;
+}

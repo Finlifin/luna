@@ -1,0 +1,15 @@
+-- Resource preparation currently rejects the lambda parameter's Drop access:
+-- indirect Drop access requires stored pointer provenance.
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+struct Watch { target: *bool }
+impl Retire for Watch {
+    fn drop(*self) { self.target.*.* = not self.target.*.*; }
+}
+fn run() -> bool {
+    let seen = false;
+    let action = |watch: Watch| {};
+    action(Watch {target: seen.ref});
+    seen
+}

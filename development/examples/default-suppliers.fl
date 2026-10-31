@@ -1,0 +1,19 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+-- Runtime defaults can call helpers whose finite, stable behavior is checked.
+-- Run with: luna default-suppliers.fl --interpret run
+fn opposite(value: bool) -> bool { not value }
+
+fn choose(
+    first: bool,
+    .second: bool = opposite(first),
+    .third: bool = opposite(second),
+) -> Tuple<bool, bool> {
+    (second, third)
+}
+
+fn run() -> bool {
+    let (second, third) = choose(true, .second = true);
+    second and not third
+}

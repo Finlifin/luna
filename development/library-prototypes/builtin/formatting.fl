@@ -1,0 +1,9 @@
+-- ── Display / Debug ────────────────────────────────────────────────────────
+
+pub trait Display {
+    fn fmt(self) -> String;
+}
+
+pub trait Debug {
+    fn debug_fmt(self) -> String;
+}

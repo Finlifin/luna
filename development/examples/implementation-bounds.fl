@@ -1,0 +1,30 @@
+typealias Flag = bool;
+
+trait Read {
+    fn read(self) -> Flag;
+}
+
+struct Leaf {}
+impl Read for Leaf {
+    fn read(self) -> Flag { true }
+}
+
+struct Box where T {
+    value: T,
+}
+
+impl Read for Box<T> where T :- Read {
+    fn read(self) -> Flag { self.value.read() }
+}
+
+impl Box<T> where T :- Read {
+    fn inspect(self) -> Flag { self.value.read() }
+}
+
+fn read(value: U) -> Flag where U :- Read {
+    value.read()
+}
+
+fn run() -> Flag {
+    read(Box<Box<Leaf>> { value: Box<Leaf> { value: Leaf {} } })
+}

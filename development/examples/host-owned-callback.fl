@@ -1,0 +1,47 @@
+-- A comparator owns its environment; invoking it only borrows the candidates.
+use resources.Drop;
+
+struct Watch { value: bool, dropped: *bool, called: *bool }
+
+impl Drop for Watch {
+    fn drop(*self) {
+        assumes not self.dropped.*.*;
+        self.dropped.*.* = true;
+    }
+}
+
+typealias Compare = %{marker: Watch} fn(*Watch, *Watch) -> bool;
+
+fn choose_by(a: Watch, b: Watch, compare: Compare) -> Watch {
+    if compare(a.ref, b.ref) { b } else { a }
+}
+
+fn make(marker: Watch) -> Compare {
+    |a: *Watch, b: *Watch| {
+        assumes not marker.dropped.*;
+        assumes not a.dropped.*.* and not b.dropped.*.*;
+        marker.called.* = true;
+        if marker.value { a.value.* and not b.value.* }
+        else { not a.value.* and b.value.* }
+    }
+}
+
+fn scenario(reverse: bool) -> bool {
+    var left = false;
+    var right = false;
+    var called = false;
+    var retired = false;
+    do {
+        let marker = Watch { value: reverse, dropped: retired.ref, called: called.ref };
+        let compare = make(marker);
+        let selected = choose_by(
+            Watch { value: false, dropped: left.ref, called: called.ref },
+            Watch { value: true, dropped: right.ref, called: called.ref }, compare);
+        assumes selected.value == not reverse;
+        assumes called and retired;
+        assumes if reverse { right and not left } else { left and not right };
+    };
+    left and right and retired
+}
+
+fn run() -> bool { scenario(false) and scenario(true) }

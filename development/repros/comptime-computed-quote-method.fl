@@ -1,0 +1,2 @@
+struct Ops {pub quote fn invert(value:bool)->bool {not value}}
+fn run()->bool {do {Ops}.invert(false)}

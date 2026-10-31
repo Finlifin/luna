@@ -1,0 +1,18 @@
+{-
+  A code generator publishes and reflects a fresh definition at comptime.
+  Only its selected expression is connected to the runtime function.
+-}
+use primitives.Type;
+
+comptime fn generate() -> <|-bool> {
+    var builder = meta.StructBuilder.new(.name = .QuoteLocal);
+    builder.add_field(.flag, bool);
+    let T = builder.Build();
+    let fields = meta.struct_field_names(T);
+    if fields.length() == 1 and fields[0] == .flag {
+        return '(true);
+    }
+    '(false)
+}
+
+fn run() -> bool { ~<generate()> }

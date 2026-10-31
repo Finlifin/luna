@@ -1,0 +1,17 @@
+typealias Type = .Type'builtin;
+pure comptime fn Identity<T: Type> -> Type { T }
+pure comptime fn Other<T: Type> -> Type = T;
+typealias ByteIdentity = Identity<.u8'builtin>;
+fn keep(value: ByteIdentity) -> Identity<.u8'builtin> { value }
+fn generic(value: Identity<T>) -> Identity<T> where T { value }
+comptime fn Observed() -> Type { Identity<.u8'builtin> }
+comptime fn Pass(value: Type) -> Type { value }
+typealias Same = Pass(Identity<.u8'builtin>);
+fn same(value: Same) -> ByteIdentity { value }
+comptime fn diverge() -> Type { diverge() }
+pure comptime fn NeverRun<T: Type> -> Type { diverge() }
+typealias Opaque = NeverRun<.u8'builtin>;
+fn keep_opaque(value: Opaque) -> Opaque { value }
+pure comptime fn Checked<T: Type> -> Type where requires T == bool { T }
+typealias CheckedFlag = Checked<bool>;
+fn checked(value: CheckedFlag) -> CheckedFlag { value }

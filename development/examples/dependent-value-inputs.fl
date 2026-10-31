@@ -1,0 +1,53 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+typealias Type = .Type'builtin;
+typealias Integer = .Integer'builtin;
+
+pure comptime fn Shape<N: Integer, .storage: Integer = (N + 1)> -> Type {
+    bool
+}
+
+pure comptime fn Indexed<N: Integer> -> Type { bool }
+
+-- The normal-form head remains opaque; its body does not identify Shape<N>
+-- with bool. An ordinary comptime value can index it inside a signature.
+fn keep(comptime n: Integer, value: Indexed<n>) -> Indexed<n> {
+    value
+}
+
+-- A named head input can also refer to an earlier signature parameter.
+fn keep_shape(comptime n: Integer, value: Shape<n, .storage = n>) -> Shape<n, .storage = n> {
+    value
+}
+
+fn tag(comptime n: Integer, comptime .T: Type = Shape<n>) -> bool {
+    true
+}
+
+fn forward(comptime n: Integer) -> bool {
+    tag(n)
+}
+
+fn run() -> Tuple<bool, bool> {
+    -- Shape's storage default is evaluated after n becomes concrete.
+    (forward(4), forward(5))
+}
+
+pure comptime fn Tagged<T, value: T, .copy: T = value> -> Type { T }
+
+fn keep_tagged(comptime A: Type, comptime v: A, value: Tagged<A, v>) -> Tagged<A, v> {
+    value
+}
+
+fn mixed_tag(comptime A: Type, comptime v: A, comptime .T: Type = Tagged<A, v>) -> bool {
+    true
+}
+
+fn mixed_forward(comptime A: Type, comptime v: A) -> bool {
+    mixed_tag(A, v)
+}
+
+fn mixed() -> Tuple<bool, bool> {
+    (mixed_forward(bool, true), mixed_forward(Type, bool))
+}

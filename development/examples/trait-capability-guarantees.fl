@@ -1,0 +1,15 @@
+-- Adapter<T> guarantees that T can read its implementation subject.
+-- Self is substituted when an implementation is checked and dispatched.
+trait Read where S { fn read(self, owner: S) -> bool; }
+trait Adapter where T :- Read<Self> {
+    fn run(self, value: T) -> bool { value.read(self) }
+}
+struct Host {}
+struct Leaf {}
+impl Read<Host> for Leaf { fn read(self, owner: Host) -> bool { true } }
+impl Adapter<T> for Host where T :- Read<Host> {}
+fn forward(owner: S, value: T) -> bool where T, S :- Adapter<T> {
+    value.read(owner)
+}
+fn direct() -> bool { Host {}.as(Adapter<Leaf>).run(Leaf {}) }
+fn generic() -> bool { forward(Host {}, Leaf {}) }

@@ -1,0 +1,38 @@
+[package]
+name = "comptime_interpretor"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+comptime_compiler = { path = "../comptime_compiler" }
+nir = { path = "../nir" }
+comptime_runtime = { path = "../comptime_runtime" }
+iir = { path = "../iir" }
+
+[[bench]]
+name = "invocation"
+harness = false
+
+[[bench]]
+name = "type_list_index"
+harness = false
+
+[[bench]]
+name = "list_length"
+harness = false
+
+[[bench]]
+name = "list_append"
+harness = false
+
+[[bench]]
+name = "borrowed_aggregate"
+harness = false
+
+[[bench]]
+name = "object_queries"
+harness = false
+
+[[bench]]
+name = "list_summary"
+harness = false

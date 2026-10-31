@@ -1,0 +1,17 @@
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+impl Duplicate for .u32'builtin {}
+struct Holder where T {
+    pub typealias Payload = T;
+}
+comptime fn Make(T: .Type'builtin) -> .Type'builtin { Holder<T> }
+fn configured(comptime T: .Type'builtin, value: defer T) -> defer T where requires T:-Duplicate {
+    const Container = Make(T);
+    const Alias = Container.Payload;
+    let result: *Alias = value.ref;
+    result.*
+}
+fn run() -> bool {
+    configured(bool, true) and configured(.u32'builtin, 7) == 7
+}

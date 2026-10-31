@@ -1,0 +1,25 @@
+-- Finite storage even though Node and Link refer to each other.
+-- Build with --copy-protocol Duplicate --drop-protocol Retire.
+trait Duplicate {}
+trait Retire {fn drop(*self);}
+impl Duplicate for bool {}
+
+enum Link {none, some(*Node)}
+struct Node {next:Link, flag:bool}
+impl Duplicate for Link {}
+impl Duplicate for Node {}
+
+fn enable(node:*Node) {
+    node.flag.* = true;
+    node.next.* match {
+        .none=>{},
+        .some(next)=>enable(next),
+    }
+}
+fn run()->bool {
+    var tail=Node {next:Link.none,flag:false};
+    var middle=Node {next:Link.some(tail.ref),flag:false};
+    var head=Node {next:Link.some(middle.ref),flag:false};
+    enable(head.ref);
+    head.flag and middle.flag and tail.flag
+}

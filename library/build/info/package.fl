@@ -1,0 +1,23 @@
+use builtin.{Symbol, Type};
+use bindings.{Object, object_get};
+
+pub struct PackageMetadata {
+    features: MetadataFeatures,
+}
+
+pub struct MetadataFeatures {
+    entries: Object,
+}
+
+impl MetadataFeatures {
+    -- Missing fields and mismatched domains return null.
+    pub pure comptime fn get(self, name: Symbol, comptime T: Type) -> ?T {
+        object_get(T, self.entries, name)
+    }
+}
+
+{-
+    The callable captures its source definition's direct dependency mapping.
+    Saving or forwarding it does not change the package that owns the lookup.
+-}
+pub use bindings.package_metadata;

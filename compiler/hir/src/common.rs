@@ -58,7 +58,7 @@ define_symbols! {
 }
 
 /// An identifier: a name plus its source location.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Ident {
     pub name: Symbol,
     pub span: Span,
@@ -126,6 +126,8 @@ pub enum Arg<'hir> {
     Named(Ident, &'hir Expr<'hir>),
     Expand(&'hir Expr<'hir>),
     Implicit(&'hir Expr<'hir>),
+    /// Trailing `do` input; routed using the declaration's lambda marker.
+    PostLambda(&'hir Expr<'hir>),
 }
 /// A literal value.
 #[derive(Debug, Clone, PartialEq)]
@@ -137,8 +139,10 @@ pub struct Lit {
 /// The kind of a literal.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LitKind {
-    Integer(i64),
-    Float(f64),
+    /// Exact validated source spelling; evaluated during elaboration/comptime.
+    Integer(String),
+    /// Exact validated source spelling, without fixed-width rounding.
+    Float(String),
     String(String),
     Bool(bool),
     Char(char),
@@ -147,6 +151,7 @@ pub enum LitKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BinOp {
+    Concat,
     Add,
     Sub,
     Mul,
@@ -165,6 +170,7 @@ pub enum BinOp {
 impl fmt::Display for BinOp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            BinOp::Concat => "++",
             BinOp::Add => "+",
             BinOp::Sub => "-",
             BinOp::Mul => "*",
@@ -209,6 +215,9 @@ pub const TPARAM_QUOTE: u32 = 1 << 2;
 pub const TPARAM_ERROR: u32 = 1 << 3;
 pub const TPARAM_LAMBDA: u32 = 1 << 4;
 pub const TPARAM_ASSOC: u32 = 1 << 5;
+pub const TPARAM_CATCH: u32 = 1 << 6;
+/// Named optional input in a callable type; its default belongs to the callable.
+pub const TPARAM_OPTIONAL: u32 = 1 << 7;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TyParam<'hir> {
@@ -219,6 +228,9 @@ pub struct TyParam<'hir> {
 }
 
 impl TyParam<'_> {
+    pub fn is_optional(&self) -> bool {
+        self.flags & TPARAM_OPTIONAL != 0
+    }
     pub fn is_implicit(&self) -> bool {
         self.flags & TPARAM_IMPLICIT != 0
     }
@@ -236,6 +248,9 @@ impl TyParam<'_> {
     }
     pub fn is_assoc(&self) -> bool {
         self.flags & TPARAM_ASSOC != 0
+    }
+    pub fn is_catch(&self) -> bool {
+        self.flags & TPARAM_CATCH != 0
     }
 }
 
@@ -279,9 +294,17 @@ impl<'hir> TyParam<'hir> {
     }
 }
 
-/// Type alias for one entry in `FnSig::params` — lets the arena macro work
-/// with this tuple type via a plain identifier.
-pub type FnSigParam<'hir> = (Ident, TyParam<'hir>);
+#[derive(Debug, Clone, PartialEq)]
+pub struct FnParam<'hir> {
+    /// Instance-side ascription checked against the inherited template domain.
+    /// It is not a replacement for that interface or a new assumption.
+    pub template_annotation: Option<&'hir Expr<'hir>>,
+    pub hir_id: HirId,
+    pub name: Ident,
+    pub index: u32,
+    pub ty: TyParam<'hir>,
+    pub span: Span,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TyParamKind<'hir> {

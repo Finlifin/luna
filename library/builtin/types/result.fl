@@ -1,0 +1,66 @@
+{-
+    Operations on native error results with one error type E. E retains its
+    complete type identity and payload. Heterogeneous error rows use the
+    language's matching, propagation and error elimination rules.
+-}
+
+use primitives.{Type, bool};
+
+pub trait ErrorResultOps where T, E {
+
+    fn is_ok(self) -> bool;
+    fn is_err(self) -> bool;
+    fn inspect(self, observer: %c fn(*T)) -> !E T where c: Type.vars.Closure;
+    fn inspect_err(self, observer: %c fn(*E)) -> !E T where c: Type.vars.Closure;
+    fn map(self, f: %c fn(T) -> U) -> !E U where U, c: Type.vars.Closure;
+    fn map_err(self, f: %c fn(E) -> F) -> !F T where F, c: Type.vars.Closure;
+    fn and_then(self, f: %c fn(T) -> !E U) -> !E U where U, c: Type.vars.Closure;
+    fn or_else(self, f: %c fn(E) -> !F T) -> !F T where F, c: Type.vars.Closure;
+    fn unwrap_or_else(self, fallback: %c fn(E) -> T) -> T where c: Type.vars.Closure;
+}
+
+impl ErrorResultOps<T, E> for !E T where T, E {
+    fn is_ok(self) -> bool = self match {
+        _! => true,
+        error _ => false,
+    };
+
+    fn is_err(self) -> bool = not self.as(ErrorResultOps<T, E>).is_ok();
+
+    {- Observe only the active branch, then transfer its complete payload.
+       The observer borrows the payload; ownership remains with the result. -}
+    fn inspect(self, observer: %c fn(*T)) -> !E T where c: Type.vars.Closure = self match {
+        value! => do { observer(value.ref); value },
+        error failure => error failure,
+    };
+
+    fn inspect_err(self, observer: %c fn(*E)) -> !E T where c: Type.vars.Closure = self match {
+        value! => value,
+        error failure => do { observer(failure.ref); error failure },
+    };
+
+    fn map(self, f: %c fn(T) -> U) -> !E U where U, c: Type.vars.Closure = self match {
+        value! => f(value),
+        error failure => error failure,
+    };
+
+    fn map_err(self, f: %c fn(E) -> F) -> !F T where F, c: Type.vars.Closure = self match {
+        value! => value,
+        error failure => error f(failure),
+    };
+
+    fn and_then(self, f: %c fn(T) -> !E U) -> !E U where U, c: Type.vars.Closure = self match {
+        value! => f(value),
+        error failure => error failure,
+    };
+
+    fn or_else(self, f: %c fn(E) -> !F T) -> !F T where F, c: Type.vars.Closure = self match {
+        value! => value,
+        error failure => f(failure),
+    };
+
+    fn unwrap_or_else(self, fallback: %c fn(E) -> T) -> T where c: Type.vars.Closure = self match {
+        value! => value,
+        error failure => fallback(failure),
+    };
+}

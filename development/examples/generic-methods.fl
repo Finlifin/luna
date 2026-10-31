@@ -1,0 +1,26 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin { T }
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+-- Implementation parameters come from the receiver; method parameters come
+-- from arguments and the expected result. Each runtime producer runs once.
+struct Holder where A {
+    value: A,
+}
+
+impl Holder<A> where A {
+    fn pair(self, other: B) -> Tuple<A, B> where B {
+        (self.value, other)
+    }
+
+    fn properties(self, ...options: B) -> Tuple<A, B> where B {
+        (self.value, options)
+    }
+}
+
+fn entry() -> bool {
+    let (number, flag): Tuple<.u8'builtin, bool> =
+        Holder<.u8'builtin> { value: 9 }.pair(true);
+    let (other, options) =
+        Holder<.u8'builtin> { value: 7 }.properties { enabled: true };
+    number == 9 and flag and other == 7 and options.enabled
+}

@@ -1,0 +1,60 @@
+{- Function identities are comptime data, including inside opaque Type values.
+   Retaining an identity does not execute the function or request its body.
+-}
+fn identity(value: T) -> T where T { value }
+
+comptime fn callback(comptime T: Type) -> fn(T) -> T { identity<T> }
+
+pure comptime fn Carrier<T, action: fn(T) -> T> -> Type { bool }
+
+comptime fn Describe(comptime T: Type) -> Type { Carrier<T, callback(T)> }
+
+fn dispatch() -> bool where T { true }
+
+comptime fn staged_identity(value: T) -> T where T { value }
+
+comptime fn staged_callback(comptime T: Type) -> comptime fn(T) -> T {
+    staged_identity<T>
+}
+
+pure comptime fn StagedCarrier<T, action: comptime fn(T) -> T> -> Type { bool }
+
+-- The callback is formed while T still belongs to the caller's telescope.
+fn staged_input(comptime T: Type, value: StagedCarrier<T, staged_callback(T)>) -> bool {
+    true
+}
+
+comptime fn DescribeStaged(comptime T: Type) -> Type {
+    StagedCarrier<T, staged_callback(T)>
+}
+
+test {
+    let flag = dispatch<Describe(bool)>();
+    let number = dispatch<Describe(u32)>();
+    assumes flag;
+    assumes number;
+    let staged = dispatch<DescribeStaged(bool)>();
+    let staged_number = dispatch<DescribeStaged(u32)>();
+    assumes staged;
+    assumes staged_number;
+}
+
+comptime fn capturing_callback(comptime T: Type)
+    -> %{flag: bool, saved: Type} comptime fn() -> Type {
+    var flag = false;
+    let saved = T;
+    || { flag = not flag; if flag { saved } else { bool } }
+}
+
+comptime fn check_captured(comptime T: Type,
+    comptime .action: %{flag: bool, saved: Type} comptime fn() -> Type = capturing_callback(T)) -> bool {
+    action() == T and action() == bool and action() == T
+}
+
+test scoped_capture_state {
+    inline if check_captured(bool) and check_captured(char) {
+        assumes true;
+    } else {
+        assumes false;
+    };
+}

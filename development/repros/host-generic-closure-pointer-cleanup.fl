@@ -1,0 +1,32 @@
+-- Expected: checked interpretation and native execution produce (bool true).
+-- Regression: predicate observations must acquire indirect borrowed premises
+-- just as ordinary reads do, without changing caller resources.
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+impl Duplicate for *T where T {}
+
+struct First { target: *bool }
+struct Second { target: *bool }
+impl Retire for First {
+    fn drop(*self) {
+        assumes not self.target.*.*;
+        self.target.*.* = true;
+    }
+}
+impl Retire for Second {
+    fn drop(*self) {
+        assumes self.target.*.*;
+        self.target.*.* = false;
+    }
+}
+fn make(value: T) -> %{value: T} fn() -> T where T { || value }
+fn run() -> bool {
+    var first = false;
+    var second = true;
+    let a = make(First {target: first.ref});
+    let b = make(Second {target: second.ref});
+    a();
+    b();
+    first and not second
+}

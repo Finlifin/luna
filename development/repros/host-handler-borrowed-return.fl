@@ -1,0 +1,24 @@
+-- Expected result: (bool true). Handler lexical returns carry the captured
+-- pointer origin back to the installing function; callers retain ownership.
+-- Run with --copy-protocol Duplicate --drop-protocol Retire.
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+impl Duplicate for *T where T {}
+
+effect read() -> bool;
+fn subject() -> #read bool { read()# }
+
+fn forward(pointer: *bool) -> *bool {
+    subject()# {
+        read() => do { return pointer; },
+    };
+    pointer
+}
+
+fn run() -> bool {
+    var seen = false;
+    let returned = forward(seen.ref);
+    returned.* = true;
+    seen
+}

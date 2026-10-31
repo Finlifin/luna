@@ -1,0 +1,66 @@
+typealias Flag = bool;
+
+enum State {
+    waiting,
+    ready,
+    done,
+}
+
+struct Job {
+    state: State = .waiting,
+}
+
+fn ready(state: State) -> Flag {
+    state match {
+        .waiting => false,
+        .ready or .done => true,
+    }
+}
+
+fn run() -> Flag {
+    let job = Job {};
+    job.state = State.ready;
+    ready(job.state)
+}
+
+-- Nested positional payloads preserve nominal identities and source-order inputs.
+enum Event {
+    idle,
+    state(State, Flag),
+}
+
+fn accepted(event: Event) -> Flag {
+    event match {
+        .idle => false,
+        .state(.waiting, _) => false,
+        .state(.ready or .done, true) => true,
+        .state(.ready or .done, false) => false,
+    }
+}
+
+fn payload_example() -> Flag {
+    let event: Event = .state(State.ready, true);
+    let .state(state, enabled) = event else { return false; };
+    enabled and ready(state) and accepted(event)
+}
+
+enum NamedEvent {
+    update { state: State = .ready, enabled: Flag = true },
+}
+
+fn named_payload_example() -> Flag {
+    let event = NamedEvent.update {};
+    event match {
+        .update { enabled: false } => false,
+        .update { state: .waiting } => false,
+        .update { state: .ready or .done, enabled: true } => true,
+    }
+}
+
+fn qualified_pattern_example(event: Event) -> Flag {
+    event match {
+        Event.idle => false,
+        Event.state(State.ready or State.done, enabled) => enabled,
+        Event.state(State.waiting, _) => false,
+    }
+}

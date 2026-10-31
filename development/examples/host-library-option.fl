@@ -1,0 +1,28 @@
+-- Native optional operations, with resources supplied by a separate package.
+use builtin.{bool};
+use optional.OptionalOps;
+
+fn invert(value: bool) -> bool {not value}
+fn choose(value: bool) -> ?bool {
+    if value {true} else {null}
+}
+
+fn run() -> bool {
+    let first: ?bool = false;
+    let mapped = first.as(OptionalOps<bool>).map<bool>(invert);
+    let absent: ?bool = null;
+    let mapped_absent = absent.as(OptionalOps<bool>).map<bool>(invert);
+    let yes: ?bool = true;
+    let no: ?bool = false;
+    let chained = yes.as(OptionalOps<bool>).and_then<bool>(choose);
+    let stopped = no.as(OptionalOps<bool>).and_then<bool>(choose);
+    mapped.as(OptionalOps<bool>).unwrap_or(false)
+        and mapped_absent.as(OptionalOps<bool>).is_none()
+        and chained.as(OptionalOps<bool>).is_some()
+        and stopped.as(OptionalOps<bool>).unwrap_or(true)
+}
+
+test value_operations {
+    let passed = run();
+    assumes passed;
+}

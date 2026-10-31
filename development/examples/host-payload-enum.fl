@@ -1,0 +1,23 @@
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+typealias Word = .u32'builtin;
+enum Result where T { missing, value(T), pair {left: T, right: T} }
+impl Duplicate for Result<Word> {}
+fn choose(flag: bool) -> Result<Word> {
+    if flag { Result<Word>.pair {right: 22, left: 20} }
+    else { Result<Word>.missing }
+}
+fn total(value: Result<Word>) -> Word {
+    value match {
+        .missing => 0,
+        .value(n) => n,
+        .pair {left, right} => do { assumes left <= 100; assumes right <= 100; left + right },
+    }
+}
+fn run() -> bool {
+    var result = choose(true);
+    let first = total(result);
+    result = Result<Word>.value(7);
+    first == 42 and total(result) == 7 and total(choose(false)) == 0
+}

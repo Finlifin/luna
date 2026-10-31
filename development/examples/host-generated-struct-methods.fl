@@ -1,0 +1,46 @@
+{-
+  Build a concrete record from reflected field descriptions, then use that
+  generated type through ordinary methods and affine resource protocols.
+  Reflection preserves field Type identities; it does not grant Copy.
+-}
+use primitives.Type;
+
+struct Source {
+    ready: bool,
+    enabled: bool,
+}
+
+comptime fn Mirrored() -> Type {
+    let builder = meta.StructBuilder.from_type(Source, .name = .Mirrored);
+    builder.Build()
+}
+
+typealias Flags = Mirrored();
+
+impl resources.Once for Flags {}
+impl resources.Clone for Flags {
+    fn clone(*self) -> Self {
+        Self { ready: self.ready.*, enabled: self.enabled.* }
+    }
+}
+impl resources.Copy for Flags {}
+
+impl Flags {
+    fn toggled(self) -> Self {
+        Self { ready: not self.ready, enabled: self.enabled }
+    }
+}
+
+fn relay(value: T) -> T where T {
+    value
+}
+
+fn run() -> bool {
+    var original = Flags { ready: false, enabled: true };
+    let changed = relay(original.toggled());
+    let cloned = original.as(resources.Clone).clone();
+    original.enabled = false;
+    changed.ready and changed.enabled and
+        not original.ready and not original.enabled and
+        not cloned.ready and cloned.enabled
+}

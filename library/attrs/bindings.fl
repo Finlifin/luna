@@ -1,0 +1,3 @@
+{- Compiler-facing attribute domains; constructors use these named bindings. -}
+pub use builtin.Symbol;
+pub typealias Object = .Object'builtin;

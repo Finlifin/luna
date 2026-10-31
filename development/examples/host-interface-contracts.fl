@@ -1,0 +1,22 @@
+-- Build with --build run --copy-protocol Duplicate --drop-protocol Retire.
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+
+struct Token {}
+impl Retire for Token { fn drop(*self) {} }
+
+trait Factory {
+    fn make(token: Token, flag: bool) -> result: Token
+        where requires flag, ensures flag'old;
+}
+struct Host {}
+impl Factory for Host {
+    fn make(token: Token, flag: bool) -> Token { token }
+}
+
+fn run() -> bool {
+    let outer = Token {};
+    let result = Host.as(Factory).make(Token {}, true);
+    true
+}

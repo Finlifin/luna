@@ -1,0 +1,57 @@
+-- Run: python3 -B development/host_examples.py passing-aggregates --opt-level 3
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+typealias U = .u128'builtin;
+impl Duplicate for bool {}
+impl Duplicate for U {}
+
+-- Same layout, distinct nominal types and effect instances.
+struct Config { enabled: bool, mask: U }
+struct Other { enabled: bool, mask: U }
+impl Duplicate for Config {}
+impl Duplicate for Other {}
+
+^attrs.effects.direct_passing effect setting() -> T where T;
+fn fetch() -> #setting<T> T where T { setting<T>()# }
+
+fn read(flag: bool) -> #[setting<Config>, setting<Other>] bool {
+    let first = fetch<Config>();
+    let second = fetch<Other>();
+    flag and first.enabled and not second.enabled
+        and first.mask == 340282366920938463463374607431768211455
+        and second.mask == 7
+}
+
+fn alternate(flag: bool) -> #[setting<Config>, setting<Other>] bool {
+    read(not flag)
+}
+
+-- The selected function expects the opposite row order.
+fn route(flag: bool) -> #[setting<Other>, setting<Config>] bool {
+    let target = if flag { read } else { alternate };
+    target(flag)
+}
+
+typealias Action = %{captured: bool} fn(bool) -> #[setting<Config>, setting<Other>] bool;
+fn make(captured: bool) -> Action { |value| captured and read(value) }
+fn apply(action: Action) -> #[setting<Other>, setting<Config>] bool { action(true) }
+
+fn subject() -> #[setting<Config>, setting<Other>] bool {
+    let first = route(true);
+    let second = route(false);
+    let action = make(true);
+    let third = apply(action);
+    let no = make(false);
+    let fourth = apply(no);
+    first and second and third and not fourth
+}
+
+fn run() -> bool {
+    subject()# {
+        setting<Config>() => Config {
+            enabled: true,
+            mask: 340282366920938463463374607431768211455,
+        },
+        setting<Other>() => Other { enabled: false, mask: 7 },
+    }
+}

@@ -1,0 +1,18 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
+typealias Type=.Type'builtin;
+trait Mapper {
+ fn pair(self,comptime A:Type,comptime B:Type,value:A,.copy:B=value)->Tuple<A, B> where requires A == B and B == bool;
+}
+struct Host {}
+impl Mapper for Host {
+ fn pair(self,comptime X:Type,comptime Y:Type,input:Y,.copy:X=input)->Tuple<X, Y> where requires X == Y and Y == bool {(input,copy)}
+}
+fn receiver(flag:*bool)->Host {flag.* = not flag.*;Host {}}
+fn value(flag:*bool)->bool {flag.*}
+fn run()->Tuple<Tuple<bool, bool>, bool> {
+ var flag=false;
+ let result=receiver(flag.ref).as(Mapper).pair(bool,bool,value(flag.ref));
+ (result,flag)
+}

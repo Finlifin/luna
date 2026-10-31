@@ -1,0 +1,13 @@
+-- Build with --copy-protocol Duplicate --drop-protocol Retire.
+trait Duplicate {} trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+typealias U = .usize'builtin;
+typealias I = .isize'builtin;
+enum Packet { .base_type U, .discrete_tag true, data: 0b(value: I), }
+impl Duplicate for Packet {}
+fn run() -> bool {
+    let packet = Packet.data { value: -1 };
+    let raw = packet'bitvec;
+    let payload = packet match { .data { value } => value };
+    raw.as(I) == -1 and payload == -1
+}

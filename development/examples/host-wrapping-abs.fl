@@ -1,0 +1,31 @@
+-- python3 -B development/host_examples.py wrapping-abs --compare-optimization
+-- LLVM abs is requested with INT_MIN poison disabled.
+-- The runner supplies --fuel 10000000 for the shared resource/contract pipeline.
+trait Duplicate {}
+trait Retire {fn drop(*self);}
+impl Duplicate for bool {}
+typealias Int = .i32'builtin;
+impl Duplicate for Int {}
+typealias Wide = .i128'builtin;
+impl Duplicate for Wide {}
+
+fn magnitude(value: Int) -> result: Int
+where ensures result == value'old or result == -value'old {
+    math.wrapping_abs(value)
+}
+
+fn run() -> bool {
+    var evaluated = false;
+    let result = magnitude(do {
+        assumes not evaluated;
+        evaluated = true;
+        -42
+    });
+    evaluated and result == 42
+        and magnitude(0) == 0
+        and magnitude(42) == 42
+        and math.wrapping_abs<.isize'builtin>(-42) == 42
+        and magnitude(-2147483648) == -2147483648
+        and math.wrapping_abs<Wide>(-170141183460469231731687303715884105728)
+            == -170141183460469231731687303715884105728
+}

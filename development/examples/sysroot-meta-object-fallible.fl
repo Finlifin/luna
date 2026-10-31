@@ -1,0 +1,86 @@
+{- Fallible Object traversal retains heterogeneous entries and ordered failures. -}
+pure comptime fn Identity<T> -> Type { T }
+
+comptime fn forbidden(entry: Object) -> !Integer void {
+    entry.value<bool>(9);
+}
+
+comptime fn run() -> bool {
+    let absent: ?bool = null;
+    let input: Object = {key: true, 'x', key: false, empty: absent, kind: Identity<bool>};
+    let doubled = input.try_flat_map(|entry: Object| -> !Integer Object {
+        if entry.EntryType(0) == char { return ({}); }
+        entry.concat(entry)
+    });
+    let rebuilt = input.try_fold({}, |acc: Object, entry: Object| -> !Integer Object {
+        acc.concat(entry)
+    });
+    let total = input.try_fold(0, |acc: Integer, entry: Object| -> !Integer Integer {
+        acc + entry.length()
+    });
+    let visited = input.try_foreach(|entry: Object| -> !Integer void {
+        entry.EntryType(0);
+    });
+    (doubled match {
+        value! => value.length() == 8
+            and (value.key(0) matches .key?) and (value.key(3) matches .key?)
+            and (value.value<bool>(0) matches true?)
+            and (value.value<bool>(2) matches false?)
+            and (value.value<?bool>(4) match {v? => v matches null, null => false})
+            and (value.get<Type>(.kind) match {T? => T == Identity<bool>, null => false}),
+        error _ => false,
+    }) and (rebuilt match {
+        value! => value.length() == 5 and (value.key(1) matches null)
+            and (value.value<char>(1) matches 'x'?),
+        error _ => false,
+    }) and (total matches 5!) and (visited matches _!)
+        and input.length() == 5 and failures() and empty_inputs()
+}
+
+comptime fn failures() -> bool {
+    let input: Object = {1, 2, 3};
+    var trace: Integer = 0;
+    let visitor = |entry: Object| -> !Integer void {
+        if entry.length() == 0 { return error trace; }
+        let n = entry.value<Integer>(0) match {v? => v, null => 0};
+        trace = trace * 10 + n;
+        if n == 2 { return error trace; }
+    };
+    let walked = input.try_foreach(visitor);
+    let seen = visitor({});
+    let folded = input.try_fold(0, |acc: Integer, entry: Object| -> !Integer Integer {
+        let n = entry.value<Integer>(0) match {v? => v, null => 0};
+        if n == 2 { return error acc; }
+        acc + n
+    });
+    let mapper = |entry: Object| -> !Integer Object {
+        if entry.length() == 0 { return error trace; }
+        let n = entry.value<Integer>(0) match {v? => v, null => 0};
+        trace = trace * 10 + n;
+        if n == 2 { return error trace; }
+        entry.set(0, false);
+        entry
+    };
+    let mapped = input.try_flat_map(mapper);
+    let mapped_trace = mapper({});
+    (walked matches error 12) and (seen matches error 12)
+        and (folded matches error 1) and (mapped matches error 12)
+        and (mapped_trace matches error 12) and trace == 0
+        and (input.value<Integer>(0) matches 1?) and input.length() == 3
+}
+
+comptime fn empty_inputs() -> bool {
+    let empty: Object = {};
+    let walked = empty.try_foreach(forbidden);
+    let mapped = empty.try_flat_map(|entry: Object| -> !Integer Object {
+        entry.slice(0, 1)
+    });
+    let seed: ?bool = null;
+    let folded = empty.try_fold(seed, |acc: ?bool, entry: Object| -> !Integer ?bool {
+        entry.value<bool>(0);
+        acc
+    });
+    (walked matches _!)
+        and (mapped match {v! => v.length() == 0, error _ => false})
+        and (folded match {v! => v matches null, error _ => false})
+}

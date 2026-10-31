@@ -71,34 +71,8 @@ impl AstNodeRef {
     }
 }
 
-/// Monotonic allocator for [`DefId`]s.
-pub struct DefIdGen {
-    pkg: u32,
-    next: u32,
-}
-
-impl DefIdGen {
-    pub fn new(pkg: u32) -> Self {
-        Self { pkg, next: 0 }
-    }
-
-    pub fn next(&mut self) -> DefId {
-        let id = DefId::new(self.pkg, self.next);
-        self.next += 1;
-        id
-    }
-
-    /// How many DefIds have been allocated so far.
-    pub fn count(&self) -> u32 {
-        self.next
-    }
-}
-
-impl Default for DefIdGen {
-    fn default() -> Self {
-        Self::new(0)
-    }
-}
+// Shared with generated definitions; scanner callers retain the existing API.
+pub use symbol::DefIdGen;
 
 /// Monotonic allocator for [`ScopeId`]s.
 pub struct ScopeIdGen {

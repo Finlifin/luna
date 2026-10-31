@@ -1,0 +1,22 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+typealias Type = .Type'builtin;
+pure comptime fn TupleElements<T> -> Type { T }
+pure comptime fn Tuple<...Es: TupleElements<Type>> -> Type { bool }
+
+struct Pair where A, .B: Type = A {
+    first: A,
+    second: B,
+}
+
+comptime fn packet(T: Type) -> Tuple<Type> { (T,) }
+
+comptime fn Build(T: Type) -> Type {
+    Pair<...packet(T)>
+}
+
+typealias Flags = Build(bool);
+
+fn run() -> bool {
+    let pair: Flags = Pair<...(bool,)> { first: true, second: false };
+    pair.first and not pair.second
+}

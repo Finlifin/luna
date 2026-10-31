@@ -1,0 +1,69 @@
+-- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
+pure comptime fn TupleElements<T> -> .Type'builtin {T}
+pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
+typealias Type = .Type'builtin;
+typealias Int = .Integer'builtin;
+pure comptime fn Array<T, N: Int> -> Type { T }
+pure comptime fn Other<T, N: Int> -> Type { T }
+comptime fn Length(value: Type) -> Int {
+    value match { Array<'bool, length> => length, _ => 0 }
+}
+comptime fn NamedLength(value: Type) -> Int {
+    value match { Array<N: length, T: 'bool> => length, _ => 0 }
+}
+comptime fn ElementType(value: Type) -> Type {
+    value match { Array<Element, _> => Element, _ => value }
+}
+comptime fn run() -> Tuple<Int, Int, Int, bool> {
+    (Length(Array<bool, 4>), NamedLength(Array<bool, 7>),
+     Length(Other<bool, 9>), ElementType(Array<bool, 4>) == bool)
+}
+comptime fn InnerLength(value: Type) -> Int {
+    value match { Array<Array<'bool, inner>, _> => inner, _ => 0 }
+}
+comptime fn nested() -> Int { InnerLength(Array<Array<bool, 5>, 8>) }
+pure comptime fn Tagged<value: Tuple<Int, bool>> -> Type { bool }
+comptime fn TagNumber(value: Type) -> Int {
+    value match { Tagged<(number, true)> => number, _ => 0 }
+}
+comptime fn tuple_value() -> Int { TagNumber(Tagged<(11, true)>) }
+pure comptime fn Small<value: .u8'builtin> -> Type { bool }
+comptime fn SmallNumber(value: Type) -> .u8'builtin {
+    value match { Small<number> => number, _ => 0 }
+}
+comptime fn fixed_value() -> .u8'builtin { SmallNumber(Small<9>) }
+
+comptime fn ErasedType() -> Type { bool }
+comptime fn erased() -> Int { Length(ErasedType()) }
+pure comptime fn Box<T, value: T> -> Type { T }
+comptime fn BoxElement(value: Type) -> Type {
+    value match { Box<Element, _> => Element, _ => value }
+}
+comptime fn dependent_wildcard() -> bool { BoxElement(Box<bool, true>) == bool }
+comptime fn Rollback(value: Type) -> Int {
+    value match {
+        Tagged<(number, false)> or Tagged<(number, true)> => number,
+        _ => 0,
+    }
+}
+comptime fn rollback() -> Int { Rollback(Tagged<(17, true)>) }
+comptime fn BoolContents(value: Type) -> bool {
+    value match { Box<'bool, contents> => contents, _ => false }
+}
+comptime fn NamedContents(value: Type) -> bool {
+    value match { Box<value: contents, T: 'bool> => contents, _ => false }
+}
+comptime fn TupleContents(value: Type) -> Int {
+    value match { Box< < Tuple<Int, bool> > , (number, true)> => number, _ => 0 }
+}
+comptime fn dependent_values() -> Tuple<bool, bool, Int, bool> {
+    (BoolContents(Box<bool, true>), NamedContents(Box<bool, true>),
+     TupleContents(Box<Tuple<Int, bool>, (23, true)>), BoolContents(Box<Int, 1>))
+}
+
+comptime fn Contents(value: Type, fallback: T) -> T where T {
+    value match { Box<'T, contents> => contents, _ => fallback }
+}
+comptime fn generic_contents() -> Tuple<bool, Int> {
+    (Contents<bool>(Box<bool, true>, false), Contents<Int>(Box<Int, 29>, 0))
+}

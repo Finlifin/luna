@@ -1,0 +1,18 @@
+trait Duplicate {}
+trait Retire { fn drop(*self); }
+impl Duplicate for bool {}
+typealias Callback = fn(comptime bool, bool) -> bool;
+fn keep(comptime flag:bool,value:bool)->bool {if flag {value} else {not value}}
+fn invert(comptime flag:bool,value:bool)->bool {if flag {not value} else {value}}
+fn flip(state:*bool)->bool {let old=state.*;state.* = not old;old}
+fn apply(callback:Callback,value:bool)->bool {
+    let first=callback(true,value);let second=callback(false,value);
+    first and not second
+}
+fn trial(start:bool)->bool {
+    var state=start;
+    let callback=if flip(state.ref) {keep} else {invert};
+    let result=apply(callback,flip(state.ref));
+    not result and state == start
+}
+fn run()->bool {trial(true) and trial(false)}

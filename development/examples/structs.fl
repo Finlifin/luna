@@ -1,0 +1,23 @@
+-- Initializers execute in field declaration order; defaults execute per use.
+typealias Flag = bool;
+
+fn fallback() -> Flag { true }
+
+struct Switch {
+    enabled: Flag,
+    fallback: Flag = fallback(),
+}
+
+struct Panel {
+    primary: Switch,
+    secondary: Switch,
+}
+
+fn run() -> Flag {
+    let panel = Panel {
+        secondary: Switch { enabled: false },
+        primary: Switch { fallback: false, enabled: true },
+    };
+    panel.secondary.enabled = true;
+    panel.primary.enabled and not panel.primary.fallback and panel.secondary.enabled
+}
