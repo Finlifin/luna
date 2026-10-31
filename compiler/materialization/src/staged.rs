@@ -538,6 +538,18 @@ impl Builder<'_> {
                     words: v.words().to_vec(),
                 })
             }
+            Value::Float(value) => {
+                if *ty != Term::Primitive(nir::Primitive::Float) {
+                    return Err("staged exact Float identity mismatch".into());
+                }
+                let mut budget = comptime_runtime::Budget {
+                    steps: self.fuel,
+                    max_limbs: 4096,
+                };
+                let spelling = value.to_literal(&mut budget);
+                self.fuel = budget.steps;
+                K::Literal(n::Literal::Float(spelling.map_err(|e| e.to_string())?))
+            }
             Value::Integer(v) => {
                 let mut budget = comptime_runtime::Budget {
                     steps: self.fuel,
@@ -546,6 +558,34 @@ impl Builder<'_> {
                 let spelling = v.to_hex_literal(&mut budget);
                 self.fuel = budget.steps;
                 K::Literal(n::Literal::Integer(spelling.map_err(|e| e.to_string())?))
+            }
+            Value::Object(object) => {
+                if *ty != Term::Primitive(nir::Primitive::Object) {
+                    return Err("staged Object identity mismatch".into());
+                }
+                let entries = object.entries();
+                self.fuel = self
+                    .fuel
+                    .checked_sub(entries.len())
+                    .ok_or("staged Object entry budget exhausted")?;
+                let mut names = Vec::with_capacity(entries.len());
+                let mut fields = Vec::with_capacity(entries.len());
+                for entry in entries {
+                    self.fuel = self
+                        .fuel
+                        .checked_sub(entry.key().map_or(0, str::len))
+                        .ok_or("staged Object key budget exhausted")?;
+                    names.push(entry.key().map(str::to_owned));
+                    let value = entry.value();
+                    fields.push(self.freeze_staged_value_in(
+                        &value.value,
+                        &value.ty,
+                        source,
+                        depth + 1,
+                        graph,
+                    )?);
+                }
+                K::Object { names, fields }
             }
             Value::AnonymousRecord(values) => {
                 let Term::Record(types) = ty else {

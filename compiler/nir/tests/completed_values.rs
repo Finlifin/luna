@@ -1117,3 +1117,45 @@ fn typed_tuple_payloads_use_declaration_layouts_for_reconstruction_and_transport
     );
     assert!(format!("{plan}").starts_with("(tuple-layout (error-layout"));
 }
+
+#[test]
+fn completed_objects_preserve_order_and_validate_each_entry_domain() {
+    let object = expr(
+        Term::Primitive(Primitive::Object),
+        K::Object {
+            names: vec![Some("same".into()), None, Some("same".into())],
+            fields: vec![
+                expr(boolean(), K::Literal(Literal::Bool(true))),
+                expr(
+                    Term::Primitive(Primitive::Char),
+                    K::Literal(Literal::Char('x')),
+                ),
+                frozen(),
+            ],
+        },
+    );
+    validate(&object).unwrap();
+    for problem in 0..4 {
+        let mut invalid = object.clone();
+        let K::Object { names, fields } = &mut invalid.kind else {
+            unreachable!()
+        };
+        match problem {
+            0 => {
+                names.pop();
+            }
+            1 => {
+                invalid.ty = boolean();
+            }
+            2 => {
+                fields[0].ty = Term::Primitive(Primitive::Char);
+            }
+            _ => {
+                fields[0].kind = K::Local(id(99));
+            }
+        }
+        assert!(validate(&invalid).is_err(), "{problem}");
+    }
+    assert!(nir::completed_values::validate(&object, &mut 1).is_err());
+    validate(&object).unwrap();
+}

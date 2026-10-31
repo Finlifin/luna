@@ -386,6 +386,28 @@ fn value_in<'a, 'd>(
             }
             Ok(())
         }
+        K::Object { names, fields } => {
+            if value.ty != Term::Primitive(Primitive::Object) || names.len() != fields.len() {
+                return Err("completed Object shape or domain mismatch");
+            }
+            charge(fuel, fields.len())?;
+            for (name, field) in names.iter().zip(fields) {
+                charge(fuel, name.as_ref().map_or(0, String::len))?;
+                // Object entries are independently typed. Repeated names and
+                // positional entries preserve order rather than merging fields.
+                value_in(
+                    field,
+                    fuel,
+                    scope,
+                    depth + 1,
+                    definitions,
+                    tuple_fields,
+                    lookup,
+                    target,
+                )?;
+            }
+            Ok(())
+        }
         K::AnonymousRecord { fields } => {
             let Term::Record(expected) = &value.ty else {
                 return Err("completed record lacks a structural record type");

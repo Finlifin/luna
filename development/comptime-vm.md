@@ -8421,3 +8421,51 @@ closure freezing as NF arguments, cyclic value graphs, or unify the separate
 constant-expression and staged materializers. Other previously unsupported
 value representations remain rejected. No language restriction is inferred from
 these remaining implementation boundaries.
+
+## Preserve ordinary Objects and exact Float values through staged freezing
+
+The completed-value checker now admits ordered Object reconstruction, checking
+its Object domain, key/field counts, every independently typed child and copy
+budget. Positional entries and duplicate names remain distinct. It still rejects
+mismatched payload types, unbound locals and arbitrary initializer execution.
+The staged freezer now handles Object recursively through the same graph state
+as aggregates and closures, and exact Float through its metered decimal literal
+serialization, without conversion to a target binary floating type.
+
+The initial Object integration failed before IIR creation because completed
+Object reconstruction was absent from `nir::completed_values`. A second boundary
+was the missing Object and Float cases in staged freezing. New source tests
+exercise source/IIR and tree/bytecode execution, repeated invocations, mutable
+exact-decimal captures, typed Object queries, nested Objects, optional layers,
+Type identity, positional/duplicate keys and shared closure entries. The Object
+case runs both direct association and a generic captured call returning Object,
+so admission and actual staged-result freezing are both covered.
+
+A controlled coverage check temporarily used the HEAD staged freezer with the
+new Object admission in place, restored the working file in a finally block,
+and ran the new integration group. Exact Float then failed with `staged
+invocation result cannot yet be frozen as an instance input`
+(`/tmp/luna-tools-o0dbsnna/result.json`). The initial direct Object case passed
+that check, prompting the additional captured-call Object variant. The final
+implementation and expanded tests passed together. No unrelated worktree edits
+were included in the coverage check.
+
+Validation from `/home/fin/luna`, final commands exited 0:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p nir --test completed_values
+python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_staged_values --test library_meta_objects
+python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_staged_values
+python3 -B development/check.py --timeout 900 -- test -p materialization
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+git diff --check
+```
+
+Reports: `/tmp/luna-tools-g_yog1x0/result.json` (17 completed-value tests),
+`/tmp/luna-tools-katxspns/result.json` (two staged-value and 34 Object tests),
+`/tmp/luna-tools-wic6qm89/result.json` (expanded staged-value coverage),
+`/tmp/luna-tools-p98_x423/result.json` (19 materialization tests), and
+`/tmp/luna-tools-5t4p9zup/result.json` (formatting). An earlier decimal fixture
+accidentally spelled a negative branch as a block-comment opener; whitespace
+was corrected before the successful runs. Runtime Object admission, NF capture
+graph freezing and full materializer unification are not added by this change.
