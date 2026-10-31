@@ -462,18 +462,18 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<n::Expr, Error> {
         let type_scope = self.local_constant_type_scope(span)?;
-        self.materialize_local_constant_in_scope(value, ty, span, type_scope)
+        self.materialize_local_constant_in_scope(&value, ty, span, type_scope)
     }
 
     fn materialize_local_constant_in_scope(
         &mut self,
-        value: Value,
+        value: &Value,
         ty: Term,
         span: Span,
         type_scope: BTreeSet<DeclarationId>,
     ) -> Result<n::Expr, Error> {
         if matches!(value, Value::Type(_)) {
-            return self.materialize_generator_data(value, ty, span);
+            return self.materialize_generator_data_at_depth(value, ty, span, 0);
         }
         // Declaration identities are ordinary constant data, not quoted-code
         // evidence. Reuse module-constant reconstruction and phase validation.
@@ -481,7 +481,7 @@ impl Checker<'_, '_> {
             type_scope,
             ..Materialization::default()
         };
-        let value = self.constant_expression(value, ty, span, 0, &mut snapshot)?;
+        let value = self.constant_expression_ref(value, ty, span, 0, &mut snapshot)?;
         if snapshot.bindings.is_empty() {
             return Ok(value);
         }
@@ -519,12 +519,12 @@ impl Checker<'_, '_> {
         ty: Term,
         span: Span,
     ) -> Result<n::Expr, Error> {
-        self.materialize_generator_data_at_depth(value, ty, span, 0)
+        self.materialize_generator_data_at_depth(&value, ty, span, 0)
     }
 
     fn materialize_generator_data_at_depth(
         &mut self,
-        value: Value,
+        value: &Value,
         ty: Term,
         span: Span,
         depth: usize,
@@ -573,7 +573,7 @@ impl Checker<'_, '_> {
                 .into_iter()
                 .zip(types)
                 .map(|((name, value), (expected, ty))| {
-                    if name != expected {
+                    if name != &expected {
                         return Err(error(span, "generator record data field mismatch"));
                     }
                     self.materialize_generator_data_at_depth(value, ty, span, depth + 1)
@@ -598,7 +598,7 @@ impl Checker<'_, '_> {
                 generator_fields: true,
                 ..Materialization::default()
             };
-            let result = self.constant_expression(value, ty, span, depth, &mut snapshot)?;
+            let result = self.constant_expression_ref(value, ty, span, depth, &mut snapshot)?;
             if !snapshot.bindings.is_empty() {
                 return Err(error(
                     span,
@@ -610,7 +610,11 @@ impl Checker<'_, '_> {
         // Local construction data can retain the enclosing Type telescope;
         // immutable module exports use the stricter closed-value boundary.
         if matches!(value, Value::Type(_)) {
-            let symbol = self.required_normal_term(value, span)?;
+            let Value::Type(term) = value else {
+                unreachable!()
+            };
+            self.charge_constant_type_copy(term, span)?;
+            let symbol = self.required_normal_term(value.clone(), span)?;
             if ty != p(P::Type) {
                 return Err(error(
                     span,
@@ -633,7 +637,8 @@ impl Checker<'_, '_> {
                 Value::FunctionInstance { .. } | Value::RuntimeTraitMethod(_)
             )
         {
-            return self.materialize_local_constant(value, ty, span);
+            let scope = self.local_constant_type_scope(span)?;
+            return self.materialize_local_constant_in_scope(value, ty, span, scope);
         }
         // Captureless comptime callbacks carry no live
         // capture graph. Anonymous bodies and generic instances reuse constant
@@ -644,7 +649,8 @@ impl Checker<'_, '_> {
             _ => false,
         };
         if ty.is_comptime_callable() && captureless_callable {
-            return self.materialize_local_constant(value, ty, span);
+            let scope = self.local_constant_type_scope(span)?;
+            return self.materialize_local_constant_in_scope(value, ty, span, scope);
         }
         if ty.is_comptime_callable() && matches!(value, Value::Closure(_)) {
             let scope = self.local_constant_type_scope(span)?;
@@ -681,7 +687,7 @@ impl Checker<'_, '_> {
             )
         })?;
         let mut snapshot = Materialization::default();
-        let value = self.constant_expression(value, ty, span, 0, &mut snapshot)?;
+        let value = self.constant_expression_ref(value, ty, span, 0, &mut snapshot)?;
         if !snapshot.bindings.is_empty() {
             return Err(error(
                 span,
@@ -740,7 +746,7 @@ impl Checker<'_, '_> {
                 &type_scope,
             )?;
             let expression = self.materialize_local_constant_in_scope(
-                value,
+                &value,
                 ty.clone(),
                 span,
                 type_scope.clone(),
@@ -3261,9 +3267,28 @@ impl Checker<'_, '_> {
         Ok(expression)
     }
 
-    fn constant_nominal_field(
+    fn charge_constant_type_copy(&mut self, ty: &Term, span: Span) -> Result<(), Error> {
+        let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let before = fuel;
+        let checked = nir::type_computations::charge_term(ty, &mut fuel);
+        self.required_steps -= (before - fuel) as u64;
+        checked.map_err(|cause| error(span, cause.to_string()))
+    }
+
+    fn constant_expression(
         &mut self,
         value: Value,
+        ty: Term,
+        span: Span,
+        depth: usize,
+        snapshot: &mut Materialization,
+    ) -> Result<n::Expr, Error> {
+        self.constant_expression_ref(&value, ty, span, depth, snapshot)
+    }
+
+    fn constant_nominal_field(
+        &mut self,
+        value: &Value,
         ty: Term,
         span: Span,
         depth: usize,
@@ -3272,13 +3297,13 @@ impl Checker<'_, '_> {
         if snapshot.generator_fields {
             self.materialize_generator_data_at_depth(value, ty, span, depth)
         } else {
-            self.constant_expression(value, ty, span, depth, snapshot)
+            self.constant_expression_ref(value, ty, span, depth, snapshot)
         }
     }
 
-    fn constant_expression(
+    fn constant_expression_ref(
         &mut self,
-        value: Value,
+        value: &Value,
         ty: Term,
         span: Span,
         depth: usize,
@@ -3296,7 +3321,7 @@ impl Checker<'_, '_> {
                 ));
             }
             Value::List { ty: actual, values } => {
-                if actual != ty {
+                if actual != &ty {
                     return Err(error(span, "constant list identity mismatch"));
                 }
                 let element = self
@@ -3323,7 +3348,7 @@ impl Checker<'_, '_> {
                 )
             }
             Value::Optional { ty: actual, value } => {
-                if actual != ty {
+                if actual != &ty {
                     return Err(error(span, "constant optional identity mismatch"));
                 }
                 let Term::Optional(payload) = &ty else {
@@ -3332,7 +3357,7 @@ impl Checker<'_, '_> {
                 match value {
                     None => K::OptionalAbsent,
                     Some(value) => K::OptionalPresent(Box::new(self.constant_nominal_field(
-                        *value,
+                        value,
                         (**payload).clone(),
                         span,
                         depth + 1,
@@ -3351,7 +3376,7 @@ impl Checker<'_, '_> {
                 error: branch,
                 value,
             } => {
-                if actual != ty {
+                if actual != &ty {
                     return Err(error(span, "constant error result identity mismatch"));
                 }
                 let Term::ErrorResult { errors, result } = &ty else {
@@ -3362,14 +3387,14 @@ impl Checker<'_, '_> {
                     Some(index) => (
                         nir::error_results::Conversion::Failure,
                         errors
-                            .get(index)
+                            .get(*index)
                             .ok_or_else(|| error(span, "constant error result tag invalid"))?,
                     ),
                 };
                 K::ErrorConvert {
                     conversion,
                     value: Box::new(self.constant_nominal_field(
-                        *value,
+                        value,
                         payload.clone(),
                         span,
                         depth + 1,
@@ -3378,7 +3403,7 @@ impl Checker<'_, '_> {
                 }
             }
             Value::Newtype { ty: actual, value } => {
-                if actual != ty {
+                if actual != &ty {
                     return Err(error(span, "constant newtype identity mismatch"));
                 }
                 self.ensure_nominal_type(&ty, span)?;
@@ -3399,16 +3424,16 @@ impl Checker<'_, '_> {
                 self.required_steps -= (before - fuel) as u64;
                 let representation = representation.map_err(|e| error(span, e.to_string()))?;
                 K::NewtypeConvert(Box::new(self.constant_nominal_field(
-                    *value,
+                    value,
                     representation,
                     span,
                     depth + 1,
                     snapshot,
                 )?))
             }
-            Value::TypeParameter(declaration) if snapshot.type_scope.contains(&declaration) => {
+            Value::TypeParameter(declaration) if snapshot.type_scope.contains(declaration) => {
                 K::TypeValue(Term::Rigid {
-                    declaration,
+                    declaration: *declaration,
                     sort: Sort::Type,
                 })
             }
@@ -3440,7 +3465,7 @@ impl Checker<'_, '_> {
                     .into_iter()
                     .zip(types)
                     .map(|((_, value), (_, ty))| {
-                        self.constant_expression(value, ty.clone(), span, depth + 1, snapshot)
+                        self.constant_expression_ref(value, ty.clone(), span, depth + 1, snapshot)
                     })
                     .collect::<Result<_, _>>()?;
                 K::AnonymousRecord { fields }
@@ -3449,7 +3474,7 @@ impl Checker<'_, '_> {
                 if ty != p(P::Object) {
                     return Err(error(span, "Object constant identity mismatch"));
                 }
-                let entries = object.into_entries();
+                let entries = object.entries();
                 self.required_steps = self
                     .required_steps
                     .checked_sub(entries.len() as u64)
@@ -3466,13 +3491,14 @@ impl Checker<'_, '_> {
                                 .ok_or_else(|| {
                                     error(span, "constant materialization budget exhausted")
                                 })?;
-                            (Some(key), value)
+                            (Some(key.clone()), value)
                         }
                     };
                     names.push(name);
+                    self.charge_constant_type_copy(&value.ty, span)?;
                     fields.push(self.constant_nominal_field(
-                        value.value,
-                        value.ty,
+                        &value.value,
+                        value.ty.clone(),
                         span,
                         depth + 1,
                         snapshot,
@@ -3498,7 +3524,10 @@ impl Checker<'_, '_> {
                     "runtime storage cannot be materialized as a constant",
                 ));
             }
-            Value::Type(value) => K::TypeValue(value),
+            Value::Type(value) => {
+                self.charge_constant_type_copy(value, span)?;
+                K::TypeValue(value.clone())
+            }
             Value::Unit => K::Unit,
             scalar @ (Value::Bool(_)
             | Value::Char(_)
@@ -3545,7 +3574,13 @@ impl Checker<'_, '_> {
                         .into_iter()
                         .zip(types)
                         .map(|(value, ty)| {
-                            self.constant_expression(value, ty.clone(), span, depth + 1, snapshot)
+                            self.constant_expression_ref(
+                                value,
+                                ty.clone(),
+                                span,
+                                depth + 1,
+                                snapshot,
+                            )
                         })
                         .collect::<Result<_, _>>()?,
                 )
@@ -3555,11 +3590,8 @@ impl Checker<'_, '_> {
                 declaration,
                 fields,
             } => {
-                if ty
-                    != (Term::Nominal {
-                        declaration,
-                        arguments: arguments.clone(),
-                    })
+                if !matches!(&ty, Term::Nominal {declaration: expected, arguments: inputs}
+                    if expected == declaration && inputs == arguments)
                 {
                     return Err(error(span, "constant record identity mismatch"));
                 }
@@ -3587,7 +3619,7 @@ impl Checker<'_, '_> {
                     return Err(error(span, "constant record field count mismatch"));
                 }
                 K::Record {
-                    declaration,
+                    declaration: *declaration,
                     fields: fields
                         .into_iter()
                         .zip(types)
@@ -3603,11 +3635,8 @@ impl Checker<'_, '_> {
                 index,
                 fields,
             } => {
-                if ty
-                    != (Term::Nominal {
-                        declaration,
-                        arguments: arguments.clone(),
-                    })
+                if !matches!(&ty, Term::Nominal {declaration: expected, arguments: inputs}
+                    if expected == declaration && inputs == arguments)
                 {
                     return Err(error(span, "constant enum identity mismatch"));
                 }
@@ -3617,7 +3646,7 @@ impl Checker<'_, '_> {
                     .ok_or_else(|| error(span, "constant enum descriptor is missing"))?;
                 let variant = definition
                     .variants
-                    .get(index)
+                    .get(*index)
                     .ok_or_else(|| error(span, "constant enum variant is missing"))?;
                 if fields.len() != variant.fields.len() {
                     return Err(error(span, "constant enum field count mismatch"));
@@ -3639,8 +3668,8 @@ impl Checker<'_, '_> {
                     )
                 })?;
                 K::Variant {
-                    declaration,
-                    index,
+                    declaration: *declaration,
+                    index: *index,
                     fields: fields
                         .into_iter()
                         .zip(types)
@@ -3650,27 +3679,38 @@ impl Checker<'_, '_> {
                         .collect::<Result<_, _>>()?,
                 }
             }
-            Value::Function(declaration) => K::Function(declaration),
+            Value::Function(declaration) => K::Function(*declaration),
             Value::FunctionInstance {
                 declaration,
                 arguments,
-            } => K::FunctionInstance {
-                declaration,
-                arguments,
-            },
+            } => {
+                for argument in arguments {
+                    self.charge_constant_type_copy(argument, span)?;
+                }
+                K::FunctionInstance {
+                    declaration: *declaration,
+                    arguments: arguments.clone(),
+                }
+            }
             Value::RuntimeTraitMethod(identity) => {
                 let comptime_interpretor::TraitMethodIdentity {
                     interface,
                     subject,
                     member,
                     method_arguments,
-                } = *identity;
+                } = identity.as_ref();
+                for term in std::iter::once(subject)
+                    .chain(&interface.arguments)
+                    .chain(method_arguments)
+                {
+                    self.charge_constant_type_copy(term, span)?;
+                }
                 K::TraitMethod {
                     interface: interface.declaration,
-                    interface_arguments: interface.arguments,
-                    subject,
-                    member,
-                    method_arguments,
+                    interface_arguments: interface.arguments.clone(),
+                    subject: subject.clone(),
+                    member: *member,
+                    method_arguments: method_arguments.clone(),
                 }
             }
             Value::Closure(closure) => {
@@ -3680,7 +3720,7 @@ impl Checker<'_, '_> {
                         arguments: arguments.to_vec(),
                     }
                 } else {
-                    let identity = ClosureIdentity::new(&closure);
+                    let identity = ClosureIdentity::new(closure);
                     if let Some((binding, previous_type)) = snapshot.closures.get(&identity) {
                         if previous_type != &ty {
                             return Err(error(span, "shared constant closure type mismatch"));
@@ -3714,23 +3754,38 @@ impl Checker<'_, '_> {
                     for ((binding, value), capture_type) in closure.captured_values().zip(types) {
                         // Only owned capture cells can be snapshotted. Pointers
                         // and free runtime storage remain invalid constants.
-                        let value = if let Value::Storage(cell) = value {
-                            cell.read().map_err(|e| {
+                        self.charge_constant_type_copy(capture_type, span)?;
+                        let expression = if let Value::Storage(cell) = value {
+                            let mut steps = self.required_steps;
+                            let checked = cell.inspect_owned(&mut steps, 128, |value, steps| {
+                                self.required_steps = *steps;
+                                let result = self.constant_expression_ref(
+                                    value,
+                                    capture_type.clone(),
+                                    span,
+                                    depth + 1,
+                                    snapshot,
+                                );
+                                *steps = self.required_steps;
+                                result
+                            });
+                            self.required_steps = steps;
+                            checked.map_err(|e| {
                                 error(span, format!("constant capture snapshot failed: {e:?}"))
-                            })?
+                            })??
                         } else {
-                            value.clone()
-                        };
-                        captures.push(n::Capture {
-                            binding,
-                            ty: capture_type.clone(),
-                            value: Some(Box::new(self.constant_expression(
+                            self.constant_expression_ref(
                                 value,
                                 capture_type.clone(),
                                 span,
                                 depth + 1,
                                 snapshot,
-                            )?)),
+                            )?
+                        };
+                        captures.push(n::Capture {
+                            binding,
+                            ty: capture_type.clone(),
+                            value: Some(Box::new(expression)),
                         });
                     }
                     let index = self.next_temporary_binding;

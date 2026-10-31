@@ -8546,3 +8546,35 @@ Reports: `/tmp/luna-tools-43plnqy_/result.json` (15 local-constant tests),
 Constant expression construction itself still has an owned capture conversion;
 this commit removes eager copies from validation, not from every materialization
 consumer. Full graph conversion and NF freezing remain separate work.
+
+## Borrow constant capture construction
+
+Constant expression reconstruction now traverses borrowed values, including
+generator-data fields. Owned entrypoints retain their callers' API while
+recursive aggregate traversal no longer copies the input payload. Capture
+storage uses `inspect_owned` through construction, not only validation; fuel
+consumed inside the guard is propagated on success and failure. Closure graph
+identity and encounter order remain shared across recursive fields. Newly
+required owned copies of Type values, Object field domains and callable
+arguments are charged before copying. This is not a complete audit of existing
+type-tree copies or a unification with NF freezing. Cyclic capture graphs remain
+unsupported. No benchmark speedup is claimed.
+
+Validation from `/home/fin/luna`:
+
+```sh
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --test cmtt_methods --test comptime_bytecode_traits --test comptime_staged_values --test library_meta_objects --test exact_floats -- --skip generator_data_rejects_runtime_inputs_wrong_identities_and_opaque_domains
+git diff --check
+```
+
+All three commands exited 0; 795 integration tests passed. Reports:
+`/tmp/luna-tools-ruof626c/result.json` (formatting) and
+`/tmp/luna-tools-63ii5s2v/result.json` (integration). The initial unfiltered run
+(`/tmp/luna-tools-4e2bo2s9/result.json`) passed 582 CMTT tests and failed the
+existing opaque-domain rejection expectation. Repeating only that test with
+`constants.rs` restored temporarily to HEAD reproduced the same failure
+(`/tmp/luna-tools-dt5wowh3/result.json`); the working change was restored
+afterward. The test expects a declaration using `Identity<bool>` to be rejected,
+but the current baseline accepts it. This pre-existing expectation was excluded
+from the subsequent regression run, not changed to make this refactor pass.
