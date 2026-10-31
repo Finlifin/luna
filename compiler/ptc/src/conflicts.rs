@@ -84,6 +84,7 @@ mod tests {
         collect(&formula, &mut atoms, &mut terms, 0, 128, &[]).unwrap();
         let mut search = Search {
             boolean: None,
+            theory_state: None,
             learned: Clauses::default(),
             context: &context,
             formula: &formula,

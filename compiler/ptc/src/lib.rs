@@ -11,6 +11,8 @@ mod effects;
 mod error_results;
 mod learning;
 mod search;
+mod theory_state;
+use theory_state::Classes;
 mod traits;
 pub use traits::TraitQuery;
 mod classification;
@@ -293,6 +295,7 @@ impl Context {
         )?;
         let mut search = Search {
             boolean: None,
+            theory_state: None,
             learned: learning::Clauses::default(),
             context: self,
             formula: &formula,
@@ -581,6 +584,7 @@ impl Context {
         }
         let mut search = Search {
             boolean: None,
+            theory_state: None,
             learned: learning::Clauses::default(),
             context: self,
             formula: &residual,
@@ -1047,36 +1051,6 @@ fn evaluate(formula: &Formula, atom_value: &impl Fn(&Atom) -> Option<bool>) -> O
     }
 }
 
-struct Classes {
-    parent: Vec<usize>,
-    size: Vec<usize>,
-}
-impl Classes {
-    fn new(count: usize) -> Self {
-        Self {
-            parent: (0..count).collect(),
-            size: vec![1; count],
-        }
-    }
-    fn root(&self, mut id: usize) -> usize {
-        while self.parent[id] != id {
-            id = self.parent[id];
-        }
-        id
-    }
-    fn merge(&mut self, a: usize, b: usize) -> bool {
-        let (mut a, mut b) = (self.root(a), self.root(b));
-        if a == b {
-            return false;
-        }
-        if self.size[a] < self.size[b] {
-            std::mem::swap(&mut a, &mut b);
-        }
-        self.parent[b] = a;
-        self.size[a] += self.size[b];
-        true
-    }
-}
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Head {
     Primitive(Primitive),
@@ -1262,6 +1236,7 @@ fn same_congruent_head(a: &Term, b: &Term, context: &Context) -> bool {
 }
 struct Search<'a> {
     boolean: Option<boolean::Circuit>,
+    theory_state: Option<theory_state::State>,
     learned: learning::Clauses,
     context: &'a Context,
     formula: &'a Formula,
@@ -1272,6 +1247,10 @@ struct Search<'a> {
 }
 struct Model {
     types: BTreeMap<DeclarationId, Term>,
+    integers: BTreeMap<DeclarationId, i128>,
+}
+struct TheoryEvidence {
+    kinds: Vec<(usize, TypeKind, bool)>,
     integers: BTreeMap<DeclarationId, i128>,
 }
 struct TheoryModel {
@@ -1402,6 +1381,20 @@ impl Search<'_> {
         assignment: &[Option<bool>],
     ) -> Result<Option<TheoryModel>, UnknownReason> {
         let mut classes = Classes::new(self.terms.nodes.len());
+        self.theory_with_classes(assignment, &mut classes)
+            .map(|evidence| {
+                evidence.map(|evidence| TheoryModel {
+                    classes,
+                    kinds: evidence.kinds,
+                    integers: evidence.integers,
+                })
+            })
+    }
+    fn theory_with_classes(
+        &mut self,
+        assignment: &[Option<bool>],
+        classes: &mut Classes,
+    ) -> Result<Option<TheoryEvidence>, UnknownReason> {
         for (atom, value) in self.atoms.iter().zip(assignment) {
             if let Atom::TypeEqual(atom) = atom {
                 if *value == Some(true) {
@@ -1576,11 +1569,7 @@ impl Search<'_> {
                 }),
             &mut self.steps,
         )?;
-        Ok(integers.map(|integers| TheoryModel {
-            classes,
-            integers,
-            kinds,
-        }))
+        Ok(integers.map(|integers| TheoryEvidence { integers, kinds }))
     }
     fn witness(&mut self, theory: &TheoryModel) -> Option<Model> {
         let classes = &theory.classes;

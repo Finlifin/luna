@@ -433,7 +433,7 @@ impl Search<'_> {
                 Ok(Propagation::None) => {}
             }
         }
-        let classes = match self.theory(assignment) {
+        let classes = match self.theory_cached(assignment) {
             Ok(Some(classes)) => classes,
             Ok(None) => return Step::Return(SearchResult::Unsat(self.learn_conflict(assignment))),
             Err(reason) => return Step::Return(SearchResult::Unknown(reason)),
@@ -526,6 +526,7 @@ mod tests {
                 for steps in (0..128).chain([256, 512, 4096, 100_000]) {
                     let mut search = Search {
                         boolean: None,
+                        theory_state: None,
                         learned: learning::Clauses::default(),
                         context: &context,
                         formula: &formula,
@@ -583,6 +584,7 @@ mod tests {
         collect(&formula, &mut atoms, &mut terms, 0, 128, &[]).unwrap();
         let mut search = Search {
             boolean: None,
+            theory_state: None,
             learned: learning::Clauses::default(),
             context: &context,
             formula: &formula,
@@ -716,6 +718,7 @@ mod tests {
         collect(&formula, &mut atoms, &mut terms, 0, 128, &[]).unwrap();
         let mut search = Search {
             boolean: None,
+            theory_state: None,
             learned: learning::Clauses::default(),
             context: &context,
             formula: &formula,
