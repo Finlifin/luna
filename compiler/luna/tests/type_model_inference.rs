@@ -59,3 +59,44 @@ fn call_rejects_a_model_that_only_satisfies_one_regional_alternative() {
     );
     assert!(!error.contains("parsing failed"), "{error}");
 }
+
+#[test]
+fn nested_equalities_preserve_symbolic_call_inputs() {
+    let package = support::compile(
+        "fn accept(value: *T)->bool where T {true}
+        fn forward(value: A)->bool where A, U, requires *A == **U {
+            accept(value)
+        }",
+    );
+    let accept = package
+        .functions
+        .iter()
+        .find(|f| f.name == "accept")
+        .unwrap()
+        .declaration;
+    let forward = package
+        .functions
+        .iter()
+        .find(|f| f.name == "forward")
+        .unwrap();
+    let expected = nir::Term::Rigid {
+        declaration: forward.type_parameters[1],
+        sort: nir::Sort::Type,
+    };
+    let mut found = false;
+    iir::visit::expressions(forward, &mut 10000, |expr, _| {
+        if let nir::program::ExprKind::FunctionInstance {
+            declaration,
+            arguments,
+        } = &expr.kind
+        {
+            if *declaration == accept {
+                assert_eq!(arguments, &[expected.clone()]);
+                found = true;
+            }
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert!(found);
+}

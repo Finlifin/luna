@@ -195,3 +195,28 @@ Unknown 或多解提升为成功。需要 comptime/value 输入共同求解的�
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`：检查 NIR 实参的源码正例及拒绝例均通过；`/tmp/luna-tools-ozxdil5j/result.json`。
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test builder_invocations contextual_data_consumer_publishes_structs_through_the_complete_sysroot`：exit 0；`/tmp/luna-tools-adht8rtm/result.json`。
 - Workspace 格式化与 `git diff --check` 通过。
+
+
+### 嵌套区域形状中的符号输入
+
+PTC 新增 `mentioned_types_metered`：按稳定遍历顺序列出区域命题中出现的 Type 候选，
+包括等式子结构、分类主体、trait 显式输入及 opaque head 的显式参数。所有候选仅是
+待检查的形状；Not／Or 中出现不授予事实，使用前仍要证明实际类型与该形状相等。
+遍历、去重和结构检查受同一预算约束，局部 binder 中的引用不会重解释为外层变量。
+
+直接 matcher 的区域别名恢复改用这个候选目录。因此 `*A == **U` 下把 A 匹配到
+`*T`，可以先证明 `A == *U`，再保留 `T = U`，不需要构造某个闭合模型。前一阶段
+`*A == **bool` 的回归也由更强的直接匹配完成，测试相应更新了对 direct matcher 的
+能力断言；类型结果与原区域义务没有放宽。模型搜索仍是直接路径停滞后的后备机制。
+
+这补齐已有区域等式的符号结构恢复，不是完整的 symbolic model extraction；不从
+函数体展开 normal form，也不由 opaque head 相等推导其参数相等。约束中尚未出现的
+一般符号解、binder 内的上下文重定位与统一持久 CDCL trail 仍未完成。
+
+验证（工作目录 `/home/fin/luna`）：
+
+- `python3 -B development/check.py --timeout 900 -- test -p ptc -p type_resolution`：exit 0，438 项；`/tmp/luna-tools-02tj7pf7/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`：exit 0，三项；`/tmp/luna-tools-p0bs9dyq/result.json`。新增源码用例检查 NIR 中保留原声明的 U 身份。
+- 原有 opaque-head 非单射、binder 隔离、歧义、低预算及候选 requires 拒绝例保持通过。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test builder_invocations contextual_data_consumer_publishes_structs_through_the_complete_sysroot`：exit 0；`/tmp/luna-tools-_l3awd3c/result.json`。
+- Workspace 格式化与 `git diff --check` 通过。

@@ -12,6 +12,7 @@ mod effects;
 mod error_results;
 mod learning;
 mod search;
+mod type_candidates;
 mod type_inputs;
 pub use type_inputs::{TypeInputOutcome, TypeInputSolution};
 mod theory_state;

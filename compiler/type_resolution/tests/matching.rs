@@ -1103,3 +1103,29 @@ fn nested_alias_views_do_not_use_outer_facts_for_local_binders() {
         I::Meta(unknown)
     );
 }
+
+#[test]
+fn nested_regional_shapes_retain_symbolic_inputs_without_a_closed_model() {
+    use type_resolution::ptc::{Context, Formula as F};
+    let rigid = |local| Term::Rigid {
+        declaration: nir::DeclarationId { package: 98, local },
+        sort: Sort::Type,
+    };
+    let optional = |ty| Term::Optional(Box::new(ty));
+    let mut context = Context::default();
+    context.assume(F::equal(optional(rigid(0)), optional(optional(rigid(1)))));
+    let mut engine = Engine::with_context(context);
+    let unknown = engine.fresh(Sort::Type);
+    let pattern = I::Instantiate {
+        template: optional(slot(0)),
+        arguments: vec![I::Meta(unknown)],
+    };
+    let (mut candidate, id) = engine
+        .match_types(pattern, I::Stable(rigid(0)), Budget::default())
+        .unwrap();
+    finish(&mut candidate);
+    assert!(candidate.state(id).unwrap().is_proven());
+    assert_eq!(candidate.freeze(&I::Meta(unknown)).unwrap(), rigid(1));
+    engine.commit(candidate).unwrap();
+    assert_eq!(engine.freeze(&I::Meta(unknown)).unwrap(), rigid(1));
+}

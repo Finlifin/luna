@@ -177,7 +177,7 @@ fn wrong_sort_assigned_and_stale_candidates_follow_existing_transaction_rules() 
 }
 
 #[test]
-fn ordinary_matching_uses_models_after_structural_proposals_stall() {
+fn ordinary_matching_recovers_nested_regional_structure() {
     let alias = Term::Rigid {
         declaration: DeclarationId {
             package: 10,
@@ -193,7 +193,7 @@ fn ordinary_matching_uses_models_after_structural_proposals_stall() {
         optional(alias.clone()),
         optional(optional(Term::Primitive(P::Bool))),
     ));
-    // Establish that the direct matcher itself cannot fill this input.
+    // Regional subterm discovery now lets direct matching retain this shape.
     let mut direct = type_resolution::InferenceContext::default();
     let direct_input = direct.fresh(Sort::Type);
     let direct_pattern = I::Instantiate {
@@ -215,7 +215,7 @@ fn ordinary_matching_uses_models_after_structural_proposals_stall() {
     .unwrap();
     assert_eq!(
         direct.resolve(&I::Meta(direct_input)).unwrap(),
-        I::Meta(direct_input)
+        stable(P::Bool)
     );
     let mut parent = Engine::with_context(context);
     let input = parent.fresh(Sort::Type);
