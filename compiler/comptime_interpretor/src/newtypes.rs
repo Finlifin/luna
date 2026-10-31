@@ -30,13 +30,7 @@ impl Interpreter<'_> {
             // declaration arguments to an empty telescope.
             graph.newtype_conversion(input, output, &mut fuel)
         } else {
-            nir::newtypes::conversion_from(
-                self.newtypes.values().copied(),
-                input,
-                output,
-                &[],
-                &mut fuel,
-            )
+            nir::newtypes::conversion_from(self.newtypes.values(), input, output, &[], &mut fuel)
         };
         self.budget.steps -= (before - fuel) as u64;
         plan.map_err(|e| {
@@ -173,8 +167,7 @@ mod tests {
                 vm.local_value(&env, TRACE, Some(SOURCE)).unwrap(),
                 Value::Bool(true)
             );
-            let definition = vm
-                .newtypes
+            let position = Arc::make_mut(&mut vm.newtypes.positions)
                 .remove(&package.newtypes[0].declaration)
                 .unwrap();
             env.insert(TRACE, Value::Bool(false));
@@ -188,7 +181,8 @@ mod tests {
                 vm.local_value(&env, TRACE, Some(SOURCE)).unwrap(),
                 Value::Bool(false)
             );
-            vm.newtypes.insert(definition.declaration, definition);
+            Arc::make_mut(&mut vm.newtypes.positions)
+                .insert(package.newtypes[0].declaration, position);
             for (input, output, value, observed) in [
                 (
                     nominal(1),

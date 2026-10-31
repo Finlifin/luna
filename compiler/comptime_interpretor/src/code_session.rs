@@ -72,6 +72,8 @@ impl<'program> Interpreter<'program> {
         }
         let indexes = session.indexes.get_or_insert_with(|| {
             Arc::new(declaration_index::SourceIndexes {
+                newtypes: vm.newtypes.positions.clone(),
+                aliases: vm.alias_contracts.positions.clone(),
                 structs: Arc::new(
                     package
                         .structs
@@ -164,6 +166,29 @@ mod tests {
                 type_parameters: vec![parameter],
                 signature: signature.clone(),
             }],
+            newtypes: vec![nir::newtypes::Newtype {
+                declaration: DeclarationId {
+                    package: 1,
+                    local: 5,
+                },
+                name: "Flag".into(),
+                type_parameters: vec![],
+                parameter_types: vec![],
+                capture_count: 0,
+                requirements: vec![],
+                capabilities: vec![],
+                representation: Term::Primitive(Primitive::Bool),
+            }],
+            alias_contracts: vec![nir::type_aliases::Contract {
+                declaration: DeclarationId {
+                    package: 1,
+                    local: 6,
+                },
+                parameters: vec![],
+                parameter_types: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+            }],
             function_parameters: vec![nir::function_parameters::Declaration {
                 declaration: identity,
                 parameters: vec![parameter],
@@ -190,6 +215,8 @@ mod tests {
         let index = first.functions.positions.clone();
         let identities = first.runtime_function_identities.positions.clone();
         let effects = first.effect_declarations.positions.clone();
+        let newtypes = first.newtypes.positions.clone();
+        let aliases = first.alias_contracts.positions.clone();
         let domains = first.declaration_parameter_domains.clone();
         let sorts = first.declaration_parameter_sorts.clone();
         first.events.push(Event::EnterFunction(DeclarationId {
@@ -207,6 +234,18 @@ mod tests {
         assert!(Arc::ptr_eq(&effects, &next.effect_declarations.positions));
         assert!(Arc::ptr_eq(&domains, &next.declaration_parameter_domains));
         assert!(Arc::ptr_eq(&sorts, &next.declaration_parameter_sorts));
+        assert!(Arc::ptr_eq(&newtypes, &next.newtypes.positions));
+        assert!(Arc::ptr_eq(&aliases, &next.alias_contracts.positions));
+        assert!(std::ptr::eq(
+            next.newtypes.get(&source.newtypes[0].declaration).unwrap(),
+            &source.newtypes[0]
+        ));
+        assert!(std::ptr::eq(
+            next.alias_contracts
+                .get(&source.alias_contracts[0].declaration)
+                .unwrap(),
+            &source.alias_contracts[0]
+        ));
         assert!(next.events().is_empty());
         assert!(next.effect_state.environment.is_empty());
         assert!(std::ptr::eq(

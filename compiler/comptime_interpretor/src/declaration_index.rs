@@ -36,6 +36,12 @@ impl<'a, T> Declarations<'a, T> {
             .get(id)
             .map(|position| &self.declarations[*position])
     }
+    pub(super) fn values(&self) -> impl Iterator<Item = &'a T> + Clone + '_ {
+        let declarations = self.declarations;
+        self.positions
+            .values()
+            .map(move |position| &declarations[*position])
+    }
     pub(super) fn contains_key(&self, id: &DeclarationId) -> bool {
         self.positions.contains_key(id)
     }
@@ -54,7 +60,12 @@ pub(super) type RuntimeIdentities<'a> = Declarations<'a, nir::program::RuntimeFu
 
 pub(super) type Effects<'a> = Declarations<'a, nir::effects::Declaration>;
 
+pub(super) type Newtypes<'a> = Declarations<'a, nir::newtypes::Newtype>;
+pub(super) type Aliases<'a> = Declarations<'a, nir::type_aliases::Contract>;
+
 pub(super) struct SourceIndexes {
+    pub(super) newtypes: Arc<BTreeMap<DeclarationId, usize>>,
+    pub(super) aliases: Arc<BTreeMap<DeclarationId, usize>>,
     pub(super) structs: Arc<BTreeMap<DeclarationId, generated_structs::StructDefinition<'static>>>,
     pub(super) enums: Arc<BTreeMap<DeclarationId, generated_enums::EnumDefinition<'static>>>,
     pub(super) method_parameters: Arc<HashMap<(DeclarationId, DeclarationId), Vec<LocalId>>>,

@@ -208,8 +208,8 @@ impl<'a> Interpreter<'a> {
                 .map(|h| (h.declaration, h))
                 .collect(),
             structs: Default::default(),
-            newtypes: BTreeMap::new(),
-            alias_contracts: BTreeMap::new(),
+            newtypes: Default::default(),
+            alias_contracts: Default::default(),
             enums: Default::default(),
             budget: Budget {
                 steps: fuel as u64,

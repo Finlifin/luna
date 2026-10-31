@@ -122,7 +122,7 @@ impl<'a, 'e> Frame<'a, 'e> {
         }
         let contract = if matches!(expr.kind, K::CheckTypeAlias { .. }) {
             Contract::Alias(
-                *vm.alias_contracts
+                vm.alias_contracts
                     .get(declaration)
                     .ok_or_else(|| vm.failure(ErrorKind::Type, Some(expr.source)))?,
             )
@@ -131,7 +131,7 @@ impl<'a, 'e> Frame<'a, 'e> {
         } else if let Some(def) = vm.enums.get(declaration) {
             Contract::Enum(def.clone())
         } else if let Some(def) = vm.newtypes.get(declaration) {
-            Contract::Newtype(*def)
+            Contract::Newtype(def)
         } else {
             return Err(vm.failure(ErrorKind::Type, Some(expr.source)));
         };

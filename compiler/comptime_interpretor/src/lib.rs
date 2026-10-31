@@ -835,8 +835,8 @@ pub struct Interpreter<'a> {
     retained_callable_signatures: HashMap<(DeclarationId, &'a [Term]), &'a Term>,
     normal_forms: BTreeMap<DeclarationId, &'a nir::normal_forms::Head>,
     structs: layout_catalog::Catalog<generated_structs::StructDefinition<'a>>,
-    newtypes: BTreeMap<DeclarationId, &'a nir::newtypes::Newtype>,
-    alias_contracts: BTreeMap<DeclarationId, &'a nir::type_aliases::Contract>,
+    newtypes: declaration_index::Newtypes<'a>,
+    alias_contracts: declaration_index::Aliases<'a>,
     enums: layout_catalog::Catalog<generated_enums::EnumDefinition<'a>>,
     budget: Budget,
     depth: usize,
@@ -1769,16 +1769,16 @@ impl<'a> Interpreter<'a> {
                 .map(|head| (head.declaration, head))
                 .collect(),
             structs,
-            alias_contracts: package
-                .alias_contracts
-                .iter()
-                .map(|contract| (contract.declaration, contract))
-                .collect(),
-            newtypes: package
-                .newtypes
-                .iter()
-                .map(|d| (d.declaration, d))
-                .collect(),
+            alias_contracts: declaration_index::Aliases::new(
+                &package.alias_contracts,
+                positions.as_ref().map(|index| index.aliases.clone()),
+                |contract| contract.declaration,
+            )?,
+            newtypes: declaration_index::Newtypes::new(
+                &package.newtypes,
+                positions.as_ref().map(|index| index.newtypes.clone()),
+                |definition| definition.declaration,
+            )?,
             enums,
             budget: Budget {
                 steps: remaining_steps,

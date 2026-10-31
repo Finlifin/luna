@@ -269,8 +269,9 @@ identity collisions, publisher-failure rollback, and absence of generated
 entries in the next VM. A constructor test exhausts fuel specifically between
 ordinary VM creation and session catalog publication, then retries successfully.
 
-Remaining world construction includes NF/newtype/alias catalogs and instantiated
-trait evidence/contracts. No active builder transaction or proof outcome is
+Remaining world construction includes NF catalogs and instantiated
+trait evidence/contracts. Newtype and alias indexes now use the shared source
+index mechanism described below. No active builder transaction or proof outcome is
 published as shared metadata.
 
 The layout stage passed the interpreter check, 331 interpreter unit tests and
@@ -280,3 +281,29 @@ Evidence: `/tmp/luna-tools-xgwqvme7/result.json`,
 `/tmp/luna-tools-6n9bh7c8/result.json`. The initial generated-definition subset
 also passed (`/tmp/luna-tools-k3xrfzmp/result.json`). Formatting and diff checks
 passed; no whole-workspace test run or wall-clock performance claim is made.
+
+## Newtype and alias catalogs
+
+Newtype definitions and alias contracts now bind typed Package slices through
+shared source declaration positions. Conversion planning iterates the indexed
+newtypes in declaration-ID order, preserving the previous deterministic map
+order. Lookup still returns the original declaration, not an unfolded or copied
+representation. Distinct nominal identities remain distinct.
+
+Only descriptor lookup is shared. Representation conversions, pattern checks,
+alias obligations and capability checks remain in their invocation paths. The
+alias session regression switches a host proof callback from Satisfied to
+Rejected and Unknown and back; denied calls must not enter the guarded body.
+
+Verification commands:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor -p luna --test nominal_types --test newtypes --test comptime_memory
+```
+
+All checks passed: 331 interpreter unit tests plus 256 integration tests (24
+nominal types, 212 source newtype cases, 20 driver memory cases). Nonempty source
+session catalogs are checked for allocation sharing and original declaration
+references. Evidence: `/tmp/luna-tools-0gxn642o/result.json` and
+`/tmp/luna-tools-kfl8hbks/result.json`. Formatting and diff checks passed.

@@ -52,7 +52,7 @@ impl<'a> Interpreter<'a> {
             (def.parameter_binders(), def.parameter_types.as_slice())
         } else if let Some(def) = self.enums.get(&declaration) {
             (def.parameter_binders(), def.parameter_types.as_slice())
-        } else if let Some(def) = self.newtypes.get(&declaration).copied() {
+        } else if let Some(def) = self.newtypes.get(&declaration) {
             (def.parameter_binders(), def.parameter_types.as_slice())
         } else {
             return Err(self.failure(ErrorKind::Type, None));
@@ -224,7 +224,7 @@ impl<'a> Interpreter<'a> {
                     def.parameter_types.as_slice()
                 } else if let Some(def) = enum_definition.as_ref() {
                     def.parameter_types.as_slice()
-                } else if let Some(def) = self.newtypes.get(&declaration).copied() {
+                } else if let Some(def) = self.newtypes.get(&declaration) {
                     def.parameter_types.as_slice()
                 } else {
                     return Err(self.failure(ErrorKind::Type, None));

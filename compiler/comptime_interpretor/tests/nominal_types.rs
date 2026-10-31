@@ -1331,3 +1331,75 @@ fn immutable_captured_record_indices_check_payloads_and_inner_contracts() {
         assert!(vm.events().is_empty());
     }
 }
+
+#[test]
+fn shared_alias_catalog_rechecks_proofs_before_executing_the_body() {
+    use comptime_interpretor::{CodeSession, ContractOutcome};
+    use nir::program::{TraitRequirement, TypePredicate};
+    use std::sync::Arc;
+    let guard = expr(
+        p(P::Void),
+        K::CheckTypeAlias {
+            preparations: vec![],
+            bindings: None,
+            order: None,
+            body: None,
+            declaration: id(20),
+            arguments: vec![],
+        },
+    );
+    let package = Arc::new(Package {
+        alias_contracts: vec![nir::type_aliases::Contract {
+            declaration: id(20),
+            parameters: vec![],
+            parameter_types: vec![],
+            requirements: vec![TypePredicate::Trait(TraitRequirement {
+                interface: id(90),
+                interface_arguments: vec![],
+                subject: p(P::Bool),
+            })],
+            capabilities: vec![],
+        }],
+        functions: vec![
+            function(
+                1,
+                expr(
+                    p(P::Type),
+                    K::Block {
+                        statements: vec![guard],
+                        result: Some(Box::new(call(3))),
+                    },
+                ),
+            ),
+            function(3, value(p(P::Char))),
+        ],
+        ..Default::default()
+    });
+    let mut session = CodeSession::new(package.clone());
+    for outcome in [
+        ContractOutcome::Satisfied,
+        ContractOutcome::Rejected,
+        ContractOutcome::Unknown,
+        ContractOutcome::Satisfied,
+    ] {
+        let solver = |_: &TypePredicate| outcome;
+        let mut vm =
+            Interpreter::for_comptime_in_session(&package, &mut session, &mut Budget::default())
+                .unwrap()
+                .with_type_solver(&solver);
+        let result = vm.with_code_session(&mut session, |vm| vm.invoke(id(1), vec![]));
+        match outcome {
+            ContractOutcome::Satisfied => assert_eq!(result.unwrap(), Value::Type(p(P::Char))),
+            ContractOutcome::Rejected => {
+                assert_eq!(result.unwrap_err().kind, ErrorKind::TypeContractRejected)
+            }
+            ContractOutcome::Unknown => {
+                assert_eq!(result.unwrap_err().kind, ErrorKind::TypeContractUnresolved)
+            }
+        }
+        let body_called = vm.events().iter().any(
+            |event| matches!(event, Event::EnterFunction(declaration) if *declaration == id(3)),
+        );
+        assert_eq!(body_called, outcome == ContractOutcome::Satisfied);
+    }
+}
