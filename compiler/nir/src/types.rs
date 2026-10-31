@@ -1475,6 +1475,7 @@ impl<E: std::error::Error + 'static> std::error::Error for CallError<E> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TypeError {
+    ConstructionBudget,
     ContextualCodeNotCallable,
     WrongSort { expected: Sort, actual: Sort },
     MissingArgument(usize),
@@ -1502,6 +1503,7 @@ pub enum TypeError {
 impl fmt::Display for TypeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ConstructionBudget => f.write_str("type construction budget exhausted"),
             Self::ContextualCodeNotCallable => f.write_str("contextual code signature requires code-method elaboration, not ordinary callable erasure"),
             Self::InvalidClosureContext => f.write_str("closure qualification requires a closure context"),
             Self::InvalidListComponent => {
@@ -1593,6 +1595,27 @@ impl TypeInterner {
         body: &Term,
         dependencies: &[(RuntimeId, Term)],
     ) -> Result<TypeRef, TypeError> {
+        self.abstract_runtime_with_budget(body, dependencies, &mut 100_000)
+    }
+
+    /// Charge the body and dependency contracts before cloning or rewriting.
+    /// Failure leaves the interner unchanged; supplied fuel accounts for both
+    /// abstraction and subsequent core admission, including cache hits.
+    pub fn abstract_runtime_with_budget(
+        &mut self,
+        body: &Term,
+        dependencies: &[(RuntimeId, Term)],
+        fuel: &mut usize,
+    ) -> Result<TypeRef, TypeError> {
+        *fuel = fuel
+            .checked_sub(dependencies.len())
+            .ok_or(TypeError::ConstructionBudget)?;
+        crate::type_computations::charge_term(body, fuel)
+            .map_err(|_| TypeError::ConstructionBudget)?;
+        for (_, ty) in dependencies {
+            crate::type_computations::charge_term(ty, fuel)
+                .map_err(|_| TypeError::ConstructionBudget)?;
+        }
         let mut positions = std::collections::BTreeMap::new();
         for (index, (id, _)) in dependencies.iter().enumerate() {
             if positions.insert(*id, index).is_some() {
@@ -1624,7 +1647,7 @@ impl TypeInterner {
             })
             .collect::<Result<Vec<_>, TypeError>>()?;
         let body = body.rewrite(0, &mut abstract_identity)?;
-        let core = self.intern(holes, body)?;
+        let core = self.intern_with_budget(holes, body, fuel)?;
         TypeRef::bind(
             core,
             dependencies
@@ -1639,6 +1662,27 @@ impl TypeInterner {
         holes: Vec<Parameter>,
         body: Term,
     ) -> Result<Arc<TypeCore>, TypeError> {
+        self.intern_with_budget(holes, body, &mut 100_000)
+    }
+
+    /// Bound all input structure before recursive formation checks and hashing.
+    /// Interning only validates structural shape; semantic contracts remain the
+    /// caller's responsibility and cannot be skipped on a shared-core hit.
+    pub fn intern_with_budget(
+        &mut self,
+        holes: Vec<Parameter>,
+        body: Term,
+        fuel: &mut usize,
+    ) -> Result<Arc<TypeCore>, TypeError> {
+        *fuel = fuel
+            .checked_sub(holes.len().saturating_add(1))
+            .ok_or(TypeError::ConstructionBudget)?;
+        for hole in &holes {
+            crate::type_computations::charge_term(&hole.ty, fuel)
+                .map_err(|_| TypeError::ConstructionBudget)?;
+        }
+        crate::type_computations::charge_term(&body, fuel)
+            .map_err(|_| TypeError::ConstructionBudget)?;
         for (index, hole) in holes.iter().enumerate() {
             require_sort(&hole.ty, Sort::Type)?;
             validate(&hole.ty, &holes[..index], &mut Vec::new(), false, true)?;

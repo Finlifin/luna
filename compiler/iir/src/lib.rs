@@ -48,14 +48,12 @@ impl CallableIdentity {
         interner: &mut nir::TypeInterner,
         fuel: &mut usize,
     ) -> Result<Self, String> {
-        nir::copy_budget::charge_type_substitution(&signature, &[], &[], fuel)
-            .map_err(|error| format!("IIR callable signature budget: {error:?}"))?;
         completed_type(&signature, &BTreeSet::new(), fuel)?;
         if !matches!(signature.callable_signature(), Term::Function { .. }) {
             return Err("IIR callable identity has a non-callable signature".into());
         }
         let core = interner
-            .intern(vec![], signature)
+            .intern_with_budget(vec![], signature, fuel)
             .map_err(|e| e.to_string())?;
         let signature = nir::TypeRef::bind(core, vec![]).map_err(|e| e.to_string())?;
         Ok(Self { key, signature })

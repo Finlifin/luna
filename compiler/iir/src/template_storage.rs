@@ -171,11 +171,8 @@ impl TemplateStorage {
             }
             selected.push(key);
         }
-        // Bound recursive core validation and hashing before publishing anything.
-        nir::copy_budget::charge_type_substitution(&logical_type, &[], &[], fuel)
-            .map_err(|error| format!("template signature budget: {error:?}"))?;
         let core = interner
-            .intern(vec![], logical_type)
+            .intern_with_budget(vec![], logical_type, fuel)
             .map_err(|e| e.to_string())?;
         let logical_type = nir::TypeRef::bind(core, vec![]).map_err(|e| e.to_string())?;
         Ok(Self {

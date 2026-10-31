@@ -9406,3 +9406,41 @@ Validation in `/home/fin/luna`:
   passed; `/tmp/luna-tools-q6n17r7r/result.json`, exit 0.
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_closures --test comptime_iir_bytecode`:
   passed; `/tmp/luna-tools-k3749mpw/result.json`, exit 0.
+
+
+## Centralize bounded TypeCore construction
+
+TypeInterner now owns resource admission for both direct interning and runtime
+identity abstraction. `intern_with_budget` charges the complete hole telescope,
+body and immutable payloads before recursive validation or hashing.
+`abstract_runtime_with_budget` charges inputs before rewriting, then passes the
+same remaining budget to core admission. Convenience entrypoints use a finite
+100000-unit budget. Budget or depth exhaustion returns ConstructionBudget and
+publishes no new core; existing cores remain reusable on a later admitted call.
+
+The two existing production consumers, IIR frozen callable signatures and
+selected template storage, now pass their operation budget into the interner.
+Their semantic completion and target checks still run before publication.
+Sharing remains structural: different runtime substitutions do not become equal
+merely because their cores are shared. No runtime data is read by abstraction.
+
+This centralizes a requirement for further TypeRef adoption; it does not replace
+all IIR annotations or connect runtime environment acquisition. Reference-side
+substitution/materialization still has its existing APIs, and no complete
+compiler resource audit or speedup is claimed.
+
+Validation in `/home/fin/luna`:
+
+- Initial regression-test compilation failed because the test omitted the
+  NormalForm sort field; corrected before runtime checks.
+  `/tmp/luna-tools-zjujtvor/result.json`, exit 101.
+- `python3 -B development/check.py --timeout 900 -- test -p nir --test type_core_budget --test types --test closure_contexts --test computations --test associated_types --test optional_types`:
+  94 passed; `/tmp/luna-tools-6sdh19ri/result.json`, exit 0. New tests cover deep
+  bodies/contracts, oversized immutable payloads, zero-budget cache hits,
+  exhaustion at each construction boundary, retry and distinct substitutions.
+- `python3 -B development/check.py --timeout 900 -- test -p iir`:
+  106 passed; `/tmp/luna-tools-fr8mq7ln/result.json`, exit 0.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed; `/tmp/luna-tools-zslqyjpe/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test function_type_dependencies --test closure_environment_parameters`:
+  passed; `/tmp/luna-tools-3_ocr6ao/result.json`, exit 0.
