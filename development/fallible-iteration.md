@@ -25,7 +25,7 @@ branch from becoming a bound on another. Copies and assignment use the same
 versioned aggregate machinery as other values. Known error-row widening maps
 the selected tag by payload identity and discards stale source-layout paths.
 
-Precision limits remain: different-tag joins do not retain a disjunction of
+At the initial implementation stage, precision limits remained: different-tag joins do not retain a disjunction of
 payload snapshots; unknown-row embeddings and product transports discard
 relational precision after checking the conversion and evaluating the input.
 No facts are invented for those cases. Additional checked assumes may still
@@ -80,3 +80,54 @@ exited 0; `/tmp/luna-tools-8tfai0_j/result.json`. Final formatting check
 `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`
 exited 0 (`/tmp/luna-tools-a3y2y0fd/result.json`), and `git diff --check` passed.
 No full language suite was run; unrelated fixture failures above remain open.
+
+
+## Transport aggregate and unknown payload observations
+
+The next implementation stage reuses NIR's checked representation-transport
+plan for every error-row and nested tuple/anonymous-record conversion.
+Snapshots retain their payloads and sibling ranges; their destination domains
+are updated recursively. Frozen copy evidence maps each payload path through
+the same plan, including paths below an unknown active branch. Identity
+subplans share immutable evidence rather than duplicating it.
+
+A row permutation changes numeric tags. Such tag observations are omitted
+rather than renamed as though their numeric values stayed unchanged. Payload
+identity is retained separately. Identity tag maps may retain tag evidence.
+The analysis therefore preserves checked payload bounds but still does not
+infer every destination tag or keep a disjunction at different-tag joins.
+No layout fact establishes source-language type equality or unfolds NF heads.
+
+Error-result patterns are now admitted in effect-free program predicates;
+recursive operand and guard checks still reject calls and side effects.
+A predicate expressed as a match can establish the payload bound before
+transport. Nested pattern-guard composition remains limited by the existing
+predicate analyzer and can lose precision; this phase does not claim general
+predicate completeness.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p program_verification --no-fail-fast`:
+  585 passed, exit 0; `/tmp/luna-tools-okqbi1yc/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test error_result_flow --test integer_contracts --test arithmetic_contexts --no-fail-fast`:
+  39 passed, exit 0; `/tmp/luna-tools-m_jgijqk/result.json`. This includes
+  unknown-row payload transport, nested products, anonymous records, stale
+  source assignment, overflow rejection, and impure predicate rejection.
+- `python3 -B -m unittest discover -s development -p test_library_check.py`:
+  13 passed, exit 0.
+
+Public-library limitation found by native acceptance:
+`development/repros/error-row-copy-resolution.fl` contains two valid intended
+uses with multiple concrete error labels. The real sysroot leaves the generic
+builtin Copy head `!E T` pending for `![Low,High] bool`; this prevents resource
+checking before LLVM emission. The original native attempt reports seven
+passes and those two failures in `/tmp/luna-library-mzxi3_jj/summary.json`.
+The reproducer is retained separately from the delivered seven-case fallible
+iterator suite, and no native support for multi-label Copy is claimed. This
+requires row inference/resource-protocol work, not a bypass in program flow.
+
+After the transport change, the delivered native suite was rerun with
+`python3 -B development/library_check.py --stage sysroot-fallible-iteration --timeout 300`:
+seven passed, exit 0; `/tmp/luna-library-b2m9sl4t/summary.json`.
+Formatting check exited 0 (`/tmp/luna-tools-op9_9uul/result.json`), and
+`git diff --check` passed. No full language suite was run.

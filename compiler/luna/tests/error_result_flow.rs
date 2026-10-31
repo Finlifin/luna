@@ -148,3 +148,126 @@ fn copying_result_facts_does_not_make_later_reassignment_safe() {
     .unwrap_err();
     assert!(error.contains("range"), "{error}");
 }
+
+#[test]
+fn unknown_row_transport_preserves_payload_bounds_without_reusing_tag_numbers() {
+    for guard in ["value < 255", "value <= 255"] {
+        let source = format!(
+            "typealias Byte = .u8'builtin;
+            enum Low {{value(Byte)}} enum High {{value(Byte)}}
+            fn run(input:![Low,High] bool)->Byte {{
+                assumes input match {{error Low.value(value) => {guard}, _ => false}};
+                let output:![High,Low] bool = input;
+                output match {{
+                    _! => 0,
+                    error Low.value(value) => value + 1,
+                    error High.value(_) => 0,
+                }}
+            }}"
+        );
+        let result = compile_with_protocols(&source, &Default::default());
+        if guard == "value < 255" {
+            result.unwrap();
+        } else {
+            let error = result.unwrap_err();
+            assert!(error.contains("range"), "{error}");
+        }
+    }
+}
+
+#[test]
+fn nested_product_transport_preserves_payload_and_sibling_ranges() {
+    for payload in [17, 255] {
+        let source = format!(
+            "typealias Byte = .u8'builtin;
+            enum Low {{value(Byte)}} enum High {{value(Byte)}}
+            fn run()->Byte {{
+                let result:![Low,High] bool = error Low.value({payload});
+                let byte:Byte = 3;
+                let original = ((result, byte), byte);
+                let output:Tuple<Tuple<![High,Low] bool,Byte>,Byte> = original;
+                let ((result,first),second) = output;
+                let observed:Byte = result match {{
+                    _! => 0,
+                    error Low.value(value) => value + 1,
+                    error High.value(_) => 0,
+                }};
+                first + second
+            }}"
+        );
+        let result = support::compile_with_tuple_protocols(&source, &Default::default());
+        if payload == 17 {
+            result.unwrap();
+        } else {
+            let error = result.unwrap_err();
+            assert!(error.contains("range"), "{error}");
+        }
+    }
+}
+
+#[test]
+fn product_transport_retires_stale_source_observations() {
+    let source = "typealias Byte = .u8'builtin;
+        enum Low {value(Byte)} enum High {value(Byte)}
+        fn run()->Byte {
+            let good:![Low,High] bool = error Low.value(17);
+            let bad:![Low,High] bool = error Low.value(255);
+            var original = (good,);
+            let output:Tuple<![High,Low] bool> = original;
+            original = (bad,);
+            let (result,) = output;
+            result match {_! => 0,error Low.value(value)=>value + 1,error High.value(_)=>0}
+        }";
+    support::compile_with_tuple(source);
+    let source = source.replace("let (result,) = output;", "let (result,) = original;");
+    let error = support::compile_with_tuple_protocols(&source, &Default::default()).unwrap_err();
+    assert!(error.contains("range"), "{error}");
+}
+
+#[test]
+fn error_predicate_admission_still_rejects_calls_in_payload_guards() {
+    let error = compile_with_protocols(
+        "typealias Byte = .u8'builtin;
+        enum Low {value(Byte)}
+        fn inspect_byte(value:Byte)->bool {true}
+        fn run(input:!Low bool) {
+            assumes input match {error Low.value(value) => inspect_byte(value), _ => false};
+        }",
+        &Default::default(),
+    )
+    .unwrap_err();
+    assert!(error.contains("effect-free program predicate"), "{error}");
+}
+
+#[test]
+fn anonymous_record_transport_preserves_error_payloads() {
+    for (payload, relation) in [(17, "<"), (255, "<=")] {
+        let source = format!(
+            "typealias Byte = .u8'builtin;
+            fn record(...fields:T)->T where T {{fields}}
+            enum Low {{value(Byte)}} enum High {{value(Byte)}}
+            fn expected()->![High,Low] bool {{true}}
+            fn run()->Byte {{
+                let result:![Low,High] bool = error Low.value({payload});
+                let byte:Byte = 3;
+                let input = record {{result:result,byte:byte}};
+                assumes input.result match {{error Low.value(value) => value {relation} 255, _ => false}};
+                assumes input.byte < 10;
+                let output:(record {{result:expected(),byte:byte}})'type = input;
+                let observed:Byte = output.result match {{
+                    _! => 0,
+                    error Low.value(value) => value + 1,
+                    error High.value(_) => 0,
+                }};
+                output.byte + 1
+            }}"
+        );
+        let result = compile_with_protocols(&source, &Default::default());
+        if payload == 17 {
+            result.unwrap();
+        } else {
+            let error = result.unwrap_err();
+            assert!(error.contains("range"), "{error}");
+        }
+    }
+}

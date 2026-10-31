@@ -1,0 +1,45 @@
+{-
+    Pending public-library resource integration for multiple error labels.
+    Run with luna test <this-file> --sysroot library --inline-functions.
+    These tests should pass, but the current generic builtin Copy head !E T
+    remains unresolved for ![Low,High] bool. Preserve this case while improving
+    row inference and resource protocol selection; do not bypass the checker.
+-}
+
+enum Low {value(u8)}
+enum High {value(u8)}
+impl Clone for Low {fn clone(*self) -> Self {self.*}}
+impl Copy for Low {}
+impl Clone for High {fn clone(*self) -> Self {self.*}}
+impl Copy for High {}
+
+fn increment_remapped(input: ![Low,High] bool) -> u8 {
+    assumes input match {error Low.value(value) => value < 255, _ => false};
+    let output: ![High,Low] bool = input;
+    output match {
+        _! => 0,
+        error Low.value(value) => value + 1,
+        error High.value(_) => 0,
+    }
+}
+
+test error_predicate_facts_survive_row_transport {
+    let input: ![Low,High] bool = error Low.value(17);
+    let observed = increment_remapped(input);
+    assumes observed == 18;
+}
+
+test nested_error_product_keeps_payload_and_siblings {
+    let result: ![Low,High] bool = error Low.value(17);
+    let byte: u8 = 3;
+    let input = ((result, byte), byte);
+    let output: Tuple<Tuple<![High,Low] bool,u8>,u8> = input;
+    let ((result,first),second) = output;
+    let observed: u8 = result match {
+        _! => 0,
+        error Low.value(value) => value + 1,
+        error High.value(_) => 0,
+    };
+    let siblings = first + second;
+    assumes observed == 18 and siblings == 6;
+}

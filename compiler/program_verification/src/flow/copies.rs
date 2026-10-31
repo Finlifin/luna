@@ -969,3 +969,63 @@ impl Walker<'_> {
         Ok(())
     }
 }
+
+impl PreparedCopy {
+    /// Reuse the frozen source facts while renaming destination components.
+    /// Numeric tags whose values change are omitted, never copied unchanged.
+    pub(super) fn transport(
+        self: &std::sync::Arc<Self>,
+        plan: &nir::error_results::RepresentationTransport,
+        limits: &mut Limits,
+        depth: usize,
+    ) -> Result<std::sync::Arc<Self>, Reason> {
+        limits.step(1)?;
+        if depth >= 128 {
+            return Err(Reason::DepthLimit);
+        }
+        if matches!(plan, nir::error_results::RepresentationTransport::Identity) {
+            return Ok(self.clone());
+        }
+        let mut fields = BTreeMap::new();
+        for (path, id) in &self.fields {
+            let mut cursor = plan;
+            let mut mapped = Vec::new();
+            let mut retained = true;
+            for component in path {
+                match super::error_results::transport_component(cursor, *component, limits)? {
+                    Some((component, next)) => {
+                        mapped.push(component);
+                        cursor = next;
+                    }
+                    None => {
+                        retained = false;
+                        break;
+                    }
+                }
+            }
+            if retained {
+                fields.insert(mapped, *id);
+            }
+        }
+        let mut children = Vec::new();
+        for (component, child) in &self.children {
+            if let Some((component, next)) =
+                super::error_results::transport_component(plan, *component, limits)?
+            {
+                children.push((component, child.transport(next, limits, depth + 1)?));
+            }
+        }
+        Ok(std::sync::Arc::new(Self {
+            source: self.source.clone(),
+            scalar: self.scalar,
+            expression: self
+                .expression
+                .as_ref()
+                .map(|p| p.copy(limits))
+                .transpose()?,
+            range: self.range.as_ref().map(|r| r.copy(limits)).transpose()?,
+            fields,
+            children,
+        }))
+    }
+}

@@ -5191,6 +5191,7 @@ fn predicate_pattern<'a>(
                 pending.push(condition);
             }
             Pattern::OptionalPresent(inner)
+            | Pattern::ErrorResult { inner, .. }
             | Pattern::Observe { inner, .. }
             | Pattern::Binding { inner, .. } => patterns.push(inner),
             Pattern::Tuple(fields)

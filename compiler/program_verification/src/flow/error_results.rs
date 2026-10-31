@@ -138,26 +138,148 @@ impl Walker<'_> {
                 if operand.ty == expr.ty {
                     return Ok(value);
                 }
-                // Keep known payload snapshots when widening a concrete branch.
-                // Unknown tags and product transports lose relational precision;
-                // never reuse source tag/path identities under another layout.
-                if conversion == Conversion::Embed {
-                    if let Some(AggregateKind::ErrorResult(source_tag)) = value.aggregate_kind {
-                        let label = if source_tag == 0 {
-                            None
-                        } else {
-                            Some(self.error_payload_type(&operand.ty, source_tag)?.clone())
-                        };
-                        let target_tag = self.error_pattern_tag(&expr.ty, label.as_ref())?;
-                        value.clear_evidence(self.limits)?;
-                        value.projection = None;
-                        value.nominal_type = Some(std::sync::Arc::new(expr.ty.clone()));
-                        value.aggregate_kind = Some(AggregateKind::ErrorResult(target_tag));
-                        return self.materialize_aggregate(value, &expr.ty, state);
-                    }
-                }
-                self.unknown_value(&expr.ty)
+                let plan = nir::error_results::transport_plan_with_layouts(
+                    &operand.ty,
+                    &expr.ty,
+                    conversion == Conversion::Product,
+                    &mut self.limits.arithmetic.steps,
+                    &mut |a, b| a == b,
+                    &|ty| {
+                        package?
+                            .normal_forms
+                            .iter()
+                            .find_map(|head| head.tuple_elements(ty))
+                    },
+                )
+                .map_err(conversion_failure)?;
+                let evidence = self
+                    .prepare_copy(&value, state)?
+                    .map(|copy| copy.transport(&plan, self.limits, 0))
+                    .transpose()?;
+                let mut snapshot = value.snapshot(self.limits, 0)?;
+                snapshot.clear_evidence(self.limits)?;
+                let mut mapped = self.transport_snapshot(snapshot, &expr.ty, &plan, 0)?;
+                mapped.evidence = evidence;
+                self.materialize_aggregate(mapped, &expr.ty, state)
             }
         }
+    }
+}
+
+// A tag observation stores a number, whereas a payload path stores identity.
+// Reordering a row can rename payload paths directly, but cannot reuse the
+// old numeric tag as if it were already the destination tag.
+pub(super) fn transport_component<'p>(
+    plan: &'p nir::error_results::RepresentationTransport,
+    component: Component,
+    limits: &mut Limits,
+) -> Result<Option<(Component, &'p nir::error_results::RepresentationTransport)>, Reason> {
+    use nir::error_results::RepresentationTransport as Plan;
+    const IDENTITY: Plan = Plan::Identity;
+    limits.step(1)?;
+    let (kind, slot) = component;
+    Ok(Some(match plan {
+        Plan::Identity => (component, &IDENTITY),
+        Plan::Tuple(fields) if kind == AggregateKind::Tuple => {
+            (component, fields.get(slot).ok_or(Reason::InvalidSignature)?)
+        }
+        Plan::Record(fields) if kind == AggregateKind::AnonymousRecord => (
+            component,
+            &fields.get(slot).ok_or(Reason::InvalidSignature)?.1,
+        ),
+        Plan::Error { tags, .. } => match kind {
+            AggregateKind::ErrorResult(tag) if slot == 0 => {
+                let mapped = *tags.get(tag).ok_or(Reason::InvalidSignature)?;
+                ((AggregateKind::ErrorResult(mapped), slot), &IDENTITY)
+            }
+            AggregateKind::ErrorTag if slot == 0 => {
+                limits.step(tags.len())?;
+                if tags.iter().enumerate().any(|(a, b)| a != *b) {
+                    return Ok(None);
+                }
+                (component, &IDENTITY)
+            }
+            _ => return Err(Reason::InvalidSignature),
+        },
+        _ => return Err(Reason::InvalidSignature),
+    }))
+}
+
+impl Walker<'_> {
+    fn transport_snapshot(
+        &mut self,
+        mut value: Value,
+        target: &Term,
+        plan: &nir::error_results::RepresentationTransport,
+        depth: usize,
+    ) -> Result<Value, Reason> {
+        use nir::error_results::RepresentationTransport as Plan;
+        self.limits.step(1)?;
+        if depth >= 128 {
+            return Err(Reason::DepthLimit);
+        }
+        match plan {
+            Plan::Identity => return Ok(value),
+            Plan::Error { tags, .. } => {
+                value.aggregate_kind = match value.aggregate_kind {
+                    Some(AggregateKind::ErrorResult(tag)) => Some(AggregateKind::ErrorResult(
+                        *tags.get(tag).ok_or(Reason::InvalidSignature)?,
+                    )),
+                    None => None,
+                    _ => return Err(Reason::InvalidSignature),
+                };
+            }
+            Plan::Tuple(plans) => {
+                let types = self
+                    .tuple_field_types(target)?
+                    .ok_or(Reason::InvalidSignature)?;
+                if types.len() != plans.len() {
+                    return Err(Reason::InvalidSignature);
+                }
+                if let Some(fields) = value.fields.take() {
+                    if fields.len() != plans.len() {
+                        return Err(Reason::InvalidSignature);
+                    }
+                    value.fields = Some(
+                        fields
+                            .into_iter()
+                            .zip(plans)
+                            .zip(types)
+                            .map(|((field, plan), ty)| {
+                                self.transport_snapshot(field, &ty, plan, depth + 1)
+                            })
+                            .collect::<Result<_, _>>()?,
+                    );
+                }
+                value.aggregate_kind = Some(AggregateKind::Tuple);
+            }
+            Plan::Record(plans) => {
+                let Term::Record(types) = target else {
+                    return Err(Reason::InvalidSignature);
+                };
+                if types.len() != plans.len() {
+                    return Err(Reason::InvalidSignature);
+                }
+                if let Some(fields) = value.fields.take() {
+                    if fields.len() != plans.len() {
+                        return Err(Reason::InvalidSignature);
+                    }
+                    let mut mapped = Vec::with_capacity(fields.len());
+                    for ((field, (name, plan)), (expected, ty)) in
+                        fields.into_iter().zip(plans).zip(types)
+                    {
+                        self.limits.step(name.len())?;
+                        if name != expected {
+                            return Err(Reason::InvalidSignature);
+                        }
+                        mapped.push(self.transport_snapshot(field, ty, plan, depth + 1)?);
+                    }
+                    value.fields = Some(mapped);
+                }
+                value.aggregate_kind = Some(AggregateKind::AnonymousRecord);
+            }
+        }
+        value.nominal_type = Some(std::sync::Arc::new(target.clone()));
+        Ok(value)
     }
 }
