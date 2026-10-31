@@ -150,8 +150,8 @@ impl Builder<'_> {
             Some((self.world.context(), self.world.assumptions())),
             None,
         )?;
-        snapshot.dispatch_instances = prepared.0;
-        self.fuel = prepared.4;
+        snapshot.dispatch_instances = prepared.dispatch;
+        self.fuel = prepared.remaining;
         let solver = |predicate: &n::TypePredicate| {
             let world = crate::capabilities::World {
                 index: self.world.index(),

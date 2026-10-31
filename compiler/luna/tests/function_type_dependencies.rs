@@ -1508,3 +1508,40 @@ fn materialized_template_tables_share_logical_cores_without_sharing_targets() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn template_storage_and_frozen_callable_evidence_share_one_materialization_pool() {
+    let package = support::compile(
+        "typealias Type=.Type'builtin;
+         typealias Callback=fn(comptime T:Type,value:T)->T;
+         fn keep(comptime T:Type,value:T)->T {value}
+         pure comptime fn Carrier<action:Callback>->Type {bool}
+         fn witness()->bool where T {true}
+         fn run()->bool {
+             let callback:Callback=keep;
+             let invoke=||callback(bool,true);
+             witness<Carrier<keep>>() and invoke()
+         }",
+    );
+    let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
+    let declaration = support::id(&package, "keep");
+    let evidence = graph
+        .callable_identities
+        .iter()
+        .find(|identity| identity.key.declaration == declaration)
+        .unwrap();
+    let storage = graph
+        .templates
+        .iter()
+        .find(|table| table.targets().contains(&evidence.key))
+        .unwrap();
+    assert!(std::sync::Arc::ptr_eq(
+        evidence.signature.core(),
+        storage.logical_type_reference().core()
+    ));
+    graph.validate(&mut 100_000).unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}

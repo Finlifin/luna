@@ -111,7 +111,7 @@ struct Builder<'a> {
     effect_contracts: Vec<iir::effects::Contract>,
     effect_instances: HashSet<nir::effects::Operation>,
     callable_identities: Vec<iir::CallableIdentity>,
-    callable_type_cores: nir::TypeInterner,
+    type_cores: nir::TypeInterner,
 }
 /// Bounded, transactional: failure returns no partially materialized world.
 pub fn dispatch_instances(
@@ -127,7 +127,7 @@ pub fn dispatch_instances(
         None,
         None,
     )
-    .map(|(dispatch, ..)| dispatch)
+    .map(|result| result.dispatch)
 }
 /// Prepare transitive dispatch dependencies of explicit entry points and the
 /// parent/capability closure of concrete implementations retained by the NIR VM.
@@ -148,7 +148,7 @@ pub fn dispatch_instances_for_roots(
         None,
         None,
     )
-    .map(|(dispatch, ..)| dispatch)
+    .map(|result| result.dispatch)
 }
 
 /// Prepare reachable dispatch while retaining ordinary Type telescopes for
@@ -167,7 +167,7 @@ pub fn dispatch_instances_for_invocation(
         None,
         None,
     )
-    .map(|(dispatch, ..)| dispatch)
+    .map(|result| result.dispatch)
 }
 
 /// Resolve one concrete method through the same checked dispatch closure used
@@ -192,8 +192,8 @@ pub fn resolve_method_instance(
         None,
     );
     match result {
-        Ok((_, _, _, _, remaining, ..)) => {
-            *fuel = remaining;
+        Ok(result) => {
+            *fuel = result.remaining;
             selected.ok_or_else(|| "method selection produced no body identity".into())
         }
         Err(reason) => {
@@ -239,8 +239,8 @@ pub fn normalize_inline_annotations(
         None,
     );
     match result {
-        Ok((_, _, _, _, remaining, ..)) => {
-            *fuel = remaining;
+        Ok(result) => {
+            *fuel = result.remaining;
             Ok(())
         }
         Err(reason) => {
@@ -270,8 +270,8 @@ pub fn resolve_quote_method_instance(
         None,
     );
     match result {
-        Ok((_, _, _, _, remaining, ..)) => {
-            *fuel = remaining;
+        Ok(result) => {
+            *fuel = result.remaining;
             selected.ok_or("quote selection produced no body identity".into())
         }
         Err(reason) => {
@@ -298,7 +298,7 @@ pub fn dispatch_instances_in_context(
         Some((context, assumptions)),
         None,
     )
-    .map(|(dispatch, ..)| dispatch)
+    .map(|result| result.dispatch)
 }
 /// Materialize an explicit set of function instances. Failure publishes no
 /// partial graph; recursive calls reuse the same instance identity.
@@ -322,16 +322,17 @@ pub fn instantiate_with_types(
     expansion: &dyn Expansion,
 ) -> Result<iir::Package, String> {
     nir::phases::validate(package).map_err(|e| format!("IIR input phase: {}", e.message))?;
-    let (
+    let BuildResult {
         mut dispatch,
         functions,
         nominals,
         interfaces,
-        _,
         expansion_sources,
         effect_contracts,
         callable_identities,
-    ) = build(
+        mut type_cores,
+        ..
+    } = build(
         package,
         budget,
         Roots::Iir(roots),
@@ -341,8 +342,13 @@ pub fn instantiate_with_types(
         Some(expansion),
     )?;
     let mut template_fuel = budget.steps;
-    let templates =
-        captured_templates::storage(&functions, package, &dispatch, &mut template_fuel)?;
+    let templates = captured_templates::storage(
+        &functions,
+        package,
+        &dispatch,
+        &mut type_cores,
+        &mut template_fuel,
+    )?;
     // A selected interface may have conditionally available or simply unused
     // methods. Publish executable links only for demanded concrete bodies.
     let demanded: HashSet<_> = functions
@@ -389,6 +395,21 @@ enum Roots<'a> {
     Method(&'a n::Expr, &'a mut Option<n::MethodInstance>),
     QuoteMethod(&'a n::Expr, &'a mut Option<n::MethodInstance>),
 }
+// The immutable type arena belongs to the entire materialization, including
+// the storage pass that runs after dependency discovery. Analysis-only callers
+// discard this private result; no active inference state is retained here.
+struct BuildResult {
+    dispatch: Vec<n::DispatchInstance>,
+    functions: Vec<iir::FunctionInstance>,
+    nominals: Vec<iir::NominalInstance>,
+    interfaces: Vec<iir::InterfaceContract>,
+    remaining: usize,
+    expansion_sources: Vec<n::ExpansionSource>,
+    effect_contracts: Vec<iir::effects::Contract>,
+    callable_identities: Vec<iir::CallableIdentity>,
+    type_cores: nir::TypeInterner,
+}
+
 fn build(
     package: &n::Package,
     budget: Budget,
@@ -397,19 +418,7 @@ fn build(
     type_roots: &[nir::Term],
     context: Option<(&Context, &[n::TraitRequirement])>,
     expansion: Option<&dyn Expansion>,
-) -> Result<
-    (
-        Vec<n::DispatchInstance>,
-        Vec<iir::FunctionInstance>,
-        Vec<iir::NominalInstance>,
-        Vec<iir::InterfaceContract>,
-        usize,
-        Vec<n::ExpansionSource>,
-        Vec<iir::effects::Contract>,
-        Vec<iir::CallableIdentity>,
-    ),
-    String,
-> {
+) -> Result<BuildResult, String> {
     let quote_selection = matches!(roots, Roots::QuoteMethod(..));
     // NIR interpretation retains all unconditional concrete implementations.
     // Their parent/capability worlds must remain closed even when only a few
@@ -467,7 +476,7 @@ fn build(
         effect_contracts: vec![],
         effect_instances: HashSet::new(),
         callable_identities: vec![],
-        callable_type_cores: nir::TypeInterner::default(),
+        type_cores: nir::TypeInterner::default(),
     };
     for ty in type_roots {
         let ty = builder.normalized_type(ty)?;
@@ -618,16 +627,17 @@ fn build(
             Task::Type(ty) => builder.ty(ty)?,
         }
     }
-    Ok((
-        builder.output,
-        builder.instances.unwrap_or_default(),
-        builder.nominals,
-        builder.interface_contracts,
-        builder.fuel,
-        builder.quote_sources,
-        builder.effect_contracts,
-        builder.callable_identities,
-    ))
+    Ok(BuildResult {
+        dispatch: builder.output,
+        functions: builder.instances.unwrap_or_default(),
+        nominals: builder.nominals,
+        interfaces: builder.interface_contracts,
+        remaining: builder.fuel,
+        expansion_sources: builder.quote_sources,
+        effect_contracts: builder.effect_contracts,
+        callable_identities: builder.callable_identities,
+        type_cores: builder.type_cores,
+    })
 }
 impl Builder<'_> {
     fn tick(&mut self, depth: usize) -> Result<(), String> {
@@ -2273,7 +2283,7 @@ impl Builder<'_> {
                             arguments: arguments.clone(),
                         },
                         signature,
-                        &mut self.callable_type_cores,
+                        &mut self.type_cores,
                         &mut self.fuel,
                     )?);
                 }

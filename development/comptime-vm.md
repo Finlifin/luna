@@ -9123,3 +9123,30 @@ Validation in `/home/fin/luna` (exit 0):
 The template-storage pool is local to this materialization phase, separate from
 retained callable evidence. General function/expression annotations still use
 Term; runtime-dependent type environments remain a separate unfinished path.
+
+
+## One type interner across IIR dependency and template storage phases
+
+The materialization builder now transfers its immutable TypeInterner to the
+captured-template storage pass. Retained callable evidence and template tables
+can therefore share one core, instead of recreating equal cores in separate
+phase-local pools. BuildResult names the result fields and owns the transferred
+pool; analysis and staged-dispatch consumers explicitly take their dispatch and
+remaining budget. No active inference state crosses this boundary.
+
+A source regression places the same dependent runtime function in an opaque
+normal-form input and a closure's template capture. The final IIR graph proves
+that callable evidence and template storage point to the same core, validates,
+and executes successfully. Sharing does not remove declaration/contract checks.
+General annotations and runtime-dependent environment handling are still pending.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test function_type_dependencies --test scoped_comptime_callables`:
+  50 passed; `/tmp/luna-tools-m_xd8ja7/result.json`, exit 0. The first build
+  exposed a staged-dispatch consumer of the old positional tuple; it was updated
+  to named fields before the successful run.
+- `python3 -B development/check.py --timeout 900 -- test -p materialization --test expansion_boundary`:
+  3 passed; `/tmp/luna-tools-p4qupoe7/result.json`, exit 0.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed; `/tmp/luna-tools-bmqgu9_6/result.json`, exit 0.
