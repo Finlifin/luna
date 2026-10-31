@@ -426,3 +426,48 @@ python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
 invocations), exit 0: `/tmp/luna-tools-wkvlxf5_/result.json`. Only explanatory
 comments changed afterward. Format check: `/tmp/luna-tools-e_dmhlkj/result.json`,
 exit 0; `git diff --check` passed.
+
+## One local append admission path for tree and bytecode execution
+
+Tree execution now sends owned local lists, root storage and projected value
+references through the same `check_list_append` / `complete_list_append`
+operations as bytecode. This removes separate tree implementations of type
+admission, resource accounting and post-extension checking. In particular, the
+old projected-reference tree path re-admitted every element after independently
+admitting both operands; the shared path checks combined representation limits
+without repeating element type admission.
+
+The prefix is checked before evaluating the suffix. Fusion remains restricted
+to local or frozen suffixes and literal lists of non-calling elements; arbitrary
+callbacks still use ordinary left-snapshot concatenation. Suffix evaluation
+holds no receiver borrow, so self-appends remain legal. Failed extension checks
+restore the original length. Runtime cleanup and the legacy internal pointer
+path remain outside this local-value operation.
+
+The new regression supplies a malformed prefix with a missing suffix binding:
+Type rejection must occur before reading that binding, on tree and bytecode,
+for owned, root-storage and projected-reference carriers. Replacing the prefix
+and supplying the suffix must recover in the same VM. Existing tests cover
+allocation reuse, aliasing, invalid suffixes and budget-boundary rollback.
+
+This does **not** make repeated append linear. `Value::List` still exposes a
+mutable `Vec<Value>` and each operation must validate its existing contents.
+A reusable admission summary needs an owned immutable representation (or a
+mutation revision) and scope-specific proof dependencies, invalidated by every
+mutation. Buffer address or declaration identity alone cannot establish that
+previously checked contents or proof assumptions are still valid. No end-to-end
+performance claim is made for this consolidation.
+
+Validation from `/home/fin/luna` (all exit 0):
+
+```sh
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib
+python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_list_operations --test comptime_list_type_evidence --test comptime_memory
+```
+
+Evidence: `/tmp/luna-tools-uymtepgr/result.json` (formatting),
+`/tmp/luna-tools-us9_3u7g/result.json` (332 interpreter unit tests), and
+`/tmp/luna-tools-cqwwqsnm/result.json` (list and memory integration suites).
+The library tests embed the meta sources; they are not a standalone sysroot
+packaging check. `git diff --check` passed.

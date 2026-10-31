@@ -648,3 +648,74 @@ fn frozen_append_checks_suffix_before_mutation_and_recovers_at_every_budget_boun
         }
     }
 }
+
+#[test]
+fn append_rejects_malformed_prefix_before_reading_suffix_for_every_carrier() {
+    let package = package();
+    let input = LocalId { owner: 1, index: 0 };
+    let suffix = LocalId { owner: 1, index: 1 };
+    let ty = list(Primitive::Bool);
+    let body = expr(
+        Term::Primitive(Primitive::Void),
+        K::Assign {
+            place: Place {
+                root: input,
+                fields: vec![],
+            },
+            value: Box::new(expr(
+                ty.clone(),
+                K::ListConcat(
+                    Box::new(expr(ty.clone(), K::Local(input))),
+                    Box::new(expr(ty.clone(), K::Local(suffix))),
+                ),
+            )),
+        },
+    );
+    for compiled in [false, true] {
+        for carrier in 0..3 {
+            let wrap = |value| match carrier {
+                0 => value,
+                1 => Value::Storage(Storage::new(value)),
+                _ => Value::ComptimeReference(
+                    value_reference::ValueReference::projected(
+                        Storage::new(Value::AnonymousRecord(vec![("items".into(), value)])),
+                        &[(nir::program::FieldOwner::Anonymous, 0)],
+                        &mut 1000,
+                    )
+                    .unwrap(),
+                ),
+            };
+            let malformed = Value::List {
+                ty: ty.clone(),
+                values: vec![Value::Char('x')],
+            };
+            let mut env = Environment::from([(input, wrap(malformed.clone()))]);
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            // The missing suffix binding would produce MissingBinding if read.
+            assert_eq!(
+                run(&mut vm, &body, &mut env, compiled).unwrap_err().kind,
+                ErrorKind::Type
+            );
+            assert_eq!(
+                vm.invocation_slot_value(&env[&input], Some(SOURCE))
+                    .unwrap(),
+                malformed
+            );
+            let valid = Value::List {
+                ty: ty.clone(),
+                values: vec![Value::Bool(true)],
+            };
+            env.insert(input, wrap(valid.clone()));
+            env.insert(suffix, valid);
+            run(&mut vm, &body, &mut env, compiled).unwrap();
+            assert_eq!(
+                vm.invocation_slot_value(&env[&input], Some(SOURCE))
+                    .unwrap(),
+                Value::List {
+                    ty: ty.clone(),
+                    values: vec![Value::Bool(true); 2]
+                }
+            );
+        }
+    }
+}

@@ -378,10 +378,10 @@ mod tests {
                     if mode == 0 {
                         vm.eval_list_append(&expr, env).expect("pointer append")
                     } else if mode >= 5 {
-                        vm.eval_owned_list_append(&reference_expr, env)
+                        vm.eval_local_list_append(&reference_expr, env)
                             .expect("owned append")
                     } else {
-                        vm.eval_reference_list_append(&reference_expr, env)
+                        vm.eval_local_list_append(&reference_expr, env)
                             .expect("reference append")
                     }
                 };
