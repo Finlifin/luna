@@ -81,6 +81,7 @@ impl Checker<'_, '_> {
         container: OwnerId,
         premise_traits: Option<&[n::Trait]>,
     ) -> Result<n::MethodContract, Error> {
+        self.validate_comptime_receiver(owner)?;
         let item = self.package.item(owner).unwrap();
         let (signature, default) = match &item.kind {
             ItemKind::Fn(sig, _) => (

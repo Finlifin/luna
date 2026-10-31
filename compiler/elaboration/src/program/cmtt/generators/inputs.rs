@@ -510,8 +510,14 @@ impl Checker<'_, '_> {
                         let value = self.check_generator_data_input(argument, expected, context)?;
                         (Argument::Data(None), value.ty)
                     } else {
-                        let (value, ty) =
-                            self.generator_data_expression_in_context(argument, expected, context)?;
+                        let (value, ty) = if matches!(
+                            signature.params[route.parameter].ty.kind,
+                            TyParamKind::Itself { is_ref: false }
+                        ) {
+                            self.generator_receiver_argument(argument, expected, context)?
+                        } else {
+                            self.generator_data_expression_in_context(argument, expected, context)?
+                        };
                         (
                             if self.generator_value_needs_live_storage(&value, argument.span)? {
                                 Argument::LiveData(value)

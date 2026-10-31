@@ -6,6 +6,35 @@ comptime 没有指针。comptime 方法的 `self` 使用值引用语义，接收
 
 VM 的 comptime 存储读写现在使用内部值引用路径：引用共享存储身份，字段赋值在右值求值后重新定位，并在预算、字段路径检查通过后写回，不借助 runtime pointer 或 Copy／Clone 协议。NIR 调用参数现可显式记录 `comptime-reference` 传递，VM 支持局部变量、结构字段的别名和跨调用路径转发，计算得到的接收者只求值一次。活动引用不能冻结为常量、逃逸进闭包快照或进入 runtime Copy 路径。源码 lowering 已为已知声明的 comptime `self` 调用发出该标记，覆盖接收者调用、显式类型调用及 trait 方法。参数收集保留局部接收者的位置，计算得到的基值仍先求值一次。`let` 接收者可读及更新字段，但不能通过方法整体重新绑定；此限制在引用转发时保留。`List.append` 与内部范围追加已使用 `self` 写回，带回调的遍历显式保存输入快照。StructBuilder／EnumBuilder 通过同一机制更新字段，保留生成类型的身份与发布检查。旧式 pattern view 指针接口及其他存储操作仍需迁移；这不是所有 comptime 接口已经完成迁移的声明。
 
+
+CMTT 的表达式／模式生成器方法也使用这一值引用语义，包括 trait 默认方法转发、
+泛型接收者和嵌套字段。方法内更新 `self` 的字段会更新调用方拥有的值；接收者表达式
+只求值一次，后续实参的副作用仍按调用顺序发生。`var` 接收者允许整值替换；`let`
+接收者允许字段更新，但整值替换在转发之后仍会被拒绝。comptime 方法声明中的
+`*self` 现在会被拒绝，应改写为 `self`；runtime 方法仍可使用 `*self`。
+
+```flurry
+struct Builder { ready: bool }
+
+impl Builder {
+    comptime fn build(self) -> < |- bool> {
+        self.ready = true;
+        let ready = self.ready;
+        '(ready)
+    }
+}
+
+comptime fn generate() -> < |- bool> {
+    let builder = Builder {ready: false};
+    let code = builder.build();
+    if builder.ready { code } else { '(false) }
+}
+
+fn generated() -> bool { ~<generate()> }
+```
+
+以上接线不意味着所有旧显式 comptime 指针参数与操作都已经从实现中移除。
+
 ## Intro
 
 传统编译时计算（如 C 的预处理器宏或 C++ 的 constexpr）在表达能力和类型安全之间存在取舍。Flurry 将编译时计算设计为语言的一等公民：编译时函数使用与运行时相同的语法和类型系统，同时通过执行阶段标记区分两者的边界。

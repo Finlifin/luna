@@ -66,7 +66,9 @@ fn dual_phase_list_protocol_rejects_malformed_staged_contracts() {
         )
         .unwrap_err();
         assert!(
-            error.contains("ListPatternView") || error.contains("associated value used as a type"),
+            error.contains("ListPatternView")
+                || error.contains("associated value used as a type")
+                || error.contains("comptime methods use value-reference self"),
             "{from}: {error}"
         );
     }
@@ -927,7 +929,9 @@ fn list_pattern_protocol_validation_precedes_any_pattern_use() {
         )
         .unwrap_err();
         assert!(
-            error.contains("ListPatternView") || error.contains("associated value used as a type"),
+            error.contains("ListPatternView")
+                || error.contains("associated value used as a type")
+                || error.contains("comptime methods use value-reference self"),
             "{error}"
         );
     }

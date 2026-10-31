@@ -6653,6 +6653,21 @@ impl Interpreter<'_> {
                     })();
                     self.budget.steps = fuel;
                     checked.map_err(|kind| self.failure(kind, None))?;
+                } else if let Value::ComptimeReference(reference) = value {
+                    if !self.comptime_only {
+                        return Err(self.failure(ErrorKind::PhaseMismatch, None));
+                    }
+                    let mut fuel = self.remaining_steps();
+                    let checked = (|| {
+                        let contents = reference.borrow(&mut fuel)?;
+                        if self.has_type(contents.value(), ty) {
+                            Ok(())
+                        } else {
+                            Err(ErrorKind::Type)
+                        }
+                    })();
+                    self.budget.steps = fuel;
+                    checked.map_err(|kind| self.failure(kind, None))?;
                 } else if !self.has_type(value, ty) {
                     return Err(self.failure(ErrorKind::Type, None));
                 }

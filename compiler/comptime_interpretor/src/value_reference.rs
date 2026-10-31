@@ -13,6 +13,17 @@ pub struct ValueReference {
 }
 
 impl ValueReference {
+    /// Create invocation-local storage for a computed receiver. This is not a
+    /// source pointer and cannot be exported into normal terms or runtime code.
+    pub fn owned(value: Value) -> Self {
+        Self::root(Storage::new(value))
+    }
+
+    /// Preserve an existing owner's identity for an elaboration-time receiver.
+    pub fn from_storage(storage: Storage) -> Self {
+        Self::root(storage)
+    }
+
     /// Promote a binding to shared invocation storage without copying its value.
     pub(super) fn for_slot(value: &mut Value) -> Self {
         match value {
@@ -192,7 +203,7 @@ impl fmt::Debug for ValueReference {
 }
 
 impl ValueReference {
-    pub(crate) fn project(
+    pub fn project(
         &self,
         fields: &[(FieldOwner, usize)],
         fuel: &mut u64,
@@ -216,7 +227,8 @@ impl ValueReference {
             rebind: self.rebind || !fields.is_empty(),
         })
     }
-    pub(crate) fn prohibit_rebind(&mut self) {
+    /// Preserve a let binding while allowing updates to its fields.
+    pub fn prohibit_rebind(&mut self) {
         self.rebind = false;
     }
 
@@ -276,6 +288,30 @@ impl crate::Interpreter<'_> {
         }
         *target = value;
         Ok(())
+    }
+
+    /// Read through a live elaboration-time receiver without copying graph
+    /// identities. Field paths and invocation budgets are checked on each read.
+    pub fn read_referenced_value(
+        &mut self,
+        reference: &ValueReference,
+    ) -> Result<Value, crate::Error> {
+        self.read_value_reference(reference, crate::SourceRange { start: 0, end: 0 })
+    }
+
+    /// Snapshot a receiver's entry value for contracts, independently of later
+    /// receiver writes. This uses the same owned graph copy as ordinary cells.
+    pub fn copy_referenced_value(
+        &mut self,
+        reference: &ValueReference,
+    ) -> Result<Value, crate::Error> {
+        if !self.comptime_only {
+            return Err(self.failure(ErrorKind::PhaseMismatch, None));
+        }
+        let contents = reference
+            .borrow(&mut self.budget.steps)
+            .map_err(|kind| self.failure(kind, None))?;
+        self.copy_representation(contents.value(), crate::SourceRange { start: 0, end: 0 }, 0)
     }
 
     pub(super) fn read_value_reference(
@@ -668,6 +704,58 @@ mod call_tests {
             parameter_bindings: target.parameters.clone(),
         })
     }
+    #[test]
+    fn prepared_reference_inputs_validate_before_writes_and_restore_owned_graphs() {
+        let target = setter();
+        let id = target.declaration;
+        let package = Package {
+            functions: vec![target],
+            ..Package::default()
+        };
+        let owner = Storage::new(Value::AnonymousRecord(vec![
+            ("first".into(), Value::Bool(false)),
+            ("second".into(), Value::Bool(true)),
+        ]));
+        let reference = ValueReference::from_storage(owner.clone())
+            .project(&[(nir::program::FieldOwner::Anonymous, 0)], &mut 100)
+            .unwrap();
+        for bytecode in [false, true] {
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            vm.bytecode_enabled = bytecode;
+            let before = owner.read().unwrap();
+            let entry = vm.copy_referenced_value(&reference).unwrap();
+            let roots = [Value::ComptimeReference(reference.clone())];
+            let checkpoint = vm.checkpoint_owned_graph(&roots).unwrap();
+            let invalid = vm.invoke_with_prepared_arguments(
+                id,
+                vec![(
+                    Term::Primitive(Primitive::Char),
+                    crate::InvocationValue::Live(roots[0].clone()),
+                )],
+            );
+            assert!(invalid.is_err());
+            assert_eq!(owner.read().unwrap(), before);
+            assert_eq!(
+                vm.invoke_with_prepared_arguments(
+                    id,
+                    vec![(
+                        Term::Primitive(Primitive::Bool),
+                        crate::InvocationValue::Live(roots[0].clone())
+                    )]
+                )
+                .unwrap(),
+                Value::Bool(true)
+            );
+            assert_eq!(
+                vm.read_referenced_value(&reference).unwrap(),
+                Value::Bool(true)
+            );
+            assert_eq!(entry, Value::Bool(false));
+            checkpoint.restore().unwrap();
+            assert_eq!(owner.read().unwrap(), before);
+        }
+    }
+
     #[test]
     fn explicit_reference_call_updates_the_callers_slot_but_value_call_does_not() {
         let target = setter();

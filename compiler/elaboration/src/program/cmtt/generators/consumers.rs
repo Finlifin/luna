@@ -32,6 +32,7 @@ impl Checker<'_, '_> {
         owner: OwnerId,
         span: Span,
     ) -> Result<(), Error> {
+        self.validate_comptime_receiver(owner)?;
         if self.data_consumers.contains_key(&owner) {
             return Ok(());
         }

@@ -138,3 +138,19 @@ fn compound_receiver_fields_preserve_old_operand_and_rhs_writes() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn comptime_pointer_receivers_are_rejected_before_any_invocation() {
+    for source in [
+        "struct Cell {value:bool} impl Cell {comptime fn get(*self)->bool {self.value.*}}",
+        "trait Read {comptime fn get(*self)->bool;}",
+        "struct Cell {value:bool} impl Cell {comptime fn build(*self)-><|-bool> {'(true)}}",
+        "struct Cell {value:bool} impl Cell {comptime fn pattern(*self)-><bool -| value:bool> {'<value>}}",
+    ] {
+        let error = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+        assert!(
+            error.contains("comptime methods use value-reference self"),
+            "{error}"
+        );
+    }
+}

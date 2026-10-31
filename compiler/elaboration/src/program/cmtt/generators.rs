@@ -58,7 +58,7 @@ pub(in crate::program::cmtt) enum Argument {
     Code(CodeValue),
 }
 // Entry snapshots copy parameter values, not the objects reached through pointers.
-type GeneratorEntryData = BTreeMap<n::LocalId, (n::Expr, Option<comptime_interpretor::Storage>)>;
+type GeneratorEntryData = BTreeMap<n::LocalId, (n::Expr, Option<GeneratorCell>)>;
 pub(in crate::program::cmtt) type GeneratorTypePlan = (
     Vec<DeclarationId>,
     Vec<Term>,
@@ -135,6 +135,7 @@ impl Checker<'_, '_> {
         owner: OwnerId,
         span: Span,
     ) -> Result<(), Error> {
+        self.validate_comptime_receiver(owner)?;
         if self.code_generators.contains_key(&owner) {
             return Ok(());
         }
@@ -440,7 +441,7 @@ impl Checker<'_, '_> {
         let roots = self
             .generator_cells
             .values()
-            .map(|(_, cell)| comptime_interpretor::Value::Storage(cell.clone()))
+            .map(|(_, cell)| cell.value())
             .collect::<Vec<_>>();
         let checkpoint = self.checkpoint_generator_cells(&roots, span)?;
         // Generator inputs use declaration identities, not a new de Bruijn
@@ -1231,7 +1232,7 @@ impl Checker<'_, '_> {
                     "missing code generator argument",
                 )
             })?;
-            self.immutable.insert(*id);
+            self.mark_generator_input_binding(owner, *id);
             self.install_generator_type_input(*id, definition.input_value(index));
             match (input, argument) {
                 (Input::Pattern(interface), Argument::Code(CodeValue::Pattern(code))) => {
@@ -1356,6 +1357,31 @@ impl Checker<'_, '_> {
         Ok(Arc::new(result))
     }
 
+    pub(in crate::program::cmtt) fn mark_generator_input_binding(
+        &mut self,
+        owner: OwnerId,
+        binding: n::LocalId,
+    ) {
+        let receiver = self
+            .package
+            .item(owner)
+            .and_then(|item| match &item.kind {
+                ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature) => {
+                    signature.params.first()
+                }
+                _ => None,
+            })
+            .is_some_and(|parameter| {
+                local(parameter.hir_id) == binding
+                    && matches!(parameter.ty.kind, TyParamKind::Itself { is_ref: false })
+            });
+        if receiver {
+            self.immutable.remove(&binding);
+        } else {
+            self.immutable.insert(binding);
+        }
+    }
+
     pub(in crate::program::cmtt) fn install_live_generator_input(
         &mut self,
         id: n::LocalId,
@@ -1371,7 +1397,7 @@ impl Checker<'_, '_> {
         };
         self.generator_data.insert(id, Some(marker.clone()));
         self.generator_cells
-            .insert(id, (marker, comptime_interpretor::Storage::new(value)));
+            .insert(id, (marker, GeneratorCell::live(value)));
     }
 
     pub(in crate::program::cmtt) fn capture_generator_entry_data(
@@ -1404,12 +1430,15 @@ impl Checker<'_, '_> {
                             format!("generator entry preparation failed: {failure}"),
                         )
                     })?;
-                    let data = vm.copy_owned_value(cell);
+                    let data = match cell {
+                        GeneratorCell::Owned(cell) => vm.copy_owned_value(cell),
+                        GeneratorCell::Reference(reference) => vm.copy_referenced_value(reference),
+                    };
                     self.required_steps = vm.remaining_steps();
                     let data = data.map_err(|failure| {
                         error(span, format!("generator entry snapshot failed: {failure}"))
                     })?;
-                    Some(comptime_interpretor::Storage::new(data))
+                    Some(GeneratorCell::owned(data))
                 } else {
                     None
                 };
@@ -1543,17 +1572,13 @@ impl Checker<'_, '_> {
                     (
                         *id,
                         snapshot.ty.clone(),
-                        comptime_interpretor::Value::Storage(cell.clone()),
+                        cell.value(),
                     )
                 })
                 .collect();
             for (binding, parameter) in &snapshots {
                 if let Some((value, Some(cell))) = entry.and_then(|entry| entry.get(parameter)) {
-                    live.push((
-                        *binding,
-                        value.ty.clone(),
-                        comptime_interpretor::Value::Storage(cell.clone()),
-                    ));
+                    live.push((*binding, value.ty.clone(), cell.value()));
                 }
             }
             let (value, _) = self.required_live_input(source, predicate, Vec::new(), live)?;
@@ -1883,7 +1908,7 @@ impl Checker<'_, '_> {
         let saved_cells = self.generator_cells.clone();
         let roots = saved_cells
             .values()
-            .map(|(_, cell)| comptime_interpretor::Value::Storage(cell.clone()))
+            .map(|(_, cell)| cell.value())
             .collect::<Vec<_>>();
         let checkpoint = self.checkpoint_generator_cells(&roots, span)?;
         let mut saved = (
@@ -2475,10 +2500,8 @@ impl Checker<'_, '_> {
         };
         self.locals.insert(input, ty.clone());
         self.generator_data.insert(input, Some(marker.clone()));
-        self.generator_cells.insert(
-            input,
-            (marker.clone(), comptime_interpretor::Storage::new(value)),
-        );
+        self.generator_cells
+            .insert(input, (marker.clone(), GeneratorCell::owned(value)));
         let mut bindings = Vec::new();
         // Check and execute embedded pattern computations in the same frame
         // as surrounding construction data. Even a scalar initializer may
@@ -2560,7 +2583,7 @@ impl Checker<'_, '_> {
                         ty,
                         kind: K::Local(id),
                     },
-                    Some(comptime_interpretor::Storage::new(value)),
+                    Some(GeneratorCell::owned(value)),
                 )
             } else {
                 (self.materialize_generator_data(value, ty, decl.span)?, None)

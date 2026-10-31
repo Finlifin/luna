@@ -4,9 +4,9 @@
 use super::*;
 
 impl Checker<'_, '_> {
-    pub(in crate::program::cmtt) fn read_generator_cell(
+    pub(in crate::program) fn read_generator_cell(
         &mut self,
-        cell: &comptime_interpretor::Storage,
+        cell: &GeneratorCell,
         span: Span,
     ) -> Result<comptime_interpretor::Value, Error> {
         let package = n::Package::default();
@@ -23,7 +23,10 @@ impl Checker<'_, '_> {
                 format!("generator storage preparation failed: {failure}"),
             )
         })?;
-        let value = vm.read_owned_value(cell);
+        let value = match cell {
+            GeneratorCell::Owned(cell) => vm.read_owned_value(cell),
+            GeneratorCell::Reference(reference) => vm.read_referenced_value(reference),
+        };
         self.required_steps = vm.remaining_steps();
         value.map_err(|failure| error(span, format!("generator storage read failed: {failure}")))
     }
@@ -71,7 +74,7 @@ impl Checker<'_, '_> {
                 return Err(error(span, "generator live data nesting limit exceeded"));
             }
             match value {
-                Value::Pointer(_) => live = true,
+                Value::Pointer(_) | Value::ComptimeReference(_) => live = true,
                 Value::Tuple(fields)
                 | Value::Record { fields, .. }
                 | Value::Variant { fields, .. } => {
@@ -153,7 +156,7 @@ impl Checker<'_, '_> {
         &mut self,
         id: n::LocalId,
         ty: &Term,
-        cell: &comptime_interpretor::Storage,
+        cell: &GeneratorCell,
         statements: &mut Vec<n::Expr>,
         span: Span,
     ) -> Result<(), Error> {
@@ -342,6 +345,91 @@ impl Checker<'_, '_> {
         Ok(())
     }
 
+    /// Retain the checked place identity for a comptime self argument. The
+    /// ordinary data frame evaluates computed receivers once and publishes any
+    /// prior effects; local projections then share the original owning cell.
+    pub(in crate::program::cmtt) fn generator_receiver_argument(
+        &mut self,
+        value: &Expr<'_>,
+        expected: Option<&Term>,
+        context: Option<&crate::calls::InputContext>,
+    ) -> Result<(comptime_interpretor::Value, Term), Error> {
+        let mut place = None;
+        let evaluated = self
+            .generator_data_frame_with(value, |this| {
+                let checked = match context {
+                    Some(context) => this.input_context_expression(value, context)?,
+                    None => this.expr(value, expected)?,
+                };
+                let mut base = &checked;
+                let mut fields = Vec::new();
+                loop {
+                    this.required_steps = this
+                        .required_steps
+                        .checked_sub(1)
+                        .ok_or_else(|| error(value.span, "generator receiver budget exhausted"))?;
+                    if fields.len() >= 128 {
+                        return Err(error(
+                            value.span,
+                            "generator receiver nesting limit exceeded",
+                        ));
+                    }
+                    match &base.kind {
+                        K::Field {
+                            value,
+                            declaration,
+                            index,
+                        } => {
+                            fields.push((n::FieldOwner::Nominal(*declaration), *index));
+                            base = value;
+                        }
+                        K::AnonymousField { value, index, .. } => {
+                            fields.push((n::FieldOwner::Anonymous, *index));
+                            base = value;
+                        }
+                        K::Local(binding) => {
+                            fields.reverse();
+                            place = Some((*binding, fields));
+                            break;
+                        }
+                        _ => break,
+                    }
+                }
+                Ok(checked)
+            })?
+            .ok_or_else(|| error(value.span, "generator receiver requires completed inputs"))?;
+        let (data, ty) = evaluated;
+        let reference = if let Some((binding, fields)) = place {
+            if let Some((_, cell)) = self.generator_cells.get(&binding) {
+                let mut reference = match cell {
+                    GeneratorCell::Owned(cell) => {
+                        comptime_interpretor::ValueReference::from_storage(cell.clone())
+                    }
+                    GeneratorCell::Reference(reference) => reference.clone(),
+                };
+                if fields.is_empty() && self.immutable.contains(&binding) {
+                    reference.prohibit_rebind();
+                }
+                reference
+                    .project(&fields, &mut self.required_steps)
+                    .map_err(|cause| {
+                        error(
+                            value.span,
+                            format!("generator receiver projection failed: {cause:?}"),
+                        )
+                    })?
+            } else {
+                comptime_interpretor::ValueReference::owned(data)
+            }
+        } else {
+            comptime_interpretor::ValueReference::owned(data)
+        };
+        Ok((
+            comptime_interpretor::Value::ComptimeReference(reference),
+            ty,
+        ))
+    }
+
     pub(in crate::program::cmtt) fn generator_data_expression(
         &mut self,
         value: &Expr<'_>,
@@ -505,14 +593,10 @@ impl Checker<'_, '_> {
                     _ => {
                         let (initial, _) =
                             self.required_normal_input(value, stored.clone(), vec![])?;
-                        comptime_interpretor::Storage::new(initial)
+                        GeneratorCell::owned(initial)
                     }
                 };
-                live.push((
-                    id,
-                    ty.clone(),
-                    comptime_interpretor::Value::Storage(cell.clone()),
-                ));
+                live.push((id, ty.clone(), cell.value()));
                 self.generator_pointer_snapshot_checks(
                     id,
                     &ty,
@@ -572,11 +656,7 @@ impl Checker<'_, '_> {
             let roots = live
                 .iter()
                 .map(|(_, _, value)| value.clone())
-                .chain(
-                    self.generator_cells
-                        .values()
-                        .map(|(_, cell)| comptime_interpretor::Value::Storage(cell.clone())),
-                )
+                .chain(self.generator_cells.values().map(|(_, cell)| cell.value()))
                 .collect::<Vec<_>>();
             checkpoint = Some(self.checkpoint_generator_cells(&roots, value.span)?);
             let (updated, _) = self.required_live_input(value, body, vec![], live)?;

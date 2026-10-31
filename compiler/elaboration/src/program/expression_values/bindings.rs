@@ -59,6 +59,29 @@ impl Checker<'_, '_> {
                 }
                 let source_binding = *id;
                 let id = local(*id);
+                if self.in_code_body && !self.checking_code_generator {
+                    let live_receiver = self
+                        .generator_data
+                        .get(&id)
+                        .and_then(Option::as_ref)
+                        .filter(|value| matches!(value.kind, K::Local(binding) if binding == id))
+                        .and_then(|value| {
+                            self.generator_cells
+                                .get(&id)
+                                .filter(|(_, cell)| matches!(cell, GeneratorCell::Reference(_)))
+                                .map(|(_, cell)| (value.ty.clone(), cell.clone()))
+                        });
+                    if let Some((ty, cell)) = live_receiver {
+                        // Quoting observes the receiver now; its invocation-local
+                        // reference is never captured by generated runtime code.
+                        let data = self.read_generator_cell(&cell, expr.span)?;
+                        let value = self.materialize_generator_data(data, ty, expr.span)?;
+                        if let Some(expected) = expected {
+                            self.require_expression(&value.ty, expected, expr.span)?;
+                        }
+                        return Ok(value);
+                    }
+                }
                 if let Some(Some(value)) = self.generator_data.get(&id) {
                     constants::charge_copy(value, &mut self.required_steps, expr.span)?;
                     let mut value = value.clone();

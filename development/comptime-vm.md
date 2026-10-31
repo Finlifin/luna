@@ -8670,3 +8670,53 @@ modules/impls and the CLI test's command-variant expectation were also corrected
 Both complete sysroot runs exited 0: `/tmp/luna-tools-x1lb16iw` (runtime, 3 tests)
 and `/tmp/luna-tools-lcm40qvb` (final comptime, 3 tests). Report directories contain
 result.json, stdout.log and stderr.log. No whole-workspace test claim.
+
+## Preserve CMTT value-reference receivers through generator frames
+
+Migrating the old comptime `*self` receiver fixtures to `self` exposed five real
+writeback failures. Generator arguments had been materialized as independent
+values, while trait-body/default forwarding read live cells into copied values.
+The generator's storage table now distinguishes owned cells from value references.
+Ordinary fields preserve the original receiver path; computed receivers are
+evaluated once into private storage. Entry contract snapshots copy the observed
+value, whereas live forwarding retains reference identity. Checkpoints include
+reference owners and restore them on failure. No runtime Copy/Clone permission
+is introduced for these operations.
+
+Prepared VM invocation now admits typed value references only in comptime and
+checks their current payload before executing any argument factory/body. The
+same reference supports ordinary reads and independently copied entry values.
+Source receiver mutability is retained across calls: var allows whole replacement,
+let disallows it but permits field updates. Trait forwarding keeps this permission.
+Quoting self snapshots its current ordinary value; it does not leave the internal
+receiver as a runtime free variable or expose a reference in generated code.
+
+Comptime method declarations reject `*self` in ordinary, trait, expression-code,
+pattern-code and contextual-data entrypoints; runtime declarations are unchanged.
+CMTT receiver fixtures now use self and direct fields. Existing explicit pointer
+parameters/operations elsewhere remain migration work; this is not a claim that
+all comptime pointers have been removed. Receiver preparation still uses the
+existing checked data frame and can allocate an intermediate value snapshot;
+this commit establishes identity and phase semantics, not a speedup claim.
+
+Additional tests cover projected receivers while later arguments update siblings,
+trait defaults making repeated updates through one receiver, rebind permission,
+contract rejection/recovery, quote-before-mutation snapshots and prepared VM
+input preflight plus checkpoint restoration in tree and bytecode modes.
+
+Final validation from `/home/fin/luna`, all commands exited 0:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib
+python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --test cmtt_methods --test comptime_receivers --test comptime_bytecode_references --test list_patterns -- --skip generator_data_rejects_runtime_inputs_wrong_identities_and_opaque_domains
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+Reports: `/tmp/luna-tools-_z6143d5/result.json` (350 interpreter unit tests),
+`/tmp/luna-tools-um64sm_v/result.json` (786 source tests), and
+`/tmp/luna-tools-fobvdknw/result.json` (formatting). The one excluded CMTT test is
+the previously reproduced baseline rejection of an ordinary opaque NF domain,
+not a newly skipped receiver failure. Initial receiver failures, prepared-input
+admission failures, forwarding failures and a quote context leak were fixed,
+not converted into expected failures. No full-workspace test claim.

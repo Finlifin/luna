@@ -806,10 +806,8 @@ impl Checker<'_, '_> {
                             // Keep the evaluated packet in a live cell. In
                             // particular, pointer fields must retain aliases.
                             this.generator_data.insert(id, Some(marker.clone()));
-                            this.generator_cells.insert(
-                                id,
-                                (marker.clone(), comptime_interpretor::Storage::new(data)),
-                            );
+                            this.generator_cells
+                                .insert(id, (marker.clone(), GeneratorCell::owned(data)));
                             marker
                         } else {
                             this.generator_data.insert(id, None);

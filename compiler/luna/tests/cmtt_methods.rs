@@ -146,10 +146,10 @@ fn pattern_expression_inputs_pass_through_inherent_and_trait_methods() {
 
 #[test]
 fn trait_pattern_methods_keep_live_receivers_and_single_evaluation() {
-    let source = "trait Rule {comptime fn pattern(*self,flag:bool)-><bool -| value:bool>;}
+    let source = "trait Rule {comptime fn pattern(self,flag:bool)-><bool -| value:bool>;}
         struct Flag {state:bool} impl Rule for Flag {
-            comptime fn pattern(*self,enabled:bool)-><bool -| value:bool> {
-                self.*.state=enabled;'<value>
+            comptime fn pattern(self,enabled:bool)-><bool -| value:bool> {
+                self.state=enabled;'<value>
             }
         }
         comptime fn next(state:*bool)->bool {let before=state.*;state.* = not before;before}
@@ -331,8 +331,8 @@ fn inherent_pattern_methods_capture_container_types_and_values() {
 #[test]
 fn inherent_pattern_reference_receivers_keep_mutation_and_contracts() {
     let source = "struct Rule {flag:bool} impl Rule {
-        comptime fn pattern(*self)-><bool -| value:bool> where ensures self.*.flag {
-            self.*.flag=true;'<value>
+        comptime fn pattern(self)-><bool -| value:bool> where ensures self.flag {
+            self.flag=true;'<value>
         }
     }
     comptime fn emit()-><|-bool> {
@@ -1380,7 +1380,7 @@ fn code_method_program_refinement_accepts_unbounded_integer_half_lines() {
 fn reference_code_method_receivers_write_back_to_generator_owned_state() {
     let source = "struct Builder {flag:bool}
         impl Builder {
-            comptime fn build(*self)-><|-bool> {self.*.flag=true;let flag=self.*.flag;'(flag)}
+            comptime fn build(self)-><|-bool> {self.flag=true;let flag=self.flag;'(flag)}
         }
         comptime fn outer()-><|-bool> {
             var builder=Builder {flag:false};
@@ -1393,10 +1393,10 @@ fn reference_code_method_receivers_write_back_to_generator_owned_state() {
 
 #[test]
 fn trait_reference_code_methods_share_state_and_keep_earlier_quotes() {
-    let source = "trait Build {comptime fn build(*self)-><|-bool>;}
+    let source = "trait Build {comptime fn build(self)-><|-bool>;}
         struct Builder {flag:bool}
         impl Build for Builder {
-            comptime fn build(*self)-><|-bool> {self.*.flag=not self.*.flag;let flag=self.*.flag;'(flag)}
+            comptime fn build(self)-><|-bool> {self.flag=not self.flag;let flag=self.flag;'(flag)}
         }
         comptime fn outer()-><|-bool> {
             var builder=Builder {flag:false};
@@ -1427,9 +1427,9 @@ fn pointer_generator_inputs_preserve_writeback_and_check_contracts() {
 }
 
 #[test]
-fn reference_code_methods_cannot_embed_comptime_pointers_in_runtime_code() {
+fn code_methods_cannot_treat_value_receivers_as_runtime_pointers() {
     let source = "struct Builder {flag:bool}
-        impl Builder {comptime fn leak(*self)-><|-*Builder> {'(self)}}
+        impl Builder {comptime fn leak(self)-><|-*Builder> {'(self)}}
         comptime fn outer()-><|-*Builder> {
             var builder=Builder {flag:false};builder.leak()
         }
@@ -1456,7 +1456,7 @@ fn pointer_generator_arguments_evaluate_once_in_source_order() {
 fn generic_reference_code_methods_preserve_parent_types_and_writeback() {
     let source = "struct Builder where T {value:T}
         impl Builder<T> where T {
-            comptime fn replace(*self,value:T)-><|-T> {self.*.value=value;let saved=self.*.value;'(saved)}
+            comptime fn replace(self,value:T)-><|-T> {self.value=value;let saved=self.value;'(saved)}
         }
         comptime fn outer()-><|-bool> {
             var builder=Builder<bool> {value:false};
@@ -1470,12 +1470,12 @@ fn generic_reference_code_methods_preserve_parent_types_and_writeback() {
 #[test]
 fn trait_default_reference_code_methods_forward_the_same_owner() {
     let source = "trait Build {
-            comptime fn build(*self)-><|-bool>;
-            comptime fn again(*self)-><|-bool> {self.*.as(Build).build()}
+            comptime fn build(self)-><|-bool>;
+            comptime fn again(self)-><|-bool> {self.as(Build).build()}
         }
         struct Builder {flag:bool}
         impl Build for Builder {
-            comptime fn build(*self)-><|-bool> {self.*.flag=true;let saved=self.*.flag;'(saved)}
+            comptime fn build(self)-><|-bool> {self.flag=true;let saved=self.flag;'(saved)}
         }
         comptime fn outer()-><|-bool> {
             var builder=Builder {flag:false};
@@ -1489,11 +1489,11 @@ fn trait_default_reference_code_methods_forward_the_same_owner() {
 #[test]
 fn reference_code_dispatch_checks_public_pointer_contracts_after_writeback() {
     let source = "trait Build {
-            comptime fn build(*self,state:*bool)-><|-bool> where requires not state.*, ensures state.*;
+            comptime fn build(self,state:*bool)-><|-bool> where requires not state.*, ensures state.*;
         }
         struct Builder {}
         impl Build for Builder {
-            comptime fn build(*self,output:*bool)-><|-bool> {output.* = true;'(true)}
+            comptime fn build(self,output:*bool)-><|-bool> {output.* = true;'(true)}
         }
         comptime fn outer()-><|-bool> {
             var builder=Builder {};var flag=false;
@@ -1792,16 +1792,16 @@ fn generator_entry_values_are_isolated_across_nested_calls() {
 fn trait_default_forwarding_keeps_live_aggregates_and_public_entry_contracts() {
     let source = "struct State {flag:bool,target:*bool}
         trait Build {
-            comptime fn build(*self,state:State)-><|-bool>
+            comptime fn build(self,state:State)-><|-bool>
                 where ensures not state'old.flag and state'old.target.*;
-            comptime fn again(*self,state:State)-><|-bool>
+            comptime fn again(self,state:State)-><|-bool>
                 where ensures not state'old.flag and state'old.target.* {
-                self.*.as(Build).build(state)
+                self.as(Build).build(state)
             }
         }
         struct Builder {}
         impl Build for Builder {
-            comptime fn build(*self,input:State)-><|-bool> {
+            comptime fn build(self,input:State)-><|-bool> {
                 input.target.* = true;'(true)
             }
         }
@@ -2321,4 +2321,88 @@ fn dependent_type_indices_survive_generated_nominal_values() {
     assert_eq!(run(&scalar, "run", vec![]), Value::Bool(true));
     let wrong = source.replace("let value=", "let value:Tagged<Type,Type>=");
     assert!(support::compile_with_protocols(&wrong, &Default::default()).is_err());
+}
+
+#[test]
+fn comptime_code_receivers_keep_projected_places_across_argument_effects() {
+    let source = "struct Builder {flag:bool}
+        struct Owner {builder:Builder, sibling:bool}
+        impl Builder {
+            comptime fn build(self,flag:bool)-><|-bool> where ensures self.flag {
+                self.flag=flag;let saved=self.flag;'(saved)
+            }
+        }
+        comptime fn generate()-><|-bool> {
+            let owner=Owner {builder:Builder {flag:false},sibling:false};
+            let code=owner.builder.build(do {owner.sibling=true;true});
+            if owner.builder.flag and owner.sibling {code} else {'(false)}
+        }
+        fn run()->bool {~<generate()>}";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    let invalid = source.replace("owner.sibling=true;true", "owner.sibling=true;false");
+    let error = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+    assert!(error.contains("postcondition"), "{error}");
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn comptime_default_code_receivers_forward_after_local_writes() {
+    let source = "trait Build {
+            comptime fn build(self)-><|-bool>;
+            comptime fn again(self)-><|-bool> {
+                let before=self.as(Build).build();self.as(Build).build()
+            }
+        }
+        struct Builder {flag:bool}
+        struct Owner {inner:Builder,sibling:bool}
+        impl Build for Builder {
+            comptime fn build(self)-><|-bool> {
+                self.flag=not self.flag;let saved=self.flag;'(saved)
+            }
+        }
+        comptime fn generate()-><|-bool> {
+            let owner=Owner {inner:Builder {flag:false},sibling:true};
+            let code=owner.inner.as(Build).again();
+            if not owner.inner.flag and owner.sibling {'(not ~<code>)} else {'(false)}
+        }
+        fn run()->bool {~<generate()>}";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn comptime_code_receiver_rebinding_preserves_the_callers_permission() {
+    let source = "struct Builder {flag:bool}
+        impl Builder {
+            comptime fn replace(self)-><|-bool> {self=Builder {flag:true};'(true)}
+            comptime fn forward(self)-><|-bool> {self.replace()}
+        }
+        comptime fn generate()-><|-bool> {
+            var owner=Builder {flag:false};let code=owner.forward();
+            if owner.flag {code} else {'(false)}
+        }
+        fn run()->bool {~<generate()>}";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    let failure = support::compile_with_protocols(
+        &source.replace("var owner", "let owner"),
+        &Default::default(),
+    )
+    .unwrap_err();
+    assert!(failure.contains("InvalidValueReference"), "{failure}");
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn quoting_a_value_receiver_freezes_its_value_before_later_mutation() {
+    let source = "struct Builder {flag:bool}
+        impl Builder {
+            comptime fn build(self)-><|-Builder> {
+                let saved='(self);self.flag=false;saved
+            }
+        }
+        comptime fn generate()-><|-Builder> {
+            let owner=Builder {flag:true};let code=owner.build();
+            if not owner.flag {code} else {'(Builder {flag:false})}
+        }
+        fn run()->bool {let value=~<generate()>;value.flag}";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
 }

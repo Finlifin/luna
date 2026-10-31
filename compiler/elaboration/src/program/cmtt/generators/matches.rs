@@ -115,10 +115,8 @@ impl Checker<'_, '_> {
                     kind: K::Local(id),
                 };
                 self.generator_data.insert(id, Some(marker.clone()));
-                self.generator_cells.insert(
-                    id,
-                    (marker.clone(), comptime_interpretor::Storage::new(value)),
-                );
+                self.generator_cells
+                    .insert(id, (marker.clone(), GeneratorCell::owned(value)));
                 marker
             } else {
                 self.materialize_generator_data(value, ty, subject.span)?
@@ -347,10 +345,8 @@ impl Checker<'_, '_> {
                             source: source(arms[index].span),
                             kind: K::Local(*id),
                         };
-                        this.generator_cells.insert(
-                            *id,
-                            (snapshot.clone(), comptime_interpretor::Storage::new(value)),
-                        );
+                        this.generator_cells
+                            .insert(*id, (snapshot.clone(), GeneratorCell::owned(value)));
                         snapshot
                     } else {
                         this.materialize_generator_data(value, ty.clone(), arms[index].span)?

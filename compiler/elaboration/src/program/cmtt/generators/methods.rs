@@ -180,7 +180,12 @@ impl Checker<'_, '_> {
                             .ok_or_else(|| error(span, "missing live trait code input"))?
                             .1
                             .clone();
-                        Argument::LiveData(self.read_generator_cell(&cell, span)?)
+                        Argument::LiveData(match cell {
+                            GeneratorCell::Reference(reference) => {
+                                comptime_interpretor::Value::ComptimeReference(reference)
+                            }
+                            cell => self.read_generator_cell(&cell, span)?,
+                        })
                     } else {
                         Argument::Data(value.clone())
                     }

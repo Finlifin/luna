@@ -1532,6 +1532,31 @@ impl ReturnObservations {
     }
 }
 
+#[derive(Clone)]
+enum GeneratorCell {
+    Owned(comptime_interpretor::Storage),
+    Reference(comptime_interpretor::ValueReference),
+}
+impl GeneratorCell {
+    fn owned(value: comptime_interpretor::Value) -> Self {
+        Self::Owned(comptime_interpretor::Storage::new(value))
+    }
+    fn live(value: comptime_interpretor::Value) -> Self {
+        match value {
+            comptime_interpretor::Value::ComptimeReference(reference) => Self::Reference(reference),
+            value => Self::owned(value),
+        }
+    }
+    fn value(&self) -> comptime_interpretor::Value {
+        match self {
+            Self::Owned(cell) => comptime_interpretor::Value::Storage(cell.clone()),
+            Self::Reference(reference) => {
+                comptime_interpretor::Value::ComptimeReference(reference.clone())
+            }
+        }
+    }
+}
+
 struct Checker<'a, 'h> {
     next_definition_identity: u32,
     delivered_types: BTreeMap<n::LocalId, (std::sync::Arc<Term>, Span)>,
@@ -1650,7 +1675,7 @@ struct Checker<'a, 'h> {
     code_packet_nominals: BTreeSet<DeclarationId>,
     computed_scalar_packets: BTreeSet<DeclarationId>,
     generator_data: BTreeMap<n::LocalId, Option<n::Expr>>,
-    generator_cells: BTreeMap<n::LocalId, (n::Expr, comptime_interpretor::Storage)>,
+    generator_cells: BTreeMap<n::LocalId, (n::Expr, GeneratorCell)>,
     checking_code_generator: bool,
     abstract_code_dependencies: BTreeMap<n::LocalId, BTreeSet<n::LocalId>>,
     in_code_body: bool,
@@ -1730,7 +1755,29 @@ impl Checker<'_, '_> {
     /// Resolve signature dependencies on demand, retaining only completed
     /// signatures. Recursive value bodies do not require recursive signatures;
     /// cycles through type observations are diagnosed explicitly.
+    fn validate_comptime_receiver(&self, owner: OwnerId) -> Result<(), Error> {
+        let Some(ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)) =
+            self.package.item(owner).map(|item| &item.kind)
+        else {
+            return Ok(());
+        };
+        if signature.modifiers.is_comptime {
+            if let Some(receiver) = signature
+                .params
+                .iter()
+                .find(|parameter| matches!(parameter.ty.kind, TyParamKind::Itself { is_ref: true }))
+            {
+                return Err(error(
+                    receiver.span,
+                    "comptime methods use value-reference self; replace *self with self",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn ensure_signature(&mut self, owner: OwnerId, span: Span) -> Result<(), Error> {
+        self.validate_comptime_receiver(owner)?;
         if self.builtin_normal_form_constant(owner, span)?.is_some() {
             return Ok(());
         }

@@ -283,6 +283,7 @@ impl Checker<'_, '_> {
         owner: OwnerId,
         span: Span,
     ) -> Result<(), Error> {
+        self.validate_comptime_receiver(owner)?;
         if self.pattern_generators.contains_key(&owner) {
             return Ok(());
         }
@@ -601,7 +602,7 @@ impl Checker<'_, '_> {
                 if let TyParamKind::Optional(_, _, value) = parameter.ty.kind {
                     this.evaluate_pattern_argument(value, input)?;
                 }
-                this.immutable.insert(*id);
+                this.mark_generator_input_binding(owner, *id);
                 this.install_generator_type_input(*id, definition.input_value(slot));
                 match input {
                     PatternInput::Data(ty) => {
@@ -1070,7 +1071,7 @@ impl Checker<'_, '_> {
                             _ => return Err(error(span, "missing pattern generator argument")),
                         },
                     };
-                    this.immutable.insert(*id);
+                    this.mark_generator_input_binding(owner, *id);
                     this.install_generator_type_input(*id, definition.input_value(slot));
                     match (input, value) {
                         (PatternInput::Data(ty), PatternArgument::Data(value)) => {
@@ -1236,7 +1237,12 @@ impl Checker<'_, '_> {
                                 .ok_or_else(|| error(span, "missing live trait code input"))?
                                 .1
                                 .clone();
-                            PatternArgument::LiveData(self.read_generator_cell(&cell, span)?)
+                            PatternArgument::LiveData(match cell {
+                                GeneratorCell::Reference(reference) => {
+                                    comptime_interpretor::Value::ComptimeReference(reference)
+                                }
+                                cell => self.read_generator_cell(&cell, span)?,
+                            })
                         } else {
                             PatternArgument::Data(value.clone())
                         }
@@ -1293,7 +1299,7 @@ impl Checker<'_, '_> {
                 definition.inputs.iter().zip(arguments).enumerate()
             {
                 this.install_generator_type_input(*binding, definition.input_value(slot));
-                this.immutable.insert(*binding);
+                this.mark_generator_input_binding(target, *binding);
                 match (input, argument) {
                     (PatternInput::Data(ty), PatternArgument::Data(value)) => {
                         this.locals.insert(*binding, ty.clone());
