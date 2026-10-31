@@ -753,3 +753,123 @@ fn warm_append_prefix_still_obeys_current_invocation_depth() {
         ErrorKind::Type
     );
 }
+
+#[test]
+fn warm_append_prefix_rechecks_embedded_type_proofs_and_recovers() {
+    use nir::program::{TraitRequirement, TypePredicate};
+    use std::cell::Cell;
+    let mut package = package();
+    let obligation = TypePredicate::Trait(TraitRequirement {
+        interface: id(90),
+        interface_arguments: vec![],
+        subject: Term::Primitive(Primitive::Bool),
+    });
+    package.normal_forms.push(Head {
+        declaration: id(4),
+        collector: None,
+        role: Role::Opaque,
+        requirements: vec![obligation.clone()],
+        parameters: vec![],
+    });
+    let guarded = Term::NormalForm {
+        head: id(4),
+        sort: nir::Sort::Type,
+        arguments: vec![],
+    };
+    let ty = list(Primitive::Type);
+    let input = LocalId { owner: 1, index: 0 };
+    let body = expr(
+        Term::Primitive(Primitive::Void),
+        K::Assign {
+            place: Place {
+                root: input,
+                fields: vec![],
+            },
+            value: Box::new(expr(
+                ty.clone(),
+                K::ListConcat(
+                    Box::new(expr(ty.clone(), K::Local(input))),
+                    Box::new(expr(
+                        ty.clone(),
+                        K::TypeList(vec![expr(
+                            Term::Primitive(Primitive::Type),
+                            K::TypeValue(Term::Primitive(Primitive::Bool)),
+                        )]),
+                    )),
+                ),
+            )),
+        },
+    );
+    for compiled in [false, true] {
+        for shared in [false, true] {
+            let value = Value::List {
+                ty: ty.clone(),
+                values: vec![Value::Type(guarded.clone())].into(),
+            };
+            value.immutable_copy_work().unwrap();
+            let value = if shared {
+                Value::Storage(Storage::new(value))
+            } else {
+                value
+            };
+            let mut env = Environment::from([(input, value)]);
+            let state = Cell::new(ContractOutcome::Satisfied);
+            let calls = Cell::new(0usize);
+            let solver = |predicate: &TypePredicate| {
+                assert_eq!(predicate, &obligation);
+                calls.set(calls.get() + 1);
+                state.get()
+            };
+            let mut vm = Interpreter::for_comptime(&package, Budget::default())
+                .unwrap()
+                .with_type_solver(&solver);
+            for outcome in [
+                ContractOutcome::Satisfied,
+                ContractOutcome::Rejected,
+                ContractOutcome::Unknown,
+                ContractOutcome::Satisfied,
+            ] {
+                state.set(outcome);
+                let before = vm
+                    .invocation_slot_value(&env[&input], Some(SOURCE))
+                    .unwrap();
+                calls.set(0);
+                let result = run(&mut vm, &body, &mut env, compiled);
+                assert!(
+                    calls.get() > 0,
+                    "structural summary must not replace proof admission"
+                );
+                let after = vm
+                    .invocation_slot_value(&env[&input], Some(SOURCE))
+                    .unwrap();
+                if outcome == ContractOutcome::Satisfied {
+                    assert!(matches!(result.unwrap(), Flow::Value(Value::Unit)));
+                    let (Value::List { values: old, .. }, Value::List { values: new, .. }) =
+                        (before, after)
+                    else {
+                        unreachable!()
+                    };
+                    assert_eq!(&new[..old.len()], old.as_slice());
+                    assert_eq!(
+                        new.last(),
+                        Some(&Value::Type(Term::Primitive(Primitive::Bool)))
+                    );
+                    assert_eq!(new.len(), old.len() + 1);
+                } else {
+                    assert_eq!(
+                        result.unwrap_err().kind,
+                        if outcome == ContractOutcome::Rejected {
+                            ErrorKind::TypeContractRejected
+                        } else {
+                            ErrorKind::TypeContractUnresolved
+                        }
+                    );
+                    assert_eq!(
+                        after, before,
+                        "denied admission must leave the receiver intact"
+                    );
+                }
+            }
+        }
+    }
+}
