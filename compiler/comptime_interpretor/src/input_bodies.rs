@@ -1,4 +1,4 @@
-//! Cache only input-independent prepared bodies of immutable package declarations.
+//! Cache input-independent preparation of immutable declaration and owned code.
 use super::*;
 
 #[derive(Clone)]
@@ -9,6 +9,7 @@ enum Entry {
 #[derive(Default)]
 pub(super) struct Cache {
     entries: BTreeMap<DeclarationId, Entry>,
+    owned: BTreeMap<usize, (std::sync::Weak<Expr>, Entry, u64)>,
     weight: u64,
 }
 impl Cache {
@@ -19,10 +20,42 @@ impl Cache {
         }
         if self.weight.saturating_add(weight) > LIMIT {
             self.entries.clear();
+            self.owned.clear();
             self.weight = 0;
         }
         self.weight += weight;
         self.entries.insert(id, entry);
+    }
+    fn owned(&mut self, body: &Arc<Expr>) -> Option<Entry> {
+        let key = Arc::as_ptr(body) as usize;
+        let (source, entry, _) = self.owned.get(&key)?;
+        if source
+            .upgrade()
+            .is_some_and(|source| Arc::ptr_eq(&source, body))
+        {
+            return Some(entry.clone());
+        }
+        let (_, _, weight) = self.owned.remove(&key).unwrap();
+        self.weight -= weight;
+        None
+    }
+
+    fn insert_owned(&mut self, body: &Arc<Expr>, entry: Entry, weight: u64) {
+        if weight > 100_000 {
+            return;
+        }
+        let key = Arc::as_ptr(body) as usize;
+        if let Some((_, _, previous)) = self.owned.remove(&key) {
+            self.weight -= previous;
+        }
+        if self.weight.saturating_add(weight) > 100_000 {
+            self.entries.clear();
+            self.owned.clear();
+            self.weight = 0;
+        }
+        self.weight += weight;
+        self.owned
+            .insert(key, (Arc::downgrade(body), entry, weight));
     }
 }
 impl Interpreter<'_> {
@@ -32,7 +65,27 @@ impl Interpreter<'_> {
         scope: &nir::FunctionInputBinding,
         declaration: Option<DeclarationId>,
     ) -> Result<(Arc<Expr>, bool), Error> {
-        let cached = declaration.and_then(|id| self.input_body_cache.entries.get(&id).cloned());
+        self.prepare_input_body_key(body, scope, declaration, None)
+    }
+
+    pub(super) fn prepare_owned_input_body(
+        &mut self,
+        body: &Arc<Expr>,
+        scope: &nir::FunctionInputBinding,
+    ) -> Result<(Arc<Expr>, bool), Error> {
+        self.prepare_input_body_key(body, scope, None, Some(body))
+    }
+
+    fn prepare_input_body_key(
+        &mut self,
+        body: &Expr,
+        scope: &nir::FunctionInputBinding,
+        declaration: Option<DeclarationId>,
+        owned: Option<&Arc<Expr>>,
+    ) -> Result<(Arc<Expr>, bool), Error> {
+        let cached = declaration
+            .and_then(|id| self.input_body_cache.entries.get(&id).cloned())
+            .or_else(|| owned.and_then(|body| self.input_body_cache.owned(body)));
         if let Some(Entry::Prepared(body)) = cached {
             return Ok((body, true));
         }
@@ -49,20 +102,24 @@ impl Interpreter<'_> {
         // completion, before publishing an independent body for later calls.
         self.specialize_input_types(&mut prepared, scope)?;
         let prepared = Arc::new(prepared);
-        if let Some(id) = declaration {
-            if dependent {
-                if cached.is_none() {
-                    self.input_body_cache.insert(id, Entry::Dependent, 1);
-                }
+        if declaration.is_some() || owned.is_some() {
+            let entry = if dependent {
+                cached.is_none().then_some((Entry::Dependent, 1))
             } else {
                 let before = self.budget.steps;
                 nir::copy_budget::charge_type_rewrite(&prepared, &mut self.budget.steps)
                     .map_err(|_| self.failure(ErrorKind::StepsExhausted, Some(body.source)))?;
-                self.input_body_cache.insert(
-                    id,
+                Some((
                     Entry::Prepared(prepared.clone()),
                     (before - self.budget.steps).saturating_add(1),
-                );
+                ))
+            };
+            if let Some((entry, weight)) = entry {
+                if let Some(id) = declaration {
+                    self.input_body_cache.insert(id, entry, weight);
+                } else if let Some(body) = owned {
+                    self.input_body_cache.insert_owned(body, entry, weight);
+                }
             }
         }
         Ok((prepared, !dependent))
@@ -161,5 +218,42 @@ mod tests {
         assert!(!Arc::ptr_eq(&held, &again));
         assert_eq!(held.to_string(), again.to_string());
         assert!(vm.input_body_cache.weight <= 100_000);
+    }
+    #[test]
+    fn owned_body_identity_keeps_input_dependent_preparation_local() {
+        let package = Package::default();
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let source = Arc::new(body(Term::Primitive(Primitive::Bool)));
+        let (first, _) = vm
+            .prepare_owned_input_body(&source, &scope(Primitive::Bool))
+            .unwrap();
+        let (second, _) = vm
+            .prepare_owned_input_body(&source, &scope(Primitive::Char))
+            .unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        let changed = Arc::new(body(Term::Primitive(Primitive::Char)));
+        let (other, _) = vm
+            .prepare_owned_input_body(&changed, &scope(Primitive::Bool))
+            .unwrap();
+        assert!(!Arc::ptr_eq(&first, &other));
+        assert!(matches!(
+            &other.kind,
+            K::TypeValue(Term::Primitive(Primitive::Char))
+        ));
+        let dependent = Arc::new(body(Term::Bound {
+            depth: 0,
+            index: 0,
+            sort: nir::Sort::Type,
+        }));
+        for input in [Primitive::Bool, Primitive::Char, Primitive::Bool] {
+            let (prepared, independent) = vm
+                .prepare_owned_input_body(&dependent, &scope(input))
+                .unwrap();
+            assert!(!independent);
+            assert!(matches!(&prepared.kind, K::TypeValue(ty) if *ty == Term::Primitive(input)));
+        }
+        let weak = Arc::downgrade(&source);
+        drop(source);
+        assert!(weak.upgrade().is_none());
     }
 }

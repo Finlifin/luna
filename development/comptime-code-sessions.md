@@ -95,3 +95,36 @@ python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --
 
 Evidence: `/tmp/luna-tools-_zbya17g/result.json`. No wall-clock benchmark or
 whole-workspace test run was performed for this stage.
+
+## Ordinary input binding on retained code
+
+Input-independent preparation now also keys owned function bodies by live code
+identity. Declaration-specialized functions and ordinary closures reuse their
+prepared body even when they have ordinary parameters. Captured environments
+and arguments are still bound independently on every invocation. Only immutable
+code is retained; weak source identities avoid keeping discarded closure bodies
+alive or confusing reused allocation addresses with old code.
+
+This uses the same contextual-type scan and specialization checks as declaration
+bodies. A body with types dependent on the current parameter telescope is marked
+dependent and rewritten each time. Both owned and declaration entries share the
+existing 100,000-work retention bound.
+
+Verification commands:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib input_bodies
+python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_memory --test comptime_bytecode_closures --test scoped_comptime_callables
+python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_clause_inputs
+```
+
+The source regression invokes `keep(value:T)->T where T` through a code session
+with alternating boolean values. Each invocation returns its own argument;
+only the first compiles bytecode. Unit checks exercise changing dependent Type
+inputs, distinct source bodies and release of the original source allocation.
+
+This stage passed the input-body unit group (3 tests), bytecode closures (2),
+driver memory (20), scoped callables (10), and declaration clause-input tests.
+Evidence: `/tmp/luna-tools-g_87w65z/result.json`,
+`/tmp/luna-tools-grpz6w2a/result.json`, and
+`/tmp/luna-tools-v9f_3oxd/result.json`. Formatting and diff checks passed.

@@ -753,11 +753,11 @@ impl<'a> Interpreter<'a> {
             self.effect_state.environment.clear();
         }
         let (specialized_body, independent_body) = if let Some(scope) = &type_scope {
-            let declaration = match &function {
-                Value::Function(id) => Some(*id),
-                _ => None,
+            let (prepared, independent) = match &function {
+                Value::Closure(closure) => self.prepare_owned_input_body(&closure.body, scope)?,
+                Value::Function(id) => self.prepare_input_body(body, scope, Some(*id))?,
+                _ => self.prepare_input_body(body, scope, None)?,
             };
-            let (prepared, independent) = self.prepare_input_body(body, scope, declaration)?;
             (Some(prepared), independent)
         } else {
             (None, false)

@@ -885,3 +885,26 @@ fn memoization_driver_retains_generic_preparation_without_result_memoization() {
     assert!(costs[1] < costs[0], "generic preparation costs: {costs:?}");
     assert_eq!(costs[1], costs[2]);
 }
+
+#[test]
+fn generic_code_session_with_ordinary_inputs_reuses_body_not_arguments() {
+    use comptime_interpretor::CodeSession;
+    use std::sync::Arc;
+    let source = Arc::new(compile("pure comptime fn keep(value:T)->T where T {value}"));
+    let mut session = CodeSession::new(source.clone());
+    for (index, flag) in [true, false, true].into_iter().enumerate() {
+        let mut vm = Interpreter::for_comptime(&source, Budget::default()).unwrap();
+        let value = vm
+            .with_code_session(&mut session, |vm| {
+                vm.invoke_instantiated(
+                    id(&source, "keep"),
+                    vec![nir::Term::Primitive(nir::Primitive::Bool)],
+                    vec![Value::Bool(flag)],
+                )
+            })
+            .unwrap();
+        assert_eq!(value, Value::Bool(flag));
+        assert!(vm.bytecode_invocations() > 0);
+        assert_eq!(vm.bytecode_compilations() > 0, index == 0);
+    }
+}
