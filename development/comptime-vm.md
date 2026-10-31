@@ -8059,3 +8059,39 @@ Validation in `/home/fin/luna`:
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_clause_inputs --test clause_staged_constants --test dynamic_trait_clauses --test comptime_bytecode_traits --test comptime_bytecode_defaults`:
   71 tests passed, exit 0; `/tmp/luna-tools-bmi4en05/result.json`.
 - Formatting and `git diff --check` passed. No full language suite was run.
+
+
+## Interface method operands (2026-10-31)
+
+Bytecode stores a method descriptor containing the interface, member, subject,
+interface and method arguments, result signature and source location. Both a
+first-class method value and an immediate call use that descriptor. Dynamic
+trait clause packets retain the same descriptor in the frame until call
+preparation. These paths no longer carry TraitMethod expressions or enter
+`eval_in_position` / `eval_trait_method` from bytecode.
+
+Selection is shared with reference execution, independently of evaluation and
+delivery. It checks interface capabilities and requirements before selecting the
+implementation; a value cannot erase a required program precondition. Calls
+retain the public interface program contract and parameter bindings, while
+dynamic defaults use the original interface's instantiated inputs. The bytecode
+path forms selected generic function instances through their checked operand
+service. Reference execution keeps its normal delivery/cleanup hooks. The
+existing bytecode eligibility restrictions for IIR, cleanup and effect contexts
+are unchanged.
+
+Descriptor copying is bounded before ownership and dumps retain explicit
+S-expression structure. This removes method-expression carriers from the VM
+call path, but default expressions, staged type plans and other remaining
+carriers still require work. Full IIR VM migration is not claimed complete.
+
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor --lib --tests`:
+  563 tests passed, exit 0; `/tmp/luna-tools-6q5dfx1s/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler --test control -p luna --test comptime_bytecode_traits --test dynamic_trait_clauses --test trait_phases --test comptime_bytecode_defaults`:
+  118 tests passed, exit 0; `/tmp/luna-tools-hsge7qap/result.json`.
+  Includes the new owned-descriptor budget check and reference/bytecode method
+  equivalence, plus forged interface contracts, defaults and phase selection.
+- Formatting and `git diff --check` passed. No full language suite was run.

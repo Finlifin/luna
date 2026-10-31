@@ -292,19 +292,25 @@ impl Interpreter<'_> {
         &mut self,
         method: &Expr,
     ) -> Result<(Vec<nir::DeclarationParameter>, Vec<Term>), Error> {
-        let K::TraitMethod {
+        let view = comptime_compiler::methods::View::expression(method)
+            .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(method.source)))?;
+        self.trait_method_default_inputs(view)
+    }
+    pub(super) fn trait_method_default_inputs(
+        &mut self,
+        method: comptime_compiler::methods::View<'_>,
+    ) -> Result<(Vec<nir::DeclarationParameter>, Vec<Term>), Error> {
+        let comptime_compiler::methods::View {
             interface,
             member,
             subject,
             interface_arguments,
             method_arguments,
-        } = &method.kind
-        else {
-            return Err(self.failure(ErrorKind::InvalidCallPlan, Some(method.source)));
-        };
+            ..
+        } = method;
         let (binders, _) = self
             .method_contracts
-            .get(&(*interface, *member))
+            .get(&(interface, member))
             .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(method.source)))?;
         let count = binders.len();
         if count != 1 + interface_arguments.len() + method_arguments.len() {
@@ -406,6 +412,31 @@ impl Interpreter<'_> {
             arguments.push(self.residual_input_term(value, source)?);
         }
         Ok(arguments)
+    }
+
+    pub(super) fn dynamic_trait_method(
+        &mut self,
+        member: DeclarationId,
+        input: &Term,
+        output: &Term,
+        origin: (DeclarationId, usize),
+        packet: Value,
+        source: SourceRange,
+    ) -> Result<comptime_compiler::methods::Method, Error> {
+        let arguments = self.dynamic_instance_arguments(input, packet, source)?;
+        let (interface, count) = origin;
+        if arguments.len() < 1 + count {
+            return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
+        }
+        Ok(comptime_compiler::methods::Method {
+            interface,
+            member,
+            subject: arguments[0].clone(),
+            interface_arguments: arguments[1..1 + count].to_vec(),
+            method_arguments: arguments[1 + count..].to_vec(),
+            output: output.clone(),
+            source,
+        })
     }
 
     pub(super) fn dynamic_instance_expression(

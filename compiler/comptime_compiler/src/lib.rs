@@ -10,6 +10,7 @@ pub mod leaf_inputs;
 pub mod leaf_patterns;
 pub mod lists;
 pub mod metadata;
+pub mod methods;
 pub mod normal_types;
 pub mod objects;
 pub mod observations;
@@ -388,7 +389,7 @@ pub enum Op {
         normal_form: Option<(Term, usize)>,
         parameter_bindings: Vec<LocalId>,
         prepare_defaults: bool,
-        method: Option<Arc<Expr>>,
+        method: Option<Arc<methods::Method>>,
     },
     CheckCallArgument {
         call: Register,
@@ -438,9 +439,9 @@ pub enum Op {
         destination: Register,
         instance: Arc<instances::Function>,
     },
-    CallableReference {
+    TraitMethod {
         destination: Register,
-        value: Arc<Expr>,
+        method: Arc<methods::Method>,
     },
     PrepareScalar(Arc<OwnedScalar>),
     CheckScalarOperand {
@@ -1144,9 +1145,10 @@ impl fmt::Display for Program {
                     destination,
                     instance,
                 } => write!(f, "(form-function-instance {destination} {instance})")?,
-                Op::CallableReference { destination, value } => {
-                    write!(f, "(callable-reference {destination} {value})")?
-                }
+                Op::TraitMethod {
+                    destination,
+                    method,
+                } => write!(f, "(select-trait-method {destination} {method})")?,
                 Op::EnterScope => write!(f, "(enter-scope)")?,
                 Op::LeaveScope => write!(f, "(leave-scope)")?,
                 Op::Unwind(depth) => write!(f, "(unwind {depth})")?,
@@ -1782,9 +1784,7 @@ fn compile_root<'a>(
                                 parameter_bindings: parameter_bindings.clone(),
                                 prepare_defaults: arguments.iter().any(|a| a.is_default),
                                 method: if matches!(callee.kind, K::TraitMethod { .. }) {
-                                    nir::copy_budget::charge_substitution(callee, &[], &[], fuel)
-                                        .map_err(|error| copy_error(error, callee.source))?;
-                                    Some(Arc::new(callee.as_ref().clone()))
+                                    Some(Arc::new(methods::Method::copy(callee, fuel)?))
                                 } else {
                                     None
                                 },
@@ -2530,13 +2530,12 @@ fn compile_root<'a>(
                         );
                     }
                     K::TraitMethod { .. } => {
-                        nir::copy_budget::charge_substitution(expr, &[], &[], fuel)
-                            .map_err(|error| copy_error(error, source))?;
+                        let method = Arc::new(methods::Method::copy(expr, fuel)?);
                         emit(
                             &mut work,
-                            Op::CallableReference {
+                            Op::TraitMethod {
                                 destination: dst,
-                                value: Arc::new(expr.clone()),
+                                method,
                             },
                         );
                     }

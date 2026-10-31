@@ -44,6 +44,7 @@ mod object_values;
 mod objects;
 mod scalar_math;
 mod staged_bytecode;
+mod trait_methods;
 mod value_reference;
 pub use objects::ObjectProperty;
 pub use value_reference::ValueReference;
@@ -4414,155 +4415,31 @@ impl<'a> Interpreter<'a> {
         environment: &mut Environment,
         direct_callee: bool,
     ) -> Result<Flow, Error> {
-        let result = match &expr.kind {
-            K::TraitMethod {
-                method_arguments,
-                interface,
-                interface_arguments,
-                member,
-                subject,
+        let method =
+            comptime_compiler::methods::View::expression(expr).expect("trait method dispatcher");
+        match self.select_trait_method(method, direct_callee)? {
+            trait_methods::Selection::Value(value) => Ok(Flow::Value(value)),
+            trait_methods::Selection::Function {
+                declaration,
+                arguments,
+                ty,
+                instantiate,
             } => {
-                let (parameters, contract) = self
-                    .method_contracts
-                    .get(&(*interface, *member))
-                    .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(expr.source)))?;
-                let parameters = parameters.clone();
-                let contract = *contract;
-                // Raw NIR can check an immediate interface call, but cannot
-                // erase its program domain into an implementation function
-                // value. IIR transports the identity and specializes the call.
-                let retained_template = self.comptime_only
-                    && !contract.signature.is_comptime_callable()
-                    && matches!(contract.signature.callable_signature(), Ok(Term::Function { parameters, .. })
-                        if parameters.iter().any(|p| p.sort != nir::Sort::Runtime));
-                if !direct_callee
-                    && !contract.program.preconditions.is_empty()
-                    && !retained_template
-                {
-                    return Err(self.failure(ErrorKind::Unsupported, Some(expr.source)));
-                }
-                if method_arguments.len() != contract.type_parameters.len() {
-                    return Err(self.failure(ErrorKind::InvalidCallPlan, Some(expr.source)));
-                }
-                let contract_arguments: Vec<_> = std::iter::once(subject.clone())
-                    .chain(interface_arguments.iter().cloned())
-                    .chain(method_arguments.iter().cloned())
-                    .collect();
-                if !self.capabilities_hold_parameters(
-                    &contract.capabilities,
-                    &parameters,
-                    &contract_arguments,
-                ) {
-                    return Err(self.failure(ErrorKind::InvalidCallPlan, Some(expr.source)));
-                }
-                for requirement in &contract.requirements {
-                    let requirement = requirement
-                        .instantiate_parameters(&parameters, &contract_arguments)
-                        .map_err(|_| self.failure(ErrorKind::Type, Some(expr.source)))?;
-                    self.check_type_contract(&requirement, expr.source)?;
-                }
-                let selected_subject = self.selected_type_view(subject, Some(expr.source))?;
-                let selected_arguments = interface_arguments
-                    .iter()
-                    .map(|argument| self.selected_type_view(argument, Some(expr.source)))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let (body, mut arguments) = self
-                    .method_bodies
-                    .get(&(
-                        InterfaceInstance {
-                            declaration: *interface,
-                            arguments: selected_arguments,
-                        },
-                        selected_subject,
-                        *member,
-                    ))
-                    .cloned()
-                    .ok_or_else(|| {
-                        self.failure(ErrorKind::UnmaterializedDispatch, Some(expr.source))
-                    })?;
-                arguments.extend(method_arguments.iter().cloned());
-                if let Some(identity) = self.runtime_function_identities.get(&body).copied() {
-                    self.admit_function_inputs(&identity.type_parameters, &arguments, expr.source)?;
-                    let signature = identity
-                        .signature
-                        .instantiate_parameters(
-                            &self.input_binders(&identity.type_parameters),
-                            &arguments,
-                        )
-                        .map_err(|_| self.failure(ErrorKind::Type, Some(expr.source)))?;
-                    if !selected_types::same(&signature, &expr.ty, &self.associated_values)
-                        || (!contract.program.preconditions.is_empty() && !retained_template)
-                    {
-                        return Err(self.failure(ErrorKind::InvalidCallPlan, Some(expr.source)));
-                    }
-                    return Ok(Flow::Value(Value::RuntimeTraitMethod(Box::new(
-                        TraitMethodIdentity {
-                            interface: InterfaceInstance {
-                                declaration: *interface,
-                                arguments: interface_arguments.clone(),
-                            },
-                            subject: subject.clone(),
-                            member: *member,
-                            method_arguments: method_arguments.clone(),
-                        },
-                    ))));
-                }
-                let definition = self
-                    .functions
-                    .get(&body)
-                    .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(expr.source)))?;
-                let ty = definition
-                    .signature
-                    .instantiate_parameters(
-                        &self.input_binders(&definition.type_parameters),
-                        &arguments,
-                    )
-                    .map_err(|_| self.failure(ErrorKind::Type, Some(expr.source)))?
-                    .with_comptime_phase(definition.phase == nir::program::FunctionPhase::Comptime)
-                    .with_unsafe_call_requirement(definition.is_unsafe);
-                if !selected_types::same(&ty, &expr.ty, &self.associated_values) {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                }
-                if self.comptime_only && definition.phase == nir::program::FunctionPhase::Runtime {
-                    self.admit_function_inputs(
-                        &definition.type_parameters,
-                        &arguments,
-                        expr.source,
-                    )?;
-                    if !contract.program.preconditions.is_empty() && !retained_template {
-                        return Err(self.failure(ErrorKind::InvalidCallPlan, Some(expr.source)));
-                    }
-                    // Transport the public interface identity even when this
-                    // snapshot also contains its implementation's runtime body.
-                    return Ok(Flow::Value(Value::RuntimeTraitMethod(Box::new(
-                        TraitMethodIdentity {
-                            interface: InterfaceInstance {
-                                declaration: *interface,
-                                arguments: interface_arguments.clone(),
-                            },
-                            subject: subject.clone(),
-                            member: *member,
-                            method_arguments: method_arguments.clone(),
-                        },
-                    ))));
-                }
                 let resolved = Expr {
                     ty,
                     source: expr.source,
-                    kind: if arguments.is_empty() && definition.requirements.is_empty() {
-                        K::Function(body)
-                    } else {
+                    kind: if instantiate {
                         K::FunctionInstance {
-                            declaration: body,
+                            declaration,
                             arguments,
                         }
+                    } else {
+                        K::Function(declaration)
                     },
                 };
-                value!(self.eval(&resolved, environment))
+                self.eval(&resolved, environment)
             }
-            _ => unreachable!("expression dispatcher selected an incompatible evaluator"),
-        };
-        Ok(Flow::Value(result))
+        }
     }
 
     fn validate_function_inputs(
@@ -5656,26 +5533,37 @@ impl<'a> Interpreter<'a> {
         callee: &Expr,
         source: SourceRange,
     ) -> Result<(nir::contracts::ProgramContract, Option<Vec<LocalId>>), Error> {
-        let interface_program = if let K::TraitMethod {
-            method_arguments,
+        match comptime_compiler::methods::View::expression(callee) {
+            Some(method) => self.interface_method_contract(method, source),
+            None => Ok((Default::default(), None)),
+        }
+    }
+    fn interface_method_contract(
+        &mut self,
+        method: comptime_compiler::methods::View<'_>,
+        source: SourceRange,
+    ) -> Result<(nir::contracts::ProgramContract, Option<Vec<LocalId>>), Error> {
+        let comptime_compiler::methods::View {
             interface,
             member,
-            interface_arguments,
             subject,
-        } = &callee.kind
-        {
+            interface_arguments,
+            method_arguments,
+            ..
+        } = method;
+        let interface_program = {
             if let Some(method) = self.iir_method(
-                *interface,
+                interface,
                 interface_arguments,
                 subject,
-                *member,
+                member,
                 method_arguments,
             )? {
                 self.copy_interface_program(&method.program, &[], &[], source)?
             } else {
                 let (parameters, contract) = self
                     .method_contracts
-                    .get(&(*interface, *member))
+                    .get(&(interface, member))
                     .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(source)))?;
                 self.budget.steps = self
                     .budget
@@ -5685,40 +5573,29 @@ impl<'a> Interpreter<'a> {
                 let contract = *contract;
                 let parameters = parameters.clone();
                 let arguments: Vec<_> = std::iter::once(subject.clone())
-                    .chain(interface_arguments.clone())
-                    .chain(method_arguments.clone())
+                    .chain(interface_arguments.iter().cloned())
+                    .chain(method_arguments.iter().cloned())
                     .collect();
                 self.copy_interface_program(&contract.program, &parameters, &arguments, source)?
             }
-        } else {
-            Default::default()
         };
-        let interface_parameters = if let K::TraitMethod {
-            method_arguments,
-            interface,
-            member,
-            interface_arguments,
-            subject,
-        } = &callee.kind
-        {
+        let interface_parameters = {
             if let Some(method) = self.iir_method(
-                *interface,
+                interface,
                 interface_arguments,
                 subject,
-                *member,
+                member,
                 method_arguments,
             )? {
                 Some(method.parameter_bindings.clone())
             } else {
                 Some(
                     self.method_parameters
-                        .get(&(*interface, *member))
+                        .get(&(interface, member))
                         .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(source)))?
                         .clone(),
                 )
             }
-        } else {
-            None
         };
         Ok((interface_program, interface_parameters))
     }

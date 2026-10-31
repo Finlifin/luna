@@ -15,7 +15,7 @@ pub(super) struct Frame {
     calls: BTreeMap<usize, PendingCall>,
     newtype_conversions: BTreeMap<usize, nir::newtypes::Conversion>,
     instance_origins: BTreeMap<usize, Option<(DeclarationId, usize)>>,
-    instance_methods: BTreeMap<usize, Expr>,
+    instance_methods: BTreeMap<usize, comptime_compiler::methods::Method>,
     closures: BTreeMap<usize, PendingClosure>,
     bit_updates: BTreeMap<usize, (Arc<comptime_compiler::bit_updates::Plan>, usize, usize)>,
     normal_types: BTreeMap<usize, super::normal_types::Inputs>,
@@ -1039,25 +1039,21 @@ impl<'a> Interpreter<'a> {
                         )?);
                         continue;
                     }
-                    let instance = self.dynamic_instance_expression(
+                    let instance = self.dynamic_trait_method(
                         constructor.declaration,
                         &constructor.input,
                         &constructor.output,
-                        origin,
+                        origin.ok_or_else(missing)?,
                         packet,
                         source,
                     )?;
-                    if origin.is_some() && *direct {
+                    if *direct {
                         // Keep interface identity until call preparation. Resolving just
                         // the implementation here would erase its contract and defaults.
                         frame.instance_methods.insert(*destination, instance);
                     } else {
-                        let result =
-                            self.eval_trait_method(&instance, &mut frame.environment, false)?;
-                        let Flow::Value(value) = result else {
-                            return Err(missing());
-                        };
-                        frame.slots[*destination] = Some(value);
+                        frame.slots[*destination] =
+                            Some(self.bytecode_trait_method(instance.view(), false)?);
                     }
                 }
                 Op::PreparePredicate { valid } => {
@@ -2144,24 +2140,23 @@ impl<'a> Interpreter<'a> {
                     let trait_defaults = if *prepare_defaults {
                         dynamic_method
                             .as_ref()
-                            .map(|method| self.trait_default_inputs(method))
+                            .map(|method| self.trait_method_default_inputs(method.view()))
                             .transpose()?
                     } else {
                         None
                     };
                     let method = method.as_deref().or(dynamic_method.as_ref());
                     let (interface_program, interface_parameters) = if let Some(method) = method {
-                        self.interface_call_contract(method, source)?
+                        self.interface_method_contract(method.view(), source)?
                     } else {
                         (Default::default(), None)
                     };
                     let callee = if let Some(method) = method {
-                        let Flow::Value(value) =
-                            self.eval_in_position(method, &mut frame.environment, true)?
-                        else {
-                            return Err(missing());
-                        };
-                        value
+                        self.tick(Some(method.source))?;
+                        self.depth += 1;
+                        let value = self.bytecode_trait_method(method.view(), true);
+                        self.depth -= 1;
+                        value?
                     } else {
                         frame.slots[*callee].take().ok_or_else(missing)?
                     };
@@ -2441,17 +2436,12 @@ impl<'a> Interpreter<'a> {
                         source,
                     )?);
                 }
-                Op::CallableReference { destination, value } => {
-                    let flow = match value.kind {
-                        K::TraitMethod { .. } => {
-                            self.eval_trait_method(value, &mut frame.environment, false)?
-                        }
-                        _ => return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source))),
-                    };
-                    let Flow::Value(value) = flow else {
-                        return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source)));
-                    };
-                    frame.slots[*destination] = Some(value);
+                Op::TraitMethod {
+                    destination,
+                    method,
+                } => {
+                    frame.slots[*destination] =
+                        Some(self.bytecode_trait_method(method.view(), false)?);
                 }
                 Op::EnterScope => frame.scopes.push(PatternScope::default()),
                 Op::LeaveScope => frame.leave_scope()?,

@@ -19,22 +19,32 @@ fn interface_defaults_use_declaration_bindings_and_method_values_compile() {
         impl Echo<T> for Host where T {comptime fn echo(input:T)->T {input}}
         comptime fn specialized()->bool {Host.as(Echo<bool>).echo(true)}",
     );
-    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
-    for (name, value) in [
-        ("direct", false),
-        ("overridden", true),
-        ("stored", true),
-        ("specialized", true),
-    ] {
-        let id = support::id(&package, name);
-        let before = vm.bytecode_invocations();
-        assert_eq!(
-            vm.invoke(id, vec![])
-                .unwrap_or_else(|e| panic!("{name}: {e:?}")),
-            Value::Bool(value),
-            "{name}"
-        );
-        assert_eq!(vm.bytecode_invocations() - before, 2, "{name}");
+    for compiled in [false, true] {
+        let mut vm = if compiled {
+            Interpreter::for_comptime(&package, Budget::default()).unwrap()
+        } else {
+            Interpreter::for_comptime_tree(&package, Budget::default()).unwrap()
+        };
+        for (name, value) in [
+            ("direct", false),
+            ("overridden", true),
+            ("stored", true),
+            ("specialized", true),
+        ] {
+            let id = support::id(&package, name);
+            let before = vm.bytecode_invocations();
+            assert_eq!(
+                vm.invoke(id, vec![])
+                    .unwrap_or_else(|e| panic!("{name}: {e:?}")),
+                Value::Bool(value),
+                "{name}"
+            );
+            assert_eq!(
+                vm.bytecode_invocations() - before,
+                if compiled { 2 } else { 0 },
+                "{name}"
+            );
+        }
     }
 }
 

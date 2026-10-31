@@ -895,3 +895,36 @@ fn constant_operands_and_callable_selection_have_distinct_instructions() {
     ));
     assert!(code.to_string().contains("(form-function-instance "));
 }
+
+#[test]
+fn trait_method_descriptors_own_identity_and_charge_their_complete_payload() {
+    let code = {
+        let method = expr(K::TraitMethod {
+            interface: nir::DeclarationId {
+                package: 1,
+                local: 10,
+            },
+            member: nir::DeclarationId {
+                package: 1,
+                local: 11,
+            },
+            subject: Term::Primitive(Primitive::Bool),
+            interface_arguments: vec![Term::Primitive(Primitive::U8)],
+            method_arguments: vec![Term::Bool(true); 128],
+        });
+        assert!(matches!(compile(&method, &mut 10), Err(Error::Budget(_))));
+        compile(&method, &mut 10000).unwrap()
+    };
+    let comptime_compiler::Op::TraitMethod { method, .. } = &code.instructions()[0].op else {
+        panic!("expected an interface method operand")
+    };
+    assert_eq!(method.member.local, 11);
+    assert_eq!(method.interface.local, 10);
+    assert_eq!(
+        method.interface_arguments,
+        vec![Term::Primitive(Primitive::U8)]
+    );
+    assert_eq!(method.method_arguments, vec![Term::Bool(true); 128]);
+    assert_eq!(method.subject, Term::Primitive(Primitive::Bool));
+    assert!(code.to_string().contains("(select-trait-method "));
+}
