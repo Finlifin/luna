@@ -156,10 +156,10 @@ impl<'a> Interpreter<'a> {
             prepared_instance_cache: Default::default(),
             declaration_world: None,
             // IIR retains occurrence environments, not the source effect world.
-            effect_declarations: BTreeMap::new(),
+            effect_declarations: Default::default(),
             effect_state: super::effects::State::default(),
             effect_values: None,
-            runtime_function_identities: BTreeMap::new(),
+            runtime_function_identities: Default::default(),
             graph: Some(graph),
             target: graph.target,
             cleanup_schedule: None,

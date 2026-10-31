@@ -82,7 +82,7 @@ impl Interpreter<'_> {
                 Err(self.failure(ErrorKind::Type, Some(source)))
             };
         }
-        if let Some(identity) = self.runtime_function_identities.get(&declaration).copied() {
+        if let Some(identity) = self.runtime_function_identities.get(&declaration) {
             // Transport-only metadata is published after producer-side
             // formation checks. It cannot authorize a runtime invocation.
             return self.admit_function_inputs(&identity.type_parameters, arguments, source);

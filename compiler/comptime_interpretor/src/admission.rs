@@ -451,7 +451,7 @@ impl Interpreter<'_> {
                 // effect invocation capability.
                 for operation in effects {
                     self.tick(None)?;
-                    let declaration = *self
+                    let declaration = self
                         .effect_declarations
                         .get(&operation.declaration)
                         .ok_or_else(|| self.failure(ErrorKind::Type, None))?;

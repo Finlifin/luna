@@ -1588,6 +1588,10 @@ fn code_session_reuses_code_but_not_values_or_world_authority() {
             .with_code_session(&mut session, |vm| vm.invoke(id(1), vec![]))
             .unwrap();
         assert_eq!(value, expected);
+        assert_eq!(
+            vm.invoke(id(2), vec![]).unwrap_err().kind,
+            ErrorKind::PhaseMismatch
+        );
         assert!(vm.bytecode_invocations() > 0);
         if attempt == 0 {
             assert!(vm.bytecode_compilations() > 0);

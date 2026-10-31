@@ -80,7 +80,7 @@ impl Interpreter<'_> {
             .cloned()
             .ok_or_else(|| self.failure(ErrorKind::UnmaterializedDispatch, Some(source)))?;
         arguments.extend(method_arguments.iter().cloned());
-        if let Some(identity) = self.runtime_function_identities.get(&body).copied() {
+        if let Some(identity) = self.runtime_function_identities.get(&body) {
             self.admit_function_inputs(&identity.type_parameters, &arguments, source)?;
             let signature = identity
                 .signature

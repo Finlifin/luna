@@ -47,7 +47,8 @@ The checks passed: 38 runtime identity tests and 18 driver memory tests
 
 ## Remaining work
 
-Most declaration tables are still rebuilt; the source function index is shared.
+Trait and layout tables are still rebuilt; source function, runtime-identity
+and effect declaration indexes are shared.
 This is not yet a
 shared VM world, persistent disk cache, or a suspended elaboration session.
 Input-dependent generated packages and IIR instance graphs need their own
@@ -147,7 +148,8 @@ invocation driver uses this constructor for its unchanged source snapshot.
 Phase, formation and trait checks still run per construction, and their existing
 world-work reservation remains in force. This stage removes repeated function
 index allocation/building; it does not claim to eliminate declaration-world
-construction. Trait, layout, effect and runtime-identity tables are still local.
+construction. Trait and layout tables are still local. Runtime-identity and effect indexes
+now use the shared typed declaration index described below.
 IIR instance lookup retains its separate graph authority.
 
 Validation commands:
@@ -166,3 +168,34 @@ The source-index stage passed `check -p luna`, the code-session unit check and
 all four listed integration groups. Evidence:
 `/tmp/luna-tools-eqs77556/result.json`, `/tmp/luna-tools-ukcivhz2/result.json`,
 and `/tmp/luna-tools-5pk4hmgb/result.json`. Formatting and diff checks passed.
+
+## Runtime identity and effect declaration indexes
+
+The position index is now generic over declaration type. Function bodies,
+body-free runtime identities and effect declarations bind distinct typed slices
+through one immutable source index bundle. A source session retains that bundle
+once; warm VM construction shares its maps without rebuilding them or retaining
+execution state.
+
+Runtime identity signatures and collisions with executable function declarations
+are still checked during construction. A cached body-free identity remains
+transport metadata and cannot authorize comptime execution. Effect signatures
+are also rechecked; sharing their lookup index does not install handlers or
+satisfy an effect capability. IIR keeps separate authority and empty source
+catalogs as before.
+
+Verification commands:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib code_session
+python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor -p luna --test runtime_function_identities --test effect_contracts --test comptime_memory --test comptime_iir_bytecode
+```
+
+The unit test uses nonempty runtime-identity and effect catalogs, checks shared
+index allocations and original declaration references, and verifies fresh
+execution state. The warm-session integration test explicitly attempts to invoke
+a body-free runtime identity and must still receive `PhaseMismatch`.
+
+This stage passed the code-session unit check and all four integration groups
+(71 tests total). Evidence: `/tmp/luna-tools-7d3tc8kq/result.json` and
+`/tmp/luna-tools-3b8d28x6/result.json`. Formatting and diff checks passed.

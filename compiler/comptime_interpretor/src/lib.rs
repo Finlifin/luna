@@ -787,7 +787,7 @@ pub struct Interpreter<'a> {
         Option<&'a dyn Fn(&StructBuildRequest, &mut u64) -> Result<PreparedStructBuild<'a>, Error>>,
     declaration_world: Option<&'a Package>,
     target: Option<nir::target::TargetData>,
-    effect_declarations: BTreeMap<DeclarationId, &'a nir::effects::Declaration>,
+    effect_declarations: declaration_index::Effects<'a>,
     effect_state: effects::State,
     effect_values: Option<&'a iir::effect_values::Plan<'a>>,
     graph: Option<&'a iir::Package>,
@@ -830,7 +830,7 @@ pub struct Interpreter<'a> {
     active_associated_initializers: HashSet<(InterfaceInstance, Term, DeclarationId)>,
     instances: HashMap<(DeclarationId, Vec<Term>), Arc<Closure>>,
     functions: declaration_index::Functions<'a>,
-    runtime_function_identities: BTreeMap<DeclarationId, &'a nir::program::RuntimeFunctionIdentity>,
+    runtime_function_identities: declaration_index::RuntimeIdentities<'a>,
     retained_callable_signatures: HashMap<(DeclarationId, &'a [Term]), &'a Term>,
     normal_forms: BTreeMap<DeclarationId, &'a nir::normal_forms::Head>,
     structs: BTreeMap<DeclarationId, generated_structs::StructDefinition<'a>>,
@@ -883,20 +883,27 @@ impl<'a> Interpreter<'a> {
         package: &'a Package,
         assumptions: &[nir::program::TraitRequirement],
         mut budget: Budget,
-        positions: Option<Arc<BTreeMap<DeclarationId, usize>>>,
+        positions: Option<Arc<declaration_index::SourceIndexes>>,
     ) -> Result<Self, Error> {
         invocation_budget::charge_world_tables(package, &mut budget)?;
-        let functions = declaration_index::Functions::new(&package.functions, positions)?;
-        let mut runtime_function_identities = BTreeMap::new();
+        let functions = declaration_index::Functions::new(
+            &package.functions,
+            positions.as_ref().map(|index| index.functions.clone()),
+            |definition| definition.declaration,
+        )?;
+        let runtime_function_identities = declaration_index::RuntimeIdentities::new(
+            &package.runtime_function_identities,
+            positions
+                .as_ref()
+                .map(|index| index.runtime_identities.clone()),
+            |identity| identity.declaration,
+        )?;
         for identity in &package.runtime_function_identities {
             if !matches!(
                 identity.signature.callable_signature(),
                 Term::Function { .. }
             ) || identity.signature.is_comptime_callable()
                 || functions.contains_key(&identity.declaration)
-                || runtime_function_identities
-                    .insert(identity.declaration, identity)
-                    .is_some()
             {
                 return Err(Error {
                     kind: ErrorKind::InvalidCallPlan,
@@ -904,13 +911,13 @@ impl<'a> Interpreter<'a> {
                 });
             }
         }
-        let mut effect_declarations = BTreeMap::new();
+        let effect_declarations = declaration_index::Effects::new(
+            &package.effects,
+            positions.as_ref().map(|index| index.effects.clone()),
+            |effect| effect.declaration,
+        )?;
         for effect in &package.effects {
-            if !matches!(effect.signature, Term::Function { .. })
-                || effect_declarations
-                    .insert(effect.declaration, effect)
-                    .is_some()
-            {
+            if !matches!(effect.signature, Term::Function { .. }) {
                 return Err(Error {
                     kind: ErrorKind::InvalidCallPlan,
                     source: None,
@@ -1185,7 +1192,10 @@ impl<'a> Interpreter<'a> {
                 } else {
                     (
                         nir::program::FunctionPhase::Runtime,
-                        &runtime_function_identities[&body].type_parameters,
+                        &runtime_function_identities
+                            .get(&body)
+                            .expect("checked runtime identity")
+                            .type_parameters,
                     )
                 };
                 if phase == nir::program::FunctionPhase::NormalForm
@@ -1780,7 +1790,7 @@ impl<'a> Interpreter<'a> {
         package: &'a Package,
         assumptions: &[nir::program::TraitRequirement],
         budget: Budget,
-        positions: Option<Arc<BTreeMap<DeclarationId, usize>>>,
+        positions: Option<Arc<declaration_index::SourceIndexes>>,
     ) -> Result<Self, Error> {
         // Reject an undersized world allowance before phase validation walks
         // declarations. Actual charging occurs once in with_assumptions.

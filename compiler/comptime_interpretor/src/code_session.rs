@@ -6,7 +6,7 @@ use super::*;
 /// retained. A changed package requires a new session, even with identical IDs.
 pub struct CodeSession {
     package: Arc<Package>,
-    functions: Option<Arc<BTreeMap<DeclarationId, usize>>>,
+    indexes: Option<Arc<declaration_index::SourceIndexes>>,
     bytecode: bytecode::CodeCache,
     inputs: input_bodies::Cache,
     defaults: default_code::Cache,
@@ -16,7 +16,7 @@ impl CodeSession {
     pub fn new(package: Arc<Package>) -> Self {
         Self {
             package,
-            functions: None,
+            indexes: None,
             bytecode: Default::default(),
             inputs: Default::default(),
             defaults: Default::default(),
@@ -65,9 +65,15 @@ impl<'program> Interpreter<'program> {
         }
         let reserved = *budget;
         budget.steps = 0;
-        let vm = Self::for_comptime_with_index(package, &[], reserved, session.functions.clone())?;
+        let vm = Self::for_comptime_with_index(package, &[], reserved, session.indexes.clone())?;
         budget.steps = vm.remaining_steps();
-        session.functions = Some(vm.functions.positions.clone());
+        session.indexes.get_or_insert_with(|| {
+            Arc::new(declaration_index::SourceIndexes {
+                functions: vm.functions.positions.clone(),
+                runtime_identities: vm.runtime_function_identities.positions.clone(),
+                effects: vm.effect_declarations.positions.clone(),
+            })
+        });
         Ok(vm)
     }
 
@@ -94,12 +100,45 @@ mod tests {
 
     #[test]
     fn source_index_is_shared_without_reusing_execution_state() {
-        let source = Arc::new(Package::default());
+        let identity = DeclarationId {
+            package: 1,
+            local: 2,
+        };
+        let effect = DeclarationId {
+            package: 1,
+            local: 3,
+        };
+        let signature = Term::Function {
+            parameters: vec![],
+            result: Box::new(Term::Primitive(Primitive::Bool)),
+        };
+        let source = Arc::new(Package {
+            runtime_function_identities: vec![nir::program::RuntimeFunctionIdentity {
+                declaration: identity,
+                type_parameters: vec![],
+                signature: signature.clone(),
+            }],
+            effects: vec![nir::effects::Declaration {
+                declaration: effect,
+                group: None,
+                name: "read".into(),
+                type_parameters: vec![],
+                parameter_types: vec![],
+                signature,
+                abi: nir::effects::Abi::Direct,
+                inline: false,
+                requirements: vec![],
+                capabilities: vec![],
+            }],
+            ..Default::default()
+        });
         let mut session = CodeSession::new(source.clone());
         let mut budget = Budget::default();
         let mut first =
             Interpreter::for_comptime_in_session(&source, &mut session, &mut budget).unwrap();
         let index = first.functions.positions.clone();
+        let identities = first.runtime_function_identities.positions.clone();
+        let effects = first.effect_declarations.positions.clone();
         first.events.push(Event::EnterFunction(DeclarationId {
             package: 1,
             local: 1,
@@ -108,7 +147,21 @@ mod tests {
         let next =
             Interpreter::for_comptime_in_session(&source, &mut session, &mut next_budget).unwrap();
         assert!(Arc::ptr_eq(&index, &next.functions.positions));
+        assert!(Arc::ptr_eq(
+            &identities,
+            &next.runtime_function_identities.positions
+        ));
+        assert!(Arc::ptr_eq(&effects, &next.effect_declarations.positions));
         assert!(next.events().is_empty());
+        assert!(next.effect_state.environment.is_empty());
+        assert!(std::ptr::eq(
+            next.runtime_function_identities.get(&identity).unwrap(),
+            &source.runtime_function_identities[0]
+        ));
+        assert!(std::ptr::eq(
+            next.effect_declarations.get(&effect).unwrap(),
+            &source.effects[0]
+        ));
         assert_eq!(budget.steps, next_budget.steps);
         let mut exhausted = Budget {
             steps: 0,
@@ -121,6 +174,9 @@ mod tests {
                 .kind,
             ErrorKind::StepsExhausted
         );
-        assert!(Arc::ptr_eq(&index, session.functions.as_ref().unwrap()));
+        assert!(Arc::ptr_eq(
+            &index,
+            &session.indexes.as_ref().unwrap().functions
+        ));
     }
 }
