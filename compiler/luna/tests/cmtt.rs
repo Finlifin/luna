@@ -2918,7 +2918,7 @@ fn nominal_generator_data_transports_runtime_callable_identity() {
 }
 
 #[test]
-fn generator_data_rejects_runtime_inputs_wrong_identities_and_opaque_domains() {
+fn generator_data_rejects_runtime_inputs_and_wrong_identities() {
     for (source, anchor) in [
         (
             "struct Config {flag:bool} pure comptime fn build(config:Config)->< |- bool> {'(config.flag)} fn run(config:Config)->bool {~<build(config)>}",
@@ -2927,10 +2927,6 @@ fn generator_data_rejects_runtime_inputs_wrong_identities_and_opaque_domains() {
         (
             "struct Config {flag:bool} struct Other {flag:bool} pure comptime fn build(config:Config)->< |- bool> {'(config.flag)} fn run()->bool {~<build(Other {flag:true})>}",
             "type",
-        ),
-        (
-            "pure comptime fn Identity<T>->.Type'builtin {T} pure comptime fn build(config:Identity<bool>)->< |- bool> {'(true)}",
-            "immutable value domain",
         ),
         (
             "pure comptime fn build(pointer:*bool)->< |- bool> {'(true)} fn run(pointer:*bool)->bool {~<build(pointer)>}",
@@ -2952,6 +2948,26 @@ fn generator_data_rejects_runtime_inputs_wrong_identities_and_opaque_domains() {
         ),
         Value::Bool(true)
     );
+}
+
+#[test]
+fn generator_data_domains_keep_user_normal_form_heads_opaque() {
+    let declarations = "typealias Type=.Type'builtin;
+        pure comptime fn Identity<T>->Type {T}
+        pure comptime fn build(config:Identity<bool>)-><|-bool> {'(true)}
+        pure comptime fn forward(config:Identity<bool>)-><|-bool> {build(config)}";
+    support::compile_with_protocols(declarations, &Default::default()).unwrap();
+    // A valid parameter domain need not expose a representation. Its head
+    // must not unfold to admit a bool or to quote its input as a bool.
+    for source in [
+        format!("{declarations} fn run()->bool {{~<build(true)>}}"),
+        format!("{declarations} fn run()->bool {{~<forward(true)>}}"),
+        declarations.replace("{'(true)}", "{'(config)}"),
+    ] {
+        let failure = support::compile_with_protocols(&source, &Default::default()).unwrap_err();
+        assert!(failure.contains("type"), "{source}: {failure}");
+        assert!(!failure.contains("parsing failed"), "{failure}");
+    }
 }
 
 #[test]

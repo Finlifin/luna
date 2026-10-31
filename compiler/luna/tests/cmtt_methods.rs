@@ -2406,3 +2406,40 @@ fn quoting_a_value_receiver_freezes_its_value_before_later_mutation() {
         fn run()->bool {let value=~<generate()>;value.flag}";
     assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
 }
+
+#[test]
+fn comptime_code_receiver_spreads_preserve_places_and_packet_evaluation() {
+    let prefix = "struct Builder {flag:bool}
+        impl Builder {
+            comptime fn build(self,flag:bool)-><|-bool> {
+                self=Builder {flag:flag};self.forward()
+            }
+            comptime fn forward(self)-><|-bool> {let flag=self.flag;'(flag)}
+        }";
+    for (preparation, call, observation) in [
+        ("", "Builder.build(...(owner,true))", "owner.flag"),
+        (
+            "let packet=(owner,true);",
+            "Builder.build(...packet)",
+            "not owner.flag",
+        ),
+        (
+            "var seen=false;",
+            "Builder.build(...do {seen=not seen;(owner,true)})",
+            "seen and not owner.flag",
+        ),
+    ] {
+        let source = format!(
+            "{prefix}
+            comptime fn generate()-><|-bool> {{
+                var owner=Builder {{flag:false}};{preparation}
+                let code={call};if {observation} {{code}} else {{'(false)}}
+            }} fn run()->bool {{~<generate()>}}"
+        );
+        assert_eq!(
+            support::run_iir_with_tuple(&source, "run", vec![]),
+            Value::Bool(true),
+            "{source}"
+        );
+    }
+}
