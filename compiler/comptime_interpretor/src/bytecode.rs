@@ -2275,20 +2275,13 @@ impl<'a> Interpreter<'a> {
                     dynamic,
                 } => {
                     let pending = frame.calls.get_mut(call).ok_or_else(missing)?;
-                    let expression = if let Some((binders, arguments)) = &pending.trait_defaults {
-                        Arc::new(self.bound_default_expression(value, binders, arguments)?)
-                    } else if *dynamic
-                        && matches!(&pending.callee,
-                        Value::Closure(closure) if closure.declaration_instance().is_some())
-                    {
-                        Arc::new(self.instance_default_expression(
-                            source,
-                            value,
-                            &pending.callee,
-                        )?)
-                    } else {
-                        value.clone()
-                    };
+                    let expression = self.specialized_default_code(
+                        value,
+                        pending.trait_defaults.as_ref(),
+                        *dynamic,
+                        &pending.callee,
+                        source,
+                    )?;
                     let environment = std::mem::take(&mut pending.defaults);
                     frame.waiting = Some(Waiting::Default {
                         call: *call,

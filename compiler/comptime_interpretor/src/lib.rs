@@ -17,6 +17,7 @@ pub use code_values::CodeValue;
 mod bit_operations;
 mod bit_representation;
 mod bit_writeback;
+mod default_code;
 mod dynamic_instances;
 mod environment;
 mod field_access;
@@ -774,6 +775,7 @@ pub struct Interpreter<'a> {
     bytecode_compilation_steps: u64,
     bytecode_cache: bytecode::CodeCache,
     input_body_cache: input_bodies::Cache,
+    default_code_cache: default_code::Cache,
     enum_builder:
         Option<&'a dyn Fn(&EnumBuildRequest, &mut u64) -> Result<PreparedEnumBuild<'a>, Error>>,
     struct_builder:
@@ -1674,6 +1676,7 @@ impl<'a> Interpreter<'a> {
             bytecode_compilation_steps: 0,
             bytecode_cache: Default::default(),
             input_body_cache: Default::default(),
+            default_code_cache: Default::default(),
             declaration_world: Some(package),
             effect_declarations,
             effect_state: effects::State::default(),

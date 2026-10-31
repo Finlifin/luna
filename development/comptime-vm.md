@@ -8095,3 +8095,45 @@ Validation in `/home/fin/luna`:
   Includes the new owned-descriptor budget check and reference/bytecode method
   equivalence, plus forged interface contracts, defaults and phase selection.
 - Formatting and `git diff --check` passed. No full language suite was run.
+
+
+## Reusing specialized default code (2026-10-31)
+
+Dynamic function and trait defaults previously allocated a new substituted Expr
+on every call. The owned-code cache therefore saw a new identity each time and
+recompiled the same specialized default. A session-local default-code cache now
+retains the immutable substituted expression, allowing its compiled program to
+be reused by the existing code cache.
+
+Keys use a live weak template identity and exact substitution inputs. Interface
+keys contain the declaration binders and arguments; function keys also contain
+the declaration and its parameter domains. These are structural transformation
+keys, not source-value Eq/Hash or invocation-result keys. No result, capture or
+runtime environment is cached. Every default still runs with that call's prepared
+arguments, and call admission plus interface contracts remain outside the cache.
+
+Key copying and comparisons consume budget before recursive work. Publication
+occurs only after successful substitution. Dead templates are pruned; at most
+64 entries and 100,000 units of accounted key/substitution work are retained.
+Oversize entries execute without publication and capacity eviction drops only
+rebuildable code. Static defaults keep their existing shared identity directly.
+
+This removes repeated substitution/compilation for repeated specializations;
+it does not yet remove the template expression carrier or complete IIR VM
+migration. A source regression warms both Boolean specializations and checks
+that compilation counts stay fixed while default executions and their callee
+observations continue on every call, with results changing with current inputs.
+No wall-clock speedup or general linear-time claim is made.
+
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib default_code`:
+  three cache identity, budget/failure recovery and capacity tests passed,
+  exit 0; `/tmp/luna-tools-gbmhzjnh/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_defaults --test comptime_bytecode_traits --test dynamic_trait_clauses --test comptime_clause_inputs`:
+  70 tests passed, exit 0; `/tmp/luna-tools-e5a_2ub_/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-mm23m5i8/result.json`; `git diff --check` passed.
+
+No full language suite was run for this cache change.

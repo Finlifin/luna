@@ -341,3 +341,50 @@ fn repeated_defaults_reuse_code_without_reusing_values_or_calls() {
         200
     );
 }
+
+#[test]
+fn dynamic_defaults_reuse_specialized_code_without_reusing_results() {
+    let package = support::compile(
+        "comptime fn observe(value:bool)->bool {not value}
+        comptime fn choose(seed:bool,.value:bool=observe(seed))->bool where flag:bool {value == flag}
+        trait Select {
+            comptime fn select(seed:bool,.value:bool=observe(seed))->bool where flag:bool;
+        }
+        impl Select for bool {
+            comptime fn select(seed:bool,value:bool)->bool where flag:bool {value == flag}
+        }
+        comptime fn ordinary(flag:bool,seed:bool)->bool {choose<flag>(seed)}
+        comptime fn interface(flag:bool,seed:bool)->bool {bool.as(Select).select<flag>(seed)}",
+    );
+    for name in ["ordinary", "interface"] {
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let run = support::id(&package, name);
+        let observe = support::id(&package, "observe");
+        for flag in [false, true] {
+            vm.invoke(run, vec![Value::Bool(flag), Value::Bool(false)])
+                .unwrap();
+        }
+        let compilations = vm.bytecode_compilations();
+        let defaults = vm.bytecode_default_evaluations();
+        let observations = vm.events().iter().filter(|event| matches!(event, comptime_interpretor::Event::EnterFunction(id) if *id == observe)).count();
+        for (flag, seed) in [(true, true), (false, false), (true, false), (false, true)] {
+            assert_eq!(
+                vm.invoke(run, vec![Value::Bool(flag), Value::Bool(seed)])
+                    .unwrap(),
+                Value::Bool(!seed == flag)
+            );
+        }
+        assert_eq!(
+            vm.bytecode_compilations(),
+            compilations,
+            "{name}: repeated defaults recompiled"
+        );
+        assert_eq!(vm.bytecode_default_evaluations() - defaults, 4);
+        let observed = vm.events().iter().filter(|event| matches!(event, comptime_interpretor::Event::EnterFunction(id) if *id == observe)).count();
+        assert_eq!(
+            observed - observations,
+            4,
+            "default computation must execute every time"
+        );
+    }
+}
