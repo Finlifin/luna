@@ -891,7 +891,7 @@ fn constant_operands_and_callable_selection_have_distinct_instructions() {
     let code = compile(&body, &mut 1000).unwrap();
     assert!(matches!(
         code.instructions()[0].op,
-        Op::CallableReference { .. }
+        Op::FunctionInstance { .. }
     ));
-    assert!(code.to_string().contains("(callable-reference "));
+    assert!(code.to_string().contains("(form-function-instance "));
 }

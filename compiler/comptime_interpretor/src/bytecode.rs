@@ -1028,6 +1028,17 @@ impl<'a> Interpreter<'a> {
                         .remove(destination)
                         .ok_or_else(missing)?;
                     let packet = frame.slots[*packet].take().ok_or_else(missing)?;
+                    if origin.is_none() {
+                        let arguments =
+                            self.dynamic_instance_arguments(&constructor.input, packet, source)?;
+                        frame.slots[*destination] = Some(self.function_instance_value(
+                            constructor.declaration,
+                            &arguments,
+                            &constructor.output,
+                            source,
+                        )?);
+                        continue;
+                    }
                     let instance = self.dynamic_instance_expression(
                         constructor.declaration,
                         &constructor.input,
@@ -1041,11 +1052,8 @@ impl<'a> Interpreter<'a> {
                         // the implementation here would erase its contract and defaults.
                         frame.instance_methods.insert(*destination, instance);
                     } else {
-                        let result = if origin.is_some() {
-                            self.eval_trait_method(&instance, &mut frame.environment, false)?
-                        } else {
-                            self.eval_function_instance(&instance, &mut frame.environment)?
-                        };
+                        let result =
+                            self.eval_trait_method(&instance, &mut frame.environment, false)?;
                         let Flow::Value(value) = result else {
                             return Err(missing());
                         };
@@ -2422,13 +2430,21 @@ impl<'a> Interpreter<'a> {
                     };
                     frame.slots[*destination] = Some(result);
                 }
+                Op::FunctionInstance {
+                    destination,
+                    instance,
+                } => {
+                    frame.slots[*destination] = Some(self.function_instance_value(
+                        instance.declaration,
+                        &instance.arguments,
+                        &instance.output,
+                        source,
+                    )?);
+                }
                 Op::CallableReference { destination, value } => {
                     let flow = match value.kind {
                         K::TraitMethod { .. } => {
                             self.eval_trait_method(value, &mut frame.environment, false)?
-                        }
-                        K::FunctionInstance { .. } => {
-                            self.eval_function_instance(value, &mut frame.environment)?
                         }
                         _ => return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source))),
                     };

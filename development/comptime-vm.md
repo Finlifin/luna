@@ -8027,3 +8027,35 @@ Validation in `/home/fin/luna`:
 
 The source groups cover public definition builders, frozen list/type arguments,
 phase rejection and invocation effects. No full language suite or benchmark was run.
+
+
+## Function-instance operands and computed clauses (2026-10-31)
+
+Static generic function references now lower to `FunctionInstance` with an owned
+signature, declaration identity and completed clause arguments. The instruction
+calls the same operand-level formation service as reference execution. The
+service lives in `function_instances.rs`; it admits input domains, substitutes
+the signature/body under the correct telescope and checks current requirements
+before returning an existing or new instance. Its S-expression dump exposes
+the declaration, arguments and output type.
+
+Dynamic non-trait clause packets freeze their checked values directly into
+arguments, then call that service. Neither execution engine constructs an
+intermediate FunctionInstance expression for this path. Packet validation still
+precedes body formation; clause computations retain their existing order and
+control-flow effects. Failed formation cannot be made successful by an earlier
+cached body. The regression now covers static and computed arguments in both
+engines and checks recovery reuses the same body after requirements are restored.
+
+Trait selection retains its interface-aware expression path and contracts;
+this is not yet the completion of callable lowering or IIR VM migration.
+No throughput claim is made.
+
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor --lib --tests`:
+  563 tests passed, exit 0; `/tmp/luna-tools-73wfo5ma/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_clause_inputs --test clause_staged_constants --test dynamic_trait_clauses --test comptime_bytecode_traits --test comptime_bytecode_defaults`:
+  71 tests passed, exit 0; `/tmp/luna-tools-bmi4en05/result.json`.
+- Formatting and `git diff --check` passed. No full language suite was run.

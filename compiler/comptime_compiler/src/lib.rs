@@ -434,6 +434,10 @@ pub enum Op {
         destination: Register,
         value: Arc<constants::Constant>,
     },
+    FunctionInstance {
+        destination: Register,
+        instance: Arc<instances::Function>,
+    },
     CallableReference {
         destination: Register,
         value: Arc<Expr>,
@@ -1136,6 +1140,10 @@ impl fmt::Display for Program {
                 Op::Constant { destination, value } => {
                     write!(f, "(constant {destination} {value})")?
                 }
+                Op::FunctionInstance {
+                    destination,
+                    instance,
+                } => write!(f, "(form-function-instance {destination} {instance})")?,
                 Op::CallableReference { destination, value } => {
                     write!(f, "(callable-reference {destination} {value})")?
                 }
@@ -2503,7 +2511,25 @@ fn compile_root<'a>(
                             },
                         );
                     }
-                    K::FunctionInstance { .. } | K::TraitMethod { .. } => {
+                    K::FunctionInstance {
+                        declaration,
+                        arguments,
+                    } => {
+                        nir::copy_budget::charge_substitution(expr, &[], &[], fuel)
+                            .map_err(|error| copy_error(error, source))?;
+                        emit(
+                            &mut work,
+                            Op::FunctionInstance {
+                                destination: dst,
+                                instance: Arc::new(instances::Function {
+                                    declaration: *declaration,
+                                    arguments: arguments.clone(),
+                                    output: expr.ty.clone(),
+                                }),
+                            },
+                        );
+                    }
+                    K::TraitMethod { .. } => {
                         nir::copy_budget::charge_substitution(expr, &[], &[], fuel)
                             .map_err(|error| copy_error(error, source))?;
                         emit(

@@ -385,15 +385,12 @@ impl Interpreter<'_> {
 
     // The tuple here is the NIR clause packet, not a language tuple-type rule.
     // Current values are checked even when the resulting instance is cached.
-    pub(super) fn dynamic_instance_expression(
+    pub(super) fn dynamic_instance_arguments(
         &mut self,
-        declaration: DeclarationId,
         input: &Term,
-        output: &Term,
-        origin: Option<(DeclarationId, usize)>,
         packet: Value,
         source: SourceRange,
-    ) -> Result<Expr, Error> {
+    ) -> Result<Vec<Term>, Error> {
         let (Term::Tuple(domains), Value::Tuple(values)) = (input, packet) else {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         };
@@ -408,6 +405,19 @@ impl Interpreter<'_> {
             }
             arguments.push(self.residual_input_term(value, source)?);
         }
+        Ok(arguments)
+    }
+
+    pub(super) fn dynamic_instance_expression(
+        &mut self,
+        declaration: DeclarationId,
+        input: &Term,
+        output: &Term,
+        origin: Option<(DeclarationId, usize)>,
+        packet: Value,
+        source: SourceRange,
+    ) -> Result<Expr, Error> {
+        let arguments = self.dynamic_instance_arguments(input, packet, source)?;
         let kind = if let Some((interface, count)) = origin {
             if arguments.len() < 1 + count {
                 return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
@@ -489,16 +499,10 @@ impl Interpreter<'_> {
             Flow::Value(value) => value,
             flow => return Ok(flow),
         };
-        let instance = self.dynamic_instance_expression(
-            *declaration,
-            &subject.ty,
-            &expr.ty,
-            None,
-            packet,
-            expr.source,
-        )?;
+        let arguments = self.dynamic_instance_arguments(&subject.ty, packet, expr.source)?;
         // Revalidate declaration domains and requirements, including cache hits.
-        self.eval_function_instance(&instance, environment)
+        self.function_instance_value(*declaration, &arguments, &expr.ty, expr.source)
+            .map(Flow::Value)
     }
 }
 
@@ -662,25 +666,50 @@ mod tests {
             Term::Primitive(Primitive::Bool),
             Term::Primitive(Primitive::Char),
         )];
-        // A controlled solver observes the transport boundary, not type theory.
-        let outcome = std::cell::Cell::new(ContractOutcome::Satisfied);
-        let solver = |_: &nir::program::TypePredicate| outcome.get();
-        let mut vm = Interpreter::for_comptime(&package, Budget::default())
-            .unwrap()
-            .with_type_solver(&solver);
-        let mut env = Environment::new();
-        env.insert(LocalId { owner: 2, index: 0 }, Value::Bool(true));
-        vm.eval(&expression(&package), &mut env).unwrap();
-        assert_eq!(vm.instances.len(), 1);
-        outcome.set(ContractOutcome::Rejected);
-        assert_eq!(
-            vm.eval(&expression(&package), &mut env).unwrap_err().kind,
-            ErrorKind::TypeContractRejected
-        );
-        assert_eq!(vm.instances.len(), 1);
-        outcome.set(ContractOutcome::Satisfied);
-        vm.eval(&expression(&package), &mut env).unwrap();
-        assert_eq!(vm.instances.len(), 1);
+        // Cache reuse must not turn a former proof into a current proof.
+        for compiled in [false, true] {
+            for dynamic in [false, true] {
+                let outcome = std::cell::Cell::new(ContractOutcome::Satisfied);
+                let solver = |_: &nir::program::TypePredicate| outcome.get();
+                let mut vm = Interpreter::for_comptime(&package, Budget::default())
+                    .unwrap()
+                    .with_type_solver(&solver);
+                let mut body = expression(&package);
+                if !dynamic {
+                    body.kind = K::FunctionInstance {
+                        declaration: package.functions[0].declaration,
+                        arguments: vec![Term::Bool(true)],
+                    };
+                }
+                let code = Arc::new(comptime_compiler::compile(&body, &mut 10000).unwrap());
+                let mut env =
+                    Environment::from([(LocalId { owner: 2, index: 0 }, Value::Bool(true))]);
+                let execute = |vm: &mut Interpreter<'_>, env: &mut Environment| {
+                    if compiled {
+                        vm.execute_code(&code, env)
+                    } else {
+                        vm.eval(&body, env)
+                    }
+                };
+                let Flow::Value(Value::Closure(first)) = execute(&mut vm, &mut env).unwrap() else {
+                    panic!("expected formed function instance")
+                };
+                assert_eq!(vm.instances.len(), 1);
+                outcome.set(ContractOutcome::Rejected);
+                assert_eq!(
+                    execute(&mut vm, &mut env).unwrap_err().kind,
+                    ErrorKind::TypeContractRejected
+                );
+                assert_eq!(vm.instances.len(), 1);
+                outcome.set(ContractOutcome::Satisfied);
+                let Flow::Value(Value::Closure(recovered)) = execute(&mut vm, &mut env).unwrap()
+                else {
+                    panic!("expected recovered function instance")
+                };
+                assert!(Arc::ptr_eq(&first, &recovered));
+                assert_eq!(vm.instances.len(), 1);
+            }
+        }
     }
 }
 

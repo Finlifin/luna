@@ -17,3 +17,20 @@ impl fmt::Display for Constructor {
         )
     }
 }
+
+/// Completed clause arguments, still subject to formation contracts at each use.
+#[derive(Debug)]
+pub struct Function {
+    pub declaration: DeclarationId,
+    pub arguments: Vec<Term>,
+    pub output: Term,
+}
+impl fmt::Display for Function {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(function-instance {} (arguments", self.declaration)?;
+        for argument in &self.arguments {
+            write!(f, " {argument}")?;
+        }
+        write!(f, ") (output {}))", self.output)
+    }
+}
