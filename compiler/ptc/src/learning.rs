@@ -141,6 +141,37 @@ impl Search<'_> {
         conflict
     }
 
+    pub(super) fn retains_conflict(
+        &mut self,
+        conflict: &Conflict,
+        assignment: &[Option<bool>],
+    ) -> bool {
+        for clause in &self.learned.entries {
+            if self.steps == 0 {
+                return false;
+            }
+            self.steps -= 1;
+            if clause.len() != conflict.support.len() {
+                continue;
+            }
+            let mut same = true;
+            for (index, value) in clause {
+                if self.steps == 0 {
+                    return false;
+                }
+                self.steps -= 1;
+                if !conflict.support.contains(index) || assignment[*index] != Some(*value) {
+                    same = false;
+                    break;
+                }
+            }
+            if same {
+                return true;
+            }
+        }
+        false
+    }
+
     pub(super) fn propagate_learned(
         &mut self,
         assignment: &[Option<bool>],

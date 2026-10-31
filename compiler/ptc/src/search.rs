@@ -3,6 +3,36 @@
 use super::{Conflict, Search, SearchResult, UnknownReason, boolean, learning};
 use std::fmt;
 
+#[cfg(test)]
+thread_local! { static BACKJUMPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
+fn backjump(
+    frames: &mut Vec<Frame>,
+    assignment: &mut [Option<bool>],
+    levels: &mut [usize],
+    decision_level: &mut usize,
+    target: usize,
+) {
+    debug_assert!(target < *decision_level);
+    for (value, level) in assignment.iter_mut().zip(levels) {
+        if *level > target {
+            *value = None;
+            *level = 0;
+        }
+    }
+    while *decision_level > target {
+        match frames
+            .pop()
+            .expect("decision frame missing during backjump")
+        {
+            Frame::Negative { .. } | Frame::Positive { .. } => *decision_level -= 1,
+            Frame::Boolean(_) | Frame::Learned { .. } => {}
+        }
+    }
+    #[cfg(test)]
+    BACKJUMPS.with(|n| n.set(n.get() + 1));
+}
+
 enum Frame {
     Boolean(Vec<(usize, bool)>),
     Learned {
@@ -65,6 +95,8 @@ impl Search<'_> {
         assignment: &mut [Option<bool>],
         mut depth: usize,
     ) -> SearchResult {
+        let entry_depth = depth;
+        let entry_assignments = assignment.iter().filter(|v| v.is_some()).count();
         let mut frames = Vec::new();
         let mut levels = vec![0usize; assignment.len()];
         let mut decision_level = 0usize;
@@ -92,26 +124,61 @@ impl Search<'_> {
             };
             let mut learned_at = None;
             loop {
-                result = self.learn_first_uip(
+                let (next, jump) = self.learn_first_uip(
                     result,
                     assignment,
                     &levels,
                     decision_level,
                     &mut learned_at,
                 );
+                result = next;
+                if let Some(target) = jump {
+                    backjump(
+                        &mut frames,
+                        assignment,
+                        &mut levels,
+                        &mut decision_level,
+                        target,
+                    );
+                    depth = entry_depth + assignment.iter().filter(|v| v.is_some()).count()
+                        - entry_assignments;
+                    continue 'search;
+                }
                 let Some(frame) = frames.pop() else {
-                    return result;
+                    // A completed subquery may still depend on entry facts.
+                    // Retain that conditional result even when a restart
+                    // eliminated the final decision-resolution frame.
+                    return match result {
+                        SearchResult::Unsat(conflict) => {
+                            SearchResult::Unsat(self.learn_resolved(conflict, assignment))
+                        }
+                        other => other,
+                    };
                 };
                 match frame {
                     Frame::Boolean(trail) => {
                         for (index, value) in trail.into_iter().rev() {
-                            result = self.learn_first_uip(
+                            let (next, jump) = self.learn_first_uip(
                                 result,
                                 assignment,
                                 &levels,
                                 decision_level,
                                 &mut learned_at,
                             );
+                            result = next;
+                            if let Some(target) = jump {
+                                backjump(
+                                    &mut frames,
+                                    assignment,
+                                    &mut levels,
+                                    &mut decision_level,
+                                    target,
+                                );
+                                depth = entry_depth
+                                    + assignment.iter().filter(|v| v.is_some()).count()
+                                    - entry_assignments;
+                                continue 'search;
+                            }
                             assignment[index] = None;
                             levels[index] = 0;
                             if let SearchResult::Unsat(proof) = result {
@@ -210,19 +277,19 @@ impl Search<'_> {
         levels: &[usize],
         decision_level: usize,
         learned_at: &mut Option<usize>,
-    ) -> SearchResult {
+    ) -> (SearchResult, Option<usize>) {
         if decision_level == 0 || *learned_at == Some(decision_level) {
-            return result;
+            return (result, None);
         }
         let SearchResult::Unsat(conflict) = result else {
-            return result;
+            return (result, None);
         };
         let mut current = 0;
         for index in &conflict.support {
             // This optional analysis shares the query budget. Its failure does
             // not change the proof or permit any unsupported assignment.
             if self.steps == 0 {
-                return SearchResult::Unsat(conflict);
+                return (SearchResult::Unsat(conflict), None);
             }
             self.steps -= 1;
             if levels[*index] == decision_level {
@@ -234,9 +301,25 @@ impl Search<'_> {
         }
         if current == 1 {
             *learned_at = Some(decision_level);
-            SearchResult::Unsat(self.learn_resolved(conflict, assignment))
+            let target = conflict
+                .support
+                .iter()
+                .map(|index| levels[*index])
+                .filter(|level| *level < decision_level)
+                .max()
+                .unwrap_or(0);
+            let conflict = self.learn_resolved(conflict, assignment);
+            let mut jump = None;
+            if self.retains_conflict(&conflict, assignment) {
+                let work = assignment.len().saturating_mul(3);
+                if self.steps >= work {
+                    self.steps -= work;
+                    jump = Some(target);
+                }
+            }
+            (SearchResult::Unsat(conflict), jump)
         } else {
-            SearchResult::Unsat(conflict)
+            (SearchResult::Unsat(conflict), None)
         }
     }
 
@@ -444,11 +527,16 @@ mod tests {
             max_depth: 128,
         };
         let mut assignment = vec![None; 3];
+        BACKJUMPS.with(|n| n.set(0));
         assert!(matches!(
             search.solve(&mut assignment, 0),
             SearchResult::Model(_)
         ));
         assert_eq!(assignment, vec![None; 3]);
+        assert!(
+            BACKJUMPS.with(|n| n.get()) > 0,
+            "UIP learning did not restart propagation"
+        );
         // The decision's opposite branch must still benefit from x=false.
         assignment[0] = Some(true);
         let learning::Propagation::Unit {
@@ -467,6 +555,53 @@ mod tests {
         assert_eq!(
             search.check_tree(&reason.tree, &mut assignment, 0),
             Err(crate::ProofError::Invalid)
+        );
+    }
+
+    #[test]
+    fn asserting_backjump_preserves_the_lower_level_prefix() {
+        let mut frames = vec![
+            Frame::Boolean(vec![(0, true)]),
+            Frame::Negative {
+                index: 1,
+                child_depth: 2,
+            },
+            Frame::Boolean(vec![(2, false)]),
+            Frame::Negative {
+                index: 3,
+                child_depth: 4,
+            },
+            Frame::Boolean(vec![(4, true)]),
+            Frame::Negative {
+                index: 5,
+                child_depth: 6,
+            },
+            Frame::Boolean(vec![(6, false)]),
+        ];
+        let mut assignment = vec![
+            Some(true),
+            Some(false),
+            Some(false),
+            Some(false),
+            Some(true),
+            Some(false),
+            Some(false),
+        ];
+        let mut levels = vec![0, 1, 1, 2, 2, 3, 3];
+        let mut level = 3;
+        backjump(&mut frames, &mut assignment, &mut levels, &mut level, 1);
+        assert_eq!(level, 1);
+        assert_eq!(frames.len(), 3);
+        assert_eq!(
+            assignment,
+            vec![Some(true), Some(false), Some(false), None, None, None, None]
+        );
+        assert_eq!(levels, vec![0, 1, 1, 0, 0, 0, 0]);
+        backjump(&mut frames, &mut assignment, &mut levels, &mut level, 0);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(
+            assignment,
+            vec![Some(true), None, None, None, None, None, None]
         );
     }
 
