@@ -316,3 +316,25 @@ Validation in `/home/fin/luna`:
 
 No full language suite was run. The unrelated host-fixture failures and
 multi-label Copy inference remain outstanding.
+
+## Host contract fixture recovery
+
+The twelve previously failing host method-contract tests now explicitly bind
+bool in their shared standalone source-package helper. These fixtures do not
+load a sysroot; production primitive lookup remains ordinary name resolution.
+No contract, cleanup, negative test assertion or host implementation changed.
+The recovered tests again reach concrete IIR validation, LLVM emission and
+native execution, including malformed cleanup evidence rejection, interface
+entry/exit checks, callback premises and affine failure cleanup.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --lib host::method_contract_tests`:
+  12 passed, exit 0; `/tmp/luna-tools-601c1nqu/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --lib`:
+  82 passed, exit 0; `/tmp/luna-tools-hfb0s1dl/result.json`.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  exit 0; `/tmp/luna-tools-f7re14dq/result.json`; `git diff --check` passed.
+
+This resolves the recorded host fixture failure, not the unrelated multi-label
+Copy inference limitation. No full language suite was run.

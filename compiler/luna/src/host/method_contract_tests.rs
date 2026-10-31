@@ -10,7 +10,9 @@ fn source_package(source: &str) -> nir::program::Package {
         std::process::id(),
         NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
-    std::fs::write(&path, source).unwrap();
+    // These isolated compiler fixtures do not load the public sysroot.
+    // Primitive names therefore need explicit bindings in the source package.
+    std::fs::write(&path, format!("typealias bool = .bool'builtin;\n{source}")).unwrap();
     let crate::cli::Command::Compile(options) =
         crate::cli::parse([path.clone().into_os_string(), "--emit".into(), "nir".into()]).unwrap()
     else {
