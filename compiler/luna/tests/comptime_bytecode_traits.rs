@@ -298,3 +298,125 @@ fn associated_values_are_selected_without_forcing_function_tree_fallback() {
         }
     }
 }
+
+#[test]
+fn associated_code_keeps_generic_interfaces_subjects_and_dependent_domains_distinct() {
+    let mut package = support::compile(
+        "typealias Char=.char'builtin;
+        comptime fn invert(value:bool)->bool {not value}
+        pure comptime trait Flags where enabled:bool {
+            assoc flag:bool=invert(enabled);
+        }
+        struct Holder where enabled:bool {}
+        struct Other {}
+        comptime impl Flags<enabled> for Holder<enabled> where enabled:bool {}
+        comptime impl Flags<true> for Other {assoc flag:bool=true;}
+        pure comptime trait Data where T,value:T {assoc data:T=value;}
+        comptime impl Data<bool,true> for Other {}
+        comptime impl Data<Char,'x'> for Other {}
+        comptime fn run(select:bool)->bool {
+            let selected=if select {
+                Holder<true>.as(Flags<true>).flag
+            } else {
+                Holder<false>.as(Flags<false>).flag
+            };
+            selected == not select and Other.as(Flags<true>).flag
+                and Other.as(Data<bool,true>).data
+                and Other.as(Data<Char,'x'>).data == 'x'
+        }",
+    );
+    let roots = [iir::InstanceKey {
+        declaration: support::id(&package, "run"),
+        arguments: vec![],
+    }];
+    package.dispatch_instances = elaboration::materialization::dispatch_instances_for_invocation(
+        &package,
+        &roots,
+        Default::default(),
+    )
+    .unwrap();
+    let graph = elaboration::materialization::instantiate(
+        &package,
+        &roots,
+        Default::default(),
+        Default::default(),
+    )
+    .unwrap();
+    for materialized in [false, true] {
+        for compiled in [false, true] {
+            let mut vm = match (materialized, compiled) {
+                (false, false) => Interpreter::for_comptime_tree(&package, Budget::default()),
+                (false, true) => Interpreter::for_comptime(&package, Budget::default()),
+                (true, false) => Interpreter::from_iir_for_comptime_tree(&graph, Budget::default()),
+                (true, true) => Interpreter::from_iir_for_comptime(&graph, Budget::default()),
+            }
+            .unwrap();
+            for (iteration, selected) in [true, false, false, true].into_iter().enumerate() {
+                let compilations = vm.bytecode_compilations();
+                let calls = vm.bytecode_invocations();
+                let result = if materialized {
+                    vm.invoke_instance(&graph.roots[0], vec![Value::Bool(selected)])
+                } else {
+                    vm.invoke(roots[0].declaration, vec![Value::Bool(selected)])
+                }
+                .unwrap();
+                assert_eq!(result, Value::Bool(true));
+                assert_eq!(vm.bytecode_invocations() > calls, compiled);
+                if iteration >= 2 {
+                    assert_eq!(vm.bytecode_compilations(), compilations);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn cached_associated_code_creates_independent_stateful_closure_values() {
+    let mut package = support::compile(
+        "typealias Counter=%{value:bool} comptime fn()->bool;
+        comptime fn counter(initial:bool)->Counter {
+            var value:bool=initial;
+            || {value=not value;value}
+        }
+        pure comptime trait Counters where initial:bool {
+            assoc next:Counter=counter(initial);
+        }
+        struct Host {}
+        comptime impl Counters<initial> for Host where initial:bool {}
+        comptime fn run()->bool {
+            let first=Host.as(Counters<false>).next;
+            let second=Host.as(Counters<false>).next;
+            let opposite=Host.as(Counters<true>).next;
+            first() and second() and not first() and not opposite()
+                and opposite() and not second()
+        }",
+    );
+    let roots = [iir::InstanceKey {
+        declaration: support::id(&package, "run"),
+        arguments: vec![],
+    }];
+    package.dispatch_instances = elaboration::materialization::dispatch_instances_for_invocation(
+        &package,
+        &roots,
+        Default::default(),
+    )
+    .unwrap();
+    // Stateful capture serialization into IIR remains a separate missing path.
+    // Here the prepared source VM must create fresh values from reused code.
+    for compiled in [false, true] {
+        let mut vm = if compiled {
+            Interpreter::for_comptime(&package, Budget::default())
+        } else {
+            Interpreter::for_comptime_tree(&package, Budget::default())
+        }
+        .unwrap();
+        for _ in 0..3 {
+            let calls = vm.bytecode_invocations();
+            assert_eq!(
+                vm.invoke(roots[0].declaration, vec![]).unwrap(),
+                Value::Bool(true)
+            );
+            assert_eq!(vm.bytecode_invocations() > calls, compiled);
+        }
+    }
+}

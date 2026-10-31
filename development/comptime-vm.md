@@ -8324,3 +8324,48 @@ Reports: `/tmp/luna-tools-fphzzm7t/result.json` (345 interpreter tests),
 `/tmp/luna-tools-ns44rlp8/result.json` (formatting). An initial compile check
 caught the missing new field in the IIR constructor; both constructors now
 initialize independent local caches. No timing speedup or full-suite claim.
+
+## Generic associated-code isolation and captured-value IIR gap
+
+Cross-path integration now alternates generic trait value arguments, different
+subjects implementing the same trait instance, and dependent associated value
+domains (`bool` versus `char`). Prepared NIR and materialized IIR each run with
+reference and bytecode execution. Repeated visits to both branches must preserve
+the results without increasing the bytecode compilation count after warming.
+A second test reads stateful associated closures twice, interleaves mutations,
+and repeats the whole invocation in the same source VM. Reused initializer code
+must create independent capture states; it must not reuse invocation results.
+
+Attempting the same stateful closure case through IIR exposed an unimplemented
+path, not a cache collision. `materialization/src/staged.rs::freeze_staged_value`
+accepts anonymous `Value::Closure` only when `captured_values().len() == 0`.
+Calling `elaboration::materialization::instantiate(&package, &roots,
+Default::default(), Default::default())` on the prepared package in
+`cached_associated_code_creates_independent_stateful_closure_values` fails with
+`staged invocation result cannot yet be frozen as an instance input`.
+The failing run is `/tmp/luna-tools-o2nmoq4y/result.json`; the final test only
+claims prepared-source coverage for this stateful case. No IIR success or
+language restriction is inferred from that exclusion.
+
+The existing constant materializer in `elaboration/src/program/constants.rs`
+restores captures using `nir::program::Capture::value`, private bindings for
+shared closures and cycle detection. The staged materializer needs equivalent
+graph-preserving behavior, preferably through shared infrastructure rather than
+another divergent conversion. Naively cloning each capture recursively can
+split a shared nested closure's mutable state. Preparation must also meter body
+and capture copying, preserve declared capture domains, reject invalid storage
+and handle failure without publishing a partial snapshot. This remains an
+implementation task; the current test commit does not implement it.
+
+Validation from `/home/fin/luna`, final commands exited 0:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters generic_associated
+python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_traits
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+git diff --check
+```
+
+Reports: `/tmp/luna-tools-pmg45ig7/result.json` (13 existing generic cases),
+`/tmp/luna-tools-2tlg1bno/result.json` (eight bytecode trait tests), and
+`/tmp/luna-tools-n0w8bc7a/result.json` (formatting).
