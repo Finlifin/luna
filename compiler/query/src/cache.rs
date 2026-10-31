@@ -26,9 +26,9 @@ pub enum QueryResult<V> {
 
 /// Memo table for one query kind (`K` → `V`).
 ///
-/// Luna is single-threaded; interior mutability is via [`std::cell::RefCell`].
+/// State transitions are synchronized; query execution is owned by its engine.
 pub struct QueryCache<K, V> {
-    map: std::cell::RefCell<HashMap<K, CacheState<V>>>,
+    map: std::sync::Mutex<HashMap<K, CacheState<V>>>,
 }
 
 impl<K, V> QueryCache<K, V>
@@ -37,7 +37,7 @@ where
 {
     pub fn new() -> Self {
         QueryCache {
-            map: std::cell::RefCell::new(HashMap::new()),
+            map: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -45,7 +45,11 @@ where
     where
         V: Clone,
     {
-        self.map.borrow().get(key).cloned()
+        self.map
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(key)
+            .cloned()
     }
 
     /// Transition `NotComputed` / absent → `InProgress`.
@@ -56,7 +60,7 @@ where
     where
         K: Clone,
     {
-        let mut map = self.map.borrow_mut();
+        let mut map = self.map.lock().unwrap_or_else(|error| error.into_inner());
         match map.get(key) {
             None | Some(CacheState::NotComputed) => {
                 map.insert(key.clone(), CacheState::InProgress);
@@ -73,7 +77,8 @@ where
         K: Clone,
     {
         self.map
-            .borrow_mut()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
             .insert(key.clone(), CacheState::Complete(value));
     }
 
@@ -82,22 +87,32 @@ where
         K: Clone,
     {
         self.map
-            .borrow_mut()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
             .insert(key.clone(), CacheState::Poisoned);
     }
 
     /// Number of entries (any state). Useful for tests.
     pub fn len(&self) -> usize {
-        self.map.borrow().len()
+        self.map
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.map.borrow().is_empty()
+        self.map
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_empty()
     }
 
     /// Clear all memoised results. Not used by the driver today.
     pub fn clear(&self) {
-        self.map.borrow_mut().clear();
+        self.map
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
     }
 }
 
@@ -117,10 +132,12 @@ where
 {
     fn clone(&self) -> Self {
         QueryCache {
-            map: std::cell::RefCell::new(self.map.borrow().clone()),
+            map: std::sync::Mutex::new(
+                self.map
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone(),
+            ),
         }
     }
 }
-
-// SAFETY: Luna is single-threaded; required so `Db: Sync` for salsa 0.22.
-unsafe impl<K: Send, V: Send> Sync for QueryCache<K, V> {}
