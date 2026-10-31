@@ -4,6 +4,7 @@
 //! Callers supply fully prepared arguments; defaults and
 //! input evaluation are outside this cache. Optional paired source Copy/Drop
 //! bindings authorize pointer transfers in this immutable compilation snapshot.
+mod staging;
 use crate::comptime_keys::{Protocol, Snapshot};
 use comptime_executor::{Cache, Context, Error, KeyProtocol, Outcome, QueryId, Scope};
 use comptime_interpretor::{Budget, Interpreter, Value};
@@ -17,6 +18,7 @@ use nir::{
 pub struct Invocation {
     package: std::sync::Arc<Package>,
     code_session: comptime_interpretor::CodeSession,
+    staging: staging::Cache,
     declaration: DeclarationId,
     arguments: Vec<Term>,
     signature: Term,
@@ -214,20 +216,21 @@ impl Invocation {
             vec![]
         };
         let mut staging_fuel = budget.steps;
-        let dispatch =
-            if crate::invocation::needs_input_staging(package, declaration, &mut staging_fuel)? {
-                // Ordinary Type inputs select the concrete dispatch world at a miss.
-                Vec::new()
-            } else {
-                elaboration::materialization::dispatch_instances_for_roots(
-                    package,
-                    &[iir::InstanceKey {
-                        declaration,
-                        arguments: arguments.clone().into(),
-                    }],
-                    budget,
-                )?
-            };
+        let needs_staging =
+            crate::invocation::needs_input_staging(package, declaration, &mut staging_fuel)?;
+        let dispatch = if needs_staging {
+            // Ordinary Type inputs select the concrete dispatch world at a miss.
+            Vec::new()
+        } else {
+            elaboration::materialization::dispatch_instances_for_roots(
+                package,
+                &[iir::InstanceKey {
+                    declaration,
+                    arguments: arguments.clone().into(),
+                }],
+                budget,
+            )?
+        };
         let mut package = package.clone();
         package.dispatch_instances = dispatch;
         let package = std::sync::Arc::new(package);
@@ -235,6 +238,7 @@ impl Invocation {
         Ok(Self {
             package,
             code_session,
+            staging: staging::Cache::new(needs_staging, &signature),
             declaration,
             arguments,
             signature,
@@ -257,6 +261,13 @@ impl Invocation {
             budget,
         })
     }
+    /// Successful IIR preparations; distinct from result-cache activity.
+    pub fn staged_preparations(&self) -> usize {
+        self.staging.preparations
+    }
+    pub fn last_execution_stats(&self) -> crate::invocation::InvocationStats {
+        self.staging.stats
+    }
     pub fn cached_results(&self) -> usize {
         self.cache.len()
     }
@@ -265,6 +276,7 @@ impl Invocation {
         values: Vec<Value>,
         context: &mut Context,
     ) -> Result<Outcome<Value>, Error<String>> {
+        self.staging.stats = Default::default();
         let (types, result_type) = self.bind_inputs(&values, context)?;
         // Gate before preparing Eq/Hash, snapshots or cache keys. A dependent
         // result is classified only after binding this invocation's inputs.
@@ -279,6 +291,7 @@ impl Invocation {
             let (value, _) = evaluate(
                 &self.package,
                 &mut self.code_session,
+                &mut self.staging,
                 &world,
                 self.resources,
                 self.budget,
@@ -355,6 +368,7 @@ impl Invocation {
             execute(
                 &self.package,
                 &mut self.code_session,
+                &mut self.staging,
                 &world,
                 self.resources,
                 self.budget,
@@ -371,6 +385,7 @@ impl Invocation {
             execute(
                 &self.package,
                 &mut self.code_session,
+                &mut self.staging,
                 &world,
                 self.resources,
                 self.budget,
@@ -514,6 +529,7 @@ impl std::fmt::Display for Invocation {
 fn execute(
     package: &Package,
     code_session: &mut comptime_interpretor::CodeSession,
+    staging: &mut staging::Cache,
     world: &World<'_>,
     resources: Option<(DeclarationId, DeclarationId)>,
     budget: ptc::Budget,
@@ -547,6 +563,7 @@ fn execute(
             evaluate(
                 package,
                 code_session,
+                staging,
                 world,
                 resources,
                 budget,
@@ -564,6 +581,7 @@ fn execute(
 fn evaluate(
     package: &Package,
     code_session: &mut comptime_interpretor::CodeSession,
+    staging: &mut staging::Cache,
     world: &World<'_>,
     resources: Option<(DeclarationId, DeclarationId)>,
     budget: ptc::Budget,
@@ -577,15 +595,26 @@ fn evaluate(
     let solver = |predicate: &TypePredicate, remaining: &mut u64| {
         crate::implementation_world::solve_metered(world, predicate, budget, remaining)
     };
-    let (prepared, graph, entry, type_arguments, values) =
-        prepare_bound_entry(package, declaration, arguments, values, budget, context)?;
+    let (prepared, values) =
+        staging.prepare(package, declaration, arguments, values, budget, context)?;
+    let source = prepared
+        .as_ref()
+        .map_or(package, |(source, _, _)| source.as_ref());
+    let graph = prepared.as_ref().map(|(_, graph, _)| graph.as_ref());
+    let entry = prepared
+        .as_ref()
+        .map_or(declaration, |(_, _, entry)| *entry);
+    let type_arguments = if prepared.is_some() {
+        Vec::new()
+    } else {
+        arguments.to_vec()
+    };
+    let code_session = staging.code.as_mut().unwrap_or(code_session);
     let steps = u64::try_from(context.remaining()).unwrap_or(u64::MAX);
     let mut vm_budget = Budget { steps, depth: 128 };
-    let prepared_vm = match &graph {
+    let prepared_vm = match graph {
         Some(graph) => Interpreter::from_iir_for_comptime_metered(graph, &mut vm_budget),
-        None => {
-            Interpreter::for_comptime_in_session(prepared.as_ref(), code_session, &mut vm_budget)
-        }
+        None => Interpreter::for_comptime_in_session(source, code_session, &mut vm_budget),
     };
     let copy_failure = std::cell::RefCell::new(None::<String>);
     let pointer_copy = |ty: &Term, remaining: &mut u64| {
@@ -636,13 +665,8 @@ fn evaluate(
                     steps: before,
                     depth: 128,
                 };
-                let result = admit_source_result(
-                    prepared.as_ref(),
-                    &value,
-                    result_type,
-                    &solver,
-                    &mut allowance,
-                );
+                let result =
+                    admit_source_result(source, &value, result_type, &solver, &mut allowance);
                 admission_work = before - allowance.steps;
                 result
             } else {
@@ -656,6 +680,10 @@ fn evaluate(
         };
         Ok((value, publish))
     });
+    staging.stats = crate::invocation::InvocationStats {
+        bytecode_compilations: vm.bytecode_compilations(),
+        bytecode_invocations: vm.bytecode_invocations(),
+    };
     context
         .spend::<String>((steps - vm.remaining_steps() + admission_work) as usize)
         .map_err(|e| e.to_string())?;

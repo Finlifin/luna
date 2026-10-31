@@ -4305,7 +4305,10 @@ fn memoized_invocation_checks_dependent_type_contracts_before_caching() {
     assert!(modest.remaining() > 0);
     let mut repeated = comptime_executor::Context::new(150_000);
     assert!(!call.invoke(args, &mut repeated).unwrap().reused);
-    assert_eq!(repeated.remaining(), modest.remaining());
+    assert!(repeated.remaining() > modest.remaining());
+    assert_eq!(call.staged_preparations(), 1);
+    assert_eq!(call.last_execution_stats().bytecode_compilations, 0);
+    assert!(call.last_execution_stats().bytecode_invocations > 0);
 }
 
 #[test]
@@ -47470,8 +47473,11 @@ fn memoized_invocation_non_type_results_skip_key_protocols() {
         assert!(!result.reused);
         assert_eq!(call.cached_results(), 0);
         if let Some(previous) = remaining {
-            assert_eq!(context.remaining(), previous);
+            assert!(context.remaining() >= previous);
+            assert_eq!(call.last_execution_stats().bytecode_compilations, 0);
         }
+        assert!(context.remaining() < 100_000);
+        assert!(call.last_execution_stats().bytecode_invocations > 0);
         remaining = Some(context.remaining());
     }
     let bare = compile("pure comptime fn negate(value:bool)->bool {not value}");

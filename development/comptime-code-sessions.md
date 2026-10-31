@@ -54,7 +54,7 @@ This is not yet a
 shared VM world, persistent disk cache, or a suspended elaboration session.
 Input-dependent generated packages still need their own explicit immutable
 lifetime. Graph sessions now retain immutable instance bodies, but memoization's
-per-input graph preparation has not yet been migrated to a retained graph owner.
+per-input graph preparation now retains the most recent Type specialization, as described below.
 A generic body whose parameter telescope depends on ordinary invocation values
 can still require a fresh per-call body after declaration specialization.
 
@@ -435,3 +435,36 @@ passed in `/tmp/luna-tools-hwaapn8f/result.json`; see `development/ptc.md` for
 commands and the independent candidate proof regressions. The entire builder
 group was not rerun after this repair; its other 78 cases passed in the preceding
 run, not in this latest targeted check.
+
+## Reusing input-bound invocation graphs
+
+`memoization::Invocation` now owns a one-entry preparation cache in addition to
+its source code session. The owner fixes the source snapshot, declaration and
+clause arguments. Its conservative key records the ordered Type-parameter values
+that input binding actually stages; ordinary arguments are never retained.
+A matching key reuses the prepared source/graph allocations and a graph CodeSession.
+A different key successfully prepares a replacement before discarding the old
+entry. This bounds retained specializations to one; alternating types can rebuild.
+
+Key copying/comparison is metered. Each invocation still binds and validates its
+current inputs, discharges contracts, validates the graph and creates fresh VM
+state. Failed preparation does not publish a partial graph. Execution failures
+may retain successfully compiled code but no execution or contract result.
+`staged_preparations()` and `last_execution_stats()` distinguish graph construction,
+bytecode compilation and actual execution from result-cache hits.
+
+Result caching remains Type-only, with the existing source Eq/Hash admission.
+Code preparation can be reused even with result-cache capacity zero. Previous
+tests equating uncached results with identical cold/warm fuel usage now check
+actual body execution and reduced preparation cost instead; collision, dependent
+contract and result-admission expectations remain unchanged.
+
+Verification (cwd `/home/fin/luna`, exit 0):
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test staged_invocation_reuse`: four passed; `/tmp/luna-tools-972ftvoq/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test execution memoized_invocation`: eleven passed; `/tmp/luna-tools-2x9zcoqw/result.json`.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --lib memoization`: admission success/failure budget test passed; `/tmp/luna-tools-nd_qwhma/result.json`.
+
+This does not finish VM-world reuse: graph validation still runs each call,
+Type-result source admission still constructs a separate source VM, and
+elaboration suspension remains unimplemented. No wall-clock speedup is claimed.
