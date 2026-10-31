@@ -112,13 +112,14 @@ fn aggregate_and_optional_results_keep_region_paths_and_absence() {
 #[test]
 fn byte_reads_export_region_obligations_through_discarded_results() {
     let package = support::compile(&format!(
-        "mod primitives {{ {} }} use primitives.*; mod text {{ {} }} use text.TextBytes;
+        "mod primitives {{ {} }} use primitives.*; mod bindings {{ {} }} mod text {{ {} }} use text.TextBytes;
         fn reads(a:str,b:str)->?u8 {{let ignored=a.byte(0);b.byte(0)}}
         fn overwritten(a:str,b:str)->str {{var slot=a;let old=slot.byte(0);slot=b;slot}}
         fn static_read()->?u8 {{\"x\".byte(0)}}
         fn equal(a:str,b:str)->bool {{a == b}}
         fn length(value:str)->u64 {{value.byte_length()}}",
         include_str!("../../../library/builtin/primitives.fl"),
+        include_str!("../../../library/builtin/bindings.fl"),
         include_str!("../../../library/builtin/text_impl/bytes.fl")
     ));
     assert_eq!(
@@ -885,7 +886,7 @@ fn optional_and_error_propagation_keep_separate_exit_dependencies() {
 #[test]
 fn scalar_index_operations_preserve_text_scan_dependencies() {
     let package = support::compile(&format!(
-        "mod primitives {{ {} }} use primitives.*; mod text {{ {} }} use text.TextBytes;
+        "mod primitives {{ {} }} use primitives.*; mod bindings {{ {} }} mod text {{ {} }} use text.TextBytes;
         fn contains(value:str,needle:u8)->bool {{
             let length=value.byte_length();var index:u64=0;
             while index < length {{
@@ -897,6 +898,7 @@ fn scalar_index_operations_preserve_text_scan_dependencies() {
         }}
         fn run()->bool {{contains(\"Aé\",169) and not contains(\"Aé\",0) and not contains(\"\",65)}}",
         include_str!("../../../library/builtin/primitives.fl"),
+        include_str!("../../../library/builtin/bindings.fl"),
         include_str!("../../../library/builtin/text_impl/bytes.fl")
     ));
     let scan = infer(&package, "contains", 100_000).unwrap();

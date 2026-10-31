@@ -6,7 +6,7 @@
 
 | 包 | 已有源码 | 后续实现位置 |
 |---|---|---|
-| builtin | `primitives.fl`、`types/`、`protocols/`、`numeric/`、`text_impl/` | `mem/`、`protocols/formatting/`、`protocols/capabilities/` |
+| builtin | `primitives.fl`、`bindings.fl`、`types/`、`protocols/`、`numeric/`、`text_impl/` | `mem/`、`protocols/formatting/`、`protocols/capabilities/` |
 | meta | `data/`、`definitions/`、`numeric/` | `reflection/`、`ast/`、`macros/`、`code/`、`types/`、`compilation/`、`runtime/`、`diagnostics/` |
 | attrs | `calling_convention/`、`staging/` | `layout/`、`effects/`、`compilation/`、`derivation/`、`quote_fn_template/` |
 | build | `info/` | `package/`、`targets/`、`tasks/`、`generated/`、`util/` |
@@ -17,6 +17,11 @@
 
 - `builtin.math` 与 `meta.math` 继续作为公开模块，分别导出 runtime 和
   comptime 数学函数；实现文件位于各包的 `numeric/`。
+- `builtin/bindings.fl` 集中绑定文本观察与 Hash 使用的编译器操作；
+  `builtin.compiler` 向其他内置包再导出这些声明，不加入 prelude。
+  meta 的文本接口复用同一绑定，不重新绑定原始符号。
+  绑定复用不代表运行时 str 的资源证明已经完成：现有 backing-region 阻塞仍由
+  [原生文本复现](../development/repros/native-text-method-provenance.fl) 保留，不能关闭资源检查绕过。
 - `builtin.text` 导出 `text_impl/bytes.fl`。`str` 属于 builtin，String 属于 std。
 - Tuple、资源协议和迭代协议继续由 builtin 根及相应 prelude 导出。
   `types/option.fl`、`types/result.fl` 操作原生可选／错误结果，不定义枚举替身。

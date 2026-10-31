@@ -4,7 +4,8 @@
 // resolves the same names through the builtin package dependency.
 concat!(
     "mod attrs {\n", include!("attrs_source.rs"), "\n}\n",
-    "mod builtin {\n", include_str!("../../../../library/builtin/primitives.fl"), "\n}\n",
+    "mod builtin {\n", include_str!("../../../../library/builtin/primitives.fl"),
+    "\nmod bindings {\n", include_str!("../../../../library/builtin/bindings.fl"), "\n} pub mod compiler {pub use bindings.*;} }\n",
     "mod bindings {\n", include_str!("../../../../library/meta/bindings.fl"), "\n}\n",
     "mod text_impl {mod bindings {\n", include_str!("../../../../library/meta/text_impl/bindings.fl"), "\n}}\n",
     "mod data {\n",

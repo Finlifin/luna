@@ -6,10 +6,11 @@ use comptime_interpretor::Value;
 
 fn compile(body: &str) -> nir::program::Package {
     let source = format!(
-        "{}\n{}\nmod iterator {{ {} }}\nmod text_bytes {{ {} }}\nuse text_bytes.TextBytes;\nmod text_iteration {{ {} }}\n{}",
+        "{}\n{}\nmod iterator {{ {} }}\nmod bindings {{ {} }}\nmod text_bytes {{ {} }}\nuse text_bytes.TextBytes;\nmod text_iteration {{ {} }}\n{}",
         include_str!("../../../library/builtin/primitives.fl"),
         include!("support/resources_source.rs"),
         &include!("support/iterator_source.rs"),
+        include_str!("../../../library/builtin/bindings.fl"),
         include_str!("../../../library/builtin/text_impl/bytes.fl"),
         include_str!("../../../development/library-prototypes/builtin/text_iteration.fl"),
         body

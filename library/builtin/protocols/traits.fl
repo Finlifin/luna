@@ -1,8 +1,6 @@
-const hash_str_byte_length = .str_byte_length'builtin;
-const hash_str_byte = .str_byte'builtin;
-const hash_symbol_byte_length = .symbol_byte_length'builtin;
-const hash_symbol_byte = .symbol_byte'builtin;
-const hash_integer_representation = .integer_representation'builtin;
+use bindings.{str_byte_length as hash_str_byte_length, str_byte as hash_str_byte,
+    symbol_byte_length as hash_symbol_byte_length, symbol_byte as hash_symbol_byte,
+    integer_representation as hash_integer_representation};
 
 -- ==========================================================================
 -- builtin/traits – fundamental traits

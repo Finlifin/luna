@@ -18,6 +18,11 @@ pub use patterns.ListPatternView;
 pub use iterator.{Iterator, IntoIterator, FromIterator, emit_item, MapIterator, MapWhileIterator, ScanIterator, FilterIterator, FilterMapIterator, FlatMapIterator, FlattenIterator, TakeWhileIterator, SkipWhileIterator, TakeIterator, SkipIterator, ChainIterator, InspectIterator, IntersperseWithIterator};
 pub use ops.*;
 
+{- Shared operation identities for the other builtin packages; not a prelude. -}
+pub mod compiler {
+    pub use bindings.*;
+}
+
 pub mod text {
     pub use text_impl.bytes.*;
 }

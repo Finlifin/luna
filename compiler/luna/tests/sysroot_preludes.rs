@@ -195,6 +195,10 @@ fn shipped_text_module_exposes_checked_utf8_byte_reads() {
         include_str!("../../../library/builtin/primitives.fl"),
     );
     input.write(
+        "library/builtin/bindings.fl",
+        include_str!("../../../library/builtin/bindings.fl"),
+    );
+    input.write(
         "library/builtin/text_bytes.fl",
         include_str!("../../../library/builtin/text_impl/bytes.fl"),
     );
@@ -493,6 +497,43 @@ fn shipped_object_fallible_traversal_preserves_entries_and_stops_on_error() {
             "run",
             "--fuel",
             "1000000",
+        ])
+        .output()
+        .unwrap();
+    assert_true(output);
+}
+
+#[test]
+fn complete_shipped_sysroot_reuses_text_bindings_for_comptime_and_hashing() {
+    let input = Inputs::new();
+    input.write(
+        "input.fl",
+        r#"
+        comptime fn checked() -> bool {
+            "é🦀".byte_length() == 6 and "é🦀".contains("🦀")
+                and ("é".byte(1) matches 169?)
+                and "é".comptime_hash() == "é".comptime_hash()
+        }
+        fn run() -> bool {
+            const staged = checked();
+            staged
+        }
+    "#,
+    );
+    let library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_luna"))
+        .arg(input.0.join("input.fl"))
+        .arg("--sysroot")
+        .arg(library)
+        .args([
+            "--build-target",
+            "x86_64",
+            "linux",
+            "64",
+            "--interpret",
+            "run",
+            "--fuel",
+            "4000000",
         ])
         .output()
         .unwrap();

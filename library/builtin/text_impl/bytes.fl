@@ -1,7 +1,6 @@
 use primitives.{str, u64, u8};
 
-const text_str_byte_length = .str_byte_length'builtin;
-const text_str_byte = .str_byte'builtin;
+use bindings.{str_byte_length as text_str_byte_length, str_byte as text_str_byte};
 
 {-
     Immutable UTF-8 byte observations. Indices count bytes, not characters.

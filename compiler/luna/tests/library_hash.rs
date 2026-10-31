@@ -6,8 +6,9 @@ use comptime_interpretor::Value;
 
 fn source(body: &str) -> String {
     format!(
-        "mod primitives {{ {} }} use primitives.*;\nmod comparison {{ {} }}\nmod resources {{ {} }}\nmod conversion {{ {} }}\nmod traits {{ {} }}\npub use traits.*;\n{body}",
+        "mod primitives {{ {} }} use primitives.*;\nmod bindings {{ {} }}\nmod comparison {{ {} }}\nmod resources {{ {} }}\nmod conversion {{ {} }}\nmod traits {{ {} }}\npub use traits.*;\n{body}",
         include_str!("../../../library/builtin/primitives.fl"),
+        include_str!("../../../library/builtin/bindings.fl"),
         support::with_attrs(include_str!(
             "../../../library/builtin/numeric/comparison.fl"
         )),
