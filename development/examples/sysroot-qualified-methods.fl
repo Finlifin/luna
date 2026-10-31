@@ -23,7 +23,12 @@ fn run() -> bool {
 
 pure comptime fn text_at_comptime() -> bool {
     let value = "a🦀";
-    value.byte_length() == 5
+    value.starts_with("a") and value.ends_with("🦀")
+        and value.contains("🦀") and (value.find("🦀") matches 1?)
+        and ("aaaab".find("aab") matches 2?)
+        and ("".find("") matches 0?) and ("a".find("long") matches null)
+        and not value.starts_with("🦀") and not value.ends_with("a")
+        and value.byte_length() == 5
         and (value.byte(1) matches 240?)
         and (value.byte(5) matches null)
         and ("".byte(18446744073709551615) matches null)

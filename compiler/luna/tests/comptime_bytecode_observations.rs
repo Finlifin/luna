@@ -18,7 +18,8 @@ fn text_and_names_use_bytecode_with_utf8_byte_boundaries() {
         comptime fn event()->str {{Event.ready'tag_name}}",
         include!("support/text_source.rs")
     );
-    let package = support::compile(&source);
+    let package =
+        support::compile_with_protocols(&source, &support::meta_fixture_protocols()).unwrap();
     let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     let mut tree = Interpreter::for_comptime_tree(&package, Budget::default()).unwrap();
     for (name, args, expected, count) in [

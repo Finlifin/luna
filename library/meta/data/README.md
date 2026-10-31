@@ -206,3 +206,43 @@ normal-form 身份。方法不构造源码指针或可写元素视图。
 仍传播，只有已求得索引的越界被转换为 null，不把任意 invocation 失败吞掉。
 真实 sysroot 用例 `development/examples/sysroot-meta-lists.fl` 覆盖空值层次、
 超大正负索引、嵌套快照与 Type 身份。
+
+## 编译期文本查询
+
+`ComptimeTextBytes` 为 `str` 提供 `starts_with(prefix)`、`ends_with(suffix)`、
+`find(needle)` 和 `contains(needle)`。通过 meta.prelude 默认导入，在 comptime
+上下文与已有的 `byte_length`、`byte` 一样使用普通方法调用。
+
+```flurry
+pure comptime fn crab_offset() -> ?u64 {
+    "é🦀a".find("🦀")
+    -- 2：UTF-8 字节偏移，不是字符序号。
+}
+
+pure comptime fn is_directive(line: str) -> bool {
+    line.starts_with("@") and line.contains(":")
+}
+```
+
+find 返回第一次精确匹配的位置，未找到返回 null；空 needle 总在位置 0 匹配，
+包括空接收者。空 prefix/suffix 总是匹配。操作区分大小写，不做 Unicode
+规范化，因此预组字符与组合字符序列不自动相等。输入及实参沿用普通 comptime
+调用和值引用语义，不构造指针，也不修改文本。
+
+实现通过既有字节查询、普通循环和检查过的边界条件组合；find 的最坏比较次数
+为 `(n - m + 1) * m`（`0 < m <= n`），不承诺线性搜索成本。循环与辅助方法
+遵循正常 invocation 工作预算，失败不会伪装成“未找到”。这些新增方法本轮仅
+提供 comptime 接口；runtime 文本借用及资源验证仍需独立实现。
+
+真实 sysroot 用例 `development/examples/sysroot-qualified-methods.fl` 覆盖
+默认可见接口与编译期查询结果在 native 测试中的使用。隔离测试同时比较字节码
+与参考执行，覆盖 UTF-8、空输入、重叠匹配、未找到及实参仅求值一次的顺序。
+
+本阶段验证（工作目录 `/home/fin/luna`，均退出 0）：
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_text_search --test text_bytes --test comptime_bytecode_observations`：
+  9 项通过；`/tmp/luna-tools-uvv5uysr/result.json`。
+- `python3 -B development/library_check.py --stage sysroot-qualified-methods --timeout 300`：
+  真实 sysroot 编译及 native 测试通过；`/tmp/luna-library-rvnsqkdf/summary.json`。
+- `cargo fmt --all` 经 `development/command.py` 执行通过，
+  `/tmp/luna-tools-swax6so5/result.json`；`git diff --check` 通过。

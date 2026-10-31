@@ -1,4 +1,4 @@
-use builtin.{str, u64, u8};
+use builtin.{str, u64, u8, bool};
 use text_impl.bindings;
 
 {-
@@ -9,6 +9,10 @@ use text_impl.bindings;
 pub pure comptime trait ComptimeTextBytes {
     pure comptime fn byte_length(self) -> u64;
     pure comptime fn byte(self, index: u64) -> ?u8;
+    pure comptime fn starts_with(self, prefix: str) -> bool;
+    pure comptime fn ends_with(self, suffix: str) -> bool;
+    pure comptime fn find(self, needle: str) -> ?u64;
+    pure comptime fn contains(self, needle: str) -> bool;
 }
 
 comptime impl ComptimeTextBytes for str {
@@ -18,5 +22,69 @@ comptime impl ComptimeTextBytes for str {
 
     pure comptime fn byte(self, index: u64) -> ?u8 {
         bindings.byte(self, index)
+    }
+
+    pure comptime fn starts_with(self, prefix: str) -> bool {
+        let length = bindings.byte_length(prefix);
+        if length > bindings.byte_length(self) { return false; };
+        self.matches_bytes_at(prefix, 0, length)
+    }
+
+    pure comptime fn ends_with(self, suffix: str) -> bool {
+        let length = bindings.byte_length(self);
+        let suffix_length = bindings.byte_length(suffix);
+        if suffix_length > length { return false; };
+        self.matches_bytes_at(suffix, length - suffix_length, suffix_length)
+    }
+
+    {-
+        Return the first exact UTF-8 byte offset. Empty needles match at zero.
+        This bounded scan performs at most (n - m + 1) * m byte comparisons;
+        it does not promise linear-time substring search or Unicode folding.
+    -}
+    pure comptime fn find(self, needle: str) -> ?u64 {
+        let length = bindings.byte_length(self);
+        let needle_length = bindings.byte_length(needle);
+        if needle_length == 0 { return 0; };
+        if needle_length > length { return null; };
+        let last = length - needle_length;
+        var start: u64 = 0;
+        while start < last {
+            if self.matches_bytes_at(needle, start, needle_length) { return start; };
+            start = start + 1;
+        };
+        if self.matches_bytes_at(needle, last, needle_length) { last } else { null }
+    }
+
+    pure comptime fn contains(self, needle: str) -> bool {
+        self.find(needle) matches _?
+    }
+}
+
+impl str {
+    {-
+        Callers establish start <= length and pattern_length <= length - start.
+        Optional byte queries remain checked; no unchecked indexing or pointer
+        representation is introduced by this library helper.
+    -}
+    pure comptime fn matches_bytes_at(self, pattern: str, start: u64, pattern_length: u64) -> bool {
+        let length = bindings.byte_length(self);
+        assumes start <= length;
+        assumes pattern_length <= length - start;
+        var index: u64 = 0;
+        while index < pattern_length {
+            assumes index <= 18446744073709551615 - start;
+            let actual = bindings.byte(self, start + index) match {
+                value? => value,
+                null => return false,
+            };
+            let expected = bindings.byte(pattern, index) match {
+                value? => value,
+                null => return false,
+            };
+            if actual != expected { return false; };
+            index = index + 1;
+        };
+        true
     }
 }

@@ -8,6 +8,11 @@ fn source(body: &str) -> String {
     format!("{}{body}", include!("support/text_source.rs"))
 }
 
+// This fixture embeds the shipped meta implementation in package zero.
+fn compile_text(source: &str) -> nir::program::Package {
+    support::compile_with_protocols(source, &support::meta_fixture_protocols()).unwrap()
+}
+
 #[test]
 fn utf8_bytes_and_boundaries_agree_in_both_phases() {
     let body = r#"
@@ -22,7 +27,7 @@ fn utf8_bytes_and_boundaries_agree_in_both_phases() {
         }
     "#;
     let staged = body.replace("fn run", "comptime fn staged");
-    let package = support::compile(&source(&format!("{body}{staged}")));
+    let package = compile_text(&source(&format!("{body}{staged}")));
     assert!(format!("{package}").contains("(text-query byte-length"));
     assert_eq!(
         luna::invocation::invoke(&package, "staged", 100_000).unwrap(),
@@ -32,7 +37,7 @@ fn utf8_bytes_and_boundaries_agree_in_both_phases() {
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::Bool(true)
     );
-    let package = support::compile(&source(&format!(
+    let package = compile_text(&source(&format!(
         "{body} fn verify() {{let valid=run();assumes valid;}}"
     )));
     let ir = luna::host::llvm_ir(&package, "verify", 100_000).unwrap();
@@ -51,7 +56,7 @@ fn utf8_bytes_and_boundaries_agree_in_both_phases() {
 
 #[test]
 fn byte_operands_execute_once_left_to_right() {
-    let package = support::compile(&source(
+    let package = compile_text(&source(
         r#"
         fn observe(state:*u64)->str {let old=state.*;assumes old == 0;state.* = 1;"az"}
         fn position(state:*u64)->u64 {let index=state.*;assumes index == 1;state.* = 2;index}
@@ -70,7 +75,7 @@ fn byte_operands_execute_once_left_to_right() {
 
 #[test]
 fn text_queries_preserve_early_exit_and_reject_wrong_input_domains() {
-    let package = support::compile(&source(
+    let package = compile_text(&source(
         "fn run()->bool {str.byte(do {return true;},0);false} comptime fn staged()->bool {str.byte(do {return true;},0);false}",
     ));
     assert_eq!(
@@ -89,7 +94,7 @@ fn text_queries_preserve_early_exit_and_reject_wrong_input_domains() {
         assert!(
             support::compile_with_protocols(
                 &source(&format!("fn invalid() {{{body};}}")),
-                &Default::default()
+                &support::meta_fixture_protocols()
             )
             .is_err()
         );
@@ -199,7 +204,7 @@ fn symbol_byte_queries_keep_distinct_domains_and_checked_indices() {
         assert!(
             support::compile_with_protocols(
                 &format!("fn invalid() {{{expression};}}"),
-                &Default::default()
+                &support::meta_fixture_protocols()
             )
             .is_err(),
             "{expression}"
@@ -211,7 +216,7 @@ fn symbol_byte_queries_keep_distinct_domains_and_checked_indices() {
 fn explicit_runtime_text_trait_does_not_bypass_comptime_phase_checks() {
     let error = support::compile_with_protocols(
         &source("comptime fn invalid()->u64 {\"abc\".as(text.TextBytes).byte_length()}"),
-        &Default::default(),
+        &support::meta_fixture_protocols(),
     )
     .unwrap_err();
     assert!(!error.contains("parsing failed"), "{error}");
