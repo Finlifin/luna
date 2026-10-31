@@ -363,7 +363,8 @@ fn repository_package_exports_object_for_user_attribute_constructors() {
     let user_attributes = dump.matches("(property \"enabled\")").count();
     let phase_attributes = dump.matches("(property \"comptime_phase\")").count();
     assert_eq!(user_attributes, 1, "{dump}");
-    assert!(phase_attributes > 0, "{dump}");
+    // Comptime-only traits no longer need per-member phase attributes.
+    // Any explicit library attributes must still be accounted for below.
     assert_eq!(
         dump.matches("(evaluated-attribute ").count(),
         user_attributes + phase_attributes,
@@ -983,4 +984,30 @@ fn foreach_calls_once_per_entry_and_vm_recovers_after_callback_failure() {
             .count(),
         3
     );
+}
+
+#[test]
+fn fallible_entry_traversal_preserves_errors_and_rejects_invalid_callbacks() {
+    let source = include_str!("../../../development/examples/sysroot-meta-object-fallible.fl");
+    assert_eq!(
+        invoke_entries(&format!(
+            "typealias Object=meta.Object; typealias Integer=meta.builtin.Integer;
+             typealias Type=meta.builtin.Type; typealias char=meta.builtin.char;
+             typealias void=meta.builtin.void; {source}"
+        ))
+        .unwrap(),
+        Value::Bool(true)
+    );
+    let meta = include!("support/meta_source.rs");
+    for source in [
+        "fn bad(input:meta.Object)->!bool meta.Object {input.try_flat_map(callback)} comptime fn callback(entry:meta.Object)->!bool meta.Object {entry}",
+        "comptime fn bad(input:meta.Object)->!bool meta.Object {input.try_flat_map(callback)} comptime fn callback(entry:bool)->!bool meta.Object { ({}) }",
+        "comptime fn bad(input:meta.Object)->!bool bool {input.try_fold(true,callback)} comptime fn callback(acc:bool,entry:meta.Object)->!bool meta.Object {entry}",
+        "comptime fn bad(input:meta.Object)->!bool meta.builtin.void {input.try_foreach(callback)} comptime fn callback(entry:meta.Object)->!bool bool {true}",
+    ] {
+        assert!(
+            compile(&format!("mod meta {{{meta}}} {source}")).is_err(),
+            "{source}"
+        );
+    }
 }

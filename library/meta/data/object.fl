@@ -1,4 +1,4 @@
-use builtin.{Integer, Symbol, Type};
+use builtin.{Integer, Symbol, Type, void};
 use bindings;
 
 pub use bindings.Object;
@@ -35,6 +35,63 @@ impl Object {
             index += 1;
         };
         accumulator
+    }
+
+    {-
+        Fallible traversal visits a fixed snapshot and stops at the first error.
+        Earlier callback effects remain visible; partial output is not returned.
+        Empty input succeeds without invoking the callback. Each one-entry Object
+        keeps its optional key, exact domain and value, including duplicate keys.
+    -}
+    pub comptime fn try_foreach(self, visit: %c comptime fn(Object) -> !E void) -> !E void
+    where E, c: Type.vars.Closure
+    {
+        let input = self;
+        let count = input.length();
+        var index: Integer = 0;
+        while index < count {
+            visit(input.slice(index, index + 1)) match {
+                _! => {},
+                error failure => { return error failure; },
+            };
+            index += 1;
+        };
+    }
+
+    pub comptime fn try_fold(self, initial: A,
+        combine: %c comptime fn(A, Object) -> !E A) -> !E A
+    where A, E, c: Type.vars.Closure
+    {
+        let input = self;
+        let count = input.length();
+        var accumulator = initial;
+        var index: Integer = 0;
+        while index < count {
+            accumulator = combine(accumulator, input.slice(index, index + 1)) match {
+                value! => value,
+                error failure => { return error failure; },
+            };
+            index += 1;
+        };
+        accumulator
+    }
+
+    pub comptime fn try_flat_map(self,
+        transform: %c comptime fn(Object) -> !E Object) -> !E Object
+    where E, c: Type.vars.Closure
+    {
+        let input = self;
+        let count = input.length();
+        var output: Object = {};
+        var index: Integer = 0;
+        while index < count {
+            transform(input.slice(index, index + 1)) match {
+                entries! => { output = output.concat(entries); },
+                error failure => { return error failure; },
+            };
+            index += 1;
+        };
+        output
     }
 
     {- Retain complete entries, in order, without reinterpreting their values. -}

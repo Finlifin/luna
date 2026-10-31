@@ -471,3 +471,30 @@ fn shipped_list_fold_retains_comptime_callback_state() {
         .unwrap();
     assert_true(output);
 }
+
+#[test]
+fn shipped_object_fallible_traversal_preserves_entries_and_stops_on_error() {
+    let input = Inputs::new();
+    input.write(
+        "input.fl",
+        include_str!("../../../development/examples/sysroot-meta-object-fallible.fl"),
+    );
+    let library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_luna"))
+        .arg(input.0.join("input.fl"))
+        .arg("--sysroot")
+        .arg(library)
+        .args([
+            "--build-target",
+            "x86_64",
+            "linux",
+            "64",
+            "--invoke-comptime",
+            "run",
+            "--fuel",
+            "1000000",
+        ])
+        .output()
+        .unwrap();
+    assert_true(output);
+}

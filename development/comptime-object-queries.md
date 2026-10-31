@@ -131,3 +131,45 @@ test passed (`/tmp/luna-tools-pk9j8wdq/result.json`). Formatting passed at
 computed-selector fallback test now also verifies that a plain reference payload
 query succeeds on the borrowed path. No ownership or storage permission was
 added by this optimization.
+
+## Fallible ordered Object traversal
+
+The public inherent Object methods now include `try_foreach`, `try_fold`, and
+`try_flat_map`. They use ordinary comptime closures and native error-qualified
+results, without new compiler operations or extension traits. Each traversal
+captures the input snapshot once, visits one-entry Objects in order, stops at
+the first language error and preserves its payload. Prior callback effects are
+not rolled back. Partial fold/flatten results stay local and are not returned
+as success. Empty input skips the callback; fold returns its seed and flatten
+returns an empty Object. Flatten retains complete entries, including unnamed
+entries, duplicate keys, optional payload layers and nominal Type identities.
+
+`development/examples/sysroot-meta-object-fallible.fl` exercises the real
+prelude and library package. It also checks retained closure state after failure
+and that edits to a callback's entry do not overwrite the original Object.
+Local rejection cases cover runtime use, wrong entry type, wrong accumulator
+result type and a visitor returning a non-void success payload.
+
+The existing attribute-export test incorrectly required positive per-member
+`comptime_phase` attribute counts after the library's migration to
+`pure comptime trait`. It now permits zero library phase attributes while still
+requiring exactly one user attribute and accounting for every evaluated
+attribute. The first run had 33 passes and this stale assertion failure;
+`/tmp/luna-tools-nm0dp18f/result.json` preserves that result.
+
+Validation from `/home/fin/luna`, final commands all exited 0:
+
+```sh
+python3 -B development/check.py --timeout 900 -- test -p luna --test library_meta_objects
+python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_object_fallible_traversal
+python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
+git diff --check
+```
+
+Reports: `/tmp/luna-tools-x6xjt5k2/result.json` (34 Object tests),
+`/tmp/luna-tools-9so3immj/result.json` (real sysroot invocation, one integration
+test), and `/tmp/luna-tools-n__0g8sr/result.json` (format check). The sysroot
+command includes explicit x86_64/Linux/64-bit target configuration, required by
+the shipped package's integer runtime proxies. No full suite was run.
+Concatenation retains its existing validation/copy costs; these methods make no
+linear-time construction claim or transaction rollback promise.
