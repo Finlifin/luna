@@ -9275,3 +9275,37 @@ Validation in `/home/fin/luna` (all exit 0):
   73 passed; `/tmp/luna-tools-9qyxo6j6/result.json`.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
   passed; `/tmp/luna-tools-wheji6zj/result.json`.
+
+
+## Index retained type links once per validation world
+
+IIR validation now builds borrowed indexes for callable instance keys, nominal
+instances and normal-form heads, then passes them through type, expression and
+effect validation. Effect contract tables and installation-value plans retain
+their own graph-bound index for subsequent queries. Index construction charges
+entries and structural keys before hashing; queries charge their actual keys
+instead of scanning/charging the complete callable catalog. Keys retain full
+structural equality, and graph integrity checks still reject duplicate entries.
+No index crosses an immutable graph's lifetime or changes exposed ordering.
+
+A regression with 256 callable identities repeatedly referring to one identity
+exhausted the old lookup budget even with 64 units per entry. It now validates
+within that budget. Removing the referenced evidence still fails, and an
+exhausted attempt does not poison a later retry. This is bounded-work evidence,
+not a wall-clock performance measurement. Other graph integrity work, including
+the existing standalone validate_index pass, has not been comprehensively
+budgeted by this change.
+
+Validation in `/home/fin/luna`:
+
+- Baseline regression: `/tmp/luna-tools-gkr9s7o6/result.json`, exit 101,
+  `IIR callable identity lookup budget exhausted`.
+- `python3 -B development/check.py --timeout 900 -- test -p iir`:
+  105 passed; `/tmp/luna-tools-h4c0lyru/result.json`, exit 0. Includes effect
+  ABI/environment, installation delivery, duplicate evidence and type links.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib retained_signature`:
+  3 passed; `/tmp/luna-tools-_zsdu3nn/result.json`, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test closure_environment_parameters --test scoped_comptime_callables --test comptime_iir_bytecode`:
+  40 passed; `/tmp/luna-tools-8euqcpqy/result.json`, exit 0.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`:
+  passed; `/tmp/luna-tools-b22rsg_q/result.json`, exit 0.

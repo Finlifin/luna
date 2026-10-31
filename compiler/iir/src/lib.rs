@@ -3,6 +3,8 @@
 pub mod effect_values;
 pub mod effects;
 mod index;
+mod type_links;
+use type_links::TypeLinks;
 pub mod staging;
 mod storage;
 pub mod template_storage;
@@ -198,21 +200,22 @@ impl Package {
     /// reference, including references embedded in defaults and patterns.
     pub fn validate(&self, fuel: &mut usize) -> Result<(), String> {
         self.validate_index()?;
+        let links = TypeLinks::new(self, fuel)?;
         for identity in &self.callable_identities {
             let signature = identity.closed_signature()?;
             if !matches!(signature.callable_signature(), Term::Function { .. }) {
                 return Err("IIR callable identity has a non-callable signature".into());
             }
-            self.validate_type(signature, fuel)?;
+            self.validate_type(&links, signature, fuel)?;
             for argument in &identity.key.arguments {
-                self.validate_type(argument, fuel)?;
+                self.validate_type(&links, argument, fuel)?;
             }
         }
         for table in &self.templates {
-            self.validate_type(table.logical_type(), fuel)?;
+            self.validate_type(&links, table.logical_type(), fuel)?;
             for target in table.targets() {
                 for argument in &target.arguments {
-                    self.validate_type(argument, fuel)?;
+                    self.validate_type(&links, argument, fuel)?;
                 }
             }
         }
@@ -224,18 +227,20 @@ impl Package {
             return Err("IIR requires associated initializers to be invoked".into());
         }
         for nominal in &self.nominals {
-            self.validate_type(&nominal.ty, fuel)?;
+            self.validate_type(&links, &nominal.ty, fuel)?;
             match &nominal.definition {
-                NominalDefinition::Newtype(n) => self.validate_type(&n.representation, fuel)?,
+                NominalDefinition::Newtype(n) => {
+                    self.validate_type(&links, &n.representation, fuel)?
+                }
                 NominalDefinition::Struct(s) => {
                     for (_, ty) in &s.fields {
-                        self.validate_type(ty, fuel)?;
+                        self.validate_type(&links, ty, fuel)?;
                     }
                 }
                 NominalDefinition::Enum(e) => {
                     for variant in &e.variants {
                         for ty in &variant.fields {
-                            self.validate_type(ty, fuel)?;
+                            self.validate_type(&links, ty, fuel)?;
                         }
                     }
                 }
@@ -243,22 +248,23 @@ impl Package {
         }
         for interface in &self.interfaces {
             for argument in &interface.interface.arguments {
-                self.validate_type(argument, fuel)?;
+                self.validate_type(&links, argument, fuel)?;
             }
-            self.validate_type(&interface.subject, fuel)?;
+            self.validate_type(&links, &interface.subject, fuel)?;
             for method in &interface.methods {
                 self.validate_type(
+                    &links,
                     method.signature.ordinary().map_err(|e| e.to_string())?,
                     fuel,
                 )?;
                 for argument in &method.type_arguments {
-                    self.validate_type(argument, fuel)?;
+                    self.validate_type(&links, argument, fuel)?;
                 }
                 let summary = method
                     .program_summary(&[], &[])
                     .map_err(|e| e.to_string())?;
                 visit::expressions(&summary, fuel, |expr, fuel| {
-                    self.validate_expression_types(expr, fuel)
+                    self.validate_expression_types_in(&links, expr, fuel)
                 })?;
             }
         }
@@ -298,7 +304,7 @@ impl Package {
         };
         use nir::program::ExprKind as K;
         for instance in &self.functions {
-            self.validate_type(&instance.function.signature, fuel)?;
+            self.validate_type(&links, &instance.function.signature, fuel)?;
             nir::call_safety::validate(&instance.function, fuel)?;
             if instance.function.is_unsafe && self.roots.contains(&instance.key) {
                 return Err("unsafe entry requires an explicit safe wrapper".into());
@@ -323,7 +329,7 @@ impl Package {
                 fuel,
             )?;
             for argument in &instance.key.arguments {
-                self.validate_type(argument, fuel)?;
+                self.validate_type(&links, argument, fuel)?;
             }
             visit::expressions(&instance.function, fuel, |expr, fuel| {
                 if matches!(
@@ -336,7 +342,7 @@ impl Package {
                     return Err("IIR contains an unformed float or integer literal".into());
                 }
 
-                self.validate_expression_types(expr, fuel)?;
+                self.validate_expression_types_in(&links, expr, fuel)?;
                 if let K::TemplateEqual(left, right) = &expr.kind {
                     let identity_operand = |value: &nir::program::Expr| {
                         matches!(
@@ -461,9 +467,9 @@ impl Package {
                 }
                 Ok(())
             })?;
-            effects::validate(self, &instance.function, fuel)?;
+            effects::validate(self, &links, &instance.function, fuel)?;
         }
-        effects::validate_contracts(self, fuel)?;
+        effects::validate_contracts(self, &links, fuel)?;
         Ok(())
     }
     /// Effect control exits need acquired cleanup schedules before this graph
@@ -513,13 +519,14 @@ impl Package {
     }
     // Contracts and executable bodies must inspect the same embedded types.
     // Validating only Expr::ty misses constants and capture/storage annotations.
-    fn validate_expression_types(
+    fn validate_expression_types_in(
         &self,
+        links: &TypeLinks<'_>,
         expr: &nir::program::Expr,
         fuel: &mut usize,
     ) -> Result<(), String> {
         use nir::program::ExprKind as K;
-        self.validate_type(&expr.ty, fuel)?;
+        self.validate_type(&links, &expr.ty, fuel)?;
         if let K::SymbolName(operand) | K::EnumName(operand) = &expr.kind {
             let never = Term::Primitive(nir::Primitive::Never);
             let expected = if operand.ty == never {
@@ -583,7 +590,7 @@ impl Package {
                 if ty.sort() != nir::Sort::Type {
                     return Err("IIR pattern label is not a type".into());
                 }
-                self.validate_type(ty, fuel)
+                self.validate_type(&links, ty, fuel)
             })
         };
         match &expr.kind {
@@ -674,67 +681,45 @@ impl Package {
                 {
                     return Err("IIR Type value requires a Type domain and type identity".into());
                 }
-                self.validate_type(ty, fuel)?;
+                self.validate_type(&links, ty, fuel)?;
             }
             K::BitAssign {
                 storage_type: ty, ..
             }
             | K::BitUpdate {
                 storage_type: ty, ..
-            } => self.validate_type(ty, fuel)?,
+            } => self.validate_type(&links, ty, fuel)?,
             K::Closure { captures, .. } => {
                 for capture in captures {
-                    self.validate_type(&capture.ty, fuel)?;
+                    self.validate_type(&links, &capture.ty, fuel)?;
                 }
             }
             _ => {}
         }
         Ok(())
     }
-    fn validate_type(&self, ty: &Term, fuel: &mut usize) -> Result<(), String> {
+    fn validate_type(
+        &self,
+        links: &TypeLinks<'_>,
+        ty: &Term,
+        fuel: &mut usize,
+    ) -> Result<(), String> {
         completed_type(ty, &self.runtime_bindings, fuel)?;
-        self.type_links(ty, fuel)
+        links.validate(ty, fuel)
     }
+    #[cfg(test)]
     fn type_links(&self, ty: &Term, fuel: &mut usize) -> Result<(), String> {
-        let mut pending = vec![ty];
-        while let Some(ty) = pending.pop() {
-            if *fuel == 0 {
-                return Err("IIR type link budget exhausted".into());
-            }
-            *fuel -= 1;
-            match ty {
-                Term::FunctionValue {
-                    declaration,
-                    arguments,
-                } => {
-                    *fuel = fuel
-                        .checked_sub(self.callable_identities.len())
-                        .ok_or("IIR callable identity lookup budget exhausted")?;
-                    if !self.callable_identities.iter().any(|identity| {
-                        identity.key.declaration == *declaration
-                            && identity.key.arguments == *arguments
-                    }) {
-                        return Err("IIR frozen callable has no signature evidence".into());
-                    }
-                }
-                Term::Nominal { .. } => {
-                    if !self.nominals.iter().any(|n| &n.ty == ty) {
-                        return Err("IIR nominal reference is dangling".into());
-                    }
-                }
-                Term::NormalForm { head, .. } => {
-                    if !self.normal_forms.iter().any(|h| h.declaration == *head) {
-                        return Err("IIR normal-form reference is dangling".into());
-                    }
-                }
-                _ => {}
-            }
-            ty.visit_children(|child| {
-                pending.push(child);
-                Ok::<_, String>(())
-            })?;
-        }
-        Ok(())
+        TypeLinks::new(self, fuel)?.validate(ty, fuel)
+    }
+
+    #[cfg(test)]
+    fn validate_expression_types(
+        &self,
+        expr: &nir::program::Expr,
+        fuel: &mut usize,
+    ) -> Result<(), String> {
+        let links = TypeLinks::new(self, fuel)?;
+        self.validate_expression_types_in(&links, expr, fuel)
     }
 }
 

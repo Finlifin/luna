@@ -1,5 +1,6 @@
 //! Concrete direct-effect environments. Requests retain explicit occurrence
 //! slots; callable preparation is checked in the caller's lexical environment.
+use crate::type_links::TypeLinks;
 use crate::{Package, visit};
 use nir::effects::{Abi, Operation};
 use nir::program::{Expr, ExprKind as K, Function, FunctionPhase, Pattern};
@@ -213,6 +214,7 @@ fn data_type(package: &Package, ty: &Term, fuel: &mut usize, depth: usize) -> Re
 
 pub(crate) fn validate(
     package: &Package,
+    links: &TypeLinks<'_>,
     function: &Function,
     fuel: &mut usize,
 ) -> Result<(), String> {
@@ -222,34 +224,45 @@ pub(crate) fn validate(
     };
     let (row, _) = row_result(result);
     let runtime = function.phase == FunctionPhase::Runtime;
-    expression(package, &function.body, row, None, runtime, true, fuel, 0)?;
+    expression(
+        package,
+        links,
+        &function.body,
+        row,
+        None,
+        runtime,
+        true,
+        fuel,
+        0,
+    )?;
     for value in function
         .preconditions
         .iter()
         .chain(&function.postconditions)
         .chain(function.defaults.iter().map(|(_, value)| value))
     {
-        expression(package, value, &[], None, runtime, false, fuel, 0)?;
+        expression(package, links, value, &[], None, runtime, false, fuel, 0)?;
     }
     Ok(())
 }
 fn operation(
     package: &Package,
+    links: &TypeLinks<'_>,
     op: &Operation,
     signature: &Term,
     fuel: &mut usize,
 ) -> Result<(), String> {
     for arg in &op.arguments {
         if arg.sort() == Sort::Type {
-            package.validate_type(arg, fuel)?;
+            package.validate_type(links, arg, fuel)?;
         } else if arg.is_structural_index_value() {
             crate::completed_dependencies(arg, &package.runtime_bindings, fuel)?;
-            package.type_links(arg, fuel)?;
+            links.validate(arg, fuel)?;
         } else {
             return Err("IIR effect label argument is not a completed input".into());
         }
     }
-    package.validate_type(signature, fuel)?;
+    package.validate_type(links, signature, fuel)?;
     let Term::Function { parameters, result } = signature else {
         return Err("IIR effect signature is not a function".into());
     };
@@ -266,6 +279,7 @@ fn operation(
 }
 fn pattern(
     package: &Package,
+    links: &TypeLinks<'_>,
     p: &Pattern,
     row: &[Operation],
     resume: Option<&Term>,
@@ -279,17 +293,28 @@ fn pattern(
     }
     match p {
         Pattern::Then { first, value, next } => {
-            pattern(package, first, row, resume, runtime, fuel, depth + 1)?;
-            expression(package, value, row, resume, runtime, false, fuel, depth + 1)?;
-            pattern(package, next, row, resume, runtime, fuel, depth + 1)?;
+            pattern(package, links, first, row, resume, runtime, fuel, depth + 1)?;
+            expression(
+                package,
+                links,
+                value,
+                row,
+                resume,
+                runtime,
+                false,
+                fuel,
+                depth + 1,
+            )?;
+            pattern(package, links, next, row, resume, runtime, fuel, depth + 1)?;
         }
         Pattern::Guard {
             pattern: p,
             condition,
         } => {
-            pattern(package, p, row, resume, runtime, fuel, depth + 1)?;
+            pattern(package, links, p, row, resume, runtime, fuel, depth + 1)?;
             expression(
                 package,
+                links,
                 condition,
                 row,
                 resume,
@@ -304,7 +329,7 @@ fn pattern(
         | Pattern::Observe { inner, .. }
         | Pattern::Binding { inner, .. }
         | Pattern::Remap { pattern: inner, .. } => {
-            pattern(package, inner, row, resume, runtime, fuel, depth + 1)?
+            pattern(package, links, inner, row, resume, runtime, fuel, depth + 1)?
         }
         Pattern::Tuple(items)
         | Pattern::TypeTuple(items)
@@ -317,7 +342,7 @@ fn pattern(
             arguments: items, ..
         } => {
             for item in items {
-                pattern(package, item, row, resume, runtime, fuel, depth + 1)?;
+                pattern(package, links, item, row, resume, runtime, fuel, depth + 1)?;
             }
         }
         _ => {}
@@ -326,6 +351,7 @@ fn pattern(
 }
 fn expression(
     package: &Package,
+    links: &TypeLinks<'_>,
     root: &Expr,
     row: &[Operation],
     resume: Option<&Term>,
@@ -365,7 +391,17 @@ fn expression(
                 {
                     return Err("IIR computation environment/result mismatch".into());
                 }
-                expression(package, body, row, resume, runtime, false, fuel, depth + 1)?;
+                expression(
+                    package,
+                    links,
+                    body,
+                    row,
+                    resume,
+                    runtime,
+                    false,
+                    fuel,
+                    depth + 1,
+                )?;
                 Ok(false)
             }
             K::EffectRun {
@@ -394,6 +430,7 @@ fn expression(
                 }
                 mapped(
                     package,
+                    links,
                     body,
                     row,
                     effects,
@@ -417,7 +454,7 @@ fn expression(
                     if !matches!(handler.abi, Abi::Direct | Abi::DirectPassing) {
                         return Err("IIR non-direct effects require control ABI lowering".into());
                     }
-                    operation(package, &handler.operation, &handler.signature, fuel)?;
+                    operation(package, links, &handler.operation, &handler.signature, fuel)?;
                     for prior in &installed {
                         spend(fuel)?;
                         if prior == &handler.operation {
@@ -442,6 +479,7 @@ fn expression(
                         }
                         pattern(
                             package,
+                            links,
                             &arm.pattern,
                             outer,
                             Some(result),
@@ -452,6 +490,7 @@ fn expression(
                         if let Some(guard) = &arm.guard {
                             expression(
                                 package,
+                                links,
                                 guard,
                                 outer,
                                 Some(result),
@@ -463,6 +502,7 @@ fn expression(
                         }
                         expression(
                             package,
+                            links,
                             &arm.body,
                             outer,
                             Some(result),
@@ -481,6 +521,7 @@ fn expression(
                 }
                 expression(
                     package,
+                    links,
                     body,
                     &installed,
                     resume,
@@ -501,7 +542,7 @@ fn expression(
                 if !matches!(abi, Abi::Direct | Abi::DirectPassing) {
                     return Err("IIR non-direct effects require control ABI lowering".into());
                 }
-                operation(package, op, signature, fuel)?;
+                operation(package, links, op, signature, fuel)?;
                 if row.get(*allowed_index) != Some(op) {
                     return Err("IIR effect request has no matching occurrence".into());
                 }
@@ -538,7 +579,17 @@ fn expression(
                 for capture in captures {
                     data_type(package, &capture.ty, fuel, depth + 1)?;
                     if let Some(value) = &capture.value {
-                        expression(package, value, row, resume, runtime, false, fuel, depth + 1)?;
+                        expression(
+                            package,
+                            links,
+                            value,
+                            row,
+                            resume,
+                            runtime,
+                            false,
+                            fuel,
+                            depth + 1,
+                        )?;
                     }
                 }
                 let Term::Function { result, .. } = expr.ty.callable_signature() else {
@@ -547,6 +598,7 @@ fn expression(
                 let own_row = row_result(result).0;
                 expression(
                     package,
+                    links,
                     body,
                     own_row,
                     None,
@@ -566,6 +618,7 @@ fn expression(
 }
 fn mapped(
     package: &Package,
+    links: &TypeLinks<'_>,
     expr: &Expr,
     caller: &[Operation],
     callee: &[Operation],
@@ -595,6 +648,7 @@ fn mapped(
             }
             expression(
                 package,
+                links,
                 target,
                 caller,
                 resume,
@@ -606,6 +660,7 @@ fn mapped(
             for argument in arguments {
                 expression(
                     package,
+                    links,
                     &argument.value,
                     caller,
                     resume,
@@ -627,6 +682,7 @@ fn mapped(
             for statement in statements {
                 expression(
                     package,
+                    links,
                     statement,
                     caller,
                     resume,
@@ -638,6 +694,7 @@ fn mapped(
             }
             mapped(
                 package,
+                links,
                 result,
                 caller,
                 callee,
@@ -660,6 +717,7 @@ fn mapped(
             }
             expression(
                 package,
+                links,
                 condition,
                 caller,
                 resume,
@@ -670,6 +728,7 @@ fn mapped(
             )?;
             mapped(
                 package,
+                links,
                 then_branch,
                 caller,
                 callee,
@@ -680,6 +739,7 @@ fn mapped(
             )?;
             mapped(
                 package,
+                links,
                 else_branch,
                 caller,
                 callee,
@@ -692,6 +752,7 @@ fn mapped(
         K::Match { value, arms } => {
             expression(
                 package,
+                links,
                 value,
                 caller,
                 resume,
@@ -706,6 +767,7 @@ fn mapped(
                 }
                 pattern(
                     package,
+                    links,
                     &arm.pattern,
                     caller,
                     resume,
@@ -716,6 +778,7 @@ fn mapped(
                 if let Some(guard) = &arm.guard {
                     expression(
                         package,
+                        links,
                         guard,
                         caller,
                         resume,
@@ -727,6 +790,7 @@ fn mapped(
                 }
                 mapped(
                     package,
+                    links,
                     &arm.body,
                     caller,
                     callee,
@@ -740,6 +804,7 @@ fn mapped(
         }
         K::EffectComputation { .. } => expression(
             package,
+            links,
             expr,
             callee,
             resume,
@@ -775,14 +840,18 @@ impl std::fmt::Display for Contract {
 /// Copy permission, or authorize a control/resource transfer.
 pub struct Contracts<'a> {
     graph: &'a Package,
+    links: TypeLinks<'a>,
     entries: Vec<Contract>,
 }
 impl<'a> Contracts<'a> {
     pub fn acquire(graph: &'a Package, fuel: &mut usize) -> Result<Self, String> {
         graph.validate(fuel)?;
+        let links = TypeLinks::new(graph, fuel)?;
+        let entries = collect_contracts(graph, &links, fuel)?;
         Ok(Self {
             graph,
-            entries: collect_contracts(graph, fuel)?,
+            links,
+            entries,
         })
     }
 
@@ -792,12 +861,12 @@ impl<'a> Contracts<'a> {
 
     pub fn get(&self, operation: &Operation, fuel: &mut usize) -> Result<&Contract, String> {
         for argument in &operation.arguments {
-            self.graph.validate_type(argument, fuel)?;
+            self.graph.validate_type(&self.links, argument, fuel)?;
         }
         for entry in &self.entries {
             spend(fuel)?;
             for argument in &entry.operation.arguments {
-                self.graph.validate_type(argument, fuel)?;
+                self.graph.validate_type(&self.links, argument, fuel)?;
             }
             if &entry.operation == operation {
                 return Ok(entry);
@@ -829,18 +898,32 @@ impl std::fmt::Display for Contracts<'_> {
     }
 }
 
-pub(crate) fn validate_contracts(package: &Package, fuel: &mut usize) -> Result<(), String> {
-    collect_contracts(package, fuel).map(|_| ())
+pub(crate) fn validate_contracts(
+    package: &Package,
+    links: &TypeLinks<'_>,
+    fuel: &mut usize,
+) -> Result<(), String> {
+    collect_contracts(package, links, fuel).map(|_| ())
 }
 
-fn collect_contracts(package: &Package, fuel: &mut usize) -> Result<Vec<Contract>, String> {
+fn collect_contracts(
+    package: &Package,
+    links: &TypeLinks<'_>,
+    fuel: &mut usize,
+) -> Result<Vec<Contract>, String> {
     // The index accelerates lookup; only first source traversal order is exposed
     // in the resulting table/dump, never hash iteration or pointer ordering.
     let mut index = std::collections::HashMap::<Operation, usize>::new();
     let mut contracts: Vec<Contract> = Vec::new();
     for contract in &package.effect_contracts {
         spend(fuel)?;
-        operation(package, &contract.operation, &contract.signature, fuel)?;
+        operation(
+            package,
+            links,
+            &contract.operation,
+            &contract.signature,
+            fuel,
+        )?;
         if contract.abi == Abi::DirectPassing
             && !matches!(&contract.signature, Term::Function {parameters, ..} if parameters.is_empty())
         {
@@ -859,7 +942,7 @@ fn collect_contracts(package: &Package, fuel: &mut usize) -> Result<Vec<Contract
             let mut insert = |op: &Operation, abi: Abi, signature: &Term| -> Result<(), String> {
                 spend(fuel)?;
                 // Validate/charge the complete key before hashing or comparing it.
-                operation(package, op, signature, fuel)?;
+                operation(package, links, op, signature, fuel)?;
                 if let Some(&position) = index.get(op) {
                     let prior = &contracts[position];
                     if prior.abi != abi || &prior.signature != signature {
