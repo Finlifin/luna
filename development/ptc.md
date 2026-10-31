@@ -79,3 +79,27 @@ first-UIP 子句；传播得到的汇合点不会等到归约为原决策文字�
 
 - `python3 -B development/check.py --timeout 900 -- test -p type_resolution`：全部通过，`/tmp/luna-tools-8olfmz64/result.json`。
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test builder_invocations contextual_data_consumer_publishes_structs_through_the_complete_sysroot`：通过，`/tmp/luna-tools-hwaapn8f/result.json`。完整库用例约 42 秒，尚未进行端到端性能优化。
+
+
+### 根子句双文字监视
+
+根 Tseitin 子句的传播现使用两个未定文字作为监视点，已满足子句只需监视使它成立的
+文字。辅助变量赋值仅唤醒仍监视它的子句；迁移后残留的桶条目在唤醒前检查归属。
+扫描游标沿子句循环移动，替换监视点时不反复从已否定的前缀开始。删除原来的完整
+occurrence 表，避免保存不再使用的全出现索引。
+
+传播产生的证书仍只包含根子句编号。独立 proof replay 与支持集裁剪继续使用完整子句
+扫描，不信任监视点、扫描游标或传播时的辅助赋值。预算耗尽丢弃本次局部传播状态，
+下次查询、翻转或撤回赋值均从当前输入重新开始。
+
+这一实现只推进 CDCL 布尔层。监视状态仍在单次根传播内建立，并未与学习子句组成
+统一持久 trail；跨回跳辅助赋值维护、Type 模型解提取及提交到 inference 的接口仍缺失。
+不能据此宣称完整 CDCL(T) 或模型驱动 unification 已经完成。
+
+验证（工作目录 `/home/fin/luna`）：
+
+- `python3 -B development/check.py --timeout 900 -- test -p ptc -p type_resolution`：exit 0；`/tmp/luna-tools-zas71iqi/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p ptc boolean::cnf::propagation`：新增监视迁移检查后 exit 0；`/tmp/luna-tools-1teig_wc/result.json`。
+- 小公式检查扩展至三个原子的全部 27 种部分赋值，对全部 8 种完整赋值检查冲突／unit
+  语义；每个产生的证明用独立扫描器重放。另覆盖重复文字、宽子句、过期监视记录、
+  预算中断后恢复与重新赋值。格式化和 `git diff --check` 通过。

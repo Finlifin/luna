@@ -2,7 +2,8 @@
 //! reconstructs clauses from the source formula, without search-state trust.
 use super::{Cnf, Literal, charge};
 use crate::ProofError;
-use std::collections::VecDeque;
+mod watches;
+use watches::Watches;
 
 pub(crate) enum Propagation {
     Conflict(Vec<usize>),
@@ -76,12 +77,9 @@ impl Cnf {
     ) -> Result<Propagation, ()> {
         let mut values = self.initial(assignment, fuel)?;
         let mut trace = Vec::new();
-        *fuel = fuel.checked_sub(self.clauses.len()).ok_or(())?;
-        let mut pending: VecDeque<_> = (0..self.clauses.len()).collect();
-        let mut queued = vec![true; self.clauses.len()];
-        while let Some(clause) = pending.pop_front() {
-            queued[clause] = false;
-            match self.status(clause, &values, fuel)? {
+        let mut watches = Watches::new(self, values.len(), fuel)?;
+        while let Some(clause) = watches.next() {
+            match watches.inspect(self, clause, &values, fuel)? {
                 Status::Open => {}
                 Status::Conflict => {
                     trace.push(clause);
@@ -97,13 +95,7 @@ impl Cnf {
                         });
                     }
                     values[literal.variable] = Some(literal.positive);
-                    for &affected in &self.occurrences[literal.variable] {
-                        charge(fuel)?;
-                        if !queued[affected] {
-                            queued[affected] = true;
-                            pending.push_back(affected);
-                        }
-                    }
+                    watches.assigned(literal.variable, fuel)?;
                 }
             }
         }
@@ -155,8 +147,57 @@ mod tests {
     }
 
     #[test]
+    fn wide_clause_ignores_unwatched_assignments_and_recovers_after_exhaustion() {
+        let width = 128;
+        let positive = |variable| Literal {
+            variable,
+            positive: true,
+        };
+        // The wide clause watches 1 and 2. Most later units cannot affect its
+        // status; only the final two assignments force the remaining theory atom.
+        let mut clauses = vec![(1..=width).chain([0]).map(positive).collect()];
+        clauses.extend((3..=width).chain([1, 2]).map(|variable| {
+            vec![Literal {
+                variable,
+                positive: false,
+            }]
+        }));
+        let cnf = Cnf {
+            atoms: 1,
+            clauses,
+            definitions: vec![(false, vec![]); width],
+        };
+        assert!(cnf.propagate(&[None], &mut 10).is_err());
+        // Bound the total work of preparation, watch events and implication.
+        // Proof replay has its own allowance and still scans complete clauses.
+        let mut fuel = 20 * width;
+        let Propagation::Unit {
+            index,
+            value,
+            trace,
+        } = cnf.propagate(&[None], &mut fuel).unwrap()
+        else {
+            panic!("all auxiliary alternatives are false, so atom zero is forced");
+        };
+        assert_eq!((index, value), (0, true));
+        assert_eq!(cnf.replay(&trace, &[Some(false)], &mut 100_000), Ok(()));
+        check_explanation(&cnf, &trace, &[Some(false)]);
+        // A new pass may flip assumptions; no auxiliary assignment leaks from
+        // the earlier propagation or its budget-interrupted predecessor.
+        assert!(matches!(
+            cnf.propagate(&[Some(true)], &mut 100_000),
+            Ok(Propagation::None)
+        ));
+        let Propagation::Conflict(trace) = cnf.propagate(&[Some(false)], &mut 100_000).unwrap()
+        else {
+            panic!("all alternatives are false");
+        };
+        assert_eq!(cnf.replay(&trace, &[Some(false)], &mut 100_000), Ok(()));
+    }
+
+    #[test]
     fn partial_propagations_agree_with_all_source_completions() {
-        let atoms = [Primitive::Bool, Primitive::U8].map(|p| {
+        let atoms = [Primitive::Bool, Primitive::U8, Primitive::Char].map(|p| {
             Atom::TypeEqual(Equality(
                 Term::Primitive(p),
                 Term::Primitive(Primitive::Bool),
@@ -184,6 +225,13 @@ mod tests {
                     Formula::And(vec![b.clone(), b.clone().negate()]),
                 ]));
                 formulas.push(Formula::And(vec![a.clone(), a.clone().negate()]));
+                for c in &leaves {
+                    formulas.push(Formula::And(vec![
+                        Formula::Or(vec![a.clone(), b.clone(), c.clone()]),
+                        Formula::Or(vec![a.clone().negate(), b.clone()]),
+                        Formula::Or(vec![b.clone().negate(), c.clone().negate()]),
+                    ]));
+                }
             }
         }
         let mut units = 0;
@@ -191,14 +239,15 @@ mod tests {
         for formula in formulas {
             let circuit = Circuit::compile(&formula, &atoms, &mut 10000).unwrap();
             let cnf = Cnf::compile(&circuit, atoms.len(), &mut 10000).unwrap();
-            for code in 0..9 {
+            for code in 0..27 {
                 let assignment = [
                     [None, Some(false), Some(true)][code % 3],
-                    [None, Some(false), Some(true)][code / 3],
+                    [None, Some(false), Some(true)][(code / 3) % 3],
+                    [None, Some(false), Some(true)][code / 9],
                 ];
                 let result = cnf.propagate(&assignment, &mut 10000).unwrap();
                 let completion_is_model = |mask: usize| {
-                    let full = [mask & 1 != 0, mask & 2 != 0];
+                    let full = [mask & 1 != 0, mask & 2 != 0, mask & 4 != 0];
                     assignment
                         .iter()
                         .zip(full)
@@ -211,7 +260,7 @@ mod tests {
                     Propagation::Conflict(trace) => {
                         conflicts += 1;
                         check_explanation(&cnf, &trace, &assignment);
-                        assert!(!(0..4).any(completion_is_model));
+                        assert!(!(0..8).any(completion_is_model));
                         assert_eq!(cnf.replay(&trace, &assignment, &mut 10000), Ok(()));
                     }
                     Propagation::Unit {
@@ -221,7 +270,7 @@ mod tests {
                     } => {
                         units += 1;
                         assert_eq!(assignment[index], None);
-                        for mask in 0..4 {
+                        for mask in 0..8 {
                             if completion_is_model(mask) {
                                 assert_eq!(mask & (1 << index) != 0, value);
                             }

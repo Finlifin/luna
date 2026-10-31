@@ -27,7 +27,6 @@ impl Literal {
 pub(crate) struct Cnf {
     atoms: usize,
     clauses: Vec<Vec<Literal>>,
-    occurrences: Vec<Vec<usize>>,
     // Definitions are topologically ordered. Each auxiliary variable is the
     // conjunction/disjunction of these literals; empty gates encode constants.
     definitions: Vec<(bool, Vec<Literal>)>,
@@ -37,7 +36,6 @@ impl Cnf {
         let mut result = Self {
             atoms,
             clauses: Vec::new(),
-            occurrences: Vec::new(),
             definitions: Vec::new(),
         };
         let mut outputs: Vec<Literal> = Vec::new();
@@ -89,15 +87,6 @@ impl Cnf {
         }
         charge(fuel)?;
         result.clauses.push(vec![*outputs.last().ok_or(())?]);
-        let variables = atoms + result.definitions.len();
-        *fuel = fuel.checked_sub(variables).ok_or(())?;
-        result.occurrences.resize_with(variables, Vec::new);
-        for (id, clause) in result.clauses.iter().enumerate() {
-            for literal in clause {
-                charge(fuel)?;
-                result.occurrences[literal.variable].push(id);
-            }
-        }
         Ok(result)
     }
 
