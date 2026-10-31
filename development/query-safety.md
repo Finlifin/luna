@@ -1,8 +1,8 @@
 # Query engine shared-state safety
 
 The query engine remains a serial evaluator. It is used by middle's provider
-queries and the interface driver; this change does not introduce incremental
-invalidation or a parallel compiler scheduler.
+queries and the interface driver. It now supports session-local dependency
+invalidation, but does not introduce a parallel compiler scheduler.
 
 Previously QueryEngine and QueryCache manually implemented Sync while storing
 mutable state in RefCell. The single-threaded convention did not enforce the
@@ -24,9 +24,9 @@ keep their existing memoization behavior.
 Caches belong to one engine. Direct cache mutation is not an incremental
 invalidation API and must not race with evaluation. Providers must not wait
 for another thread to re-enter the same engine, because provider evaluation
-is deliberately serialized. Dependency edges, revision invalidation, cross-
-query parallel scheduling and cross-thread wait-cycle detection remain future
-work; no implementation of those capabilities is claimed here.
+is deliberately serialized. Persistent fingerprints, unchanged-result reuse,
+cross-session storage, parallel scheduling and cross-thread wait-cycle detection
+remain future work.
 
 Validation in `/home/fin/luna`:
 
@@ -44,3 +44,46 @@ Validation in `/home/fin/luna`:
   exit 0; `/tmp/luna-tools-j8ksqww5/result.json`; `git diff --check` passed.
 
 No full language test suite, race detector or throughput benchmark was run.
+
+## Observed dependencies and input replacement
+
+Each typed cache slot has an identity independent of its diagnostic key text.
+Every query read records an edge, including cache hits and failed reads.
+Completing or unwinding an evaluation replaces its old observed read set;
+obsolete branch dependencies no longer cause invalidation.
+
+`QueryEngine::update_input` serializes input mutation with query evaluation and
+marks the input query and its transitive consumers dirty. Mutation from an
+active provider is rejected before executing the callback. Invalidation runs
+both before and after the callback, including unwinding: an intermediate read
+inside the callback cannot leave an obsolete result cached. Dirty poisoned
+queries can retry after input replacement. Independent cache clones start cold;
+shared results require sharing the cache and its owning engine.
+
+`Db::set_hir_input` uses this boundary. Database clones share the input mutex,
+engine and HIR memo table, so replacing input through either clone invalidates
+both views and observed consumers. The old HIR result remains owned. This does
+not resolve the database's other raw-pointer lifetimes or make all compiler
+arenas safe for parallel use. The driver still constructs a new database per
+compilation; persistent incremental compilation is not claimed.
+
+`dependency_dump()` exposes a sorted S-expression with escaped diagnostic labels.
+Its numeric identities are session-local tokens, not persistent fingerprints.
+Low-level cache mutation bypasses dependency tracking; input writers must use
+the engine API. The dependency graph currently lives for the engine lifetime.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p query -p middle -p interface --no-fail-fast`:
+  16 tests passed, four existing doctests ignored, exit 0;
+  `/tmp/luna-tools-xqlf02d5/result.json`.
+  Covers cached and transitive reads, diagnostic-key collisions, branch edge
+  replacement, panic recovery, reentrant mutation rejection, intermediate
+  reads during mutation, cold clones and shared database input replacement.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test subcommands`:
+  seven tests passed, including native build/execution and package checking,
+  exit 0; `/tmp/luna-tools-3rizjmod/result.json`.
+
+The database test uses a controlled HIR provider to test the input boundary;
+it is not an end-to-end source-edit incremental compilation test. No full
+language suite, race detector or performance benchmark was run for this stage.

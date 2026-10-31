@@ -24,10 +24,11 @@
 //!
 //! # Incremental compilation
 //!
-//! This layer does **not** implement a dependency graph or incremental
-//! invalidation.  Cache entries live for the lifetime of a [`Db`]; the
-//! driver rebuilds the database for a fresh compilation.  [`DepNode`] is
-//! a placeholder for a future dep-graph hook.
+//! The engine records invocation-local query dependencies and invalidates
+//! observed consumers through [`QueryEngine::update_input`]. Cached reads are
+//! dependencies too. Diagnostic [`DepNode`] strings are not cache identities.
+//! Persistent fingerprints, unchanged-result reuse and cross-session storage
+//! are not implemented; the driver still creates a database per compilation.
 //!
 //! # Adding a new query
 //!
@@ -39,6 +40,7 @@
 mod cache;
 mod cycle;
 mod dep;
+mod dependencies;
 mod howto;
 mod stack;
 
@@ -74,6 +76,7 @@ pub struct QueryEngine {
     owner: Mutex<Option<(std::thread::ThreadId, usize)>>,
     available: Condvar,
     hooks: QueryHooks,
+    dependencies: Mutex<dependencies::Dependencies>,
 }
 
 impl QueryEngine {
@@ -82,6 +85,7 @@ impl QueryEngine {
             stack: Mutex::new(QueryStack::new()),
             owner: Mutex::new(None),
             available: Condvar::new(),
+            dependencies: Mutex::new(Default::default()),
             hooks: QueryHooks::noop(),
         }
     }
@@ -91,6 +95,7 @@ impl QueryEngine {
             stack: Mutex::new(QueryStack::new()),
             owner: Mutex::new(None),
             available: Condvar::new(),
+            dependencies: Mutex::new(Default::default()),
             hooks,
         }
     }
@@ -124,6 +129,52 @@ impl QueryEngine {
         EvaluationGuard { engine: self }
     }
 
+    /// Change an input and invalidate its query plus all observed consumers.
+    /// Invalidates before running update, so a panic cannot leave stale results valid.
+    /// Reentrant input changes are rejected before either mutation takes place.
+    pub fn update_input<K: Eq + Hash + Clone, V>(
+        &self,
+        cache: &QueryCache<K, V>,
+        key: &K,
+        update: impl FnOnce(),
+    ) -> Result<(), InputUpdateDuringQuery> {
+        let _evaluation = self.enter();
+        if !self.stack().is_empty() {
+            return Err(InputUpdateDuringQuery);
+        }
+        let node = cache.node(key);
+        self.dependencies
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .invalidate(node);
+        struct UpdateGuard<'a> {
+            engine: &'a QueryEngine,
+            node: dependencies::NodeId,
+        }
+        impl Drop for UpdateGuard<'_> {
+            fn drop(&mut self) {
+                self.engine
+                    .dependencies
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .invalidate(self.node);
+            }
+        }
+        // A callback may read queries before finishing its mutation. Retire
+        // those intermediate results on both normal return and unwinding.
+        let _update = UpdateGuard { engine: self, node };
+        update();
+        Ok(())
+    }
+
+    /// Diagnostic session-local identities; not persistent cache keys.
+    pub fn dependency_dump(&self) -> String {
+        self.dependencies
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .to_string()
+    }
+
     pub fn hooks(&self) -> &QueryHooks {
         &self.hooks
     }
@@ -141,6 +192,15 @@ impl Clone for QueryEngine {
         QueryEngine::with_hooks(self.hooks.clone())
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InputUpdateDuringQuery;
+impl std::fmt::Display for InputUpdateDuringQuery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("cannot update query input during an active evaluation")
+    }
+}
+impl std::error::Error for InputUpdateDuringQuery {}
 
 // Providers may recursively request queries on this thread. Other threads wait
 // until the complete evaluation finishes, including its hooks and unwind path.
@@ -191,6 +251,22 @@ where
     let _evaluation = engine.enter();
     // Format the key once for diagnostics / hooks.
     let key_str = key_display(&key);
+
+    let node = cache.node(&key);
+    if engine
+        .dependencies
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .read(
+            node,
+            DepNode {
+                query: desc.name,
+                key: key_str.clone(),
+            },
+        )
+    {
+        cache.invalidate(&key);
+    }
 
     // Fast path: already complete / poisoned / in-progress.
     match cache.get(&key) {
@@ -248,6 +324,11 @@ where
     impl<'a, K: Eq + Hash + Clone, V> Drop for StackGuard<'a, K, V> {
         fn drop(&mut self) {
             self.engine
+                .dependencies
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .finish();
+            self.engine
                 .stack
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -259,6 +340,11 @@ where
         }
     }
 
+    engine
+        .dependencies
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .begin(node);
     let mut guard = StackGuard {
         engine,
         cache,

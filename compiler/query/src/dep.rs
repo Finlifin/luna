@@ -1,12 +1,9 @@
-//! Placeholder dependency-graph hooks for a future incremental compiler.
-//!
-//! Today Luna rebuilds the whole [`crate::QueryEngine`] / `Db` per
-//! compilation, so these hooks are no-ops unless the host installs
-//! custom callbacks for tracing.
+//! Diagnostic tracing hooks. These labels do not identify dependency nodes;
+//! the engine tracks those through each cache's typed keys independently.
 
 use std::sync::Arc;
 
-/// Identifies a query invocation for a future dep-graph.
+/// Human-readable query invocation label for tracing.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct DepNode {
     pub query: &'static str,

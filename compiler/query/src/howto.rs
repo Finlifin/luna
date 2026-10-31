@@ -41,8 +41,13 @@
 //!
 //! ## Invalidation
 //!
-//! There is no fine-grained invalidation.  Start a new `Db` for a new
-//! compilation.  [`DepNode`](crate::DepNode) / [`QueryHooks`](crate::QueryHooks)
-//! exist for future incremental work and tracing.
+//! Replace provider inputs through [`QueryEngine::update_input`](crate::QueryEngine::update_input).
+//! Supply the cache and key of the query that reads that input, and perform
+//! mutation inside the callback. Observed consumers are transitively invalidated,
+//! including dependencies returned from cache. Reentrant updates from providers
+//! are rejected. Recomputed queries replace their old dependency edges.
+//! Share `Arc<QueryCache<...>>` to share results; a direct cache clone is cold.
+//! Query tokens are session-local, not persistent fingerprints. A new compilation
+//! still starts a new `Db`; unchanged-result validation is not implemented.
 
 // This module exists solely for rustdoc.

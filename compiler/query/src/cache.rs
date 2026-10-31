@@ -29,6 +29,7 @@ pub enum QueryResult<V> {
 /// State transitions are synchronized; query execution is owned by its engine.
 pub struct QueryCache<K, V> {
     map: std::sync::Mutex<HashMap<K, CacheState<V>>>,
+    nodes: std::sync::Mutex<HashMap<K, crate::dependencies::NodeId>>,
 }
 
 impl<K, V> QueryCache<K, V>
@@ -38,7 +39,27 @@ where
     pub fn new() -> Self {
         QueryCache {
             map: std::sync::Mutex::new(HashMap::new()),
+            nodes: std::sync::Mutex::new(HashMap::new()),
         }
+    }
+
+    pub(crate) fn node(&self, key: &K) -> crate::dependencies::NodeId
+    where
+        K: Clone,
+    {
+        *self
+            .nodes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(key.clone())
+            .or_insert_with(crate::dependencies::NodeId::fresh)
+    }
+
+    pub(crate) fn invalidate(&self, key: &K) {
+        self.map
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(key);
     }
 
     pub fn get(&self, key: &K) -> Option<CacheState<V>>
@@ -125,19 +146,10 @@ where
     }
 }
 
-impl<K, V> Clone for QueryCache<K, V>
-where
-    K: Eq + Hash + Clone,
-    V: Clone,
-{
+// Independent cache clones cannot inherit dependency evidence from an engine.
+// Share Arc<QueryCache<...>> to share memoized results; cloning the cache is cold.
+impl<K: Eq + Hash, V> Clone for QueryCache<K, V> {
     fn clone(&self) -> Self {
-        QueryCache {
-            map: std::sync::Mutex::new(
-                self.map
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .clone(),
-            ),
-        }
+        Self::new()
     }
 }

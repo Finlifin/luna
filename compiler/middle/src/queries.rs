@@ -39,36 +39,6 @@ use crate::hir_package::HirPackageBox;
 use crate::hir_query::HirQueryInput;
 use crate::ty::{AdtDef, NFId, TyCtxt};
 
-// ── SyncCell ──────────────────────────────────────────────────────────────────
-
-/// A `RefCell<T>` wrapper that unsafely implements `Sync`.
-///
-/// Required because salsa 0.22 bounds `Db: Sync` through `HasStorage`.
-/// Luna is single-threaded; all `Db` accesses occur on the main thread.
-struct SyncCell<T>(std::cell::RefCell<T>);
-
-unsafe impl<T> Sync for SyncCell<T> {}
-
-impl<T> SyncCell<T> {
-    fn new(val: T) -> Self {
-        SyncCell(std::cell::RefCell::new(val))
-    }
-
-    fn borrow(&self) -> std::cell::Ref<'_, T> {
-        self.0.borrow()
-    }
-
-    fn borrow_mut(&self) -> std::cell::RefMut<'_, T> {
-        self.0.borrow_mut()
-    }
-}
-
-impl<T: Clone> Clone for SyncCell<T> {
-    fn clone(&self) -> Self {
-        SyncCell(std::cell::RefCell::new(self.0.borrow().clone()))
-    }
-}
-
 // ── Query descriptors ─────────────────────────────────────────────────────────
 
 const HIR_PACKAGE: QueryDesc = QueryDesc::new("hir_package");
@@ -159,8 +129,8 @@ pub trait LunaDatabase: salsa::Database {
 
     /// Lower the package's AST to HIR, returning an owned [`HirPackageBox`].
     ///
-    /// Memoised via [`query::QueryCache`]: the provider runs at most once per
-    /// key (`()`) per database instance.  Cycles panic as an ICE.
+    /// Memoised via [`query::QueryCache`] until input replacement invalidates
+    /// the key (`()`) and its observed consumers. Cycles panic as an ICE.
     ///
     /// # Panics
     ///
@@ -192,7 +162,7 @@ pub struct Db {
     pub query_engine: Arc<QueryEngine>,
 
     /// Inputs for the `hir_package` query (set before calling the query).
-    hir_input: Arc<SyncCell<Option<Arc<HirQueryInput>>>>,
+    hir_input: Arc<std::sync::Mutex<Option<Arc<HirQueryInput>>>>,
 
     /// Per-query memo tables.
     pub caches: QueryCaches,
@@ -221,21 +191,29 @@ impl Db {
             ty_ctxt: Arc::new(TyCtxt::new()),
             providers: Providers::default(),
             query_engine: Arc::new(QueryEngine::new()),
-            hir_input: Arc::new(SyncCell::new(None)),
+            hir_input: Arc::new(std::sync::Mutex::new(None)),
             caches: QueryCaches::new(),
         }
     }
 
     /// Store the query inputs for the `hir_package` query.
     ///
-    /// Must be called before the first invocation of `hir_package(())`.
+    /// Replacing input invalidates HIR and its observed query consumers.
+    /// Input cannot be replaced from inside an active query provider.
     pub fn set_hir_input(&self, input: Arc<HirQueryInput>) {
-        *self.hir_input.borrow_mut() = Some(input);
+        self.query_engine
+            .update_input(&self.caches.hir_package, &(), || {
+                *self.hir_input.lock().unwrap_or_else(|e| e.into_inner()) = Some(input);
+            })
+            .expect("HIR input replacement during query evaluation");
     }
 
     /// Retrieve the current query input, if any.
     pub fn hir_input(&self) -> Option<Arc<HirQueryInput>> {
-        self.hir_input.borrow().clone()
+        self.hir_input
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// `hir_package` query body — goes through the generic query engine.
