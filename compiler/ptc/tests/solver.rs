@@ -2110,3 +2110,38 @@ fn frozen_optional_congruence_keeps_presence_and_type_only_proof_boundary() {
         Outcome::IllFormed(_)
     ));
 }
+
+#[test]
+fn boolean_implication_propagation_has_replayable_branch_local_proofs() {
+    let atoms: Vec<_> = (0..12).map(|i| eq(variable(i), ty(P::Bool))).collect();
+    let mut base = Context::with_scope(vec![]);
+    for pair in atoms.windows(2) {
+        base.assume(F::Or(vec![pair[0].clone().negate(), pair[1].clone()]));
+    }
+    let mut positive = base.fork();
+    positive.assume(atoms[0].clone());
+    proved(&positive, atoms[11].clone());
+    let mut negative = base.fork();
+    negative.assume(atoms[11].clone().negate());
+    proved(&negative, atoms[0].clone().negate());
+    let mut inconsistent = positive.fork();
+    inconsistent.assume(atoms[0].clone().negate());
+    proved(&inconsistent, F::False);
+    // An implication chain alone does not supply its antecedent. Propagation
+    // in a sibling query must not become a fact in this context.
+    match base.prove(atoms[11].clone(), Budget::default()) {
+        Outcome::NotEntailed(witness) => base.verify_witness(&witness, Budget::default()).unwrap(),
+        other => panic!("expected a checked counterexample, got {other}"),
+    }
+    assert!(matches!(
+        positive.prove(
+            atoms[11].clone(),
+            Budget {
+                steps: 1,
+                ..Budget::default()
+            }
+        ),
+        Outcome::Unknown { .. }
+    ));
+    proved(&positive, atoms[11].clone());
+}

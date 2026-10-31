@@ -4,6 +4,7 @@
 //! These theory fragments cover type equality, integer difference logic, Boolean combinations,
 //! closed structural constructors and explicitly admitted normal-form
 //! congruence. Abstract satisfiability is never itself a source witness.
+mod boolean;
 mod effects;
 mod error_results;
 mod traits;
@@ -279,7 +280,7 @@ impl Context {
             },
         )?;
         let mut search = Search {
-            required_atoms: None,
+            boolean: None,
             context: self,
             formula: &formula,
             atoms: &atoms,
@@ -566,7 +567,7 @@ impl Context {
             };
         }
         let mut search = Search {
-            required_atoms: None,
+            boolean: None,
             context: self,
             formula: &residual,
             atoms: &atoms,
@@ -1246,9 +1247,7 @@ fn same_congruent_head(a: &Term, b: &Term, context: &Context) -> bool {
     matches!((a, b), (Term::NormalForm { head: a, sort: sa, arguments: aa }, Term::NormalForm { head: b, sort: sb, arguments: ab }) if a == b && sa == sb && aa.len() == ab.len() && context.congruence_heads.contains(a))
 }
 struct Search<'a> {
-    // Query-local search order only; never shared with another context, goal
-    // or proof check. Contains no assignment facts.
-    required_atoms: Option<Vec<usize>>,
+    boolean: Option<boolean::Circuit>,
     context: &'a Context,
     formula: &'a Formula,
     atoms: &'a [Atom],
@@ -1343,70 +1342,26 @@ impl Search<'_> {
             Ok(())
         }
     }
-    /// Prefer literals required by the Boolean skeleton before choosing a
-    /// disjunctive branch. This is only a search-order change: both children
-    /// are still represented by the existing, independently checked Split.
-    fn required_atom(&mut self, assignment: &[Option<bool>]) -> Result<Option<usize>, ()> {
-        if self.required_atoms.is_none() {
-            self.steps = self.steps.checked_sub(self.atoms.len()).ok_or(())?;
-            let mut seen = vec![false; self.atoms.len()];
-            let mut order = Vec::new();
-            let mut pending = vec![(self.formula, true)];
-            while let Some((formula, truth)) = pending.pop() {
-                self.tick()?;
-                match formula {
-                    Formula::Not(inner) => pending.push((inner, !truth)),
-                    Formula::And(parts) if truth => {
-                        self.steps = self.steps.checked_sub(parts.len()).ok_or(())?;
-                        pending.extend(parts.iter().rev().map(|part| (part, true)));
-                    }
-                    Formula::Or(parts) if !truth => {
-                        self.steps = self.steps.checked_sub(parts.len()).ok_or(())?;
-                        pending.extend(parts.iter().rev().map(|part| (part, false)));
-                    }
-                    Formula::Equal(_)
-                    | Formula::Kind(_)
-                    | Formula::Trait(_)
-                    | Formula::IntLe(_) => {
-                        for (index, atom) in self.atoms.iter().enumerate() {
-                            self.steps = self.steps.checked_sub(1).ok_or(())?;
-                            let matches = match (formula, atom) {
-                                (Formula::Equal(a), Atom::TypeEqual(b)) => a == b,
-                                (Formula::Kind(a), Atom::Kind(b)) => a == b,
-                                (Formula::Trait(a), Atom::Trait(b)) => a == b,
-                                (Formula::IntLe(a), Atom::IntLe(b)) => a == b,
-                                _ => false,
-                            };
-                            if matches {
-                                if !seen[index] {
-                                    seen[index] = true;
-                                    order.push(index);
-                                }
-                                break;
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            self.required_atoms = Some(order);
-        }
-        for index in self.required_atoms.as_ref().unwrap() {
-            self.steps = self.steps.checked_sub(1).ok_or(())?;
-            if assignment[*index].is_none() {
-                return Ok(Some(*index));
-            }
-        }
-        Ok(None)
-    }
     fn solve(&mut self, assignment: &mut [Option<bool>], depth: usize) -> SearchResult {
         if depth >= self.max_depth || self.tick().is_err() {
             return SearchResult::Unknown(UnknownReason::BudgetExhausted);
         }
-        if evaluate(self.formula, &|atom| {
-            assignment[self.atoms.iter().position(|a| a == atom).unwrap()]
-        }) == Some(false)
+        if self.boolean.is_none() {
+            match boolean::Circuit::compile(self.formula, self.atoms, &mut self.steps) {
+                Ok(circuit) => self.boolean = Some(circuit),
+                Err(()) => return SearchResult::Unknown(UnknownReason::BudgetExhausted),
+            }
+        }
+        let (truth, forced) = match self
+            .boolean
+            .as_ref()
+            .unwrap()
+            .propagate(assignment, &mut self.steps)
         {
+            Ok(result) => result,
+            Err(()) => return SearchResult::Unknown(UnknownReason::BudgetExhausted),
+        };
+        if truth == Some(false) {
             return SearchResult::Unsat(ProofTree::BooleanConflict);
         }
         let classes = match self.theory(assignment) {
@@ -1422,11 +1377,39 @@ impl Search<'_> {
             }
             Err(reason) => return SearchResult::Unknown(reason),
         };
-        let required = match self.required_atom(assignment) {
-            Ok(index) => index,
-            Err(()) => return SearchResult::Unknown(UnknownReason::BudgetExhausted),
-        };
-        if let Some(index) = required.or_else(|| assignment.iter().position(Option::is_none)) {
+        if !forced.is_empty() {
+            let mut trail = Vec::new();
+            for (index, value) in forced {
+                if let Some(previous) = assignment[index] {
+                    if previous != value {
+                        break;
+                    }
+                    continue;
+                }
+                assignment[index] = Some(value);
+                trail.push((index, value));
+            }
+            let mut result = self.solve(assignment, depth + trail.len());
+            for (index, value) in trail.into_iter().rev() {
+                assignment[index] = None;
+                if let SearchResult::Unsat(proof) = result {
+                    let conflict = Box::new(ProofTree::BooleanConflict);
+                    let proof = Box::new(proof);
+                    let (negative, positive) = if value {
+                        (conflict, proof)
+                    } else {
+                        (proof, conflict)
+                    };
+                    result = SearchResult::Unsat(ProofTree::Split {
+                        atom: self.atoms[index].clone(),
+                        negative,
+                        positive,
+                    });
+                }
+            }
+            return result;
+        }
+        if let Some(index) = assignment.iter().position(Option::is_none) {
             assignment[index] = Some(false);
             let negative = self.solve(assignment, depth + 1);
             assignment[index] = None;
@@ -2101,72 +2084,6 @@ impl fmt::Display for Proof {
 #[cfg(test)]
 mod context_snapshot_tests {
     use super::*;
-
-    #[test]
-    fn required_atom_order_is_query_local_and_assignment_independent() {
-        let equal = |local| {
-            Formula::equal(
-                Term::Rigid {
-                    declaration: DeclarationId { package: 91, local },
-                    sort: Sort::Type,
-                },
-                Term::Primitive(Primitive::Bool),
-            )
-        };
-        let formula = Formula::And(vec![
-            equal(0),
-            Formula::Or(vec![equal(1), equal(2)]),
-            Formula::Not(Box::new(Formula::Not(Box::new(equal(3))))),
-        ]);
-        let context = Context::with_scope(vec![]);
-        let mut atoms = Vec::new();
-        let mut terms = Terms::default();
-        collect(&formula, &mut atoms, &mut terms, 0, 128, &[]).unwrap();
-        let mut search = Search {
-            required_atoms: None,
-            context: &context,
-            formula: &formula,
-            atoms: &atoms,
-            terms: &terms,
-            steps: 0,
-            max_depth: 128,
-        };
-        let mut assignment = vec![None; atoms.len()];
-        assert!(search.required_atom(&assignment).is_err());
-        assert!(search.required_atoms.is_none());
-        // Enough to visit the first literal, but not to finish the skeleton:
-        // no partially built priority list may survive this failure either.
-        search.steps = 12;
-        assert!(search.required_atom(&assignment).is_err());
-        assert!(search.required_atoms.is_none());
-        search.steps = 1000;
-        assignment[0] = Some(true);
-        assert_eq!(search.required_atom(&assignment).unwrap(), Some(3));
-        let built = search.steps;
-        // Backtracking must make the earlier atom eligible again. A cached
-        // list of previously unassigned atoms would silently change the order.
-        assignment[0] = None;
-        assert_eq!(search.required_atom(&assignment).unwrap(), Some(0));
-        assert_eq!(built - search.steps, 1);
-        assignment[0] = Some(true);
-        assignment[3] = Some(true);
-        assert_eq!(search.required_atom(&assignment).unwrap(), None);
-        // Atoms beneath a positive disjunction remain ordinary choices.
-        assert_eq!(assignment[1], None);
-        assert_eq!(assignment[2], None);
-        // A fresh search cannot inherit the order of an unrelated query.
-        let other = Formula::Or(vec![equal(0), equal(3)]);
-        let mut fresh = Search {
-            required_atoms: None,
-            context: &context,
-            formula: &other,
-            atoms: &atoms,
-            terms: &terms,
-            steps: 1000,
-            max_depth: 128,
-        };
-        assert_eq!(fresh.required_atom(&vec![None; atoms.len()]).unwrap(), None);
-    }
 
     #[test]
     fn required_literals_precede_disjunctions_with_checkable_proofs() {
