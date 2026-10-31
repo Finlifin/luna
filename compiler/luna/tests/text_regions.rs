@@ -2585,3 +2585,44 @@ fn trait_method_text_summaries_keep_selected_subject_and_argument_origins() {
     assert!(infer(&package, "alias", 1).is_err());
     assert!(infer(&package, "alias", 100_000).is_ok());
 }
+
+#[test]
+fn deeply_nested_text_scopes_preserve_origins_and_fail_with_a_diagnostic() {
+    use nir::program::{Expr, ExprKind};
+
+    let baseline = support::compile("typealias str=.str'builtin; fn echo(value:str)->str {value}");
+    let nested = |depth| {
+        let mut package = baseline.clone();
+        let function = package
+            .functions
+            .iter_mut()
+            .find(|f| f.name == "echo")
+            .unwrap();
+        for _ in 0..depth {
+            let inner = function.body.clone();
+            function.body = Expr {
+                source: inner.source,
+                ty: inner.ty.clone(),
+                kind: ExprKind::Block {
+                    statements: vec![],
+                    result: Some(Box::new(inner)),
+                },
+            };
+        }
+        package
+    };
+    let package = nested(80);
+    let summary = infer(&package, "echo", 1_000_000).unwrap();
+    assert_eq!(
+        summary.returned.as_ref().unwrap()[&vec![]],
+        BTreeSet::from([parameter(0, &[])])
+    );
+    assert!(infer(&package, "echo", 1).is_err());
+    assert_eq!(infer(&package, "echo", 1_000_000).unwrap(), summary);
+    let error = infer(&nested(140), "echo", 1_000_000).unwrap_err();
+    assert!(
+        error.contains("depth") && error.contains("exhausted"),
+        "{error}"
+    );
+    assert_eq!(infer(&package, "echo", 1_000_000).unwrap(), summary);
+}
