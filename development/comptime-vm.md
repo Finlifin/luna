@@ -8578,3 +8578,42 @@ existing opaque-domain rejection expectation. Repeating only that test with
 afterward. The test expects a declaration using `Identity<bool>` to be rejected,
 but the current baseline accepts it. This pre-existing expectation was excluded
 from the subsequent regression run, not changed to make this refactor pass.
+
+## Reuse immutable exact-Float representation sizes during export
+
+Exact Float literal serialization and NF export previously reparsed the entire
+canonical decimal significand into an Integer only to check its limb limit.
+This repeated arithmetic with quadratic digit/limb work even though the value
+was already immutable. DecimalValue now retains its exact coefficient limb
+count when construction already computed it. Arithmetic normalization that
+removes trailing zeros computes that metadata lazily on the first successful
+representation check; subsequent checks reuse only the count. No failed check,
+invocation result, domain admission or type equality outcome is memoized.
+
+Each export still checks the current coefficient and exponent limits and charges
+payload copying/serialization. Metadata is excluded from equality, hashing,
+Debug and Display, preserving canonical identity and signed zero. Limits can
+therefore become stricter after an earlier successful check; failure leaves the
+value reusable. The change does not add captured-closure or Code NF encoding,
+remove the first parse of a new significand, or complete the Float algebra.
+
+Regression tests cover a 2048-digit value with linear export fuel, cold arithmetic
+metadata, failures followed by recovery, lower limits after warming, coefficient
+and exponent boundary sizes, zero, hash stability and unchanged dumps. NF tests
+exercise both ordinary and invocation export. This is a bounded-work regression,
+not a wall-clock speedup measurement.
+
+Validation from `/home/fin/luna`, all commands exited 0:
+
+```sh
+python3 -B development/command.py --timeout 120 -- cargo fmt --all
+python3 -B development/check.py --timeout 900 -- test -p comptime_runtime --test decimal
+python3 -B development/check.py --timeout 900 -- test -p comptime_runtime -p comptime_interpretor
+python3 -B development/check.py --timeout 900 -- test -p luna --test exact_floats --test comptime_staged_values --test literals
+git diff --check
+```
+
+Reports: `/tmp/luna-tools-ouomeggp/result.json` (formatting),
+`/tmp/luna-tools-s1u944cj/result.json` (18 decimal tests),
+`/tmp/luna-tools-ib7fnbm2/result.json` (631 runtime/interpreter tests), and
+`/tmp/luna-tools-73ju3z1a/result.json` (54 source integration tests).

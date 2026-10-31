@@ -665,3 +665,107 @@ fn computed_binary_midpoints_follow_ties_to_even_including_subnormal_edges() {
         }
     }
 }
+
+#[test]
+fn representation_metadata_rechecks_limits_and_never_changes_identity() {
+    use comptime_runtime::decimal::DecimalValue;
+    use std::hash::{Hash, Hasher};
+    fn hash(value: &DecimalValue) -> u64 {
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        value.hash(&mut hash);
+        hash.finish()
+    }
+    // Multiplication creates a significand with a removable trailing zero.
+    let left = DecimalValue::parse_literal("2.0", &mut Budget::default()).unwrap();
+    let right = DecimalValue::parse_literal("21474836485.0", &mut Budget::default()).unwrap();
+    let value = left.multiply(&right, &mut Budget::default()).unwrap();
+    let original = value.clone();
+    let debug = format!("{value:?}");
+    let identity = hash(&value);
+    let mut exhausted = Budget {
+        steps: 1,
+        max_limbs: 2,
+    };
+    assert_eq!(
+        value.check_representation(&mut exhausted),
+        Err(Error::BudgetExhausted)
+    );
+    assert_eq!(exhausted.steps, 0);
+    assert_eq!(
+        value.check_representation(&mut Budget {
+            steps: 1000,
+            max_limbs: 1
+        }),
+        Err(Error::SizeLimit)
+    );
+    value
+        .check_representation(&mut Budget {
+            steps: 1000,
+            max_limbs: 2,
+        })
+        .unwrap();
+    value
+        .check_representation(&mut Budget {
+            steps: 1,
+            max_limbs: 2,
+        })
+        .unwrap();
+    assert_eq!(
+        value.check_representation(&mut Budget {
+            steps: 1,
+            max_limbs: 1
+        }),
+        Err(Error::SizeLimit)
+    );
+    assert_eq!(value, original);
+    assert_eq!(hash(&value), identity);
+    assert_eq!(format!("{value:?}"), debug);
+    assert_eq!(
+        value.to_literal(&mut Budget::default()).unwrap(),
+        "4294967297.0e1"
+    );
+}
+
+#[test]
+fn known_decimal_export_uses_linear_copy_fuel_and_checks_both_size_limits() {
+    use comptime_runtime::decimal::DecimalValue;
+    let digits = "7".repeat(2048);
+    let text = format!("{digits}.0");
+    let value = DecimalValue::parse_literal(&text, &mut Budget::default()).unwrap();
+    let mut linear = Budget {
+        steps: digits.len() * 2 + 64,
+        max_limbs: 4096,
+    };
+    assert_eq!(
+        value.to_literal(&mut linear).unwrap(),
+        format!("{digits}.0e0")
+    );
+    assert_eq!(
+        value.to_literal(&mut Budget {
+            steps: 10000,
+            max_limbs: 1
+        }),
+        Err(Error::SizeLimit)
+    );
+    let huge_exponent =
+        DecimalValue::parse_literal("1.0e4294967296", &mut Budget::default()).unwrap();
+    assert_eq!(
+        huge_exponent.check_representation(&mut Budget {
+            steps: 1,
+            max_limbs: 1
+        }),
+        Err(Error::SizeLimit)
+    );
+    huge_exponent
+        .check_representation(&mut Budget {
+            steps: 1,
+            max_limbs: 2,
+        })
+        .unwrap();
+    let zero = DecimalValue::parse_literal("-0.0", &mut Budget::default()).unwrap();
+    zero.check_representation(&mut Budget {
+        steps: 1,
+        max_limbs: 0,
+    })
+    .unwrap();
+}

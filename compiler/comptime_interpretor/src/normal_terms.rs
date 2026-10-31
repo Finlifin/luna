@@ -732,15 +732,15 @@ impl Value {
                         return Err(ErrorKind::RepresentationSizeLimit);
                     }
                     charge(budget, value.digits().len().saturating_add(exponent_limbs))?;
-                    comptime_runtime::Integer::parse_literal(value.digits(), budget).map_err(
-                        |error| match error {
+                    value
+                        .check_representation(budget)
+                        .map_err(|error| match error {
                             comptime_runtime::Error::SizeLimit => {
                                 ErrorKind::RepresentationSizeLimit
                             }
                             comptime_runtime::Error::BudgetExhausted => ErrorKind::StepsExhausted,
                             _ => ErrorKind::Type,
-                        },
-                    )?;
+                        })?;
                     Term::Float(value.clone())
                 }
                 Value::Integer(value) => freeze_integer(value, budget)?,
@@ -756,6 +756,48 @@ impl Value {
 mod borrowed_input_tests {
     use super::*;
     const SOURCE: SourceRange = SourceRange { start: 1, end: 2 };
+
+    #[test]
+    fn exact_float_normal_export_reuses_representation_metadata_not_limits() {
+        let text = format!("{}.0", "7".repeat(2048));
+        let number = comptime_runtime::decimal::DecimalValue::parse_literal(
+            &text,
+            &mut comptime_runtime::Budget::default(),
+        )
+        .unwrap();
+        let value = Value::Float(number.clone());
+        let parameters = BTreeSet::new();
+        let domains = BTreeMap::new();
+        for invocation in [false, true] {
+            let mut small = comptime_runtime::Budget {
+                steps: 10000,
+                max_limbs: 1,
+            };
+            assert_eq!(
+                value.to_scoped_term(&mut small, &parameters, &domains, invocation),
+                Err(ErrorKind::RepresentationSizeLimit)
+            );
+            let mut linear = comptime_runtime::Budget {
+                steps: 4200,
+                max_limbs: 4096,
+            };
+            assert_eq!(
+                value
+                    .to_scoped_term(&mut linear, &parameters, &domains, invocation)
+                    .unwrap(),
+                Term::Float(number.clone())
+            );
+            let mut exhausted = comptime_runtime::Budget {
+                steps: 1,
+                max_limbs: 4096,
+            };
+            assert_eq!(
+                value.to_scoped_term(&mut exhausted, &parameters, &domains, invocation),
+                Err(ErrorKind::StepsExhausted)
+            );
+        }
+        assert_eq!(value, Value::Float(number));
+    }
 
     #[test]
     fn staged_binding_after_ordinary_prefix_preserves_dependent_domains() {

@@ -1,7 +1,11 @@
 //! Exact lexical decimal components, before choosing a binary runtime proxy.
 //! This is not a general implementation of the language's comptime Float.
 use crate::{Budget, Error, Integer};
-use std::fmt;
+use std::{
+    fmt,
+    hash::{Hash, Hasher},
+    sync::OnceLock,
+};
 
 #[derive(Clone, Debug)]
 pub struct DecimalLiteral {
@@ -92,11 +96,12 @@ impl DecimalLiteral {
                 digits: "0".into(),
                 exponent: Integer::zero(),
                 negative: self.negative,
+                coefficient_limbs: OnceLock::from(0),
             });
         }
         let canonical = nonzero.trim_end_matches('0');
         // Apply the same representation-size check as exact integer parsing.
-        Integer::parse_literal(canonical, budget)?;
+        let coefficient = Integer::parse_literal(canonical, budget)?;
         let removed = nonzero.len() - canonical.len();
         let exponent = self
             .exponent
@@ -105,6 +110,7 @@ impl DecimalLiteral {
             digits: canonical.into(),
             exponent,
             negative: self.negative,
+            coefficient_limbs: OnceLock::from(coefficient.bit_len().div_ceil(32)),
         })
     }
 
@@ -137,11 +143,38 @@ impl fmt::Display for DecimalLiteral {
 /// significand digit (except zero) and a zero exponent for zero. Identity keeps
 /// the sign of zero, because two numerically equal values may round differently.
 /// This is a literal-value building block, not the full language Float algebra.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone)]
 pub struct DecimalValue {
     digits: Box<str>,
     exponent: Integer,
     negative: bool,
+    // Immutable representation metadata, independent of value identity and
+    // caller limits. Failed checks never cache an outcome.
+    coefficient_limbs: OnceLock<usize>,
+}
+impl fmt::Debug for DecimalValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DecimalValue")
+            .field("digits", &self.digits)
+            .field("exponent", &self.exponent)
+            .field("negative", &self.negative)
+            .finish()
+    }
+}
+impl PartialEq for DecimalValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.negative == other.negative
+            && self.digits == other.digits
+            && self.exponent == other.exponent
+    }
+}
+impl Eq for DecimalValue {}
+impl Hash for DecimalValue {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.digits.hash(state);
+        self.exponent.hash(state);
+        self.negative.hash(state);
+    }
 }
 impl DecimalValue {
     /// Read an internal literal spelling. Source lexing still represents minus
@@ -161,10 +194,7 @@ impl DecimalValue {
                 .saturating_add(self.exponent.bit_len().div_ceil(32))
                 .saturating_add(8),
         )?;
-        Integer::parse_literal(&self.digits, budget)?;
-        if self.exponent.bit_len().div_ceil(32) > budget.max_limbs {
-            return Err(Error::SizeLimit);
-        }
+        self.check_representation(budget)?;
         let exponent = self.exponent.to_decimal_literal(budget)?;
         let mut spelling = String::new();
         if self.negative {
@@ -174,6 +204,28 @@ impl DecimalValue {
         spelling.push_str(".0e");
         spelling.push_str(&exponent);
         Ok(spelling)
+    }
+
+    /// Recheck current size limits without reparsing a known immutable
+    /// significand. This charges validation only; callers charge copying or
+    /// serialization separately. No invocation result or type proof is cached.
+    pub fn check_representation(&self, budget: &mut Budget) -> Result<(), Error> {
+        budget.charge(1)?;
+        if self.exponent.bit_len().div_ceil(32) > budget.max_limbs {
+            return Err(Error::SizeLimit);
+        }
+        let limbs = if let Some(limbs) = self.coefficient_limbs.get() {
+            *limbs
+        } else {
+            let coefficient = Integer::parse_literal(&self.digits, budget)?;
+            let limbs = coefficient.bit_len().div_ceil(32);
+            let _ = self.coefficient_limbs.set(limbs);
+            limbs
+        };
+        if limbs > budget.max_limbs {
+            return Err(Error::SizeLimit);
+        }
+        Ok(())
     }
 
     pub fn digits(&self) -> &str {
@@ -243,6 +295,7 @@ impl DecimalValue {
                 digits: "0".into(),
                 exponent: Integer::zero(),
                 negative: negative_zero,
+                coefficient_limbs: OnceLock::from(0),
             });
         }
         let spelling = value.to_decimal_literal(budget)?;
@@ -257,6 +310,11 @@ impl DecimalValue {
             digits: canonical.into(),
             exponent,
             negative: value.is_negative(),
+            coefficient_limbs: if canonical.len() == magnitude.len() {
+                OnceLock::from(value.bit_len().div_ceil(32))
+            } else {
+                OnceLock::new()
+            },
         })
     }
 
