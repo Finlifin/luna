@@ -203,3 +203,101 @@ fn explicit_input_search_does_not_bind_ambient_variables_or_leak_across_branches
         O::IllFormed(_)
     ));
 }
+
+#[test]
+fn relative_solutions_preserve_ambient_identities_and_replay_their_equalities() {
+    let context = Context::default();
+    let pointer = |ty| Term::Pointer(Box::new(ty));
+    let constraint = F::And(vec![
+        F::Or(vec![
+            F::equal(var(0), pointer(var(8))),
+            F::equal(var(0), pointer(var(9))),
+        ]),
+        F::equal(var(8), var(9)),
+        F::equal(var(1), var(0)),
+    ]);
+    let inputs = [id(0), id(1)];
+    let outcome = context.search_type_inputs(&inputs, constraint.clone(), &mut Budget::default());
+    let O::Unique(solution) = outcome else {
+        panic!("{outcome}")
+    };
+    let problem = context
+        .type_input_context(&inputs, constraint, &mut Budget::default())
+        .unwrap();
+    problem
+        .verify_witness(&solution.model, Budget::default())
+        .unwrap();
+    for input in inputs {
+        let (value, proof) = &solution.bindings[&input];
+        assert_eq!(value, &pointer(var(8)));
+        problem.verify_proof(proof, Budget::default()).unwrap();
+        assert_eq!(
+            proof.goal,
+            F::equal(
+                Term::Rigid {
+                    declaration: input,
+                    sort: Sort::Type
+                },
+                value.clone()
+            )
+        );
+        assert!(
+            value
+                .rigid_parameters()
+                .unwrap()
+                .keys()
+                .all(|id| !inputs.contains(id))
+        );
+    }
+    assert!(context.assumptions().is_empty());
+}
+
+#[test]
+fn requested_aliases_and_branch_occurrences_do_not_authorize_symbolic_solutions() {
+    let context = Context::default();
+    let outcome = context.search_type_inputs(
+        &[id(0), id(1)],
+        F::equal(var(0), var(1)),
+        &mut Budget::default(),
+    );
+    assert!(matches!(outcome, O::Ambiguous { .. }), "{outcome}");
+    for constraint in [
+        F::Or(vec![F::equal(var(0), var(9)), F::equal(var(0), boolean())]),
+        F::equal(var(0), var(9)).negate(),
+    ] {
+        let outcome = context.search_type_inputs(&[id(0)], constraint, &mut Budget::default());
+        assert!(
+            !matches!(outcome, O::Unique(_) | O::Inconsistent(_)),
+            "{outcome}"
+        );
+        if let O::Ambiguous {
+            candidate,
+            alternative,
+            ..
+        } = outcome
+        {
+            assert_eq!(candidate.types.get(&id(9)), alternative.types.get(&id(9)));
+            assert_eq!(candidate.integers, alternative.integers);
+        }
+    }
+    for steps in 0..128 {
+        let mut budget = Budget {
+            steps,
+            ..Budget::default()
+        };
+        let outcome = context.search_type_inputs(&[id(0)], F::equal(var(0), var(9)), &mut budget);
+        assert!(
+            !matches!(
+                outcome,
+                O::Ambiguous { .. } | O::Inconsistent(_) | O::IllFormed(_)
+            ),
+            "{outcome}"
+        );
+    }
+    let outcome =
+        context.search_type_inputs(&[id(0)], F::equal(var(0), var(9)), &mut Budget::default());
+    let O::Unique(solution) = outcome else {
+        panic!("{outcome}")
+    };
+    assert_eq!(solution.bindings[&id(0)].0, var(9));
+}

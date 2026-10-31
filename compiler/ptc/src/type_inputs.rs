@@ -2,6 +2,7 @@
 //! exported binding additionally needs entailment under the supplied problem.
 //! This does not authorize treating an unproved function requirement as a fact.
 use super::*;
+mod symbolic;
 
 #[derive(Clone, Debug)]
 pub struct TypeInputSolution {
@@ -27,8 +28,8 @@ impl Context {
     /// Returned evidence belongs to `type_input_context`, leaving `self` intact.
     ///
     /// Currently closed model reification bounds this fallback's completeness.
-    /// Symbolic/opaque solutions outside that fragment remain Unknown, never an
-    /// arbitrary substitution. Direct unification should run before this search.
+    /// Symbolic solutions may retain ambient inputs when their equality is
+    /// proved for the whole problem. Direct unification should run first.
     pub fn search_type_inputs(
         &self,
         inputs: &[DeclarationId],
@@ -51,6 +52,7 @@ impl Context {
             Outcome::IllFormed(message) => return TypeInputOutcome::IllFormed(message),
         };
         let mut bindings = BTreeMap::new();
+        let mut symbolic_candidates = None;
         for &variable in inputs {
             let Some(value) = model.types.get(&variable) else {
                 return TypeInputOutcome::Unknown(UnknownReason::UnvalidatedModel);
@@ -68,6 +70,33 @@ impl Context {
                     bindings.insert(variable, (value.clone(), proof));
                 }
                 Outcome::NotEntailed(alternative) => {
+                    let candidates = match &symbolic_candidates {
+                        Some(candidates) => candidates,
+                        None => {
+                            let candidates = match symbolic::candidates(&problem, inputs, budget) {
+                                Ok(candidates) => candidates,
+                                Err(reason) => return TypeInputOutcome::Unknown(reason),
+                            };
+                            symbolic_candidates.insert(candidates)
+                        }
+                    };
+                    match symbolic::binding(&problem, variable, candidates, budget) {
+                        Ok(Some(binding)) => {
+                            bindings.insert(variable, binding);
+                            continue;
+                        }
+                        Ok(None) => {}
+                        Err(reason) => return TypeInputOutcome::Unknown(reason),
+                    }
+                    // Two different ambient worlds do not establish ambiguity
+                    // for an input relative to one fixed surrounding interface.
+                    match symbolic::same_ambient(&model, &alternative, inputs, budget) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            return TypeInputOutcome::Unknown(UnknownReason::UnvalidatedModel);
+                        }
+                        Err(reason) => return TypeInputOutcome::Unknown(reason),
+                    }
                     return TypeInputOutcome::Ambiguous {
                         variable,
                         candidate: model,

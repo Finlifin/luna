@@ -247,3 +247,28 @@ theory unit 不能混入辅助序列，否则下一次重放会把已成立的�
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`：通过；`/tmp/luna-tools-4_gzwjm6/result.json`。
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test builder_invocations contextual_data_consumer_publishes_structs_through_the_complete_sysroot`：通过；`/tmp/luna-tools-vz0uaafo/result.json`。
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`：通过；`/tmp/luna-tools-jbh232p5/result.json`。`git diff --check` 通过。
+
+
+### 相对于外层参数的 Type 解
+
+Type 输入搜索不再把 `T = U` 中外层 U 的不同具体模型解释直接判为 T 歧义。
+闭合模型值不能被证明为唯一时，搜索从原问题提及的 Type 形状中选择不依赖任何
+本次待解变量的符号候选；每个交付值仍须由整个问题证明 `T == candidate`。
+候选只作为提案，Not／Or 中的出现本身不是事实，不展开不透明 normal-form 头。
+输出保留外层声明身份，并沿既有 inference trial 路径重证原义务后才允许提交。
+
+本次排除了 `T = S`（T、S 都待解）这样的循环或未决输入依赖。`T = U`、
+`T = *U` 以及分支合并后得到的符号形状可保留；多输入可共同绑定同一外层形状，
+不会把搜索临时身份发布到结果。若未找到符号解，只有两份模型的外层 Type 与
+整数输入解释相同时才交付 Ambiguous，否则保留 Unknown。比较、候选遍历和证明
+都消耗请求预算，预算耗尽不会发布部分绑定。
+
+边界：仍先要求一个有效的满足模型；候选来自问题已有形状，尚未合成任意新的
+符号表达式。一般不透明类型模型与 binder 内符号解仍有未实现部分。
+
+验证（工作目录 `/home/fin/luna`）：
+
+- `python3 -B development/check.py --timeout 900 -- test -p ptc --test type_inputs -p type_resolution --test type_input_search`：通过；`/tmp/luna-tools-43uvz6es/result.json`。
+- 最终计费与反例断言完成后，`python3 -B development/check.py --timeout 900 -- test -p ptc -p type_resolution`：443 项通过；`/tmp/luna-tools-zkeht2m2/result.json`。新增检查覆盖符号身份、分支等式、多个待解输入、循环拒绝、非事实候选、低预算恢复、证书重放及候选隔离。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`：通过；`/tmp/luna-tools-6uo02w8a/result.json`。
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`：通过；`/tmp/luna-tools-o9wci2d6/result.json`。`git diff --check` 通过。

@@ -43,6 +43,40 @@ fn unique_models_propose_isolated_candidates_with_original_obligations() {
         Term::Primitive(P::Bool)
     );
 }
+
+#[test]
+fn symbolic_model_proposals_preserve_the_ambient_type_and_transaction_boundary() {
+    let mut parent = Engine::default();
+    let input = parent.fresh(Sort::Type);
+    let ambient = Term::Rigid {
+        declaration: DeclarationId {
+            package: 921,
+            local: 7,
+        },
+        sort: Sort::Type,
+    };
+    let problem = R::Equal(
+        I::Meta(input),
+        I::Stable(Term::Pointer(Box::new(ambient.clone()))),
+    );
+    let Search::Proposed {
+        mut candidate,
+        obligation,
+        evidence,
+    } = parent
+        .search_type_inputs(&[input], &problem, &mut Budget::default())
+        .unwrap()
+    else {
+        panic!("the input is determined relative to the ambient declaration");
+    };
+    assert_eq!(parent.inspect(&I::Meta(input)).unwrap(), I::Meta(input));
+    let expected = Term::Pointer(Box::new(ambient));
+    assert_eq!(evidence.bindings.values().next().unwrap().0, expected);
+    candidate.advance(100, Budget::default());
+    assert!(candidate.state(obligation).unwrap().is_proven());
+    parent.commit(candidate).unwrap();
+    assert_eq!(parent.freeze(&I::Meta(input)).unwrap(), expected);
+}
 #[test]
 fn existing_requires_neither_supply_search_facts_nor_disappear_on_commit() {
     let mut parent = Engine::default();
