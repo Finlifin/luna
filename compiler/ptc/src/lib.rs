@@ -7,6 +7,7 @@
 mod boolean;
 mod effects;
 mod error_results;
+mod learning;
 mod traits;
 pub use traits::TraitQuery;
 mod classification;
@@ -139,6 +140,7 @@ pub struct Proof {
 #[derive(Clone, Debug)]
 pub enum ProofTree {
     BooleanConflict,
+    /// An inconsistent subset of literals present on the current branch.
     TheoryConflict(Vec<(Atom, bool)>),
     Split {
         atom: Atom,
@@ -281,6 +283,7 @@ impl Context {
         )?;
         let mut search = Search {
             boolean: None,
+            learned: learning::Clauses::default(),
             context: self,
             formula: &formula,
             atoms: &atoms,
@@ -568,6 +571,7 @@ impl Context {
         }
         let mut search = Search {
             boolean: None,
+            learned: learning::Clauses::default(),
             context: self,
             formula: &residual,
             atoms: &atoms,
@@ -1248,6 +1252,7 @@ fn same_congruent_head(a: &Term, b: &Term, context: &Context) -> bool {
 }
 struct Search<'a> {
     boolean: Option<boolean::Circuit>,
+    learned: learning::Clauses,
     context: &'a Context,
     formula: &'a Formula,
     atoms: &'a [Atom],
@@ -1291,21 +1296,27 @@ impl Search<'_> {
                 }
             }
             ProofTree::TheoryConflict(literals) => {
-                let expected: Vec<_> = self
-                    .atoms
-                    .iter()
-                    .zip(assignment.iter())
-                    .filter_map(|(a, b)| b.map(|b| (a, b)))
-                    .collect();
-                if literals.len() != expected.len()
-                    || !literals
-                        .iter()
-                        .zip(expected)
-                        .all(|((a, b), (c, d))| a == c && *b == d)
-                {
-                    return Err(ProofError::Invalid);
+                let mut support = vec![None; assignment.len()];
+                for (atom, value) in literals {
+                    self.tick().map_err(|()| ProofError::BudgetExhausted)?;
+                    let mut found = None;
+                    for (index, candidate) in self.atoms.iter().enumerate() {
+                        self.steps = self
+                            .steps
+                            .checked_sub(1)
+                            .ok_or(ProofError::BudgetExhausted)?;
+                        if candidate == atom {
+                            found = Some(index);
+                            break;
+                        }
+                    }
+                    let index = found.ok_or(ProofError::Invalid)?;
+                    if assignment[index] != Some(*value) || support[index].is_some() {
+                        return Err(ProofError::Invalid);
+                    }
+                    support[index] = Some(*value);
                 }
-                match self.theory(assignment) {
+                match self.theory(&support) {
                     Ok(None) => Ok(()),
                     Ok(Some(_)) => Err(ProofError::Invalid),
                     Err(UnknownReason::ArithmeticRange) => Err(ProofError::ArithmeticRange),
@@ -1364,16 +1375,39 @@ impl Search<'_> {
         if truth == Some(false) {
             return SearchResult::Unsat(ProofTree::BooleanConflict);
         }
+        match self.propagate_learned(assignment) {
+            Err(reason) => return SearchResult::Unknown(reason),
+            Ok(learning::Propagation::Conflict(proof)) => return SearchResult::Unsat(proof),
+            Ok(learning::Propagation::Unit {
+                index,
+                value,
+                reason,
+            }) => {
+                assignment[index] = Some(value);
+                let result = self.solve(assignment, depth + 1);
+                assignment[index] = None;
+                return match result {
+                    SearchResult::Unsat(proof) => {
+                        let (negative, positive) = if value {
+                            (reason, proof)
+                        } else {
+                            (proof, reason)
+                        };
+                        SearchResult::Unsat(ProofTree::Split {
+                            atom: self.atoms[index].clone(),
+                            negative: Box::new(negative),
+                            positive: Box::new(positive),
+                        })
+                    }
+                    other => other,
+                };
+            }
+            Ok(learning::Propagation::None) => {}
+        }
         let classes = match self.theory(assignment) {
             Ok(Some(classes)) => classes,
             Ok(None) => {
-                return SearchResult::Unsat(ProofTree::TheoryConflict(
-                    self.atoms
-                        .iter()
-                        .zip(assignment.iter())
-                        .filter_map(|(a, b)| b.map(|b| (a.clone(), b)))
-                        .collect(),
-                ));
+                return SearchResult::Unsat(self.learn_conflict(assignment));
             }
             Err(reason) => return SearchResult::Unknown(reason),
         };
