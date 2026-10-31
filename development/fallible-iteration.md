@@ -131,3 +131,52 @@ After the transport change, the delivered native suite was rerun with
 seven passed, exit 0; `/tmp/luna-library-b2m9sl4t/summary.json`.
 Formatting check exited 0 (`/tmp/luna-tools-op9_9uul/result.json`), and
 `git diff --check` passed. No full language suite was run.
+
+## Ordinary comptime values as error-row inputs
+
+`!expr T` now accepts a named or computed `meta.List<Type>` value, rather than
+requiring the error collection to be an HIR list literal. The expression is
+checked in the comptime input phase, then passed through ordinary required
+invocation and domain validation. Each delivered element must be Type. The
+existing error-result constructor still handles duplicates and empty rows.
+The supplied collection's domain must match its checked domain; an arbitrary
+aggregate or list of values is not reinterpreted as Type labels.
+
+A singleton Type expression keeps the existing type-description path, so
+normal-form heads are not invoked or unfolded merely because they appear in
+an error row. Literal rows retain support for symbolic signature parameters
+without requiring an installed list protocol. Computed collections with a
+finite shape can likewise contain restored generic Type parameters.
+
+This is a prerequisite for general error-row inputs, not a solution to the
+multi-label Copy reproducer. `!E T` is not uniquely decomposed against a
+multi-label result: nested error qualifiers merge, and an unknown success
+component can absorb error labels. Choosing one arbitrary decomposition or
+turning pending into rejection would change inference semantics. A wholly
+unresolved collection parameter still cannot be evaluated into a finite row;
+no special Type-list parameter category or Copy-specific solver rule is added.
+
+Validation in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_lists`:
+  32 passed, exit 0; `/tmp/luna-tools-xleeguf1/result.json`. This includes
+  named/computed rows, branch-selected empty rows, deduplication, scoped generic
+  parameters, opaque normal-form identity, and rejection of wrong domains.
+- Earlier combined `type_lists` / `error_result_flow` run: 31 + 11 passed,
+  exit 0; `/tmp/luna-tools-7kdx4yln/result.json` (before the generic-row case).
+- `python3 -B development/library_check.py --stage sysroot-fallible-iteration --timeout 300`:
+  nine native cases passed, exit 0; `/tmp/luna-library-evund80q/summary.json`.
+  The two new delivered cases exercise public meta.List constants, comptime
+  row producers, duplicate collapse and empty-row success. The separate
+  multi-label Copy reproducer is still not claimed as passing.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test error_surface --no-fail-fast`:
+  117 passed, one failed, exit 101; `/tmp/luna-tools-shmthiso/result.json`.
+  `generic_error_labels_do_not_choose_ambiguous_permutations_or_unfold_heads`
+  expects a call with an opaque head to reject argument inference, but it is
+  accepted. The new identity test independently confirms no head unfolding;
+  the broader inference assertion remains unresolved, not counted as passing.
+- Library runner unit tests: 13 passed, exit 0.
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --no-fail-fast`:
+  passed, exit 0; `/tmp/luna-tools-r29xklk5/result.json`.
+- Final formatting check exited 0 (`/tmp/luna-tools-iivke1oy/result.json`),
+  and `git diff --check` passed. No full language suite was run.

@@ -808,3 +808,95 @@ fn comptime_list_loop_reads_local_indices_without_quadratic_copy_cost() {
         Value::Integer(comptime_runtime::Integer::from_u128(64))
     );
 }
+
+#[test]
+fn error_rows_accept_named_and_computed_type_collections() {
+    let package = compile(
+        "enum Low {bad} enum High {bad}
+        const Errors:List<Type> = [Low,High,Low];
+        comptime fn errors(flag:bool)->List<Type> {
+            if flag {[High,Low]} else {[]}
+        }
+        fn named()->!Errors bool {error Low.bad}
+        fn computed()->!errors(true) bool {error High.bad}
+        fn empty()->!errors(false) bool {true}
+        fn run()->bool {
+            let a = named() match {_! => false,error Low.bad => true,error High.bad => false};
+            let b = computed() match {_! => false,error Low.bad => false,error High.bad => true};
+            a and b and empty()
+        }",
+    )
+    .unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 200_000).unwrap(),
+        Value::Bool(true)
+    );
+    let named = package
+        .functions
+        .iter()
+        .find(|f| f.name == "named")
+        .unwrap();
+    let Term::Function { result, .. } = &named.signature else {
+        panic!("function")
+    };
+    let Term::ErrorResult { errors, .. } = result.as_ref() else {
+        panic!("error row")
+    };
+    assert_eq!(errors.len(), 2);
+}
+
+#[test]
+fn error_row_collections_reject_wrong_domains_and_runtime_producers() {
+    for declaration in [
+        "const Errors:List<bool> = [true];",
+        "const Errors:bool = true;",
+        "const Errors:List<List<Type>> = [[bool]];",
+    ] {
+        let error = compile(&format!("{declaration} fn run()->!Errors bool {{true}}")).unwrap_err();
+        assert!(error.contains("error row requires Type"), "{error}");
+    }
+    let error = compile(
+        "fn errors()->List<Type> {[bool]} const Errors = errors();
+        fn run()->!Errors bool {true}",
+    )
+    .unwrap_err();
+    assert!(!error.contains("parsing failed"), "{error}");
+}
+
+#[test]
+fn error_row_values_preserve_opaque_normal_form_labels() {
+    let package = compile(
+        "pure comptime fn Wrap<T>->Type {T}
+        const Errors:List<Type> = [Wrap<bool>];
+        fn direct()->!Wrap<bool> bool {true}
+        fn collected()->!Errors bool {direct()}",
+    )
+    .unwrap();
+    let result = |name| {
+        let f = package.functions.iter().find(|f| f.name == name).unwrap();
+        let Term::Function { result, .. } = &f.signature else {
+            panic!("function")
+        };
+        result.as_ref()
+    };
+    assert_eq!(result("direct"), result("collected"));
+    let Term::ErrorResult { errors, .. } = result("collected") else {
+        panic!("error row")
+    };
+    assert!(matches!(&errors[0], Term::NormalForm { .. }));
+    assert_ne!(errors[0], Term::Primitive(P::Bool));
+}
+
+#[test]
+fn computed_error_rows_restore_generic_type_parameters() {
+    let package = compile(
+        "comptime fn labels()->List<Type> where T {[T]}
+        fn fail(value:T)->!labels<T>() bool where T {error value}
+        fn run()->bool {fail(true) match {_! => false,error value => value}}",
+    )
+    .unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 200_000).unwrap(),
+        Value::Bool(true)
+    );
+}

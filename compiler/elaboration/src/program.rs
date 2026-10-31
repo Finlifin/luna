@@ -3748,13 +3748,7 @@ impl Checker<'_, '_> {
                     })
             }
             H::ErrorQualifiedType(errors, result) => {
-                let labels = match &errors.kind {
-                    H::List(items) => items
-                        .iter()
-                        .map(|item| self.type_expr(item))
-                        .collect::<Result<Vec<_>, _>>()?,
-                    _ => vec![self.type_expr(errors)?],
-                };
+                let labels = self.error_type_labels(errors)?;
                 Ok(Term::error_result(labels, self.type_expr(result)?))
             }
             H::EffectQualifiedType(effects, result) => {

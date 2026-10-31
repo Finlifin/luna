@@ -2,6 +2,7 @@
 use super::*;
 mod catches;
 mod layouts;
+mod type_labels;
 
 impl Checker<'_, '_> {
     fn error_node(&mut self, ty: Term, kind: K, span: Span) -> Result<n::Expr, Error> {

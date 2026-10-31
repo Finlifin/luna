@@ -118,3 +118,24 @@ test successful_fold_preserves_optional_accumulator_layer {
     };
     assumes kept_absence;
 }
+
+const FailureKinds: meta.List<Type> = [bool, bool];
+
+comptime fn select_errors(required: bool) -> meta.List<Type> {
+    if required {[bool]} else {[]}
+}
+
+fn named_failure() -> !FailureKinds bool {error true}
+fn computed_failure() -> !select_errors(true) bool {error false}
+fn no_failure() -> !select_errors(false) bool {true}
+
+test named_and_computed_error_rows {
+    let named = named_failure() match {_! => false, error value => value};
+    let computed = computed_failure() match {_! => false, error value => not value};
+    assumes named and computed;
+}
+
+test empty_computed_error_row_is_plain_success {
+    let success: bool = no_failure();
+    assumes success;
+}
