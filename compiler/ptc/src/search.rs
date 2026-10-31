@@ -66,23 +66,54 @@ impl Search<'_> {
         mut depth: usize,
     ) -> SearchResult {
         let mut frames = Vec::new();
+        let mut levels = vec![0usize; assignment.len()];
+        let mut decision_level = 0usize;
         'search: loop {
             let mut result = match self.enter(assignment, depth) {
                 Step::Descend(frame, child_depth) => {
+                    match &frame {
+                        Frame::Boolean(trail) => {
+                            for (index, _) in trail {
+                                levels[*index] = decision_level;
+                            }
+                        }
+                        Frame::Learned { index, .. } => levels[*index] = decision_level,
+                        Frame::Negative { index, .. } => {
+                            decision_level += 1;
+                            levels[*index] = decision_level;
+                        }
+                        Frame::Positive { .. } => unreachable!(),
+                    }
                     frames.push(frame);
                     depth = child_depth;
                     continue;
                 }
                 Step::Return(result) => result,
             };
+            let mut learned_at = None;
             loop {
+                result = self.learn_first_uip(
+                    result,
+                    assignment,
+                    &levels,
+                    decision_level,
+                    &mut learned_at,
+                );
                 let Some(frame) = frames.pop() else {
                     return result;
                 };
                 match frame {
                     Frame::Boolean(trail) => {
                         for (index, value) in trail.into_iter().rev() {
+                            result = self.learn_first_uip(
+                                result,
+                                assignment,
+                                &levels,
+                                decision_level,
+                                &mut learned_at,
+                            );
                             assignment[index] = None;
+                            levels[index] = 0;
                             if let SearchResult::Unsat(proof) = result {
                                 if !proof.support.contains(&index) {
                                     result = SearchResult::Unsat(proof);
@@ -111,6 +142,7 @@ impl Search<'_> {
                         reason,
                     } => {
                         assignment[index] = None;
+                        levels[index] = 0;
                         if let SearchResult::Unsat(proof) = result {
                             let (negative, positive) = if value {
                                 (reason, proof)
@@ -130,6 +162,8 @@ impl Search<'_> {
                         if matches!(result, SearchResult::Model(_))
                             || matches!(&result, SearchResult::Unsat(conflict) if !conflict.support.contains(&index))
                         {
+                            levels[index] = 0;
+                            decision_level -= 1;
                             continue;
                         }
                         assignment[index] = Some(true);
@@ -142,6 +176,8 @@ impl Search<'_> {
                     }
                     Frame::Positive { index, negative } => {
                         assignment[index] = None;
+                        levels[index] = 0;
+                        decision_level -= 1;
                         if matches!(&result, SearchResult::Unsat(conflict) if !conflict.support.contains(&index))
                         {
                             continue;
@@ -164,6 +200,43 @@ impl Search<'_> {
                     }
                 }
             }
+        }
+    }
+
+    fn learn_first_uip(
+        &mut self,
+        result: SearchResult,
+        assignment: &[Option<bool>],
+        levels: &[usize],
+        decision_level: usize,
+        learned_at: &mut Option<usize>,
+    ) -> SearchResult {
+        if decision_level == 0 || *learned_at == Some(decision_level) {
+            return result;
+        }
+        let SearchResult::Unsat(conflict) = result else {
+            return result;
+        };
+        let mut current = 0;
+        for index in &conflict.support {
+            // This optional analysis shares the query budget. Its failure does
+            // not change the proof or permit any unsupported assignment.
+            if self.steps == 0 {
+                return SearchResult::Unsat(conflict);
+            }
+            self.steps -= 1;
+            if levels[*index] == decision_level {
+                current += 1;
+                if current > 1 {
+                    break;
+                }
+            }
+        }
+        if current == 1 {
+            *learned_at = Some(decision_level);
+            SearchResult::Unsat(self.learn_resolved(conflict, assignment))
+        } else {
+            SearchResult::Unsat(conflict)
         }
     }
 
@@ -333,6 +406,68 @@ mod tests {
             }
         }
         assert!(saw_unknown && saw_model && saw_unsat);
+    }
+
+    #[test]
+    fn first_uip_retains_the_propagated_dominator_before_the_decision() {
+        let atom = |local| {
+            Formula::equal(
+                Term::Rigid {
+                    declaration: DeclarationId { package: 82, local },
+                    sort: Sort::Type,
+                },
+                Term::Primitive(Primitive::Bool),
+            )
+        };
+        let d = atom(0);
+        let x = atom(1);
+        let y = atom(2);
+        // d=false forces x=true. x forces both y polarities, so x is the
+        // first UIP; learning only d=true loses this stronger explanation.
+        let formula = Formula::And(vec![
+            Formula::Or(vec![d, x.clone()]),
+            Formula::Or(vec![x.clone().negate(), y.clone()]),
+            Formula::Or(vec![x.negate(), y.negate()]),
+        ]);
+        let context = Context::default();
+        let mut atoms = Vec::new();
+        let mut terms = Terms::default();
+        collect(&formula, &mut atoms, &mut terms, 0, 128, &[]).unwrap();
+        let mut search = Search {
+            boolean: None,
+            learned: learning::Clauses::default(),
+            context: &context,
+            formula: &formula,
+            atoms: &atoms,
+            terms: &terms,
+            steps: 100_000,
+            max_depth: 128,
+        };
+        let mut assignment = vec![None; 3];
+        assert!(matches!(
+            search.solve(&mut assignment, 0),
+            SearchResult::Model(_)
+        ));
+        assert_eq!(assignment, vec![None; 3]);
+        // The decision's opposite branch must still benefit from x=false.
+        assignment[0] = Some(true);
+        let learning::Propagation::Unit {
+            index,
+            value,
+            reason,
+        } = search.propagate_learned(&assignment).unwrap()
+        else {
+            panic!("first-UIP clause was not retained");
+        };
+        assert_eq!((index, value), (1, false));
+        assert_eq!(reason.support.iter().copied().collect::<Vec<_>>(), vec![1]);
+        assignment[1] = Some(true);
+        search.check_tree(&reason.tree, &mut assignment, 0).unwrap();
+        assignment[1] = Some(false);
+        assert_eq!(
+            search.check_tree(&reason.tree, &mut assignment, 0),
+            Err(crate::ProofError::Invalid)
+        );
     }
 
     #[test]
