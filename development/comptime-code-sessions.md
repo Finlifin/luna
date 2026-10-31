@@ -495,3 +495,33 @@ Verification (cwd `/home/fin/luna`):
   it. Corrected the fixture to the documented clause syntax before the passing run.
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_iir_bytecode`: exit 0, eight tests after adding repeated invalid-owner rejection; `/tmp/luna-tools-ll_1e7te/result.json`.
 - Workspace formatting and `git diff --check` passed.
+
+
+## Source admission indexes for prepared Type results
+
+The bounded specialization now owns a source CodeSession beside its graph
+session. Source admission constructs a fresh VM using that exact snapshot's
+shared declaration and layout indexes. Replacing the staged Type key replaces
+both sessions; failed preparation keeps the prior pair intact.
+
+This admission validates the result representation and Type formation, not source
+Eq/Hash. It executes no user code, so lending bytecode caches is unnecessary.
+Each result is still admitted with the current solver and remaining allowance.
+Constructor failures reserve their budget as before; admission failure cannot
+refund work or cache a rejected value. Non-Type results bypass this path.
+
+The second VM has not been eliminated: source phase and formation preparation
+still run. Some shared-index work remains conservatively charged per call. This
+change removes repeated index allocation rather than promising a measured
+wall-clock speedup or a proportional fuel reduction.
+
+Verification (cwd `/home/fin/luna`):
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --lib memoization`: exit 0, two tests; `/tmp/luna-tools-dv2qxdzb/result.json`.
+  Covers cold/warm source layout preparation, current-value rejection, exhausted
+  construction and successful recovery. The first fixture used only runtime
+  signatures, whose world charge remains unchanged; it was corrected to exercise
+  the separately metered source layout catalog publication.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test execution memoized_invocation`: exit 0, eleven tests; `/tmp/luna-tools-1yhhe4ey/result.json`.
+  Includes zero-capacity Type-result admission and staged Type-key replacement.
+- Workspace formatting and `git diff --check` passed.

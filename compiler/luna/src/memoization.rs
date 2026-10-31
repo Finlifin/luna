@@ -667,8 +667,14 @@ fn evaluate(
                     steps: before,
                     depth: 128,
                 };
-                let result =
-                    admit_source_result(source, &value, result_type, &solver, &mut allowance);
+                let result = admit_source_result(
+                    source,
+                    staging.admission.as_mut().expect("prepared source session"),
+                    &value,
+                    result_type,
+                    &solver,
+                    &mut allowance,
+                );
                 admission_work = before - allowance.steps;
                 result
             } else {
@@ -704,12 +710,13 @@ fn evaluate(
  */
 fn admit_source_result(
     package: &Package,
+    session: &mut comptime_interpretor::CodeSession,
     value: &Value,
     ty: &Term,
     solver: &dyn Fn(&TypePredicate, &mut u64) -> comptime_interpretor::ContractOutcome,
     budget: &mut Budget,
 ) -> Result<(), comptime_interpretor::Error> {
-    let mut admission = Interpreter::for_comptime_in_budget(package, &[], budget)?
+    let mut admission = Interpreter::for_comptime_in_session(package, session, budget)?
         .with_budgeted_type_solver(solver);
     let result = admission.validate_immutable_input(value, ty);
     budget.steps = admission.remaining_steps();
@@ -886,8 +893,66 @@ mod budget_tests {
     use nir::Primitive;
 
     #[test]
+    fn result_admission_reuses_indexes_but_rechecks_values_and_current_budget() {
+        let package = std::sync::Arc::new(Package {
+            structs: vec![nir::program::Struct {
+                declaration: DeclarationId {
+                    package: 1,
+                    local: 1,
+                },
+                name: "Record".into(),
+                type_parameters: vec![],
+                parameter_types: vec![],
+                fields: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+            }],
+            ..Default::default()
+        });
+        let mut session = comptime_interpretor::CodeSession::new(package.clone());
+        let solver = |_: &TypePredicate, _: &mut u64| ContractOutcome::Unknown;
+        let ty = Term::Primitive(Primitive::Type);
+        let value = Value::Type(Term::Primitive(Primitive::Bool));
+        let mut cold = Budget::default();
+        admit_source_result(&package, &mut session, &value, &ty, &solver, &mut cold).unwrap();
+        let mut warm = Budget::default();
+        admit_source_result(&package, &mut session, &value, &ty, &solver, &mut warm).unwrap();
+        assert!(warm.steps > cold.steps);
+        assert!(warm.steps < Budget::default().steps);
+        let mut rejected = Budget::default();
+        assert_eq!(
+            admit_source_result(
+                &package,
+                &mut session,
+                &Value::Bool(true),
+                &ty,
+                &solver,
+                &mut rejected
+            )
+            .unwrap_err()
+            .kind,
+            ErrorKind::Type
+        );
+        assert!(rejected.steps < Budget::default().steps);
+        let mut exhausted = Budget {
+            steps: 0,
+            ..Budget::default()
+        };
+        assert_eq!(
+            admit_source_result(&package, &mut session, &value, &ty, &solver, &mut exhausted)
+                .unwrap_err()
+                .kind,
+            ErrorKind::StepsExhausted
+        );
+        let mut recovered = Budget::default();
+        admit_source_result(&package, &mut session, &value, &ty, &solver, &mut recovered).unwrap();
+        assert_eq!(recovered.steps, warm.steps);
+    }
+
+    #[test]
     fn result_admission_charges_success_rejection_and_construction_failure() {
-        let package = Package::default();
+        let package = std::sync::Arc::new(Package::default());
+        let mut session = comptime_interpretor::CodeSession::new(package.clone());
         let solver = |_: &TypePredicate, _: &mut u64| ContractOutcome::Unknown;
         let ty = Term::Primitive(Primitive::Type);
         let value = Value::Type(Term::Primitive(Primitive::Bool));
@@ -896,7 +961,7 @@ mod budget_tests {
             depth: 128,
         };
         assert_eq!(
-            admit_source_result(&package, &value, &ty, &solver, &mut budget)
+            admit_source_result(&package, &mut session, &value, &ty, &solver, &mut budget)
                 .unwrap_err()
                 .kind,
             ErrorKind::StepsExhausted
@@ -911,27 +976,41 @@ mod budget_tests {
         };
         budget.steps = 1;
         assert_eq!(
-            admit_source_result(&larger_world, &value, &ty, &solver, &mut budget)
-                .unwrap_err()
-                .kind,
+            admit_source_result(
+                &larger_world,
+                &mut session,
+                &value,
+                &ty,
+                &solver,
+                &mut budget
+            )
+            .unwrap_err()
+            .kind,
             ErrorKind::StepsExhausted
         );
         assert_eq!(budget.steps, 0);
         budget.steps = 1000;
-        admit_source_result(&package, &value, &ty, &solver, &mut budget).unwrap();
+        admit_source_result(&package, &mut session, &value, &ty, &solver, &mut budget).unwrap();
         assert!(budget.steps > 0 && budget.steps < 1000);
         let before = budget.steps;
         assert_eq!(
-            admit_source_result(&package, &Value::Bool(true), &ty, &solver, &mut budget)
-                .unwrap_err()
-                .kind,
+            admit_source_result(
+                &package,
+                &mut session,
+                &Value::Bool(true),
+                &ty,
+                &solver,
+                &mut budget
+            )
+            .unwrap_err()
+            .kind,
             ErrorKind::Type
         );
         assert!(budget.steps < before);
         // Enough for world construction, but not for value admission.
         budget.steps = 1;
         assert_eq!(
-            admit_source_result(&package, &value, &ty, &solver, &mut budget)
+            admit_source_result(&package, &mut session, &value, &ty, &solver, &mut budget)
                 .unwrap_err()
                 .kind,
             ErrorKind::StepsExhausted

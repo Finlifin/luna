@@ -47533,6 +47533,28 @@ fn memoized_invocation_admits_only_bound_type_results() {
             .unwrap()
             .reused
     );
+    // Disable result retention so each Type result reaches source admission.
+    // Changing the staged domain replaces both graph and source preparation.
+    let mut uncached = memoized(&package, "keep", vec![], 0).unwrap();
+    for domain in [
+        Primitive::Type,
+        Primitive::Type,
+        Primitive::Bool,
+        Primitive::Type,
+    ] {
+        let value = if domain == Primitive::Type {
+            ty(Primitive::Bool)
+        } else {
+            Value::Bool(true)
+        };
+        let result = uncached
+            .invoke(vec![ty(domain), value.clone()], &mut context)
+            .unwrap();
+        assert_eq!(*result.value, value);
+        assert!(!result.reused);
+        assert_eq!(uncached.cached_results(), 0);
+    }
+    assert_eq!(uncached.staged_preparations(), 3);
     let mut make = memoized(&package, "Make", vec![], 8).unwrap();
     assert!(!make.invoke(vec![], &mut context).unwrap().reused);
     assert!(make.invoke(vec![], &mut context).unwrap().reused);

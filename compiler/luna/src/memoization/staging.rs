@@ -8,6 +8,7 @@ pub(super) struct Cache {
     slots: Vec<usize>,
     entry: Option<Entry>,
     pub code: Option<comptime_interpretor::CodeSession>,
+    pub admission: Option<comptime_interpretor::CodeSession>,
     pub preparations: usize,
     pub stats: crate::invocation::InvocationStats,
 }
@@ -32,6 +33,7 @@ impl Cache {
                 .collect(),
             entry: None,
             code: None,
+            admission: None,
             preparations: 0,
             stats: Default::default(),
         }
@@ -111,6 +113,7 @@ impl Cache {
         // Publish only after preparation succeeds. A failed attempt retains the
         // prior specialization; a successful different key replaces it.
         self.code = Some(comptime_interpretor::CodeSession::for_iir(graph.clone()));
+        self.admission = Some(comptime_interpretor::CodeSession::new(package.clone()));
         self.entry = Some(Entry {
             inputs,
             package: package.clone(),
