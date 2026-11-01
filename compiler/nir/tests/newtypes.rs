@@ -785,3 +785,77 @@ fn captured_value_admission_requires_independent_evidence_after_domain_substitut
     assert!(check(&arguments, &mut 0).is_err());
     assert!(check(&arguments, &mut 10000).is_ok());
 }
+
+#[test]
+fn indexed_conversion_queries_only_endpoints_and_checks_resolver_identity() {
+    use nir::newtypes::{ConversionError, conversion, conversion_with};
+    let definition = generic();
+    let boolean = Term::Primitive(Primitive::Bool);
+    let inner = Term::Nominal {
+        declaration: id(1),
+        arguments: vec![boolean.clone()],
+    };
+    let outer = Term::Nominal {
+        declaration: id(1),
+        arguments: vec![inner.clone()],
+    };
+    let other = Term::Nominal {
+        declaration: id(3),
+        arguments: vec![],
+    };
+    for (source, target) in [
+        (&boolean, &inner),
+        (&inner, &boolean),
+        (&inner, &outer),
+        (&outer, &inner),
+        (&inner, &inner),
+        (&inner, &other),
+        (&outer, &boolean),
+    ] {
+        let mut visited = vec![];
+        let actual = conversion_with(source, target, &[], &mut 100_000, |declaration, _| {
+            visited.push(declaration);
+            Ok((declaration == id(1)).then_some(&definition))
+        })
+        .unwrap();
+        assert_eq!(
+            actual,
+            conversion(
+                std::slice::from_ref(&definition),
+                source,
+                target,
+                &[],
+                &mut 100_000
+            )
+            .unwrap()
+        );
+        assert!(visited.len() <= 2);
+        for declaration in visited {
+            assert!([source, target].iter().any(
+                |ty| matches!(ty, Term::Nominal {declaration:actual, ..} if *actual == declaration)
+            ));
+        }
+    }
+    let mut wrong = definition.clone();
+    wrong.declaration = id(99);
+    assert!(matches!(
+        conversion_with(&boolean, &inner, &[], &mut 100_000, |_, _| Ok(Some(&wrong))),
+        Err(ConversionError::DuplicateIdentity(_))
+    ));
+    assert_eq!(
+        conversion_with(&boolean, &inner, &[], &mut 100_000, |_, _| Err(
+            ConversionError::Budget
+        )),
+        Err(ConversionError::Budget)
+    );
+    assert!(matches!(
+        conversion(
+            &[definition.clone(), definition],
+            &boolean,
+            &inner,
+            &[],
+            &mut 100_000
+        ),
+        Err(ConversionError::DuplicateIdentity(_))
+    ));
+}

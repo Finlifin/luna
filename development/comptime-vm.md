@@ -11222,3 +11222,39 @@ Validation from `/home/fin/luna`:
   (`/tmp/luna-tools-0b2e3p_6/result.json`).
 - Workspace formatting passed (`/tmp/luna-tools-_7jue7yl/result.json`);
   `git diff --check` passed.
+
+
+### Indexed source newtype conversion queries
+
+The source VM still enumerated its entire newtype registry for each direct-edge
+query even though source and generated declarations already had checked indexes.
+A regression measured four identical conversions at 94 steps in a small world
+and 734 after adding 128 unrelated definitions (red result:
+`/tmp/luna-tools-nd927iqy/result.json`, exit 101).
+
+NIR now provides conversion_with for identity-checked lookup clients. Scope,
+substitution, sort and direct-edge checks remain in the same implementation;
+the iterator adapter retains duplicate-identity detection. Resolver failures
+propagate, and a resolver returning the wrong declaration is rejected. Both the
+source VM and elaboration cast checking now query their current declaration
+indexes. No conversion outcome or mutable formation evidence is cached. Unused
+VM registry iteration methods were removed.
+
+Tests cover source and freshly published endpoints, unrelated declaration cost,
+the same generic declaration appearing at both endpoints, absence versus lookup
+failure, no transitive unwrapping, and all insufficient budgets followed by
+successful retry. Iterator-based completed-value callers and standalone IIR
+validation still use their existing scanning adapters.
+
+Validation from `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 900 -- test -p nir
+  -p comptime_interpretor`: passed, exit 0
+  (`/tmp/luna-tools-pisy6ya9/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test newtypes
+  --test builder_invocations newtype`: 47 passed, exit 0
+  (`/tmp/luna-tools-tq392egj/result.json`).
+- After removing unused registry iterators, `python3 -B development/check.py
+  --timeout 900 -- check -p comptime_interpretor`: passed, exit 0
+  (`/tmp/luna-tools-nup233mm/result.json`).
+- Workspace formatting passed (`/tmp/luna-tools-0jcrwc78/result.json`);
+  `git diff --check` passed.

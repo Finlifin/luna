@@ -36,12 +36,6 @@ impl<'a, T> Declarations<'a, T> {
             .get(id)
             .map(|position| &self.declarations[*position])
     }
-    pub(super) fn values(&self) -> impl Iterator<Item = &'a T> + Clone + '_ {
-        let declarations = self.declarations;
-        self.positions
-            .values()
-            .map(move |position| &declarations[*position])
-    }
     pub(super) fn contains_key(&self, id: &DeclarationId) -> bool {
         self.positions.contains_key(id)
     }
@@ -91,11 +85,6 @@ impl<'a> Newtypes<'a> {
                 .get(id)
                 .map(generated_newtypes::NewtypeDefinition::Borrowed)
         })
-    }
-    pub(super) fn values(&self) -> impl Iterator<Item = &nir::newtypes::Newtype> + Clone {
-        self.source
-            .values()
-            .chain(self.local.values().map(|definition| &**definition))
     }
     pub(super) fn contains_key(&self, id: &DeclarationId) -> bool {
         self.source.contains_key(id) || self.local.contains_key(id)

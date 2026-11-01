@@ -102,12 +102,12 @@ impl Checker<'_, '_> {
                 let value = self.expr(value, None)?;
                 self.ensure_nominal_type(&target, expr.span)?;
                 self.ensure_nominal_type(&value.ty, expr.span)?;
-                let conversion = nir::newtypes::conversion_from(
-                    self.newtypes.values(),
+                let conversion = nir::newtypes::conversion_with(
                     &value.ty,
                     &target,
                     &self.call_input_frames(),
                     &mut 100_000,
+                    |id, _| Ok(self.newtypes.get(&id)),
                 )
                 .map_err(|e| error(expr.span, e.to_string()))?;
                 if conversion.is_some() {

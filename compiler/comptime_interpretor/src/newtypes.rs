@@ -44,7 +44,9 @@ impl Interpreter<'_> {
                 Ok(None)
             })()
         } else {
-            nir::newtypes::conversion_from(self.newtypes.values(), input, output, &[], &mut fuel)
+            nir::newtypes::conversion_with(input, output, &[], &mut fuel, |id, _| {
+                Ok(self.newtypes.get(&id))
+            })
         };
         self.budget.steps -= (before - fuel) as u64;
         let plan = plan
@@ -432,5 +434,134 @@ mod tests {
             vm.budget.steps = 100_000;
             vm.check_comptime_domain(&safe, SOURCE).unwrap();
         }
+    }
+
+    #[test]
+    fn source_newtype_conversion_cost_ignores_unrelated_declarations() {
+        let boolean = Term::Primitive(Primitive::Bool);
+        let definition = |local, representation: Term| nir::newtypes::Newtype {
+            declaration: DeclarationId { package: 0, local },
+            name: format!("Wrapper{local}"),
+            type_parameters: vec![],
+            parameter_types: vec![],
+            capture_count: 0,
+            requirements: vec![],
+            capabilities: vec![],
+            representation,
+        };
+        let mut costs = vec![];
+        for count in [0, 128] {
+            let package = Package {
+                newtypes: (100..100 + count)
+                    .map(|local| definition(local, boolean.clone()))
+                    .chain([definition(1, boolean.clone())])
+                    .collect(),
+                ..Default::default()
+            };
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            vm.install_owned_generated_newtypes_with(
+                vec![definition(2, nominal(1))].into(),
+                || Ok::<_, ()>(()),
+            )
+            .unwrap();
+            let before = vm.remaining_steps();
+            for (input, output) in [
+                (boolean.clone(), nominal(1)),
+                (nominal(1), boolean.clone()),
+                (nominal(1), nominal(2)),
+                (nominal(2), nominal(1)),
+            ] {
+                let plan = vm
+                    .prepare_newtype_conversion(&input, &output, SOURCE)
+                    .unwrap();
+                assert_eq!(plan.source(), &input);
+                assert_eq!(plan.target(), &output);
+            }
+            costs.push(before - vm.remaining_steps());
+        }
+        assert_eq!(
+            costs[0], costs[1],
+            "unrelated declarations enter each conversion"
+        );
+    }
+
+    #[test]
+    fn repeated_generic_declaration_at_both_endpoints_remains_one_identity() {
+        let boolean = Term::Primitive(Primitive::Bool);
+        let parameter = DeclarationId {
+            package: 0,
+            local: 2,
+        };
+        let package = Package {
+            newtypes: vec![nir::newtypes::Newtype {
+                declaration: DeclarationId {
+                    package: 0,
+                    local: 1,
+                },
+                name: "Wrapper".into(),
+                type_parameters: vec![parameter],
+                parameter_types: vec![],
+                capture_count: 0,
+                requirements: vec![],
+                capabilities: vec![],
+                representation: Term::Rigid {
+                    declaration: parameter,
+                    sort: nir::Sort::Type,
+                },
+            }],
+            ..Default::default()
+        };
+        let applied = |argument| Term::Nominal {
+            declaration: DeclarationId {
+                package: 0,
+                local: 1,
+            },
+            arguments: vec![argument],
+        };
+        let inner = applied(boolean.clone());
+        let outer = applied(inner.clone());
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        for (input, output) in [
+            (inner.clone(), outer.clone()),
+            (outer.clone(), inner.clone()),
+        ] {
+            let before = vm.remaining_steps();
+            let expected = vm
+                .prepare_newtype_conversion(&input, &output, SOURCE)
+                .unwrap();
+            let cost = before - vm.remaining_steps();
+            for steps in 0..cost {
+                vm.budget.steps = steps;
+                assert_eq!(
+                    vm.prepare_newtype_conversion(&input, &output, SOURCE)
+                        .unwrap_err()
+                        .kind,
+                    ErrorKind::StepsExhausted,
+                    "budget {steps}"
+                );
+                vm.budget.steps = 100_000;
+                assert_eq!(
+                    vm.prepare_newtype_conversion(&input, &output, SOURCE)
+                        .unwrap(),
+                    expected
+                );
+            }
+        }
+        assert!(
+            vm.prepare_newtype_conversion(&inner, &inner, SOURCE)
+                .is_err()
+        );
+        assert!(
+            vm.prepare_newtype_conversion(&outer, &boolean, SOURCE)
+                .is_err()
+        );
+        assert!(
+            vm.prepare_newtype_conversion(
+                &inner,
+                &applied(Term::Primitive(Primitive::Char)),
+                SOURCE
+            )
+            .is_err()
+        );
     }
 }

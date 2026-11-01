@@ -499,6 +499,32 @@ pub fn conversion_from<'a>(
     frames: &[Vec<Sort>],
     fuel: &mut usize,
 ) -> Result<Option<Conversion>, ConversionError> {
+    conversion_with(source, target, frames, fuel, |declaration, fuel| {
+        let mut found = None;
+        for definition in definitions.clone() {
+            spend(fuel, 1)?;
+            if definition.declaration == declaration {
+                if found.is_some() {
+                    return Err(ConversionError::DuplicateIdentity(declaration));
+                }
+                found = Some(definition);
+            }
+        }
+        Ok(found)
+    })
+}
+
+/// Query only endpoint declarations in an already identity-checked registry.
+/// The resolver must return its unique current definition, charge any additional
+/// traversal it performs, and propagate failures instead of reporting absence.
+/// This does not cache formation evidence or specialize a declaration instance.
+pub fn conversion_with<'a>(
+    source: &Term,
+    target: &Term,
+    frames: &[Vec<Sort>],
+    fuel: &mut usize,
+    mut lookup: impl FnMut(DeclarationId, &mut usize) -> Result<Option<&'a Newtype>, ConversionError>,
+) -> Result<Option<Conversion>, ConversionError> {
     for ty in [source, target] {
         charge(ty, fuel)?;
         if ty.sort() != Sort::Type {
@@ -530,17 +556,11 @@ pub fn conversion_from<'a>(
         else {
             continue;
         };
-        let mut found = None;
-        for definition in definitions.clone() {
-            spend(fuel, 1)?;
-            if definition.declaration == *declaration {
-                if found.is_some() {
-                    return Err(ConversionError::DuplicateIdentity(*declaration));
-                }
-                found = Some(definition);
+        spend(fuel, 1)?;
+        if let Some(definition) = lookup(*declaration, fuel)? {
+            if definition.declaration != *declaration {
+                return Err(ConversionError::DuplicateIdentity(*declaration));
             }
-        }
-        if let Some(definition) = found {
             let instantiated = definition.representation_budgeted(arguments, frames, fuel)?;
             charge(&instantiated, fuel)?;
             charge(representation, fuel)?;
