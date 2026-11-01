@@ -145,3 +145,16 @@ comptime fn optional_protocol_hashing() -> bool {
 test optional_payload_hash_protocol {
     inline if optional_protocol_hashing() {assumes true;} else {assumes false;}
 }
+
+comptime fn error_protocols() -> bool {
+    let left: !FoldedKey FoldedKey = FoldedKey {value: 12};
+    let right: !FoldedKey FoldedKey = FoldedKey {value: 22};
+    let failure: !FoldedKey FoldedKey = error FoldedKey {value: 12};
+    let same: !FoldedKey FoldedKey = error FoldedKey {value: 22};
+    left.eq(right) and failure.eq(same) and left.ne(failure)
+        and left.hash() == right.hash() and failure.hash() == same.hash()
+}
+
+test error_payload_protocols {
+    inline if error_protocols() {assumes true;} else {assumes false;}
+}

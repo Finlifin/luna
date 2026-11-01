@@ -357,3 +357,85 @@ fn optional_hashes_encode_presence_and_complete_payload_digests() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn error_result_protocols_use_matching_payload_branches() {
+    let package = compile(
+        "struct Key {value:Integer}
+        comptime impl ComptimeEq for Key {
+            comptime fn eq(self,other:Self)->bool {
+                let checked=1.div_trunc(if self.value==99 {0} else {1});
+                self.value.rem_euclid(10)==other.value.rem_euclid(10) and checked==1
+            }
+        }
+        comptime impl ComptimeHash for Key {
+            comptime fn hash(self)->u64 {
+                let checked=1.div_trunc(if self.value==99 {0} else {1});
+                let before=self.value;
+                self.value=99;
+                before.rem_euclid(10).hash()
+            }
+        }
+        comptime fn run()->bool {
+            let a:!Key Key=Key {value:12}; let b:!Key Key=Key {value:22};
+            let e:!Key Key=error Key {value:12}; let f:!Key Key=error Key {value:22};
+            let poison_ok:!Key Key=Key {value:99};
+            let poison_error:!Key Key=error Key {value:99};
+            a.eq(b) and e.eq(f) and a.ne(e) and e.ne(a)
+                and poison_ok.ne(poison_error) and poison_error.ne(poison_ok)
+                and a.hash()==b.hash() and e.hash()==f.hash()
+                and a.hash()==b.hash() and e.hash()==f.hash()
+        }
+        comptime fn good()->u64 {let a:!u64 u64=7; a.hash()}
+        comptime fn bad()->u64 {let a:!u64 u64=error 7; a.hash()}
+        comptime fn fail()->u64 {let a:!Key Key=error Key {value:99}; a.hash()}",
+    )
+    .unwrap();
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke(support::id(&package, "run"), vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    for (name, tag) in [("good", 0u8), ("bad", 1u8)] {
+        let expected = std::iter::once(tag)
+            .chain(7u64.to_le_bytes())
+            .fold(14695981039346656037u64, |state, byte| {
+                (state ^ u64::from(byte)).wrapping_mul(1099511628211)
+            });
+        assert_eq!(
+            vm.invoke(support::id(&package, name), vec![]).unwrap(),
+            Value::UnsignedInteger(expected.into())
+        );
+    }
+    assert_eq!(
+        vm.invoke(support::id(&package, "fail"), vec![])
+            .unwrap_err()
+            .kind,
+        ErrorKind::DivisionByZero
+    );
+    assert_eq!(
+        vm.invoke(support::id(&package, "run"), vec![]).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn error_protocols_require_both_payloads_to_supply_the_requested_interface() {
+    for domain in ["!Key bool", "!bool Key"] {
+        for (interface, method, result) in [
+            ("ComptimeEq", "eq(value)", "bool"),
+            ("ComptimeHash", "hash()", "u64"),
+        ] {
+            let source = format!(
+                "struct Key {{value:bool}} comptime fn bad(value:{domain})->{result} {{value.as({interface}).{method}}}"
+            );
+            let failure = compile(&source)
+                .err()
+                .expect("missing payload protocol must reject the call");
+            assert!(
+                failure.contains("trait") || failure.contains("method"),
+                "{failure}"
+            );
+        }
+    }
+}

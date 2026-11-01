@@ -1,7 +1,9 @@
 {- Comptime operations on native optional/error values use value references
    for self and value parameters for callbacks; no comptime pointers. -}
 
-use builtin.{Type, bool};
+use builtin.{Type, bool, u64};
+use numeric.equality.ComptimeEq;
+use hashing.{ComptimeHash, mix_byte, mix_digest};
 
 pub pure comptime trait ComptimeErrorResultOps where T, E {
     comptime fn is_ok(self) -> bool;
@@ -57,5 +59,27 @@ comptime impl ComptimeErrorResultOps<T, E> for !E T where T, E {
     comptime fn unwrap_or_else(self, fallback: %c comptime fn(E) -> T) -> T where c: Type.vars.Closure = self match {
         value! => value,
         error failure => fallback(failure),
+    };
+}
+
+{- Single-label error results compare only corresponding payload branches. -}
+comptime impl ComptimeEq for !E T where T:- ComptimeEq, E:- ComptimeEq {
+    comptime fn eq(self, other: Self) -> bool = self match {
+        left! => other match {
+            right! => left.as(ComptimeEq).eq(right),
+            error _ => false,
+        },
+        error left => other match {
+            _! => false,
+            error right => left.as(ComptimeEq).eq(right),
+        },
+    };
+}
+
+{- Hashes choose buckets; equality still distinguishes labels and payloads. -}
+comptime impl ComptimeHash for !E T where T:- ComptimeHash, E:- ComptimeHash {
+    comptime fn hash(self) -> u64 = self match {
+        value! => mix_digest(mix_byte(14695981039346656037, 0), value.as(ComptimeHash).hash()),
+        error failure => mix_digest(mix_byte(14695981039346656037, 1), failure.as(ComptimeHash).hash()),
     };
 }
