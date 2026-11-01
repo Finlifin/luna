@@ -2,7 +2,12 @@
 //! No invocation values, mutable layouts or solver outcomes are retained here.
 use super::*;
 
+mod methods;
+use methods::MethodIndex;
+
 pub(crate) struct GraphIndexes {
+    pub(crate) contracts: MethodIndex,
+    pub(crate) dispatch: MethodIndex,
     pub(crate) declarations: HashSet<DeclarationId>,
     pub(crate) nominals: HashMap<Term, usize>,
     pub(crate) callables: HashMap<DeclarationId, HashMap<Arc<[Term]>, usize>>,
@@ -53,8 +58,12 @@ impl GraphIndexes {
                     dispatch.implementation,
                 );
             }
+            let contracts = MethodIndex::contracts(graph, &mut fuel)?;
+            let dispatch = MethodIndex::dispatch(graph, &mut fuel)?;
             let declarations = super::nominals::declaration_identities(graph, &mut fuel)?;
             Ok(Self {
+                contracts,
+                dispatch,
                 declarations,
                 nominals,
                 callables,

@@ -290,19 +290,14 @@ impl<'a> Interpreter<'a> {
         let Some(graph) = self.graph else {
             return Ok(None);
         };
-        graph
-            .interfaces
-            .iter()
-            .find(|i| {
-                i.interface.declaration == interface
-                    && i.interface.arguments == arguments
-                    && &i.subject == subject
+        self.graph_indexes
+            .as_ref()
+            .and_then(|indexes| {
+                indexes
+                    .contracts
+                    .get(interface, arguments, subject, member, method_arguments)
             })
-            .and_then(|i| {
-                i.methods
-                    .iter()
-                    .find(|m| m.declaration == member && m.type_arguments == method_arguments)
-            })
+            .map(|(outer, inner)| &graph.interfaces[outer].methods[inner])
             .map(Some)
             .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, None))
     }
@@ -424,19 +419,19 @@ impl<'a> Interpreter<'a> {
         let graph = self
             .graph
             .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(method.source)))?;
-        let selected = graph
-            .dispatch
-            .iter()
-            .find(|d| {
-                d.interface == method.interface
-                    && d.interface_arguments == method.interface_arguments
-                    && d.subject == *method.subject
+        let selected = self
+            .graph_indexes
+            .as_ref()
+            .and_then(|indexes| {
+                indexes.dispatch.get(
+                    method.interface,
+                    method.interface_arguments,
+                    method.subject,
+                    method.member,
+                    method.method_arguments,
+                )
             })
-            .and_then(|d| {
-                d.methods.iter().find(|m| {
-                    m.member == method.member && m.method_arguments == method.method_arguments
-                })
-            })
+            .map(|(outer, inner)| &graph.dispatch[outer].methods[inner])
             .ok_or_else(|| self.failure(ErrorKind::UnmaterializedDispatch, Some(method.source)))?;
         self.charge_copy_work(Some(method.source), |fuel| {
             for term in &selected.arguments {
