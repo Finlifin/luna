@@ -4,12 +4,25 @@
 use super::*;
 
 impl Checker<'_, '_> {
+    /// Storage observations need the same nominal and representation world as
+    /// invocation. An empty package cannot validate captured payload domains.
+    fn generator_storage_world(&self) -> n::Package {
+        n::Package {
+            target: self.target,
+            normal_forms: self.normal_form_metadata(),
+            structs: self.structs.values().cloned().collect(),
+            newtypes: self.newtypes.values().cloned().collect(),
+            enums: self.enums.values().cloned().collect(),
+            ..Default::default()
+        }
+    }
+
     pub(in crate::program) fn read_generator_cell(
         &mut self,
         cell: &GeneratorCell,
         span: Span,
     ) -> Result<comptime_interpretor::Value, Error> {
-        let package = n::Package::default();
+        let package = self.generator_storage_world();
         let mut vm = comptime_interpretor::Interpreter::for_comptime(
             &package,
             comptime_interpretor::Budget {
@@ -36,7 +49,7 @@ impl Checker<'_, '_> {
         roots: &[comptime_interpretor::Value],
         span: Span,
     ) -> Result<comptime_interpretor::OwnedGraphCheckpoint, Error> {
-        let package = n::Package::default();
+        let package = self.generator_storage_world();
         let mut vm = comptime_interpretor::Interpreter::for_comptime(
             &package,
             comptime_interpretor::Budget {

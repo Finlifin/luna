@@ -247,6 +247,7 @@ impl crate::Interpreter<'_> {
         value: Value,
         source: crate::SourceRange,
     ) -> Result<(), crate::Error> {
+        self.validate_container_replacement(&value, source)?;
         let reference = match target {
             Value::ComptimeReference(reference) => Some(
                 reference
@@ -260,6 +261,13 @@ impl crate::Interpreter<'_> {
             _ => None,
         };
         if let Some(reference) = reference {
+            {
+                let contents = reference
+                    .borrow(&mut self.budget.steps)
+                    .map_err(|kind| self.failure(kind, Some(source)))?;
+                self.validate_container_replacement(contents.value(), source)?;
+            }
+
             return reference
                 .replace(value, &mut self.budget.steps)
                 .map_err(|kind| self.failure(kind, Some(source)));
@@ -288,6 +296,7 @@ impl crate::Interpreter<'_> {
             }
             .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
         }
+        self.validate_container_replacement(target, source)?;
         *target = value;
         Ok(())
     }

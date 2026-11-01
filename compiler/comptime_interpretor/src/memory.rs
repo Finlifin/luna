@@ -601,17 +601,6 @@ impl PointerValue {
             Ok(())
         })
     }
-    /// Extend an owned list buffer without changing any previously copied value.
-    /// Validation runs under the storage lock and must not execute user code.
-    /// On failure, remove the new suffix before exposing the target again.
-    pub(crate) fn append_list_checked(
-        &self,
-        suffix: Value,
-        check: impl FnOnce(&Value, usize) -> Result<(), ErrorKind>,
-    ) -> Result<(), ErrorKind> {
-        self.with_target(|target| append_list_checked(target, suffix, check))
-    }
-
     pub(crate) fn project_anonymous(
         &self,
         name: &str,
@@ -930,7 +919,7 @@ mod record_storage_tests {
     #[test]
     fn owned_value_copy_preserves_borrows_and_checks_budget_and_responsibility() {
         let package = nir::program::Package::default();
-        let mut vm = super::super::Interpreter::for_comptime(&package, Default::default()).unwrap();
+        let mut vm = super::super::Interpreter::new(&package, Default::default()).unwrap();
         let target = Storage::new(Value::Bool(false));
         let pointer = target.pointer(boolean(), vec![]);
         let owner = Storage::new(Value::Tuple(vec![

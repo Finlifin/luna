@@ -21,6 +21,7 @@ mod bit_operations;
 mod bit_representation;
 mod bit_writeback;
 mod comptime_domains;
+mod comptime_graph;
 mod default_code;
 mod dynamic_instances;
 mod environment;
@@ -3074,9 +3075,6 @@ impl<'a> Interpreter<'a> {
         }
     }
     fn eval_pointer(&mut self, expr: &Expr, environment: &mut Environment) -> Result<Flow, Error> {
-        if let Some(result) = self.eval_list_append(expr, environment) {
-            return result;
-        }
         if nir::program::pointer_operation_error_in(expr, self.target).is_some() {
             return Err(self.failure(ErrorKind::Type, Some(expr.source)));
         }

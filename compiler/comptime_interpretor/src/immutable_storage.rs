@@ -2,6 +2,28 @@
 use super::*;
 
 impl Interpreter<'_> {
+    /// Validate both sides before replacing immutable data through a value
+    /// reference. This does not impose runtime Copy on comptime receivers.
+    pub(super) fn validate_container_replacement(
+        &mut self,
+        value: &Value,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        let ty = match value {
+            Value::Object(_) => &Term::Primitive(Primitive::Object),
+            Value::List { ty, .. } => ty,
+            _ => return Ok(()),
+        };
+        self.check_comptime_graph(value, source, 0)?;
+        self.validate_immutable_input(value, ty)
+            .map_err(|mut error| {
+                if error.source.is_none() {
+                    error.source = Some(source);
+                }
+                error
+            })
+    }
+
     pub(super) fn validate_immutable_storage(
         &mut self,
         value: &Value,
@@ -127,12 +149,11 @@ mod tests {
         Expr {
             source,
             ty: Term::Primitive(Primitive::Void),
-            kind: K::WritePointer {
-                pointer: Box::new(Expr {
-                    source,
-                    ty: Term::Pointer(Box::new(ty.clone())),
-                    kind: K::Local(LocalId { owner: 1, index: 0 }),
-                }),
+            kind: K::Assign {
+                place: nir::program::Place {
+                    root: LocalId { owner: 1, index: 0 },
+                    fields: vec![],
+                },
                 value: Box::new(Expr {
                     source,
                     ty,
@@ -146,7 +167,7 @@ mod tests {
         let mut env = Environment::new();
         env.insert(
             LocalId { owner: 1, index: 0 },
-            Value::Pointer(storage.pointer(Term::Primitive(Primitive::Object), vec![])),
+            Value::ComptimeReference(value_reference::ValueReference::root(storage.clone())),
         );
         env.insert(LocalId { owner: 1, index: 1 }, value);
         env
@@ -168,17 +189,17 @@ mod tests {
             },
         )]));
         let package = Package::default();
-        for (old, new) in [
-            (object(false), invalid.clone()),
-            (invalid, object(true)),
-            (object(false), active.clone()),
-            (active, object(true)),
+        for (old, new, expected) in [
+            (object(false), invalid.clone(), ErrorKind::Type),
+            (invalid, object(true), ErrorKind::Type),
+            (object(false), active.clone(), ErrorKind::PhaseMismatch),
+            (active, object(true), ErrorKind::PhaseMismatch),
         ] {
             let storage = Storage::new(old.clone());
             let mut env = environment(&storage, new);
             let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
             let error = vm.eval(&write(), &mut env).unwrap_err();
-            assert_eq!(error.kind, ErrorKind::Type);
+            assert_eq!(error.kind, expected);
             assert!(error.source.is_some());
             assert_eq!(storage.read().unwrap(), old);
         }
@@ -254,16 +275,22 @@ mod tests {
             ..Default::default()
         };
         let source = SourceRange { start: 1, end: 2 };
-        let pointer = Expr {
-            source,
-            ty: Term::Pointer(Box::new(ty.clone())),
-            kind: K::Local(LocalId { owner: 1, index: 0 }),
+        let original = Value::List {
+            ty: ty.clone(),
+            values: vec![Value::Bool(false)].into(),
         };
-        let expr = Expr {
+        let expected = Value::List {
+            ty: ty.clone(),
+            values: vec![Value::Bool(false), Value::Bool(true)].into(),
+        };
+        let reference_expr = Expr {
             source,
             ty: Term::Primitive(Primitive::Void),
-            kind: K::WritePointer {
-                pointer: Box::new(pointer.clone()),
+            kind: K::Assign {
+                place: nir::program::Place {
+                    root: LocalId { owner: 1, index: 0 },
+                    fields: vec![],
+                },
                 value: Box::new(Expr {
                     source,
                     ty: ty.clone(),
@@ -271,7 +298,7 @@ mod tests {
                         Box::new(Expr {
                             source,
                             ty: ty.clone(),
-                            kind: K::ReadPointer(Box::new(pointer)),
+                            kind: K::Local(LocalId { owner: 1, index: 0 }),
                         }),
                         Box::new(Expr {
                             source,
@@ -286,34 +313,7 @@ mod tests {
                 }),
             },
         };
-        let original = Value::List {
-            ty: ty.clone(),
-            values: vec![Value::Bool(false)].into(),
-        };
-        let expected = Value::List {
-            ty: ty.clone(),
-            values: vec![Value::Bool(false), Value::Bool(true)].into(),
-        };
-        let K::WritePointer { value, .. } = &expr.kind else {
-            unreachable!()
-        };
-        let mut reference_value = value.clone();
-        let K::ListConcat(left, _) = &mut reference_value.kind else {
-            unreachable!()
-        };
-        left.kind = K::Local(LocalId { owner: 1, index: 0 });
-        let reference_expr = Expr {
-            source,
-            ty: Term::Primitive(Primitive::Void),
-            kind: K::Assign {
-                place: nir::program::Place {
-                    root: LocalId { owner: 1, index: 0 },
-                    fields: vec![],
-                },
-                value: reference_value,
-            },
-        };
-        for mode in 0..8 {
+        for mode in 1..8 {
             let wrap = |value| {
                 if mode == 2 {
                     Value::AnonymousRecord(vec![
@@ -353,8 +353,6 @@ mod tests {
                 let mut env = Environment::new();
                 let receiver = if mode >= 5 {
                     original.clone()
-                } else if mode == 0 {
-                    Value::Pointer(storage.pointer(ty.clone(), vec![]))
                 } else {
                     let reference = if mode == 2 {
                         value_reference::ValueReference::projected(
@@ -379,9 +377,7 @@ mod tests {
                 let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
                 vm.budget.steps = steps;
                 let append = |vm: &mut Interpreter<'_>, env: &mut Environment| {
-                    if mode == 0 {
-                        vm.eval_list_append(&expr, env).expect("pointer append")
-                    } else if mode >= 5 {
+                    if mode >= 5 {
                         vm.eval_local_list_append(&reference_expr, env)
                             .expect("owned append")
                     } else {

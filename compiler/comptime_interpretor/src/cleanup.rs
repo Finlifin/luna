@@ -583,6 +583,7 @@ impl<'a> Interpreter<'a> {
                 for entry in object.entries() {
                     self.copy_work(entry.key().map_or(0, str::len), source)?;
                     self.copy_invocation_type_work(&entry.value().ty, source, true)?;
+                    self.check_comptime_domain(&entry.value().ty, source)?;
                     self.check_borrowed_representation(&entry.value().value, source, depth + 1)?;
                 }
             }
@@ -683,6 +684,7 @@ impl<'a> Interpreter<'a> {
                 for entry in object.entries() {
                     self.copy_work(entry.key().map_or(0, str::len), source)?;
                     self.copy_invocation_type_work(&entry.value().ty, source, preserve_identity)?;
+                    self.check_comptime_domain(&entry.value().ty, source)?;
                     let payload = self.clone_representation(
                         &entry.value().value,
                         source,
@@ -710,7 +712,12 @@ impl<'a> Interpreter<'a> {
                 self.copy_work(reference.metadata_work(), source)?;
                 value.clone()
             }
-            Value::Storage(_) | Value::Closure(_) if preserve_identity => value.clone(),
+            Value::Storage(_) | Value::Closure(_) if preserve_identity => {
+                if self.comptime_only {
+                    self.check_comptime_graph(value, source, depth)?;
+                }
+                value.clone()
+            }
             Value::Storage(storage) => {
                 let limit = self
                     .budget
@@ -865,6 +872,9 @@ impl<'a> Interpreter<'a> {
                 }
             }
             Value::Pointer(pointer) => {
+                if self.comptime_only {
+                    return Err(self.failure(ErrorKind::PhaseMismatch, Some(source)));
+                }
                 self.copy_type_work(&pointer.pointee, source)?;
                 self.copy_work(
                     pointer.copy_metadata_work().ok_or_else(|| {

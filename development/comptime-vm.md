@@ -10442,3 +10442,50 @@ No process remains live. The source operation boundary is integrated, but D12
 is not closed: direct host-value admission must still be audited for pointer
 values hidden in Object/closure graphs and legacy copy permissions. The earlier
 unrelated budget, memory-proof and factory baseline failures remain recorded.
+
+
+Captured payload admission and value-reference replacement
+--------------------------------------------------------
+
+Host-created Objects could retain runtime pointer payloads, and identity-preserving
+closure copies did not inspect mutable captured cells. The VM now checks those
+payload graphs on each observation. A traversal-local identity set handles shared
+cells and cycles; no mutable validity result is cached between calls. Pointer
+values are rejected in comptime copies while runtime borrowed-pointer identity
+and expiration behavior remain covered by the runtime interpreter.
+
+The new checks exposed six CMTT regressions caused by generator storage helpers
+constructing an empty declaration world. They now supply current nominal layouts
+and normal-form representation metadata, so legal nominal captures are checked
+against their actual domains rather than weakening the payload check. Type values
+and runtime callable/code descriptions remain separate from stored pointers.
+
+The obsolete comptime pointer-only list append optimization was removed. Existing
+owned, projected-reference and self-append tests retain budget-boundary rollback
+and retry checks. Ordinary value-reference container replacement now validates
+both old and new representations before mutation, without imposing the runtime
+pointer path's Copy permission on comptime data.
+
+Evidence from `/home/fin/luna`:
+- The host Object pointer repro originally returned success; the new test now
+  rejects it and then successfully invokes with legal data, on both engines.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor
+  --lib`: 375 passed, exit 0 (`/tmp/luna-tools-93ja4xik/result.json`). Includes
+  mutation/recovery of the same shared callback cell and cyclic graph traversal.
+- Initial cross-layer run: six nominal-capture failures, with all other CMTT,
+  storage, Object and list cases passing (`/tmp/luna-tools-zn048lr_/result.json`).
+- After declaration-world wiring, `development/check.py --timeout 900 -- test
+  -p luna --test cmtt --test library_meta_objects --test type_lists
+  --test comptime_storage_domains --no-fail-fast`: exit 0, 592 + 34 + 32 + 5
+  passed (`/tmp/luna-tools-v7rdrf7d/result.json`). The Object group includes its
+  real sysroot/target CLI integration.
+- `development/check.py --timeout 900 -- test -p luna --test cmtt_methods
+  --test library_protocols --no-fail-fast`: 152 + 27 passed, exit 0
+  (`/tmp/luna-tools-lalk82rz/result.json`). A prior command used the nonexistent
+  target `comptime_methods` and exited before running tests; corrected above.
+- Workspace formatting passed (`/tmp/luna-tools-_o1xm8lx/result.json`).
+
+This is not completion of D12 or the broader audit. Generator storage observations
+still construct declaration metadata snapshots; persistent borrowed worlds and
+other execution architecture work remain separate. Earlier unrelated budget,
+memory-proof and factory baseline failures have not been reclassified as fixed.
