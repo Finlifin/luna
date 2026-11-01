@@ -421,3 +421,54 @@ fn trusted_list_excludes_optional_member_without_solving_its_payload() {
         Selection::Deferred { .. }
     ));
 }
+
+#[test]
+fn inherent_matching_and_replay_preserve_caller_type_scope() {
+    let mut index = InherentIndex::default();
+    index
+        .insert(
+            head(20, boxed(var(1)), vec![id(1)], &["get"]),
+            Budget::default(),
+        )
+        .unwrap();
+    let nested = context().theory_in_scope(vec![vec![Sort::Type], vec![Sort::Type]]);
+    let closed_subject = boxed(Term::Primitive(P::Bool));
+    let closed = index
+        .resolve_types("get", &closed_subject, &nested, Budget::default())
+        .unwrap();
+    assert_eq!(closed.selection, Selection::Selected(id(20)));
+    let scoped = context().theory_in_scope(vec![vec![Sort::Type]]);
+    let input = Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: Sort::Type,
+    };
+    let subject = boxed(input.clone());
+    let result = index
+        .resolve_types("get", &subject, &scoped, Budget::default())
+        .unwrap();
+    assert_eq!(
+        result.selection,
+        Selection::Selected(id(20)),
+        "{:?}",
+        result.assessments
+    );
+    let TypeAssessment::Applicable(evidence) = &result.assessments[&id(20)] else {
+        panic!()
+    };
+    assert_eq!(evidence.type_arguments, vec![input]);
+    index
+        .verify_evidence("get", evidence, &subject, &scoped, Budget::default())
+        .unwrap();
+    assert!(
+        index
+            .verify_evidence("get", evidence, &subject, &context(), Budget::default())
+            .is_err()
+    );
+    let wrong_sort = context().theory_in_scope(vec![vec![Sort::ComptimeValue]]);
+    assert!(
+        index
+            .verify_evidence("get", evidence, &subject, &wrong_sort, Budget::default())
+            .is_err()
+    );
+}

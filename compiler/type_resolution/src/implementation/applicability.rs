@@ -216,7 +216,7 @@ impl ImplementationHead {
             &self.type_parameters,
             &self.parameter_types,
             &matched.evidence.type_arguments,
-            &[],
+            context.scope(),
             &mut remaining,
         )
         .map_err(substitution_proof_error)?;
@@ -565,7 +565,7 @@ impl ImplementationHead {
             &self.type_parameters,
             &self.parameter_types,
             matched.type_arguments(),
-            &[],
+            context.scope(),
             &mut budget.steps,
         )
         .map_err(computation)?;
@@ -577,7 +577,7 @@ impl ImplementationHead {
                     .instantiate_bounded(argument, &mut budget.steps)
                     .map_err(computation)?;
                 value
-                    .check_scope(&[])
+                    .check_scope(context.scope())
                     .map_err(|error| TypeAssessment::Invalid(error.to_string()))?;
                 Ok(value)
             })
@@ -713,7 +713,19 @@ impl ImplementationHead {
                     "non-Type interface argument matching is not implemented".into(),
                 ));
             }
-            if let Err(error) = term.check_scope(&[]) {
+        }
+        // Query inputs belong to the caller telescope. Declaration templates
+        // must remain closed and cannot capture that telescope accidentally.
+        for (term, scope) in std::iter::once(subject)
+            .chain(interface_arguments)
+            .map(|term| (term, context.scope()))
+            .chain(
+                std::iter::once(&self.subject)
+                    .chain(&self.interface_arguments)
+                    .map(|term| (term, &[][..])),
+            )
+        {
+            if let Err(error) = term.check_scope(scope) {
                 return Err(TypeAssessment::Invalid(error.to_string()));
             }
         }
@@ -832,7 +844,33 @@ impl ImplementationHead {
         let parameters = self
             .parameter_binders()
             .map_err(|e| TypeAssessment::Invalid(e.to_string()))?;
-        let mut root = Engine::with_context(context.fork());
+        let mut root = match context.scope() {
+            [] => Engine::with_context(context.fork()),
+            [frame] => {
+                let caller_scope = frame
+                    .iter()
+                    .map(|sort| {
+                        (
+                            *sort,
+                            (*sort == Sort::Type).then_some(Term::Primitive(nir::Primitive::Type)),
+                        )
+                    })
+                    .collect();
+                Engine::with_sparse_call_scope(context.fork(), caller_scope)
+                    .map_err(|error| TypeAssessment::Invalid(format!("caller scope: {error:?}")))?
+            }
+            _ if std::iter::once(subject)
+                .chain(interface_arguments)
+                .all(|term| term.check_scope(&[]).is_ok()) =>
+            {
+                Engine::with_context(context.fork())
+            }
+            _ => {
+                return Err(TypeAssessment::Pending(
+                    "nested caller frames require scoped head inference".into(),
+                ));
+            }
+        };
         let types: Vec<_> = parameters
             .iter()
             .map(|parameter| I::Meta(root.fresh(parameter.sort)))
@@ -1227,7 +1265,7 @@ impl ImplementationHead {
             &self.type_parameters,
             &self.parameter_types,
             &arguments,
-            &[],
+            context.scope(),
             &mut domain_fuel,
         )
         .map_err(|error| match error {
@@ -1683,7 +1721,7 @@ impl ImplementationHead {
             &self.type_parameters,
             &self.parameter_types,
             &evidence.type_arguments,
-            &[],
+            context.scope(),
             &mut domain_fuel,
         )
         .map_err(substitution_proof_error)?;
@@ -1809,13 +1847,23 @@ fn validate_head_arguments_with_domains(
         return Err("implementation argument count mismatch".into());
     }
     let ids: Vec<_> = binders.iter().map(|binder| binder.declaration).collect();
-    let substitution = nir::DeclarationSubstitution::bounded(&ids, domains, arguments, &[], fuel)?;
+    let frames = context.map_or(&[][..], |(context, _)| context.scope());
+    let substitution =
+        nir::DeclarationSubstitution::bounded(&ids, domains, arguments, frames, fuel)?;
     for (index, (binder, argument)) in binders.iter().zip(arguments).enumerate() {
         let declared = domains
             .get(index)
             .unwrap_or(&nir::Term::Primitive(nir::Primitive::Type));
         let domain = substitution.instantiate_bounded(declared, fuel)?;
         nir::type_computations::charge_term(argument, fuel)?;
+        // Type inputs need scope and sort admission, already checked by the
+        // substitution. They are not closed runtime or comptime value payloads.
+        if domain == Term::Primitive(nir::Primitive::Type) {
+            if argument.sort() != Sort::Type {
+                return Err("implementation Type argument sort mismatch".into());
+            }
+            continue;
+        }
         if binder.sort == nir::Sort::ComptimeValue
             && *argument
                 == (nir::Term::Rigid {

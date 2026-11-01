@@ -154,3 +154,24 @@ fn required_inputs_observe_associated_domains_after_prior_type_arguments() {
         );
     }
 }
+
+#[test]
+fn inherent_methods_keep_associated_inputs_through_selection_and_instantiation() {
+    let source = "typealias Type=.Type'builtin;
+        trait Source { assoc Item:Type; }
+        impl Source for bool { assoc Item:Type=bool; }
+        struct Cell where T { value:T }
+        impl Cell<T> where T {
+            comptime fn get(self)->T { self.value }
+        }
+        comptime fn read(comptime T:Type, value:Cell<T.as(Source).Item>)->T.as(Source).Item
+        where requires T :- Source
+        { value.get() }
+        const saved=read(bool, Cell<bool> {value:true});
+        comptime fn run()->bool { saved }";
+    let package = support::compile_with_protocols(source, &Default::default()).unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}

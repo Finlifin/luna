@@ -2979,3 +2979,56 @@ fn comptime_parent_phase_can_follow_only_comptime_only_given_evidence() {
         }
     }
 }
+
+#[test]
+fn inherent_qualification_retains_caller_scope_and_rejects_scope_changes() {
+    use type_resolution::implementation::{InherentHead, InherentIndex};
+    let ctx = context().theory_in_scope(vec![vec![Sort::Type]]);
+    let mut candidate = implementation(20, 100, boxed(var()), vec![id(1)], vec![]);
+    candidate.interface = None;
+    let mut inherent = InherentIndex::default();
+    inherent
+        .insert(
+            InherentHead {
+                declaration: candidate.declaration,
+                type_parameters: candidate.type_parameters.clone(),
+                parameter_types: candidate.parameter_types.clone(),
+                subject: candidate.subject.clone(),
+                requirements: vec![],
+                members: ["read".into()].into_iter().collect(),
+            },
+            Budget::default(),
+        )
+        .unwrap();
+    let implementations = vec![candidate];
+    let ix = Index::default();
+    let world = World {
+        index: &ix,
+        implementations: &implementations,
+        traits: &[],
+        assumptions: &[],
+        context: &ctx,
+    };
+    let subject = boxed(Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: Sort::Type,
+    });
+    let result = world
+        .resolve_inherent(&inherent, "read", &subject, Budget::default())
+        .unwrap();
+    assert_eq!(result.types.selection, Selection::Selected(id(20)));
+    world
+        .verify_inherent_evidence(&inherent, "read", &subject, &result, Budget::default())
+        .unwrap();
+    let closed = context();
+    let other = World {
+        context: &closed,
+        ..world
+    };
+    assert!(
+        other
+            .verify_inherent_evidence(&inherent, "read", &subject, &result, Budget::default())
+            .is_err()
+    );
+}

@@ -1,5 +1,5 @@
-{- Known gap: inherent method selection on a collection whose element domain
-   depends on an ordinary Type input reports an invalid caller binder.
+{- Regression: inherent method selection retains the caller's ordinary Type
+   binder when a collection element domain is an associated projection.
    Reproduce with luna check and the repository sysroot. -}
 trait Source {
     assoc Item: Type;
@@ -7,7 +7,7 @@ trait Source {
 impl Source for bool {
     assoc Item: Type = bool;
 }
-comptime fn count(comptime T: Type, values: meta.List<T.as(Source).Item>) -> usize
+comptime fn count(comptime T: Type, values: meta.List<T.as(Source).Item>) -> Integer
 where requires T :- Source
 {
     values.length()

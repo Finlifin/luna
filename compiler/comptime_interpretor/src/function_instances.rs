@@ -101,6 +101,11 @@ impl Interpreter<'_> {
         if self.graph.is_some() {
             return self.iir_function_value(declaration, arguments, output, source);
         }
+        let observed_arguments = arguments
+            .iter()
+            .map(|argument| self.selected_type_view(argument, Some(source)))
+            .collect::<Result<Vec<_>, _>>()?;
+        let arguments = observed_arguments.as_slice();
         if let Some(identity) = self.runtime_function_identities.get(&declaration) {
             self.admit_function_inputs(&identity.type_parameters, arguments, source)?;
             let binders = self.input_binders(&identity.type_parameters);

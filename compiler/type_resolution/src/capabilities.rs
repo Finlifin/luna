@@ -959,7 +959,7 @@ impl Solver<'_, '_> {
             &implementation.type_parameters,
             &implementation.parameter_types,
             &evidence.type_arguments,
-            &[],
+            self.world.context.scope(),
             &mut self.remaining,
         ) {
             Ok(substitution) => substitution,
