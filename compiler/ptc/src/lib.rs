@@ -2226,9 +2226,18 @@ fn closed_type(term: &Term, nominal: &BTreeSet<DeclarationId>) -> bool {
         }
         return true;
     }
-    if matches!(term, Term::Nominal { declaration, arguments } if !arguments.is_empty() && !nominal.contains(declaration))
+    if let Term::Nominal {
+        declaration,
+        arguments,
+    } = term
     {
-        return false;
+        // A nominal Type's parameters are ordinary comptime inputs, not an
+        // implicit all-Type telescope. Declaration formation remains the
+        // producer's responsibility; model replay checks completed arguments.
+        return (arguments.is_empty() || nominal.contains(declaration))
+            && arguments
+                .iter()
+                .all(|argument| model_applications::closed_argument(argument, nominal));
     }
     constructor(term).is_some()
         && !matches!(term, Term::Primitive(Primitive::Unit))

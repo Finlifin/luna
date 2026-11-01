@@ -606,6 +606,17 @@ fn qualified_and_opaque_type_models_commit_original_symbolic_identities() {
     let row = Term::error_result(vec![Term::Primitive(P::Char)], Term::Primitive(P::Bool));
     for expected in [
         row.clone(),
+        Term::Nominal {
+            declaration: head,
+            arguments: vec![Term::Bool(true)],
+        },
+        Term::Nominal {
+            declaration: head,
+            arguments: vec![Term::RecordValue(vec![(
+                "element".into(),
+                Term::TupleValue(vec![Term::Primitive(P::Bool), Term::Char('x')]),
+            )])],
+        },
         Term::NormalForm {
             head,
             sort: Sort::Type,
@@ -635,6 +646,7 @@ fn qualified_and_opaque_type_models_commit_original_symbolic_identities() {
     ] {
         let mut context = Context::default();
         context.admit_congruence(head);
+        context.admit_nominal_constructor(head);
         let mut parent = Engine::with_context(context);
         let input = parent.fresh(Sort::Type);
         let problem = R::Equal(I::Meta(input), I::Stable(expected.clone()));
