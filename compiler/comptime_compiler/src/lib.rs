@@ -443,7 +443,7 @@ pub enum Op {
     },
     Constant {
         destination: Register,
-        value: Arc<constants::Constant>,
+        constant: constants::Id,
     },
     FunctionInstance {
         destination: Register,
@@ -500,12 +500,16 @@ pub struct Instruction {
 }
 #[derive(Debug)]
 pub struct Program {
+    constants: Vec<Arc<constants::Constant>>,
     instructions: Vec<Instruction>,
     locals: Vec<(LocalId, Register)>,
     registers: usize,
     storage_work: usize,
 }
 impl Program {
+    pub fn constants(&self) -> &[Arc<constants::Constant>] {
+        &self.constants
+    }
     pub fn instructions(&self) -> &[Instruction] {
         &self.instructions
     }
@@ -535,6 +539,10 @@ impl fmt::Display for Program {
         write!(f, "(engine-code (registers {}) (locals", self.registers)?;
         for (local, slot) in &self.locals {
             write!(f, " ({local} {slot})")?;
+        }
+        write!(f, ") (constants")?;
+        for (index, value) in self.constants.iter().enumerate() {
+            write!(f, " ({index} {value})")?;
         }
         write!(f, ") (instructions")?;
         for (pc, instruction) in self.instructions.iter().enumerate() {
@@ -1164,9 +1172,10 @@ impl fmt::Display for Program {
                     }
                     write!(f, "))")?;
                 }
-                Op::Constant { destination, value } => {
-                    write!(f, "(constant {destination} {value})")?
-                }
+                Op::Constant {
+                    destination,
+                    constant,
+                } => write!(f, "(constant {destination} (index {constant}))")?,
                 Op::FunctionInstance {
                     destination,
                     instance,
@@ -1300,6 +1309,7 @@ fn compile_root<'a>(
     };
     let initial_fuel = *fuel;
     let mut instructions = Vec::new();
+    let mut constant_table = constants::Table::default();
     let mut locals = BTreeMap::new();
     let mut registers = 1;
     let mut labels = Vec::new();
@@ -2605,12 +2615,12 @@ fn compile_root<'a>(
                     }
                     K::Unit => emit(&mut work, Op::Unit(dst)),
                     K::Literal(_) | K::TypeValue(_) | K::ComptimeValue(_) | K::Function(_) => {
-                        let value = constants.get(expr, fuel)?;
+                        let constant = constant_table.insert(constants.get(expr, fuel)?);
                         emit(
                             &mut work,
                             Op::Constant {
                                 destination: dst,
-                                value,
+                                constant,
                             },
                         );
                     }
@@ -3084,6 +3094,7 @@ fn compile_root<'a>(
     }
     Ok((
         Program {
+            constants: constant_table.finish(),
             instructions,
             locals: locals.into_iter().collect(),
             registers,

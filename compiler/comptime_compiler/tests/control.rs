@@ -82,9 +82,10 @@ fn compiled_constants_outlive_their_source_and_charge_payload_copying() {
         compile(&body, &mut 20_000).unwrap()
     };
     assert!(code.storage_work() >= 4096);
-    let comptime_compiler::Op::Constant { value, .. } = &code.instructions()[0].op else {
+    let comptime_compiler::Op::Constant { constant, .. } = &code.instructions()[0].op else {
         panic!("missing owned constant")
     };
+    let value = &code.constants()[constant.0];
     assert_eq!(
         value.kind,
         comptime_compiler::constants::Kind::Literal(nir::program::Literal::String(
@@ -919,9 +920,10 @@ fn constant_operands_and_callable_selection_have_distinct_instructions() {
     ] {
         let body = expr(kind);
         let code = compile(&body, &mut 1000).unwrap();
-        let Op::Constant { value, .. } = &code.instructions()[0].op else {
+        let Op::Constant { constant, .. } = &code.instructions()[0].op else {
             panic!("expected immutable operand")
         };
+        let value = &code.constants()[constant.0];
         assert!(matches!(
             value.kind,
             Kind::Function(_) | Kind::Type(_) | Kind::Frozen(_)
@@ -997,14 +999,17 @@ fn repeated_constants_share_owned_payloads_without_merging_instructions() {
         .instructions()
         .iter()
         .filter_map(|instruction| {
-            if let comptime_compiler::Op::Constant { value, .. } = &instruction.op {
-                Some((instruction.source, value))
+            if let comptime_compiler::Op::Constant { constant, .. } = &instruction.op {
+                Some((instruction.source, &code.constants()[constant.0]))
             } else {
                 None
             }
         })
         .collect();
     assert_eq!(constants.len(), 2);
+    assert_eq!(code.constants().len(), 1);
+    assert!(code.to_string().contains("(constants (0 (typed-constant"));
+    assert_eq!(code.to_string().matches("(index 0)").count(), 2);
     assert_ne!(constants[0].0, constants[1].0);
     assert!(std::sync::Arc::ptr_eq(constants[0].1, constants[1].1));
     assert!(code.to_string().contains("payload"));
@@ -1044,11 +1049,12 @@ fn constant_pool_preserves_domains_kinds_and_float_bits() {
         .instructions()
         .iter()
         .filter_map(|instruction| match &instruction.op {
-            comptime_compiler::Op::Constant { value, .. } => Some(value),
+            comptime_compiler::Op::Constant { constant, .. } => Some(&code.constants()[constant.0]),
             _ => None,
         })
         .collect();
     assert_eq!(values.len(), 2 * count);
+    assert_eq!(code.constants().len(), count);
     for i in 0..count {
         assert!(std::sync::Arc::ptr_eq(values[i], values[i + count]));
         for j in i + 1..count {

@@ -7,18 +7,47 @@ use std::fmt;
 use std::hash::BuildHasher;
 use std::sync::{Arc, Weak};
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub enum Kind {
     Literal(Literal),
     Type(Term),
     Frozen(Term),
     Function(DeclarationId),
 }
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct Constant {
     pub ty: Term,
     pub kind: Kind,
 }
+/// Stable table-local identity, independent of allocation addresses or hashes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Id(pub usize);
+impl fmt::Display for Id {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+#[derive(Default)]
+pub(crate) struct Table {
+    ids: HashMap<Arc<Constant>, Id>,
+    values: Vec<Arc<Constant>>,
+}
+impl Table {
+    // Pool::get has already charged the complete identity traversal.
+    pub(crate) fn insert(&mut self, value: Arc<Constant>) -> Id {
+        if let Some(id) = self.ids.get(&value) {
+            return *id;
+        }
+        let id = Id(self.values.len());
+        self.ids.insert(value.clone(), id);
+        self.values.push(value);
+        id
+    }
+    pub(crate) fn finish(self) -> Vec<Arc<Constant>> {
+        self.values
+    }
+}
+
 // Keys borrow source operands only while comparing. The bounded weak index
 // neither owns source bodies nor keeps constants alive after code eviction.
 #[derive(PartialEq, Eq, Hash)]
@@ -169,5 +198,24 @@ mod tests {
                 .all(|entry| entry.upgrade().is_none())
         );
         assert!(session.compile(&literal(1), &mut 1000).is_ok());
+    }
+
+    #[test]
+    fn table_ids_survive_weak_pool_eviction_and_equal_reallocation() {
+        let mut pool = Pool::default();
+        let mut table = Table::default();
+        let first = pool.get(&literal(0), &mut 1000).unwrap();
+        let id = table.insert(first.clone());
+        assert_eq!(id.to_string(), "0");
+        for value in 1..MAX_ENTRIES + 8 {
+            let value = pool.get(&literal(value as u128), &mut 1000).unwrap();
+            table.insert(value);
+        }
+        let recreated = pool.get(&literal(0), &mut 1000).unwrap();
+        assert!(!Arc::ptr_eq(&first, &recreated));
+        assert_eq!(table.insert(recreated), id);
+        let values = table.finish();
+        assert_eq!(values.len(), MAX_ENTRIES + 8);
+        assert!(Arc::ptr_eq(&values[id.0], &first));
     }
 }

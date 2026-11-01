@@ -275,8 +275,8 @@ fn independent_compilations_share_constants_only_in_the_matching_code_session() 
             .instructions()
             .iter()
             .find_map(|instruction| {
-                if let Op::Constant { value, .. } = &instruction.op {
-                    Some(value)
+                if let Op::Constant { constant, .. } = &instruction.op {
+                    Some(&program.constants()[constant.0])
                 } else {
                     None
                 }

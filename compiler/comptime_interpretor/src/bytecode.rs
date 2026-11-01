@@ -2539,8 +2539,12 @@ impl<'a> Interpreter<'a> {
                     frame.slots[*destination] =
                         Some(self.scalar_math_values(binding, &values, source)?);
                 }
-                Op::Constant { destination, value } => {
+                Op::Constant {
+                    destination,
+                    constant,
+                } => {
                     use comptime_compiler::constants::Kind;
+                    let value = code.constants().get(constant.0).ok_or_else(missing)?;
                     let result = match &value.kind {
                         Kind::Literal(literal) => {
                             self.literal_constant(literal, &value.ty, source)?

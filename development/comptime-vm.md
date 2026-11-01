@@ -9756,3 +9756,32 @@ Validation from `/home/fin/luna`:
 - Workspace formatting passed (`/tmp/luna-tools-rj4f763u/result.json`); `git diff --check` passed.
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_iir_bytecode --test scoped_comptime_callables --test comptime_staged_values --test comptime_bytecode`: 30 passed (`/tmp/luna-tools-sn126b1a/result.json`).
 - Real sysroot stateful List.fold acceptance passed (`/tmp/luna-tools-kl8srvo1/result.json`): `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_list_fold_retains_comptime_callback_state`.
+
+### Indexed bytecode constant tables
+
+A compiled `Program` now owns an explicit typed constant table. Constant-load
+instructions carry a table-local `constants::Id` instead of an Arc payload;
+the VM bounds-checks the index and performs the existing load admission and
+evaluation using that entry. Instructions keep their own source locations.
+
+IDs follow deterministic first occurrence during lowering. Table identity uses
+exact type/kind/payload equality, not allocation addresses or weak-pool residency.
+If the session pool evicts a still-used identity and later allocates an equal
+payload again, the current table reuses its original ID. The table owns one Arc
+per distinct constant; compatible entries in separate programs can still share
+payloads through the existing session pool. Temporary lookup maps are discarded
+when compilation finishes or fails.
+
+S-expression dumps now show `(constants (0 (typed-constant ...)) ...)` followed
+by loads of the form `(constant <register> (index <id>))`. Equal operands appear
+once in the table without losing instruction ordering or source locations.
+The Rust opcode API correspondingly changes from `value` to `constant` and
+exposes `Program::constants()` for consumers. This is an in-memory indexed
+representation, not a serialized module format or a completed IIR VM migration.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`: 625 passed (`/tmp/luna-tools-v090_cia/result.json`). Checks cover stable indices after weak-index eviction/reallocation, table deduplication, deterministic dumps, source lifetime and existing session/world isolation.
+- Workspace formatting passed (`/tmp/luna-tools-2kvjqhp_/result.json`); `git diff --check` passed.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode --test comptime_iir_bytecode --test comptime_bytecode_types --test comptime_bytecode_lists --test comptime_staged_values`: 39 passed (`/tmp/luna-tools-umgdw89r/result.json`).
+- Real sysroot Type-factory identity acceptance passed (`/tmp/luna-tools-8j4hm329/result.json`): `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_type_factories_keep_identity_through_comptime_parameters`.
