@@ -360,3 +360,154 @@ fn dependent_symbolic_proposals_commit_without_temporary_search_identities() {
     );
     assert_eq!(parent.freeze(&I::Meta(inner)).unwrap(), ambient);
 }
+
+#[test]
+fn model_search_late_budget_failures_preserve_assignments_and_waiters() {
+    let mut parent = Engine::default();
+    let outer = parent.fresh(Sort::Type);
+    let inner = parent.fresh(Sort::Type);
+    let waiting = parent.require(R::Equal(I::Meta(inner), stable(P::Bool)));
+    parent.advance(100, Budget::default());
+    assert!(matches!(parent.state(waiting), Some(State::Waiting(_))));
+    let problem = R::And(vec![
+        determined(I::Meta(inner)),
+        R::Equal(
+            I::Meta(outer),
+            I::Instantiate {
+                template: Term::Optional(Box::new(Term::Bound {
+                    depth: 0,
+                    index: 0,
+                    sort: Sort::Type,
+                })),
+                arguments: vec![I::Meta(inner)],
+            },
+        ),
+    ]);
+    let inputs = [outer, inner];
+    let mut measured = Budget::default();
+    let before = measured.steps;
+    assert!(matches!(
+        parent
+            .search_type_inputs(&inputs, &problem, &mut measured)
+            .unwrap(),
+        Search::Proposed { .. }
+    ));
+    let used = before - measured.steps;
+    let mut interrupted = 0;
+    let mut completed = 0;
+    // Search strategies divide available fuel, so a smaller allowance need not
+    // reproduce the exact work count of the full-budget run. Accept only a
+    // complete checked proposal or an isolated budget failure at every point.
+    for steps in 0..=used {
+        let mut budget = Budget {
+            steps,
+            ..Budget::default()
+        };
+        match parent.search_type_inputs(&inputs, &problem, &mut budget) {
+            Err(Error::Inference(InferenceError::Budget))
+            | Ok(Search::Unresolved(TypeInputOutcome::Unknown(
+                type_resolution::ptc::UnknownReason::BudgetExhausted,
+            ))) => interrupted += 1,
+            Ok(Search::Proposed {
+                mut candidate,
+                obligation,
+                ..
+            }) => {
+                completed += 1;
+                assert_eq!(candidate.inspect(&I::Meta(inner)).unwrap(), stable(P::Bool));
+                assert_eq!(
+                    candidate.inspect(&I::Meta(outer)).unwrap(),
+                    I::Stable(Term::Optional(Box::new(Term::Primitive(P::Bool))))
+                );
+                assert!(candidate.freeze(&I::Meta(outer)).is_err());
+                candidate.advance(100, Budget::default());
+                assert!(candidate.state(waiting).unwrap().is_proven());
+                assert!(candidate.state(obligation).unwrap().is_proven());
+                assert_eq!(
+                    candidate.freeze(&I::Meta(inner)).unwrap(),
+                    Term::Primitive(P::Bool)
+                );
+            }
+            other => panic!(
+                "search must not publish a partially staged proposal at {steps}/{used}: {}",
+                match other {
+                    Ok(result) => result.to_string(),
+                    Err(error) => format!("{error:?}"),
+                }
+            ),
+        }
+        assert!(budget.steps <= steps);
+        assert!(matches!(parent.state(waiting), Some(State::Waiting(_))));
+        for input in inputs {
+            assert_eq!(parent.inspect(&I::Meta(input)).unwrap(), I::Meta(input));
+        }
+    }
+    assert!(interrupted > 0);
+    assert!(completed > 0);
+    let Search::Proposed {
+        mut candidate,
+        obligation,
+        ..
+    } = parent
+        .search_type_inputs(&inputs, &problem, &mut Budget::default())
+        .unwrap()
+    else {
+        panic!("a fresh allowance must recover");
+    };
+    assert!(candidate.freeze(&I::Meta(outer)).is_err());
+    candidate.advance(100, Budget::default());
+    assert!(candidate.state(waiting).unwrap().is_proven());
+    assert!(candidate.state(obligation).unwrap().is_proven());
+    parent.commit(candidate).unwrap();
+    assert_eq!(
+        parent.freeze(&I::Meta(inner)).unwrap(),
+        Term::Primitive(P::Bool)
+    );
+    assert_eq!(
+        parent.freeze(&I::Meta(outer)).unwrap(),
+        Term::Optional(Box::new(Term::Primitive(P::Bool)))
+    );
+}
+
+#[test]
+fn fixed_environment_ambiguity_does_not_assign_inference_inputs() {
+    let mut parent = Engine::default();
+    let input = parent.fresh(Sort::Type);
+    let ambient = DeclarationId {
+        package: 927,
+        local: 1,
+    };
+    let ambient_type = I::Stable(Term::Rigid {
+        declaration: ambient,
+        sort: Sort::Type,
+    });
+    let problem = R::Not(Box::new(R::Equal(I::Meta(input), ambient_type)));
+    let Search::Unresolved(TypeInputOutcome::Ambiguous {
+        candidate,
+        alternative,
+        ..
+    }) = parent
+        .search_type_inputs(&[input], &problem, &mut Budget::default())
+        .unwrap()
+    else {
+        panic!("inequality cannot determine the requested input");
+    };
+    assert_eq!(candidate.types[&ambient], alternative.types[&ambient]);
+    assert_eq!(parent.inspect(&I::Meta(input)).unwrap(), I::Meta(input));
+    let Search::Proposed { mut candidate, .. } = parent
+        .search_type_inputs(
+            &[input],
+            &determined(I::Meta(input)),
+            &mut Budget::default(),
+        )
+        .unwrap()
+    else {
+        panic!("an independent determined problem must remain solvable");
+    };
+    candidate.advance(100, Budget::default());
+    parent.commit(candidate).unwrap();
+    assert_eq!(
+        parent.freeze(&I::Meta(input)).unwrap(),
+        Term::Primitive(P::Bool)
+    );
+}

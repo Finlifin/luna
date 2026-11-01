@@ -939,3 +939,27 @@ Validation from `/home/fin/luna`:
 This is bounded model search, not complete ambiguity decision: unavailable theory
 models, exhausted fuel, and opaque application tables that cannot be kept
 identical still return Unknown. No source or library interface was changed.
+
+### Type-resolution model-search transaction coverage
+
+Extended the public inference-engine regressions beyond early search failure.
+A two-input dependent problem with an existing waiter now sweeps every allowance
+from zero through the measured full-search work. Each result must be either a
+budget failure with no parent mutation or a complete two-binding proposal whose
+original equation and pre-existing obligation can both be proved. A final retry
+commits successfully. The test also checks that fixed-environment ambiguity
+passes through the engine without assigning its requested metavariable and does
+not contaminate a later independent problem.
+
+The first test draft incorrectly treated a measured work count as a minimum
+successful allowance (`/tmp/luna-tools-2onwhatr/result.json`, exit 101). Search
+strategies apportion available fuel, so lower allowances can follow a cheaper
+successful path. The final test accepts only fully checked success or isolated
+budget exhaustion; it does not constrain strategy-dependent work counts. No
+production leakage was found and no inference semantics were changed.
+
+Validation from `/home/fin/luna`: `python3 -B development/check.py --timeout 900
+-- test -p type_resolution --test type_input_search` passed all 11 tests
+(`/tmp/luna-tools-i2wc47bq/result.json`, exit 0). Workspace formatting passed
+(`/tmp/luna-tools-3wntrqcz/result.json`, exit 0). This verifies the engine API
+boundary, not completeness of CDCL theories or source-language inference.
