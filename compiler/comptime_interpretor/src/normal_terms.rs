@@ -630,7 +630,7 @@ impl Value {
                 }
                 _ => None,
             };
-            if invocation {
+            {
                 if let Value::RuntimeTraitMethod(method) = value {
                     budget.consume(1).map_err(|_| ErrorKind::StepsExhausted)?;
                     for argument in method.terms() {
@@ -651,7 +651,7 @@ impl Value {
                     return Ok(Term::MethodValue(method.clone()));
                 }
 
-                if let Some((declaration, arguments)) = instance {
+                if let Some((declaration, arguments)) = instance.filter(|_| invocation) {
                     budget.consume(1).map_err(|_| ErrorKind::StepsExhausted)?;
                     for argument in arguments {
                         nir::type_computations::charge_term(argument, &mut budget.steps)

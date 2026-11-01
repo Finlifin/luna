@@ -31,3 +31,28 @@ impl TraitMethodIdentity {
             .chain(&self.method_arguments)
     }
 }
+
+/// Borrowed callable identity for declaration-world signature queries.
+#[derive(Clone, Copy)]
+pub enum CallableValueRef<'a> {
+    Function {
+        declaration: DeclarationId,
+        arguments: &'a [Term],
+    },
+    Method(&'a TraitMethodIdentity),
+}
+impl<'a> CallableValueRef<'a> {
+    pub fn from_term(term: &'a Term) -> Option<Self> {
+        match term {
+            Term::FunctionValue {
+                declaration,
+                arguments,
+            } => Some(Self::Function {
+                declaration: *declaration,
+                arguments,
+            }),
+            Term::MethodValue(method) => Some(Self::Method(method)),
+            _ => None,
+        }
+    }
+}

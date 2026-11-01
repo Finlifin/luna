@@ -2633,7 +2633,7 @@ impl Builder<'_> {
                         .find(|h| h.declaration == *head)
                         .ok_or("IIR normal-form type has no head declaration")?;
                     descriptor
-                        .check_arguments_in_scope_with_callables_budgeted_in(
+                        .check_arguments_in_scope_with_callable_values_budgeted_in(
                             arguments,
                             |head| {
                                 self.package.normal_forms.iter().any(|metadata| {
@@ -2656,8 +2656,10 @@ impl Builder<'_> {
                                 )
                             },
                             |_, _| false,
-                            |id, args, frames, fuel| {
-                                self.world.callable_signature(id, args, frames, fuel)
+                            |value, frames, fuel| {
+                                self.world
+                                    .callable_value_signature(value, frames, fuel)
+                                    .map(std::borrow::Cow::Owned)
                             },
                             &[],
                             &mut self.fuel,

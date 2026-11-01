@@ -2106,7 +2106,7 @@ impl<'a> Interpreter<'a> {
             &self.abstract_type_parameters,
             &self.abstract_value_parameters,
             |ty, variant, fuel| self.normal_value_fields(ty, variant, fuel),
-            |id, args, frames, fuel| self.normal_callable_signature_view(id, args, frames, fuel),
+            |value, frames, fuel| self.normal_value_callable_signature_view(value, frames, fuel),
             self.target,
         )
     }
@@ -2123,7 +2123,7 @@ impl<'a> Interpreter<'a> {
             &BTreeSet::new(),
             &BTreeMap::new(),
             |ty, variant, fuel| self.normal_value_fields(ty, variant, fuel),
-            |id, args, frames, fuel| self.normal_callable_signature_view(id, args, frames, fuel),
+            |value, frames, fuel| self.normal_value_callable_signature_view(value, frames, fuel),
             self.target,
         )
     }
@@ -2328,8 +2328,8 @@ impl<'a> Interpreter<'a> {
                 &self.abstract_type_parameters,
                 &self.abstract_value_parameters,
                 |ty, variant, fuel| self.normal_value_fields(ty, variant, fuel),
-                |id, args, frames, fuel| {
-                    self.normal_callable_signature_view(id, args, frames, fuel)
+                |value, frames, fuel| {
+                    self.normal_value_callable_signature_view(value, frames, fuel)
                 },
                 self.target,
             )
@@ -4486,14 +4486,14 @@ impl<'a> Interpreter<'a> {
                         ty: domain.clone(),
                     }],
                 };
-                contract.check_arguments_in_scope_with_callable_views_budgeted_in(
+                contract.check_arguments_in_scope_with_callable_values_budgeted_in(
                     std::slice::from_ref(argument),
                     |id| self.normal_forms.get(&id).is_some_and(|head| head.role == nir::normal_forms::Role::Tuple),
                     |id| self.normal_forms.get(&id).is_some_and(|head| head.role == nir::normal_forms::Role::TypeList),
                     |ty, variant, fuel| self.normal_value_fields(ty, variant, fuel),
                     |value, domain| matches!(value, Term::Rigid { declaration, sort: nir::Sort::ComptimeValue }
                         if self.abstract_value_parameters.get(declaration) == Some(domain)),
-                    |id, args, frames, fuel| self.normal_callable_signature_view(id, args, frames, fuel),
+                    |value, frames, fuel| self.normal_value_callable_signature_view(value, frames, fuel),
                     frames, fuel, self.target,
                 ).map_err(|_| if *fuel == 0 { ErrorKind::StepsExhausted } else { ErrorKind::Type })?;
                 continue;
@@ -6662,7 +6662,7 @@ fn scoped_term_value_work_with_evidence_in(
         parameters,
         value_parameters,
         nominal_fields,
-        |_, _, _, _| None,
+        |_, _, _| None,
         target,
     )
 }
@@ -6674,8 +6674,7 @@ fn scoped_term_value_work_with_callables_in<'signature>(
     value_parameters: &BTreeMap<DeclarationId, Term>,
     nominal_fields: impl Fn(&Term, Option<u32>, &mut usize) -> Option<Vec<Term>>,
     callable_signature: impl Fn(
-        DeclarationId,
-        &[Term],
+        nir::CallableValueRef<'_>,
         &[Vec<nir::Sort>],
         &mut usize,
     ) -> Option<std::borrow::Cow<'signature, Term>>,
@@ -6790,7 +6789,7 @@ fn scoped_term_value_work_with_callables_in<'signature>(
                     }
                 }
                 metadata
-                    .check_arguments_in_scope_with_callable_views_budgeted_in(
+                    .check_arguments_in_scope_with_callable_values_budgeted_in(
                         arguments,
                         |head| {
                             heads

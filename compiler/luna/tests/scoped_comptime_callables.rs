@@ -333,3 +333,85 @@ fn unstaged_runtime_method_defaults_preserve_the_selected_contract() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn normal_form_method_inputs_keep_their_interface_origin() {
+    let source = "typealias Type = .Type'builtin;
+        trait First { fn first(comptime value: bool) -> bool; }
+        trait Second { fn second(comptime value: bool) -> bool; }
+        impl First for bool { fn first(comptime value: bool) -> bool { true } }
+        impl Second for bool { fn second(comptime value: bool) -> bool { true } }
+        pure comptime fn Carrier<action: fn(comptime bool) -> bool> -> Type { bool }
+        comptime fn selected() -> fn(comptime bool) -> bool { bool.first }
+        comptime fn run() -> bool { Carrier<selected()> == Carrier<bool.first> }
+        fn consume_first(value: Carrier<bool.first>) -> bool { true }
+        fn consume_second(value: Carrier<bool.second>) -> bool { true }";
+    let package = support::compile_with_protocols(source, &Default::default()).unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    let parameter = |name: &str| {
+        let function = package.functions.iter().find(|f| f.name == name).unwrap();
+        let nir::Term::Function { parameters, .. } = &function.signature else {
+            panic!("signature")
+        };
+        parameters[0].ty.clone()
+    };
+    assert_ne!(parameter("consume_first"), parameter("consume_second"));
+    for name in ["consume_first", "consume_second"] {
+        let ty = parameter(name);
+        let nir::Term::NormalForm { arguments, .. } = ty else {
+            panic!("NF head was lost")
+        };
+        assert!(matches!(&arguments[0], nir::Term::MethodValue(_)));
+        let key = iir::InstanceKey {
+            declaration: support::id(&package, name),
+            arguments: vec![].into(),
+        };
+        elaboration::materialization::instantiate(
+            &package,
+            &[key],
+            Default::default(),
+            elaboration::ptc::Budget::default(),
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn method_normal_form_inputs_restore_caller_type_arguments() {
+    let source = "typealias Type = .Type'builtin; typealias char = .char'builtin;
+        trait Mapper { fn map() -> bool where T; }
+        impl Mapper for bool { fn map() -> bool where T { true } }
+        pure comptime fn Carrier<action: fn() -> bool> -> Type { bool }
+        fn generic(comptime T: Type, value: Carrier<bool.map<T>>) -> bool { true }
+        fn concrete(value: Carrier<bool.map<bool>>) -> bool { true }
+        fn other(value: Carrier<bool.map<char>>) -> bool { true }";
+    let package = support::compile_with_protocols(source, &Default::default()).unwrap();
+    let input = |name: &str, index: usize| {
+        let signature = &package
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap()
+            .signature;
+        signature.check_scope(&[]).unwrap();
+        let nir::Term::Function { parameters, .. } = signature else {
+            panic!("signature")
+        };
+        parameters[index].ty.clone()
+    };
+    for (name, primitive) in [
+        ("concrete", nir::Primitive::Bool),
+        ("other", nir::Primitive::Char),
+    ] {
+        assert_eq!(
+            input("generic", 1)
+                .substitute(&[nir::Term::Primitive(primitive)])
+                .unwrap(),
+            input(name, 0)
+        );
+    }
+    assert_ne!(input("concrete", 0), input("other", 0));
+}

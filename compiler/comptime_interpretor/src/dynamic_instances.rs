@@ -21,6 +21,71 @@ impl Interpreter<'_> {
             .map(std::borrow::Cow::into_owned)
     }
 
+    pub(super) fn normal_value_callable_signature_view(
+        &self,
+        value: nir::CallableValueRef<'_>,
+        frames: &[Vec<nir::Sort>],
+        fuel: &mut usize,
+    ) -> Option<std::borrow::Cow<'_, Term>> {
+        let nir::CallableValueRef::Method(method) = value else {
+            let nir::CallableValueRef::Function {
+                declaration,
+                arguments,
+            } = value
+            else {
+                unreachable!()
+            };
+            return self.normal_callable_signature_view(declaration, arguments, frames, fuel);
+        };
+        *fuel = fuel.checked_sub(1)?;
+        for term in method.terms() {
+            nir::type_computations::charge_term(term, fuel).ok()?;
+        }
+        if self.graph.is_some() {
+            let contract = self
+                .iir_method(
+                    method.interface.declaration,
+                    &method.interface.arguments,
+                    &method.subject,
+                    method.member,
+                    &method.method_arguments,
+                )
+                .ok()??;
+            let signature = contract.signature.ordinary().ok()?;
+            if signature.is_comptime_callable() {
+                return None;
+            }
+            nir::type_computations::charge_term(signature, fuel).ok()?;
+            return Some(std::borrow::Cow::Borrowed(signature));
+        }
+        let (parameters, contract) = self
+            .method_contracts
+            .get(&(method.interface.declaration, method.member))?;
+        if method.method_arguments.len() != contract.type_parameters.len()
+            || method
+                .interface
+                .arguments
+                .len()
+                .checked_add(method.method_arguments.len())
+                .and_then(|n| n.checked_add(1))
+                != Some(parameters.len())
+            || contract.signature.is_comptime_callable()
+        {
+            return None;
+        }
+        *fuel = fuel.checked_sub(parameters.len())?;
+        let inputs: Vec<_> = method.terms().cloned().collect();
+        let parameters: Vec<_> = parameters.iter().map(|p| p.declaration).collect();
+        self.validate_function_inputs_in_scope(&parameters, &inputs, frames, fuel)
+            .ok()?;
+        let signature = self
+            .function_substitution_bounded(&parameters, &inputs, frames, fuel)
+            .ok()?
+            .instantiate_bounded(contract.signature.ordinary().ok()?, fuel)
+            .ok()?;
+        Some(std::borrow::Cow::Owned(signature))
+    }
+
     pub(super) fn normal_callable_signature_view(
         &self,
         declaration: DeclarationId,

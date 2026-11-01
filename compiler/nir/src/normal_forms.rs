@@ -931,6 +931,43 @@ impl Head {
         fuel: &mut usize,
         target: Option<crate::target::TargetData>,
     ) -> Result<(), ApplicationError> {
+        self.check_arguments_in_scope_with_callable_values_budgeted_in(
+            arguments,
+            is_tuple,
+            is_list,
+            nominal_fields,
+            declared,
+            |value, frames, fuel| match value {
+                crate::CallableValueRef::Function {
+                    declaration,
+                    arguments,
+                } => callable_signature(declaration, arguments, frames, fuel),
+                crate::CallableValueRef::Method(_) => None,
+            },
+            frames,
+            fuel,
+            target,
+        )
+    }
+
+    /// Validate function and interface-method values through the receiving
+    /// declaration world. Method origin is part of the query, never erased.
+    pub fn check_arguments_in_scope_with_callable_values_budgeted_in<'signature>(
+        &self,
+        arguments: &[Term],
+        is_tuple: impl Fn(DeclarationId) -> bool,
+        is_list: impl Fn(DeclarationId) -> bool,
+        nominal_fields: impl Fn(&Term, Option<u32>, &mut usize) -> Option<Vec<Term>>,
+        declared: impl Fn(&Term, &Term) -> bool,
+        callable_signature: impl Fn(
+            crate::CallableValueRef<'_>,
+            &[Vec<Sort>],
+            &mut usize,
+        ) -> Option<std::borrow::Cow<'signature, Term>>,
+        frames: &[Vec<Sort>],
+        fuel: &mut usize,
+        target: Option<crate::target::TargetData>,
+    ) -> Result<(), ApplicationError> {
         let mut remaining = *fuel;
         let result = (|| {
             if arguments.len() != self.parameters.len() {
@@ -1018,17 +1055,17 @@ impl Head {
                             | Term::ComptimeFunction(_)
                             | Term::NormalFormFunction(..)
                             | Term::UnsafeFunction(_),
-                            Term::FunctionValue {
-                                declaration,
-                                arguments,
-                            },
+                            Term::FunctionValue { .. } | Term::MethodValue(_),
                         ) => {
                             argument
                                 .check_scope(frames)
                                 .map_err(|_| ApplicationError::InputType { index })?;
-                            let signature =
-                                callable_signature(*declaration, arguments, frames, &mut remaining)
-                                    .ok_or(ApplicationError::InputType { index })?;
+                            let signature = callable_signature(
+                                crate::CallableValueRef::from_term(argument).unwrap(),
+                                frames,
+                                &mut remaining,
+                            )
+                            .ok_or(ApplicationError::InputType { index })?;
                             crate::type_computations::charge_term(&signature, &mut remaining)
                                 .map_err(|_| ApplicationError::InputType { index })?;
                             signature.check_scope(frames).is_ok() && signature.as_ref() == &expected

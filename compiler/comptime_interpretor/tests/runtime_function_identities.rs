@@ -1862,3 +1862,69 @@ fn frozen_method_inputs_retain_origin_and_recheck_receiving_contracts() {
         );
     }
 }
+
+#[test]
+fn method_normal_inputs_validate_origins_argument_partitions_and_contracts() {
+    let mut world = trait_package();
+    world.normal_forms.push(nir::normal_forms::Head {
+        declaration: id(100),
+        collector: None,
+        role: nir::normal_forms::Role::Opaque,
+        requirements: vec![],
+        parameters: vec![nir::normal_forms::Parameter {
+            declaration: id(101),
+            binding: nir::program::LocalId {
+                owner: 100,
+                index: 0,
+            },
+            kind: nir::normal_forms::Kind::Value,
+            ty: signature(Term::Primitive(Primitive::Bool)),
+        }],
+    });
+    let mut vm = Interpreter::for_comptime(&world, Budget::default()).unwrap();
+    let method = vm.invoke(id(1), vec![]).unwrap();
+    let argument = method.into_normal_term(&mut Default::default()).unwrap();
+    let nf = |argument| {
+        Value::Type(Term::NormalForm {
+            head: id(100),
+            sort: Sort::Type,
+            arguments: vec![argument],
+        })
+    };
+    let type_domain = Term::Primitive(Primitive::Type);
+    vm.validate_immutable_input(&nf(argument.clone()), &type_domain)
+        .unwrap();
+    let mut moved = argument.clone();
+    let Term::MethodValue(method) = &mut moved else {
+        panic!("method identity")
+    };
+    method
+        .interface
+        .arguments
+        .push(method.method_arguments.pop().unwrap());
+    assert!(
+        vm.validate_immutable_input(&nf(moved), &type_domain)
+            .is_err()
+    );
+    let mut wrong_owner = argument.clone();
+    let Term::MethodValue(method) = &mut wrong_owner else {
+        panic!("method identity")
+    };
+    method.interface.declaration = id(99);
+    assert!(
+        vm.validate_immutable_input(&nf(wrong_owner), &type_domain)
+            .is_err()
+    );
+    let mut changed = world.clone();
+    changed.traits[0].methods[0].requirements = vec![nir::program::TypePredicate::Bool(false)];
+    let mut changed = Interpreter::for_comptime(&changed, Budget::default()).unwrap();
+    assert_eq!(
+        changed
+            .validate_immutable_input(&nf(argument.clone()), &type_domain)
+            .unwrap_err()
+            .kind,
+        ErrorKind::TypeContractRejected
+    );
+    vm.validate_immutable_input(&nf(argument), &type_domain)
+        .unwrap();
+}

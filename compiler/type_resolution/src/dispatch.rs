@@ -196,6 +196,82 @@ impl<'a> DeclarationWorld<'a> {
                     )),
                 )
             };
+        self.specialized_callable_signature(
+            declaration,
+            parameters,
+            signature,
+            qualifiers,
+            arguments,
+            frames,
+            fuel,
+        )
+    }
+
+    pub fn callable_value_signature(
+        &self,
+        value: nir::CallableValueRef<'_>,
+        frames: &[Vec<nir::Sort>],
+        fuel: &mut usize,
+    ) -> Option<Term> {
+        match value {
+            nir::CallableValueRef::Function {
+                declaration,
+                arguments,
+            } => self.callable_signature(declaration, arguments, frames, fuel),
+            nir::CallableValueRef::Method(method) => {
+                *fuel = fuel.checked_sub(self.package.traits.len().saturating_add(1))?;
+                let interface = self
+                    .package
+                    .traits
+                    .iter()
+                    .find(|t| t.declaration == method.interface.declaration)?;
+                *fuel = fuel.checked_sub(interface.methods.len().saturating_add(1))?;
+                let contract = interface
+                    .methods
+                    .iter()
+                    .find(|m| m.declaration == method.member)?;
+                if method.interface.arguments.len() != interface.type_parameters.len()
+                    || method.method_arguments.len() != contract.type_parameters.len()
+                    || contract.signature.is_comptime_callable()
+                {
+                    return None;
+                }
+                for term in method.terms() {
+                    nir::type_computations::charge_term(term, fuel).ok()?;
+                }
+                *fuel = fuel.checked_sub(
+                    interface
+                        .type_parameters
+                        .len()
+                        .saturating_add(contract.type_parameters.len())
+                        .saturating_add(1),
+                )?;
+                let mut parameters = interface.parameters_with_self();
+                parameters.extend(&contract.type_parameters);
+                let inputs: Vec<_> = method.terms().cloned().collect();
+                self.specialized_callable_signature(
+                    method.member,
+                    &parameters,
+                    contract.signature.ordinary().ok()?,
+                    None,
+                    &inputs,
+                    frames,
+                    fuel,
+                )
+            }
+        }
+    }
+
+    fn specialized_callable_signature(
+        &self,
+        declaration: Id,
+        parameters: &[Id],
+        signature: &Term,
+        qualifiers: Option<(bool, bool)>,
+        arguments: &[Term],
+        frames: &[Vec<nir::Sort>],
+        fuel: &mut usize,
+    ) -> Option<Term> {
         let domains = self.input_domains(parameters, fuel).ok()?;
         let descriptor = nir::normal_forms::Head {
             declaration,
@@ -222,7 +298,7 @@ impl<'a> DeclarationWorld<'a> {
                 .collect(),
         };
         descriptor
-            .check_arguments_in_scope_with_callables_budgeted_in(
+            .check_arguments_in_scope_with_callable_values_budgeted_in(
                 arguments,
                 |id| {
                     self.normal_heads
@@ -243,7 +319,10 @@ impl<'a> DeclarationWorld<'a> {
                     )
                 },
                 |_, _| false,
-                |id, args, frames, fuel| self.callable_signature(id, args, frames, fuel),
+                |value, frames, fuel| {
+                    self.callable_value_signature(value, frames, fuel)
+                        .map(std::borrow::Cow::Owned)
+                },
                 frames,
                 fuel,
                 self.package.target,
