@@ -11370,3 +11370,41 @@ Validation from `/home/fin/luna`:
   math wrappers and native intrinsic cases.
 - Formatting check passed, exit 0 (`/tmp/luna-tools-rlnbi_v2/result.json`);
   `git diff --check` passed.
+
+### Explicit signatures for fixed compiler-operation bindings
+
+Compiler-operation constants previously had to omit their type annotation:
+TyPlaceholder was used as an operation-recognition condition. Supplying the
+correct comptime function type made the binding unusable. Resolution now follows
+operation identity through imports and constant aliases, collects explicit
+annotations along the chain, and checks each against a fixed signature contract.
+Incorrect arity, parameter domains, result types or execution phases are rejected
+at declaration checking even if no call uses the binding. Ordinary non-operation
+constants still use their normal checking path; cyclic signatures are rejected.
+
+The meta binding layer now spells out signatures for 22 fixed operations covering
+Integer division/remainder, fixed Object operations and struct/enum/newtype
+reflection. List result types retain the registered opaque head, including nested
+lists; annotations cannot substitute another similarly shaped head. Invocation
+still uses the existing operation-specific domain and phase checks and evaluates
+ordinary inputs once in source order.
+
+This is signature validation at the existing operation binding boundary. It does
+not yet materialize these bindings as first-class callable values. Dependent or
+polymorphic operations and shared runtime/comptime text operations still require
+proper callable contracts; a monomorphic annotation cannot specialize an
+otherwise generic operation. Their existing unannotated bindings remain explicit
+implementation debt rather than a new language rule.
+
+Validation from `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 900 -- test -p luna
+  --test compiler_operation_bindings --test comptime_iir_bytecode`: passed,
+  exit 0 (`/tmp/luna-tools-07jgo8c_/result.json`). Cases include imported aliases,
+  wrong unused signatures, phase and value-escape rejection, exact NF result
+  identity, and single ordered evaluation of arguments.
+- `python3 -B development/library_check.py --timeout 900 --stage sysroot-meta
+  --stage sysroot-meta-object --stage sysroot-newtype-builder
+  --stage sysroot-enum-builder`: all selected stages passed, exit 0
+  (`/tmp/luna-library-yma9sdpl/summary.json`), using real public sysroot APIs.
+- Workspace formatting passed (`/tmp/luna-tools-vcb_i3cy/result.json`);
+  `git diff --check` passed.

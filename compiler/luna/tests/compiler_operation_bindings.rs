@@ -118,3 +118,106 @@ fn ordinary_callable_parameters_shadow_operation_bindings() {
     }
     assert!(compile(&source).unwrap_err().contains("excessively deep"));
 }
+
+#[test]
+fn typed_operation_bindings_check_imported_aliases_and_keep_evaluation_order() {
+    let package = compile(
+        "mod operations {
+            pub const divide: comptime fn(Integer, Integer) -> Integer = .comptime_integer_div_trunc'builtin;
+        }
+        use operations.divide;
+        typealias Count = Integer;
+        const alias: comptime fn(Count, Count) -> Count = divide;
+        const unannotated = alias;
+        struct Trace { value: Integer }
+        impl Trace {
+            comptime fn input(self, digit: Integer) -> Integer {
+                self.value = self.value * 10 + digit;
+                digit
+            }
+        }
+        comptime fn run() -> bool {
+            let trace = Trace { value: 0 };
+            let result = unannotated(trace.input(8), trace.input(2));
+            result == 4 and trace.value == 82
+        }"
+    ).unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn typed_operation_bindings_reject_wrong_signatures_even_without_calls() {
+    for signature in [
+        "fn(Integer, Integer) -> Integer",
+        "comptime fn(Integer) -> Integer",
+        "comptime fn(bool, Integer) -> Integer",
+        "comptime fn(Integer, Integer) -> bool",
+        "comptime fn(comptime Integer, Integer) -> Integer",
+    ] {
+        for initializer in [".comptime_integer_div_trunc'builtin", "original"] {
+            let source = format!(
+                "const original = .comptime_integer_div_trunc'builtin; const wrong: {signature} = {initializer};"
+            );
+            let error = compile(&source).unwrap_err();
+            assert!(error.contains("signature mismatch"), "{source}: {error}");
+        }
+    }
+    let error =
+        compile("const generic: comptime fn(List<bool>) -> Integer = .list_length'builtin;")
+            .unwrap_err();
+    assert!(error.contains("signature contract"), "{error}");
+}
+
+#[test]
+fn typed_operation_bindings_preserve_phase_and_value_escape_checks() {
+    for (body, diagnostic) in [
+        (
+            "fn bad() -> Integer { divide(8, 2) }",
+            "requires comptime invocation",
+        ),
+        (
+            "comptime fn bad() { let escaped = divide; }",
+            "requires a direct call",
+        ),
+    ] {
+        let source = format!(
+            "const divide: comptime fn(Integer, Integer) -> Integer = .comptime_integer_div_trunc'builtin; {body}"
+        );
+        let error = compile(&source).unwrap_err();
+        assert!(error.contains(diagnostic), "{error}");
+    }
+}
+
+#[test]
+fn typed_reflection_signatures_preserve_normal_form_identity() {
+    let package = compile(
+        "const fields: comptime fn(Type) -> List<Type> = .struct_field_types'builtin;
+        const Representation: comptime fn(Type) -> Type = .newtype_representation'builtin;
+        struct Record { flag: bool }
+        newtype Wrapper = bool;
+        comptime fn run() -> bool {
+            fields(Record)[0] == bool and Representation(Wrapper) == bool
+        }",
+    )
+    .unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    let error = compile(
+        "pure comptime fn Other<T> -> Type { T }
+        const wrong: comptime fn(Type) -> Other<Type> = .struct_field_types'builtin;",
+    )
+    .unwrap_err();
+    assert!(error.contains("signature mismatch"), "{error}");
+    let error = compile(
+        "const original: comptime fn(Type) -> List<Type> = .struct_field_types'builtin;
+        const wrong: comptime fn(Type) -> List<bool> = original;
+        const copied = wrong;",
+    )
+    .unwrap_err();
+    assert!(error.contains("signature mismatch"), "{error}");
+}

@@ -1,5 +1,6 @@
 //! Named bindings for compiler operations retain their checked call lowering.
 use super::*;
+mod signatures;
 
 fn operation(name: &str) -> bool {
     matches!(
@@ -167,6 +168,7 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<Option<hir::Symbol>, Error> {
         let mut visited = BTreeSet::new();
+        let mut annotations = Vec::new();
         loop {
             let Some(item) = self.package.item(owner) else {
                 return Ok(None);
@@ -175,7 +177,7 @@ impl Checker<'_, '_> {
                 return Ok(None);
             };
             if !matches!(annotation.kind, H::TyPlaceholder) {
-                return Ok(None);
+                annotations.push((owner, annotation));
             }
             if !visited.insert(owner) || visited.len() > 64 {
                 return Err(error(
@@ -188,7 +190,34 @@ impl Checker<'_, '_> {
                 .checked_sub(1)
                 .ok_or_else(|| error(span, "compiler operation binding budget exhausted"))?;
             match &initializer.kind {
-                H::Builtin(name) if operation(name.as_str()) => return Ok(Some(*name)),
+                H::Builtin(name) if operation(name.as_str()) => {
+                    let name = *name;
+                    if !annotations.is_empty() {
+                        let expected = signatures::fixed(name.as_str(), self.protocols.meta_list)
+                            .map_err(|message| error(span, message))?
+                            .ok_or_else(|| error(span, "typed compiler operation requires a supported callable signature contract"))?;
+                        for (owner, annotation) in annotations {
+                            if !self.active_signatures.insert(owner) {
+                                return Err(error(
+                                    annotation.span,
+                                    "cyclic compiler operation signature",
+                                ));
+                            }
+                            let actual = self.type_expr(annotation);
+                            self.active_signatures.remove(&owner);
+                            let actual = actual?;
+                            if actual != expected {
+                                return Err(error(
+                                    annotation.span,
+                                    format!(
+                                        "compiler operation signature mismatch: expected {expected}, found {actual}"
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                    return Ok(Some(name));
+                }
                 H::ResolvedDef { def_id, .. } => {
                     let Some(next) = self.package.definition_owner(*def_id) else {
                         return Ok(None);
