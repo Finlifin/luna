@@ -1,7 +1,7 @@
 //! Type views use only compiler-selected associated values. No implementation
 //! search, default substitution or normal-form head evaluation occurs here.
 use super::*;
-type Values<'a> = HashMap<(InterfaceInstance, Term, DeclarationId), &'a Expr>;
+type Values<'a> = associated_catalog::Catalog<'a>;
 
 impl Interpreter<'_> {
     pub(super) fn selected_type_view(
@@ -381,7 +381,7 @@ mod tests {
     #[test]
     fn callable_value_inputs_resolve_selected_types_without_changing_identity() {
         let selected = value(Term::Primitive(Primitive::Bool));
-        let values = HashMap::from([(key(2), &selected)]);
+        let values = Values::from([(key(2), &selected)]);
         for input in [
             Term::FunctionValue {
                 declaration: id(10),
@@ -405,7 +405,7 @@ mod tests {
             };
             assert_eq!(view(&input, &values).unwrap(), expected);
             assert_eq!(
-                view(&input, &HashMap::new()).unwrap_err(),
+                view(&input, &Values::default()).unwrap_err(),
                 ErrorKind::UnmaterializedDispatch
             );
         }
@@ -424,11 +424,11 @@ mod tests {
             },
         ] {
             assert_eq!(
-                normalize(&input, &HashMap::new(), &mut 3, 0).unwrap_err(),
+                normalize(&input, &Values::default(), &mut 3, 0).unwrap_err(),
                 ErrorKind::StepsExhausted
             );
             assert_eq!(
-                normalize(&input, &HashMap::new(), &mut 200, 0).unwrap(),
+                normalize(&input, &Values::default(), &mut 200, 0).unwrap(),
                 input
             );
         }
@@ -467,7 +467,7 @@ mod tests {
     fn nested_selected_views_keep_opaque_heads_and_function_sorts() {
         let bool_type = Term::Primitive(Primitive::Bool);
         let selected = value(bool_type.clone());
-        let values = HashMap::from([(key(2), &selected)]);
+        let values = Values::from([(key(2), &selected)]);
         let signature = Term::Function {
             parameters: vec![nir::Parameter {
                 sort: nir::Sort::Runtime,
@@ -501,13 +501,13 @@ mod tests {
     #[test]
     fn selected_views_reject_missing_wrong_sort_and_cyclic_entries() {
         assert_eq!(
-            view(&projection(2), &HashMap::new()).unwrap_err(),
+            view(&projection(2), &Values::default()).unwrap_err(),
             ErrorKind::UnmaterializedDispatch
         );
         let mut invalid = value(Term::Primitive(Primitive::Bool));
         invalid.ty = Term::Primitive(Primitive::Bool);
         assert_eq!(
-            view(&projection(2), &HashMap::from([(key(2), &invalid)])).unwrap_err(),
+            view(&projection(2), &Values::from([(key(2), &invalid)])).unwrap_err(),
             ErrorKind::Type
         );
         std::thread::Builder::new()
@@ -516,12 +516,12 @@ mod tests {
                 let a = value(projection(3));
                 let b = value(projection(2));
                 assert_eq!(
-                    view(&projection(2), &HashMap::from([(key(2), &a), (key(3), &b)])).unwrap_err(),
+                    view(&projection(2), &Values::from([(key(2), &a), (key(3), &b)])).unwrap_err(),
                     ErrorKind::DepthExhausted
                 );
                 let good = value(Term::Primitive(Primitive::Bool));
                 assert_eq!(
-                    view(&projection(2), &HashMap::from([(key(2), &good)])).unwrap(),
+                    view(&projection(2), &Values::from([(key(2), &good)])).unwrap(),
                     Term::Primitive(Primitive::Bool)
                 );
             })
@@ -535,7 +535,7 @@ mod tests {
         let boolean = Term::Primitive(Primitive::Bool);
         let character = Term::Primitive(Primitive::Char);
         let selected = value(boolean.clone());
-        let values = HashMap::from([(key(2), &selected)]);
+        let values = Values::from([(key(2), &selected)]);
         let input = P::And(vec![
             P::Equal(projection(2), boolean.clone()),
             P::Not(Box::new(P::Equal(projection(2), character.clone()))),
@@ -558,7 +558,7 @@ mod tests {
     fn nominal_views_preserve_declaration_and_argument_identity() {
         let boolean = Term::Primitive(Primitive::Bool);
         let selected = value(boolean.clone());
-        let values = HashMap::from([(key(2), &selected)]);
+        let values = Values::from([(key(2), &selected)]);
         let projected = Term::Nominal {
             declaration: id(20),
             arguments: vec![projection(2)],
@@ -601,13 +601,13 @@ mod tests {
         let character = Term::Primitive(Primitive::Char);
         let label = value(boolean.clone());
         let success = value(Term::error_result(vec![character.clone()], boolean.clone()));
-        let values = HashMap::from([(key(2), &label), (key(3), &success)]);
+        let values = Values::from([(key(2), &label), (key(3), &success)]);
         let input = Term::error_result(vec![projection(2), boolean.clone()], projection(3));
         let expected = Term::error_result(vec![boolean.clone(), character], boolean);
         assert_eq!(view(&input, &values).unwrap(), expected);
         assert!(same(&input, &expected, &values));
         assert_eq!(
-            view(&input, &HashMap::new()).unwrap_err(),
+            view(&input, &Values::default()).unwrap_err(),
             ErrorKind::UnmaterializedDispatch
         );
         assert_eq!(
@@ -622,7 +622,7 @@ mod tests {
         let character = Term::Primitive(Primitive::Char);
         let inner_type = Term::error_result(vec![character.clone()], boolean.clone());
         let selected = value(inner_type.clone());
-        let values = HashMap::from([(key(2), &selected)]);
+        let values = Values::from([(key(2), &selected)]);
         let inner = Term::ErrorValue {
             ty: Box::new(inner_type.clone()),
             label: Some(Box::new(character.clone())),
@@ -644,7 +644,7 @@ mod tests {
         assert_eq!(view(&input, &values).unwrap(), expected);
         let wrong = value(boolean);
         assert_eq!(
-            view(&input, &HashMap::from([(key(2), &wrong)])).unwrap_err(),
+            view(&input, &Values::from([(key(2), &wrong)])).unwrap_err(),
             ErrorKind::Type
         );
     }

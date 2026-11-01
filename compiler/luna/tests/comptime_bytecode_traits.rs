@@ -450,4 +450,127 @@ fn cached_associated_code_creates_independent_stateful_closure_values() {
             }
         }
     }
+    let package = std::sync::Arc::new(package);
+    assert!(
+        package
+            .dispatch_instances
+            .iter()
+            .any(|instance| !instance.associated_initializers.is_empty())
+    );
+    let mut session = comptime_interpretor::CodeSession::new(package.clone());
+    for iteration in 0..3 {
+        let mut budget = Budget::default();
+        let mut vm =
+            Interpreter::for_comptime_in_session(&package, &mut session, &mut budget).unwrap();
+        if iteration > 0 {
+            assert_eq!(Budget::default().steps - budget.steps, 1);
+        }
+        assert_eq!(
+            vm.with_code_session(&mut session, |vm| vm.invoke(roots[0].declaration, vec![]))
+                .unwrap(),
+            Value::Bool(true)
+        );
+    }
+    let mut reordered = package.as_ref().clone();
+    reordered.dispatch_instances.reverse();
+    for instance in &mut reordered.dispatch_instances {
+        instance.associated_initializers.reverse();
+    }
+    let mut vm =
+        Interpreter::for_comptime_in_session(&reordered, &mut session, &mut Budget::default())
+            .unwrap();
+    assert_eq!(
+        vm.invoke(roots[0].declaration, vec![]).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn source_sessions_share_dispatch_world_but_recheck_each_invocation() {
+    use comptime_interpretor::CodeSession;
+    use std::sync::Arc;
+    let mut package = support::compile(
+        "pure comptime trait Flag {
+            assoc enabled:bool=true;
+            comptime fn invert(value:bool)->bool;
+        }
+        comptime impl Flag for bool {
+            comptime fn invert(value:bool)->bool {not value}
+        }
+        comptime fn run(value:bool)->bool where requires value {
+            bool.as(Flag).enabled and not bool.as(Flag).invert(value)
+        }",
+    );
+    let root = support::id(&package, "run");
+    package.dispatch_instances = elaboration::materialization::dispatch_instances_for_invocation(
+        &package,
+        &[iir::InstanceKey {
+            declaration: root,
+            arguments: vec![].into(),
+        }],
+        Default::default(),
+    )
+    .unwrap();
+    assert!(!package.dispatch_instances.is_empty());
+    let source = Arc::new(package);
+    let mut probe = CodeSession::new(source.clone());
+    let mut cold = Budget::default();
+    Interpreter::for_comptime_in_session(&source, &mut probe, &mut cold).unwrap();
+    let cost = Budget::default().steps - cold.steps;
+    assert!(cost > 1);
+    let mut session = CodeSession::new(source.clone());
+    let mut insufficient = Budget {
+        steps: cost - 1,
+        ..Budget::default()
+    };
+    assert!(
+        Interpreter::for_comptime_in_session(&source, &mut session, &mut insufficient).is_err()
+    );
+    assert!(
+        Interpreter::for_comptime_in_session(
+            &source,
+            &mut session,
+            &mut Budget {
+                steps: 1,
+                ..Budget::default()
+            },
+        )
+        .is_err()
+    );
+    for (iteration, value) in [true, false, true].into_iter().enumerate() {
+        let mut budget = Budget::default();
+        let mut vm =
+            Interpreter::for_comptime_in_session(&source, &mut session, &mut budget).unwrap();
+        if iteration > 0 {
+            assert_eq!(Budget::default().steps - budget.steps, 1);
+        }
+        let result =
+            vm.with_code_session(&mut session, |vm| vm.invoke(root, vec![Value::Bool(value)]));
+        if value {
+            assert_eq!(result.unwrap(), Value::Bool(true));
+        } else {
+            assert_eq!(result.unwrap_err().kind, ErrorKind::ProgramContractRejected);
+        }
+    }
+    // Identical declaration IDs do not permit sharing positional evidence.
+    let mut changed = source.as_ref().clone();
+    changed.functions.reverse();
+    changed.dispatch_instances.reverse();
+    let mut budget = Budget::default();
+    let mut vm = Interpreter::for_comptime_in_session(&changed, &mut session, &mut budget).unwrap();
+    assert!(Budget::default().steps - budget.steps > 1);
+    assert_eq!(
+        vm.invoke(root, vec![Value::Bool(true)]).unwrap(),
+        Value::Bool(true)
+    );
+    let mut tiny = Budget {
+        steps: 1,
+        ..Budget::default()
+    };
+    let mut vm = Interpreter::for_comptime_in_session(&source, &mut session, &mut tiny).unwrap();
+    assert_eq!(tiny.steps, 0);
+    assert_eq!(
+        vm.invoke(root, vec![Value::Bool(true)]).unwrap_err().kind,
+        ErrorKind::StepsExhausted
+    );
 }

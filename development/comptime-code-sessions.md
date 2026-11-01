@@ -48,10 +48,10 @@ The checks passed: 38 runtime identity tests and 18 driver memory tests
 
 ## Remaining work
 
-Trait evidence is still rebuilt; source function, runtime-identity
-and effect declaration indexes are shared.
-This is not yet a
-shared VM world, persistent disk cache, or a suspended elaboration session.
+Source declaration evidence and dispatch indexes are shared for exact snapshots
+prepared without caller assumptions. Additional assumptions still require fresh
+world preparation. This is not a persistent disk cache or a suspended elaboration
+session.
 Input-dependent generated packages still need their own explicit immutable
 lifetime. Graph sessions now retain immutable instance bodies, but memoization's
 per-input graph preparation now retains the most recent Type specialization, as described below.
@@ -59,6 +59,9 @@ A generic body whose parameter telescope depends on ordinary invocation values
 can still require a fresh per-call body after declaration specialization.
 
 ## Source snapshot phase evidence
+
+This phase-only stage was subsequently extended by the complete source declaration
+environment described below.
 
 Source indexes now retain their exact owning package and certify successful
 comptime preparation, including the full phase traversal. Warm source-session
@@ -80,6 +83,36 @@ Verification from `/home/fin/luna`:
 - `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib code_session`: three passed (`/tmp/luna-tools-8bps5xms/result.json`). Covers invalid snapshot isolation, failed publication, budget exhaustion, fresh VM state and recovery. An initial fixture used the wrong Rust enum import; corrected before this passing run.
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_memory --test execution memoized_`: fifteen passed (`/tmp/luna-tools-aod73lqn/result.json`).
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_memory`: twenty passed (`/tmp/luna-tools-1iawix2l/result.json`), including repeated non-Type execution and generic ordinary-input isolation.
+
+## Shared source declaration environment
+
+Source sessions now retain the fully checked implementation relationships and
+method dispatch maps, alongside positional indexes for associated values and
+associated initializer code. The latter borrow expressions from the exact package
+through shared positions; they neither clone expression trees nor retain values
+produced by running initializers. Cold and warm paths use a single fresh-state
+constructor so callbacks, active initializer guards, frames, cleanup, generated
+definitions, events and mutable environments cannot leak between invocations.
+
+Only successful construction without caller premises publishes this environment.
+Warm construction charges one bookkeeping step and shares the immutable tables.
+An invocation with additional premises still prepares and checks its own trait
+world; an unrelated package cannot use the indexes, even if IDs match. Failed
+preparation remains unpublished. Declaration evidence does not replace current
+input, method-contract or result admission. Runtime/IIR preparation keeps its
+existing path, and this change does not implement elaboration suspension.
+
+The reduction to constant warm preparation work is structural and covered by
+budget checks; no wall-clock benchmark is claimed.
+
+Verification from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor`: 590 passed (`/tmp/luna-tools-jyzpjm7i/result.json`). Initial compilation exposed test fixtures still constructing raw maps; they now construct the catalog without changing their semantic assertions.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_traits --test comptime_memory --test staged_invocation_reuse`: 33 passed (`/tmp/luna-tools-6lnwaaff/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode_traits`: nine passed after extending stateful associated initializer coverage across fresh sessions and reordered backing tables (`/tmp/luna-tools-r6i1b9zv/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_reflection_objects_feed_checked_definition_builders`: passed using the actual shipped sysroot (`/tmp/luna-tools-uh6k56k5/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p luna --lib memoization`: two passed (`/tmp/luna-tools-4238y2dp/result.json`), including source admission of retained Type results.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`: passed (`/tmp/luna-tools-8wuqgtrr/result.json`); `git diff --check` passed.
 
 ## Generic declaration specialization
 

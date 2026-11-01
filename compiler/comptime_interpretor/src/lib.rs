@@ -818,11 +818,13 @@ macro_rules! value {
     };
 }
 
+mod associated_catalog;
 mod code_session;
 mod contextual_code;
 mod declaration_index;
 mod layout_catalog;
 mod list_values;
+mod source_state;
 pub use list_values::ListValues;
 mod method_catalog;
 pub use code_session::CodeSession;
@@ -902,9 +904,10 @@ pub struct Interpreter<'a> {
     method_contracts: method_catalog::Contracts<'a>,
     implemented_interfaces: Arc<HashMap<(InterfaceInstance, Term), DeclarationId>>,
     assumed_interfaces: HashSet<(InterfaceInstance, Term)>,
-    method_bodies: HashMap<(InterfaceInstance, Term, DeclarationId), (DeclarationId, Vec<Term>)>,
-    associated_values: HashMap<(InterfaceInstance, Term, DeclarationId), &'a Expr>,
-    associated_initializers: HashMap<(InterfaceInstance, Term, DeclarationId), &'a Expr>,
+    method_bodies:
+        Arc<HashMap<(InterfaceInstance, Term, DeclarationId), (DeclarationId, Vec<Term>)>>,
+    associated_values: associated_catalog::Catalog<'a>,
+    associated_initializers: associated_catalog::Catalog<'a>,
     active_associated_initializers: HashSet<(InterfaceInstance, Term, DeclarationId)>,
     instances: function_instances::Instances,
     functions: declaration_index::Functions<'a>,
@@ -963,6 +966,14 @@ impl<'a> Interpreter<'a> {
         mut budget: Budget,
         positions: Option<Arc<declaration_index::SourceIndexes>>,
     ) -> Result<Self, Error> {
+        // Only sessions without caller premises publish complete world indexes.
+        // A caller with extra premises still needs its own implication checks.
+        let positions = positions.filter(|index| std::ptr::eq(package, index.source.as_ref()));
+        if assumptions.is_empty() {
+            if let Some(index) = &positions {
+                return Self::from_source_indexes(package, budget, index.clone());
+            }
+        }
         invocation_budget::charge_world_tables(package, &mut budget)?;
         let functions = declaration_index::Functions::new(
             &package.functions,
@@ -1344,18 +1355,22 @@ impl<'a> Interpreter<'a> {
                 }
             }
         }
-        let mut associated_values = HashMap::new();
-        let mut associated_initializers = HashMap::new();
-        for instance in &package.dispatch_instances {
-            for (member, value) in &instance.associated {
+        let mut associated_values = associated_catalog::Catalog::source(package);
+        let mut associated_initializers = associated_catalog::Catalog::source(package);
+        for (dispatch, instance) in package.dispatch_instances.iter().enumerate() {
+            for (position, (member, _)) in instance.associated.iter().enumerate() {
                 if associated_values
-                    .insert(
+                    .insert_at(
                         (
                             instance.interface_instance(),
                             instance.subject.clone(),
                             *member,
                         ),
-                        value,
+                        associated_catalog::Position {
+                            dispatch,
+                            member: position,
+                            initializer: false,
+                        },
                     )
                     .is_some()
                 {
@@ -1364,8 +1379,8 @@ impl<'a> Interpreter<'a> {
             }
         }
 
-        for instance in &package.dispatch_instances {
-            for (member, initializer) in &instance.associated_initializers {
+        for (dispatch, instance) in package.dispatch_instances.iter().enumerate() {
+            for (position, (member, _)) in instance.associated_initializers.iter().enumerate() {
                 let key = (
                     instance.interface_instance(),
                     instance.subject.clone(),
@@ -1373,7 +1388,14 @@ impl<'a> Interpreter<'a> {
                 );
                 if associated_values.contains_key(&key)
                     || associated_initializers
-                        .insert(key, initializer.expression())
+                        .insert_at(
+                            key,
+                            associated_catalog::Position {
+                                dispatch,
+                                member: position,
+                                initializer: true,
+                            },
+                        )
                         .is_some()
                 {
                     return Err(invalid());
@@ -1800,88 +1822,31 @@ impl<'a> Interpreter<'a> {
                 kind: ErrorKind::StepsExhausted,
                 source: None,
             })?;
-        Ok(Self {
-            bytecode_invocations: 0,
-            bytecode_default_evaluations: 0,
-            bytecode_staged_inputs: 0,
-            bytecode_contextual_inputs: 0,
-            bytecode_input_preparations: 0,
-            bytecode_compilations: 0,
-            bytecode_compilation_steps: 0,
-            bytecode_cache: Default::default(),
-            borrowed_code_cache: Default::default(),
-            input_body_cache: Default::default(),
-            default_code_cache: Default::default(),
-            contextual_code_cache: Default::default(),
-            prepared_instance_cache: Default::default(),
-            declaration_world: Some(package),
-            effect_declarations,
-            effect_state: effects::State::default(),
-            effect_values: None,
-            graph: None,
-            target: package.target,
-            cleanup_schedule: None,
-            cleanup_scopes: HashMap::new(),
-            cleanup_sites: HashMap::new(),
-            cleanup_effect_context: HashMap::new(),
-            cleanup_frame: None,
-            cleanup_failed: false,
-            prepared_frames: vec![],
-            residual_temporaries: vec![],
-            pattern_binding_orders: BTreeMap::new(),
-            cleanup_context: vec![],
-            comptime_only: false,
-            bytecode_enabled: true,
-            abstract_type_parameters: BTreeSet::new(),
-            abstract_value_parameters: BTreeMap::new(),
-            struct_builder: None,
-            enum_builder: None,
-            type_solver: None,
-            pointer_copy: None,
-            method_parameters,
-            declaration_parameter_sorts,
-            declaration_parameter_domains,
-            method_contracts,
-            method_origins,
-            implemented_interfaces: Arc::new(worlds),
-            assumed_interfaces,
-            method_bodies,
-            associated_values,
-            associated_initializers,
-            active_associated_initializers: HashSet::new(),
-            instances: Default::default(),
-            functions,
-            runtime_function_identities,
-            graph_indexes: None,
-            normal_forms: declaration_index::NormalForms::new(
-                &package.normal_forms,
-                positions.as_ref().map(|index| index.normal_forms.clone()),
-                |head| head.declaration,
-            )?,
-            structs,
-            alias_contracts: declaration_index::Aliases::new(
-                &package.alias_contracts,
-                positions.as_ref().map(|index| index.aliases.clone()),
-                |contract| contract.declaration,
-            )?,
-            newtypes: declaration_index::Newtypes::new(
-                &package.newtypes,
-                positions.as_ref().map(|index| index.newtypes.clone()),
-                |definition| definition.declaration,
-            )?,
-            enums,
-            budget: Budget {
+        Self::from_source_state(
+            package,
+            Budget {
                 steps: remaining_steps,
-                // Bound native recursion independently of a caller-supplied
-                // budget: call frames include contracts and cleanup contexts.
-                // This guard must fire on the supported 2 MiB host stack.
-                depth: budget.depth.min(64),
+                depth: budget.depth,
             },
-            depth: 0,
-            invocation_depth: 0,
-            invocation_depth_limit: budget.depth,
-            events: Vec::new(),
-        })
+            positions,
+            source_state::Prepared {
+                effect_declarations,
+                method_parameters,
+                declaration_parameter_sorts,
+                declaration_parameter_domains,
+                method_contracts,
+                method_origins,
+                implemented_interfaces: Arc::new(worlds),
+                assumed_interfaces,
+                method_bodies: Arc::new(method_bodies),
+                associated_values,
+                associated_initializers,
+                functions,
+                runtime_function_identities,
+                structs,
+                enums,
+            },
+        )
     }
     /// A phase-checked entrypoint for concrete first-order comptime functions.
     /// Resource/effect verification remains the caller's separate obligation.
@@ -4482,7 +4447,7 @@ impl<'a> Interpreter<'a> {
             arguments: selected_arguments,
         };
         let key = (selected_interface, selected_subject, member);
-        let selected = *self
+        let selected = self
             .associated_values
             .get(&key)
             .or_else(|| {

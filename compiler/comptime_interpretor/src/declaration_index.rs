@@ -69,6 +69,11 @@ pub(super) struct SourceIndexes {
     // Published only after successful comptime preparation. Owning the exact
     // snapshot makes the phase-validation evidence immune to address reuse.
     pub(super) source: Arc<Package>,
+    pub(super) implementations: Arc<HashMap<(InterfaceInstance, Term), DeclarationId>>,
+    pub(super) methods:
+        Arc<HashMap<(InterfaceInstance, Term, DeclarationId), (DeclarationId, Vec<Term>)>>,
+    pub(super) associated: Arc<associated_catalog::Positions>,
+    pub(super) initializers: Arc<associated_catalog::Positions>,
     pub(super) method_contracts: Arc<method_catalog::Entries>,
     pub(super) normal_forms: Arc<BTreeMap<DeclarationId, usize>>,
     pub(super) newtypes: Arc<BTreeMap<DeclarationId, usize>>,

@@ -107,8 +107,8 @@ impl<'program> Interpreter<'program> {
     }
 
     /// Construct a fresh execution state using this snapshot's declaration index.
-    /// Successful phase validation belongs to the exact immutable snapshot;
-    /// trait and formation preparation still consume the current allowance.
+    /// Successful declaration validation belongs to the exact immutable
+    /// snapshot. Each VM still admits current inputs and executes independently.
     pub fn for_comptime_in_session(
         package: &'program Package,
         session: &mut CodeSession,
@@ -131,6 +131,10 @@ impl<'program> Interpreter<'program> {
         let indexes = session.indexes.get_or_insert_with(|| {
             Arc::new(declaration_index::SourceIndexes {
                 source: source.clone(),
+                implementations: vm.implemented_interfaces.clone(),
+                methods: vm.method_bodies.clone(),
+                associated: vm.associated_values.positions.clone(),
+                initializers: vm.associated_initializers.positions.clone(),
                 method_contracts: vm.method_contracts.entries.clone(),
                 normal_forms: vm.normal_forms.positions.clone(),
                 newtypes: vm.newtypes.positions.clone(),
@@ -288,6 +292,26 @@ mod tests {
         assert!(recovered.events().is_empty());
         assert!(Arc::ptr_eq(&evidence, session.indexes.as_ref().unwrap()));
         assert!(Arc::ptr_eq(&source, &evidence.source));
+        let premise = nir::program::TraitRequirement {
+            interface: DeclarationId {
+                package: 1,
+                local: 999,
+            },
+            interface_arguments: vec![],
+            subject: Term::Primitive(Primitive::Bool),
+        };
+        assert_eq!(
+            Interpreter::for_comptime_with_index(
+                &source,
+                &[premise],
+                Budget::default(),
+                Some(evidence),
+            )
+            .err()
+            .unwrap()
+            .kind,
+            ErrorKind::InvalidCallPlan,
+        );
     }
 
     #[test]
