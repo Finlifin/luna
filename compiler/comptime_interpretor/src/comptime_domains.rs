@@ -1,6 +1,19 @@
 //! Recheck dependent storage domains after invocation inputs are substituted.
 use super::*;
 
+fn charge_layout_work(fuel: &mut usize, count: usize) -> Option<()> {
+    match fuel.checked_sub(count) {
+        Some(left) => {
+            *fuel = left;
+            Some(())
+        }
+        None => {
+            *fuel = 0;
+            None
+        }
+    }
+}
+
 impl Interpreter<'_> {
     pub(super) fn check_comptime_domain(
         &mut self,
@@ -19,33 +32,23 @@ impl Interpreter<'_> {
                 &|ty, fuel| {
                     let fields: Vec<&Term> = match ty {
                         Term::Nominal { .. } => {
-                            let mut definition = None;
-                            for instance in &graph.nominals {
-                                *fuel = fuel.checked_sub(1)?;
-                                nir::type_computations::charge_term(&instance.ty, fuel)
-                                    .map_err(|_| *fuel = 0)
-                                    .ok()?;
-                                if &instance.ty == ty {
-                                    definition = Some(&instance.definition);
-                                    break;
-                                }
-                            }
-                            let definition = definition?;
+                            charge_layout_work(fuel, 1)?;
+                            nir::type_computations::charge_term(ty, fuel)
+                                .map_err(|_| *fuel = 0)
+                                .ok()?;
+                            let index = self.graph_indexes.as_ref()?.nominals.get(ty)?;
+                            let definition = &graph.nominals[*index].definition;
                             let count = match definition {
                                 iir::NominalDefinition::Struct(def) => def.fields.len(),
-                                iir::NominalDefinition::Enum(def) => def
-                                    .variants
-                                    .iter()
-                                    .fold(0usize, |n, v| n.saturating_add(v.fields.len())),
+                                iir::NominalDefinition::Enum(def) => {
+                                    charge_layout_work(fuel, def.variants.len())?;
+                                    def.variants
+                                        .iter()
+                                        .fold(0usize, |n, v| n.saturating_add(v.fields.len()))
+                                }
                                 iir::NominalDefinition::Newtype(_) => 1,
                             };
-                            *fuel = match fuel.checked_sub(count) {
-                                Some(left) => left,
-                                None => {
-                                    *fuel = 0;
-                                    return None;
-                                }
-                            };
+                            charge_layout_work(fuel, count)?;
                             match definition {
                                 iir::NominalDefinition::Struct(def) => {
                                     def.fields.iter().map(|(_, ty)| ty).collect()
@@ -60,8 +63,10 @@ impl Interpreter<'_> {
                             *fuel = fuel.checked_sub(1)?;
                             let metadata = self.normal_forms.get(head)?;
                             if let Some(fields) = metadata.tuple_elements(ty) {
+                                charge_layout_work(fuel, fields.len())?;
                                 fields.iter().collect()
                             } else if let Some(element) = metadata.list_element(ty) {
+                                charge_layout_work(fuel, 1)?;
                                 vec![element]
                             } else {
                                 vec![]
@@ -339,5 +344,93 @@ mod tests {
         *cell.0.lock().unwrap() = Value::Unit;
         assert_eq!(rejected.unwrap_err().kind, ErrorKind::PhaseMismatch);
         vm.check_comptime_graph(&root, source, 0).unwrap();
+    }
+    #[test]
+    fn concrete_domain_lookup_does_not_rescan_unrelated_instances() {
+        let ty = |local| Term::Nominal {
+            declaration: DeclarationId { package: 91, local },
+            arguments: vec![],
+        };
+        let make = |count| iir::Package {
+            nominals: (1..=count)
+                .map(|local| iir::NominalInstance {
+                    ty: ty(local),
+                    definition: iir::NominalDefinition::Newtype(nir::newtypes::Newtype {
+                        declaration: DeclarationId { package: 91, local },
+                        name: "Flag".into(),
+                        type_parameters: vec![],
+                        parameter_types: vec![],
+                        capture_count: 0,
+                        requirements: vec![],
+                        capabilities: vec![],
+                        representation: Term::Primitive(Primitive::Bool),
+                    }),
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let mut costs = vec![];
+        for count in [1, 128] {
+            let graph = make(count);
+            let mut vm = Interpreter::from_iir_for_comptime(&graph, Budget::default()).unwrap();
+            let before = vm.remaining_steps();
+            vm.check_comptime_domain(&ty(count), SourceRange { start: 1, end: 2 })
+                .unwrap();
+            costs.push(before - vm.remaining_steps());
+        }
+        assert_eq!(
+            costs[0], costs[1],
+            "unrelated declarations affect every domain lookup"
+        );
+    }
+
+    #[test]
+    fn concrete_domain_checks_charge_empty_enum_alternatives() {
+        let declaration = DeclarationId {
+            package: 91,
+            local: 1,
+        };
+        let ty = Term::Nominal {
+            declaration,
+            arguments: vec![],
+        };
+        let make = |count| iir::Package {
+            nominals: vec![iir::NominalInstance {
+                ty: ty.clone(),
+                definition: iir::NominalDefinition::Enum(nir::program::Enum {
+                    declaration,
+                    name: "Choices".into(),
+                    is_intrinsic: false,
+                    type_parameters: vec![],
+                    parameter_types: vec![],
+                    requirements: vec![],
+                    capabilities: vec![],
+                    groups: vec![],
+                    encoding: None,
+                    symbol_encoding: None,
+                    variants: (0..count)
+                        .map(|i| nir::program::Variant {
+                            name: format!("case{i}"),
+                            shape: nir::program::VariantShape::Unit,
+                            fields: vec![],
+                        })
+                        .collect(),
+                }),
+            }],
+            ..Default::default()
+        };
+        let mut costs = vec![];
+        for count in [1, 128] {
+            let graph = make(count);
+            let mut vm = Interpreter::from_iir_for_comptime(&graph, Budget::default()).unwrap();
+            let before = vm.remaining_steps();
+            vm.check_comptime_domain(&ty, SourceRange { start: 1, end: 2 })
+                .unwrap();
+            costs.push(before - vm.remaining_steps());
+        }
+        assert!(
+            costs[1] >= costs[0] + 127,
+            "empty variants were scanned for free: {costs:?}"
+        );
     }
 }

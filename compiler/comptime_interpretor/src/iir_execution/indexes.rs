@@ -3,6 +3,7 @@
 use super::*;
 
 pub(crate) struct GraphIndexes {
+    pub(crate) nominals: HashMap<Term, usize>,
     pub(crate) callables: HashMap<DeclarationId, HashMap<Arc<[Term]>, usize>>,
     pub(crate) normal_forms: Arc<BTreeMap<DeclarationId, usize>>,
     pub(crate) implementations: Arc<HashMap<(InterfaceInstance, Term), DeclarationId>>,
@@ -25,6 +26,14 @@ impl GraphIndexes {
                     .or_default()
                     .insert(identity.key.arguments.clone(), index);
             }
+            let mut nominals = HashMap::new();
+            for (index, instance) in graph.nominals.iter().enumerate() {
+                fuel = fuel.checked_sub(1).ok_or(())?;
+                // Pay for copying and hashing the full instance key once. The
+                // immutable graph session shares this index across invocations.
+                nir::type_computations::charge_term(&instance.ty, &mut fuel).map_err(|_| ())?;
+                nominals.insert(instance.ty.clone(), index);
+            }
             let mut normal_forms = BTreeMap::new();
             for (index, head) in graph.normal_forms.iter().enumerate() {
                 fuel = fuel.checked_sub(1).ok_or(())?;
@@ -44,6 +53,7 @@ impl GraphIndexes {
                 );
             }
             Ok(Self {
+                nominals,
                 callables,
                 normal_forms: Arc::new(normal_forms),
                 implementations: Arc::new(implementations),

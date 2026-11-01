@@ -11130,3 +11130,27 @@ Validation from `/home/fin/luna`:
   (`/tmp/luna-tools-rmdzdiu2/result.json`).
 - Workspace formatting passed (`/tmp/luna-tools-wqpl3nm6/result.json`);
   `git diff --check` passed.
+
+
+### Indexed concrete storage admission and metered layout traversal
+
+Concrete IIR domain and formation admission now use a full-instance nominal
+index shared by the immutable graph session. Index construction charges key
+copy/hash work once; each lookup charges its own key traversal. No mutable
+inference state or admission outcome is cached. Storage checks charge empty enum
+alternatives and reference-field allocation before traversing/allocating them.
+
+Two regressions first failed against the old implementation: unrelated nominal
+instances increased every lookup's fuel cost, and empty enum alternatives were
+scanned without charge (`/tmp/luna-tools-2vcf8ygj/result.json`, exit 101). Both now
+pass. This establishes the lookup and budget contract, not a wall-time speedup
+measurement; other nominal consumers may still use linear searches.
+
+Validation from `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor`:
+  passed, exit 0 (`/tmp/luna-tools-aweo8gci/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test
+  comptime_iir_bytecode --test comptime_staged_values`: passed, exit 0
+  (`/tmp/luna-tools-59z1_j_5/result.json`).
+- Workspace formatting check passed, exit 0
+  (`/tmp/luna-tools-8yzfh7rq/result.json`); `git diff --check` passed.
