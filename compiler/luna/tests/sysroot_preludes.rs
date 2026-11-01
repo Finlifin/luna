@@ -419,8 +419,11 @@ fn shipped_type_factories_keep_identity_through_comptime_parameters() {
         const SEQUENCE=Apply(List, bool);
         const PRODUCT=Collect(Tuple);
         const LENGTH=forward<List<bool>,bool>([true, false]);
+        pure comptime fn EmptyTag<T, value:T> -> Type {bool}
+        comptime fn Empty(T:Type) -> Type {EmptyTag<T,()>}
+        const EMPTY=Empty(Tuple<>);
         fn run()->bool {
-            const same = SEQUENCE == List<bool> and PRODUCT == Tuple<bool,u8> and LENGTH == 2;
+            const same = SEQUENCE == List<bool> and PRODUCT == Tuple<bool,u8> and LENGTH == 2 and EMPTY == EmptyTag<Tuple<>,()>;
             same
         }
     ",

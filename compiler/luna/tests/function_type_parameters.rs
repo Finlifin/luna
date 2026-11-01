@@ -1386,6 +1386,12 @@ fn deferred_unit_inputs_remain_values_when_the_domain_becomes_type() {
                 panic!("the ordinary factory must retain its head");
             };
             assert_eq!(arguments, vec![Term::Primitive(P::Void), Term::Unit]);
+            let domain = Term::Tuple(vec![]);
+            let value = vm.invoke(build, vec![Value::Type(domain.clone())]).unwrap();
+            let Value::Type(Term::NormalForm { arguments, .. }) = value else {
+                panic!("empty tuple input must retain the factory head");
+            };
+            assert_eq!(arguments, vec![domain, Term::TupleValue(vec![])]);
         }
     }
 }

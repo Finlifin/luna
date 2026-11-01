@@ -277,6 +277,14 @@ impl Interpreter<'_> {
         expected: &Term,
         source: SourceRange,
     ) -> Result<Value, Error> {
+        // Match ordinary expression elaboration: unit syntax may construct an
+        // empty tuple value when the contextual domain supplies that layout.
+        if self
+            .tuple_input_elements(expected)
+            .is_some_and(|fields| fields.is_empty())
+        {
+            return Ok(Value::Tuple(Vec::new()));
+        }
         self.check_type_contract(
             &nir::program::TypePredicate::Equal(Term::Primitive(Primitive::Void), expected.clone()),
             source,

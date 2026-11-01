@@ -1648,3 +1648,44 @@ fn frozen_types(fields: Vec<Term>) -> Term {
         fields,
     }
 }
+
+#[test]
+fn contextual_unit_observes_empty_tuple_domains_without_producing_types() {
+    let package = container_package();
+    let registered = Term::NormalForm {
+        head: DeclarationId {
+            package: 12,
+            local: 6,
+        },
+        sort: nir::Sort::Type,
+        arguments: vec![frozen_types(vec![])],
+    };
+    for domain in [Term::Tuple(vec![]), registered] {
+        let body = container_body(domain.clone(), A::Unit { source: SOURCE });
+        let code = Arc::new(comptime_compiler::compile(&body, &mut 100_000).unwrap());
+        for linear in [false, true] {
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            let mut environment = Environment::new();
+            let value = if linear {
+                vm.execute_code(&code, &mut environment)
+            } else {
+                vm.eval(&body, &mut environment)
+            }
+            .unwrap();
+            let Flow::Value(Value::Type(Term::NormalForm { arguments, .. })) = value else {
+                panic!("the outer factory must retain its identity");
+            };
+            assert_eq!(arguments, vec![domain.clone(), Term::TupleValue(vec![])]);
+            for invalid in [
+                Term::Primitive(Primitive::Type),
+                Term::Tuple(vec![Term::Primitive(Primitive::Bool)]),
+            ] {
+                assert!(vm.normal_unit_value(&invalid, SOURCE).is_err());
+            }
+            assert_eq!(
+                vm.normal_unit_value(&domain, SOURCE).unwrap(),
+                Value::Tuple(vec![])
+            );
+        }
+    }
+}

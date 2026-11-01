@@ -10817,3 +10817,37 @@ completion of the entire audit's NF representation migration.
   shipped_type_factories_keep_identity_through_comptime_parameters`, exit 0
   (`/tmp/luna-tools-je8xuxoi/result.json`). List/Tuple callable inputs retain
   their normal-form identities through the shipped bindings and public methods.
+
+### Delayed unit inputs honor empty tuple value domains
+
+Ordinary expression elaboration accepts `()` in an empty tuple value domain,
+while deferred input preparation accepted only void. Reproduced this discrepancy
+with the same source factory invoked after its domain becomes an empty tuple:
+`deferred_unit_inputs_remain_values_when_the_domain_becomes_type` failed with
+TypeContractUnresolved (`/tmp/luna-tools-ju_8hwil/result.json`, exit 101).
+
+Shared unit preparation now observes the existing tuple layout view. An empty
+view produces `Value::Tuple([])`; otherwise the ordinary void-domain contract
+still applies. It never produces Type, erases an NF head or treats a nonempty
+tuple as unit. The outer factory freezes the empty value under its actual input
+domain, keeping registered Tuple identity distinct from the structural view.
+
+Added tree/linear checks for both structural and registered empty tuple domains,
+rejection of Type and nonempty tuples, and recovery in the same VM. Extended
+source coverage across positional and late named Type domains, and the real
+sysroot type-factory case with a delayed `Tuple<>` input.
+
+Evidence from `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor
+  --lib normal_type_tests`: all 19 passed, exit 0
+  (`/tmp/luna-tools-cmoq5x2q/result.json`).
+- Workspace formatting passed (`/tmp/luna-tools-qk4u2ms1/result.json`, exit 0);
+  `git diff --check` passed.
+- `development/check.py --timeout 900 -- test -p luna --test
+  function_type_parameters`: all 57 passed, exit 0
+  (`/tmp/luna-tools-p7wwtepv/result.json`).
+- Real sysroot acceptance passed: `development/check.py --timeout 900 -- test
+  -p luna --test sysroot_preludes
+  shipped_type_factories_keep_identity_through_comptime_parameters`, exit 0
+  (`/tmp/luna-tools-zts1eb6b/result.json`). It checks delayed `Tuple<>` input
+  identity against direct construction through the shipped binding.
