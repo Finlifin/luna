@@ -494,7 +494,7 @@ fn rejected_scope_extensions_are_atomic_and_keep_consumed_fuel() {
 }
 
 #[test]
-fn prepared_owned_roots_preserve_borrow_identity_across_invocations() {
+fn runtime_owned_roots_preserve_borrow_identity_across_invocations() {
     use comptime_interpretor::Storage;
     let pointer_ty = Term::Pointer(Box::new(bool_ty()));
     let mut package = package(expr(pointer_ty.clone(), K::AddressOf(Box::new(input()))));
@@ -528,8 +528,11 @@ fn prepared_owned_roots_preserve_borrow_identity_across_invocations() {
         K::ReadPointer(Box::new(expr(pointer_ty.clone(), K::Local(local())))),
     );
     package.functions.extend([writer, reader]);
+    for function in &mut package.functions {
+        function.phase = FunctionPhase::Runtime;
+    }
     let owner = Storage::new(Value::Bool(false));
-    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
     let pointer = vm
         .invoke_with_typed_values(id(0), vec![(bool_ty(), Value::Storage(owner.clone()))])
         .unwrap();
@@ -544,7 +547,7 @@ fn prepared_owned_roots_preserve_borrow_identity_across_invocations() {
         .unwrap();
     // A fresh interpreter sees the same invocation-owned storage; no copying
     // or implicit promotion of the weak pointer to an owner takes place.
-    let mut next = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let mut next = Interpreter::new(&package, Budget::default()).unwrap();
     next.invoke_with_typed_values(id(1), vec![(pointer_ty.clone(), pointer.clone())])
         .unwrap();
     assert_eq!(owner.read().unwrap(), Value::Bool(true));

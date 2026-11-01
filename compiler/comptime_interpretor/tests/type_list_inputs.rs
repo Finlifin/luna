@@ -1,4 +1,4 @@
-use comptime_interpretor::{Budget, Interpreter, Value};
+use comptime_interpretor::{Budget, Interpreter, Value, ValueReference};
 use nir::normal_forms::{Head, Kind, Parameter as Input};
 use nir::program::{
     Expr, ExprKind as K, Function, FunctionPhase, LocalId, NormalFormArgument, Package, SourceRange,
@@ -939,12 +939,7 @@ fn list_operations_reject_forged_output_domains_and_honor_vm_budget() {
     }
 }
 
-fn repeated_list_lengths(
-    element: P,
-    reads: usize,
-    storage: bool,
-    general: bool,
-) -> (Package, Term) {
+fn repeated_list_lengths(element: P, reads: usize, general: bool) -> (Package, Term) {
     let (mut package, list) = list_operation_package(element, false);
     let function = &mut package.functions[0];
     let source = function.body.source;
@@ -963,17 +958,6 @@ fn repeated_list_lengths(
         };
     }
     let mut statements = Vec::new();
-    if storage {
-        statements.push(Expr {
-            source,
-            ty: Term::Pointer(Box::new(list.clone())),
-            kind: K::AddressOf(Box::new(Expr {
-                source,
-                ty: list.clone(),
-                kind: K::Local(function.parameters[0]),
-            })),
-        });
-    }
     statements.extend(vec![read.clone(); reads - 1]);
     function.body = Expr {
         source,
@@ -991,7 +975,7 @@ fn repeated_list_lengths_charge_the_observation_not_every_element() {
     for element in [P::Bool, P::Type] {
         for storage in [false, true] {
             let run = |length, reads, general| {
-                let (package, list) = repeated_list_lengths(element, reads, storage, general);
+                let (package, list) = repeated_list_lengths(element, reads, general);
                 let argument = if element == P::Type {
                     ordinary_type_list(vec![ty(P::Bool); length])
                 } else {
@@ -999,6 +983,11 @@ fn repeated_list_lengths_charge_the_observation_not_every_element() {
                         ty: list,
                         values: vec![Value::Bool(true); length].into(),
                     }
+                };
+                let argument = if storage {
+                    Value::ComptimeReference(ValueReference::owned(argument))
+                } else {
+                    argument
                 };
                 let mut vm = Interpreter::for_comptime(
                     &package,
@@ -1022,8 +1011,8 @@ fn repeated_list_lengths_charge_the_observation_not_every_element() {
                 let compilation = vm.bytecode_compilation_steps() - compilation_before;
                 assert_eq!(compilation, 0);
                 assert_eq!(vm.bytecode_compilations(), 1);
-                // AddressOf still selects the tree carrier; its lowering decision is reused.
-                assert_eq!(vm.bytecode_invocations(), 2 * usize::from(!storage));
+                // Both ordinary values and value-reference receivers execute linearly.
+                assert_eq!(vm.bytecode_invocations(), 2);
                 before - vm.remaining_steps() - compilation
             };
             let small = run(1, 64, false) - run(1, 1, false);
@@ -1091,7 +1080,7 @@ fn list_length_observes_replacement_and_runs_general_operand_effects() {
     for element in [P::Bool, P::Type] {
         for storage in [false, true] {
             for general in [false, true] {
-                let (mut package, list) = repeated_list_lengths(element, 1, storage, false);
+                let (mut package, list) = repeated_list_lengths(element, 1, false);
                 let function = &mut package.functions[0];
                 let source = function.body.source;
                 let replacement = Expr {
@@ -1155,6 +1144,11 @@ fn list_length_observes_replacement_and_runs_general_operand_effects() {
                         values: vec![Value::Bool(true)].into(),
                     }
                 };
+                let argument = if storage {
+                    Value::ComptimeReference(ValueReference::owned(argument))
+                } else {
+                    argument
+                };
                 let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
                 assert_eq!(
                     vm.invoke(id(3), vec![argument]).unwrap(),
@@ -1168,7 +1162,7 @@ fn list_length_observes_replacement_and_runs_general_operand_effects() {
 #[test]
 fn local_list_length_still_charges_large_element_type_descriptions() {
     let run = |width, reads| {
-        let (mut package, _) = repeated_list_lengths(P::Bool, reads, false, false);
+        let (mut package, _) = repeated_list_lengths(P::Bool, reads, false);
         let element = Term::Tuple(vec![ty(P::Bool); width]);
         let list = Term::NormalForm {
             head: id(1),
@@ -1224,9 +1218,9 @@ fn local_list_length_still_charges_large_element_type_descriptions() {
     assert!(large > small + 200_000, "{small} -> {large}");
 }
 
-fn list_pointer_package(element: P) -> (Package, Term, Term) {
+fn list_receiver_package(element: P) -> (Package, Term, Term) {
     let (mut package, list) = fixed_list_read_package(element, 1, "0");
-    let pointer = Term::Pointer(Box::new(list.clone()));
+    let receiver = list.clone();
     let function = &mut package.functions[0];
     let source = function.body.source;
     let input = function.parameters[0];
@@ -1236,26 +1230,11 @@ fn list_pointer_package(element: P) -> (Package, Term, Term) {
             sort: Sort::Runtime,
             ty: list.clone(),
         }],
-        result: Box::new(pointer.clone()),
+        result: Box::new(receiver.clone()),
     };
-    function.body = node(
-        pointer.clone(),
-        K::AddressOf(Box::new(node(list.clone(), K::Local(input)))),
-    );
-    let mut reader = function.clone();
-    reader.declaration = id(4);
-    reader.signature = Term::Function {
-        parameters: vec![Parameter {
-            sort: Sort::Runtime,
-            ty: pointer.clone(),
-        }],
-        result: Box::new(list.clone()),
-    };
-    reader.body = node(
-        list.clone(),
-        K::ReadPointer(Box::new(node(pointer.clone(), K::Local(input)))),
-    );
-    let mut writer = reader.clone();
+    function.body = node(list.clone(), K::Local(input));
+    function.declaration = id(4);
+    let mut writer = function.clone();
     writer.declaration = id(5);
     let replacement = LocalId { owner: 3, index: 1 };
     writer.parameters.push(replacement);
@@ -1263,7 +1242,7 @@ fn list_pointer_package(element: P) -> (Package, Term, Term) {
         parameters: vec![
             Parameter {
                 sort: Sort::Runtime,
-                ty: pointer.clone(),
+                ty: receiver.clone(),
             },
             Parameter {
                 sort: Sort::ComptimeValue,
@@ -1274,20 +1253,33 @@ fn list_pointer_package(element: P) -> (Package, Term, Term) {
     };
     writer.body = node(
         ty(P::Void),
-        K::WritePointer {
-            pointer: Box::new(node(pointer.clone(), K::Local(input))),
+        K::Assign {
+            place: nir::program::Place {
+                root: input,
+                fields: vec![],
+            },
             value: Box::new(node(list.clone(), K::Local(replacement))),
         },
     );
-    package.functions.extend([reader, writer]);
-    (package, list, pointer)
+    package.functions.push(writer);
+    (package, list, receiver)
 }
 
 #[test]
-fn comptime_list_pointer_writes_are_atomic_under_budget_exhaustion() {
+fn comptime_list_receiver_writes_are_atomic_under_budget_exhaustion() {
     use comptime_interpretor::{ErrorKind, Storage};
-    for element in [P::Bool, P::Type] {
-        let (package, list, pointer_ty) = list_pointer_package(element);
+    for (element, tree) in [P::Bool, P::Type]
+        .into_iter()
+        .flat_map(|element| [false, true].map(move |tree| (element, tree)))
+    {
+        let (package, list, receiver_ty) = list_receiver_package(element);
+        let new_vm = |budget| {
+            if tree {
+                Interpreter::for_comptime_tree(&package, budget)
+            } else {
+                Interpreter::for_comptime(&package, budget)
+            }
+        };
         let value = |count| {
             if element == P::Type {
                 ordinary_type_list(vec![ty(P::Bool); count])
@@ -1304,25 +1296,18 @@ fn comptime_list_pointer_writes_are_atomic_under_budget_exhaustion() {
             let original = value(2);
             let replacement = value(8);
             let owner = Storage::new(original.clone());
-            let mut setup = Interpreter::for_comptime(&package, Budget::default()).unwrap();
-            let pointer = setup
-                .invoke_with_typed_values(
-                    id(3),
-                    vec![(list.clone(), Value::Storage(owner.clone()))],
-                )
-                .unwrap();
-            let result = Interpreter::for_comptime(
-                &package,
-                Budget {
-                    steps,
-                    ..Budget::default()
-                },
-            )
+            let mut setup = new_vm(Budget::default()).unwrap();
+            let receiver = Value::ComptimeReference(ValueReference::from_storage(owner.clone()));
+            let checkpoint = setup.checkpoint_owned_graph(&[receiver.clone()]).unwrap();
+            let result = new_vm(Budget {
+                steps,
+                ..Budget::default()
+            })
             .and_then(|mut vm| {
                 vm.invoke_with_typed_values(
                     id(5),
                     vec![
-                        (pointer_ty.clone(), pointer.clone()),
+                        (receiver_ty.clone(), receiver.clone()),
                         (list.clone(), replacement.clone()),
                     ],
                 )
@@ -1335,12 +1320,15 @@ fn comptime_list_pointer_writes_are_atomic_under_budget_exhaustion() {
                 Err(error) => {
                     failures += 1;
                     assert_eq!(error.kind, ErrorKind::StepsExhausted);
+                    let observed = owner.read().unwrap();
+                    assert!(observed == original || observed == replacement);
+                    checkpoint.restore().unwrap();
                     assert_eq!(owner.read().unwrap(), original);
                 }
                 other => panic!("unexpected write result: {other:?}"),
             }
             let snapshot = setup
-                .invoke_with_typed_values(id(4), vec![(pointer_ty.clone(), pointer)])
+                .invoke_with_typed_values(id(4), vec![(receiver_ty.clone(), receiver)])
                 .unwrap();
             assert_eq!(snapshot, owner.read().unwrap());
         }
@@ -1349,10 +1337,10 @@ fn comptime_list_pointer_writes_are_atomic_under_budget_exhaustion() {
 }
 
 #[test]
-fn list_pointer_access_does_not_grant_runtime_copy_permission() {
+fn list_receivers_do_not_grant_runtime_transport_permission() {
     use comptime_interpretor::{ErrorKind, Storage};
     for element in [P::Bool, P::Type] {
-        let (mut package, list, pointer_ty) = list_pointer_package(element);
+        let (mut package, list, receiver_ty) = list_receiver_package(element);
         let original = if element == P::Type {
             ordinary_type_list(vec![])
         } else {
@@ -1362,10 +1350,7 @@ fn list_pointer_access_does_not_grant_runtime_copy_permission() {
             }
         };
         let owner = Storage::new(original.clone());
-        let pointer = Interpreter::for_comptime(&package, Budget::default())
-            .unwrap()
-            .invoke_with_typed_values(id(3), vec![(list.clone(), Value::Storage(owner.clone()))])
-            .unwrap();
+        let receiver = Value::ComptimeReference(ValueReference::from_storage(owner.clone()));
         for function in &mut package.functions {
             function.phase = FunctionPhase::Runtime;
             if let Term::Function { parameters, .. } = &mut function.signature {
@@ -1376,15 +1361,15 @@ fn list_pointer_access_does_not_grant_runtime_copy_permission() {
         }
         let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
         assert_eq!(
-            vm.invoke_with_typed_values(id(4), vec![(pointer_ty.clone(), pointer.clone())])
+            vm.invoke_with_typed_values(id(4), vec![(receiver_ty.clone(), receiver.clone())])
                 .unwrap_err()
                 .kind,
-            ErrorKind::Unsupported
+            ErrorKind::PhaseMismatch
         );
         assert_eq!(
             vm.invoke_with_typed_values(
                 id(5),
-                vec![(pointer_ty, pointer), (list, original.clone())]
+                vec![(receiver_ty, original.clone()), (list, original.clone())]
             )
             .unwrap_err()
             .kind,
@@ -1396,18 +1381,16 @@ fn list_pointer_access_does_not_grant_runtime_copy_permission() {
 }
 
 #[test]
-fn list_pointer_rejects_wrong_element_and_identity_without_modifying_storage() {
+fn list_receiver_rejects_wrong_element_and_identity_without_modifying_storage() {
     use comptime_interpretor::{ErrorKind, Storage};
-    let (package, list, pointer_ty) = list_pointer_package(P::Bool);
+    let (package, list, receiver_ty) = list_receiver_package(P::Bool);
     let original = Value::List {
         ty: list.clone(),
         values: vec![Value::Bool(true)].into(),
     };
     let owner = Storage::new(original.clone());
     let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
-    let pointer = vm
-        .invoke_with_typed_values(id(3), vec![(list.clone(), Value::Storage(owner.clone()))])
-        .unwrap();
+    let receiver = Value::ComptimeReference(ValueReference::from_storage(owner.clone()));
     for invalid in [
         ordinary_type_list(vec![ty(P::Bool)]),
         Value::List {
@@ -1420,14 +1403,14 @@ fn list_pointer_rejects_wrong_element_and_identity_without_modifying_storage() {
         },
         Value::List {
             ty: list.clone(),
-            values: vec![pointer.clone()].into(),
+            values: vec![receiver.clone()].into(),
         },
     ] {
         assert_eq!(
             vm.invoke_with_typed_values(
                 id(5),
                 vec![
-                    (pointer_ty.clone(), pointer.clone()),
+                    (receiver_ty.clone(), receiver.clone()),
                     (list.clone(), invalid)
                 ]
             )
@@ -1437,7 +1420,7 @@ fn list_pointer_rejects_wrong_element_and_identity_without_modifying_storage() {
         );
         assert_eq!(owner.read().unwrap(), original);
         assert_eq!(
-            vm.invoke_with_typed_values(id(4), vec![(pointer_ty.clone(), pointer.clone())])
+            vm.invoke_with_typed_values(id(4), vec![(receiver_ty.clone(), receiver.clone())])
                 .unwrap(),
             original
         );
@@ -1445,15 +1428,15 @@ fn list_pointer_rejects_wrong_element_and_identity_without_modifying_storage() {
 }
 
 fn list_append_package(element: P, general: bool) -> (Package, Term, Term) {
-    let (mut package, list, pointer) = list_pointer_package(element);
-    let writer = &mut package.functions[2];
+    let (mut package, list, receiver) = list_receiver_package(element);
+    let writer = &mut package.functions[1];
     let source = writer.body.source;
     let node = |ty, kind| Expr { source, ty, kind };
     let Term::Function { parameters, .. } = &mut writer.signature else {
         unreachable!()
     };
     parameters[1].ty = ty(element);
-    let local = node(pointer.clone(), K::Local(writer.parameters[0]));
+    let local = node(receiver.clone(), K::Local(writer.parameters[0]));
     let suffix = node(
         list.clone(),
         K::TypeList(vec![node(ty(element), K::Local(writer.parameters[1]))]),
@@ -1471,26 +1454,36 @@ fn list_append_package(element: P, general: bool) -> (Package, Term, Term) {
     };
     writer.body = node(
         ty(P::Void),
-        K::WritePointer {
-            pointer: Box::new(local.clone()),
+        K::Assign {
+            place: nir::program::Place {
+                root: writer.parameters[0],
+                fields: vec![],
+            },
             value: Box::new(node(
                 list.clone(),
-                K::ListConcat(
-                    Box::new(node(list.clone(), K::ReadPointer(Box::new(local)))),
-                    Box::new(suffix),
-                ),
+                K::ListConcat(Box::new(local), Box::new(suffix)),
             )),
         },
     );
-    (package, list, pointer)
+    (package, list, receiver)
 }
 
 #[test]
 fn list_append_failure_rolls_back_and_success_preserves_snapshots() {
     use comptime_interpretor::{ErrorKind, Storage};
-    for element in [P::Bool, P::Type] {
+    for (element, tree) in [P::Bool, P::Type]
+        .into_iter()
+        .flat_map(|element| [false, true].map(move |tree| (element, tree)))
+    {
         for general in [false, true] {
-            let (package, list, pointer_ty) = list_append_package(element, general);
+            let (package, list, receiver_ty) = list_append_package(element, general);
+            let new_vm = |budget| {
+                if tree {
+                    Interpreter::for_comptime_tree(&package, budget)
+                } else {
+                    Interpreter::for_comptime(&package, budget)
+                }
+            };
             let original = if element == P::Type {
                 ordinary_type_list(vec![ty(P::Bool); 4])
             } else {
@@ -1529,28 +1522,22 @@ fn list_append_failure_rolls_back_and_success_preserves_snapshots() {
             let mut failures = 0;
             for steps in 1..600 {
                 let owner = Storage::new(original.clone());
-                let mut setup = Interpreter::for_comptime(&package, Budget::default()).unwrap();
-                let pointer = setup
-                    .invoke_with_typed_values(
-                        id(3),
-                        vec![(list.clone(), Value::Storage(owner.clone()))],
-                    )
-                    .unwrap();
+                let mut setup = new_vm(Budget::default()).unwrap();
+                let receiver =
+                    Value::ComptimeReference(ValueReference::from_storage(owner.clone()));
                 let snapshot = setup
-                    .invoke_with_typed_values(id(4), vec![(pointer_ty.clone(), pointer.clone())])
+                    .invoke_with_typed_values(id(4), vec![(receiver_ty.clone(), receiver.clone())])
                     .unwrap();
-                let result = Interpreter::for_comptime(
-                    &package,
-                    Budget {
-                        steps,
-                        ..Budget::default()
-                    },
-                )
+                let checkpoint = setup.checkpoint_owned_graph(&[receiver.clone()]).unwrap();
+                let result = new_vm(Budget {
+                    steps,
+                    ..Budget::default()
+                })
                 .and_then(|mut vm| {
                     vm.invoke_with_typed_values(
                         id(5),
                         vec![
-                            (pointer_ty.clone(), pointer.clone()),
+                            (receiver_ty.clone(), receiver.clone()),
                             (ty(element), item.clone()),
                         ],
                     )
@@ -1563,6 +1550,12 @@ fn list_append_failure_rolls_back_and_success_preserves_snapshots() {
                     Err(error) => {
                         failures += 1;
                         assert_eq!(error.kind, ErrorKind::StepsExhausted);
+                        // A return instruction can exhaust fuel after the write
+                        // committed. No partial list may escape; invocation-wide
+                        // rollback is the explicit caller checkpoint boundary.
+                        let observed = owner.read().unwrap();
+                        assert!(observed == original || observed == expected);
+                        checkpoint.restore().unwrap();
                         assert_eq!(owner.read().unwrap(), original);
                     }
                     other => panic!("unexpected result {other:?}"),
@@ -1577,7 +1570,7 @@ fn list_append_failure_rolls_back_and_success_preserves_snapshots() {
 #[test]
 fn list_append_representation_limit_preserves_old_storage_and_recovers() {
     use comptime_interpretor::{ErrorKind, Storage};
-    let (package, list, pointer_ty) = list_append_package(P::Type, false);
+    let (package, _list, receiver_ty) = list_append_package(P::Type, false);
     let overhead = ordinary_type_list(vec![]).immutable_copy_work().unwrap();
     let element_work = Value::Type(ty(P::Bool)).immutable_copy_work().unwrap();
     let capacity = (100_000 - overhead) / element_work;
@@ -1597,14 +1590,12 @@ fn list_append_representation_limit_preserves_old_storage_and_recovers() {
         },
     )
     .unwrap();
-    let pointer = vm
-        .invoke_with_typed_values(id(3), vec![(list.clone(), Value::Storage(owner.clone()))])
-        .unwrap();
+    let receiver = Value::ComptimeReference(ValueReference::from_storage(owner.clone()));
     assert_eq!(
         vm.invoke_with_typed_values(
             id(5),
             vec![
-                (pointer_ty.clone(), pointer.clone()),
+                (receiver_ty.clone(), receiver.clone()),
                 (ty(P::Type), Value::Type(ty(P::Char)))
             ]
         )
@@ -1614,7 +1605,7 @@ fn list_append_representation_limit_preserves_old_storage_and_recovers() {
     );
     assert_eq!(owner.read().unwrap(), original);
     assert_eq!(
-        vm.invoke_with_typed_values(id(4), vec![(pointer_ty, pointer)])
+        vm.invoke_with_typed_values(id(4), vec![(receiver_ty, receiver)])
             .unwrap(),
         original
     );

@@ -10637,3 +10637,42 @@ and representation-limit recovery). They fail with PhaseMismatch from the
 previously installed phase boundaries, not from the new Depth classification;
 their value-reference/runtime migration remains pending. The separate deep
 pattern-control test still needs its tree/linear execution contract audited.
+
+
+Migrate remaining pointer-based interpreter integration fixtures
+---------------------------------------------------------------
+
+The eight integration failures found during depth classification now exercise
+valid phase paths. The prepared weak-borrow identity test runs actual runtime
+functions/VMs and retains its lifetime, wrong-domain and checkpoint assertions.
+List receivers use internal ValueReference handles with ordinary list domains;
+read/write bodies use Local/Assign, and no source pointer factory remains.
+Repeated length tests require linear execution for both plain values and receiver
+handles, retaining size-independent per-read cost checks and large element-domain
+metadata charging.
+
+Write and append allowance sweeps run both interpreter engines. A call can finish
+its atomic write and then exhaust fuel on return, so the integration boundary
+checks storage is a complete old or new value before explicitly restoring the
+caller's owned-graph checkpoint on failure. This matches generator transaction
+ownership; no automatic rollback was added to ordinary invocations. Existing
+operation-local atomicity tests remain unchanged. Snapshot isolation, invalid
+list domains/elements, representation-limit rejection/recovery and runtime
+transport rejection remain covered.
+
+Evidence from `/home/fin/luna`:
+- Initial migrated suites: 19 + 26 passed, one append test exposed the post-write
+  return-budget distinction (`/tmp/luna-tools-n329s004/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor`:
+  all 596 tests passed (`/tmp/luna-tools-jcejx_r_/result.json`, exit 0).
+- After removing the redundant old factory fixture and adding explicit tree/linear
+  sweeps, `development/check.py --timeout 900 -- test -p comptime_interpretor
+  --test type_list_inputs --test abstract_values --no-fail-fast`: 27 + 19 passed,
+  exit 0 (`/tmp/luna-tools-9sfem0b8/result.json`). The expanded write sweep also
+  reaches the same post-write return boundary and uses explicit rollback.
+- Workspace formatting passed (`/tmp/luna-tools-j97aziow/result.json`); diff
+  checks passed. No process remains live.
+
+This is a fixture/coverage migration, not a new language feature or a claim that
+all comptime architecture and builtin package work is finished. Deep pattern
+execution and the other previously recorded execution failures remain open.
