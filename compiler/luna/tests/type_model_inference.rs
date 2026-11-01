@@ -154,3 +154,79 @@ fn value_indexed_opaque_heads_preserve_inferred_type_arguments() {
     .unwrap();
     assert!(found);
 }
+
+#[test]
+fn excluded_alternative_determines_the_call_input() {
+    let package = support::compile(
+        "fn accept(value: *T)->bool where T {true}
+        fn forward(value: A)->bool
+        where A, requires (A == *bool or A == **bool) and A != **bool
+        {
+            accept(value)
+        }",
+    );
+    assert_call_input(&package, nir::Term::Primitive(nir::Primitive::Bool));
+}
+
+#[test]
+fn branch_local_equalities_agree_on_one_call_input() {
+    let package = support::compile(
+        "fn accept(value: *T)->bool where T {true}
+        fn forward(value: A)->bool
+        where A, B, C,
+            requires (A == B and B == *bool) or (A == C and C == *bool)
+        {
+            accept(value)
+        }",
+    );
+    assert_call_input(&package, nir::Term::Primitive(nir::Primitive::Bool));
+}
+
+#[test]
+fn equally_shaped_alternatives_do_not_choose_an_arbitrary_input() {
+    for alternatives in ["A == *bool or A == **bool", "A == **bool or A == *bool"] {
+        let source = format!(
+            "fn accept(value: *T)->bool where T {{true}}
+            fn forward(value: A)->bool where A, requires {alternatives} {{
+                accept(value)
+            }}"
+        );
+        let error = support::compile_with_protocols(&source, &Default::default())
+            .expect_err("both branches have pointer shape but disagree on T");
+        assert!(
+            error.contains("type") || error.contains("inference"),
+            "{error}"
+        );
+        assert!(!error.contains("parsing failed"), "{error}");
+    }
+}
+
+fn assert_call_input(package: &nir::program::Package, expected: nir::Term) {
+    let accept = package
+        .functions
+        .iter()
+        .find(|f| f.name == "accept")
+        .unwrap()
+        .declaration;
+    let forward = package
+        .functions
+        .iter()
+        .find(|f| f.name == "forward")
+        .unwrap();
+    let mut found = false;
+    iir::visit::expressions(forward, &mut 10_000, |expr, _| {
+        if let nir::program::ExprKind::FunctionInstance {
+            declaration,
+            arguments,
+        } = &expr.kind
+        {
+            if *declaration == accept {
+                assert_eq!(arguments, &[expected.clone()]);
+                found = true;
+            }
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert!(found, "the generic call must retain its proven input");
+}

@@ -861,3 +861,25 @@ Validation from `/home/fin/luna`:
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`: four passed (`/tmp/luna-tools-r5s3szvc/result.json`).
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_type_factories_keep_identity_through_comptime_parameters`: passed (`/tmp/luna-tools-zypxapuu/result.json`).
 - Formatting check and `git diff --check` passed (`/tmp/luna-tools-wsq1h7qt/result.json`).
+
+## Source-level disjunctive Type input contracts
+
+The source acceptance suite now exercises more than nested equality aliases:
+excluding one of two pointer alternatives determines the input, and separate
+branches with local equality chains can establish one common input. Conversely,
+two viable pointer alternatives with different pointee types must not select an
+arbitrary input, regardless of source branch order. Positive tests inspect the
+retained function-instance argument rather than only compilation success.
+
+This is additional evidence for the existing frontend connection, not a new
+inference policy or a claim that general model search is complete. The explicit
+Type-input search API still proves each exported binding in its private problem
+context; closed model reification and available symbolic candidates bound its
+completeness. Regional shape matching separately proves equality before using
+an extracted structural view. Neither path grants arbitrary model assignments
+as regional facts.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`: seven passed (`/tmp/luna-tools-2hkg93a9/result.json`).
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: passed (`/tmp/luna-tools-8kf7rfmz/result.json`).
