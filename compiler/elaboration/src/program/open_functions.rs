@@ -2343,24 +2343,7 @@ impl Checker<'_, '_> {
                         sort: Sort::ComptimeValue,
                         ty,
                     }));
-                    // Abstract code has an arbitrary runtime result. Its pure
-                    // behavior assumption belongs only to this declaration-side
-                    // witness; each supplied body is checked again concretely.
-                    let mut abstract_inputs = BTreeMap::new();
-                    let mut fuel = usize::try_from(this.required_steps).unwrap_or(usize::MAX);
-                    let before = fuel;
-                    let observed = nir::visit::expression(&behavior, &mut fuel, |node, fuel| {
-                        if let K::Local(binding) = node.kind {
-                            if this.abstract_code_dependencies.contains_key(&binding) {
-                                nir::type_computations::charge_term(&node.ty, fuel)
-                                    .map_err(|failure| failure.to_string())?;
-                                abstract_inputs.insert(binding, node.ty.clone());
-                            }
-                        }
-                        Ok(())
-                    });
-                    this.required_steps -= (before - fuel) as u64;
-                    observed.map_err(|message| error(item.span, message))?;
+                    let abstract_inputs = this.abstract_code_inputs(&behavior, item.span)?;
                     parameters.extend(abstract_inputs.values().cloned().map(|ty| Parameter {
                         sort: Sort::Runtime,
                         ty,

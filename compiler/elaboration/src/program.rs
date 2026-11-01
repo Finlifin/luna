@@ -1303,10 +1303,10 @@ fn elaborate_candidate<'a, 'h>(
         checker.in_code_body = previous_code;
         checker.quote_holes = previous_holes;
         let value = value?;
-        if sig.modifiers.is_function_template {
+        if sig.modifiers.is_function_template && !sig.modifiers.is_pure {
             continue;
         }
-        output.functions.push(n::Function {
+        let mut function = n::Function {
             phase: if sig.modifiers.is_normal_form_head {
                 n::FunctionPhase::NormalForm
             } else if sig.modifiers.is_comptime {
@@ -1346,7 +1346,24 @@ fn elaborate_candidate<'a, 'h>(
                 .enumerate()
                 .filter_map(|(i, value)| value.clone().map(|value| (i, value)))
                 .collect(),
-        });
+        };
+        if sig.modifiers.is_function_template {
+            let inputs = checker.abstract_code_inputs(&function.body, item.span)?;
+            let Term::Function { parameters, .. } = &mut function.signature else {
+                unreachable!()
+            };
+            parameters.extend(inputs.values().cloned().map(|ty| Parameter {
+                sort: Sort::Runtime,
+                ty,
+            }));
+            function.parameters.extend(inputs.keys().copied());
+            function.inline = false;
+            function.defaults.clear();
+            function.name.push_str(" [template]");
+            checker.ordinary_behavior_functions.push(function);
+        } else {
+            output.functions.push(function);
+        }
     }
     let attributes = prepared_attributes;
     checker.expand_test_templates(&mut output)?;

@@ -2,6 +2,31 @@
 use super::*;
 
 impl Checker<'_, '_> {
+    /// Model abstract code results as runtime inputs only in analysis witnesses.
+    /// Concrete instances still supply and validate the actual code behavior.
+    pub(in crate::program) fn abstract_code_inputs(
+        &mut self,
+        body: &n::Expr,
+        span: Span,
+    ) -> Result<BTreeMap<n::LocalId, Term>, Error> {
+        let mut inputs = BTreeMap::new();
+        let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let before = fuel;
+        let observed = nir::visit::expression(body, &mut fuel, |node, fuel| {
+            if let K::Local(binding) = node.kind {
+                if self.abstract_code_dependencies.contains_key(&binding) {
+                    nir::type_computations::charge_term(&node.ty, fuel)
+                        .map_err(|failure| failure.to_string())?;
+                    inputs.insert(binding, node.ty.clone());
+                }
+            }
+            Ok(())
+        });
+        self.required_steps -= (before - fuel) as u64;
+        observed.map_err(|message| error(span, message))?;
+        Ok(inputs)
+    }
+
     pub(in crate::program) fn function_body(
         &mut self,
         owner: OwnerId,

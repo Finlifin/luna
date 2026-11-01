@@ -2982,3 +2982,36 @@ fn shared_template_staged_setup_retains_purity_checks() {
         .expect("unused shared setup must satisfy purity");
     assert!(failure.contains("P4 evidence"), "{failure}");
 }
+
+#[test]
+fn unused_pure_shared_templates_check_setup_without_becoming_runtime_functions() {
+    let source =
+        "template pure fn unused(value:bool,quote lambda body:<current:bool |- bool>)->bool {
+            let current=not value;~<body>
+        } fn run()->bool {true}";
+    let Artifact::Nir(package) = compile(source, Emit::Nir).unwrap() else {
+        panic!("expected NIR")
+    };
+    assert!(
+        !package
+            .functions
+            .iter()
+            .any(|function| function.name.contains("unused"))
+    );
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+    for operation in ["pointer.* = true;", "write(pointer);"] {
+        let source = format!(
+            "fn write(pointer:*bool) {{pointer.* = true;}}
+            template pure fn invalid(pointer:*bool,quote lambda body:<|-bool>)->bool {{
+                {operation} ~<body>
+            }}"
+        );
+        let failure = compile(&source, Emit::Nir)
+            .err()
+            .expect("unused pure template must validate setup effects");
+        assert!(failure.contains("P4 evidence"), "{failure}");
+    }
+}
