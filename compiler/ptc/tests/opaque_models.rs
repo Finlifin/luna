@@ -159,3 +159,178 @@ fn cyclic_opaque_equations_have_finite_interpretations_not_recursive_types() {
         );
     }
 }
+
+#[test]
+fn completed_value_arguments_keep_identity_in_symbolic_solutions() {
+    use std::sync::Arc;
+    let values = vec![
+        Term::BitVec(
+            comptime_runtime::bitvec::BitVec::from_words(9, &[0x155], &mut Default::default())
+                .unwrap(),
+        ),
+        Term::Unit,
+        Term::Bool(true),
+        Term::Char('🦀'),
+        Term::Integer(comptime_runtime::Integer::from_i128(123456789)),
+        Term::String(Arc::from("a\n\"🦀")),
+        Term::Symbol(Arc::from("payload")),
+    ];
+    for value in values {
+        let mut context = Context::default();
+        context.admit_congruence(id(100));
+        let apply = |ty| Term::NormalForm {
+            head: id(100),
+            sort: Sort::Type,
+            arguments: vec![ty, value.clone()],
+        };
+        let inputs = [id(0), id(1)];
+        let constraint = F::And(vec![
+            F::equal(var(0), apply(var(1))),
+            F::equal(var(1), var(9)),
+        ]);
+        let outcome =
+            context.search_type_inputs(&inputs, constraint.clone(), &mut Budget::default());
+        let TypeInputOutcome::Unique(solution) = outcome else {
+            panic!("{value}: {outcome}")
+        };
+        assert_eq!(solution.bindings[&id(0)].0, apply(var(9)));
+        let problem = context
+            .type_input_context(&inputs, constraint, &mut Budget::default())
+            .unwrap();
+        problem
+            .verify_witness(&solution.model, Budget::default())
+            .unwrap();
+        for (_, proof) in solution.bindings.values() {
+            problem.verify_proof(proof, Budget::default()).unwrap();
+        }
+        assert!(
+            solution
+                .model
+                .applications
+                .iter()
+                .all(|entry| entry.arguments[1] == value)
+        );
+    }
+}
+
+#[test]
+fn unsupported_value_domains_and_non_type_results_cannot_forge_a_model() {
+    let mut context = Context::default();
+    context.admit_congruence(id(100));
+    let apply = |value| Term::NormalForm {
+        head: id(100),
+        sort: Sort::Type,
+        arguments: vec![value],
+    };
+    for value in [
+        Term::Float64(0),
+        Term::Value { store: 1, index: 0 },
+        Term::Rigid {
+            declaration: id(8),
+            sort: Sort::ComptimeValue,
+        },
+    ] {
+        assert!(matches!(
+            context.prove(F::equal(apply(value), boolean()), Budget::default()),
+            Outcome::Unknown { .. }
+        ));
+    }
+    let outcome = context.prove(
+        F::equal(apply(Term::Bool(true)), boolean()),
+        Budget::default(),
+    );
+    let Outcome::NotEntailed(witness) = outcome else {
+        panic!("{outcome}")
+    };
+    context.verify_witness(&witness, Budget::default()).unwrap();
+    let mut wrong_result = witness.clone();
+    wrong_result.applications[0].result = Term::Bool(false);
+    assert!(
+        context
+            .verify_witness(&wrong_result, Budget::default())
+            .is_err()
+    );
+    let mut wrong_input = witness;
+    wrong_input.applications[0].arguments[0] = Term::Float64(0);
+    assert!(
+        context
+            .verify_witness(&wrong_input, Budget::default())
+            .is_err()
+    );
+}
+
+#[test]
+fn fixed_arguments_preserve_congruence_without_inventing_injectivity() {
+    let mut context = Context::default();
+    context.admit_congruence(id(100));
+    let equality = F::equal(head(Term::Bool(true)), head(Term::Bool(false)));
+    for goal in [equality.clone(), equality.negate()] {
+        let outcome = context.prove(goal, Budget::default());
+        let Outcome::NotEntailed(witness) = outcome else {
+            panic!("{outcome}")
+        };
+        context.verify_witness(&witness, Budget::default()).unwrap();
+    }
+    let goal = F::equal(
+        head(Term::String(String::from("same").into())),
+        head(Term::String(String::from("same").into())),
+    );
+    let outcome = context.prove(goal, Budget::default());
+    let Outcome::Entailed(proof) = outcome else {
+        panic!("{outcome}")
+    };
+    context.verify_proof(&proof, Budget::default()).unwrap();
+}
+
+#[test]
+fn large_completed_payloads_are_metered_before_model_indexing() {
+    let mut context = Context::default();
+    context.admit_congruence(id(100));
+    let goal = F::equal(head(Term::String("x".repeat(4096).into())), boolean());
+    let outcome = context.prove(
+        goal.clone(),
+        Budget {
+            steps: 100,
+            ..Budget::default()
+        },
+    );
+    assert!(
+        matches!(
+            outcome,
+            Outcome::Unknown {
+                reason: ptc::UnknownReason::BudgetExhausted,
+                ..
+            }
+        ),
+        "{outcome}"
+    );
+    let outcome = context.prove(
+        goal,
+        Budget {
+            steps: 1_000_000,
+            ..Budget::default()
+        },
+    );
+    let Outcome::NotEntailed(witness) = outcome else {
+        panic!("{outcome}")
+    };
+    context
+        .verify_witness(
+            &witness,
+            Budget {
+                steps: 1_000_000,
+                ..Budget::default()
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        context.verify_witness(
+            &witness,
+            Budget {
+                steps: 100,
+                ..Budget::default()
+            }
+        ),
+        Err(ptc::ProofError::BudgetExhausted)
+    ));
+}

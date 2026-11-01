@@ -651,6 +651,7 @@ dependencies = [
 name = "ptc"
 version = "0.1.0"
 dependencies = [
+ "comptime_runtime",
  "nir",
 ]
 

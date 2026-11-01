@@ -662,6 +662,20 @@ fn within_input_limits(input: Input<'_>, limit: usize, fuel: &mut usize) -> bool
             return false;
         }
         *fuel -= 1;
+        // Hashing and copying completed value inputs must pay for their
+        // payload, not merely the one symbolic node that contains it.
+        if let Input::Term(term) = input {
+            let payload = match term {
+                Term::String(value) | Term::Symbol(value) => value.len(),
+                Term::Integer(value) => value.bit_len().div_ceil(32),
+                Term::BitVec(value) => value.words().len(),
+                _ => 0,
+            };
+            let Some(remaining) = fuel.checked_sub(payload) else {
+                return false;
+            };
+            *fuel = remaining;
+        }
         // Pending roots already require at least one step each. Check width
         // before pushing children so a tiny budget cannot allocate a huge work
         // list merely to discover exhaustion on the next iteration.
@@ -1693,6 +1707,11 @@ impl Search<'_> {
             };
             let mut concrete = Vec::new();
             for argument in arguments {
+                if model_applications::fixed_argument(argument) {
+                    nir::type_computations::charge_term(argument, &mut self.steps).ok()?;
+                    concrete.push(argument.clone());
+                    continue;
+                }
                 concrete.push(reify(
                     self.terms.ids[argument],
                     self.terms,
@@ -1998,6 +2017,9 @@ fn substitute_types(
         return None;
     };
     fuel.set(remaining);
+    if model_applications::fixed_argument(term) {
+        return model_applications::copy(term, fuel);
+    }
     if let Term::Rigid {
         declaration,
         sort: Sort::Type,

@@ -100,3 +100,57 @@ fn nested_equalities_preserve_symbolic_call_inputs() {
     .unwrap();
     assert!(found);
 }
+
+#[test]
+fn value_indexed_opaque_heads_preserve_inferred_type_arguments() {
+    let package = support::compile(
+        "typealias Type = .Type'builtin;
+        pure comptime fn Tagged<T, flag: bool> -> Type { T }
+        fn accept(value: *T)->bool where T {true}
+        fn forward(value: A)->bool where A, U, requires *A == **Tagged<U,true> {
+            accept(value)
+        }",
+    );
+    let accept = package
+        .functions
+        .iter()
+        .find(|f| f.name == "accept")
+        .unwrap()
+        .declaration;
+    let forward = package
+        .functions
+        .iter()
+        .find(|f| f.name == "forward")
+        .unwrap();
+    let [tagged] = package.normal_forms.as_slice() else {
+        panic!("this fixture declares exactly one opaque head")
+    };
+    let head = tagged.declaration;
+    let expected = nir::Term::NormalForm {
+        head,
+        sort: nir::Sort::Type,
+        arguments: vec![
+            nir::Term::Rigid {
+                declaration: forward.type_parameters[1],
+                sort: nir::Sort::Type,
+            },
+            nir::Term::Bool(true),
+        ],
+    };
+    let mut found = false;
+    iir::visit::expressions(forward, &mut 10000, |expr, _| {
+        if let nir::program::ExprKind::FunctionInstance {
+            declaration,
+            arguments,
+        } = &expr.kind
+        {
+            if *declaration == accept {
+                assert_eq!(arguments, &[expected.clone()]);
+                found = true;
+            }
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert!(found);
+}

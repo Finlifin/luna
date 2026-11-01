@@ -5,3 +5,6 @@ edition = "2024"
 
 [dependencies]
 nir = { path = "../nir" }
+
+[dev-dependencies]
+comptime_runtime = { path = "../comptime_runtime" }

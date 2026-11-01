@@ -355,3 +355,32 @@ Validation from `/home/fin/luna`:
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_type_factories_keep_identity_through_comptime_parameters`: passed (`/tmp/luna-tools-hopp3w1w/result.json`). Real sysroot imports now also exercise `A == List<U>` forwarding to `List.length()`; the Integer assertion stays comptime and only its bool result enters runtime. Earlier fixture attempts correctly rejected a runtime pointer to comptime-only List, an incorrectly spelled method, and runtime use of Integer; no phase rule was relaxed.
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`: 3 passed (`/tmp/luna-tools-zdnj4cdw/result.json`).
 - `git diff --check`: passed.
+
+
+## Completed intrinsic values in opaque model applications
+
+Finite application tables now also accept completed Unit, bool, char, exact
+Integer, str, Symbol and BitVec identities as ordinary inputs alongside Type
+arguments. Reification and independent replay share the same admission rule;
+results must still be closed Types. No declaration name, List<Type> shape or
+special normal-form input slot is recognized. Symbolic Type-input extraction
+retains these values in the proved opaque application rather than replacing the
+application with its model's incidental structural result.
+
+Different input values do not imply different output Types: models validate both
+equal-output and unequal-output possibilities for `F<true>` and `F<false>`.
+Floating values, open comptime parameters, value-store handles and aggregates
+needing protocol evidence remain Unknown. This change does not import program
+arithmetic or user Eq/Hash into PTC.
+
+Input traversal now charges strings/symbols by byte length, exact integers by
+limb count and BitVecs by word count before hashing or copying them. The initial
+preflight and witness replay both enforce this budget. Tests cover every admitted
+value category, independent proof/model replay, unsupported and forged domains,
+large-payload exhaustion and successful retry with sufficient work.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p ptc -p type_resolution`: 456 passed (`/tmp/luna-tools-ufg1rcg9/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`: 4 passed (`/tmp/luna-tools-6w_w27uq/result.json`). The new source case checks the inferred `Tagged<U, true>` retains the original head, ambient U and completed bool input.
+- `git diff --check`: passed.

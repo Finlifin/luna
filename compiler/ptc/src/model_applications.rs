@@ -24,7 +24,23 @@ pub(super) fn admitted(term: &Term, context: &Context) -> bool {
     matches!(term, Term::NormalForm { head, sort: Sort::Type, arguments }
         if context.congruence_heads.contains(head)
             && !context.tuple_heads.contains(head)
-            && arguments.iter().all(|arg| arg.sort() == Sort::Type))
+            && arguments.iter().all(|arg| arg.sort() == Sort::Type || fixed_argument(arg)))
+}
+
+/// Completed intrinsic value identities only. This is not program equality:
+/// floating comparison, user Eq/Hash and unresolved value stores need their
+/// own evidence and must not be guessed from Rust representation equality.
+pub(super) fn fixed_argument(term: &Term) -> bool {
+    matches!(
+        term,
+        Term::Unit
+            | Term::Bool(_)
+            | Term::Char(_)
+            | Term::Integer(_)
+            | Term::String(_)
+            | Term::Symbol(_)
+            | Term::BitVec(_)
+    )
 }
 
 pub(super) fn index(
@@ -41,11 +57,18 @@ pub(super) fn index(
         {
             return Err(ProofError::Invalid);
         }
-        for value in entry.arguments.iter().chain(std::iter::once(&entry.result)) {
+        for (value, is_argument) in entry
+            .arguments
+            .iter()
+            .map(|value| (value, true))
+            .chain(std::iter::once((&entry.result, false)))
+        {
             if !within_input_limits(Input::Term(value), depth, fuel) {
                 return Err(ProofError::BudgetExhausted);
             }
-            if !closed_type(value, &context.nominal_constructors) || value.check_scope(&[]).is_err()
+            if !(closed_type(value, &context.nominal_constructors)
+                || (is_argument && fixed_argument(value)))
+                || value.check_scope(&[]).is_err()
             {
                 return Err(ProofError::Invalid);
             }
