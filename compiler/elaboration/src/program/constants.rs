@@ -1345,6 +1345,16 @@ impl Checker<'_, '_> {
                 return Ok(value.clone());
             }
         }
+        if let K::Call {
+            callee, arguments, ..
+        } = &value.kind
+        {
+            if let Some(observed) =
+                self.partial_staged_call(callee, arguments, depth, fuel, scope)?
+            {
+                return Ok(observed);
+            }
+        }
         if let K::ListConcat(left, right) = &value.kind {
             if self.list_element_type(&value.ty).is_none()
                 || left.ty != value.ty

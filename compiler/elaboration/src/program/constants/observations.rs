@@ -224,6 +224,108 @@ impl ObservationScope {
     }
 }
 
+impl Checker<'_, '_> {
+    /// Inspect a checked body using immutable argument evidence. The call stays
+    /// in executable IR, including argument evaluation and failing contracts.
+    pub(super) fn partial_staged_call(
+        &self,
+        callee: &n::Expr,
+        arguments: &[n::CallArgument],
+        depth: usize,
+        fuel: &mut usize,
+        caller: &ObservationScope,
+    ) -> Result<Option<Arc<PartialStagedValue>>, String> {
+        let (signature, bindings, body) = match &callee.kind {
+            K::Function(id)
+            | K::FunctionInstance {
+                declaration: id,
+                arguments: _,
+            } if !matches!(&callee.kind, K::FunctionInstance { arguments, .. } if !arguments.is_empty()) =>
+            {
+                *fuel = fuel
+                    .checked_sub(
+                        self.generated_functions.len() + self.ordinary_behavior_functions.len(),
+                    )
+                    .ok_or("partial callable lookup budget exhausted")?;
+                let Some(function) = self
+                    .generated_functions
+                    .iter()
+                    .chain(&self.ordinary_behavior_functions)
+                    .find(|function| function.declaration == *id)
+                else {
+                    return Ok(None);
+                };
+                if function.phase != n::FunctionPhase::Comptime
+                    || !function.type_parameters.is_empty()
+                {
+                    return Ok(None);
+                }
+                (
+                    &function.signature,
+                    function.parameters.as_slice(),
+                    &function.body,
+                )
+            }
+            K::Closure {
+                parameters,
+                captures,
+                body,
+            } if captures.is_empty() && callee.ty.is_comptime_callable() => (
+                callee.ty.callable_signature(),
+                parameters.as_slice(),
+                body.as_ref(),
+            ),
+            _ => return Ok(None),
+        };
+        let Term::Function { parameters, .. } = signature.callable_signature() else {
+            return Ok(None);
+        };
+        if parameters.len() != arguments.len() || bindings.len() != parameters.len() {
+            return Ok(None);
+        }
+        *fuel = fuel
+            .checked_sub(parameters.len())
+            .ok_or("partial callable input budget exhausted")?;
+        let mut inputs = vec![None; parameters.len()];
+        let mut observed = vec![None; parameters.len()];
+        for argument in arguments {
+            let index = argument.parameter;
+            if index >= parameters.len() || observed[index].is_some() || argument.is_default {
+                return Ok(None);
+            }
+            let value = self.partial_staged_value_in(&argument.value, depth + 1, fuel, caller)?;
+            if parameters[index].sort != Sort::Runtime {
+                let PartialStagedData::Known(term) = &value.data else {
+                    return Ok(None);
+                };
+                nir::type_computations::charge_term(term, fuel)
+                    .map_err(|error| error.to_string())?;
+                inputs[index] = Some(term.clone());
+            }
+            observed[index] = Some(value);
+        }
+        nir::type_computations::charge_term(signature, fuel).map_err(|error| error.to_string())?;
+        let binding = signature
+            .prepare_function_inputs(&inputs)
+            .map_err(|error| error.to_string())?;
+        let mut copy_fuel = *fuel as u64;
+        let copied = nir::copy_budget::charge_expression(body, &mut copy_fuel);
+        *fuel = copy_fuel as usize;
+        copied.map_err(|_| "partial callable body budget exhausted")?;
+        let mut body = body.clone();
+        body.rewrite_types(&mut |ty| {
+            nir::type_computations::charge_term(ty, fuel).map_err(|error| error.to_string())?;
+            binding.rebind(ty).map_err(|error| error.to_string())
+        })?;
+        let mut scope = ObservationScope::default();
+        for (local, value) in bindings.iter().zip(observed) {
+            scope.insert(*local, value.unwrap(), fuel)?;
+        }
+        self.partial_staged_value_in(&body, depth + 1, fuel, &scope)
+            .map(Some)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
