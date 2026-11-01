@@ -3,6 +3,16 @@
 use super::*;
 
 impl Interpreter<'_> {
+    pub(super) fn prepare_aggregate(
+        &mut self,
+        ty: &Term,
+        source: SourceRange,
+    ) -> Result<Term, Error> {
+        let ty = self.selected_type_view(ty, Some(source))?;
+        self.check_comptime_domain(&ty, source)?;
+        Ok(ty)
+    }
+
     #[inline(never)]
     pub(super) fn eval_variant(
         &mut self,
@@ -18,6 +28,7 @@ impl Interpreter<'_> {
             else {
                 unreachable!("variant evaluator")
             };
+            let ty = this.prepare_aggregate(&expr.ty, expr.source)?;
             let mut values = Vec::new();
             for (slot, field) in fields.iter().enumerate() {
                 let value = match this.eval(field, environment)? {
@@ -27,7 +38,7 @@ impl Interpreter<'_> {
                 this.retain_prepared(slot, field.source, &value)?;
                 values.push(value);
             }
-            this.construct_variant(&expr.ty, *declaration, *index, values, expr.source)
+            this.construct_variant(&ty, *declaration, *index, values, expr.source)
                 .map(Flow::Value)
         })
     }
@@ -40,13 +51,7 @@ impl Interpreter<'_> {
         values: Vec<Value>,
         source: SourceRange,
     ) -> Result<Value, Error> {
-        self.check_comptime_domain(ty, source)?;
-        let selected = if self.associated_values.is_empty() {
-            None
-        } else {
-            Some(self.selected_type_view(ty, Some(source))?)
-        };
-        let Term::Nominal { arguments, .. } = selected.as_ref().unwrap_or(ty) else {
+        let Term::Nominal { arguments, .. } = ty else {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         };
         let value = Value::Variant {
@@ -76,6 +81,7 @@ impl Interpreter<'_> {
                 } => (Some(*declaration), fields),
                 _ => unreachable!("record evaluator"),
             };
+            let ty = this.prepare_aggregate(&expr.ty, expr.source)?;
             let mut values = Vec::new();
             for (slot, field) in fields.iter().enumerate() {
                 let value = match this.eval(field, environment)? {
@@ -85,7 +91,7 @@ impl Interpreter<'_> {
                 this.retain_prepared(slot, field.source, &value)?;
                 values.push(value);
             }
-            this.construct_record(&expr.ty, declaration, values, expr.source)
+            this.construct_record(&ty, declaration, values, expr.source)
                 .map(Flow::Value)
         })
     }
@@ -98,12 +104,7 @@ impl Interpreter<'_> {
         source: SourceRange,
     ) -> Result<Value, Error> {
         let value = if let Some(declaration) = declaration {
-            let selected = if self.associated_values.is_empty() {
-                None
-            } else {
-                Some(self.selected_type_view(ty, Some(source))?)
-            };
-            let Term::Nominal { arguments, .. } = selected.as_ref().unwrap_or(ty) else {
+            let Term::Nominal { arguments, .. } = ty else {
                 return Err(self.failure(ErrorKind::Type, Some(source)));
             };
             Value::Record {
@@ -132,3 +133,6 @@ impl Interpreter<'_> {
         Ok(value)
     }
 }
+
+#[cfg(test)]
+mod tests;

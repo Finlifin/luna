@@ -16,6 +16,7 @@ pub(super) struct Frame {
     newtype_conversions: BTreeMap<usize, nir::newtypes::Conversion>,
     list_types: BTreeMap<usize, Term>,
     optional_types: BTreeMap<usize, Term>,
+    aggregate_types: BTreeMap<usize, Term>,
     error_conversions: BTreeMap<usize, comptime_compiler::ErrorConversion>,
     append_types: BTreeMap<usize, Term>,
     list_operations: BTreeMap<usize, (Term, Option<Term>)>,
@@ -1062,6 +1063,7 @@ impl<'a> Interpreter<'a> {
             newtype_conversions: BTreeMap::new(),
             list_types: BTreeMap::new(),
             optional_types: BTreeMap::new(),
+            aggregate_types: BTreeMap::new(),
             error_conversions: BTreeMap::new(),
             append_types: BTreeMap::new(),
             list_operations: BTreeMap::new(),
@@ -2248,33 +2250,45 @@ impl<'a> Interpreter<'a> {
                     )?);
                 }
 
+                Op::PrepareAggregate { destination, ty } => {
+                    let ty = self.prepare_aggregate(ty, source)?;
+                    frame.aggregate_types.insert(*destination, ty);
+                }
                 Op::Variant {
                     destination,
                     declaration,
                     index,
-                    ty,
+                    ty: _,
                     fields,
                 } => {
+                    let ty = frame
+                        .aggregate_types
+                        .remove(destination)
+                        .ok_or_else(missing)?;
                     let values = fields
                         .iter()
                         .map(|field| frame.slots[*field].take().ok_or_else(missing))
                         .collect::<Result<Vec<_>, _>>()?;
                     frame.slots[*destination] =
-                        Some(self.construct_variant(ty, *declaration, *index, values, source)?);
+                        Some(self.construct_variant(&ty, *declaration, *index, values, source)?);
                 }
 
                 Op::Record {
                     destination,
                     declaration,
-                    ty,
+                    ty: _,
                     fields,
                 } => {
+                    let ty = frame
+                        .aggregate_types
+                        .remove(destination)
+                        .ok_or_else(missing)?;
                     let values = fields
                         .iter()
                         .map(|field| frame.slots[*field].take().ok_or_else(missing))
                         .collect::<Result<Vec<_>, _>>()?;
                     frame.slots[*destination] =
-                        Some(self.construct_record(ty, *declaration, values, source)?);
+                        Some(self.construct_record(&ty, *declaration, values, source)?);
                 }
 
                 Op::WriteBits {

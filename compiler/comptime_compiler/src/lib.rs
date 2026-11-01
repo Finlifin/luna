@@ -367,6 +367,10 @@ pub enum Op {
         conversion: Arc<ErrorConversion>,
     },
 
+    PrepareAggregate {
+        destination: Register,
+        ty: Term,
+    },
     Variant {
         destination: Register,
         declaration: nir::DeclarationId,
@@ -1025,6 +1029,9 @@ impl fmt::Display for Program {
                     conversion,
                 } => write!(f, "(error-convert {destination} {value} {conversion})")?,
 
+                Op::PrepareAggregate { destination, ty } => {
+                    write!(f, "(prepare-aggregate %{destination} {ty})")?;
+                }
                 Op::Variant {
                     destination,
                     declaration,
@@ -1963,6 +1970,13 @@ fn compile_root<'a>(
                         for (field, slot) in fields.iter().zip(slots).rev() {
                             work.push(Work::Expression(field, slot));
                         }
+                        emit(
+                            &mut work,
+                            Op::PrepareAggregate {
+                                destination: dst,
+                                ty: copy_term(&expr.ty, fuel, source)?,
+                            },
+                        );
                     }
                     K::Variant {
                         declaration,
@@ -1986,6 +2000,13 @@ fn compile_root<'a>(
                         for (field, slot) in fields.iter().zip(slots).rev() {
                             work.push(Work::Expression(field, slot));
                         }
+                        emit(
+                            &mut work,
+                            Op::PrepareAggregate {
+                                destination: dst,
+                                ty: copy_term(&expr.ty, fuel, source)?,
+                            },
+                        );
                     }
                     K::AssociatedValue {
                         interface,

@@ -30,6 +30,7 @@ fn read_event(value: Event) -> bool {
 }
 
 test {
+    inline if associated_variants { assumes true; } else { assumes false; };
     let idle = read_event(Event.idle);
     let empty = read_event(Event.empty {});
     let data = read_event(Event.net.data {ready: true, count: 27});
@@ -37,3 +38,40 @@ test {
     assumes empty;
     assumes data;
 }
+
+trait PayloadType {
+    assoc Item: Type;
+}
+impl PayloadType for bool {
+    assoc Item: Type = bool;
+}
+enum Choice where T {
+    item(T),
+    empty,
+}
+comptime fn choose(comptime T: Type, value: T.as(PayloadType).Item) -> Choice<T.as(PayloadType).Item>
+where requires T :- PayloadType
+{
+    Choice<T.as(PayloadType).Item>.item(value)
+}
+comptime fn absent(comptime T: Type) -> Choice<T.as(PayloadType).Item>
+where requires T :- PayloadType
+{
+    Choice<T.as(PayloadType).Item>.empty
+}
+comptime fn associated_choices() -> bool {
+    let chosen = choose(bool, true) match {
+        .item(value) => value,
+        .empty => false,
+    };
+    let missing = absent(bool) match {
+        .item(_) => false,
+        .empty => true,
+    };
+    let built = Event.net.data {ready: chosen and missing, count: 27};
+    built match {
+        .net.data {ready: ready, count: count} => ready and count == 27,
+        _ => false,
+    }
+}
+const associated_variants = associated_choices();

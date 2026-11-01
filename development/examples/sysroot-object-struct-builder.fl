@@ -60,9 +60,31 @@ const edited = edit_description();
 const correct = describe();
 
 test {
+    inline if associated_aggregate { assumes true; } else { assumes false; };
     inline if edited { assumes true; } else { assumes false; };
     inline if correct { assumes true; } else { assumes false; };
     let packet = Packet {ready: true, count: 23};
     assumes packet.ready;
     assumes packet.count == 23;
 }
+
+trait FieldType {
+    assoc Item: Type;
+}
+impl FieldType for bool {
+    assoc Item: Type = bool;
+}
+struct Holder where T {
+    item: T,
+}
+comptime fn hold(comptime T: Type, value: T.as(FieldType).Item) -> Holder<T.as(FieldType).Item>
+where requires T :- FieldType
+{
+    Holder<T.as(FieldType).Item> {item: value}
+}
+comptime fn associated_holder() -> bool {
+    let held = hold(bool, true);
+    let packet = Packet {ready: held.item, count: 23};
+    packet.ready and packet.count == 23
+}
+const associated_aggregate = associated_holder();
