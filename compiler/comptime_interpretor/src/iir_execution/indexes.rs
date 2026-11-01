@@ -3,9 +3,13 @@
 use super::*;
 
 mod methods;
+mod targets;
 use methods::MethodIndex;
+use targets::instance_positions;
 
 pub(crate) struct GraphIndexes {
+    pub(crate) templates: HashMap<DeclarationId, HashMap<Arc<[Term]>, usize>>,
+    pub(crate) functions: HashMap<DeclarationId, HashMap<Arc<[Term]>, usize>>,
     pub(crate) contracts: MethodIndex,
     pub(crate) dispatch: MethodIndex,
     pub(crate) declarations: HashSet<DeclarationId>,
@@ -19,19 +23,30 @@ impl GraphIndexes {
         let before = usize::try_from(budget.steps).unwrap_or(usize::MAX);
         let mut fuel = before;
         let result = (|| {
-            let mut callables: HashMap<_, HashMap<_, _>> = HashMap::new();
-            for (index, identity) in graph.callable_identities.iter().enumerate() {
-                fuel = fuel.checked_sub(1).ok_or(())?;
-                for argument in identity.key.arguments.iter() {
-                    nir::type_computations::charge_term(argument, &mut fuel).map_err(|_| ())?;
-                }
-                // The graph owns immutable argument slices. Share their owner
-                // rather than copying every term into a second key tree.
-                callables
-                    .entry(identity.key.declaration)
-                    .or_default()
-                    .insert(identity.key.arguments.clone(), index);
-            }
+            let callables = instance_positions(
+                graph
+                    .callable_identities
+                    .iter()
+                    .enumerate()
+                    .map(|(index, identity)| (index, &identity.key)),
+                &mut fuel,
+            )?;
+            let functions = instance_positions(
+                graph
+                    .functions
+                    .iter()
+                    .enumerate()
+                    .map(|(index, function)| (index, &function.key)),
+                &mut fuel,
+            )?;
+            let templates = instance_positions(
+                graph
+                    .templates
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(index, table)| table.targets().iter().map(move |key| (index, key))),
+                &mut fuel,
+            )?;
             let mut nominals = HashMap::new();
             for (index, instance) in graph.nominals.iter().enumerate() {
                 fuel = fuel.checked_sub(1).ok_or(())?;
@@ -62,6 +77,8 @@ impl GraphIndexes {
             let dispatch = MethodIndex::dispatch(graph, &mut fuel)?;
             let declarations = super::nominals::declaration_identities(graph, &mut fuel)?;
             Ok(Self {
+                templates,
+                functions,
                 contracts,
                 dispatch,
                 declarations,

@@ -263,17 +263,12 @@ impl<'a> Interpreter<'a> {
         id: DeclarationId,
         value: &Value,
     ) -> Option<&'a nir::program::Function> {
-        if let Some(graph) = self.graph {
+        if self.graph.is_some() {
             let arguments = match value {
-                Value::Closure(c) => c.instance_arguments.clone().unwrap_or_default(),
-                _ => Arc::from([]),
+                Value::Closure(c) => c.instance_arguments.as_deref().unwrap_or_default(),
+                _ => &[],
             };
-            graph
-                .function(&iir::InstanceKey {
-                    declaration: id,
-                    arguments: arguments.into(),
-                })
-                .map(|f| &f.function)
+            self.iir_function_definition(id, arguments)
         } else {
             self.functions.get(&id)
         }
@@ -303,13 +298,9 @@ impl<'a> Interpreter<'a> {
     }
 
     fn iir_callable(&mut self, key: &iir::InstanceKey) -> Result<Value, Error> {
-        let graph = self
-            .graph
-            .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, None))?;
-        let definition = &graph
-            .function(key)
-            .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?
-            .function;
+        let definition = self
+            .iir_function_definition(key.declaration, &key.arguments)
+            .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;
         let cache_key = (key.declaration, key.arguments.clone());
         if let Some(callable) = self.instances.lookup(key.declaration, &key.arguments) {
             return Ok(Value::Closure(callable.clone()));
@@ -457,10 +448,10 @@ impl<'a> Interpreter<'a> {
         output: &Term,
         source: SourceRange,
     ) -> Result<Value, Error> {
-        let graph = self
-            .graph
-            .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(source)))?;
-        let value = if graph.template_type(&key).is_some() {
+        let value = if self
+            .iir_template_type(key.declaration, &key.arguments)
+            .is_some()
+        {
             if let Some(method) = method {
                 Value::RuntimeTraitMethod(Box::new(TraitMethodIdentity {
                     interface: InterfaceInstance {

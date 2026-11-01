@@ -2622,31 +2622,23 @@ impl<'a> Interpreter<'a> {
         self.has_type_at(value, ty, 0)
     }
     fn has_type_at(&self, value: &Value, ty: &Term, depth: usize) -> bool {
-        if let (Some(graph), Value::RuntimeTraitMethod(identity)) = (self.graph, value) {
-            return graph
-                .template_method_type(
-                    &identity.interface,
-                    &identity.subject,
-                    identity.member,
-                    &identity.method_arguments,
-                )
-                .is_some_and(|logical| logical == ty);
-        }
-        if let (
-            Some(graph),
-            Value::FunctionInstance {
-                declaration,
-                arguments,
-            },
-        ) = (self.graph, value)
-        {
-            return graph.templates.iter().any(|table| {
-                table.logical_type() == ty
-                    && table.targets().iter().any(|key| {
-                        key.declaration == *declaration
-                            && key.arguments.as_ref() == arguments.as_slice()
-                    })
-            });
+        if self.graph.is_some() {
+            match value {
+                Value::RuntimeTraitMethod(identity) => {
+                    return self
+                        .iir_template_method_type(identity)
+                        .is_some_and(|logical| logical == ty);
+                }
+                Value::FunctionInstance {
+                    declaration,
+                    arguments,
+                } => {
+                    return self
+                        .iir_template_type(*declaration, arguments)
+                        .is_some_and(|logical| logical == ty);
+                }
+                _ => {}
+            }
         }
         if let Value::AbstractValue {
             declaration,
