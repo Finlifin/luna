@@ -23,6 +23,33 @@ fn compile_bound(source: &str, splice: bool) -> Result<nir::program::Package, St
     )
 }
 
+fn invoke_with_callback_counts(package: &nir::program::Package, expected: &[(&str, usize)]) {
+    let mut vm = comptime_interpretor::Interpreter::for_comptime(
+        package,
+        comptime_interpretor::Budget {
+            steps: 5_000_000,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        vm.invoke(support::id(package, "run"), vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    for (name, count) in expected {
+        let declaration = support::id(package, name);
+        let observed = vm
+            .events()
+            .iter()
+            .filter(|event| {
+                matches!(event,
+            comptime_interpretor::Event::EnterFunction(id) if *id == declaration)
+            })
+            .count();
+        assert_eq!(observed, *count, "{name}");
+    }
+}
+
 #[test]
 fn binary_bounds_preserve_duplicate_ranges_and_custom_ordering() {
     let package = compile(
@@ -70,9 +97,9 @@ fn partition_point_checks_all_boundaries_with_logarithmic_callback_counts() {
             comptime fn run()->bool {{
                 let values:meta.List<Integer> = [{values}];
                 inline for cut in 0..{end} {{
-                    var calls:Integer=0;let counter=calls.ref;
-                    let index=values.partition_point(|value|{{counter.* += 1;value < cut}});
-                    if index != cut or calls > {bound} {{return false;}}
+                    var calls:Integer=0;
+                    let index=values.partition_point(|value|{{calls += 1;assumes calls <= {bound};value < cut}});
+                    if index != cut or calls != 0 {{return false;}}
                 }}
                 true
             }}",
@@ -91,21 +118,21 @@ fn partition_point_checks_all_boundaries_with_logarithmic_callback_counts() {
 fn binary_search_uses_fixed_input_snapshots_and_midpoint_order() {
     let package = compile(
         "typealias Integer=.Integer'builtin;
+        comptime fn visit() {}
         comptime fn run()->bool {
             var input:meta.List<Integer> = [0,1,2,3,4,5,6,7];
-            let saved=input;let source=input.ref;
-            var visits:Integer=0;let trace=visits.ref;
+            let saved=input;
+            var visits:Integer=0;
             let result=input.partition_point(|value| {
-                trace.* = trace.* * 10 + value;source.* = [];value < 3
+                visit();visits = visits * 10 + value;
+                assumes visits == 4 or visits == 42 or visits == 423;
+                input = [];value < 3
             });
-            result == 3 and visits == 423 and input.length() == 0 and saved.length() == 8
+            result == 3 and visits == 0 and input.length() == 8 and saved.length() == 8
         }",
     )
     .unwrap();
-    assert_eq!(
-        luna::invocation::invoke(&package, "run", 1_000_000).unwrap(),
-        Value::Bool(true)
-    );
+    invoke_with_callback_counts(&package, &[("visit", 3)]);
 }
 
 #[test]
@@ -155,12 +182,12 @@ fn stable_sort_retains_type_identity_snapshots_and_equal_item_order() {
             let sorted_types=types.sort_by(|a,b| false);
             var input:meta.List<Integer> = [12,1,11,3,2];
             let saved=input;
-            let target=input.ref;
-            let sorted=input.sort_by(|a,b| {target.* = [];let left=if a > 10 {a - 10} else {a};let right=if b > 10 {b - 10} else {b};left < right});
+
+            let sorted=input.sort_by(|a,b| {input = [];let left=if a > 10 {a - 10} else {a};let right=if b > 10 {b - 10} else {b};left < right});
             let empty:meta.List<Integer> = [];
             let no_calls=empty.sort_by(|a,b| {let bad:meta.List<bool> = [];bad[0]});
             let singles:meta.List<Integer> = [7];let single=singles.sort_by(|a,b| {let bad:meta.List<bool> = [];bad[0]});
-            input.length() == 0 and saved[0] == 12 and saved[4] == 2
+            input.length() == 5 and saved[0] == 12 and saved[4] == 2
                 and sorted[0] == 1 and sorted[1] == 11 and sorted[2] == 12
                 and sorted[3] == 2 and sorted[4] == 3
                 and sorted_types[0] == Identity<bool> and sorted_types[1] == bool
@@ -263,10 +290,10 @@ fn sort_handles_incomplete_runs_with_bounded_comparison_counts() {
         let package = compile(&format!(
             "typealias Integer=.Integer'builtin;
             comptime fn run()->bool {{
-                var comparisons:Integer=0;let counter=comparisons.ref;
+                var comparisons:Integer=0;
                 let values:meta.List<Integer> = [{values}];
-                let ordered=values.sort_by(|a,b| {{counter.* += 1;a < b}});
-                ordered.length() == {count} and comparisons <= {bound} and {checks}
+                let ordered=values.sort_by(|a,b| {{comparisons += 1;assumes comparisons <= {bound};a < b}});
+                ordered.length() == {count} and comparisons == 0 and {checks}
             }}",
             checks = if checks.is_empty() { "true" } else { &checks }
         ))
@@ -368,10 +395,12 @@ fn list_operations_evaluate_arguments_once_in_order_and_propagate_returns() {
     let package = compile(
         "
         typealias Integer=.Integer'builtin;
-        comptime fn input(counter:*Integer, expected:Integer)->meta.List<bool> {
-            let ordered=counter.* == expected;
-            counter.* = counter.* + 1;
+        struct Counter {value:Integer}
+        impl Counter {comptime fn input(self, expected:Integer)->meta.List<bool> {
+            let ordered=self.value == expected;
+            self.value = self.value + 1;
             [ordered]
+        }
         }
         comptime fn early_left()->bool {
             meta.List<bool>.concat(do {return true;}, [false]); false
@@ -383,10 +412,10 @@ fn list_operations_evaluate_arguments_once_in_order_and_propagate_returns() {
             .list_length'builtin(do {return true;}); false
         }
         comptime fn run()->bool {
-            var counter:Integer=0;
-            let xs=(input(counter.ref,0)).concat(input(counter.ref,1));
-            let count=(input(counter.ref,2)).length();
-            counter == 3 and xs[0] and xs[1] and count == 1
+            let counter=Counter {value:0};
+            let xs=(counter.input(0)).concat(counter.input(1));
+            let count=(counter.input(2)).length();
+            counter.value == 3 and xs[0] and xs[1] and count == 1
                 and early_left() and early_right() and early_length()
         }
     ",
@@ -423,6 +452,17 @@ fn ordinary_package_uses_public_list_operations_without_builtin_access() {
     .unwrap();
     let library =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/meta/lib.fl");
+    let builtin = directory.join("builtin.fl");
+    std::fs::write(
+        &builtin,
+        concat!(
+            include_str!("../../../library/builtin/primitives.fl"),
+            "\npub mod compiler {\n",
+            include_str!("../../../library/builtin/bindings.fl"),
+            "\n}\n",
+        ),
+    )
+    .unwrap();
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_luna"))
         .args(["--packages-v1", "--package", "1", "101", "app"])
         .arg(&input)
@@ -430,10 +470,7 @@ fn ordinary_package_uses_public_list_operations_without_builtin_access() {
         .args(["--package", "2", "202", "meta"])
         .arg(&library)
         .args(["--package", "3", "303", "builtin"])
-        .arg(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../library/builtin/primitives.fl"),
-        )
+        .arg(&builtin)
         .args(["--dependency", "2", "builtin", "3"])
         .args(["--dependency", "1", "builtin", "3"])
         .args(["--package", "4", "404", "attrs"])
@@ -487,33 +524,31 @@ fn repository_list_combinators_preserve_callback_order_and_state() {
             let doubled=values.map(|value| value * 2);
             doubled.fold(0,|sum,value| sum + value)
         }
+        comptime fn visit() {}
+        comptime fn unexpected() {assumes false;}
         comptime fn run()->bool {
             var visits:Integer=0;
-            var calls:Integer=0;
-            let call_count=calls.ref;
+
             let mapped=(digits()).map(|value| {
                 visits = visits + 1;
-                call_count.* = call_count.* + 1;
+                assumes visits == value;
                 value + visits
             });
             var order:Integer=0;
-            let output=order.ref;
-            mapped.foreach(|value| {output.* = output.* * 10 + value;});
+
+            mapped.foreach(|value| {order += 2;assumes order == value;visit();});
             let folded=(digits()).fold(0,encode);
             let empty:meta.List<Integer> = [];
-            let untouched=empty.map(|value| {call_count.* = call_count.* + 100;value});
-            empty.foreach(|value| {call_count.* = call_count.* + 100;});
-            let initial=empty.fold(42,|acc,value| {call_count.* = call_count.* + 100;acc + value});
-            visits == 0 and calls == 3 and order == 246 and folded == 123 and initial == 42 and total() == 12
+            let untouched=empty.map(|value| {unexpected();value});
+            empty.foreach(|value| {unexpected();});
+            let initial=empty.fold(42,|acc,value| {unexpected();acc + value});
+            visits == 0 and order == 0 and folded == 123 and initial == 42 and total() == 12
                 and untouched.length() == 0 and mapped.length() == 3
                 and mapped[0] == 2 and mapped[1] == 4 and mapped[2] == 6
         }
     ";
     let package = compile(source).unwrap();
-    assert_eq!(
-        luna::invocation::invoke(&package, "run", 1_000_000).unwrap(),
-        Value::Bool(true)
-    );
+    invoke_with_callback_counts(&package, &[("visit", 3), ("unexpected", 0)]);
 }
 
 #[test]
@@ -562,19 +597,22 @@ fn list_map_evaluates_producers_once_and_keeps_owned_inputs_separate() {
     let package = compile(
         "
         typealias Integer=.Integer'builtin;
-        comptime fn input(trace:*Integer)->meta.List<Integer> {
-            trace.* = trace.* * 10 + 1; [1,2,3]
+        struct Trace {value:Integer}
+        impl Trace {
+        comptime fn input(self)->meta.List<Integer> {
+            self.value = self.value * 10 + 1; [1,2,3]
+        }
+        comptime fn producer(self)->comptime fn(Integer)->Integer {
+            self.value = self.value * 10 + 2; increment
+        }
         }
         comptime fn increment(value:Integer)->Integer {value + 1}
-        comptime fn producer(trace:*Integer)->comptime fn(Integer)->Integer {
-            trace.* = trace.* * 10 + 2; increment
-        }
         comptime fn run()->bool {
-            var trace:Integer=0;
-            let mapped=(input(trace.ref)).map(producer(trace.ref));
+            let trace=Trace {value:0};
+            let mapped=(trace.input()).map(trace.producer());
             var original:meta.List<Integer> = [1,2,3];
             let snapshot=original.map(|value| {original = []; value});
-            trace == 12 and mapped[0] == 2 and mapped[2] == 4
+            trace.value == 12 and mapped[0] == 2 and mapped[2] == 4
                 and original.length() == 3 and snapshot.length() == 3
                 and snapshot[0] == 1 and snapshot[1] == 2 and snapshot[2] == 3
         }
@@ -588,25 +626,22 @@ fn list_map_evaluates_producers_once_and_keeps_owned_inputs_separate() {
 }
 
 #[test]
-fn list_pointer_replacement_preserves_active_iteration_and_read_snapshots() {
+fn list_value_replacement_preserves_iteration_and_capture_snapshots() {
     let package = compile(
         "
         typealias Integer=.Integer'builtin;
         typealias Type=.Type'builtin;
         comptime fn run()->bool {
             var original:meta.List<Integer> = [1,2,3];
-            let slot=original.ref;
-            let before=slot.*;
-            let mapped=original.map(|value| {slot.* = []; value + 1});
+            let before=original;
+            let mapped=original.map(|value| {original = []; value + 1});
             var types:meta.List<Type> = [bool];
-            let types_slot=types.ref;
-            let old_types=types_slot.*;
-            types_slot.* = [Integer,Type];
+            let old_types=types;
+            types = [Integer,Type];
             var nested:meta.List<meta.List<bool>> = [[true]];
-            let nested_slot=nested.ref;
-            let old_nested=nested_slot.*;
-            nested_slot.* = [[false],[]];
-            original.length() == 0 and before.length() == 3
+            let old_nested=nested;
+            nested = [[false],[]];
+            original.length() == 3 and before.length() == 3
                 and before[0] == 1 and before[2] == 3
                 and mapped.length() == 3 and mapped[0] == 2 and mapped[2] == 4
                 and old_types.length() == 1 and old_types[0] == bool
@@ -704,24 +739,28 @@ fn list_queries_short_circuit_and_empty_inputs_never_call_predicates() {
     let package = compile(
         "
         typealias Integer=.Integer'builtin;
+        comptime fn any_visit() {}
+        comptime fn all_visit() {}
+        comptime fn find_visit() {}
+        comptime fn unexpected() {assumes false;}
         comptime fn run()->bool {
             let input:meta.List<Integer> = [1,2,3];
             let empty:meta.List<Integer> = [];
             var trace:Integer=0;
-            let slot=trace.ref;
-            let found_any=input.any(|value| {slot.* = slot.* * 10 + value; value == 2});
-            let any_order=trace == 12;
+
+            let found_any=input.any(|value| {trace += 1;assumes trace == value;any_visit(); value == 2});
+            let any_order=trace == 0;
             trace = 0;
-            let every=input.all(|value| {slot.* = slot.* * 10 + value; value < 2});
-            let all_order=trace == 12;
+            let every=input.all(|value| {trace += 1;assumes trace == value;all_visit(); value < 2});
+            let all_order=trace == 0;
             trace = 0;
-            let found=input.find(|value| {slot.* = slot.* * 10 + value; value == 2});
-            let find_order=trace == 12;
+            let found=input.find(|value| {trace += 1;assumes trace == value;find_visit(); value == 2});
+            let find_order=trace == 0;
             trace = 0;
-            let no_any=empty.any(|value| {slot.* = 99; true});
-            let yes_all=empty.all(|value| {slot.* = 99; false});
-            let no_find=empty.find(|value| {slot.* = 99; true});
-            let no_filter=empty.filter(|value| {slot.* = 99; true});
+            let no_any=empty.any(|value| {unexpected(); true});
+            let yes_all=empty.all(|value| {unexpected(); false});
+            let no_find=empty.find(|value| {unexpected(); true});
+            let no_filter=empty.filter(|value| {unexpected(); true});
             found_any and not every and any_order and all_order and find_order
                 and (found match {value? => value == 2,null => false})
                 and not no_any and yes_all and trace == 0
@@ -736,9 +775,14 @@ fn list_queries_short_circuit_and_empty_inputs_never_call_predicates() {
         ",
     )
     .unwrap();
-    assert_eq!(
-        luna::invocation::invoke(&package, "run", 1_000_000).unwrap(),
-        Value::Bool(true)
+    invoke_with_callback_counts(
+        &package,
+        &[
+            ("any_visit", 2),
+            ("all_visit", 2),
+            ("find_visit", 2),
+            ("unexpected", 0),
+        ],
     );
 }
 
@@ -754,26 +798,24 @@ fn list_filter_preserves_order_identity_and_snapshot_during_callback_writes() {
             Packet<...(types).filter(|value| value == bool)>
         }
         comptime fn Direct()->Type {Packet<bool,bool>}
+        comptime fn visit() {}
         comptime fn run()->bool {
             var original:meta.List<Integer> = [1,2,3,4];
-            let slot=original.ref;
+
             var order:Integer=0;
-            let order_slot=order.ref;
+
             let kept=original.filter(|value| {
-                order_slot.* = order_slot.* * 10 + value;
-                slot.* = [];
+                visit();order = order + 1;assumes order == value;
+                original = [];
                 value == 1 or value == 3
             });
-            original.length() == 0 and order == 1234
+            original.length() == 4 and order == 0
                 and kept.length() == 2 and kept[0] == 1 and kept[1] == 3
         }
         ",
     )
     .unwrap();
-    assert_eq!(
-        luna::invocation::invoke(&package, "run", 1_000_000).unwrap(),
-        Value::Bool(true)
-    );
+    invoke_with_callback_counts(&package, &[("visit", 4)]);
     let generated = luna::invocation::invoke(&package, "Generated", 1_000_000).unwrap();
     assert!(matches!(
         generated,
@@ -1143,32 +1185,34 @@ fn list_ranges_evaluate_arguments_once_before_bounds_checks() {
     let package = compile(
         "
         typealias Integer = .Integer'builtin;
-        comptime fn input(trace: *Integer, value: meta.List<Integer>) -> meta.List<Integer> {
-            trace.* = trace.* * 10 + 1; value
+        struct State {trace:Integer,original:meta.List<Integer>}
+        impl State {
+        comptime fn input(self, value: meta.List<Integer>) -> meta.List<Integer> {
+            self.trace = self.trace * 10 + 1; value
         }
-        comptime fn bound(trace: *Integer, tag: Integer, value: Integer) -> Integer {
-            trace.* = trace.* * 10 + tag; value
+        comptime fn bound(self, tag: Integer, value: Integer) -> Integer {
+            self.trace = self.trace * 10 + tag; value
         }
-        comptime fn replacement(trace: *Integer, original: *meta.List<Integer>) -> meta.List<Integer> {
-            trace.* = trace.* * 10 + 4;
-            original.* = [];
+        comptime fn replacement(self) -> meta.List<Integer> {
+            self.trace = self.trace * 10 + 4;
+            self.original = [];
             [9]
         }
+        }
         comptime fn run() -> bool {
-            var trace: Integer = 0;
-            var original: meta.List<Integer> = [1,2,3];
-            let changed = (input(trace.ref, original)).replace_range(bound(trace.ref, 2, 1), bound(trace.ref, 3, 2), replacement(trace.ref, original.ref));
-            let first = trace == 1234 and original.length() == 0
+            let state=State {trace:0,original:[1,2,3]};
+            let changed = (state.input(state.original)).replace_range(state.bound( 2, 1), state.bound( 3, 2), state.replacement());
+            let first = state.trace == 1234 and state.original.length() == 0
                 and (changed match {xs? => xs.length() == 3 and xs[0] == 1
                     and xs[1] == 9 and xs[2] == 3, null => false});
-            trace = 0;
-            original = [1,2,3];
-            let invalid = (input(trace.ref, original)).replace_range(bound(trace.ref, 2, -1), bound(trace.ref, 3, 2), replacement(trace.ref, original.ref));
-            let second = trace == 1234 and original.length() == 0
+            state.trace = 0;
+            state.original = [1,2,3];
+            let invalid = (state.input(state.original)).replace_range(state.bound( 2, -1), state.bound( 3, 2), state.replacement());
+            let second = state.trace == 1234 and state.original.length() == 0
                 and (invalid match {null => true, _? => false});
-            trace = 0;
-            let selected = (input(trace.ref, [7,8,9])).slice(bound(trace.ref, 2, 1), bound(trace.ref, 3, 3));
-            first and second and trace == 123
+            state.trace = 0;
+            let selected = (state.input([7,8,9])).slice(state.bound( 2, 1), state.bound( 3, 3));
+            first and second and state.trace == 123
                 and (selected match {xs? => xs.length() == 2 and xs[0] == 8 and xs[1] == 9, null => false})
         }
         ",
@@ -1657,10 +1701,10 @@ fn list_scans_preserve_input_and_accumulator_snapshots() {
             pure comptime fn Identity<T>->Type {{T}}
             comptime fn run()->bool {{
                 var input:meta.List<Type> = [Identity<bool>,bool,Integer];
-                let slot=input.ref;let original=input;
+                let original=input;
                 let seed:meta.List<Type> = [];
-                let history=input.{method}(seed,|acc,value| {{slot.* = [];acc.append(value);acc}});
-                history.length() == 3 and input.length() == 0 and seed.length() == 0
+                let history=input.{method}(seed,|acc,value| {{input = [];acc.append(value);acc}});
+                history.length() == 3 and input.length() == 3 and seed.length() == 0
                     and (history[0]).length() == {a} and (history[1]).length() == {b}
                     and (history[2]).length() == {c} and history[2][0] == Identity<bool>
                     and original[0] == Identity<bool> and original[1] == bool
@@ -1683,19 +1727,18 @@ fn list_scans_visit_each_element_once_including_the_last_exclusive_step() {
     for method in ["scan", "scan_exclusive"] {
         let package = compile(&format!(
             "typealias Integer=.Integer'builtin;
+            comptime fn visit() {{}}
+            comptime fn unexpected() {{assumes false;}}
             comptime fn run()->bool {{
                 let values:meta.List<Integer> = [1,2,3];
                 let empty:meta.List<Integer> = [];
-                var trace:Integer=0;let record=trace.ref;
-                let result=values.{method}(0,|acc,value|{{record.* = record.* * 10 + value;acc + value}});
-                let absent=empty.{method}(0,|acc,value|{{record.* = 999;acc}});
-                trace == 123 and result.length() == 3 and absent.length() == 0
+                var trace:Integer=0;
+                let result=values.{method}(0,|acc,value|{{trace += 1;assumes trace == value;visit();acc + value}});
+                let absent=empty.{method}(0,|acc,value|{{unexpected();acc}});
+                trace == 0 and result.length() == 3 and absent.length() == 0
             }}"
         )).unwrap();
-        assert_eq!(
-            luna::invocation::invoke(&package, "run", 1_000_000).unwrap(),
-            Value::Bool(true)
-        );
+        invoke_with_callback_counts(&package, &[("visit", 3), ("unexpected", 0)]);
     }
 }
 
@@ -1755,14 +1798,17 @@ fn list_scans_evaluate_receiver_seed_and_callback_producer_once_in_order() {
     for method in ["scan", "scan_exclusive"] {
         let package = compile(&format!(
             "typealias Integer=.Integer'builtin;
-            comptime fn input(trace:*Integer)->meta.List<Integer> {{trace.* = trace.* * 10 + 1;[2,3]}}
-            comptime fn seed(trace:*Integer)->Integer {{trace.* = trace.* * 10 + 2;10}}
+            struct Trace {{value:Integer}}
+            impl Trace {{
+            comptime fn input(self)->meta.List<Integer> {{self.value = self.value * 10 + 1;[2,3]}}
+            comptime fn seed(self)->Integer {{self.value = self.value * 10 + 2;10}}
+            comptime fn callback(self)->comptime fn(Integer,Integer)->Integer {{self.value = self.value * 10 + 3;combine}}
+            }}
             comptime fn combine(acc:Integer,value:Integer)->Integer {{acc + value}}
-            comptime fn callback(trace:*Integer)->comptime fn(Integer,Integer)->Integer {{trace.* = trace.* * 10 + 3;combine}}
             comptime fn run()->bool {{
-                var trace:Integer=0;
-                let values=(input(trace.ref)).{method}(seed(trace.ref),callback(trace.ref));
-                trace == 123 and values.length() == 2 and values[1] == {last}
+                let trace=Trace {{value:0}};
+                let values=(trace.input()).{method}(trace.seed(),trace.callback());
+                trace.value == 123 and values.length() == 2 and values[1] == {last}
             }}", last=if method == "scan" {15} else {12}
         )).unwrap();
         assert_eq!(

@@ -66,12 +66,15 @@ fn explicit_division_evaluates_operands_once_and_preserves_early_returns() {
     for operation in ["div_trunc", "rem_trunc"] {
         let expected = if operation == "div_trunc" { 2 } else { 1 };
         let package = compile(&format!(
-            "comptime fn left(trace:*Integer)->Integer {{trace.* = trace.* * 10 + 1;7}}
-            comptime fn right(trace:*Integer)->Integer {{trace.* = trace.* * 10 + 2;3}}
+            "struct Trace {{value:Integer}}
+            impl Trace {{
+            comptime fn left(self)->Integer {{self.value = self.value * 10 + 1;7}}
+            comptime fn right(self)->Integer {{self.value = self.value * 10 + 2;3}}
+            }}
             comptime fn run()->bool {{
-                var trace:Integer=0;
-                let result=meta.{operation}(left(trace.ref),right(trace.ref));
-                result == {expected} and trace == 12
+                let trace=Trace {{value:0}};
+                let result=meta.{operation}(trace.left(),trace.right());
+                result == {expected} and trace.value == 12
             }}
             comptime fn early()->bool {{
                 .comptime_integer_{operation}'builtin(do {{return true;}},do {{return false;}});

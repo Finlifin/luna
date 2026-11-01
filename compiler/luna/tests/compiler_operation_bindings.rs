@@ -39,8 +39,9 @@ fn compiler_operations_follow_imports_and_constant_aliases() {
 fn compiler_operation_arguments_keep_source_order_and_single_evaluation() {
     let package=compile(
         "const concat=.list_concat'builtin;const length=.list_length'builtin;
-        comptime fn input(trace:*Integer,digit:Integer)->List<bool> {trace.* = trace.* * 10 + digit;[true]}
-        comptime fn run()->bool {var trace:Integer=0;let values=concat(input(trace.ref,1),input(trace.ref,2));trace == 12 and length(values) == 2}"
+        struct Trace {value:Integer}
+        impl Trace {comptime fn input(self,digit:Integer)->List<bool> {self.value = self.value * 10 + digit;[true]}}
+        comptime fn run()->bool {let trace=Trace {value:0};let values=concat(trace.input(1),trace.input(2));trace.value == 12 and length(values) == 2}"
     ).unwrap();
     assert_eq!(
         luna::invocation::invoke(&package, "run", 100_000).unwrap(),
