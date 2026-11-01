@@ -2846,3 +2846,49 @@ fn shared_template_declaration_types_and_instance_names_keep_separate_scopes() {
         comptime_interpretor::Value::Bool(true)
     );
 }
+
+#[test]
+fn shared_template_body_uses_the_generated_functions_effect_row() {
+    for attribute in ["", "^attrs.effects.direct_passing "] {
+        for category in ["", "inline ", "quote "] {
+            for body in ["read()# and current", "return read()# and current;"] {
+                let source = format!(
+                    "{attribute}effect read()->bool;
+                    template fn fixture(value:bool,quote lambda body:<current:bool |- bool>)->#read bool {{
+                        let current=value;~<body>
+                    }}
+                    {category}fn selected use fixture {{{body}}}
+                    fn run()->bool {{selected(true)# {{read()=>true,}}}}"
+                );
+                let Artifact::Nir(package) = compile(&source, Emit::Nir)
+                    .unwrap_or_else(|e| panic!("{attribute}/{category}/{body}: {e}"))
+                else {
+                    panic!("expected NIR")
+                };
+                let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
+                let mut vm =
+                    comptime_interpretor::Interpreter::from_iir(&graph, Default::default())
+                        .unwrap();
+                assert_eq!(
+                    vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+                    comptime_interpretor::Value::Bool(true)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn shared_template_body_cannot_request_undeclared_effects() {
+    for row in ["bool", "#permitted bool"] {
+        let source = format!(
+            "effect forbidden()->bool;effect permitted()->bool;
+            template fn fixture(quote lambda body:<|-bool>)->{row} {{~<body>}}
+            fn invalid use fixture {{forbidden()#}}"
+        );
+        let failure = compile(&source, Emit::Nir)
+            .err()
+            .expect("undeclared effect");
+        assert!(!failure.contains("not implemented"), "{failure}");
+    }
+}

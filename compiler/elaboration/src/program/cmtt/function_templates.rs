@@ -14,6 +14,14 @@ impl Checker<'_, '_> {
         let saved_locals = self.locals.clone();
         let saved_code = self.code_values.clone();
         let saved_checking = self.checking_code_generator;
+        // The supplied runtime body belongs to this generated function. Check
+        // its requests in that function's declared row, not the environment of
+        // whichever body was elaborated before code construction started.
+        let effects = match result {
+            Term::Computation { effects, .. } => Some(effects.clone()),
+            _ => None,
+        };
+        let saved_effects = std::mem::replace(&mut self.effect_environment, effects);
         let checked = (|| {
             let formal = self.code_interface(template.interface.ty)?;
             let code = if let Some(supplied) = template.supplied {
@@ -76,6 +84,7 @@ impl Checker<'_, '_> {
         self.locals = saved_locals;
         self.code_values = saved_code;
         self.checking_code_generator = saved_checking;
+        self.effect_environment = saved_effects;
         checked
     }
 }
