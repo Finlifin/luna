@@ -710,23 +710,28 @@ fn pattern_variadic_inputs_reject_wrong_shapes_and_code_collections() {
 }
 
 #[test]
-fn generator_pointer_range_snapshots_refresh_after_alias_writes() {
-    let source = "comptime fn build(count:*.u8'builtin,alias:*.u8'builtin)-><|-bool> {
-            assumes count.* < 255;count.*+=1;
-            alias.* = 254;
-            assumes count.* < 255;count.*+=1;
-            let correct=count.* == 255;'(correct)
+fn generator_range_evidence_refreshes_after_receiver_writes() {
+    let source = "typealias Byte=.u8'builtin;
+        struct Counter {value:Byte}
+        impl Counter {
+            comptime fn set(self,value:Byte) {self.value=value;}
+            comptime fn build(self)-><|-bool> {
+                assumes self.value < 255;self.value+=1;
+                self.set(254);
+                assumes self.value < 255;self.value+=1;
+                let correct=self.value == 255;'(correct)
+            }
         }
-        comptime fn emit()-><|-bool> {var count:.u8'builtin=0;build(count.ref,count.ref)}
+        comptime fn emit()-><|-bool> {let count=Counter {value:0};count.build()}
         fn run()->bool {~<emit()>}";
     assert_eq!(run(source, "run", vec![]), Value::Bool(true));
-    let invalid = source.replace("alias.* = 254", "alias.* = 255");
+    let invalid = source.replace("self.set(254)", "self.set(255)");
     let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
     assert!(!failure.contains("parsing failed"), "{failure}");
     let invalid = source.replace(
-        "alias.* = 254;
-            assumes count.* < 255;count.*+=1;",
-        "do {alias.* = 255;count.*+=1;};",
+        "self.set(254);
+                assumes self.value < 255;self.value+=1;",
+        "do {self.set(255);self.value+=1;};",
     );
     let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
     assert!(
