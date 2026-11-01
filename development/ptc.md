@@ -453,3 +453,36 @@ Validation from `/home/fin/luna`:
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`: four passed (`/tmp/luna-tools-ieh8wiss/result.json`).
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_type_factories_keep_identity_through_comptime_parameters`: passed with the shipped library (`/tmp/luna-tools-7o16fj8w/result.json`).
 - Formatting check and `git diff --check` passed (`/tmp/luna-tools-l3m0bbla/result.json`).
+
+## Trail notifications for learned clauses
+
+The production learned-clause propagation path now consumes deduplicated changed
+atom IDs from the search trail instead of comparing a complete previous
+assignment vector. Decisions, propagated assignments and undo/backjump operations
+all emit notifications. Scoped proof probes do not: their opposite value is not
+a change to the live search world. The trail's current notification buffer has
+one consumer, learned propagation; root CNF and theory still use snapshots.
+
+A fresh search starts a new notification epoch and schedules existing clauses
+for reinspection. New learned clauses remain pending independently of whether any
+atom changed. Successful propagation acknowledges notifications; interrupted work
+keeps them available for retry, and resending IDs only schedules clauses once.
+Clause-body interruption leaves the unfinished clause pending. Ordinary search
+cleanup restores caller values without allocating notifications for a consumer
+that can no longer run; the next search's epoch handles that boundary.
+
+The old snapshot synchronizer is now test-only. The production watch table no
+longer stores an atom-sized previous-assignment vector. A 4,096-atom test checks
+that a quiescent event pass succeeds with zero fuel and a change to one unwatched
+atom consumes only one notification step. This is a local work bound, not an
+end-to-end timing claim. Independent clause/proof validation and model admission
+are unchanged. Shared reason storage and root/theory event consumers remain work
+for later stages of the complete CDCL implementation.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p ptc -p type_resolution`: 461 passed (`/tmp/luna-tools-3moca8j2/result.json`).
+- New tests compare all 81 four-atom partial assignments in both directions against a full clause evaluator, retry interrupted notifications across 40 fuel cutoffs, reset search epochs, and add new clauses without assignment changes. Trail tests verify that proof probes emit no events and backjump reports exactly the undone atoms.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`: four passed (`/tmp/luna-tools-4qvx1qjm/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_type_factories_keep_identity_through_comptime_parameters`: passed (`/tmp/luna-tools-ubls547g/result.json`).
+- Formatting check and `git diff --check` passed (`/tmp/luna-tools-fpf3ybci/result.json`).

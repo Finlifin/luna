@@ -342,7 +342,11 @@ impl Search<'_> {
             return Step::Return(SearchResult::Unsat(conflict));
         }
         let forced = propagation.literals;
-        match self.propagate_learned(assignment.values()) {
+        let learned = self.propagate_learned_changes(assignment.values(), assignment.changes());
+        if learned.is_ok() {
+            assignment.acknowledge_changes();
+        }
+        match learned {
             Err(reason) => return Step::Return(SearchResult::Unknown(reason)),
             Ok(learning::Propagation::Conflict(proof)) => {
                 return Step::Return(SearchResult::Unsat(proof));

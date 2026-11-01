@@ -10,6 +10,7 @@ pub(super) struct Watches {
     pairs: Vec<[Option<usize>; 2]>,
     by_atom: BTreeMap<usize, BTreeSet<usize>>,
     pending: BTreeSet<usize>,
+    #[cfg(test)]
     previous: Vec<Option<bool>>,
 }
 fn charge(fuel: &mut usize, count: usize) -> Result<(), UnknownReason> {
@@ -47,6 +48,7 @@ impl Clauses {
 
     /// Return a conflicting clause or one unit literal. Interrupted work stays
     /// pending; an unchanged retry cannot accidentally skip an unfinished scan.
+    #[cfg(test)]
     pub(super) fn propagate(
         &mut self,
         assignment: &[Option<bool>],
@@ -71,6 +73,39 @@ impl Clauses {
             }
             self.watches.previous[atom] = *value;
         }
+        self.propagate_pending(assignment, fuel)
+    }
+
+    /// None opens a new search epoch. Otherwise only notified atoms may have
+    /// changed; interrupted callers must resend their unacknowledged changes.
+    pub(super) fn propagate_changes(
+        &mut self,
+        assignment: &[Option<bool>],
+        changed: Option<&BTreeSet<usize>>,
+        fuel: &mut usize,
+    ) -> Result<Option<(usize, Option<(usize, bool)>)>, UnknownReason> {
+        #[cfg(test)]
+        self.watches.previous.clear();
+        if let Some(changed) = changed {
+            for atom in changed {
+                charge(fuel, 1)?;
+                if let Some(entries) = self.watches.by_atom.get(atom) {
+                    charge(fuel, entries.len())?;
+                    self.watches.pending.extend(entries);
+                }
+            }
+        } else {
+            charge(fuel, self.entries.len())?;
+            self.watches.pending.extend(0..self.entries.len());
+        }
+        self.propagate_pending(assignment, fuel)
+    }
+
+    fn propagate_pending(
+        &mut self,
+        assignment: &[Option<bool>],
+        fuel: &mut usize,
+    ) -> Result<Option<(usize, Option<(usize, bool)>)>, UnknownReason> {
         while let Some(&id) = self.watches.pending.first() {
             charge(fuel, 1)?;
             let clause = &self.entries[id];
@@ -252,6 +287,103 @@ mod tests {
                 .map(BTreeSet::len)
                 .sum::<usize>(),
             128
+        );
+    }
+
+    fn check_event_result(
+        clauses: &Clauses,
+        assignment: &[Option<bool>],
+        result: Option<(usize, Option<(usize, bool)>)>,
+    ) {
+        if let Some((id, outcome)) = result {
+            assert_eq!(oracle(&clauses.entries[id], assignment), Some(outcome));
+        } else {
+            assert!(
+                clauses
+                    .entries
+                    .iter()
+                    .all(|clause| oracle(clause, assignment).is_none())
+            );
+        }
+    }
+
+    #[test]
+    fn trail_notifications_match_all_partial_assignments_and_retry_after_interruptions() {
+        let mut clauses = store();
+        let mut previous = vec![None; 4];
+        for code in (0..81).chain((0..81).rev()) {
+            let mut digits = code;
+            let assignment: Vec<_> = (0..4)
+                .map(|_| {
+                    let value = [None, Some(false), Some(true)][digits % 3];
+                    digits /= 3;
+                    value
+                })
+                .collect();
+            let changed = assignment
+                .iter()
+                .zip(&previous)
+                .enumerate()
+                .filter_map(|(atom, (a, b))| (a != b).then_some(atom))
+                .collect();
+            let result = clauses
+                .propagate_changes(&assignment, Some(&changed), &mut 100_000)
+                .unwrap();
+            check_event_result(&clauses, &assignment, result);
+            previous = assignment;
+        }
+        for fuel in 0..40 {
+            let mut clauses = store();
+            let first = [Some(false), Some(false), Some(false), Some(true)];
+            clauses
+                .propagate_changes(&first, None, &mut 100_000)
+                .unwrap();
+            let next = [Some(true), Some(true), Some(false), None];
+            let changes = BTreeSet::from([0, 1, 3]);
+            let _ = clauses.propagate_changes(&next, Some(&changes), &mut { fuel });
+            let result = clauses
+                .propagate_changes(&next, Some(&changes), &mut 100_000)
+                .unwrap();
+            check_event_result(&clauses, &next, result);
+            // A new search may have unrelated premises but no assignment events.
+            let result = clauses
+                .propagate_changes(&first, None, &mut 100_000)
+                .unwrap();
+            check_event_result(&clauses, &first, result);
+            clauses.push(vec![(0, false)]);
+            let result = clauses
+                .propagate_changes(&first, Some(&BTreeSet::new()), &mut 100_000)
+                .unwrap();
+            check_event_result(&clauses, &first, result);
+        }
+    }
+
+    #[test]
+    fn unchanged_trail_does_not_scan_the_atom_universe() {
+        let mut clauses = Clauses::default();
+        for atom in 1..65 {
+            clauses.push(vec![(0, true), (atom, true)]);
+        }
+        let assignment = vec![Some(false); 4096];
+        assert!(
+            clauses
+                .propagate_changes(&assignment, None, &mut 100_000)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            clauses
+                .propagate_changes(&assignment, Some(&BTreeSet::new()), &mut 0)
+                .unwrap()
+                .is_none()
+        );
+        let mut changed = assignment;
+        changed[4095] = None;
+        assert!(
+            clauses
+                .propagate_changes(&changed, Some(&BTreeSet::from([4095])), &mut 1)
+                .unwrap()
+                .is_none()
         );
     }
 }

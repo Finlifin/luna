@@ -1,6 +1,6 @@
 //! Search-owned assignments in chronological order. Proof probes are temporary
 //! views and never become search entries or change their decision levels.
-use std::fmt;
+use std::{collections::BTreeSet, fmt};
 
 #[derive(Clone, Copy)]
 pub(super) enum Origin {
@@ -19,6 +19,8 @@ pub(super) struct Trail<'a> {
     values: &'a mut [Option<bool>],
     levels: Vec<usize>,
     entries: Vec<Entry>,
+    changes: BTreeSet<usize>,
+    synchronized: bool,
 }
 impl<'a> Trail<'a> {
     pub(super) fn new(values: &'a mut [Option<bool>]) -> Self {
@@ -26,7 +28,17 @@ impl<'a> Trail<'a> {
             levels: vec![0; values.len()],
             values,
             entries: Vec::new(),
+            changes: BTreeSet::new(),
+            synchronized: false,
         }
+    }
+    // None starts a new consumer epoch; otherwise only these atoms changed.
+    pub(super) fn changes(&self) -> Option<&BTreeSet<usize>> {
+        self.synchronized.then_some(&self.changes)
+    }
+    pub(super) fn acknowledge_changes(&mut self) {
+        self.changes.clear();
+        self.synchronized = true;
     }
     pub(super) fn values(&self) -> &[Option<bool>] {
         self.values
@@ -43,6 +55,7 @@ impl<'a> Trail<'a> {
             "search assignment overwrites a live premise"
         );
         self.values[index] = Some(value);
+        self.changes.insert(index);
         self.levels[index] = level;
         self.entries.push(Entry {
             index,
@@ -55,6 +68,7 @@ impl<'a> Trail<'a> {
         let entry = self.entries.pop().expect("missing search assignment");
         assert_eq!(entry.index, index, "search unwind must follow the trail");
         self.values[index] = None;
+        self.changes.insert(index);
         self.levels[index] = 0;
     }
     pub(super) fn backjump(&mut self, target: usize) {
@@ -94,8 +108,10 @@ impl<'a> Trail<'a> {
 }
 impl Drop for Trail<'_> {
     fn drop(&mut self) {
-        while let Some(entry) = self.entries.last() {
-            self.undo(entry.index);
+        // A subsequent search starts a new consumer epoch; cleanup need not
+        // allocate notifications that no consumer can observe.
+        while let Some(entry) = self.entries.pop() {
+            self.values[entry.index] = None;
         }
     }
 }
@@ -131,16 +147,20 @@ mod tests {
             trail.assign(2, true, 1, Origin::Decision);
             trail.assign(3, false, 1, Origin::Learned);
             let before = trail.to_string();
+            assert!(trail.changes().is_none());
+            trail.acknowledge_changes();
             let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 trail.probe(2, false, |_| panic!("interrupted proof probe"));
             }));
             assert!(panic.is_err());
             assert_eq!(trail.to_string(), before);
+            assert!(trail.changes().unwrap().is_empty());
             assert_eq!(
                 trail.values(),
                 &[Some(true), Some(false), Some(true), Some(false)]
             );
             trail.backjump(0);
+            assert_eq!(trail.changes(), Some(&BTreeSet::from([2, 3])));
             assert_eq!(trail.values(), &[Some(true), Some(false), None, None]);
             assert_eq!(trail.levels(), &[0, 0, 0, 0]);
             assert_eq!(

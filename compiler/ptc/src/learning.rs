@@ -179,11 +179,28 @@ impl Search<'_> {
         false
     }
 
+    #[cfg(test)]
     pub(super) fn propagate_learned(
         &mut self,
         assignment: &[Option<bool>],
     ) -> Result<Propagation, UnknownReason> {
-        if let Some((id, missing)) = self.learned.propagate(assignment, &mut self.steps)? {
+        let pending = self.learned.propagate(assignment, &mut self.steps)?;
+        Ok(self.learned_result(pending))
+    }
+
+    pub(super) fn propagate_learned_changes(
+        &mut self,
+        assignment: &[Option<bool>],
+        changed: Option<&std::collections::BTreeSet<usize>>,
+    ) -> Result<Propagation, UnknownReason> {
+        let pending = self
+            .learned
+            .propagate_changes(assignment, changed, &mut self.steps)?;
+        Ok(self.learned_result(pending))
+    }
+
+    fn learned_result(&self, pending: Option<(usize, Option<(usize, bool)>)>) -> Propagation {
+        if let Some((id, missing)) = pending {
             let clause = &self.learned.entries[id];
             let mut reason = self.conflict_proof(clause);
             if let Some(proof) = self.learned.proofs.get(clause) {
@@ -195,16 +212,16 @@ impl Search<'_> {
                     proof: proof.clone(),
                 };
             }
-            return Ok(match missing {
+            return match missing {
                 None => Propagation::Conflict(reason),
                 Some((index, value)) => Propagation::Unit {
                     index,
                     value,
                     reason,
                 },
-            });
+            };
         }
-        Ok(Propagation::None)
+        Propagation::None
     }
 }
 
