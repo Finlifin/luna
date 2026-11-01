@@ -248,7 +248,7 @@ mod tests {
         ));
         assert_eq!(
             state.to_string(),
-            "(root-propagation (theory-atoms 1) (values unknown) (auxiliary-reasons) (yielded (clause 0) (literal 0 true)))"
+            "(root-propagation (theory-atoms 1) (values unknown) (trail) (conflict) (auxiliary-reasons) (yielded (clause 0) (literal 0 true)))"
         );
     }
 

@@ -384,3 +384,42 @@ Validation from `/home/fin/luna`:
 - `python3 -B development/check.py --timeout 900 -- test -p ptc -p type_resolution`: 456 passed (`/tmp/luna-tools-ufg1rcg9/result.json`).
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`: 4 passed (`/tmp/luna-tools-6w_w27uq/result.json`). The new source case checks the inferred `Tagged<U, true>` retains the original head, ambient U and completed bool input.
 - `git diff --check`: passed.
+
+## Reversible root propagation trail
+
+Root CNF continuations now survive premise retraction and search backjumps.
+The session records external theory-atom assignments and auxiliary implications
+in chronological order, with the root clause responsible for each auxiliary.
+On a removed or flipped premise, synchronization finds its earliest trail
+position, undoes that suffix and retains the valid prefix. Still-present caller
+assignments in the undone suffix are then admitted again. This is conservative
+chronological rollback, not dependency-minimal invalidation.
+
+Watches persist across these transitions. Unit clauses retain subscriptions;
+undone implications reschedule their reason clauses, and pending proposals or
+conflicts are reconsidered after rollback. Repeated conflicts remain available
+without consuming the queue and incorrectly returning no propagation. Watch
+buckets now use ordered sets with explicit subscription removal, so repeated
+assignment and retraction cannot accumulate duplicate/stale subscriptions.
+
+Auxiliary certificates are truncated with the trail. Independent replay and
+explanation still reconstruct the original CNF without consulting retained state.
+Budget-interrupted updates are discarded by the circuit owner; no partially
+updated trail becomes evidence. The S-expression dump includes chronological
+entries, auxiliary reasons and a retained conflict clause.
+
+This extends the earlier monotone continuation stage. Root, learned and theory
+reason storage are not yet unified: search still communicates atom-assignment
+snapshots, and synchronization scans those atoms. Full event-driven CDCL trail
+integration remains unfinished. Type input extraction still requires a proof of
+the candidate equality under the original problem; a satisfying model alone
+never authorizes committing an inferred Type.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p ptc -p type_resolution`: 458 passed (`/tmp/luna-tools-_mbth90g/result.json`).
+- Regressions preserve a 64-auxiliary prefix across 64 branch changes, compare with fresh propagation, independently replay certificates, retain/retract conflicts, and check bounded subscriptions after 1,000 transitions.
+- Existing exhaustive three-atom partial assignments and interruption/recovery checks also use the retained path. No expected logical outcomes or independent verifier checks were weakened.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`: four passed (`/tmp/luna-tools-el942yz6/result.json`), including rejection of a model satisfying only one regional alternative.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_type_factories_keep_identity_through_comptime_parameters`: passed (`/tmp/luna-tools-x5v118in/result.json`), exercising real library List identity and method forwarding.
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`: passed (`/tmp/luna-tools-0yuiomdl/result.json`); `git diff --check` passed.

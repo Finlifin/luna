@@ -100,13 +100,11 @@ impl Circuit {
         // Taking ownership makes every interrupted update discard its partial
         // state. Certificates never depend on retaining this optimization.
         let mut state = match self.propagation.take() {
-            Some(state) if state.extends(assignment, fuel)? => state,
+            Some(state) => state,
             _ => cnf::Session::new(cnf, assignment, fuel)?,
         };
         let result = state.propagate(cnf, assignment, fuel)?;
-        if !matches!(result, cnf::Propagation::Conflict(_)) {
-            self.propagation = Some(state);
-        }
+        self.propagation = Some(state);
         Ok(result)
     }
 

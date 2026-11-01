@@ -1,5 +1,5 @@
-//! Monotone propagation continuation within one immutable root clause set.
-//! Retraction rebuilds the continuation; proof replay never consults it.
+//! Reversible propagation trail within one immutable root clause set.
+//! Retraction preserves the valid prefix; proof replay never consults it.
 use super::{Cnf, Literal, Propagation, Status, Watches, charge};
 use std::fmt;
 
@@ -9,6 +9,13 @@ pub(crate) struct Session {
     watches: Watches,
     auxiliary_trace: Vec<usize>,
     yielded: Option<(usize, Literal)>,
+    conflict: Option<usize>,
+    trail: Vec<Entry>,
+    atom_positions: Vec<Option<usize>>,
+}
+struct Entry {
+    literal: Literal,
+    reason: Option<usize>,
 }
 impl Session {
     pub(crate) fn new(
@@ -17,30 +24,82 @@ impl Session {
         fuel: &mut usize,
     ) -> Result<Self, ()> {
         let values = cnf.initial(assignment, fuel)?;
+        let mut trail = Vec::new();
+        let mut atom_positions = vec![None; assignment.len()];
+        for (variable, value) in assignment.iter().enumerate() {
+            charge(fuel)?;
+            if let Some(positive) = value {
+                atom_positions[variable] = Some(trail.len());
+                trail.push(Entry {
+                    literal: Literal {
+                        variable,
+                        positive: *positive,
+                    },
+                    reason: None,
+                });
+            }
+        }
         Ok(Self {
             watches: Watches::new(cnf, values.len(), fuel)?,
             values,
             atoms: assignment.len(),
             auxiliary_trace: Vec::new(),
             yielded: None,
+            conflict: None,
+            trail,
+            atom_positions,
         })
     }
 
-    pub(crate) fn extends(
-        &self,
-        assignment: &[Option<bool>],
-        fuel: &mut usize,
-    ) -> Result<bool, ()> {
+    fn synchronize(&mut self, assignment: &[Option<bool>], fuel: &mut usize) -> Result<(), ()> {
         if assignment.len() != self.atoms {
-            return Ok(false);
+            return Err(());
         }
-        for (old, new) in self.values[..self.atoms].iter().zip(assignment) {
+        let mut cut = self.trail.len();
+        for (index, value) in assignment.iter().enumerate() {
             charge(fuel)?;
-            if old.is_some() && old != new {
-                return Ok(false);
+            if self.values[index].is_some() && self.values[index] != *value {
+                cut = cut.min(self.atom_positions[index].ok_or(())?);
             }
         }
-        Ok(true)
+        if cut < self.trail.len() {
+            // Every implication depends only on assignments preceding it. Undo
+            // the suffix, including unchanged caller atoms that followed the
+            // invalid premise, then admit those caller atoms again below.
+            while self.trail.len() > cut {
+                charge(fuel)?;
+                let entry = self.trail.pop().unwrap();
+                let variable = entry.literal.variable;
+                self.values[variable] = None;
+                if let Some(reason) = entry.reason {
+                    let removed = self.auxiliary_trace.pop();
+                    debug_assert_eq!(removed, Some(reason));
+                    self.watches.schedule(reason);
+                } else {
+                    self.atom_positions[variable] = None;
+                }
+                self.watches.assigned(variable, fuel)?;
+            }
+            if let Some((clause, _)) = self.yielded.take() {
+                self.watches.schedule(clause);
+            }
+            if let Some(clause) = self.conflict.take() {
+                self.watches.schedule(clause);
+            }
+        }
+        for (variable, value) in assignment.iter().enumerate() {
+            charge(fuel)?;
+            if let Some(positive) = value.filter(|_| self.values[variable].is_none()) {
+                self.atom_positions[variable] = Some(self.trail.len());
+                self.trail.push(Entry {
+                    literal: Literal { variable, positive },
+                    reason: None,
+                });
+                self.values[variable] = Some(positive);
+                self.watches.assigned(variable, fuel)?;
+            }
+        }
+        Ok(())
     }
 
     fn certificate(&self, clause: usize, fuel: &mut usize) -> Result<Vec<usize>, ()> {
@@ -56,12 +115,9 @@ impl Session {
         assignment: &[Option<bool>],
         fuel: &mut usize,
     ) -> Result<Propagation, ()> {
-        for (index, value) in assignment.iter().copied().enumerate() {
-            charge(fuel)?;
-            if self.values[index] != value {
-                self.values[index] = value;
-                self.watches.assigned(index, fuel)?;
-            }
+        self.synchronize(assignment, fuel)?;
+        if let Some(clause) = self.conflict {
+            return Ok(Propagation::Conflict(self.certificate(clause, fuel)?));
         }
         if let Some((clause, literal)) = self.yielded {
             match self.values[literal.variable] {
@@ -82,8 +138,7 @@ impl Session {
             match self.watches.inspect(cnf, clause, &self.values, fuel)? {
                 Status::Open => {}
                 Status::Conflict => {
-                    // A conflicting pass is terminal. Retain the empty-clause
-                    // result through a full restart on the next request.
+                    self.conflict = Some(clause);
                     return Ok(Propagation::Conflict(self.certificate(clause, fuel)?));
                 }
                 Status::Unit(literal) if literal.variable < self.atoms => {
@@ -95,6 +150,11 @@ impl Session {
                     });
                 }
                 Status::Unit(literal) => {
+                    charge(fuel)?;
+                    self.trail.push(Entry {
+                        literal,
+                        reason: Some(clause),
+                    });
                     self.auxiliary_trace.push(clause);
                     self.values[literal.variable] = Some(literal.positive);
                     self.watches.assigned(literal.variable, fuel)?;
@@ -113,6 +173,28 @@ impl fmt::Display for Session {
                 None => write!(f, " unknown")?,
             }
         }
+        write!(f, ") (trail")?;
+        for entry in &self.trail {
+            write!(
+                f,
+                " ({} {} {}",
+                if entry.reason.is_some() {
+                    "auxiliary"
+                } else {
+                    "atom"
+                },
+                entry.literal.variable,
+                entry.literal.positive
+            )?;
+            if let Some(reason) = entry.reason {
+                write!(f, " (reason {reason})")?;
+            }
+            write!(f, ")")?;
+        }
+        write!(f, ") (conflict")?;
+        if let Some(clause) = self.conflict {
+            write!(f, " {clause}")?;
+        }
         write!(f, ") (auxiliary-reasons")?;
         for clause in &self.auxiliary_trace {
             write!(f, " {clause}")?;
@@ -126,5 +208,101 @@ impl fmt::Display for Session {
             )?;
         }
         write!(f, "))")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rollback_retains_independent_auxiliaries_and_replays_both_branches() {
+        let literal = |variable, positive| Literal { variable, positive };
+        let prefix = 64;
+        let last = 3 + prefix - 1;
+        let branch = last + 1;
+        let mut clauses = Vec::new();
+        for output in 3..=branch {
+            let input = if output == 3 {
+                0
+            } else if output == branch {
+                1
+            } else {
+                output - 1
+            };
+            clauses.push(vec![literal(input, false), literal(output, true)]);
+            clauses.push(vec![literal(input, true), literal(output, false)]);
+        }
+        clauses.push(vec![
+            literal(last, false),
+            literal(branch, false),
+            literal(2, true),
+        ]);
+        let cnf = Cnf {
+            atoms: 3,
+            clauses,
+            definitions: vec![(false, vec![]); prefix + 1],
+        };
+        let initial = [Some(true), None, None];
+        let mut session = Session::new(&cnf, &initial, &mut 100_000).unwrap();
+        assert!(matches!(
+            session.propagate(&cnf, &initial, &mut 100_000),
+            Ok(Propagation::None)
+        ));
+        let reasons = session.auxiliary_trace.clone();
+        assert_eq!(reasons.len(), prefix);
+        let mut warm = 1_000_000;
+        let mut cold = 1_000_000;
+        for iteration in 0..64 {
+            let enabled = iteration % 2 == 0;
+            let assignment = [Some(true), Some(enabled), None];
+            let result = session.propagate(&cnf, &assignment, &mut warm).unwrap();
+            let fresh = cnf.propagate(&assignment, &mut cold).unwrap();
+            assert_eq!(&session.auxiliary_trace[..prefix], reasons.as_slice());
+            assert_eq!(session.values[last], Some(true));
+            assert_eq!(session.values[branch], Some(enabled));
+            match (result, fresh) {
+                (
+                    Propagation::Unit {
+                        index: 2,
+                        value: true,
+                        trace,
+                    },
+                    Propagation::Unit {
+                        index: 2,
+                        value: true,
+                        ..
+                    },
+                ) if enabled => {
+                    cnf.replay(&trace, &[Some(true), Some(true), Some(false)], &mut 100_000)
+                        .unwrap();
+                }
+                (Propagation::None, Propagation::None) if !enabled => {}
+                _ => panic!("retained and fresh worlds disagree"),
+            }
+        }
+        assert!(
+            warm > cold,
+            "retaining the prefix must avoid recomputing it"
+        );
+        // A retained conflict is stable, but must be reconsidered after rollback.
+        let conflict = [Some(true), Some(true), Some(false)];
+        for _ in 0..2 {
+            let Propagation::Conflict(trace) =
+                session.propagate(&cnf, &conflict, &mut 100_000).unwrap()
+            else {
+                panic!("expected conflict");
+            };
+            cnf.replay(&trace, &conflict, &mut 100_000).unwrap();
+        }
+        assert!(matches!(
+            session.propagate(&cnf, &[Some(true), Some(false), Some(false)], &mut 100_000),
+            Ok(Propagation::None)
+        ));
+        assert!(
+            session
+                .to_string()
+                .contains("(auxiliary 3 true (reason 0))")
+        );
     }
 }

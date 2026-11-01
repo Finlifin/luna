@@ -1,12 +1,12 @@
-//! Two watched literals per root clause, retained across a monotone propagation
-//! continuation. Proof replay uses the independent full-clause scanner.
+//! Root-clause watches retained across assignments and rollback.
+//! Proof replay uses the independent full-clause scanner.
 use super::{Cnf, Literal, Status, charge};
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 
 pub(super) struct Watches {
     watched: Vec<[Option<usize>; 2]>,
     cursor: Vec<usize>,
-    buckets: Vec<Vec<usize>>,
+    buckets: Vec<BTreeSet<usize>>,
     pending: VecDeque<usize>,
     queued: Vec<bool>,
 }
@@ -18,7 +18,7 @@ impl Watches {
         Ok(Self {
             watched: vec![[None; 2]; count],
             cursor: vec![0; count],
-            buckets: vec![Vec::new(); variables],
+            buckets: vec![BTreeSet::new(); variables],
             pending: (0..count).collect(),
             queued: vec![true; count],
         })
@@ -29,22 +29,27 @@ impl Watches {
         Some(clause)
     }
     pub(super) fn assigned(&mut self, variable: usize, fuel: &mut usize) -> Result<(), ()> {
-        // Each variable is assigned at most once in this local monotone pass.
-        // Moved watches leave stale entries; validate them before waking a clause.
+        // A variable can be assigned, unassigned and assigned again. Inspection
+        // reinstalls its subscriptions after each queued change.
         for clause in std::mem::take(&mut self.buckets[variable]) {
             charge(fuel)?;
             if self.watched[clause].contains(&Some(variable)) && !self.queued[clause] {
-                self.queued[clause] = true;
-                self.pending.push_back(clause);
+                self.schedule(clause);
             }
         }
         Ok(())
     }
+    pub(super) fn schedule(&mut self, clause: usize) {
+        if !self.queued[clause] {
+            self.queued[clause] = true;
+            self.pending.push_back(clause);
+        }
+    }
     fn install(&mut self, clause: usize, first: usize, second: Option<usize>) {
         self.watched[clause] = [Some(first), second];
-        self.buckets[first].push(clause);
+        self.buckets[first].insert(clause);
         if let Some(second) = second.filter(|second| *second != first) {
-            self.buckets[second].push(clause);
+            self.buckets[second].insert(clause);
         }
     }
     pub(super) fn inspect(
@@ -55,6 +60,10 @@ impl Watches {
         fuel: &mut usize,
     ) -> Result<Status, ()> {
         charge(fuel)?;
+        for variable in self.watched[clause].iter().flatten() {
+            charge(fuel)?;
+            self.buckets[*variable].remove(&clause);
+        }
         self.watched[clause] = [None; 2];
         let literals = &cnf.clauses[clause];
         let mut unit: Option<Literal> = None;
@@ -86,7 +95,10 @@ impl Watches {
             }
         }
         Ok(match unit {
-            Some(unit) => Status::Unit(unit),
+            Some(unit) => {
+                self.install(clause, unit.variable, None);
+                Status::Unit(unit)
+            }
             None => Status::Conflict,
         })
     }
@@ -169,6 +181,34 @@ mod tests {
                 variable: 3,
                 positive: true
             }))
+        ));
+    }
+
+    #[test]
+    fn repeated_retractions_keep_live_subscriptions_bounded() {
+        let cnf = clause(4);
+        let mut values = vec![None; 4];
+        let mut fuel = 100_000;
+        let mut watches = Watches::new(&cnf, 4, &mut fuel).unwrap();
+        for iteration in 0..1000 {
+            values[0] = if iteration % 2 == 0 { Some(true) } else { None };
+            watches.assigned(0, &mut fuel).unwrap();
+            while let Some(clause) = watches.next() {
+                assert!(matches!(
+                    watches.inspect(&cnf, clause, &values, &mut fuel),
+                    Ok(Status::Open)
+                ));
+            }
+            assert!(watches.buckets.iter().map(BTreeSet::len).sum::<usize>() <= 2);
+        }
+        values.fill(Some(false));
+        for variable in 0..4 {
+            watches.assigned(variable, &mut fuel).unwrap();
+        }
+        let clause = watches.next().expect("final changes must wake the clause");
+        assert!(matches!(
+            watches.inspect(&cnf, clause, &values, &mut fuel),
+            Ok(Status::Conflict)
         ));
     }
 }
