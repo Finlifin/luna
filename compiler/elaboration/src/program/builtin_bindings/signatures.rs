@@ -29,6 +29,38 @@ pub(super) fn fixed(
             vec![p(P::Object), p(P::Integer), p(P::Integer)],
             p(P::Object),
         ),
+        "build_newtype" => (vec![p(P::Symbol), p(P::Type)], p(P::Type)),
+        "build_struct" => (
+            vec![p(P::Symbol), list(p(P::Symbol))?, list(p(P::Type))?],
+            p(P::Type),
+        ),
+        "build_enum" | "build_enum_paths" | "build_symbol_enum_paths" | "build_bits_enum_paths" => {
+            let paths = if name == "build_enum" {
+                list(p(P::Symbol))?
+            } else {
+                list(list(p(P::Symbol))?)?
+            };
+            let mut inputs = vec![
+                p(P::Symbol),
+                paths.clone(),
+                paths,
+                list(p(P::Symbol))?,
+                list(list(p(P::Symbol))?)?,
+                list(list(p(P::Type))?)?,
+            ];
+            if name == "build_symbol_enum_paths" {
+                inputs.push(list(p(P::Symbol))?);
+            } else if name == "build_bits_enum_paths" {
+                inputs.extend([
+                    p(P::Integer),
+                    Term::Optional(Box::new(p(P::Type))),
+                    list(p(P::Integer))?,
+                    list(p(P::Integer))?,
+                    list(list(p(P::Integer))?)?,
+                ]);
+            }
+            (inputs, p(P::Type))
+        }
         "newtype_representation" => (vec![p(P::Type)], p(P::Type)),
         "struct_field_types" => (vec![p(P::Type)], list(p(P::Type))?),
         "struct_field_names" | "enum_variant_shapes" | "enum_symbol_values" => {
@@ -54,4 +86,18 @@ pub(super) fn fixed(
             .collect(),
         result: Box::new(output),
     }))))
+}
+
+// Definition publication allocates a new nominal identity on every invocation.
+// A Type result alone does not make these operations pure or memoizable.
+pub(super) fn publishes_definition(name: &str) -> bool {
+    matches!(
+        name,
+        "build_newtype"
+            | "build_struct"
+            | "build_enum"
+            | "build_enum_paths"
+            | "build_symbol_enum_paths"
+            | "build_bits_enum_paths"
+    )
 }

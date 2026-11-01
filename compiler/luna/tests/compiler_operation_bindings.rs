@@ -452,3 +452,114 @@ fn named_operation_calls_splice_only_the_comptime_result() {
     );
     assert!(support::compile_with_bindings(&invalid, &Default::default(), Some("Splice")).is_err());
 }
+
+#[test]
+fn definition_operation_values_preserve_fresh_type_identity() {
+    let package = run_all_carriers(
+        "typealias Symbol = .Symbol'builtin;
+        const Newtype: comptime fn(Symbol, Type) -> Type = .build_newtype'builtin;
+        const Record: comptime fn(Symbol, List<Symbol>, List<Type>) -> Type = .build_struct'builtin;
+        comptime fn Build(make: comptime fn(Symbol, Type) -> Type) -> Type {
+            let makers: List<comptime fn(Symbol, Type) -> Type> = [make];
+            makers[0](.Wrapper, bool)
+        }
+        comptime fn BuildViaValue() -> Type { Build(Newtype) }
+        comptime fn RejectViaValue() -> Type {
+            let make = Record;
+            make(.Invalid, [.flag, .flag], [bool, bool])
+        }
+        const First = Build(Newtype);
+        const Second = Build(Newtype);
+        comptime fn BuildRecord() -> Type {
+            let make = Record;
+            make(.Record, [.flag], [bool])
+        }
+        const One = BuildRecord();
+        const Two = BuildRecord();
+        const Representation = .newtype_representation'builtin;
+        const fields = .struct_field_types'builtin;
+        comptime fn run() -> bool {
+            Representation(First) == bool and Representation(Second) == bool
+                and fields(One)[0] == bool and fields(Two)[0] == bool
+        }",
+    );
+    let entry = support::id(&package, "BuildViaValue");
+    let rejected = support::id(&package, "RejectViaValue");
+    let rejected_key = iir::InstanceKey {
+        declaration: rejected,
+        arguments: vec![].into(),
+    };
+    let key = iir::InstanceKey {
+        declaration: entry,
+        arguments: vec![].into(),
+    };
+    let graph = elaboration::materialization::instantiate(
+        &package,
+        &[key.clone(), rejected_key.clone()],
+        Default::default(),
+        elaboration::ptc::Budget::default(),
+    )
+    .unwrap();
+    for instantiated in [false, true] {
+        for bytecode in [false, true] {
+            let publisher = elaboration::definitions::AllocatedDefinitionPublisher::new(
+                &package, 9900, 1, 1_000_000,
+            );
+            let publish = |request: &comptime_interpretor::NewtypeBuildRequest, steps: &mut u64| {
+                publisher.prepare_newtype(request, steps)
+            };
+            let publish_struct = |request: &comptime_interpretor::StructBuildRequest,
+                                  steps: &mut u64| {
+                publisher.prepare_struct(request, steps)
+            };
+            use comptime_interpretor::{Budget, Interpreter};
+            let mut vm = match (instantiated, bytecode) {
+                (false, false) => Interpreter::for_comptime_tree(&package, Budget::default()),
+                (false, true) => Interpreter::for_comptime(&package, Budget::default()),
+                (true, false) => Interpreter::from_iir_for_comptime_tree(&graph, Budget::default()),
+                (true, true) => Interpreter::from_iir_for_comptime(&graph, Budget::default()),
+            }
+            .unwrap()
+            .with_newtype_builder(&publish)
+            .with_struct_builder(&publish_struct);
+            let failure = if instantiated {
+                vm.invoke_instance(&rejected_key, vec![])
+            } else {
+                vm.invoke(rejected, vec![])
+            };
+            assert!(failure.is_err());
+            let mut invoke = || {
+                if instantiated {
+                    vm.invoke_instance(&key, vec![])
+                } else {
+                    vm.invoke(entry, vec![])
+                }
+            };
+            let first = invoke().unwrap();
+            let second = invoke().unwrap();
+            assert_ne!(first, second);
+            drop(vm);
+            let (published, _) = publisher.finish();
+            assert_eq!(published.newtypes.len(), 2);
+            assert!(published.structs.is_empty());
+        }
+    }
+    assert_eq!(package.newtypes.len(), 2);
+    assert_ne!(
+        package.newtypes[0].declaration,
+        package.newtypes[1].declaration
+    );
+    assert_eq!(package.structs.len(), 2);
+    assert_ne!(
+        package.structs[0].declaration,
+        package.structs[1].declaration
+    );
+    for name in ["build_newtype", "build_struct"] {
+        let function = package
+            .functions
+            .iter()
+            .find(|function| function.name == format!("<compiler-operation.{name}>"))
+            .unwrap();
+        assert!(!function.pure, "definition publication is effectful");
+    }
+}

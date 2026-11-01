@@ -32,11 +32,18 @@ const compiler_enum_bit_masks: comptime fn(Type) -> List<Integer> = .enum_bit_ma
 const compiler_enum_bit_values: comptime fn(Type) -> List<Integer> = .enum_bit_values'builtin;
 const compiler_enum_bit_offsets: comptime fn(Type) -> List<List<Integer>> = .enum_bit_offsets'builtin;
 const CompilerNewtypeRepresentation: comptime fn(Type) -> Type = .newtype_representation'builtin;
-const CompilerBuildNewtype = .build_newtype'builtin;
-const CompilerBuildStruct = .build_struct'builtin;
-const CompilerBuildEnumPaths = .build_enum_paths'builtin;
-const CompilerBuildSymbolEnumPaths = .build_symbol_enum_paths'builtin;
-const CompilerBuildBitsEnumPaths = .build_bits_enum_paths'builtin;
+const CompilerBuildNewtype: comptime fn(Symbol, Type) -> Type = .build_newtype'builtin;
+const CompilerBuildStruct: comptime fn(Symbol, List<Symbol>, List<Type>) -> Type = .build_struct'builtin;
+const CompilerBuildEnumPaths: comptime fn(Symbol, List<List<Symbol>>,
+    List<List<Symbol>>, List<Symbol>, List<List<Symbol>>, List<List<Type>>) -> Type
+    = .build_enum_paths'builtin;
+const CompilerBuildSymbolEnumPaths: comptime fn(Symbol, List<List<Symbol>>,
+    List<List<Symbol>>, List<Symbol>, List<List<Symbol>>, List<List<Type>>,
+    List<Symbol>) -> Type = .build_symbol_enum_paths'builtin;
+const CompilerBuildBitsEnumPaths: comptime fn(Symbol, List<List<Symbol>>,
+    List<List<Symbol>>, List<Symbol>, List<List<Symbol>>, List<List<Type>>,
+    Integer, ?Type, List<Integer>, List<Integer>, List<List<Integer>>) -> Type
+    = .build_bits_enum_paths'builtin;
 
 {-
     Named compiler-operation bindings for comptime data and definitions.
@@ -131,9 +138,7 @@ pub pure comptime fn enum_variant_field_types(subject: Type) -> List<List<Type>>
     compiler_enum_variant_field_types(subject)
 }
 
-pub comptime fn BuildStruct(name: Symbol, names: List<Symbol>, types: List<Type>) -> Type {
-    CompilerBuildStruct(name, names, types)
-}
+pub const BuildStruct: comptime fn(Symbol, List<Symbol>, List<Type>) -> Type = CompilerBuildStruct;
 
 pub comptime fn BuildEnum(name: Symbol, groups: List<List<Symbol>>,
     paths: List<List<Symbol>>, shapes: List<Symbol>,
@@ -182,9 +187,7 @@ pub pure comptime fn enum_bit_offsets(subject: Type) -> List<List<Integer>> {
 }
 
 
-pub comptime fn BuildNewtype(name: Symbol, representation: Type) -> Type {
-    CompilerBuildNewtype(name, representation)
-}
+pub const BuildNewtype: comptime fn(Symbol, Type) -> Type = CompilerBuildNewtype;
 
 
 pub pure comptime fn NewtypeRepresentation(subject: Type) -> Type {

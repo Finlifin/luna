@@ -58,7 +58,7 @@ impl Checker<'_, '_> {
                 name: format!("<compiler-operation.{}>", name.as_str()),
                 phase: n::FunctionPhase::Comptime,
                 inline: false,
-                pure: true,
+                pure: !signatures::publishes_definition(name.as_str()),
                 is_unsafe: false,
                 signature: ty.callable_signature().clone(),
                 parameters: bindings,
@@ -85,6 +85,18 @@ fn operation_body(name: &str, mut inputs: Vec<n::Expr>, source: n::SourceRange) 
     use n::{
         EnumBitQuery as B, EnumStructureQuery as Q, ObjectEditKind as E, ObjectQueryKind as O,
     };
+    if signatures::publishes_definition(name) {
+        if name == "build_bits_enum_paths" {
+            let encoding = inputs.split_off(6);
+            inputs.push(packet(encoding, source));
+        }
+        let request = Box::new(packet(inputs, source));
+        return match name {
+            "build_newtype" => K::BuildNewtype(request),
+            "build_struct" => K::BuildStruct(request),
+            _ => K::BuildEnum(request),
+        };
+    }
     if matches!(
         name,
         "comptime_integer_div_trunc" | "comptime_integer_rem_trunc"
@@ -157,5 +169,13 @@ fn operation_body(name: &str, mut inputs: Vec<n::Expr>, source: n::SourceRange) 
                 _ => unreachable!("fixed operation contract has no body"),
             },
         },
+    }
+}
+
+fn packet(inputs: Vec<n::Expr>, source: n::SourceRange) -> n::Expr {
+    n::Expr {
+        source,
+        ty: Term::Tuple(inputs.iter().map(|input| input.ty.clone()).collect()),
+        kind: K::Tuple(inputs),
     }
 }
