@@ -1843,31 +1843,35 @@ fn trait_default_forwarding_preserves_value_and_entry_snapshots() {
 }
 
 #[test]
-fn generator_live_matches_select_pointer_payloads() {
-    let source = "enum Link {some(*bool),none}
+fn generator_matches_mutate_owned_payloads_without_changing_the_source() {
+    let source = "struct State {flag:bool}
+        enum Link {some(State),none}
         comptime fn build(link:Link)-><|-bool> {
             link match {
-                .some(pointer)=>{pointer.* = true;let value=pointer.*;'(value)},
+                .some(state)=>{state.flag=true;let value=state.flag;'(value)},
                 .none=>'(false)
             }
         }
         comptime fn outer()-><|-bool> {
-            var flag=false;
-            let code=build(Link.some(flag.ref));
-            if flag {code} else {'(false)}
+            let state=State {flag:false};let link=Link.some(state);
+            let code=build(link);
+            let unchanged=not state.flag and (link match {.some(saved)=>not saved.flag,.none=>false});
+            '(unchanged and ~<code>)
         }
         fn run()->bool {~<outer()> and not ~<build(Link.none)>}";
     assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
 }
 
 #[test]
-fn generator_live_let_else_exports_cells_and_evaluates_guards_once() {
-    let source = "comptime fn build(enabled:bool)-><|-bool> {
-            var flag=false;var visited=false;
-            let (pointer,true) if do {visited=not visited;visited} = (flag.ref,enabled)
-                else {return '(not visited);};
-            pointer.* = true;
-            let result=flag and visited;
+fn generator_let_else_exports_owned_values_and_evaluates_guards_once() {
+    let source = "typealias Count=.Integer'builtin;
+        struct State {flag:bool}
+        comptime fn build(enabled:bool)-><|-bool> {
+            let state=State {flag:false};var visits:Count=0;
+            let (copy,true) if do {visits+=1;true} = (state,enabled)
+                else {let skipped=visits == 0;return '(skipped);};
+            copy.flag=true;
+            let result=copy.flag and not state.flag and visits == 1;
             '(result)
         }
         fn run()->bool {~<build(true)> and ~<build(false)>}";
@@ -1889,16 +1893,18 @@ fn generator_failed_guards_preserve_writes_for_later_candidates() {
 }
 
 #[test]
-fn generator_failed_live_let_else_guard_keeps_outer_writeback() {
-    let source = "comptime fn build()-><|-bool> {
-        var flag=false;
-        let pointer if do {pointer.* = true;false} = flag.ref
-            else {return '(flag);};
-        '(false)
-    }
-    fn run()->bool {~<build()>}";
+fn generator_failed_let_else_guard_keeps_outer_receiver_writeback() {
+    let source = "struct State {flag:bool}
+        impl State {comptime fn mark(self)->bool {self.flag=true;false}}
+        comptime fn build()-><|-bool> {
+            let state=State {flag:false};
+            let copy if state.mark() = state
+                else {let marked=state.flag;return '(marked);};
+            '(false)
+        }
+        fn run()->bool {~<build()>}";
     assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
-    let invalid = source.replace("return '(flag);", "'(flag);");
+    let invalid = source.replace("return '(marked);", "'(marked);");
     let error = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
     assert!(error.contains("must diverge"), "{error}");
 }
@@ -1970,34 +1976,21 @@ fn generator_live_tuple_elements_keep_binding_and_escape_restrictions() {
 }
 
 #[test]
-fn generator_enum_updates_switch_between_live_and_frozen_payloads() {
-    let source = "trait Duplicate {}trait Retire {fn drop(*self);}
-        enum Link {none,some(*bool)}impl Duplicate for Link {}
+fn generator_enum_replacement_preserves_owned_payload_snapshots() {
+    let source = "struct State {flag:bool}
+        enum Link {none,some(State)}
         comptime fn build()-><|-bool> {
-            var flag=false;var slot=Link.none;
-            let address=slot.ref;
-            slot=Link.some(flag.ref);
-            let .some(pointer)=address.* else {return '(false);};
-            pointer.* = true;
-            slot=Link.none;
-            let .none=address.* else {return '(false);};
-            '(flag)
+            let state=State {flag:false};var slot=Link.none;
+            slot=Link.some(state);let saved=slot;
+            let .some(copy)=slot else {return '(false);};
+            copy.flag=true;slot=Link.none;
+            let .none=slot else {return '(false);};
+            let .some(original)=saved else {return '(false);};
+            let correct=copy.flag and not original.flag and not state.flag;
+            '(correct)
         }
         fn run()->bool {~<build()>}";
-    let package = support::compile_with_source_bindings(
-        source,
-        &Default::default(),
-        luna::protocols::type_constructors::Selectors {
-            copy: Some("Duplicate"),
-            drop: Some("Retire"),
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    assert_eq!(
-        luna::execution::interpret(&package, "run", 100_000).unwrap(),
-        Value::Bool(true)
-    );
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
 }
 
 #[test]
