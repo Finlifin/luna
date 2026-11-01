@@ -2900,3 +2900,138 @@ fn enum_builder_object_payload_duplicates_reach_checked_publication() {
         .expect("duplicate fields must fail");
     assert!(error.contains("duplicate"), "{error}");
 }
+
+#[test]
+fn public_newtype_builder_preserves_identity_and_runtime_conversions() {
+    let fixture = Fixture::new(
+        "
+        use builtin.Type;
+        comptime fn Flag() -> Type {
+            let draft = meta.NewtypeBuilder.new(bool, .name = .GeneratedFlag);
+            draft.Build()
+        }
+        typealias First = Flag();
+        typealias Second = Flag();
+        fn read(value: First) -> bool {value.as(bool)}
+        fn run() -> bool {read(true.as(First)) and not false.as(Second).as(bool)}
+        comptime fn ready() -> bool {true}
+    ",
+    );
+    let (Artifact::Nir(package), _, _) = fixture.invoke_meta("ready").unwrap() else {
+        panic!()
+    };
+    let generated: Vec<_> = package
+        .newtypes
+        .iter()
+        .filter(|item| item.name == "GeneratedFlag")
+        .collect();
+    assert_eq!(generated.len(), 2);
+    assert_ne!(generated[0].declaration, generated[1].declaration);
+    for definition in generated {
+        assert_eq!(
+            definition.representation,
+            nir::Term::Primitive(nir::Primitive::Bool)
+        );
+    }
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn public_newtype_builder_edits_use_value_references_and_preserve_snapshots() {
+    let fixture = Fixture::new(
+        "
+        use builtin.Type;
+        comptime fn Changed() -> Type {
+            let draft = meta.NewtypeBuilder.new(bool, .name = .Edited);
+            let saved = draft;
+            draft.set_representation(Type);
+            let changed = draft.Build();
+            let original = saved.Build();
+            if changed == original { return bool; }
+            original
+        }
+        typealias Flag = Changed();
+        fn run() -> bool {true.as(Flag).as(bool)}
+        comptime fn ready() -> bool {true}
+    ",
+    );
+    let (Artifact::Nir(package), _, _) = fixture.invoke_meta("ready").unwrap() else {
+        panic!()
+    };
+    let generated: Vec<_> = package
+        .newtypes
+        .iter()
+        .filter(|item| item.name == "Edited")
+        .collect();
+    assert_eq!(generated.len(), 2);
+    assert_eq!(
+        generated[0].representation,
+        nir::Term::Primitive(nir::Primitive::Type)
+    );
+    assert_eq!(
+        generated[1].representation,
+        nir::Term::Primitive(nir::Primitive::Bool)
+    );
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn public_newtype_builder_returns_types_from_explicit_invocation() {
+    let fixture = Fixture::new(
+        "
+        use builtin.Type;
+        comptime fn Build() -> Type {
+            let inner = meta.NewtypeBuilder.new(bool, .name = .Inner).Build();
+            meta.NewtypeBuilder.new(inner, .name = .Outer).Build()
+        }
+    ",
+    );
+    let (Artifact::Nir(package), value, _) = fixture.invoke_meta("Build").unwrap() else {
+        panic!()
+    };
+    let inner = package
+        .newtypes
+        .iter()
+        .find(|item| item.name == "Inner")
+        .unwrap();
+    let outer = package
+        .newtypes
+        .iter()
+        .find(|item| item.name == "Outer")
+        .unwrap();
+    assert_eq!(
+        outer.representation,
+        nir::Term::Nominal {
+            declaration: inner.declaration,
+            arguments: vec![]
+        }
+    );
+    assert_eq!(
+        value,
+        Value::Type(nir::Term::Nominal {
+            declaration: outer.declaration,
+            arguments: vec![]
+        })
+    );
+}
+
+#[test]
+fn public_newtype_builder_does_not_grant_implicit_identity_conversion() {
+    let fixture = Fixture::new(
+        "
+        use builtin.Type;
+        comptime fn Flag() -> Type {meta.NewtypeBuilder.new(bool).Build()}
+        typealias Flagged = Flag();
+        fn read(value: Flagged) -> bool {value.as(bool)}
+        fn invalid() -> bool {read(true)}
+        comptime fn ready() -> bool {true}
+    ",
+    );
+    assert!(fixture.invoke_meta("ready").is_err());
+}

@@ -1549,10 +1549,12 @@ fn compile_root<'a>(
                             },
                         );
                     }
-                    K::BuildStruct(request) | K::BuildEnum(request) => {
+                    K::BuildStruct(request) | K::BuildEnum(request) | K::BuildNewtype(request) => {
                         let build = Arc::new(definitions::Build {
                             kind: if matches!(expr.kind, K::BuildStruct(_)) {
                                 definitions::Kind::Struct
+                            } else if matches!(expr.kind, K::BuildNewtype(_)) {
+                                definitions::Kind::Newtype
                             } else {
                                 definitions::Kind::Enum
                             },

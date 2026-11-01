@@ -582,3 +582,30 @@ fn shipped_reflection_objects_feed_checked_definition_builders() {
         .unwrap();
     assert_true(output);
 }
+
+#[test]
+fn shipped_newtype_builder_preserves_nominal_boundaries() {
+    let input = Inputs::new();
+    input.write(
+        "input.fl",
+        include_str!("../../../development/examples/sysroot-newtype-builder.fl"),
+    );
+    let library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_luna"))
+        .arg(input.0.join("input.fl"))
+        .arg("--sysroot")
+        .arg(library)
+        .args([
+            "--build-target",
+            "x86_64",
+            "linux",
+            "64",
+            "--interpret",
+            "run",
+            "--fuel",
+            "4000000",
+        ])
+        .output()
+        .unwrap();
+    assert_true(output);
+}

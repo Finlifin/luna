@@ -144,6 +144,12 @@ impl PreparedRequired {
                 .expect("configured builder service")
                 .prepare(request, fuel)
         };
+        let build_newtype = |request: &comptime_interpretor::NewtypeBuildRequest,
+                             fuel: &mut u64| {
+            builder
+                .expect("configured builder service")
+                .prepare_newtype(request, fuel)
+        };
         let build_enum = |request: &comptime_interpretor::EnumBuildRequest, fuel: &mut u64| {
             builder
                 .expect("configured builder service")
@@ -304,7 +310,8 @@ impl PreparedRequired {
             if builder.is_some() {
                 session = session
                     .with_struct_builder(&build)
-                    .with_enum_builder(&build_enum);
+                    .with_enum_builder(&build_enum)
+                    .with_newtype_builder(&build_newtype);
             }
             let output = session
                 .enqueue_prepared(
@@ -364,7 +371,8 @@ impl PreparedRequired {
         if builder.is_some() {
             interpreter = interpreter
                 .with_struct_builder(&build)
-                .with_enum_builder(&build_enum);
+                .with_enum_builder(&build_enum)
+                .with_newtype_builder(&build_newtype);
         }
         interpreter = interpreter.with_budgeted_type_solver(&type_solver);
         interpreter = interpreter.with_budgeted_pointer_copy_permission(&pointer_copy);

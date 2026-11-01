@@ -8550,6 +8550,9 @@ impl Checker<'_, '_> {
                         name.as_str() == "build_bits_enum_paths",
                     )
                 }
+                H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if name.as_str() == "build_newtype") => {
+                    self.build_newtype_builtin(expr, args, expected)
+                }
                 H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if name.as_str() == "build_struct") => {
                     self.build_struct_builtin(expr, args, expected)
                 }

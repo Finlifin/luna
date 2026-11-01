@@ -458,6 +458,47 @@ impl Checker<'_, '_> {
         })
     }
 
+    pub(super) fn build_newtype_builtin(
+        &mut self,
+        expr: &Expr<'_>,
+        args: &[Arg<'_>],
+        expected: Option<&Term>,
+    ) -> Result<n::Expr, Error> {
+        if self.runtime_value_context() || self.in_code_body {
+            return Err(error(
+                expr.span,
+                "newtype construction requires comptime invocation",
+            ));
+        }
+        let [Arg::Positional(name), Arg::Positional(representation)] = args else {
+            return Err(error(
+                expr.span,
+                "newtype construction requires name and representation Type",
+            ));
+        };
+        let values = vec![
+            self.expr(name, Some(&p(P::Symbol)))?,
+            self.expr(representation, Some(&p(P::Type)))?,
+        ];
+        let ty = p(if values.iter().any(|value| is_never(&value.ty)) {
+            P::Never
+        } else {
+            P::Type
+        });
+        if let Some(expected) = expected {
+            self.require_expression(&ty, expected, expr.span)?;
+        }
+        Ok(n::Expr {
+            source: source(expr.span),
+            ty,
+            kind: K::BuildNewtype(Box::new(n::Expr {
+                source: source(expr.span),
+                ty: Term::Tuple(values.iter().map(|value| value.ty.clone()).collect()),
+                kind: K::Tuple(values),
+            })),
+        })
+    }
+
     pub(super) fn build_struct_builtin(
         &mut self,
         expr: &Expr<'_>,

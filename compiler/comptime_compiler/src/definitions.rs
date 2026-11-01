@@ -4,12 +4,14 @@ use super::*;
 #[derive(Clone, Copy, Debug)]
 pub enum Kind {
     Struct,
+    Newtype,
     Enum,
 }
 impl fmt::Display for Kind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Struct => "struct",
+            Self::Newtype => "newtype",
             Self::Enum => "enum",
         })
     }

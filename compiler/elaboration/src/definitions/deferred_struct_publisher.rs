@@ -10,6 +10,16 @@ pub trait StructBuildService {
         request: &StructBuildRequest,
         steps: &mut u64,
     ) -> Result<PreparedStructBuild<'s>, Error>;
+    fn prepare_newtype<'s>(
+        &'s self,
+        request: &comptime_interpretor::NewtypeBuildRequest,
+        _steps: &mut u64,
+    ) -> Result<comptime_interpretor::PreparedNewtypeBuild<'s>, Error> {
+        Err(Error {
+            kind: ErrorKind::Type,
+            source: Some(request.source),
+        })
+    }
     fn prepare_enum<'s>(
         &'s self,
         request: &comptime_interpretor::EnumBuildRequest,

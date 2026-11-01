@@ -185,12 +185,35 @@ comptime fn MirroredInstruction() -> Type {
 真实 sysroot 验收：`python3 -B development/library_check.py --stage sysroot-fixed-enum`。
 
 
-newtype builder 的发布基础：VM 已支持受检的具体 newtype 描述批次，
-包括动态身份保留、表示类型检查、显式包装／解包以及失败回滚；
-`DefinitionAdmissionSession` 中它与 struct、enum 共用 revision 和身份空间。
-具体 newtype 请求已接入 `AllocatedDefinitionPublisher`，复用全局身份前沿、
-`CheckedDefinitionPublisher` 的 formation admission 和有限表示检查；newtype、
-struct、enum 共用表示依赖图，拒绝按值循环，允许指针间接循环。
-这仍是编译器宿主接口，尚未导出 `meta.NewtypeBuilder`。后续须接通源码构造请求的
-NIR/字节码入口、VM callback、库绑定与真实 sysroot 验收，不能用 struct 包装代替
-newtype 身份和表示语义。泛型及捕获子句的 builder 仍未交付。
+## 具体 newtype
+
+`meta.NewtypeBuilder.new(representation: Type, .name: Symbol = .Generated)`
+创建普通 comptime 草稿；`set_representation(self, representation)` 使用值引用更新草稿，
+已经保存的快照不变。`Build(self) -> Type` 每次发布新的 nominal 身份，并保留精确的
+表示类型；不展开 normal-form 头，不继承表示类型的字段、方法或 trait。
+
+```flurry
+comptime fn Flag() -> Type {
+    let draft = meta.NewtypeBuilder.new(bool, .name = .GeneratedFlag);
+    draft.Build()
+}
+
+typealias Enabled = Flag();
+
+fn enabled() -> bool {
+    let value = true.as(Enabled);
+    value.as(bool)
+}
+```
+
+新类型通过显式 cast 与其直接表示转换；不能隐式当作 bool 使用，也不会与另一次
+`Build` 得到的类型相等。包装 Type 本身可以用于 comptime，不代表允许在 runtime
+存储 Type 值。
+
+构造请求经过统一身份分配、formation admission 和有限表示检查。失败不发布
+半成品，struct、enum、newtype 共用表示依赖图，按值循环拒绝，指针间接循环合法。
+此事务不承诺回滚构造参数求值或任意宿主副作用。
+
+真实 sysroot 示例：`development/examples/sysroot-newtype-builder.fl`。
+验收入口：`python3 -B development/library_check.py --stage sysroot-newtype-builder`。
+当前只支持具体表示类型；泛型／捕获子句、属性描述及 from_type 反射复制仍未交付。

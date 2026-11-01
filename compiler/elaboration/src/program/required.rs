@@ -2707,6 +2707,7 @@ pub(super) fn references(
                 | K::ListLength(value)
                 | K::StructFieldTypes(value)
                 | K::BuildStruct(value)
+                | K::BuildNewtype(value)
                 | K::BuildMetadata {
                     selector: value, ..
                 }

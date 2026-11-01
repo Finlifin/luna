@@ -28,6 +28,7 @@ impl Interpreter<'_> {
         }
         match build.kind {
             Kind::Struct => self.build_struct_value(value, source),
+            Kind::Newtype => self.build_newtype_value(value, source),
             Kind::Enum => self.build_enum_value(value, source),
         }
     }
@@ -39,6 +40,7 @@ impl Interpreter<'_> {
     ) -> Result<Flow, Error> {
         let (kind, request) = match &expr.kind {
             K::BuildStruct(request) => (Kind::Struct, request),
+            K::BuildNewtype(request) => (Kind::Newtype, request),
             K::BuildEnum(request) => (Kind::Enum, request),
             _ => unreachable!(),
         };

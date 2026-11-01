@@ -314,6 +314,12 @@ fn execute_prepared(
             .expect("builder installed only with publisher")
             .prepare(request, remaining)
     };
+    let newtype_builder = |request: &comptime_interpretor::NewtypeBuildRequest,
+                           remaining: &mut u64| {
+        publisher
+            .expect("builder installed only with publisher")
+            .prepare_newtype(request, remaining)
+    };
     let enum_builder = |request: &comptime_interpretor::EnumBuildRequest, remaining: &mut u64| {
         publisher
             .expect("builder installed only with publisher")
@@ -322,7 +328,8 @@ fn execute_prepared(
     if publisher.is_some() {
         interpreter = interpreter
             .with_struct_builder(&builder)
-            .with_enum_builder(&enum_builder);
+            .with_enum_builder(&enum_builder)
+            .with_newtype_builder(&newtype_builder);
     }
     let operation = |vm: &mut Interpreter<'_>| {
         if graph.is_some() {

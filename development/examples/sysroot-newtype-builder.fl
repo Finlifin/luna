@@ -1,0 +1,19 @@
+{- Build a nominal boundary from a completed Type using the public meta API. -}
+comptime fn Flag() -> Type {
+    let draft = meta.NewtypeBuilder.new(bool, .name = .GeneratedFlag);
+    draft.Build()
+}
+
+typealias Enabled = Flag();
+typealias Visible = Flag();
+
+fn run() -> bool {
+    let enabled = true.as(Enabled);
+    let visible = false.as(Visible);
+    enabled.as(bool) and not visible.as(bool)
+}
+
+test {
+    let result = run();
+    assumes result;
+}

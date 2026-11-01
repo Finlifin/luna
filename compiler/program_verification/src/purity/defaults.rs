@@ -266,6 +266,7 @@ pub fn stable_default(expr: &n::Expr) -> bool {
         | K::ListLength(_)
         | K::StructFieldTypes(_)
         | K::BuildStruct(_)
+        | K::BuildNewtype(_)
         | K::BuildEnum(_)
         | K::EnumStructure { .. }
         | K::ObjectQuery { .. }

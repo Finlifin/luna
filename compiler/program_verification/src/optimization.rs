@@ -279,6 +279,7 @@ fn visit(
         | K::ListLength(value)
         | K::StructFieldTypes(value)
         | K::BuildStruct(value)
+        | K::BuildNewtype(value)
         | K::BuildEnum(value)
         | K::EnumStructure { subject: value, .. }
         | K::ObjectQuery { subject: value, .. }

@@ -1123,6 +1123,8 @@ pub enum ExprKind {
     StructFieldNames(Box<Expr>),
     /// Compiler-private packet: definition name, field names, field Types.
     BuildStruct(Box<Expr>),
+    /// Compiler-private packet: definition name and representation Type.
+    BuildNewtype(Box<Expr>),
     /// Private packet: name, groups, variants, shapes, field names, field Types,
     /// and optionally a Symbol encoding list or fixed-bit encoding packet.
     BuildEnum(Box<Expr>),
@@ -3523,6 +3525,7 @@ impl fmt::Display for ExprKind {
             Self::ListLength(values) => write!(f, "(list-length {values})"),
             Self::StructFieldTypes(subject) => write!(f, "(struct-field-types {subject})"),
             Self::BuildStruct(request) => write!(f, "(build-struct {request})"),
+            Self::BuildNewtype(request) => write!(f, "(build-newtype {request})"),
             Self::BuildEnum(request) => write!(f, "(build-enum {request})"),
             Self::EnumStructure { subject, query } => {
                 write!(f, "(enum-structure (query {query}) {subject})")
@@ -3915,6 +3918,7 @@ impl Expr {
                     | ExprKind::ListLength(_)
                     | ExprKind::StructFieldTypes(_)
                     | ExprKind::BuildStruct(_)
+                    | ExprKind::BuildNewtype(_)
                     | ExprKind::BuildEnum(_)
                     | ExprKind::EnumStructure { .. }
                     | ExprKind::ObjectQuery { .. }
@@ -4003,6 +4007,7 @@ impl Expr {
                 | ExprKind::ListLength(value)
                 | ExprKind::StructFieldTypes(value)
                 | ExprKind::BuildStruct(value)
+                | ExprKind::BuildNewtype(value)
                 | ExprKind::BuildMetadata {
                     selector: value, ..
                 }
@@ -4405,6 +4410,7 @@ impl Expr {
             | ExprKind::ListLength(value)
             | ExprKind::StructFieldTypes(value)
             | ExprKind::BuildStruct(value)
+            | ExprKind::BuildNewtype(value)
             | ExprKind::BuildMetadata {
                 selector: value, ..
             }

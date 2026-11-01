@@ -1,0 +1,26 @@
+use bindings;
+use builtin.{Symbol, Type};
+
+{-
+    Each Build publishes a fresh nominal identity with the exact supplied
+    representation. The draft does not grant fields, methods or trait evidence
+    from that representation; values cross the boundary through explicit casts.
+-}
+pub struct NewtypeBuilder {
+    name: Symbol,
+    representation: Type,
+}
+
+impl NewtypeBuilder {
+    pub comptime fn new(representation: Type, .name: Symbol = .Generated) -> Self {
+        Self { name: name, representation: representation }
+    }
+
+    pub comptime fn set_representation(self, representation: Type) {
+        self.representation = representation;
+    }
+
+    pub comptime fn Build(self) -> Type {
+        bindings.BuildNewtype(self.name, self.representation)
+    }
+}

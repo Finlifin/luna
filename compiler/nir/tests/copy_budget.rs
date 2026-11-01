@@ -471,6 +471,7 @@ fn struct_reflection_charges_subject_copy_before_allocation() {
     }
     check(&expr(K::BuildStruct(Box::new(large()))));
     check(&expr(K::BuildEnum(Box::new(large()))));
+    check(&expr(K::BuildNewtype(Box::new(large()))));
     check(&expr(K::EnumStructure {
         subject: Box::new(large()),
         query: nir::program::EnumStructureQuery::FieldTypes,

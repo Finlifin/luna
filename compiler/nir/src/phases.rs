@@ -1343,6 +1343,7 @@ pub fn machine_arithmetic_functions(
                             work.push(Work::Expr(subject, false, true));
                         }
                         K::BuildStruct(value)
+                        | K::BuildNewtype(value)
                         | K::BuildEnum(value)
                         | K::EnumStructure { subject: value, .. }
                         | K::ObjectQuery { subject: value, .. }

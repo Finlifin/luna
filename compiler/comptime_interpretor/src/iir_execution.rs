@@ -184,6 +184,7 @@ impl<'a> Interpreter<'a> {
             abstract_value_parameters: BTreeMap::new(),
             struct_builder: None,
             enum_builder: None,
+            newtype_builder: None,
             type_solver: None,
             pointer_copy: None,
             declaration_parameter_sorts: Default::default(),

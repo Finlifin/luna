@@ -11050,3 +11050,46 @@ Validation from `/home/fin/luna`:
 Source lowering, VM callback dispatch and meta.NewtypeBuilder remain the next
 vertical stage. No new public Flurry builder API is claimed by this host-level
 publication work, and generic/captured builder descriptions remain unsupported.
+
+
+### Public concrete NewtypeBuilder executes through checked publication
+
+The build_newtype compiler operation now lowers a name/representation packet
+into BuildNewtype NIR, with S-expression display, charged traversal/substitution,
+comptime phase checking, materialization handling and impure-operation
+classification. Linear bytecode uses the existing definition-build protocol;
+tree and compiled execution share request validation and exact host-result
+checking. A host cannot replace the requested representation/name or add result
+constraints before publication. Runtime dispatch rejects before calling the
+publisher; host execution does not replenish invocation fuel.
+
+Both required-expression execution and explicit CLI invocation install the
+newtype callback on the allocated publisher. The meta binding layer exposes the
+operation through NewtypeBuilder.new, set_representation and Build. The builder
+uses ordinary comptime value references and snapshots, with no pointer receiver
+or inherited representation methods. Each Build returns a fresh nominal Type.
+
+Source tests cover typealias construction, fresh identities, explicit runtime
+casts, rejection of implicit identity conversion, draft edits/snapshots and
+explicit invocation that publishes dependent newtypes into the returned package.
+The real-sysroot example additionally runs through the ordinary luna test CLI.
+An initial example directly called run() inside assumes; the existing predicate
+elaborator rejects such calls, so the example now binds the call result before
+asserting it. No predicate implementation or expected semantics were weakened.
+
+Validation from `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 900 -- test -p nir
+  -p comptime_compiler -p comptime_interpretor`: 1130 passed, exit 0
+  (`/tmp/luna-tools-646npmps/result.json`).
+- Source builder group: 4 passed (`/tmp/luna-tools-14cfpsfv/stdout.log`);
+  that combined run subsequently failed its sysroot example on the assumes
+  call described above. The corrected sysroot test passed, exit 0
+  (`/tmp/luna-tools-494_o6z_/result.json`).
+- `python3 -B development/library_check.py --stage sysroot-newtype-builder`:
+  1 test passed, exit 0 (`/tmp/luna-library-d9p4dca6/summary.json`).
+- Workspace formatting check passed (`/tmp/luna-tools-lgkrhubm/result.json`);
+  `git diff --check` passed.
+
+This completes the public concrete-newtype path. Generic/captured clauses,
+attribute descriptions and reflection-based from_type copying remain separate
+work; this is not completion of the wider definition-builder system.

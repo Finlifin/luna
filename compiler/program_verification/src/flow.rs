@@ -5489,6 +5489,7 @@ impl Walker<'_> {
             K::StructFieldTypes(subject)
             | K::StructFieldNames(subject)
             | K::BuildStruct(subject)
+            | K::BuildNewtype(subject)
             | K::BuildEnum(subject)
             | K::ObjectQuery { subject, .. }
             | K::ObjectEdit { subject, .. }

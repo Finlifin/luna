@@ -38,6 +38,7 @@ fn operation(name: &str) -> bool {
             | "enum_bit_values"
             | "enum_bit_offsets"
             | "build_struct"
+            | "build_newtype"
             | "build_enum"
             | "build_enum_paths"
             | "build_symbol_enum_paths"

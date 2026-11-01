@@ -107,6 +107,13 @@ impl StructBuildService for AllocatedDefinitionPublisher<'_> {
     ) -> Result<PreparedStructBuild<'s>, Error> {
         self.prepare_struct(request, steps)
     }
+    fn prepare_newtype<'s>(
+        &'s self,
+        request: &NewtypeBuildRequest,
+        steps: &mut u64,
+    ) -> Result<PreparedNewtypeBuild<'s>, Error> {
+        AllocatedDefinitionPublisher::prepare_newtype(self, request, steps)
+    }
     fn prepare_enum<'s>(
         &'s self,
         request: &EnumBuildRequest,

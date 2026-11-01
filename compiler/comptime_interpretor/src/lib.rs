@@ -873,6 +873,9 @@ pub struct Interpreter<'a> {
     default_code_cache: default_code::Cache,
     contextual_code_cache: contextual_code::Cache,
     prepared_instance_cache: function_instances::Cache,
+    newtype_builder: Option<
+        &'a dyn Fn(&NewtypeBuildRequest, &mut u64) -> Result<PreparedNewtypeBuild<'a>, Error>,
+    >,
     enum_builder:
         Option<&'a dyn Fn(&EnumBuildRequest, &mut u64) -> Result<PreparedEnumBuild<'a>, Error>>,
     struct_builder:
@@ -3434,7 +3437,9 @@ impl<'a> Interpreter<'a> {
             K::TypeEqual(..) => self.eval_type_equal(expr, environment),
             K::TemplateEqual(..) => self.eval_template_equal(expr, environment),
             K::ListLength(_) | K::ListConcat(..) => self.eval_list_operation(expr, environment),
-            K::BuildStruct(_) | K::BuildEnum(_) => self.eval_definition_build(expr, environment),
+            K::BuildStruct(_) | K::BuildEnum(_) | K::BuildNewtype(_) => {
+                self.eval_definition_build(expr, environment)
+            }
             K::EnumStructure { .. } => self.eval_observation(expr, environment),
             K::ComptimeFunctionInstance { .. } => {
                 self.eval_comptime_function_instance(expr, environment)
