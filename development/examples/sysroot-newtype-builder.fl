@@ -22,6 +22,32 @@ fn run() -> bool {
 }
 
 test {
-    let result = run();
-    assumes result;
+    inline if checked_associated_conversion {
+        let result = run();
+        assumes result;
+    } else {
+        assumes false;
+    };
 }
+
+trait Representation {
+    assoc Item: Type;
+}
+
+impl Representation for bool {
+    assoc Item: Type = bool;
+}
+
+comptime fn associated_round_trip(comptime T: Type, value: T.as(Representation).Item) -> T.as(Representation).Item
+where requires T :- Representation
+{
+    let wrapped = value.as(Wrapper<T.as(Representation).Item>);
+    wrapped.as(T.as(Representation).Item)
+}
+
+comptime fn generated_round_trip() -> bool {
+    let wrapped = true.as(Reflected);
+    wrapped.as(bool) and associated_round_trip(bool, true)
+}
+
+const checked_associated_conversion = generated_round_trip();

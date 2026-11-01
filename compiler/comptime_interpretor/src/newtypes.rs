@@ -22,6 +22,11 @@ impl Interpreter<'_> {
         output: &Term,
         source: SourceRange,
     ) -> Result<nir::newtypes::Conversion, Error> {
+        // Observe both endpoints before executing the operand. The conversion
+        // retains these domains, so completion never reruns a Type initializer.
+        let input = self.selected_type_view(input, Some(source))?;
+        let output = self.selected_type_view(output, Some(source))?;
+        let (input, output) = (&input, &output);
         let mut fuel = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
         let before = fuel;
         let plan = if self.graph.is_some() {
@@ -437,6 +442,134 @@ mod tests {
             }
             vm.budget.steps = 100_000;
             vm.check_comptime_domain(&safe, SOURCE).unwrap();
+        }
+    }
+
+    #[test]
+    fn associated_newtype_endpoints_are_observed_before_operands() {
+        let boolean = Term::Primitive(Primitive::Bool);
+        let parameter = DeclarationId {
+            package: 0,
+            local: 2,
+        };
+        let package = Package {
+            newtypes: vec![nir::newtypes::Newtype {
+                declaration: DeclarationId {
+                    package: 0,
+                    local: 1,
+                },
+                name: "Wrapper".into(),
+                type_parameters: vec![parameter],
+                parameter_types: vec![],
+                capture_count: 0,
+                requirements: vec![],
+                capabilities: vec![],
+                representation: Term::Rigid {
+                    declaration: parameter,
+                    sort: nir::Sort::Type,
+                },
+            }],
+            ..Default::default()
+        };
+        let projection = Term::AssociatedType {
+            origin: Box::new(nir::AssociatedTypeOrigin {
+                interface: DeclarationId {
+                    package: 1,
+                    local: 80,
+                },
+                member: DeclarationId {
+                    package: 1,
+                    local: 81,
+                },
+            }),
+            arguments: vec![],
+            subject: Box::new(boolean.clone()),
+        };
+        let applied = |argument| Term::Nominal {
+            declaration: DeclarationId {
+                package: 0,
+                local: 1,
+            },
+            arguments: vec![argument],
+        };
+        let observed = applied(boolean.clone());
+        let resolver = |_: &Expr, fuel: &mut u64| {
+            *fuel -= 1;
+            Ok(AssociatedSelection {
+                initializer: nir::associated_initializers::AssociatedInitializer::new(
+                    expr(
+                        Term::Primitive(Primitive::Type),
+                        K::TypeValue(boolean.clone()),
+                    ),
+                    &mut 1000,
+                )
+                .unwrap(),
+                requires_invocation: true,
+            })
+        };
+        for compiled in [false, true] {
+            let mut vm = Interpreter::for_comptime(&package, Budget::default())
+                .unwrap()
+                .with_associated_resolver(&resolver);
+            let wrapped = Value::Newtype {
+                ty: observed.clone(),
+                value: Box::new(Value::Bool(true)),
+            };
+            for (input, output, value, expected) in [
+                (
+                    projection.clone(),
+                    applied(projection.clone()),
+                    Value::Bool(true),
+                    wrapped.clone(),
+                ),
+                (
+                    applied(projection.clone()),
+                    projection.clone(),
+                    wrapped.clone(),
+                    Value::Bool(true),
+                ),
+            ] {
+                let body = query(input, output);
+                let code = Arc::new(comptime_compiler::compile(&body, &mut 10000).unwrap());
+                // A failed observation must not execute the operand or poison a retry.
+                vm.budget.steps = 0;
+                let mut env =
+                    Environment::from([(INPUT, value.clone()), (TRACE, Value::Bool(false))]);
+                assert_eq!(
+                    execute(&mut vm, &body, &code, &mut env, compiled)
+                        .unwrap_err()
+                        .kind,
+                    ErrorKind::StepsExhausted
+                );
+                assert_eq!(env[&TRACE], Value::Bool(false));
+                vm.budget.steps = Budget::default().steps;
+                let Flow::Value(actual) =
+                    execute(&mut vm, &body, &code, &mut env, compiled).unwrap()
+                else {
+                    panic!()
+                };
+                assert_eq!(actual, expected);
+                assert_eq!(
+                    vm.local_value(&env, TRACE, Some(SOURCE)).unwrap(),
+                    Value::Bool(true)
+                );
+                // Domain observation does not waive the completed payload check.
+                env.insert(INPUT, Value::Char('x'));
+                assert_eq!(
+                    execute(&mut vm, &body, &code, &mut env, compiled)
+                        .unwrap_err()
+                        .kind,
+                    ErrorKind::Type
+                );
+                env.insert(INPUT, value);
+                let Flow::Value(retried) =
+                    execute(&mut vm, &body, &code, &mut env, compiled).unwrap()
+                else {
+                    panic!()
+                };
+                assert_eq!(retried, expected);
+                assert!(vm.active_associated_initializers.is_empty());
+            }
         }
     }
 

@@ -235,3 +235,9 @@ fn enabled() -> bool {
 一层表示边，不递归拆包装。新草稿不会复制 formation 子句、属性、方法或 trait。
 
 当前只支持构造具体表示类型；生成泛型／捕获子句和属性描述仍未交付。
+
+已发布的 builder 类型支持 runtime 与 comptime 的直接表示转换；泛型转换端点中的
+关联 Type 在 invocation 中观察并保留，包装与拆包不展开名义身份。当前 cast 目标
+仍不能直接引用 comptime 函数里的局部 Type 值（例如 `let Generated = draft.Build();
+value.as(Generated)`），该路径的动态类型 elaboration 尚未接通；上述示例先通过
+顶层 `typealias` 发布类型。
