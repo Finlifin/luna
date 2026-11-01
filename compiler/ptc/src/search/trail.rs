@@ -7,8 +7,7 @@ use std::{collections::BTreeSet, fmt};
 
 pub(super) enum Reason {
     Decision,
-    // Replayed against the restored prefix only when conflict resolution needs it.
-    Boolean,
+    Boolean(std::sync::Arc<BTreeSet<usize>>),
     RootClause(Conflict),
     Learned(Conflict),
 }
@@ -147,7 +146,7 @@ impl fmt::Display for Trail<'_> {
         for entry in &self.entries {
             let origin = match &entry.reason {
                 Reason::Decision => "decision",
-                Reason::Boolean => "boolean",
+                Reason::Boolean(_) => "boolean",
                 Reason::RootClause(_) => "root-clause",
                 Reason::Learned(_) => "learned",
             };
@@ -156,8 +155,18 @@ impl fmt::Display for Trail<'_> {
                 " (assignment {} {} (level {}) (origin {origin})",
                 entry.index, entry.value, entry.level
             )?;
-            if let Reason::RootClause(proof) | Reason::Learned(proof) = &entry.reason {
-                write!(f, " (reason {proof})")?;
+            match &entry.reason {
+                Reason::RootClause(proof) | Reason::Learned(proof) => {
+                    write!(f, " (reason {proof})")?
+                }
+                Reason::Boolean(support) => {
+                    write!(f, " (antecedents")?;
+                    for atom in support.iter() {
+                        write!(f, " {atom}")?;
+                    }
+                    write!(f, ")")?;
+                }
+                Reason::Decision => {}
             }
             write!(f, ")")?;
         }
@@ -217,7 +226,7 @@ mod tests {
         let mut values = [Some(true), None, None, None];
         {
             let mut trail = Trail::new(&mut values);
-            trail.assign(1, false, 0, Reason::Boolean);
+            trail.assign(1, false, 0, Reason::Boolean(Default::default()));
             trail.assign(2, true, 1, Reason::Decision);
             trail.assign(3, false, 1, Reason::Learned(Conflict::boolean(&[])));
             let before = trail.to_string();
@@ -242,7 +251,7 @@ mod tests {
             assert_eq!(trail.levels(), &[0, 0, 0, 0]);
             assert_eq!(
                 trail.to_string(),
-                "(assignment-trail (assignment 1 false (level 0) (origin boolean)))"
+                "(assignment-trail (assignment 1 false (level 0) (origin boolean) (antecedents)))"
             );
         }
         assert_eq!(values, [Some(true), None, None, None]);
@@ -267,7 +276,7 @@ mod tests {
         trail.acknowledge_changes(Consumer::Root);
         trail.assign(1, false, 1, Reason::Decision);
         trail.acknowledge_changes(Consumer::Learned);
-        trail.assign(2, true, 1, Reason::Boolean);
+        trail.assign(2, true, 1, Reason::Boolean(Default::default()));
         assert_eq!(trail.changes(Consumer::Learned), Some(&BTreeSet::from([2])));
         assert_eq!(trail.changes(Consumer::Root), Some(&BTreeSet::from([1, 2])));
         trail.acknowledge_changes(Consumer::Root);

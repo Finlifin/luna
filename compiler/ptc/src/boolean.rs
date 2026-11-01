@@ -3,12 +3,20 @@
 pub(crate) mod cnf;
 
 use super::{Atom, Formula};
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, sync::Arc};
 
 pub(super) struct Propagation {
     pub truth: Option<bool>,
-    pub literals: Vec<(usize, bool)>,
+    pub literals: Vec<Unit>,
     pub conflict_support: Option<BTreeSet<usize>>,
+}
+
+pub(super) struct Unit {
+    pub index: usize,
+    pub value: bool,
+    // These are antecedents only; negating the propagated literal completes
+    // the independently replayable Boolean conflict. Conjuncts share support.
+    pub support: Arc<BTreeSet<usize>>,
 }
 
 pub(super) struct Circuit {
@@ -178,21 +186,25 @@ impl Circuit {
             });
         }
         let mut forced = Vec::new();
-        let mut pending = vec![(root, true)];
-        while let Some((id, truth)) = pending.pop() {
+        let mut pending = vec![(root, true, Arc::new(BTreeSet::new()))];
+        while let Some((id, truth, support)) = pending.pop() {
             charge(fuel)?;
             if values[id].is_some() {
                 continue;
             }
             match &self.nodes[id] {
-                Node::Atom(i) => forced.push((*i, truth)),
-                Node::Not(i) => pending.push((*i, !truth)),
+                Node::Atom(i) => forced.push(Unit {
+                    index: *i,
+                    value: truth,
+                    support,
+                }),
+                Node::Not(i) => pending.push((*i, !truth, support)),
                 node @ (Node::And(children) | Node::Or(children)) => {
                     let all_required = matches!(node, Node::And(_)) == truth;
                     if all_required {
                         // Charge the frontier before allocating it.
                         *fuel = fuel.checked_sub(children.len()).ok_or(())?;
-                        pending.extend(children.iter().rev().map(|i| (*i, truth)));
+                        pending.extend(children.iter().rev().map(|i| (*i, truth, support.clone())));
                     } else {
                         let mut unique = None;
                         for i in children {
@@ -206,7 +218,13 @@ impl Circuit {
                             }
                         }
                         if let Some(i) = unique {
-                            pending.push((i, truth));
+                            // Other children establish the guard for descending
+                            // through this disjunction (or negated conjunction).
+                            *fuel = fuel.checked_sub(children.len() + support.len()).ok_or(())?;
+                            let siblings = children.iter().copied().filter(|id| *id != i).collect();
+                            let mut antecedents = self.explain_nodes(&values, siblings, fuel)?;
+                            antecedents.extend(support.iter().copied());
+                            pending.push((i, truth, Arc::new(antecedents)));
                         }
                     }
                 }
@@ -224,8 +242,15 @@ impl Circuit {
         values: &[Option<bool>],
         fuel: &mut usize,
     ) -> Result<BTreeSet<usize>, ()> {
+        self.explain_nodes(values, vec![self.nodes.len() - 1], fuel)
+    }
+    fn explain_nodes(
+        &self,
+        values: &[Option<bool>],
+        mut pending: Vec<usize>,
+        fuel: &mut usize,
+    ) -> Result<BTreeSet<usize>, ()> {
         let mut support = BTreeSet::new();
-        let mut pending = vec![self.nodes.len() - 1];
         while let Some(id) = pending.pop() {
             charge(fuel)?;
             let truth = values[id].ok_or(())?;
@@ -359,10 +384,32 @@ mod tests {
                         Some(false)
                     );
                 }
-                for (i, truth) in result.literals {
+                for Unit {
+                    index: i,
+                    value: truth,
+                    support,
+                } in result.literals
+                {
                     let previous = assignment[i];
                     assert!(previous.is_none());
                     assignment[i] = Some(!truth);
+                    let reduced: Vec<_> = assignment
+                        .iter()
+                        .enumerate()
+                        .map(|(index, value)| {
+                            if index == i || support.contains(&index) {
+                                *value
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    assert_eq!(
+                        evaluate(&formula, &|a| reduced
+                            [atoms.iter().position(|b| a == b).unwrap()]),
+                        Some(false)
+                    );
+                    assert!(!support.contains(&i));
                     assert_eq!(
                         evaluate(&formula, &|a| assignment
                             [atoms.iter().position(|b| a == b).unwrap()]),
@@ -370,6 +417,73 @@ mod tests {
                     );
                     assignment[i] = previous;
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn conjunction_units_share_only_the_guard_antecedents() {
+        let atoms: Vec<_> = (0..5)
+            .map(|local| {
+                Atom::TypeEqual(Equality(
+                    Term::Rigid {
+                        declaration: nir::DeclarationId { package: 97, local },
+                        sort: nir::Sort::Type,
+                    },
+                    Term::Primitive(Primitive::Bool),
+                ))
+            })
+            .collect();
+        let leaf = |i: usize| match &atoms[i] {
+            Atom::TypeEqual(e) => Formula::Equal(e.clone()),
+            _ => unreachable!(),
+        };
+        let formula = Formula::And(vec![
+            Formula::Or(vec![
+                Formula::And(vec![leaf(0), leaf(1)]),
+                Formula::And(vec![leaf(2), leaf(3)]),
+            ]),
+            Formula::Or(vec![leaf(4), leaf(4).negate()]),
+        ]);
+        let circuit = Circuit::compile(&formula, &atoms, &mut 10000).unwrap();
+        let assignment = [Some(false), Some(true), None, None, Some(true)];
+        let mut fuel = 10000;
+        let result = circuit.propagate(&assignment, &mut fuel).unwrap();
+        assert_eq!(
+            result
+                .literals
+                .iter()
+                .map(|u| (u.index, u.value))
+                .collect::<Vec<_>>(),
+            [(2, true), (3, true)]
+        );
+        assert_eq!(*result.literals[0].support, BTreeSet::from([0]));
+        assert!(Arc::ptr_eq(
+            &result.literals[0].support,
+            &result.literals[1].support
+        ));
+        let cost = 10000 - fuel;
+        for budget in 0..cost {
+            assert!(circuit.propagate(&assignment, &mut { budget }).is_err());
+            let retried = circuit.propagate(&assignment, &mut 10000).unwrap();
+            for unit in retried.literals {
+                assert_eq!(*unit.support, BTreeSet::from([0]));
+                let mut premises = vec![None; atoms.len()];
+                for &index in unit.support.iter() {
+                    premises[index] = assignment[index];
+                }
+                premises[unit.index] = Some(!unit.value);
+                assert_eq!(
+                    evaluate(&formula, &|a| premises
+                        [atoms.iter().position(|b| a == b).unwrap()]),
+                    Some(false)
+                );
+                premises[0] = None;
+                assert_eq!(
+                    evaluate(&formula, &|a| premises
+                        [atoms.iter().position(|b| a == b).unwrap()]),
+                    None
+                );
             }
         }
     }
@@ -394,21 +508,42 @@ mod tests {
         assert_eq!(
             {
                 let result = circuit.propagate(&[None], &mut 1000).unwrap();
-                (result.truth, result.literals)
+                (
+                    result.truth,
+                    result
+                        .literals
+                        .into_iter()
+                        .map(|u| (u.index, u.value))
+                        .collect::<Vec<_>>(),
+                )
             },
             (None, vec![(0, false)])
         );
         assert_eq!(
             {
                 let result = circuit.propagate(&[Some(true)], &mut 1000).unwrap();
-                (result.truth, result.literals)
+                (
+                    result.truth,
+                    result
+                        .literals
+                        .into_iter()
+                        .map(|u| (u.index, u.value))
+                        .collect::<Vec<_>>(),
+                )
             },
             (Some(false), vec![])
         );
         assert_eq!(
             {
                 let result = circuit.propagate(&[None], &mut 1000).unwrap();
-                (result.truth, result.literals)
+                (
+                    result.truth,
+                    result
+                        .literals
+                        .into_iter()
+                        .map(|u| (u.index, u.value))
+                        .collect::<Vec<_>>(),
+                )
             },
             (None, vec![(0, false)])
         );

@@ -140,8 +140,11 @@ impl Search<'_> {
                                     continue;
                                 }
                                 let reason = match reason {
-                                    Reason::Boolean => assignment
-                                        .probe(index, !value, |values| self.boolean_reason(values)),
+                                    Reason::Boolean(support) => {
+                                        assignment.probe(index, !value, |values| {
+                                            self.boolean_reason(index, &support, values)
+                                        })
+                                    }
                                     Reason::RootClause(reason) | Reason::Learned(reason) => reason,
                                     Reason::Decision => {
                                         unreachable!("decision inside propagation frame")
@@ -368,14 +371,19 @@ impl Search<'_> {
         // Reach a Boolean fixed point before checking the more expensive theory.
         if !forced.is_empty() {
             let start = assignment.len();
-            for (index, value) in forced {
+            for boolean::Unit {
+                index,
+                value,
+                support,
+            } in forced
+            {
                 if let Some(previous) = assignment.values()[index] {
                     if previous != value {
                         break;
                     }
                     continue;
                 }
-                assignment.assign(index, value, decision_level, Reason::Boolean);
+                assignment.assign(index, value, decision_level, Reason::Boolean(support));
             }
             let child_depth = depth + assignment.len() - start;
             return Step::Descend(Frame::Propagated { start }, child_depth);
@@ -604,7 +612,12 @@ mod tests {
         assignment.fill(None);
         let mut assignment = Trail::new(&mut assignment);
         for (index, (value, level)) in initial.into_iter().zip([0, 1, 1, 2, 2, 3, 3]).enumerate() {
-            assignment.assign(index, value.unwrap(), level, Reason::Boolean);
+            assignment.assign(
+                index,
+                value.unwrap(),
+                level,
+                Reason::Boolean(Default::default()),
+            );
         }
         let mut level = 3;
         backjump(&mut frames, &mut assignment, &mut level, 1);

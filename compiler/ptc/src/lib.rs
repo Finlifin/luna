@@ -1393,26 +1393,26 @@ impl Search<'_> {
             Ok(())
         }
     }
-    fn boolean_reason(&mut self, assignment: &[Option<bool>]) -> Conflict {
-        let mut reason = Conflict::boolean(assignment);
-        if reason.support.len() <= 1 {
-            return reason;
+    fn boolean_reason(
+        &mut self,
+        index: usize,
+        antecedents: &BTreeSet<usize>,
+        assignment: &[Option<bool>],
+    ) -> Conflict {
+        // Propagation already established the guard under the earlier prefix.
+        // Only materialize its support here; never rerun the Boolean circuit.
+        // If optional support allocation exceeds fuel, retain all premises.
+        let work = antecedents.len().saturating_add(1);
+        if self.steps < work {
+            return Conflict::boolean(assignment);
         }
-        // Explaining a propagation is optional search work. Failure retains
-        // every current premise, never an incomplete dependency set.
-        let allowance = (self.steps / 8).min(2048);
-        let mut work = allowance;
-        if let Some(circuit) = &self.boolean {
-            if let Ok(propagation) = circuit.propagate(assignment, &mut work) {
-                if propagation.truth == Some(false) {
-                    if let Some(support) = propagation.conflict_support {
-                        reason.support = support;
-                    }
-                }
-            }
+        self.steps -= work;
+        let mut support = antecedents.clone();
+        support.insert(index);
+        Conflict {
+            tree: ProofTree::BooleanConflict,
+            support,
         }
-        self.steps -= allowance - work;
-        reason
     }
     fn theory(
         &mut self,

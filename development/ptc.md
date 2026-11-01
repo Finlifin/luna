@@ -584,3 +584,32 @@ Validation from `/home/fin/luna`:
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`: four passed (`/tmp/luna-tools-uilrw90y/result.json`).
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_type_factories_keep_identity_through_comptime_parameters`: passed (`/tmp/luna-tools-8rww2_ja/result.json`).
 - Formatting check and `git diff --check` passed (`/tmp/luna-tools-z7pvo424/result.json`).
+
+## Boolean propagation captures its antecedents
+
+Circuit propagation now returns a unit literal together with the antecedents
+that justify it. Descending through a disjunction (or negated conjunction)
+collects evidence for the other children's known values using the current
+circuit evaluation. Descending through a conjunction shares an immutable
+antecedent set among its units. No type terms are copied into these reasons.
+
+The assignment trail retains that support. Resolution adds the negated unit to
+form a Boolean-conflict proof, without rerunning the circuit against a probe.
+The independent proof checker still evaluates the original formula; recorded
+support alone cannot authorize a proof. If optional support materialization
+cannot fit the remaining budget, the existing conservative all-premises proof
+is retained. Propagation itself charges explanation traversal and cannot publish
+partially collected antecedents on interruption.
+
+This replaces the preceding stage's lazy Boolean re-explanation. It does not
+make the whole Boolean circuit incremental, unify CNF auxiliary reasons, or
+complete CDCL implication-graph analysis. These remain distinct implementation
+gaps; Type inference still requires entailment beyond a candidate model.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p ptc -p type_resolution`: 467 passed (`/tmp/luna-tools-y57eowy5/result.json`).
+- The exhaustive partial-assignment circuit tests now independently evaluate each reason using only its antecedents and the opposite unit. Added coverage verifies shared support across conjunctive units, exclusion of irrelevant assigned atoms, failure when a required guard is removed, and retry after every insufficient propagation budget.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`: four passed (`/tmp/luna-tools-swnci1ir/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_type_factories_keep_identity_through_comptime_parameters`: passed (`/tmp/luna-tools-uiqtfwv4/result.json`).
+- Formatting check and `git diff --check` passed (`/tmp/luna-tools-y4lc6x0b/result.json`).
