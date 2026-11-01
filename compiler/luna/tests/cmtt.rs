@@ -669,17 +669,20 @@ fn pattern_variadic_inputs_collect_generic_fixed_and_empty_tuples() {
 }
 
 #[test]
-fn pattern_variadic_inputs_preserve_source_order_defaults_and_live_aliases() {
+fn pattern_variadic_inputs_preserve_source_order_and_value_snapshots() {
     let source = "typealias Count=.Integer'builtin;
-        comptime fn bump(count:*Count)->bool {count.*+=1;count.* == 2}
-        comptime fn select(...items:Tuple<*Count,bool,bool>,.before:bool=false,.after:bool=false)-><bool -| value:bool> {
-            let (count,first,second)=items;let wanted=not before and first and not second and not after and count.* == 4;
-            count.*+=1;'<value if value == wanted>
+        struct Counter {value:Count}
+        impl Counter {comptime fn bump(self)->bool {self.value+=1;self.value == 2}}
+        comptime fn select(...items:Tuple<Counter,bool,bool>,.before:bool=false,.after:bool=false)-><bool -| value:bool> {
+            let (count,first,second)=items;
+            let wanted=not before and first and not second and not after and count.value == 1;
+            count.bump();let updated=count.value == 2;
+            '<value if value == (wanted and updated)>
         }
         comptime fn emit()-><|-bool> {
-            var count:Count=0;
-            const p=select(.before=bump(count.ref),count.ref,bump(count.ref),...do {(bump(count.ref),)},.after=bump(count.ref));
-            let complete=count == 5;'(complete and (true match {~<p> => value,_ => false}))
+            let count=Counter {value:0};
+            const p=select(.before=count.bump(),count,count.bump(),...do {(count.bump(),)},.after=count.bump());
+            let complete=count.value == 4;'(complete and (true match {~<p> => value,_ => false}))
         }
         fn run()->bool {~<emit()>}";
     assert_eq!(
@@ -769,48 +772,54 @@ fn pattern_generator_aggregates_keep_callbacks_and_value_snapshots() {
 }
 
 #[test]
-fn pattern_generator_live_pointer_inputs_preserve_aliases_defaults_and_spreads() {
-    let source =
-        "comptime fn select(count:*.u8'builtin,.alias:*.u8'builtin=count)-><bool -| value:bool> {
-            assumes count.* < 250;count.*+=1;
-            assumes alias.* < 250;alias.*+=1;
-            let wanted=count.* == 2;
+fn pattern_generator_value_inputs_preserve_defaults_and_spread_snapshots() {
+    let source = "typealias Byte=.u8'builtin;
+        struct Counter {value:Byte}
+        impl Counter {comptime fn bump(self) {assumes self.value < 250;self.value+=1;}}
+        comptime fn select(count:Counter,.copy:Counter=count)-><bool -| value:bool> {
+            count.bump();count.bump();copy.bump();
+            let wanted=count.value == 2 and copy.value == 1;
             '<value if value == wanted>
         }
-        comptime fn forward(count:*.u8'builtin)-><bool -| value:bool> {select(count)}
+        comptime fn forward(count:Counter)-><bool -| value:bool> {select(count)}
         comptime fn emit(flag:bool)-><|-bool> {
-            var count:.u8'builtin=0;
-            const p=forward(count.ref);
-            const q=select(...do {(count.ref,)});
-            let total=count == 4;
+            let count=Counter {value:0};
+            const p=forward(count);
+            const q=select(...do {(count,)});
+            let unchanged=count.value == 0;
             const selected:<bool -| value:bool> = if flag {p} else {q};
-            '(total and (flag match {~<selected> => value == flag,_ => false}))
+            '(unchanged and (true match {~<selected> => value,_ => false}))
         }
         fn run()->bool {~<emit(true)> and ~<emit(false)>}";
     assert_eq!(run(source, "run", vec![]), Value::Bool(true));
-    let explicit = source.replace("select(count)}", "select(count,.alias=count)}");
+    let explicit = source.replace("select(count)}", "select(count,.copy=count)}");
     assert_eq!(run(&explicit, "run", vec![]), Value::Bool(true));
 }
 
 #[test]
-fn pattern_generator_live_inputs_support_entry_and_exit_contracts() {
-    let source = "comptime fn select(count:*.u8'builtin)-><bool -| value:bool>
-        where requires count.* == 0, ensures count.* == 1 {
-            assumes count.* < 255;count.*+=1;'<value>
+fn pattern_generator_value_inputs_support_entry_and_exit_contracts() {
+    let source = "typealias Byte=.u8'builtin;
+        struct Counter {value:Byte}
+        impl Counter {comptime fn bump(self) {assumes self.value < 255;self.value+=1;}}
+        comptime fn select(count:Counter)-><bool -| value:bool>
+        where requires count.value == 0, ensures count.value == 1
+        {
+            count.bump();'<value>
         }
         comptime fn emit()-><|-bool> {
-            var count:.u8'builtin=0;const p=select(count.ref);
-            '(true match {~<p> => value})
+            let count=Counter {value:0};const p=select(count);
+            let unchanged=count.value == 0;
+            '(unchanged and (true match {~<p> => value}))
         }
         fn run()->bool {~<emit()>}";
     assert_eq!(run(source, "run", vec![]), Value::Bool(true));
     for (invalid, message) in [
         (
-            source.replace("requires count.* == 0", "requires count.* == 1"),
+            source.replace("requires count.value == 0", "requires count.value == 1"),
             "precondition rejected",
         ),
         (
-            source.replace("ensures count.* == 1", "ensures count.* == 0"),
+            source.replace("ensures count.value == 1", "ensures count.value == 0"),
             "postcondition rejected",
         ),
     ] {
