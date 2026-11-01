@@ -9673,3 +9673,29 @@ Validation from `/home/fin/luna`:
 
 - `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --test nominal_types nominal_record_index_budget_boundaries_do_not_report_type_errors`: old test failed on HEAD (`/tmp/luna-tools-w5wh2_yh/result.json`); updated test passed with the same HEAD implementation (`/tmp/luna-tools-pw5xmzyr/result.json`).
 - Workspace formatting passed (`/tmp/luna-tools-ll674zef/result.json`); `git diff --check` passed.
+
+### Reject definition-only pattern evidence at bytecode admission
+
+`nir::program::Pattern::CodeEvidence` is a definition-checking marker, explicitly
+neither executable nor lowerable. It is not a quoted-pattern implementation
+waiting for a VM opcode. The historical audit's unsupported-pattern observation
+therefore cannot justify executing this marker through the reference engine.
+
+Pattern lowering now reports `UnresolvedTypeEvidence` when it encounters the
+marker. The VM maps that failure to `TypeContractUnresolved`, retaining the
+source range and compilation work charges. It no longer classifies this case
+as an unsupported operation eligible for tree fallback. Staged inputs rejected
+by this admission check do not execute their earlier operand effects. The test
+expectation for that malformed input changes accordingly; valid sequential and
+Type-structural patterns continue to execute their effects once.
+
+Genuinely unsupported effect control retains the separate fallback behavior
+and negative compilation cache. This change does not retire the reference
+interpreter, implement effect bytecode, or complete the IIR VM migration.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`: 618 passed (`/tmp/luna-tools-em0bdk1s/result.json`).
+- Workspace formatting passed (`/tmp/luna-tools-8xs47eyo/result.json`); `git diff --check` passed.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --test cmtt_phase_boundaries --test cmtt_type_inputs --test quote_functions`: 717 passed (`/tmp/luna-tools-o9d3p6o9/result.json`).
+- Real sysroot reflection/definition-builder acceptance passed (`/tmp/luna-tools-942i5w4s/result.json`): `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_reflection_objects_feed_checked_definition_builders`.

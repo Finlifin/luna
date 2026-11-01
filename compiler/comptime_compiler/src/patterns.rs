@@ -137,6 +137,9 @@ pub(super) fn lower<'a>(
             }
         }
         match task {
+            Task::Pattern(P::CodeEvidence { .. }, _, _) => {
+                return Err(Error::UnresolvedTypeEvidence(source));
+            }
             Task::Pattern(P::Then { first, value, next }, input, failed) => {
                 let transformed = fresh();
                 pending.push(Task::Pattern(next, transformed, failed));

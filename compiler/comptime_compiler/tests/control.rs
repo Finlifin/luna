@@ -21,7 +21,7 @@ fn linear_compilation_has_bounded_work_and_deterministic_dump() {
     assert!(matches!(compile(&body, &mut 1), Err(Error::Budget(_))));
 }
 #[test]
-fn unsupported_work_and_invalid_transfers_never_publish_partial_code() {
+fn definition_evidence_and_invalid_transfers_never_publish_partial_code() {
     let body = expr(K::If {
         condition: Box::new(expr(K::Unit)),
         then_branch: Box::new(expr(K::Unit)),
@@ -37,7 +37,7 @@ fn unsupported_work_and_invalid_transfers_never_publish_partial_code() {
     });
     assert!(matches!(
         compile(&body, &mut 100),
-        Err(Error::Unsupported(_))
+        Err(Error::UnresolvedTypeEvidence(_))
     ));
     let invalid = expr(K::Break(LocalId { owner: 1, index: 0 }));
     assert!(matches!(

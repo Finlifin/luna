@@ -269,7 +269,7 @@ fn staged_inputs_survive_cloning_with_selected_shapes_and_delayed_preflight() {
 }
 
 #[test]
-fn staged_patterns_compile_or_fall_back_before_operand_effects() {
+fn staged_patterns_reject_definition_evidence_before_operand_effects() {
     use nir::program::{MatchArm, Pattern};
     let package = Package::default();
     let trace = LocalId { owner: 7, index: 0 };
@@ -342,7 +342,7 @@ fn staged_patterns_compile_or_fall_back_before_operand_effects() {
                 ControlFlow::Continue(StagedNormalInput::Value(Value::Bool(true)))
             ));
         }
-        assert_eq!(env.get(&trace), Some(&Value::Bool(true)));
+        assert_eq!(env.get(&trace), Some(&Value::Bool(case != 2)));
         assert_eq!(vm.bytecode_staged_inputs(), usize::from(case != 2));
     }
 }

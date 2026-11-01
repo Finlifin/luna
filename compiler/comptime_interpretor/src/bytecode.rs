@@ -731,6 +731,9 @@ impl<'a> Interpreter<'a> {
         match result {
             Ok(program) => Ok(Some(program)),
             Err(comptime_compiler::Error::Unsupported(_)) => Ok(None),
+            Err(comptime_compiler::Error::UnresolvedTypeEvidence(source)) => {
+                Err(self.failure(ErrorKind::TypeContractUnresolved, Some(source)))
+            }
             Err(comptime_compiler::Error::Budget(source)) => {
                 Err(self.failure(ErrorKind::StepsExhausted, Some(source)))
             }

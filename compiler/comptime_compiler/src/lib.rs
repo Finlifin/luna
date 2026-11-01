@@ -526,6 +526,8 @@ pub enum Error {
     Unsupported(SourceRange),
     Budget(SourceRange),
     InvalidControl(SourceRange),
+    /// Definition-checking evidence reached executable pattern lowering.
+    UnresolvedTypeEvidence(SourceRange),
 }
 
 impl fmt::Display for Program {

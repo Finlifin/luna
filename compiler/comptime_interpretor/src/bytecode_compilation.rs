@@ -55,7 +55,7 @@ fn unsupported_and_invalid_compilation_probes_keep_their_work_charges() {
     );
     assert!(vm.budget.steps < before);
     // Definition-only evidence is not executable bytecode.
-    let unsupported = Expr {
+    let evidence = Expr {
         kind: K::Match {
             value: Box::new(body()),
             arms: vec![nir::program::MatchArm {
@@ -64,6 +64,18 @@ fn unsupported_and_invalid_compilation_probes_keep_their_work_charges() {
                 body: body(),
             }],
         },
+        ..body()
+    };
+    let before = vm.budget.steps;
+    assert_eq!(
+        vm.compile_body(&evidence).unwrap_err().kind,
+        ErrorKind::TypeContractUnresolved
+    );
+    assert!(vm.budget.steps < before);
+    assert_eq!(vm.bytecode_invocations(), 0);
+    // Unsupported effect control retains its separate fallback policy.
+    let unsupported = Expr {
+        kind: K::EffectResume(Box::new(body())),
         ..body()
     };
     let before = vm.budget.steps;
