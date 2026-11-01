@@ -296,21 +296,13 @@ impl Interpreter<'_> {
         expected: &Term,
         source: SourceRange,
     ) -> Result<Value, Error> {
-        let value = match expected {
-            Term::Primitive(Primitive::Type) => Value::Type(Term::Primitive(Primitive::Void)),
-            _ => {
-                self.check_type_contract(
-                    &nir::program::TypePredicate::Equal(
-                        Term::Primitive(Primitive::Void),
-                        expected.clone(),
-                    ),
-                    source,
-                )?;
-                Value::Unit
-            }
-        };
-        Ok(value)
+        self.check_type_contract(
+            &nir::program::TypePredicate::Equal(Term::Primitive(Primitive::Void), expected.clone()),
+            source,
+        )?;
+        Ok(Value::Unit)
     }
+
     pub(super) fn normal_integer_value(
         &mut self,
         expected: &Term,

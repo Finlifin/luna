@@ -10733,3 +10733,36 @@ Evidence from `/home/fin/luna`:
   (`/tmp/luna-tools-4nwv8u11/result.json`). This also rebuilt the downstream
   frontend, verification, materialization and driver consumers. The case passes
   List and Tuple as ordinary comptime callable values and checks their identities.
+
+### Contextual unit remains a value
+
+`NormalFormArgument::Unit` previously returned `Value::Type(void)` when the
+contextual domain became Type. This contradicts `docs/type/type-identity.md`:
+parentheses construct values, and `()` cannot replace a Type binding. Removed
+that conversion. Shared contextual preparation now checks void against the
+expected domain through the ordinary type contract and returns `Value::Unit`.
+This applies to tree and linear execution, including late input-domain staging.
+
+The scalar regression now rejects Type-domain unit; a container identity fixture
+uses an explicit already-formed Type instead of relying on this conversion.
+Source tests exercise positional domains and an explicitly declared named `.T`
+provided after the unit operand. Both engines reject Type and then accept void
+in the same VM, retaining the ordinary NF head and a Unit value argument.
+
+Validation from `/home/fin/luna`:
+- Before the fix, `development/check.py --timeout 900 -- test -p
+  comptime_interpretor --lib contextual_scalars_use_the_preceding_type_input`
+  failed by accepting unit as Type (`/tmp/luna-tools-01r3mala/result.json`, exit 101).
+- After the fix, all 18 normal-type tests passed
+  (`/tmp/luna-tools-9al5x1c0/result.json`, exit 0), and the full interpreter suite
+  passed 596 tests (`/tmp/luna-tools-dtuuqbkm/result.json`, exit 0).
+- `development/check.py --timeout 900 -- test -p luna --test
+  function_type_parameters`: 56 passed (`/tmp/luna-tools-wn64htla/result.json`,
+  exit 0). An intermediate fixture incorrectly named positional NF parameters;
+  it was corrected to declare `.T` explicitly, without relaxing named-input rules.
+- Workspace formatting passed (`/tmp/luna-tools-cilgm9al/result.json`, exit 0).
+
+Still outstanding: `input_domains::Kind::Tuple` and its `type_head` metadata retain
+another legacy branch producing Type from nonempty contextual tuple syntax. That
+branch and its positive legacy fixtures require removal; the unit fix does not
+claim the entire contextual-input representation has been corrected.

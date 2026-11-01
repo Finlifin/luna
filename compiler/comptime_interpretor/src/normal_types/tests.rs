@@ -345,7 +345,7 @@ fn contextual_scalars_use_the_preceding_type_input() {
         (Primitive::U8, integer("1", true), false),
         (Primitive::BitVec(9), integer("511", false), true),
         (Primitive::Bool, integer("1", false), false),
-        (Primitive::Type, A::Unit { source: SOURCE }, true),
+        (Primitive::Type, A::Unit { source: SOURCE }, false),
         (Primitive::Void, A::Unit { source: SOURCE }, true),
         (Primitive::Bool, A::Unit { source: SOURCE }, false),
     ] {
@@ -370,20 +370,13 @@ fn contextual_scalars_use_the_preceding_type_input() {
         match (expected, actual) {
             (Ok(Flow::Value(expected)), Ok(Flow::Value(actual))) => {
                 assert_eq!(actual, expected);
-                if ty == Primitive::Type || ty == Primitive::Void {
+                if ty == Primitive::Void {
                     assert_eq!(
                         actual,
                         Value::Type(Term::NormalForm {
                             head,
                             sort: nir::Sort::Type,
-                            arguments: vec![
-                                Term::Primitive(ty),
-                                if ty == Primitive::Type {
-                                    Term::Primitive(Primitive::Void)
-                                } else {
-                                    Term::Unit
-                                }
-                            ],
+                            arguments: vec![Term::Primitive(ty), Term::Unit],
                         })
                     );
                 }
@@ -554,22 +547,24 @@ fn nested_contextual_containers_preserve_domains_and_tuple_heads() {
         ),
         (
             Term::Primitive(Primitive::Type),
-            A::Tuple {
-                source: SOURCE,
-                type_head: Some(tuple_head),
-                items: vec![
-                    A::Value(expr(
-                        Primitive::Type,
-                        K::TypeValue(Term::Primitive(Primitive::Bool)),
-                    )),
-                    A::Unit { source: SOURCE },
-                ],
-            },
+            A::Value(expr(
+                Primitive::Type,
+                K::TypeValue(Term::NormalForm {
+                    head: tuple_head,
+                    sort: nir::Sort::Type,
+                    arguments: vec![frozen_types(vec![
+                        Term::Primitive(Primitive::Bool),
+                        Term::Primitive(Primitive::Void),
+                    ])],
+                }),
+            )),
         ),
     ] {
         let body = container_body(domain.clone(), input);
         let code = Arc::new(comptime_compiler::compile(&body, &mut 100000).unwrap());
-        assert!(code.to_string().contains("(finish-normal-container "));
+        if domain != Term::Primitive(Primitive::Type) {
+            assert!(code.to_string().contains("(finish-normal-container "));
+        }
         let mut tree = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         let Flow::Value(expected) = tree.eval(&body, &mut Environment::new()).unwrap() else {
