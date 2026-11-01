@@ -2445,6 +2445,39 @@ fn open_deferred_known_regions_call_callbacks_closures_and_methods() {
 }
 
 #[test]
+fn open_deferred_regions_retain_generated_callable_dependencies() {
+    let package = compile(
+        "typealias Type = .Type'builtin;
+        typealias Integer = .Integer'builtin;
+        typealias Object = .Object'builtin;
+        const length = .object_length'builtin;
+        comptime fn Select(T: Type) -> Type { T }
+        comptime fn inspect(comptime T: Type, unknown: defer Select(T)) -> Integer {
+            length({flag: true})
+        }
+        comptime fn compute() -> bool { inspect(bool, false) == 1 }
+        fn run() -> bool { inline if compute() { true } else { false } }",
+    );
+    for bytecode in [false, true] {
+        let mut vm = if bytecode {
+            Interpreter::for_comptime(&package, Budget::default())
+        } else {
+            Interpreter::for_comptime_tree(&package, Budget::default())
+        }
+        .unwrap();
+        assert_eq!(
+            vm.invoke(id(&package, "compute"), vec![]).unwrap(),
+            Value::Bool(true)
+        );
+    }
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
+}
+
+#[test]
 fn open_deferred_trait_requirements_support_known_operations_and_forwarding() {
     let source = "typealias Type=.Type'builtin;
         trait Inspect {fn inspect(self)->bool;}

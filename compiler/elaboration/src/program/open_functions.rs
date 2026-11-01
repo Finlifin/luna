@@ -2559,6 +2559,30 @@ impl Checker<'_, '_> {
             if !seen.insert(id) {
                 continue;
             }
+            // Generated bodies carry ordinary function identities even when
+            // their source declaration is a constant binding. Close the typed
+            // dependency before trying to recover a source function signature.
+            if let Some(function) = self
+                .generated_functions
+                .iter()
+                .find(|f| f.declaration == id)
+            {
+                let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                let before = fuel;
+                let charged =
+                    nir::copy_budget::charge_function_substitution(function, &[], &[], &mut fuel);
+                self.required_steps -= (before - fuel) as u64;
+                charged.map_err(|_| {
+                    error(span, "ordinary region function snapshot budget exhausted")
+                })?;
+                pending.extend(required::function_references(
+                    function,
+                    &mut members,
+                    &mut associated,
+                ));
+                functions.push(function.clone());
+                continue;
+            }
             let Some(owner) = self.package.owners().find_map(|(owner, _)| {
                 (matches_declaration(self.package, &self.package_identities, owner, id))
                     .then_some(owner)
@@ -2568,8 +2592,8 @@ impl Checker<'_, '_> {
             if matches!(&self.package.item(owner).unwrap().kind, ItemKind::Fn(sig, _) if sig.modifiers.is_comptime && !sig.modifiers.is_normal_form_head)
             {
                 let function = self.required_function(owner, span)?;
-                pending.extend(required::references(
-                    &function.body,
+                pending.extend(required::function_references(
+                    &function,
                     &mut members,
                     &mut associated,
                 ));
@@ -5298,6 +5322,20 @@ impl Checker<'_, '_> {
             .package
             .definition_owner(def_id)
             .ok_or_else(|| error(callee.span, "missing callable declaration"))?;
+        if self
+            .package
+            .item(owner)
+            .is_some_and(|item| matches!(item.kind, ItemKind::Const(..) | ItemKind::Associated(_)))
+        {
+            // A resolved value declaration follows the same callable-value
+            // route as a local. Its source item need not be a function item.
+            let saved = std::mem::replace(&mut self.describing_open_spread, true);
+            let saved_call = std::mem::replace(&mut self.describing_open_call, true);
+            let result = self.describe_known_region(expr, expected);
+            self.describing_open_call = saved_call;
+            self.describing_open_spread = saved;
+            return result;
+        }
         self.ensure_signature(owner, callee.span)?;
         self.ensure_contract(owner, callee.span)?;
         let Some(ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) =

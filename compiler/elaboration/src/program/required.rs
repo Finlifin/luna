@@ -2551,7 +2551,7 @@ fn live_references(
     Ok(found)
 }
 
-fn function_references(
+pub(super) fn function_references(
     function: &n::Function,
     members: &mut BTreeSet<DeclarationId>,
     associated: &mut BTreeSet<DeclarationId>,
