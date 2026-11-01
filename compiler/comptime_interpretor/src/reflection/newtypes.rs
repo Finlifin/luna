@@ -39,8 +39,7 @@ impl Interpreter<'_> {
             if self.graph.is_some() {
                 nir::type_computations::charge_term(&selected, &mut fuel)
                     .map_err(|_| nir::newtypes::ConversionError::Budget)?;
-                let Some(iir::NominalDefinition::Newtype(definition)) =
-                    self.concrete_nominal(&selected)
+                let Some(ConcreteNominal::Newtype(definition)) = self.concrete_nominal(&selected)
                 else {
                     return Ok(None);
                 };

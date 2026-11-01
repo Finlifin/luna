@@ -1,7 +1,9 @@
 //! Execution from retained concrete instances; no source templates are consulted.
 use super::*;
 mod indexes;
+mod nominals;
 pub(super) use indexes::GraphIndexes;
+pub(super) use nominals::ConcreteNominal;
 
 impl<'a> Interpreter<'a> {
     pub(super) fn eval_template_equal(

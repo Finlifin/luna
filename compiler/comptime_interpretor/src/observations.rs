@@ -187,10 +187,7 @@ impl Interpreter<'_> {
                     unreachable!()
                 };
                 let is_enum = if self.graph.is_some() {
-                    matches!(
-                        self.concrete_nominal(input),
-                        Some(iir::NominalDefinition::Enum(_))
-                    )
+                    matches!(self.concrete_nominal(input), Some(ConcreteNominal::Enum(_)))
                 } else {
                     self.enums.contains_key(declaration)
                 };
@@ -262,9 +259,7 @@ impl Interpreter<'_> {
                         arguments,
                     };
                     match self.concrete_nominal_metered(&subject)? {
-                        Some(iir::NominalDefinition::Enum(definition)) => {
-                            Some(generated_enums::EnumDefinition::Borrowed(definition))
-                        }
+                        Some(ConcreteNominal::Enum(definition)) => Some(definition),
                         _ => None,
                     }
                 } else {

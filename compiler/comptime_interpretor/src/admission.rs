@@ -244,10 +244,10 @@ impl Interpreter<'_> {
                         .concrete_nominal(ty)
                         .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
                     // Concrete descriptors already substituted their declaration telescope.
-                    let (requirements, capabilities) = match definition {
-                        iir::NominalDefinition::Struct(d) => (&d.requirements, &d.capabilities),
-                        iir::NominalDefinition::Enum(d) => (&d.requirements, &d.capabilities),
-                        iir::NominalDefinition::Newtype(d) => (&d.requirements, &d.capabilities),
+                    let (requirements, capabilities) = match &definition {
+                        ConcreteNominal::Struct(d) => (&d.requirements, &d.capabilities),
+                        ConcreteNominal::Enum(d) => (&d.requirements, &d.capabilities),
+                        ConcreteNominal::Newtype(d) => (&d.requirements, &d.capabilities),
                     };
                     for predicate in requirements {
                         self.tick(None)?;

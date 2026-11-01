@@ -86,9 +86,7 @@ impl<'a> Interpreter<'a> {
         };
         let definition = if self.graph.is_some() {
             match self.concrete_nominal_metered(ty)? {
-                Some(iir::NominalDefinition::Enum(definition)) => {
-                    Some(generated_enums::EnumDefinition::Borrowed(definition))
-                }
+                Some(ConcreteNominal::Enum(definition)) => Some(definition),
                 _ => None,
             }
         } else {

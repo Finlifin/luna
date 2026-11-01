@@ -35,9 +35,7 @@ impl Interpreter<'_> {
                         arguments,
                     };
                     match self.concrete_nominal_metered(&subject)? {
-                        Some(iir::NominalDefinition::Enum(definition)) => {
-                            Some(generated_enums::EnumDefinition::Borrowed(definition))
-                        }
+                        Some(ConcreteNominal::Enum(definition)) => Some(definition),
                         _ => None,
                     }
                 } else {

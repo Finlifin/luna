@@ -31,11 +31,15 @@ impl Interpreter<'_> {
                 for endpoint in [input, output] {
                     nir::type_computations::charge_term(endpoint, &mut fuel)
                         .map_err(|_| nir::newtypes::ConversionError::Budget)?;
-                    if let Some(iir::NominalDefinition::Newtype(definition)) =
+                    if let Some(ConcreteNominal::Newtype(definition)) =
                         self.concrete_nominal(endpoint)
                     {
                         if let Some(plan) = nir::newtypes::instance_conversion(
-                            definition, endpoint, input, output, &mut fuel,
+                            &definition,
+                            endpoint,
+                            input,
+                            output,
+                            &mut fuel,
                         )? {
                             return Ok(Some(plan));
                         }

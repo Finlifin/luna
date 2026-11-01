@@ -24,6 +24,7 @@ concat!(
     "mod fields {\n", include_str!("../../../../library/meta/definitions/fields.fl"), "\n}\n",
     "mod structs {\n", include_str!("../../../../library/meta/definitions/structs.fl"), "\n}\n",
     "mod enums {\n", include_str!("../../../../library/meta/definitions/enums.fl"), "\n}\n",
+    "mod newtypes {\n", include_str!("../../../../library/meta/definitions/newtypes.fl"), "\n}\n",
     "}\n",
     include_str!("../../../../library/meta/lib.fl"),
 ).replace("use numeric.{scalar_math, equality};\n", "use numeric.equality;\n").replace("pub mod math {\n    pub use scalar_math.*;\n}\n\n", "")

@@ -162,7 +162,7 @@ impl<'world> Interpreter<'world> {
         &'vm mut self,
         definitions: StructBatch<'world>,
     ) -> Result<Installation<'vm, 'world>, Error> {
-        if !self.comptime_only || self.graph.is_some() || self.cleanup_schedule.is_some() {
+        if !self.comptime_only || self.cleanup_schedule.is_some() {
             return Err(self.failure(ErrorKind::PhaseMismatch, None));
         }
         if !self.abstract_type_parameters.is_empty() || !self.abstract_value_parameters.is_empty() {
@@ -275,6 +275,9 @@ impl<'world> Interpreter<'world> {
             || self.declaration_parameter_sorts.contains_key(&id)
         {
             return Ok(true);
+        }
+        if let Some(indexes) = &self.graph_indexes {
+            return Ok(indexes.declarations.contains(&id));
         }
         // Trait/impl and body-free telescope identities are not all represented
         // by executable function tables. They still occupy declaration space.

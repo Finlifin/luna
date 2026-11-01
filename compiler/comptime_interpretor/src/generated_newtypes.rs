@@ -176,7 +176,7 @@ impl<'world> Interpreter<'world> {
         &'vm mut self,
         definitions: NewtypeBatch<'world>,
     ) -> Result<Installation<'vm, 'world>, Error> {
-        if !self.comptime_only || self.graph.is_some() || self.cleanup_schedule.is_some() {
+        if !self.comptime_only || self.cleanup_schedule.is_some() {
             return Err(self.failure(ErrorKind::PhaseMismatch, None));
         }
         if !self.abstract_type_parameters.is_empty() || !self.abstract_value_parameters.is_empty() {

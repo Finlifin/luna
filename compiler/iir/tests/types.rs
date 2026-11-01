@@ -379,7 +379,7 @@ fn type_list_constants_validate_embedded_types_and_domain_authority() {
         package
             .validate(&mut 10_000)
             .unwrap_err()
-            .contains("type-list constant")
+            .contains("list construction")
     );
     package.functions[0].function.body.ty = list;
     package.normal_forms.pop();
@@ -389,7 +389,7 @@ fn type_list_constants_validate_embedded_types_and_domain_authority() {
         package
             .validate(&mut 10_000)
             .unwrap_err()
-            .contains("type-list constant")
+            .contains("list construction")
     );
     package.normal_forms[0].role = Role::TypeList;
     package.validate(&mut 10_000).unwrap();

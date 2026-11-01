@@ -3,6 +3,7 @@
 use super::*;
 
 pub(crate) struct GraphIndexes {
+    pub(crate) declarations: HashSet<DeclarationId>,
     pub(crate) nominals: HashMap<Term, usize>,
     pub(crate) callables: HashMap<DeclarationId, HashMap<Arc<[Term]>, usize>>,
     pub(crate) normal_forms: Arc<BTreeMap<DeclarationId, usize>>,
@@ -52,7 +53,9 @@ impl GraphIndexes {
                     dispatch.implementation,
                 );
             }
+            let declarations = super::nominals::declaration_identities(graph, &mut fuel)?;
             Ok(Self {
+                declarations,
                 nominals,
                 callables,
                 normal_forms: Arc::new(normal_forms),
@@ -70,15 +73,41 @@ impl GraphIndexes {
 impl<'a> Interpreter<'a> {
     /// Exact immutable instance lookup. Callers that already budget traversal of
     /// the type may use this directly; this stores no formation verdicts.
-    pub(crate) fn concrete_nominal(&self, ty: &Term) -> Option<&'a iir::NominalDefinition> {
-        let index = self.graph_indexes.as_ref()?.nominals.get(ty)?;
-        Some(&self.graph?.nominals[*index].definition)
+    pub(crate) fn concrete_nominal(&self, ty: &Term) -> Option<ConcreteNominal<'a>> {
+        let graph = self.graph?;
+        let indexes = self.graph_indexes.as_ref()?;
+        if let Some(index) = indexes.nominals.get(ty) {
+            return Some(ConcreteNominal::borrowed(
+                &graph.nominals[*index].definition,
+            ));
+        }
+        // Published batches are concrete definitions with their own identities.
+        // Do not treat a missing generic instance as an empty-telescope type.
+        let Term::Nominal {
+            declaration,
+            arguments,
+        } = ty
+        else {
+            return None;
+        };
+        if !arguments.is_empty() {
+            return None;
+        }
+        if let Some(definition) = self.structs.get(declaration) {
+            Some(ConcreteNominal::Struct(definition.clone()))
+        } else if let Some(definition) = self.enums.get(declaration) {
+            Some(ConcreteNominal::Enum(definition.clone()))
+        } else {
+            self.newtypes
+                .handle(declaration)
+                .map(ConcreteNominal::Newtype)
+        }
     }
 
     pub(crate) fn concrete_nominal_metered(
         &mut self,
         ty: &Term,
-    ) -> Result<Option<&'a iir::NominalDefinition>, Error> {
+    ) -> Result<Option<ConcreteNominal<'a>>, Error> {
         self.tick(None)?;
         let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
         let mut fuel = before;

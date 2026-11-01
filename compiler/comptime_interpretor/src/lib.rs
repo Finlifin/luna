@@ -28,6 +28,7 @@ mod environment;
 mod field_access;
 mod function_instances;
 mod iir_execution;
+use iir_execution::ConcreteNominal;
 mod immutable_storage;
 mod input_bodies;
 mod input_domains;
@@ -2118,23 +2119,21 @@ impl<'a> Interpreter<'a> {
         };
         if self.graph.is_some() {
             return match (self.concrete_nominal(ty)?, variant) {
-                (iir::NominalDefinition::Enum(definition), Some(index)) => {
-                    instantiate_value_fields(
-                        &[],
-                        &[],
-                        &[],
-                        definition.variants.get(index as usize)?.fields.iter(),
-                        fuel,
-                    )
-                }
-                (iir::NominalDefinition::Newtype(definition), None) => instantiate_value_fields(
+                (ConcreteNominal::Enum(definition), Some(index)) => instantiate_value_fields(
+                    &[],
+                    &[],
+                    &[],
+                    definition.variants.get(index as usize)?.fields.iter(),
+                    fuel,
+                ),
+                (ConcreteNominal::Newtype(definition), None) => instantiate_value_fields(
                     &[],
                     &[],
                     &[],
                     std::iter::once(&definition.representation),
                     fuel,
                 ),
-                (iir::NominalDefinition::Struct(definition), None) => instantiate_value_fields(
+                (ConcreteNominal::Struct(definition), None) => instantiate_value_fields(
                     &[],
                     &[],
                     &[],
@@ -2663,7 +2662,7 @@ impl<'a> Interpreter<'a> {
             };
             if self.graph.is_some() {
                 return self.concrete_nominal(ty).is_some_and(|definition| {
-                    if let iir::NominalDefinition::Newtype(definition) = definition {
+                    if let ConcreteNominal::Newtype(definition) = definition {
                         self.has_type_at(value, &definition.representation, depth + 1)
                     } else {
                         false
@@ -2714,7 +2713,7 @@ impl<'a> Interpreter<'a> {
                             arguments: args,
                             fields,
                         },
-                        iir::NominalDefinition::Struct(s),
+                        ConcreteNominal::Struct(s),
                     ) => {
                         actual == declaration
                             && args == arguments
@@ -2731,7 +2730,7 @@ impl<'a> Interpreter<'a> {
                             index,
                             fields,
                         },
-                        iir::NominalDefinition::Enum(e),
+                        ConcreteNominal::Enum(e),
                     ) => {
                         actual == declaration
                             && args == arguments

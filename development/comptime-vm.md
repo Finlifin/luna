@@ -11258,3 +11258,53 @@ Validation from `/home/fin/luna`:
   (`/tmp/luna-tools-nup233mm/result.json`).
 - Workspace formatting passed (`/tmp/luna-tools-0jcrwc78/result.json`);
   `git diff --check` passed.
+
+### Concrete builder publication in IIR comptime sessions
+
+Concrete struct, enum and newtype publication now works in both IIR tree and
+bytecode comptime sessions. A live nominal view borrows artifact definitions or
+owns handles into freshly published batches. Reflection, formation, frozen-value
+admission, storage-domain checks and direct newtype conversions use that same
+view. Published definitions never mutate the artifact or its reusable indexes;
+missing generic instances cannot resolve through the concrete publication map.
+
+The artifact index reserves retained declaration identities, including body-free
+interface and implementation identities. Publication still checks the combined
+world, commits only after admission, and removes staged entries on error, unwind
+or fuel exhaustion. Runtime sessions and cleanup schedules remain ineligible.
+Tests cover collisions, retry after rollback, exact instance identity, ownership
+release, and pointer storage in an inactive generated enum alternative.
+
+The public meta builder test exposed an older IIR validation restriction: list
+construction accepted only Type elements even though elaboration already emits
+ordinary typed lists. Validation now checks each operand against the registered
+list layout's actual element domain, including nested lists and empty lists.
+Opaque heads and wrong operand types remain rejected. This removes the Type-only
+restriction; it does not complete the separate migration away from legacy list
+layout roles and the TypeList IR spelling.
+
+The public integration test compiles the repository's meta/attrs sources with
+isolated builtin bindings, materializes Build and inspect, then executes both IIR
+carriers. Each session publishes two chains of newtype -> struct -> enum, verifies
+fresh identities and reflected representations, and leaves the artifact unchanged.
+This is concrete publication support, not generic/captured definition builders,
+function/trait/impl generation, or migration of the CLI invocation driver to IIR.
+
+Validation from `/home/fin/luna`:
+- IIR and interpreter suites passed, exit 0, with
+  `python3 -B development/check.py --timeout 900 -- test -p iir
+  -p comptime_interpretor` (`/tmp/luna-tools-sukyy9el/result.json`).
+- The public cross-kind IIR test passed, exit 0
+  (`/tmp/luna-tools-sbnnfmou/result.json`); its initial failure demonstrated the
+  Type-only list restriction (`/tmp/luna-tools-9o00qfcr/result.json`).
+- Workspace formatting passed, exit 0 (`/tmp/luna-tools-qjlz5wwl/result.json`).
+- Broader builder regression run: 84 passed, 2 failed, exit 101
+  (`/tmp/luna-tools-9b__tke7/result.json`). Both failures were unresolved imports
+  in the shared isolated meta fixture, which omitted definitions.newtypes while
+  embedding the current public root. The fixture now includes the real module;
+  the complete-sysroot contextual builder case passed in that run.
+- After correcting that fixture, all 3 CLI builder cases passed, exit 0
+  (`/tmp/luna-tools-x4_nesgq/result.json`, builder_invocations filter cli_).
+- All 10 comptime_iir_bytecode integration cases passed, exit 0
+  (`/tmp/luna-tools-fo9bkbvr/result.json`). This target was rerun separately
+  because Cargo stopped at the earlier builder fixture failures.

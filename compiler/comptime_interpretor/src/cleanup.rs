@@ -165,21 +165,21 @@ impl Interpreter<'_> {
                     .concrete_nominal_metered(ty)?
                     .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, None))?;
                 match definition {
-                    iir::NominalDefinition::Newtype(definition) => {
+                    ConcreteNominal::Newtype(definition) => {
                         return self.cleanup_value_context(
                             &definition.representation,
                             depth + 1,
                             pointers_only,
                         );
                     }
-                    iir::NominalDefinition::Struct(definition) => {
+                    ConcreteNominal::Struct(definition) => {
                         for (_, field) in &definition.fields {
                             if self.cleanup_value_context(field, depth + 1, pointers_only)? {
                                 return Ok(true);
                             }
                         }
                     }
-                    iir::NominalDefinition::Enum(definition) => {
+                    ConcreteNominal::Enum(definition) => {
                         for variant in &definition.variants {
                             for field in &variant.fields {
                                 if self.cleanup_value_context(field, depth + 1, pointers_only)? {

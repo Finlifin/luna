@@ -268,3 +268,181 @@ fn bit_observation_uses_checked_value_identity_after_associated_selection() {
         assert_eq!(observed, Value::BitVec(expected));
     }
 }
+
+fn fresh(local: u32) -> Term {
+    Term::Nominal {
+        declaration: id(local),
+        arguments: vec![],
+    }
+}
+#[test]
+fn generated_graph_definitions_are_transactional_and_reject_artifact_collisions() {
+    let mut graph = graph(0);
+    graph.interfaces.push(iir::InterfaceContract {
+        interface: InterfaceInstance {
+            declaration: id(77),
+            arguments: vec![],
+        },
+        subject: boolean(),
+        methods: vec![],
+    });
+    graph.dispatch.push(nir::program::DispatchInstance {
+        interface: id(77),
+        interface_arguments: vec![],
+        subject: boolean(),
+        implementation: id(78),
+        arguments: vec![],
+        methods: vec![],
+        associated: vec![],
+        associated_initializers: vec![],
+    });
+    let baseline = graph.clone();
+    let mut vm = Interpreter::from_iir_for_comptime(&graph, Budget::default()).unwrap();
+    for local in [1, 2, 3, 77, 78] {
+        let iir::NominalDefinition::Newtype(definition) = newtype(local, boolean()) else {
+            panic!()
+        };
+        assert!(matches!(
+            vm.install_owned_generated_newtypes_with(vec![definition].into(), || Ok::<_, ()>(())),
+            Err(NewtypePublicationError::Admission(Error {
+                kind: ErrorKind::InvalidCallPlan,
+                ..
+            }))
+        ));
+    }
+    let definitions: Arc<[Struct]> = vec![Struct {
+        declaration: id(10),
+        name: "Generated".into(),
+        type_parameters: vec![],
+        parameter_types: vec![],
+        requirements: vec![],
+        capabilities: vec![],
+        fields: vec![("base".into(), ty(1, boolean()))],
+    }]
+    .into();
+    assert!(
+        vm.install_owned_generated_structs_with(definitions.clone(), || Err::<(), _>(
+            "host rejected"
+        ))
+        .is_err()
+    );
+    assert!(vm.reflect_struct(&fresh(10)).is_err());
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = vm
+            .install_owned_generated_structs_with(definitions.clone(), || -> Result<(), ()> {
+                panic!("publisher unwound")
+            });
+    }));
+    assert!(unwound.is_err());
+    assert!(vm.reflect_struct(&fresh(10)).is_err());
+    vm.install_owned_generated_structs_with(definitions, || Ok::<_, ()>(()))
+        .unwrap();
+    assert_eq!(
+        vm.reflect_struct(&fresh(10)).unwrap().fields[0].ty,
+        ty(1, boolean())
+    );
+    let payload = frozen(1, Term::Bool(true), boolean());
+    let input = Term::NominalValue {
+        ty: Box::new(fresh(10)),
+        variant: None,
+        fields: vec![payload],
+    };
+    assert!(vm.decode_immutable_input(&input, &fresh(10)).is_ok());
+    assert!(vm.reflect_struct(&ty(10, boolean())).is_err());
+    assert_eq!(graph, baseline);
+}
+
+#[test]
+fn generated_concrete_views_release_ownership_and_check_inactive_storage() {
+    let graph = graph(0);
+    let definitions: Arc<[Enum]> = vec![Enum {
+        declaration: id(20),
+        name: "Generated".into(),
+        type_parameters: vec![],
+        parameter_types: vec![],
+        requirements: vec![],
+        capabilities: vec![],
+        is_intrinsic: false,
+        groups: vec![],
+        encoding: None,
+        symbol_encoding: None,
+        variants: vec![
+            Variant {
+                name: "empty".into(),
+                shape: VariantShape::Unit,
+                fields: vec![],
+            },
+            Variant {
+                name: "pointer".into(),
+                shape: VariantShape::Tuple,
+                fields: vec![Term::Pointer(Box::new(boolean()))],
+            },
+        ],
+    }]
+    .into();
+    let weak = Arc::downgrade(&definitions);
+    let mut vm = Interpreter::from_iir_for_comptime(&graph, Budget::default()).unwrap();
+    vm.install_owned_generated_enums_with(definitions, || Ok::<_, ()>(()))
+        .unwrap();
+    assert_eq!(vm.reflect_enum(&fresh(20)).unwrap().variants.len(), 2);
+    assert_eq!(
+        vm.check_comptime_domain(&fresh(20), SourceRange { start: 1, end: 2 })
+            .unwrap_err()
+            .kind,
+        ErrorKind::PhaseMismatch
+    );
+    assert!(weak.upgrade().is_some());
+    drop(vm);
+    assert!(weak.upgrade().is_none());
+}
+
+#[test]
+fn generated_iir_batches_rollback_at_every_insufficient_admission_budget() {
+    let graph = graph(0);
+    let make = || -> Arc<[nir::newtypes::Newtype]> {
+        [(30, ty(1, boolean())), (31, fresh(30))]
+            .into_iter()
+            .map(|(local, representation)| {
+                let iir::NominalDefinition::Newtype(definition) = newtype(local, representation)
+                else {
+                    panic!()
+                };
+                definition
+            })
+            .collect()
+    };
+    let mut vm = Interpreter::from_iir_for_comptime(&graph, Budget::default()).unwrap();
+    let before = vm.remaining_steps();
+    vm.install_owned_generated_newtypes_with(make(), || Ok::<_, ()>(()))
+        .unwrap();
+    let cost = before - vm.remaining_steps();
+    for steps in 0..cost {
+        let mut vm = Interpreter::from_iir_for_comptime(&graph, Budget::default()).unwrap();
+        vm.budget.steps = steps;
+        let committed = std::cell::Cell::new(false);
+        assert!(matches!(
+            vm.install_owned_generated_newtypes_with(make(), || {
+                committed.set(true);
+                Ok::<_, ()>(())
+            }),
+            Err(NewtypePublicationError::Admission(Error {
+                kind: ErrorKind::StepsExhausted,
+                ..
+            }))
+        ));
+        assert!(!committed.get());
+        assert!(vm.concrete_nominal(&fresh(30)).is_none());
+        assert!(vm.concrete_nominal(&fresh(31)).is_none());
+        vm.budget.steps = 100_000;
+        vm.install_owned_generated_newtypes_with(make(), || Ok::<_, ()>(()))
+            .unwrap();
+        let plan = vm
+            .prepare_newtype_conversion(&fresh(30), &fresh(31), SourceRange { start: 1, end: 2 })
+            .unwrap();
+        assert_eq!(plan.target(), &fresh(31));
+        assert_eq!(
+            vm.reflect_newtype(&fresh(30)).unwrap().representation,
+            ty(1, boolean())
+        );
+    }
+}

@@ -481,3 +481,80 @@ fn canonical_frozen_inputs_check_machine_domains_and_recover_after_failure() {
     assert!(canonical_input_with_layouts(layouts, &valid, &mut 1).is_err());
     canonical_input_with_layouts(layouts, &valid, &mut 100_000).unwrap();
 }
+
+fn graph_for_list(body: Expr) -> iir::Package {
+    use nir::program::{Function, FunctionPhase};
+    let key = iir::InstanceKey {
+        declaration: id(50),
+        arguments: vec![].into(),
+    };
+    iir::Package {
+        roots: vec![key.clone()],
+        normal_forms: vec![head()],
+        functions: vec![iir::FunctionInstance {
+            key,
+            function: Function {
+                declaration: id(50),
+                name: "make".into(),
+                phase: FunctionPhase::Comptime,
+                inline: false,
+                pure: true,
+                is_unsafe: false,
+                signature: Term::Function {
+                    parameters: vec![],
+                    result: Box::new(body.ty.clone()),
+                },
+                body,
+                parameters: vec![],
+                defaults: vec![],
+                type_parameters: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                entry_snapshots: vec![],
+            },
+        }],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn concrete_list_construction_checks_ordinary_and_nested_element_domains() {
+    let scalar = Term::Primitive(Primitive::Bool);
+    let inner = list(scalar.clone(), vec![boolean(true)]);
+    for body in [
+        inner.clone(),
+        list(inner.ty.clone(), vec![inner.clone()]),
+        list(scalar.clone(), vec![]),
+    ] {
+        let graph = graph_for_list(body);
+        graph.validate(&mut 100_000).unwrap();
+        assert!(graph.validate(&mut 0).is_err());
+        graph.validate(&mut 100_000).unwrap();
+        let mut opaque = graph.clone();
+        opaque.normal_forms[0].role = Role::Opaque;
+        assert!(opaque.validate(&mut 100_000).is_err());
+    }
+    let invalid = graph_for_list(list(inner.ty.clone(), vec![boolean(false)]));
+    assert!(
+        invalid
+            .validate(&mut 100_000)
+            .unwrap_err()
+            .contains("element type")
+    );
+    let invalid = graph_for_list(list(
+        scalar,
+        vec![expr(
+            Term::Primitive(Primitive::Type),
+            K::TypeValue(inner.ty),
+        )],
+    ));
+    assert!(
+        invalid
+            .validate(&mut 100_000)
+            .unwrap_err()
+            .contains("element type")
+    );
+}

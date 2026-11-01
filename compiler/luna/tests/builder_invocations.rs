@@ -3092,3 +3092,105 @@ fn public_newtype_builder_reflection_rejects_other_type_kinds() {
         assert!(fixture.invoke_meta("ready").is_err(), "{subject}");
     }
 }
+
+#[test]
+fn public_builders_publish_and_reflect_cross_kind_types_in_concrete_iir() {
+    use comptime_interpretor::Budget;
+    use elaboration::definitions::AllocatedDefinitionPublisher;
+    let fixture = Fixture::new(
+        "
+        use builtin.Type;
+        comptime fn Build() -> Type {
+            let wrapper = meta.NewtypeBuilder.new(bool, .name=.Flag).Build();
+            let record = meta.StructBuilder.new(.name=.Record);
+            record.add_field(.flag, wrapper);
+            let choice = meta.EnumBuilder.new(.name=.Choice);
+            choice.add_tuple(.some, [record.Build()]);
+            choice.Build()
+        }
+        comptime fn inspect(subject: Type) -> bool {
+            let record = subject.enum_variant_field_types()[0][0];
+            let wrapper = record.struct_field_types()[0];
+            wrapper.NewtypeRepresentation() == bool
+        }
+        comptime fn ready() -> bool { true }
+        ",
+    );
+    let (Artifact::Nir(package), _, _) = fixture.invoke_meta("ready").unwrap() else {
+        panic!()
+    };
+    let root = |name| iir::InstanceKey {
+        declaration: package
+            .functions
+            .iter()
+            .find(|function| function.name == name)
+            .unwrap()
+            .declaration,
+        arguments: vec![].into(),
+    };
+    let build = root("Build");
+    let inspect = root("inspect");
+    let graph = elaboration::materialization::instantiate(
+        &package,
+        &[build.clone(), inspect.clone()],
+        Default::default(),
+        elaboration::ptc::Budget {
+            steps: 1_000_000,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let baseline = graph.clone();
+    for compiled in [false, true] {
+        // This fixture reserves a separate publication namespace.
+        let publisher = AllocatedDefinitionPublisher::new(&package, 9900, 1, 10_000_000);
+        let structs = |request: &comptime_interpretor::StructBuildRequest, steps: &mut u64| {
+            publisher.prepare_struct(request, steps)
+        };
+        let enums = |request: &comptime_interpretor::EnumBuildRequest, steps: &mut u64| {
+            publisher.prepare_enum(request, steps)
+        };
+        let newtypes = |request: &comptime_interpretor::NewtypeBuildRequest, steps: &mut u64| {
+            publisher.prepare_newtype(request, steps)
+        };
+        let mut vm = if compiled {
+            Interpreter::from_iir_for_comptime(
+                &graph,
+                Budget {
+                    steps: 10_000_000,
+                    ..Default::default()
+                },
+            )
+        } else {
+            Interpreter::from_iir_for_comptime_tree(
+                &graph,
+                Budget {
+                    steps: 10_000_000,
+                    ..Default::default()
+                },
+            )
+        }
+        .unwrap()
+        .with_struct_builder(&structs)
+        .with_enum_builder(&enums)
+        .with_newtype_builder(&newtypes);
+        let first = vm.invoke_instance(&build, vec![]).unwrap();
+        let second = vm.invoke_instance(&build, vec![]).unwrap();
+        assert_ne!(first, second);
+        for subject in [first, second] {
+            assert_eq!(
+                vm.invoke_instance(&inspect, vec![subject]).unwrap(),
+                Value::Bool(true)
+            );
+        }
+        if compiled {
+            assert!(vm.bytecode_invocations() > 0);
+        }
+        drop(vm);
+        let (published, _) = publisher.finish();
+        assert_eq!(published.structs.len(), 2);
+        assert_eq!(published.enums.len(), 2);
+        assert_eq!(published.newtypes.len(), 2);
+    }
+    assert_eq!(graph, baseline);
+}

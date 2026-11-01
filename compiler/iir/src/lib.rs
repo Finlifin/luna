@@ -668,39 +668,36 @@ impl Package {
                 }
             }
             K::TypeList(fields) => {
-                let diverging = {
-                    for field in fields {
-                        *fuel = fuel
-                            .checked_sub(1)
-                            .ok_or("IIR type-list budget exhausted")?;
-                        if !matches!(
-                            field.ty,
-                            Term::Primitive(nir::Primitive::Type | nir::Primitive::Never)
-                        ) {
-                            return Err("IIR type-list operand is not Type".into());
-                        }
-                    }
-                    fields
-                        .iter()
-                        .any(|field| field.ty == Term::Primitive(nir::Primitive::Never))
-                };
-                if diverging {
+                *fuel = fuel
+                    .checked_sub(fields.len())
+                    .ok_or("IIR list budget exhausted")?;
+                if fields
+                    .iter()
+                    .any(|field| field.ty == Term::Primitive(nir::Primitive::Never))
+                {
                     if expr.ty != Term::Primitive(nir::Primitive::Never) {
-                        return Err("IIR diverging type-list construction must be Never".into());
+                        return Err("IIR diverging list construction must be Never".into());
                     }
                     return Ok(());
                 }
-                let mut admitted = false;
+                let mut element = None;
                 for head in &self.normal_forms {
                     *fuel = fuel
                         .checked_sub(1)
-                        .ok_or("IIR type-list metadata budget exhausted")?;
-                    admitted |= head.is_type_list_instance(&expr.ty);
+                        .ok_or("IIR list metadata budget exhausted")?;
+                    if let Some(ty) = head.list_element(&expr.ty) {
+                        element = Some(ty);
+                        break;
+                    }
                 }
-                if !admitted || !nir::normal_forms::type_list_input_type(&expr.ty) {
-                    return Err(
-                        "IIR type-list constant requires trusted meta.List<Type> metadata".into(),
-                    );
+                let element = element
+                    .ok_or("IIR list construction requires registered list layout metadata")?;
+                for field in fields {
+                    nir::type_computations::charge_term(&field.ty, fuel)
+                        .map_err(|_| "IIR list element budget exhausted")?;
+                    if &field.ty != element {
+                        return Err("IIR list operand does not match its element type".into());
+                    }
                 }
             }
             K::TypeValue(ty) => {

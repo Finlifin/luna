@@ -30,32 +30,34 @@ impl Interpreter<'_> {
                 ty,
                 &[],
                 &|ty, fuel| {
+                    let nominal;
                     let fields: Vec<&Term> = match ty {
                         Term::Nominal { .. } => {
                             charge_layout_work(fuel, 1)?;
                             nir::type_computations::charge_term(ty, fuel)
                                 .map_err(|_| *fuel = 0)
                                 .ok()?;
-                            let definition = self.concrete_nominal(ty)?;
+                            nominal = self.concrete_nominal(ty)?;
+                            let definition = &nominal;
                             let count = match definition {
-                                iir::NominalDefinition::Struct(def) => def.fields.len(),
-                                iir::NominalDefinition::Enum(def) => {
+                                ConcreteNominal::Struct(def) => def.fields.len(),
+                                ConcreteNominal::Enum(def) => {
                                     charge_layout_work(fuel, def.variants.len())?;
                                     def.variants
                                         .iter()
                                         .fold(0usize, |n, v| n.saturating_add(v.fields.len()))
                                 }
-                                iir::NominalDefinition::Newtype(_) => 1,
+                                ConcreteNominal::Newtype(_) => 1,
                             };
                             charge_layout_work(fuel, count)?;
                             match definition {
-                                iir::NominalDefinition::Struct(def) => {
+                                ConcreteNominal::Struct(def) => {
                                     def.fields.iter().map(|(_, ty)| ty).collect()
                                 }
-                                iir::NominalDefinition::Enum(def) => {
+                                ConcreteNominal::Enum(def) => {
                                     def.variants.iter().flat_map(|v| &v.fields).collect()
                                 }
-                                iir::NominalDefinition::Newtype(def) => vec![&def.representation],
+                                ConcreteNominal::Newtype(def) => vec![&def.representation],
                             }
                         }
                         Term::NormalForm { head, .. } => {

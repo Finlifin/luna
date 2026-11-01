@@ -106,9 +106,7 @@ impl Interpreter<'_> {
         };
         let definition = if self.graph.is_some() {
             match self.concrete_nominal_metered(ty)? {
-                Some(iir::NominalDefinition::Struct(definition)) => {
-                    Some(generated_structs::StructDefinition::Borrowed(definition))
-                }
+                Some(ConcreteNominal::Struct(definition)) => Some(definition),
                 _ => None,
             }
         } else {

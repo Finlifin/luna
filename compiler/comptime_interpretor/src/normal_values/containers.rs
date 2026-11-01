@@ -224,12 +224,7 @@ impl Interpreter<'_> {
                     },
                     None if self.graph.map_or_else(
                         || self.newtypes.contains_key(declaration),
-                        |_| {
-                            matches!(
-                                self.concrete_nominal(ty),
-                                Some(iir::NominalDefinition::Newtype(_))
-                            )
-                        },
+                        |_| matches!(self.concrete_nominal(ty), Some(ConcreteNominal::Newtype(_))),
                     ) =>
                     {
                         let [value]: [Value; 1] = values
