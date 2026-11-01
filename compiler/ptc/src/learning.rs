@@ -290,25 +290,31 @@ mod tests {
             search.propagate_learned(&sibling).unwrap(),
             Propagation::None
         ));
-        let ProofTree::TheoryConflict(mut support) = reason.tree else {
+        let ProofTree::TheoryConflict(support) = reason.tree else {
             unreachable!()
         };
+        let mut support = support.to_vec();
         support.pop();
         sibling[2] = Some(true);
         assert_eq!(
-            search.check_tree(&ProofTree::TheoryConflict(support), &mut sibling, 0),
+            search.check_tree(&ProofTree::TheoryConflict(support.into()), &mut sibling, 0),
             Err(ProofError::Invalid)
         );
         search.steps = 0;
         assert!(search.propagate_learned(&sibling).is_err());
         search.steps = 100_000;
         search.check_tree(&proof.tree, &mut sibling, 0).unwrap();
-        let ProofTree::TheoryConflict(mut duplicate) = proof.tree.clone() else {
+        let ProofTree::TheoryConflict(duplicate) = proof.tree.clone() else {
             unreachable!()
         };
+        let mut duplicate = duplicate.to_vec();
         duplicate.push(duplicate[0].clone());
         assert_eq!(
-            search.check_tree(&ProofTree::TheoryConflict(duplicate), &mut sibling, 0),
+            search.check_tree(
+                &ProofTree::TheoryConflict(duplicate.into()),
+                &mut sibling,
+                0
+            ),
             Err(ProofError::Invalid)
         );
         // An interrupted deletion trial must restore its removed premise.
@@ -455,7 +461,7 @@ mod resolved_tests {
             Err(ProofError::Invalid)
         );
         let missing = ProofTree::Lemma {
-            premises: vec![],
+            premises: vec![].into(),
             proof: proof.clone(),
         };
         assert_eq!(

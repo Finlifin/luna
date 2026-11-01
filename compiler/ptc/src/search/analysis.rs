@@ -11,29 +11,10 @@ fn charge(fuel: &mut usize, work: usize) -> Option<()> {
     Some(())
 }
 
-// Lemma payloads share their older proof DAG. Only owned split subtrees need
-// recursive copying; bound their depth before invoking the derived clone.
+// Proof nodes and payloads are immutable and shared. Reusing a reason copies
+// only the query-local support set and a constant-size proof root.
 fn copy_reason(reason: &Conflict, fuel: &mut usize) -> Option<Conflict> {
-    charge(fuel, reason.support.len())?;
-    let mut pending = vec![(&reason.tree, 0)];
-    while let Some((tree, depth)) = pending.pop() {
-        charge(fuel, 1)?;
-        if depth >= 32 {
-            return None;
-        }
-        match tree {
-            ProofTree::Split {
-                negative, positive, ..
-            } => {
-                pending.push((negative, depth + 1));
-                pending.push((positive, depth + 1));
-            }
-            ProofTree::Lemma { premises, .. } => charge(fuel, premises.len())?,
-            ProofTree::TheoryConflict(literals) => charge(fuel, literals.len())?,
-            ProofTree::ClauseConflict(trace) => charge(fuel, trace.len())?,
-            ProofTree::BooleanConflict => {}
-        }
-    }
+    charge(fuel, reason.support.len().saturating_add(1))?;
     Some(Conflict {
         tree: reason.tree.clone(),
         support: reason.support.clone(),
@@ -135,6 +116,96 @@ mod tests {
     use std::{collections::BTreeSet, sync::Arc};
 
     #[test]
+    fn deep_reason_reuse_shares_nodes_but_not_validation_authority() {
+        let atom = |local| {
+            Formula::equal(
+                Term::Rigid {
+                    declaration: DeclarationId { package: 99, local },
+                    sort: Sort::Type,
+                },
+                Term::Primitive(Primitive::Bool),
+            )
+        };
+        let mut parts = vec![Formula::False];
+        parts.extend((0..64).map(|i| Formula::Or(vec![atom(i), atom(i).negate()])));
+        let formula = Formula::And(parts);
+        let context = Context::default();
+        let mut atoms = Vec::new();
+        let mut terms = Terms::default();
+        collect(&formula, &mut atoms, &mut terms, 0, 128, &[]).unwrap();
+        let mut search = Search {
+            boolean: None,
+            theory_state: None,
+            learned: learning::Clauses::default(),
+            context: &context,
+            formula: &formula,
+            atoms: &atoms,
+            terms: &terms,
+            steps: 100000,
+            max_depth: 128,
+        };
+        let leaf = Arc::new(ProofTree::BooleanConflict);
+        let mut tree = ProofTree::BooleanConflict;
+        for atom in atoms.iter().rev() {
+            tree = ProofTree::Split {
+                atom: Arc::new(atom.clone()),
+                negative: Arc::new(tree),
+                positive: leaf.clone(),
+            };
+        }
+        let original = Conflict {
+            tree,
+            support: BTreeSet::new(),
+        };
+        assert!(copy_reason(&original, &mut 0).is_none());
+        // Copy work depends on support size, not the 64-level proof body.
+        let copied = copy_reason(&original, &mut 1).unwrap();
+        let (
+            ProofTree::Split {
+                atom: a,
+                negative: n,
+                positive: p,
+            },
+            ProofTree::Split {
+                atom: ca,
+                negative: cn,
+                positive: cp,
+            },
+        ) = (&original.tree, &copied.tree)
+        else {
+            panic!("expected shared split")
+        };
+        assert!(Arc::ptr_eq(a, ca) && Arc::ptr_eq(n, cn) && Arc::ptr_eq(p, cp));
+        assert_eq!(original.tree.to_string(), copied.tree.to_string());
+        drop(original);
+        let mut values = vec![None; atoms.len()];
+        search.check_tree(&copied.tree, &mut values, 0).unwrap();
+        assert!(values.iter().all(Option::is_none));
+        let mut forged = copied.tree.clone();
+        let ProofTree::Split { atom, .. } = &mut forged else {
+            unreachable!()
+        };
+        *Arc::make_mut(atom) = crate::Atom::TypeEqual(crate::Equality(
+            Term::Primitive(Primitive::U8),
+            Term::Primitive(Primitive::U16),
+        ));
+        search.steps = 100000;
+        assert_eq!(
+            search.check_tree(&forged, &mut values, 0),
+            Err(crate::ProofError::Invalid)
+        );
+        search.steps = 100000;
+        search.check_tree(&copied.tree, &mut values, 0).unwrap();
+        search.max_depth = 8;
+        search.steps = 100000;
+        assert_eq!(
+            search.check_tree(&copied.tree, &mut values, 0),
+            Err(crate::ProofError::BudgetExhausted)
+        );
+        assert!(values.iter().all(Option::is_none));
+    }
+
+    #[test]
     fn mixed_reasons_find_the_uip_without_unwinding_or_notifying() {
         let atom = |local| {
             Formula::equal(
@@ -186,7 +257,7 @@ mod tests {
             1,
             Reason::Learned(Conflict {
                 tree: ProofTree::Lemma {
-                    premises: vec![(atoms[1].clone(), true), (atoms[3].clone(), false)],
+                    premises: vec![(atoms[1].clone(), true), (atoms[3].clone(), false)].into(),
                     proof: Arc::new(ProofTree::BooleanConflict),
                 },
                 support: BTreeSet::from([1, 3]),

@@ -189,7 +189,7 @@ mod tests {
         let discarded = Arc::new(ProofTree::BooleanConflict);
         let reason = |proof: &Arc<ProofTree>, index| Conflict {
             tree: ProofTree::Lemma {
-                premises: Vec::new(),
+                premises: Vec::new().into(),
                 proof: proof.clone(),
             },
             support: BTreeSet::from([index]),

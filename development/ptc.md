@@ -642,3 +642,32 @@ Validation from `/home/fin/luna`:
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`: four passed (`/tmp/luna-tools-3obuzhk1/result.json`).
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_type_factories_keep_identity_through_comptime_parameters`: passed (`/tmp/luna-tools-i6pp0b27/result.json`).
 - Formatting check and `git diff --check` passed (`/tmp/luna-tools-bf6d111b/result.json`).
+
+## Shared immutable proof payloads
+
+Proof splits now share both child nodes and their pivot atom. Theory literals,
+lemma premises, and CNF replay traces use immutable shared slices. Cloning a
+proof root therefore retains its payload instead of recursively cloning owned
+split trees or copying type terms and clause traces. Existing lemma references
+continue to form a DAG, and S-expression dumps keep their established content.
+
+First-UIP reason reuse now charges only the copied query-local support set and
+one root operation. It no longer walks the entire proof before copying or
+rejects reuse because the owned tree exceeds the former 32-level copy limit.
+This is not a relaxation of verification: proof admission and independent replay
+retain their own depth, fuel, premise, and declaration-authority checks. Shared
+nodes remain alive when a clause store or original reason is released.
+
+This removes owned subtree copying from the preceding stage. It is reference-
+counted immutable sharing, not a unified indexed arena for root auxiliaries and
+search reasons. Verification still traverses the proof under its actual
+premises; sharing alone supplies no cached validation result.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p ptc -p type_resolution`: 469 passed (`/tmp/luna-tools-kh1eyunu/result.json`).
+- A 64-level proof reuses its nodes with one unit of copy fuel, survives release of the original root, preserves its dump, and independently replays successfully. Copy-on-write corruption of a shared pivot is rejected without changing the retained proof. A short verifier depth still rejects the valid deep proof and restores assignments.
+- Existing learned-clause eviction, missing/duplicate premises, forged CNF traces, scope checks, and all interrupted first-UIP analysis budgets remain covered.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`: four passed (`/tmp/luna-tools-r8nkny3j/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_type_factories_keep_identity_through_comptime_parameters`: passed (`/tmp/luna-tools-blu7g9h4/result.json`).
+- Formatting check and `git diff --check` passed (`/tmp/luna-tools-ql8mge5h/result.json`).

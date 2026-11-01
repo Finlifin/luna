@@ -181,15 +181,18 @@ fn proof_replay_rejects_forged_leaves_and_foreign_scope_support() {
         context.verify_proof(&proof, Budget::default()),
         Err(ProofError::Invalid)
     );
-    proof.tree = ProofTree::TheoryConflict(vec![]);
+    proof.tree = ProofTree::TheoryConflict(vec![].into());
     assert_eq!(
         context.verify_proof(&proof, Budget::default()),
         Err(ProofError::Invalid)
     );
     proof.tree = ProofTree::Split {
-        atom: ptc::Atom::TypeEqual(ptc::Equality(ty(P::Char), ty(P::Bool))),
-        negative: Box::new(ProofTree::BooleanConflict),
-        positive: Box::new(ProofTree::BooleanConflict),
+        atom: std::sync::Arc::new(ptc::Atom::TypeEqual(ptc::Equality(
+            ty(P::Char),
+            ty(P::Bool),
+        ))),
+        negative: std::sync::Arc::new(ProofTree::BooleanConflict),
+        positive: std::sync::Arc::new(ProofTree::BooleanConflict),
     };
     assert_eq!(
         context.verify_proof(&proof, Budget::default()),
@@ -2212,12 +2215,12 @@ fn root_clause_propagation_exports_replayable_theory_reasons() {
         }
     }
     let mut forged = proof.clone();
-    forged.tree = ptc::ProofTree::ClauseConflict(vec![usize::MAX]);
+    forged.tree = ptc::ProofTree::ClauseConflict(vec![usize::MAX].into());
     assert_eq!(
         context.verify_proof(&forged, Budget::default()),
         Err(ptc::ProofError::Invalid)
     );
-    forged.tree = ptc::ProofTree::ClauseConflict(vec![]);
+    forged.tree = ptc::ProofTree::ClauseConflict(vec![].into());
     assert_eq!(
         context.verify_proof(&forged, Budget::default()),
         Err(ptc::ProofError::Invalid)

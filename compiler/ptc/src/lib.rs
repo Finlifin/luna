@@ -148,22 +148,24 @@ pub struct Proof {
     pub tuple_heads: BTreeSet<DeclarationId>,
     pub tree: ProofTree,
 }
+/// Immutable proof DAG payloads. Cloning a root shares its subproofs and terms;
+/// sharing never bypasses independent replay under the proof's own premises.
 #[derive(Clone, Debug)]
 pub enum ProofTree {
     BooleanConflict,
     /// Unit root clauses followed by a falsified clause, independently replayed.
-    ClauseConflict(Vec<usize>),
+    ClauseConflict(Arc<[usize]>),
     /// An inconsistent subset of literals present on the current branch.
-    TheoryConflict(Vec<(Atom, bool)>),
+    TheoryConflict(Arc<[(Atom, bool)]>),
     /// A previously established contradiction under exactly these premises.
     Lemma {
-        premises: Vec<(Atom, bool)>,
+        premises: Arc<[(Atom, bool)]>,
         proof: Arc<ProofTree>,
     },
     Split {
-        atom: Atom,
-        negative: Box<ProofTree>,
-        positive: Box<ProofTree>,
+        atom: Arc<Atom>,
+        negative: Arc<ProofTree>,
+        positive: Arc<ProofTree>,
     },
 }
 #[derive(Clone, Debug)]
@@ -1334,7 +1336,7 @@ impl Search<'_> {
                 premises: literals, ..
             } => {
                 let mut support = vec![None; assignment.len()];
-                for (atom, value) in literals {
+                for (atom, value) in literals.iter() {
                     self.tick().map_err(|()| ProofError::BudgetExhausted)?;
                     let mut found = None;
                     for (index, candidate) in self.atoms.iter().enumerate() {
@@ -1371,7 +1373,7 @@ impl Search<'_> {
                 let index = self
                     .atoms
                     .iter()
-                    .position(|a| a == atom)
+                    .position(|a| a == atom.as_ref())
                     .ok_or(ProofError::Invalid)?;
                 if assignment[index].is_some() {
                     return Err(ProofError::Invalid);
@@ -2103,21 +2105,21 @@ impl fmt::Display for ProofTree {
             Self::BooleanConflict => f.write_str("(boolean-conflict)"),
             Self::ClauseConflict(trace) => {
                 f.write_str("(clause-conflict")?;
-                for clause in trace {
+                for clause in trace.iter() {
                     write!(f, " {clause}")?;
                 }
                 f.write_str(")")
             }
             Self::TheoryConflict(literals) => {
                 f.write_str("(theory-conflict")?;
-                for (atom, value) in literals {
+                for (atom, value) in literals.iter() {
                     write!(f, " (literal {value} {atom})")?;
                 }
                 f.write_str(")")
             }
             Self::Lemma { premises, proof } => {
                 write!(f, "(lemma (premises")?;
-                for (atom, value) in premises {
+                for (atom, value) in premises.iter() {
                     write!(f, " (literal {value} {atom})")?;
                 }
                 write!(f, ") (proof {proof}))")

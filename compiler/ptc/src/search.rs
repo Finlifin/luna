@@ -284,7 +284,7 @@ impl Search<'_> {
         } else {
             trace
         };
-        conflict.tree = super::ProofTree::ClauseConflict(trace);
+        conflict.tree = super::ProofTree::ClauseConflict(trace.into());
         conflict
     }
 

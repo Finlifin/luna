@@ -30,9 +30,9 @@ impl Conflict {
         support.remove(&index);
         Self {
             tree: ProofTree::Split {
-                atom: atom.clone(),
-                negative: Box::new(negative.tree),
-                positive: Box::new(positive.tree),
+                atom: std::sync::Arc::new(atom.clone()),
+                negative: std::sync::Arc::new(negative.tree),
+                positive: std::sync::Arc::new(positive.tree),
             },
             support,
         }
