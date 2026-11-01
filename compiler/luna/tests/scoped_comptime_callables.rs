@@ -444,3 +444,46 @@ fn ordinary_type_inputs_select_methods_for_each_receiver_type() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn constrained_ordinary_type_inputs_supply_dependent_defaults() {
+    let source =
+        include_str!("../../../development/repros/staged-type-input-constrained-default.fl")
+            .replace("T.select", "T.as(Selector).select");
+    let package = support::compile_with_protocols(&source, &Default::default()).unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn inferred_interface_for_ordinary_type_input() {
+    let source =
+        include_str!("../../../development/repros/staged-type-input-constrained-default.fl");
+    let package = support::compile_with_protocols(&source, &Default::default()).unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn dependent_method_defaults_require_unambiguous_trait_evidence() {
+    let source =
+        include_str!("../../../development/repros/staged-type-input-constrained-default.fl");
+    let missing = source.replace(
+        "impl Selector for char { fn select(comptime value: bool) -> bool { false } }",
+        "",
+    );
+    let failure = support::compile_with_protocols(&missing, &Default::default()).unwrap_err();
+    assert!(!failure.contains("invalid binder reference"), "{failure}");
+    let ambiguous = source.replace(
+        "requires T :- Selector",
+        "requires T :- Selector and T :- Other",
+    ) + "trait Other { fn select(comptime value: bool) -> bool; }
+impl Other for bool { fn select(comptime value: bool) -> bool { true } }
+impl Other for char { fn select(comptime value: bool) -> bool { false } }";
+    let failure = support::compile_with_protocols(&ambiguous, &Default::default()).unwrap_err();
+    assert!(failure.contains("ambiguous"), "{failure}");
+}

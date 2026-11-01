@@ -3805,6 +3805,18 @@ impl Checker<'_, '_> {
                     ));
                 };
                 if ty == p(P::Type) {
+                    // A bound Type may already have an explicit capability.
+                    // Its member contract supplies a description without
+                    // selecting a concrete implementation or executing code.
+                    if self.is_static_method_subject(receiver) {
+                        let subject = self.type_expr(receiver)?;
+                        if self
+                            .context_member_interface(&subject, field.name.as_str(), expr.span)?
+                            .is_some()
+                        {
+                            return self.describe_known_region(expr, expected);
+                        }
+                    }
                     // A staged Type factory supplies its container identity at
                     // invocation. Preserve an ordinary unknown description;
                     // the concrete instance must redo member/access checking.
@@ -7750,6 +7762,7 @@ impl Checker<'_, '_> {
             return Ok(None);
         }
         if self.describing_open_call
+            && !self.checking_default_behavior
             && matches!(&self.package.item(owner).unwrap().kind, ItemKind::Fn(sig, _) if sig.modifiers.is_comptime)
         {
             return Ok(None);
@@ -7769,7 +7782,9 @@ impl Checker<'_, '_> {
             });
         }
         let result = result.clone();
-        if self.checking_default_behavior {
+        if self.checking_default_behavior
+            && !matches!(&self.package.item(owner).unwrap().kind, ItemKind::Fn(sig, _) if sig.modifiers.is_comptime)
+        {
             self.default_behavior_functions.insert(owner);
             if !self.active_open_definitions.contains(&owner) {
                 self.check_open_definition(owner)?;
@@ -7780,15 +7795,16 @@ impl Checker<'_, '_> {
         // every inline alternative.
         // Keep the declared stages; ordinary input checking can retain symbolic
         // comptime inputs without recursively demanding the callee definition.
+        let signature = Term::Function {
+            parameters,
+            result: Box::new(result),
+        };
         let callee = n::Expr {
             source: source(expr.span),
-            ty: Term::Function {
-                parameters,
-                result: Box::new(result),
-            },
+            ty: self.callable_type(owner, signature.clone()),
             kind: K::Function(declaration(self.package, &self.package_identities, owner)),
         };
-        let saved = self.signatures.insert(owner, callee.ty.clone());
+        let saved = self.signatures.insert(owner, signature);
         let result = (|| {
             if self.type_parameters[&owner].is_empty() && clauses.is_none() {
                 self.finish_call(expr, callee, args, vec![], expected, None)
@@ -8922,6 +8938,17 @@ impl Checker<'_, '_> {
                         .push((binding, ty.clone(), value.clone()));
                     if parameters[slot].sort == Sort::Type {
                         this.type_input_bindings.insert(binding, value.clone());
+                        // The instance binds this declaration's ordinary Type
+                        // input. Preserve that equality for its original
+                        // capability facts as well as expression substitution.
+                        this.context.assume(crate::ptc::Formula::equal(
+                            Term::Bound {
+                                depth: 0,
+                                index: slot,
+                                sort: Sort::Type,
+                            },
+                            value.clone(),
+                        ));
                     } else {
                         this.value_input_bindings
                             .insert(binding, (value.clone(), ty.clone()));

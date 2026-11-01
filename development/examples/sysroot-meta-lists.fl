@@ -177,7 +177,7 @@ comptime fn reducers_and_searches() -> bool {
 test comptime_list_collectors {
     let staged_default_result = staged_default_dispatch(bool);
     assumes staged_default_result;
-    let ordinary_default_result = ordinary_default_dispatch();
+    let ordinary_default_result = ordinary_default_dispatch(bool);
     assumes ordinary_default_result;
     inline if run() {
         assumes true;
@@ -421,15 +421,16 @@ fn staged_default_dispatch(comptime T: Type,
 comptime fn ordinary_staged_method(comptime T: Type) -> fn(comptime bool) -> bool
 where requires T :- StagedSelector
 {
-    let methods: meta.List<fn(comptime bool) -> bool> = [T.as(StagedSelector).select];
+    let methods: meta.List<fn(comptime bool) -> bool> = [T.select];
     methods.first() match {
         method? => method,
-        null => T.as(StagedSelector).select,
+        null => T.select,
     }
 }
 
-fn ordinary_default_dispatch(
-    comptime .action: fn(comptime bool) -> bool = ordinary_staged_method(bool)) -> bool
+fn ordinary_default_dispatch(comptime T: Type,
+    comptime .action: fn(comptime bool) -> bool = ordinary_staged_method(T)) -> bool
+where requires T :- StagedSelector
 {
     action(true)
 }

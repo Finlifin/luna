@@ -353,7 +353,7 @@ impl Checker<'_, '_> {
                     }))
     }
 
-    pub(super) fn context_member_interface(
+    pub(in crate::program) fn context_member_interface(
         &self,
         subject: &Term,
         name: &str,

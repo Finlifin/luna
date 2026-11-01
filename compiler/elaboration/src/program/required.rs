@@ -2303,9 +2303,15 @@ impl Checker<'_, '_> {
         }
         self.ensure_signature(owner, span)?;
         self.ensure_contract(owner, span)?;
-        let signature = self.signatures[&owner].clone();
+        let signature = self.known_callable_signature(owner).ok_or_else(|| {
+            error(
+                span,
+                "required comptime function signature still needs invocation inputs",
+            )
+        })?;
         let saved_owner = self.signature_owner.replace(owner);
         let saved_locals = std::mem::take(&mut self.locals);
+        let saved_type_bindings = self.type_input_bindings.clone();
         let saved_captures = std::mem::take(&mut self.captures);
         let saved_result = self.result.take();
         let saved_partial_return = self.partial_return_context.take();
@@ -2321,8 +2327,18 @@ impl Checker<'_, '_> {
             let Term::Function { parameters, result } = &signature else {
                 unreachable!()
             };
-            for (param, ty) in sig.params.iter().zip(parameters) {
+            for (index, (param, ty)) in sig.params.iter().zip(parameters).enumerate() {
                 self.locals.insert(local(param.hir_id), ty.ty.clone());
+                if ty.sort == Sort::Type {
+                    self.type_input_bindings.insert(
+                        local(param.hir_id),
+                        Term::Bound {
+                            depth: 0,
+                            index,
+                            sort: Sort::Type,
+                        },
+                    );
+                }
             }
             self.result = Some((**result).clone());
             let body = self
@@ -2360,6 +2376,7 @@ impl Checker<'_, '_> {
         })();
         self.signature_owner = saved_owner;
         self.locals = saved_locals;
+        self.type_input_bindings = saved_type_bindings;
         self.captures = saved_captures;
         self.result = saved_result;
         self.partial_return_context = saved_partial_return;
