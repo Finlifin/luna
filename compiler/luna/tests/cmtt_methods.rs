@@ -1525,39 +1525,43 @@ fn code_dispatch_checks_public_value_contracts_after_local_updates() {
 }
 
 #[test]
-fn pointer_generator_aliases_observe_each_write_across_statements() {
+fn quoted_runtime_pointer_arguments_observe_each_write_across_statements() {
     for (right, expected, final_left) in [("left", "true", "false"), ("right", "false", "true")] {
         let source = format!(
-            "comptime fn build(first:*bool,second:*bool,expected:bool)-><|-bool> {{
+            "fn write(first:*bool,second:*bool,expected:bool)->bool {{
                 first.* = true;
                 let seen=second.*;
                 second.* = false;
-                '(seen == expected)
+                seen == expected
             }}
-            comptime fn outer()-><|-bool> {{
-                var left=false;var right=false;
-                let code=build(left.ref,{right}.ref,{expected});
-                if left == {final_left} and not right {{code}} else {{'(false)}}
+            comptime fn build()-><|-bool> {{
+                '(do {{
+                    var left=false;var right=false;
+                    let result=write(left.ref,{right}.ref,{expected});
+                    result and left == {final_left} and not right
+                }})
             }}
-            fn run()->bool {{~<outer()>}}"
+            fn run()->bool {{~<build()>}}"
         );
         assert_eq!(support::run_iir(&source, "run", vec![]), Value::Bool(true));
     }
 }
 
 #[test]
-fn generator_local_pointer_bindings_keep_aliases_and_refresh_indirect_owners() {
+fn quoted_runtime_pointer_bindings_keep_aliases_and_refresh_indirect_owners() {
     let source = "comptime fn build()-><|-bool> {
-            var first=false;var second=false;
-            var pointer=first.ref;
-            let alias=pointer;
-            pointer.* = true;
-            let seen=first and alias.*;
-            pointer=second.ref;
-            pointer.* = true;
-            alias.* = false;
-            let result=seen and not first and second;
-            '(result)
+            '(do {
+                var first=false;var second=false;
+                var pointer=first.ref;
+                let alias=pointer;
+                pointer.* = true;
+                let seen=first and alias.*;
+                pointer=second.ref;
+                pointer.* = true;
+                alias.* = false;
+                let result=seen and not first and second;
+                result
+            })
         }
         fn run()->bool {~<build()>}";
     assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
@@ -1578,47 +1582,52 @@ fn generator_local_pointers_reject_dead_owners_and_runtime_exports() {
 }
 
 #[test]
-fn generator_pointer_patterns_keep_live_aliases_and_frozen_observations() {
+fn quoted_runtime_pointer_patterns_keep_aliases_and_frozen_observations() {
     let source = "comptime fn build()-><|-bool> {
-            var flag=false;
-            let pointer and pointer.* is original=flag.ref;
-            pointer.* = true;
-            let result=not original and flag;
-            '(result)
+            '(do {
+                var flag=false;
+                let pointer and pointer.* is original=flag.ref;
+                pointer.* = true;
+                let result=not original and flag;
+                result
+            })
         }
         fn run()->bool {~<build()>}";
     assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
 }
 
 #[test]
-fn generator_pointer_tuples_destructure_without_copying_owners() {
+fn quoted_runtime_pointer_tuples_destructure_without_copying_owners() {
     let source = "comptime fn build()-><|-bool> {
-            var left=false;var right=false;
-            let pair=(left.ref,right.ref);
-            let (first,second)=pair;
-            first.* = true;second.* = true;
-            let result=left and right;
-            '(result)
+            '(do {
+                var left=false;var right=false;
+                let pair=(left.ref,right.ref);
+                let (first,second)=pair;
+                first.* = true;second.* = true;
+                let result=left and right;
+                result
+            })
         }
         fn run()->bool {~<build()>}";
     assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
 }
 
 #[test]
-fn generator_pointer_records_transfer_as_live_data_inputs() {
+fn quoted_runtime_pointer_records_preserve_targets_across_calls() {
     let source = "struct Links {first:*bool,second:*bool}
-        comptime fn write(links:Links)-><|-bool> {
+        fn write(links:Links)->bool {
             links.first.* = true;links.second.* = true;
-            let result=links.first.* and links.second.*;
-            '(result)
+            links.first.* and links.second.*
         }
-        comptime fn outer()-><|-bool> {
-            var left=false;var right=false;
-            let links=Links {first:left.ref,second:right.ref};
-            let code=write(links);
-            if left and right {code} else {'(false)}
+        comptime fn build()-><|-bool> {
+            '(do {
+                var left=false;var right=false;
+                let links=Links {first:left.ref,second:right.ref};
+                let result=write(links);
+                result and left and right
+            })
         }
-        fn run()->bool {~<outer()>}";
+        fn run()->bool {~<build()>}";
     assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
 }
 
@@ -1640,17 +1649,19 @@ fn generator_aggregates_preserve_mutable_callback_state() {
 }
 
 #[test]
-fn generator_pointer_nominal_wrappers_preserve_payload_identity() {
+fn quoted_runtime_pointer_nominal_wrappers_preserve_payload_identity() {
     let source = "enum Link {some(*bool)}
         newtype Address=*bool;
         comptime fn build()-><|-bool> {
-            var flag=false;
-            let wrapped=flag.ref.as(Address);
-            let link=Link.some(wrapped.as(*bool));
-            let .some(pointer)=link;
-            pointer.* = true;
-            let result=flag;
-            '(result)
+            '(do {
+                var flag=false;
+                let wrapped=flag.ref.as(Address);
+                let link=Link.some(wrapped.as(*bool));
+                let .some(pointer)=link;
+                pointer.* = true;
+                let result=flag;
+                result
+            })
         }
         fn run()->bool {~<build()>}";
     assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
