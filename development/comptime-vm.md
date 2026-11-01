@@ -10898,3 +10898,24 @@ Validation from `/home/fin/luna`:
 
 This completes the null-literal path within the existing contextual input model;
 it does not replace that model with general suspended elaboration.
+
+
+### Error conversion admits complete comptime storage domains
+
+Error conversion now checks both the source and destination storage domains
+before evaluating the operand, using the same live nominal-domain validation
+as other comptime construction paths. A pointer in an inactive success or error
+branch is still an invalid comptime storage domain; runtime conversion remains
+legal. This does not prohibit Type values describing runtime pointer types.
+
+The direct tree/bytecode regression reproduced successful construction of an
+illegal comptime value before the fix (`/tmp/luna-tools-_yw7h15b/result.json`,
+exit 101). It now checks both branch directions and verifies operand effects
+remain unexecuted on rejection, while runtime evaluation succeeds.
+
+Validation from `/home/fin/luna`: `python3 -B development/check.py --timeout
+900 -- test -p comptime_interpretor` passed, exit 0
+(`/tmp/luna-tools-ov_wv8_5/result.json`). Workspace formatting passed
+(`/tmp/luna-tools-b_ps4s86/result.json`), as did `git diff --check`.
+This is VM construction coverage, not new source elaboration support for
+phase-dependent local type annotations.

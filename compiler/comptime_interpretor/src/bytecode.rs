@@ -3141,6 +3141,81 @@ mod tests {
     }
 
     #[test]
+    fn error_construction_checks_inactive_comptime_domains_before_effects() {
+        use nir::error_results::Conversion;
+        let package = Package::default();
+        let source = SourceRange { start: 1, end: 2 };
+        let trace = LocalId { owner: 1, index: 0 };
+        let boolean = Term::Primitive(Primitive::Bool);
+        let pointer = Term::Pointer(Box::new(boolean.clone()));
+        for conversion in [Conversion::Success, Conversion::Failure] {
+            let ty = Term::ErrorResult {
+                errors: vec![if conversion == Conversion::Success {
+                    pointer.clone()
+                } else {
+                    boolean.clone()
+                }],
+                result: Box::new(if conversion == Conversion::Success {
+                    boolean.clone()
+                } else {
+                    pointer.clone()
+                }),
+            };
+            let body = Expr {
+                source,
+                ty: ty.clone(),
+                kind: K::ErrorConvert {
+                    conversion,
+                    value: Box::new(Expr {
+                        source,
+                        ty: boolean.clone(),
+                        kind: K::Block {
+                            statements: vec![Expr {
+                                source,
+                                ty: Term::Primitive(Primitive::Void),
+                                kind: K::Assign {
+                                    place: nir::program::Place {
+                                        root: trace,
+                                        fields: vec![],
+                                    },
+                                    value: Box::new(Expr {
+                                        source,
+                                        ty: boolean.clone(),
+                                        kind: K::Literal(Literal::Bool(true)),
+                                    }),
+                                },
+                            }],
+                            result: Some(Box::new(Expr {
+                                source,
+                                ty: boolean.clone(),
+                                kind: K::Literal(Literal::Bool(true)),
+                            })),
+                        },
+                    }),
+                },
+            };
+            let code = Arc::new(comptime_compiler::compile(&body, &mut 1000).unwrap());
+            for compiled in [false, true] {
+                let mut environment = Environment::new();
+                environment.insert(trace, Value::Bool(false));
+                let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+                let result = if compiled {
+                    vm.execute_code(&code, &mut environment)
+                } else {
+                    vm.eval(&body, &mut environment)
+                };
+                assert_eq!(result.unwrap_err().kind, ErrorKind::PhaseMismatch);
+                assert_eq!(environment.get(&trace), Some(&Value::Bool(false)));
+            }
+            let mut runtime = Interpreter::new(&package, Budget::default()).unwrap();
+            let mut environment = Environment::new();
+            environment.insert(trace, Value::Bool(false));
+            assert!(runtime.eval(&body, &mut environment).is_ok());
+            assert_eq!(environment.get(&trace), Some(&Value::Bool(true)));
+        }
+    }
+
+    #[test]
     fn product_error_transport_preserves_labels_and_payloads_inside_records() {
         use nir::error_results::Conversion;
         let package = Package::default();

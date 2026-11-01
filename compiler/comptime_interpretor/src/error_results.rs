@@ -123,6 +123,8 @@ impl Interpreter<'_> {
                 Some(at),
             )
         })?;
+        self.check_comptime_domain(source_ty, at)?;
+        self.check_comptime_domain(target_ty, at)?;
         self.admit_type(target_ty, 0)?;
         Ok(())
     }
