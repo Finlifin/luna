@@ -276,17 +276,13 @@ impl Package {
             normal_forms: self.normal_forms.clone(),
             ..Default::default()
         };
-        let layouts: std::collections::HashMap<_, _> = self
-            .nominals
-            .iter()
-            .map(|instance| (&instance.ty, &instance.definition))
-            .collect();
         let resolve_storage = |ty: &Term, fuel: &mut usize| -> Option<Vec<Term>> {
+            let definition = links.nominal(ty, fuel).ok()??;
             let mut copy_field = |field: &Term| {
                 nir::type_computations::charge_term(field, fuel).ok()?;
                 Some(field.clone())
             };
-            match layouts.get(ty)? {
+            match definition {
                 NominalDefinition::Struct(definition) => definition
                     .fields
                     .iter()
@@ -533,7 +529,7 @@ impl Package {
     ) -> Result<(), String> {
         use nir::program::ExprKind as K;
         self.validate_type(&links, &expr.ty, fuel)?;
-        lists::validate(&self.normal_forms, expr, fuel)?;
+        lists::validate(links, expr, fuel)?;
         if let K::BuildMetadata {
             selector, entries, ..
         } = &expr.kind
@@ -572,16 +568,10 @@ impl Package {
                         return Err("IIR Symbol tag_name requires a Symbol operand".into());
                     }
                     K::EnumName(_) => {
-                        let mut found = false;
-                        for nominal in &self.nominals {
-                            *fuel = fuel
-                                .checked_sub(1)
-                                .ok_or("IIR tag_name layout budget exhausted")?;
-                            if nominal.ty == operand.ty {
-                                found = matches!(nominal.definition, NominalDefinition::Enum(_));
-                                break;
-                            }
-                        }
+                        let found = matches!(
+                            links.nominal(&operand.ty, fuel)?,
+                            Some(NominalDefinition::Enum(_))
+                        );
                         if !found {
                             return Err("IIR enum tag_name requires an enum instance".into());
                         }
@@ -594,21 +584,13 @@ impl Package {
             nir::intrinsics::checked(expr).map_err(str::to_owned)?;
             // Intrinsic families currently have no type/value parameters.
             // A matching declaration alone must not authorize another instance.
-            let mut family = None;
-            for nominal in &self.nominals {
-                *fuel = fuel
-                    .checked_sub(1)
-                    .ok_or("IIR intrinsic tag family lookup budget exhausted")?;
-                if matches!(&nominal.ty, Term::Nominal { declaration, arguments }
-                    if *declaration == tag.family && arguments.is_empty())
-                {
-                    if let NominalDefinition::Enum(definition) = &nominal.definition {
-                        family = Some(definition);
-                    }
-                    break;
-                }
-            }
-            let family = family.ok_or("IIR intrinsic tag family instance is missing")?;
+            let key = Term::Nominal {
+                declaration: tag.family,
+                arguments: vec![],
+            };
+            let Some(NominalDefinition::Enum(family)) = links.nominal(&key, fuel)? else {
+                return Err("IIR intrinsic tag family instance is missing".into());
+            };
             nir::intrinsics::validate_family(family, *tag).map_err(str::to_owned)?;
         }
         if matches!(&expr.kind, K::UnsafeScope(body) if body.ty != expr.ty) {
@@ -656,12 +638,12 @@ impl Package {
                     &expr.ty,
                     fuel,
                     &mut |a, b| a == b,
-                    &|ty| self.normal_forms.iter().find_map(|m| m.tuple_elements(ty)),
+                    &|ty| links.head(ty).and_then(|head| head.tuple_elements(ty)),
                 )
                 .map_err(|e| format!("IIR error result conversion: {e}"))?;
             }
             K::NewtypeConvert(value) => {
-                if self
+                if links
                     .newtype_conversion(&value.ty, &expr.ty, fuel)
                     .map_err(|e| e.to_string())?
                     .is_none()

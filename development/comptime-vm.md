@@ -11338,3 +11338,35 @@ Validation from `/home/fin/luna`:
   (`/tmp/luna-tools-__xctszs/result.json`).
 - Formatting check passed, exit 0 (`/tmp/luna-tools-yhbgpeni/result.json`);
   `git diff --check` passed.
+
+### Share artifact declaration indexes across IIR validation consumers
+
+TypeLinks now retains borrowed nominal definitions under their complete instance
+keys and normal-form metadata under declaration identity. Previously it held
+membership sets while list operations, enum names, intrinsic tags and newtype
+conversions independently scanned the same package. Runtime storage admission
+also built a second nominal map. Those validation consumers now use the shared
+view; error-result tuple layout lookup uses the same indexed head metadata.
+
+Construction and queried nominal keys remain charged. Newtype conversion checks
+only its two exact endpoints through the existing direct-edge checker, preserving
+scope, representation and instance identity rules. The view belongs to one
+immutable artifact validation call and retains no formation verdicts or solver
+results. Standalone Package.newtype_conversion and staging layout adapters still
+have scanning interfaces; this does not complete NF representation migration.
+
+Tests compare marginal validation cost with 128 unrelated NF heads and nominal
+instances. Additional list operations cost the same in both worlds, and nominal
+queries distinguish different applications of the same declaration. Zero-budget
+failures recover with a fresh allowance; artifact construction is still paid once.
+
+Validation from `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 900 -- test -p iir
+  -p comptime_interpretor`: passed, exit 0
+  (`/tmp/luna-tools-2p13szwv/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p luna
+  --test comptime_iir_bytecode --test encoded_enums --test host_intrinsic_protocol`:
+  passed, exit 0 (`/tmp/luna-tools-cqhgs2qx/result.json`), including repository
+  math wrappers and native intrinsic cases.
+- Formatting check passed, exit 0 (`/tmp/luna-tools-rlnbi_v2/result.json`);
+  `git diff --check` passed.

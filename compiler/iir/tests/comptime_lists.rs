@@ -650,3 +650,34 @@ fn concrete_list_operations_preserve_divergence_and_charge_domain_checks() {
         assert!(graph.validate(&mut 100_000).is_err());
     }
 }
+
+#[test]
+fn repeated_list_validation_does_not_rescan_unrelated_heads() {
+    fn cost(padding: u32, repetitions: usize) -> usize {
+        let values = list(Term::Primitive(Primitive::Bool), vec![boolean(true)]);
+        let observation = expr(
+            Term::Primitive(Primitive::Integer),
+            K::ListLength(Box::new(values)),
+        );
+        let body = expr(
+            Term::Primitive(Primitive::Bool),
+            K::Block {
+                statements: vec![observation; repetitions],
+                result: Some(Box::new(boolean(true))),
+            },
+        );
+        let mut graph = graph_for_list(body);
+        for local in 100..100 + padding {
+            let mut opaque = head();
+            opaque.declaration = id(local);
+            opaque.role = Role::Opaque;
+            graph.normal_forms.insert(0, opaque);
+        }
+        let mut fuel = 1_000_000;
+        graph.validate(&mut fuel).unwrap();
+        1_000_000 - fuel
+    }
+    // Publication still pays for the whole artifact once. Additional operation
+    // validation must depend on its operands rather than unrelated declarations.
+    assert_eq!(cost(0, 10) - cost(0, 2), cost(128, 10) - cost(128, 2));
+}

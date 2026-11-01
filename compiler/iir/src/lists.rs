@@ -1,18 +1,12 @@
 //! List operations preserve their complete domain, independently of element sort.
-use nir::normal_forms::Head;
+use crate::type_links::TypeLinks;
 use nir::program::{Expr, ExprKind as K};
 use nir::{Primitive, Term};
 
-fn element<'a>(heads: &[Head], ty: &'a Term, fuel: &mut usize) -> Result<&'a Term, String> {
-    for head in heads {
-        *fuel = fuel
-            .checked_sub(1)
-            .ok_or("IIR list metadata budget exhausted")?;
-        if let Some(element) = head.list_element(ty) {
-            return Ok(element);
-        }
-    }
-    Err("IIR list construction or operation requires registered list layout metadata".into())
+fn element<'a>(links: &TypeLinks<'_>, ty: &'a Term, fuel: &mut usize) -> Result<&'a Term, String> {
+    links.list_element(ty, fuel)?.ok_or_else(|| {
+        "IIR list construction or operation requires registered list layout metadata".into()
+    })
 }
 fn equal(left: &Term, right: &Term, fuel: &mut usize) -> Result<bool, String> {
     nir::type_computations::charge_term(left, fuel)
@@ -22,7 +16,7 @@ fn equal(left: &Term, right: &Term, fuel: &mut usize) -> Result<bool, String> {
     Ok(left == right)
 }
 
-pub(super) fn validate(heads: &[Head], expr: &Expr, fuel: &mut usize) -> Result<(), String> {
+pub(super) fn validate(links: &TypeLinks<'_>, expr: &Expr, fuel: &mut usize) -> Result<(), String> {
     let never = Term::Primitive(Primitive::Never);
     let integer = Term::Primitive(Primitive::Integer);
     match &expr.kind {
@@ -36,7 +30,7 @@ pub(super) fn validate(heads: &[Head], expr: &Expr, fuel: &mut usize) -> Result<
                 }
                 return Ok(());
             }
-            let element = element(heads, &expr.ty, fuel)?;
+            let element = element(links, &expr.ty, fuel)?;
             for field in fields {
                 if !equal(&field.ty, element, fuel)? {
                     return Err("IIR list operand does not match its element type".into());
@@ -44,7 +38,7 @@ pub(super) fn validate(heads: &[Head], expr: &Expr, fuel: &mut usize) -> Result<
             }
         }
         K::TypeListIndex(values, index) => {
-            let element = element(heads, &values.ty, fuel)?;
+            let element = element(links, &values.ty, fuel)?;
             let expected = if index.ty == never { &never } else { element };
             if (index.ty != integer && index.ty != never) || !equal(&expr.ty, expected, fuel)? {
                 return Err("IIR list index has incompatible index or result types".into());
@@ -54,7 +48,7 @@ pub(super) fn validate(heads: &[Head], expr: &Expr, fuel: &mut usize) -> Result<
             let expected = if values.ty == never {
                 &never
             } else {
-                element(heads, &values.ty, fuel)?;
+                element(links, &values.ty, fuel)?;
                 &integer
             };
             if !equal(&expr.ty, expected, fuel)? {
@@ -63,10 +57,10 @@ pub(super) fn validate(heads: &[Head], expr: &Expr, fuel: &mut usize) -> Result<
         }
         K::ListConcat(left, right) => {
             if left.ty != never {
-                element(heads, &left.ty, fuel)?;
+                element(links, &left.ty, fuel)?;
             }
             if right.ty != never {
-                element(heads, &right.ty, fuel)?;
+                element(links, &right.ty, fuel)?;
             }
             let expected = if left.ty == never || right.ty == never {
                 &never
