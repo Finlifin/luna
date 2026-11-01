@@ -39,23 +39,27 @@ fn boundaries_run_once_before_per_iteration_guards() {
     assert_eq!(
         invoke(
             r#"
-        comptime fn bound(trace:*.Integer'builtin,digit:.Integer'builtin,value:.Integer'builtin)->.Integer'builtin {
-            trace.* = trace.* * 10 + digit; value
-        }
-        comptime fn keep(trace:*.Integer'builtin,i:.Integer'builtin)->bool {
-            trace.* = trace.* * 10 + i + 3; i!=1
-        }
-        comptime fn scan(trace:*.Integer'builtin,count:.Integer'builtin)->.Integer'builtin {
-            var sum:.Integer'builtin=0;
-            inline for i if keep(trace,i) in bound(trace,1,0)..bound(trace,2,count) {
-                sum = sum + i;
+        typealias Count=.Integer'builtin;
+        struct Trace {value:Count}
+        impl Trace {
+            comptime fn bound(self,digit:Count,value:Count)->Count {
+                self.value = self.value * 10 + digit; value
             }
-            sum
+            comptime fn keep(self,i:Count)->bool {
+                self.value = self.value * 10 + i + 3; i!=1
+            }
+            comptime fn scan(self,count:Count)->Count {
+                var sum:Count=0;
+                inline for i if self.keep(i) in self.bound(1,0)..self.bound(2,count) {
+                    sum = sum + i;
+                }
+                sum
+            }
         }
         comptime fn run()->bool {
-            var trace:.Integer'builtin=0;
-            let sum=scan(trace.ref,3);
-            sum==2 and trace==12345
+            let trace=Trace {value:0};
+            let sum=trace.scan(3);
+            sum==2 and trace.value==12345
         }
     "#
         ),

@@ -953,10 +953,11 @@ fn comptime_nominal_member_defaults_read_selected_parent_value() {
 fn comptime_nominal_member_value_inputs_execute_once_in_source_order() {
     let source = "typealias Type=.Type'builtin;
         struct Holder where tag:bool {pub newtype Wrapped<value:bool> = bool;}
-        comptime fn flip(pointer:*bool)->bool {pointer.* = not pointer.*;pointer.*}
+        struct State {flag:bool}
+        impl State {comptime fn flip(self)->bool {self.flag=not self.flag;self.flag}}
         comptime fn Build()->Type {
-            var flag=false;
-            Holder<flip(flag.ref)>.Wrapped<flip(flag.ref)>
+            let state=State {flag:false};
+            Holder<state.flip()>.Wrapped<state.flip()>
         }
         fn read(value:Holder<true>.Wrapped<false>)->bool {value.as(bool)}
         fn run()->bool {read(true.as(Build()))}";
@@ -981,14 +982,16 @@ fn comptime_nominal_constructor_rejects_wrong_domains_and_runtime_escape() {
 fn comptime_nominal_mixed_packets_execute_once() {
     let source = "typealias Type=.Type'builtin;
         newtype Flags<a:bool,b:bool> = bool;
-        comptime fn packet(pointer:*bool)->Tuple<bool,bool> {
-            pointer.* = not pointer.*;
-            (pointer.*,not pointer.*)
+        struct State {flag:bool}
+        impl State {
+            comptime fn packet(self)->Tuple<bool,bool> {
+                self.flag=not self.flag;(self.flag,not self.flag)
+            }
         }
         comptime fn Build()->Type {
-            var flag=false;
-            let result=Flags<...packet(flag.ref)>;
-            if flag {result} else {Flags<false,false>}
+            let state=State {flag:false};
+            let result=Flags<...state.packet()>;
+            if state.flag {result} else {Flags<false,false>}
         }
         fn read(value:Flags<true,false>)->bool {value.as(bool)}
         fn run()->bool {read(true.as(Build()))}";
@@ -1040,12 +1043,15 @@ fn comptime_nominal_empty_packets_keep_effects_and_named_defaults() {
 fn comptime_nominal_multiple_packets_and_named_inputs_preserve_source_order() {
     let source = "typealias Type=.Type'builtin;
         newtype Flags<a:bool,b:bool,.last:bool=false> = bool;
-        comptime fn packet(pointer:*bool)->Tuple<bool> {
-            pointer.* = not pointer.*;(pointer.*,)
+        struct State {flag:bool}
+        impl State {
+            comptime fn packet(self)->Tuple<bool> {
+                self.flag=not self.flag;(self.flag,)
+            }
         }
         comptime fn Build()->Type {
-            var flag=false;
-            Flags<...packet(flag.ref),.last=flag,...packet(flag.ref)>
+            let state=State {flag:false};
+            Flags<...state.packet(),.last=state.flag,...state.packet()>
         }
         fn read(value:Flags<true,false,.last=true>)->bool {value.as(bool)}
         fn run()->bool {read(true.as(Build()))}";

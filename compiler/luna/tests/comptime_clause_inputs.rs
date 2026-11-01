@@ -52,14 +52,18 @@ fn clauses_execute_once_before_ordinary_arguments_in_source_order() {
     assert_eq!(
         invoke(
             "
-        comptime fn mark(state:*.Integer'builtin,digit:.Integer'builtin)->bool {
-            state.* = state.* * 10 + digit; true
+        typealias Count=.Integer'builtin;
+        struct Trace {value:Count}
+        impl Trace {
+            comptime fn mark(self,digit:Count)->bool {
+                self.value = self.value * 10 + digit;true
+            }
         }
         comptime fn combine(value:bool)->bool where a:bool,b:bool {a and b and value}
         comptime fn run()->bool {
-            var state:.Integer'builtin=0;
-            let result=combine<mark(state.ref,1),mark(state.ref,2)>(mark(state.ref,3));
-            result and state==123
+            let state=Trace {value:0};
+            let result=combine<state.mark(1),state.mark(2)>(state.mark(3));
+            result and state.value==123
         }
     "
         ),
@@ -152,19 +156,28 @@ fn pure_comptime_call_keeps_the_selected_declaration_behavior() {
 
 #[test]
 fn named_clause_values_keep_source_order_before_ordinary_arguments() {
-    assert_eq!(invoke("
-        comptime fn mark(state:*.Integer'builtin,digit:.Integer'builtin)->bool {
-            state.* = state.* * 10 + digit; true
+    assert_eq!(
+        invoke(
+            "
+        typealias Count=.Integer'builtin;
+        struct Trace {value:Count}
+        impl Trace {
+            comptime fn mark(self,digit:Count)->bool {
+                self.value = self.value * 10 + digit;true
+            }
         }
         comptime fn choose(value:bool)->bool where .first:bool=false,.second:bool=false {
             first and second and value
         }
         comptime fn run()->bool {
-            var trace:.Integer'builtin=0;
-            let result=choose<.second=mark(trace.ref,1),.first=mark(trace.ref,2)>(mark(trace.ref,3));
-            result and trace==123
+            let trace=Trace {value:0};
+            let result=choose<.second=trace.mark(1),.first=trace.mark(2)>(trace.mark(3));
+            result and trace.value==123
         }
-    "),Value::Bool(true));
+    "
+        ),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -379,9 +392,9 @@ fn ordinary_defaults_see_prepared_arguments_and_inherited_clauses() {
 #[test]
 fn explicit_ordinary_input_runs_after_clause_snapshot() {
     assert_eq!(invoke("
-        comptime fn change(flag:*bool)->bool {flag.* = false;true}
+        struct State {flag:bool} impl State {comptime fn change(self)->bool {self.flag=false;true}}
         comptime fn choose(input:bool,.value:bool=flag and input)->bool where flag:bool {value}
-        comptime fn run()->bool {var flag=true;let result=choose<flag>(change(flag.ref));result and not flag}
+        comptime fn run()->bool {let state=State {flag:true};let result=choose<state.flag>(state.change());result and not state.flag}
     "),Value::Bool(true));
 }
 
@@ -518,12 +531,16 @@ fn receiver_runs_before_clause_and_ordinary_argument_producers() {
     assert_eq!(invoke("
         struct Factory {flag:bool}
         impl Factory {comptime fn choose(self,input:bool,.extra:bool=flag)->bool where flag:bool {self.flag and input and extra}}
-        comptime fn mark(trace:*.Integer'builtin,digit:.Integer'builtin)->bool {trace.* = trace.* * 10 + digit;true}
-        comptime fn make(trace:*.Integer'builtin)->Factory {Factory {flag:mark(trace,1)}}
+        typealias Count=.Integer'builtin;
+        struct Trace {value:Count}
+        impl Trace {
+            comptime fn mark(self,digit:Count)->bool {self.value = self.value * 10 + digit;true}
+            comptime fn make(self)->Factory {Factory {flag:self.mark(1)}}
+        }
         comptime fn run()->bool {
-            var trace:.Integer'builtin=0;
-            let result=make(trace.ref).choose<mark(trace.ref,2)>(mark(trace.ref,3));
-            result and trace==123
+            let trace=Trace {value:0};
+            let result=trace.make().choose<trace.mark(2)>(trace.mark(3));
+            result and trace.value==123
         }
     "),Value::Bool(true));
 }
@@ -533,12 +550,16 @@ fn receiver_spread_and_defaults_keep_instance_identity_and_order() {
     assert_eq!(invoke("
         struct Factory {flag:bool}
         impl Factory {comptime fn choose(self,input:bool,.extra:bool=flag)->bool where flag:bool {self.flag and input and extra}}
-        comptime fn mark(trace:*.Integer'builtin,digit:.Integer'builtin)->bool {trace.* = trace.* * 10 + digit;true}
-        comptime fn make(trace:*.Integer'builtin)->Factory {Factory {flag:mark(trace,1)}}
+        typealias Count=.Integer'builtin;
+        struct Trace {value:Count}
+        impl Trace {
+            comptime fn mark(self,digit:Count)->bool {self.value = self.value * 10 + digit;true}
+            comptime fn make(self)->Factory {Factory {flag:self.mark(1)}}
+        }
         comptime fn run()->bool {
-            var trace:.Integer'builtin=0;
-            let result=make(trace.ref).choose<mark(trace.ref,2)>(...do {(mark(trace.ref,3),)});
-            result and trace==123
+            let trace=Trace {value:0};
+            let result=trace.make().choose<trace.mark(2)>(...do {(trace.mark(3),)});
+            result and trace.value==123
         }
     "),Value::Bool(true));
 }
@@ -591,16 +612,20 @@ fn ordinary_comptime_inline_calls_snapshot_mutable_arguments_once() {
         invoke(
             "comptime fn choose(flag:bool)->bool {inline if flag {true} else {false}}
          comptime fn forward(flag:bool)->bool {choose(flag)}
-         comptime fn mark(state:*.Integer'builtin,digit:.Integer'builtin,value:bool)->bool {
-             state.* = state.* * 10 + digit; value
+         typealias Count=.Integer'builtin;
+         struct Trace {value:Count}
+         impl Trace {
+             comptime fn mark(self,digit:Count,value:bool)->bool {
+                 self.value = self.value * 10 + digit;value
+             }
          }
          comptime fn run()->bool {
-             var trace:.Integer'builtin=0;
+             let trace=Trace {value:0};
              var flag=true;
-             let first=forward(mark(trace.ref,1,flag));
+             let first=forward(trace.mark(1,flag));
              flag=false;
-             let second=forward(mark(trace.ref,2,flag));
-             first and not second and trace==12
+             let second=forward(trace.mark(2,flag));
+             first and not second and trace.value==12
          }"
         ),
         Value::Bool(true)
@@ -629,21 +654,26 @@ fn ordinary_comptime_inline_when_and_match_use_invocation_values() {
 fn ordinary_comptime_inline_when_short_circuits_selector_effects() {
     assert_eq!(
         invoke(
-            "comptime fn mark(state:*.Integer'builtin,digit:.Integer'builtin,value:bool)->bool {
-             state.* = state.* * 10 + digit; value
+            "typealias Count=.Integer'builtin;
+         struct Trace {value:Count}
+         impl Trace {
+             comptime fn mark(self,digit:Count,value:bool)->bool {
+                 self.value = self.value * 10 + digit;value
+             }
          }
-         comptime fn choose(trace:*.Integer'builtin)->bool {
+         impl Trace {comptime fn choose(self)->bool {
              inline when {
-                 mark(trace,1,false)=>false,
-                 mark(trace,2,true)=>true,
-                 mark(trace,3,true)=>false,
+                 self.mark(1,false)=>false,
+                 self.mark(2,true)=>true,
+                 self.mark(3,true)=>false,
                  else=>false
              }
          }
+         }
          comptime fn run()->bool {
-             var trace:.Integer'builtin=0;
-             let result=choose(trace.ref);
-             result and trace==12
+             let trace=Trace {value:0};
+             let result=trace.choose();
+             result and trace.value==12
          }"
         ),
         Value::Bool(true)
