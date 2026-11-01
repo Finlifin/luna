@@ -124,3 +124,74 @@ fn nominal_model_admission_keeps_unknown_domains_and_head_authority() {
         TypeInputOutcome::Unique(_)
     ));
 }
+
+fn payload(variant: Option<u32>, field: Term) -> Term {
+    Term::NominalValue {
+        ty: Box::new(Term::Nominal {
+            declaration: id(11),
+            arguments: vec![Term::Primitive(Primitive::Bool)],
+        }),
+        variant,
+        fields: vec![field],
+    }
+}
+
+#[test]
+fn nominal_payload_models_preserve_identity_variant_and_type_fields() {
+    let mut context = Context::default();
+    context.admit_nominal_constructor(id(10));
+    context.admit_nominal_constructor(id(11));
+    context.admit_congruence(id(12));
+    for variant in [None, Some(0), Some(1)] {
+        let expected = Term::NormalForm {
+            head: id(12),
+            sort: Sort::Type,
+            arguments: vec![payload(variant, input(9))],
+        };
+        let constraint = F::equal(input(0), expected.clone());
+        let TypeInputOutcome::Unique(solution) =
+            context.search_type_inputs(&[id(0)], constraint.clone(), &mut Budget::default())
+        else {
+            panic!("nominal payload should retain its ambient Type")
+        };
+        assert_eq!(solution.bindings[&id(0)].0, expected);
+        let problem = context
+            .type_input_context(&[id(0)], constraint, &mut Budget::default())
+            .unwrap();
+        problem
+            .verify_witness(&solution.model, Budget::default())
+            .unwrap();
+        problem
+            .verify_proof(&solution.bindings[&id(0)].1, Budget::default())
+            .unwrap();
+        let mut forged = solution.model;
+        let entry = forged
+            .applications
+            .iter_mut()
+            .find(|entry| entry.head == id(12))
+            .unwrap();
+        let Term::NominalValue { variant, .. } = &mut entry.arguments[0] else {
+            panic!()
+        };
+        *variant = Some(27);
+        assert!(problem.verify_witness(&forged, Budget::default()).is_err());
+    }
+    for field in [Term::Float64(0), Term::Value { store: 1, index: 0 }] {
+        assert!(matches!(
+            context.prove(
+                F::equal(input(0), nominal(payload(None, field))),
+                Budget::default()
+            ),
+            Outcome::Unknown { .. }
+        ));
+    }
+    let mut unregistered = Context::default();
+    unregistered.admit_nominal_constructor(id(10));
+    assert!(matches!(
+        unregistered.prove(
+            F::equal(input(0), nominal(payload(None, Term::Bool(true)))),
+            Budget::default()
+        ),
+        Outcome::Unknown { .. }
+    ));
+}

@@ -62,6 +62,16 @@ fn argument_with_types(term: &Term, type_leaf: &impl Fn(&Term) -> bool) -> bool 
             | Term::String(_)
             | Term::Symbol(_)
             | Term::BitVec(_) => true,
+            // Formation is checked before PTC admission. A nominal payload
+            // retains its declared Type and variant; an opaque NF domain does
+            // not acquire collection/layout authority from this carrier alone.
+            Term::NominalValue { ty, fields, .. } => {
+                matches!(ty.as_ref(), Term::Nominal { .. })
+                    && visit(ty, depth + 1, remaining, type_leaf)
+                    && fields
+                        .iter()
+                        .all(|value| visit(value, depth + 1, remaining, type_leaf))
+            }
             Term::TupleValue(values) => values
                 .iter()
                 .all(|value| visit(value, depth + 1, remaining, type_leaf)),

@@ -2022,7 +2022,10 @@ fn reify(
             *fuel = fuel.checked_sub(effects.len())?;
         }
         if model_applications::fixed_argument(term)
-            || matches!(term, Term::TupleValue(_) | Term::RecordValue(_))
+            || matches!(
+                term,
+                Term::TupleValue(_) | Term::RecordValue(_) | Term::NominalValue { .. }
+            )
         {
             nir::type_computations::charge_term(term, fuel).ok()?;
         }
@@ -2072,6 +2075,15 @@ fn rebuild(
     match term {
         Term::Primitive(p) => Some(Term::Primitive(*p)),
         term if model_applications::fixed_argument(term) => Some(term.clone()),
+        Term::NominalValue {
+            ty,
+            variant,
+            fields,
+        } if matches!(ty.as_ref(), Term::Nominal { .. }) => Some(Term::NominalValue {
+            ty: Box::new(child(ty)?),
+            variant: *variant,
+            fields: fields.iter().map(&mut *child).collect::<Option<_>>()?,
+        }),
         Term::TupleValue(values) => Some(Term::TupleValue(
             values.iter().map(&mut *child).collect::<Option<_>>()?,
         )),
