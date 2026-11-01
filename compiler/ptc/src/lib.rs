@@ -12,6 +12,7 @@ mod effects;
 mod error_results;
 mod learning;
 mod model_applications;
+mod model_effects;
 mod search;
 mod type_candidates;
 mod type_inputs;
@@ -2003,7 +2004,15 @@ fn reify(
         return None;
     }
     let result = if let Some(&representative) = representatives.get(&root) {
-        rebuild(&terms.nodes[representative], nominal, &mut |child| {
+        let term = &terms.nodes[representative];
+        if let Term::Computation { effects, .. } = term {
+            // Nullary operations still allocate and participate in ordering.
+            *fuel = fuel.checked_sub(effects.len())?;
+        }
+        if model_applications::fixed_argument(term) {
+            nir::type_computations::charge_term(term, fuel).ok()?;
+        }
+        rebuild(term, nominal, &mut |child| {
             reify(
                 terms.ids[child],
                 terms,
@@ -2048,6 +2057,10 @@ fn rebuild(
 ) -> Option<Term> {
     match term {
         Term::Primitive(p) => Some(Term::Primitive(*p)),
+        term if model_applications::fixed_argument(term) => Some(term.clone()),
+        Term::Computation { effects, result } => {
+            model_effects::rebuild(effects, result, nominal, child)
+        }
         Term::ErrorResult { errors, result } => Some(Term::error_result(
             errors.iter().map(&mut *child).collect::<Option<Vec<_>>>()?,
             child(result)?,
@@ -2141,6 +2154,13 @@ fn substitute_types(
         // Child substitution charged each ground argument before hashing it.
         return model_applications::copy(applications.get(&(*head, arguments))?, fuel);
     }
+    if let Term::Computation { effects, .. } = term {
+        let Some(remaining) = fuel.get().checked_sub(effects.len()) else {
+            fuel.set(0);
+            return None;
+        };
+        fuel.set(remaining);
+    }
     let value = rebuild(term, nominal, &mut |child| {
         substitute_types(child, types, bound_types, applications, fuel, nominal)
     })?;
@@ -2148,6 +2168,9 @@ fn substitute_types(
     Some(value)
 }
 fn closed_type(term: &Term, nominal: &BTreeSet<DeclarationId>) -> bool {
+    if let Term::Computation { effects, result } = term {
+        return model_effects::canonical(effects, result, nominal);
+    }
     if let Term::ErrorResult { errors, result } = term {
         // Model equality uses completed canonical values. Reject forged raw
         // assignments rather than interpreting label order or duplicate tags

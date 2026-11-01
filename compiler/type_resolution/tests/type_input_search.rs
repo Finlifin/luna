@@ -555,7 +555,7 @@ fn nested_scope_type_models_preserve_binding_depth_through_commit() {
 }
 
 #[test]
-fn error_and_opaque_type_models_commit_original_symbolic_identities() {
+fn qualified_and_opaque_type_models_commit_original_symbolic_identities() {
     let head = DeclarationId {
         package: 946,
         local: 1,
@@ -568,6 +568,19 @@ fn error_and_opaque_type_models_commit_original_symbolic_identities() {
             sort: Sort::Type,
             arguments: vec![row],
         },
+        Term::computation(
+            vec![
+                nir::effects::Operation {
+                    declaration: DeclarationId {
+                        package: 946,
+                        local: 2
+                    },
+                    arguments: vec![Term::Bool(true)],
+                };
+                2
+            ],
+            Term::Primitive(P::Bool),
+        ),
     ] {
         let mut context = Context::default();
         context.admit_congruence(head);
