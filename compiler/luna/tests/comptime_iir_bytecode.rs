@@ -477,3 +477,35 @@ fn graph_sessions_reuse_callable_and_declaration_indexes_without_caching_admissi
     Interpreter::from_iir_for_comptime_in_session(&graph, &mut session, &mut budget).unwrap();
     assert_eq!(budget.steps, 0);
 }
+
+#[test]
+fn concrete_comptime_storage_uses_instantiated_nominal_layouts() {
+    let graph = graph(
+        "newtype Wrapper<T> = T;
+        enum Choice where T {empty, some(T)}
+        comptime fn run(flag:bool)->bool {
+            let selected = Choice<bool>.some(flag) match {
+                .empty => false, .some(value) => value,
+            };
+            let optional: ?bool = selected;
+            let wrapped = optional.as(Wrapper<?bool>);
+            wrapped.as(?bool) match {value? => value, null => false}
+        }",
+        "run",
+    );
+    for compiled in [false, true] {
+        let mut vm = if compiled {
+            Interpreter::from_iir_for_comptime(&graph, Budget::default())
+        } else {
+            Interpreter::from_iir_for_comptime_tree(&graph, Budget::default())
+        }
+        .unwrap();
+        for value in [true, false, true] {
+            assert_eq!(
+                vm.invoke_instance(&graph.roots[0], vec![Value::Bool(value)])
+                    .unwrap(),
+                Value::Bool(value)
+            );
+        }
+    }
+}

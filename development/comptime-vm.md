@@ -11093,3 +11093,40 @@ Validation from `/home/fin/luna`:
 This completes the public concrete-newtype path. Generic/captured clauses,
 attribute descriptions and reflection-based from_type copying remain separate
 work; this is not completion of the wider definition-builder system.
+
+
+### Newtype conversion checks formation and completed comptime storage
+
+The conversion plan previously established only a direct representation edge.
+A direct VM conversion could construct an instance with a false formation
+requirement before running any admission checks (red regression:
+`/tmp/luna-tools-oml3i0vy/result.json`, exit 101). Preparation now checks both
+storage domains and admits both endpoint Types before evaluating the operand.
+Tree and bytecode share this ordering; failure does not execute operand effects,
+and legal runtime optional-pointer representations remain supported.
+
+Adding this boundary exposed a missing prerequisite in the shared comptime
+storage checker: IIR has no source declaration package. NIR now accepts an
+artifact-local layout resolver for both nominal and normal-form stored fields.
+The VM selects the exact IIR instance key, inspects its already-substituted
+layout, and charges lookup/copy work without reconstructing a source package.
+It does not reapply a source telescope to concrete descriptors. Invalid layouts
+remain rejected; budget exhaustion is retryable and does not mean invalidity.
+
+Coverage includes wrap and unwrap formation rejection, inactive pointer storage,
+pre-effect ordering, recovery, two instances sharing a declaration but carrying
+different concrete representations, and a sweep of insufficient IIR layout
+budgets. A source-to-IIR case executes a generic enum, optional and newtype in
+both carriers without a source declaration world.
+
+Validation from `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 900 -- test -p nir
+  -p comptime_interpretor`: passed, exit 0 (`/tmp/luna-tools-8iclu_xu/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test newtypes
+  --test builder_invocations newtype`: 45 passed, exit 0
+  (`/tmp/luna-tools-etrgsbdt/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test
+  comptime_iir_bytecode --test comptime_staged_values`: passed, exit 0
+  (`/tmp/luna-tools-rmdzdiu2/result.json`).
+- Workspace formatting passed (`/tmp/luna-tools-wqpl3nm6/result.json`);
+  `git diff --check` passed.

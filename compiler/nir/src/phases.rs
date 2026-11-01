@@ -1780,6 +1780,18 @@ pub fn validate_comptime_storage_with_nominals(
     comptime_storage::validate_resolved(ty, package, frames, Some(resolve), fuel)
 }
 
+/// Validate completed storage using artifact-local nominal and normal-form
+/// layouts. The resolver supplies all stored fields, including inactive
+/// variants; metadata-only type arguments do not themselves count as storage.
+pub fn validate_comptime_storage_with_layouts(
+    ty: &Term,
+    frames: &[Vec<Sort>],
+    resolve: &dyn Fn(&Term, &mut usize) -> Option<Vec<Term>>,
+    fuel: &mut usize,
+) -> Result<(), &'static str> {
+    comptime_storage::validate_layouts(ty, frames, resolve, fuel)
+}
+
 type NominalStorageResolver<'a> = Option<&'a dyn Fn(&Term, &mut usize) -> Option<Vec<Term>>>;
 fn validate_runtime_storage_inner(
     ty: &Term,

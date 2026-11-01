@@ -10,6 +10,86 @@ impl Interpreter<'_> {
         if !self.comptime_only {
             return Ok(());
         }
+        if let Some(graph) = self.graph {
+            let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+            let mut fuel = before;
+            let checked = nir::phases::validate_comptime_storage_with_layouts(
+                ty,
+                &[],
+                &|ty, fuel| {
+                    let fields: Vec<&Term> = match ty {
+                        Term::Nominal { .. } => {
+                            let mut definition = None;
+                            for instance in &graph.nominals {
+                                *fuel = fuel.checked_sub(1)?;
+                                nir::type_computations::charge_term(&instance.ty, fuel)
+                                    .map_err(|_| *fuel = 0)
+                                    .ok()?;
+                                if &instance.ty == ty {
+                                    definition = Some(&instance.definition);
+                                    break;
+                                }
+                            }
+                            let definition = definition?;
+                            let count = match definition {
+                                iir::NominalDefinition::Struct(def) => def.fields.len(),
+                                iir::NominalDefinition::Enum(def) => def
+                                    .variants
+                                    .iter()
+                                    .fold(0usize, |n, v| n.saturating_add(v.fields.len())),
+                                iir::NominalDefinition::Newtype(_) => 1,
+                            };
+                            *fuel = match fuel.checked_sub(count) {
+                                Some(left) => left,
+                                None => {
+                                    *fuel = 0;
+                                    return None;
+                                }
+                            };
+                            match definition {
+                                iir::NominalDefinition::Struct(def) => {
+                                    def.fields.iter().map(|(_, ty)| ty).collect()
+                                }
+                                iir::NominalDefinition::Enum(def) => {
+                                    def.variants.iter().flat_map(|v| &v.fields).collect()
+                                }
+                                iir::NominalDefinition::Newtype(def) => vec![&def.representation],
+                            }
+                        }
+                        Term::NormalForm { head, .. } => {
+                            *fuel = fuel.checked_sub(1)?;
+                            let metadata = self.normal_forms.get(head)?;
+                            if let Some(fields) = metadata.tuple_elements(ty) {
+                                fields.iter().collect()
+                            } else if let Some(element) = metadata.list_element(ty) {
+                                vec![element]
+                            } else {
+                                vec![]
+                            }
+                        }
+                        _ => return None,
+                    };
+                    for field in &fields {
+                        nir::type_computations::charge_term(field, fuel)
+                            .map_err(|_| *fuel = 0)
+                            .ok()?;
+                    }
+                    Some(fields.into_iter().cloned().collect())
+                },
+                &mut fuel,
+            );
+            self.budget.steps -= (before - fuel) as u64;
+            return checked.map_err(|_| {
+                self.failure(
+                    if fuel == 0 {
+                        ErrorKind::StepsExhausted
+                    } else {
+                        ErrorKind::PhaseMismatch
+                    },
+                    Some(source),
+                )
+            });
+        }
         let package = self
             .declaration_world
             .ok_or_else(|| self.failure(ErrorKind::PhaseMismatch, Some(source)))?;

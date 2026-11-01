@@ -19,7 +19,37 @@ pub(super) fn validate_resolved(
     resolve: super::NominalStorageResolver<'_>,
     fuel: &mut usize,
 ) -> Result<(), &'static str> {
-    match contains_pointer(ty, package, frames, &mut HashSet::new(), fuel, 0, resolve) {
+    match contains_pointer(
+        ty,
+        Some(package),
+        frames,
+        &mut HashSet::new(),
+        fuel,
+        0,
+        resolve,
+    ) {
+        Ok(false) => Ok(()),
+        Ok(true) => Err("runtime pointer values cannot inhabit comptime storage"),
+        Err(()) => Err("comptime storage inspection limit or invalid payload layout"),
+    }
+}
+
+/// Inspect concrete artifact layouts without reapplying source telescopes.
+pub(super) fn validate_layouts(
+    ty: &Term,
+    frames: &[Vec<Sort>],
+    resolve: &dyn Fn(&Term, &mut usize) -> Option<Vec<Term>>,
+    fuel: &mut usize,
+) -> Result<(), &'static str> {
+    match contains_pointer(
+        ty,
+        None,
+        frames,
+        &mut HashSet::new(),
+        fuel,
+        0,
+        Some(resolve),
+    ) {
         Ok(false) => Ok(()),
         Ok(true) => Err("runtime pointer values cannot inhabit comptime storage"),
         Err(()) => Err("comptime storage inspection limit or invalid payload layout"),
@@ -28,7 +58,7 @@ pub(super) fn validate_resolved(
 
 fn contains_pointer(
     ty: &Term,
-    package: &Package,
+    package: Option<&Package>,
     frames: &[Vec<Sort>],
     seen: &mut HashSet<Term>,
     fuel: &mut usize,
@@ -63,14 +93,18 @@ fn contains_pointer(
             _ => vec![],
         },
         Term::NormalForm { .. } => {
-            if let Some(fields) = crate::normal_forms::tuple_fields(Some(package), ty) {
+            if package.is_none() {
+                resolve.ok_or(())?(ty, fuel).ok_or(())?
+            } else if let Some(fields) = crate::normal_forms::tuple_fields(package, ty) {
                 fields.to_vec()
             } else if let Some(element) =
-                crate::normal_forms::list_element_budgeted(package, ty, fuel).map_err(|error| {
-                    if matches!(error, crate::NominalAdmissionError::Budget) {
-                        *fuel = 0;
-                    }
-                })?
+                crate::normal_forms::list_element_budgeted(package.unwrap(), ty, fuel).map_err(
+                    |error| {
+                        if matches!(error, crate::NominalAdmissionError::Budget) {
+                            *fuel = 0;
+                        }
+                    },
+                )?
             {
                 vec![element]
             } else {
@@ -84,19 +118,20 @@ fn contains_pointer(
         } => {
             if let Some(resolve) = resolve {
                 resolve(ty, fuel).ok_or(())?
-            } else if let Some(definition) = package
-                .structs
-                .iter()
-                .find(|d| d.declaration == *declaration)
-            {
+            } else if let Some(definition) = package.and_then(|package| {
+                package
+                    .structs
+                    .iter()
+                    .find(|d| d.declaration == *declaration)
+            }) {
                 definition
                     .instantiate_fields_in_scope(arguments, frames)
                     .map_err(|_| ())?
                     .into_iter()
                     .map(|(_, field)| field)
                     .collect()
-            } else if let Some(definition) =
-                package.enums.iter().find(|d| d.declaration == *declaration)
+            } else if let Some(definition) = package
+                .and_then(|package| package.enums.iter().find(|d| d.declaration == *declaration))
             {
                 definition
                     .instantiate_variants_in_scope(arguments, frames)
@@ -104,11 +139,12 @@ fn contains_pointer(
                     .into_iter()
                     .flat_map(|variant| variant.fields)
                     .collect()
-            } else if let Some(definition) = package
-                .newtypes
-                .iter()
-                .find(|d| d.declaration == *declaration)
-            {
+            } else if let Some(definition) = package.and_then(|package| {
+                package
+                    .newtypes
+                    .iter()
+                    .find(|d| d.declaration == *declaration)
+            }) {
                 vec![
                     definition
                         .representation_budgeted(arguments, frames, fuel)

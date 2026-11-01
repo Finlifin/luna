@@ -33,16 +33,22 @@ impl Interpreter<'_> {
             nir::newtypes::conversion_from(self.newtypes.values(), input, output, &[], &mut fuel)
         };
         self.budget.steps -= (before - fuel) as u64;
-        plan.map_err(|e| {
-            self.failure(
-                match e {
-                    nir::newtypes::ConversionError::Budget => ErrorKind::StepsExhausted,
-                    _ => ErrorKind::Type,
-                },
-                Some(source),
-            )
-        })?
-        .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))
+        let plan = plan
+            .map_err(|e| {
+                self.failure(
+                    match e {
+                        nir::newtypes::ConversionError::Budget => ErrorKind::StepsExhausted,
+                        _ => ErrorKind::Type,
+                    },
+                    Some(source),
+                )
+            })?
+            .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
+        self.check_comptime_domain(input, source)?;
+        self.check_comptime_domain(output, source)?;
+        self.admit_type(input, 0)?;
+        self.admit_type(output, 0)?;
+        Ok(plan)
     }
 
     pub(super) fn complete_newtype_conversion(
@@ -233,6 +239,184 @@ mod tests {
                 execute(&mut vm, &wrap, &wrap_code, &mut env, compiled).unwrap(),
                 Flow::Value(Value::Newtype { .. })
             ));
+        }
+    }
+    #[test]
+    fn conversion_checks_formation_and_inactive_storage_before_operand_effects() {
+        let boolean = Term::Primitive(Primitive::Bool);
+        let optional_pointer = Term::Optional(Box::new(Term::Pointer(Box::new(boolean.clone()))));
+        let mut package = Package::default();
+        for (local, representation, requirements) in [
+            (
+                1,
+                boolean.clone(),
+                vec![nir::program::TypePredicate::Bool(false)],
+            ),
+            (2, boolean.clone(), vec![]),
+            (3, optional_pointer.clone(), vec![]),
+        ] {
+            package.newtypes.push(nir::newtypes::Newtype {
+                declaration: DeclarationId { package: 0, local },
+                name: format!("Wrapper{local}"),
+                type_parameters: vec![],
+                parameter_types: vec![],
+                capture_count: 0,
+                capabilities: vec![],
+                requirements,
+                representation,
+            });
+        }
+        for compiled in [false, true] {
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            for (input, output, value, expected) in [
+                (
+                    boolean.clone(),
+                    nominal(1),
+                    Value::Bool(true),
+                    ErrorKind::TypeContractRejected,
+                ),
+                (
+                    nominal(1),
+                    boolean.clone(),
+                    Value::Newtype {
+                        ty: nominal(1),
+                        value: Box::new(Value::Bool(true)),
+                    },
+                    ErrorKind::TypeContractRejected,
+                ),
+                (
+                    optional_pointer.clone(),
+                    nominal(3),
+                    Value::Optional {
+                        ty: optional_pointer.clone(),
+                        value: None,
+                    },
+                    ErrorKind::PhaseMismatch,
+                ),
+            ] {
+                let body = query(input, output);
+                let code = Arc::new(comptime_compiler::compile(&body, &mut 10000).unwrap());
+                let mut env = Environment::from([(INPUT, value), (TRACE, Value::Bool(false))]);
+                assert_eq!(
+                    execute(&mut vm, &body, &code, &mut env, compiled)
+                        .unwrap_err()
+                        .kind,
+                    expected
+                );
+                assert_eq!(
+                    vm.local_value(&env, TRACE, Some(SOURCE)).unwrap(),
+                    Value::Bool(false)
+                );
+            }
+            let body = query(boolean.clone(), nominal(2));
+            let code = Arc::new(comptime_compiler::compile(&body, &mut 10000).unwrap());
+            let mut env =
+                Environment::from([(INPUT, Value::Bool(true)), (TRACE, Value::Bool(false))]);
+            assert!(matches!(
+                execute(&mut vm, &body, &code, &mut env, compiled),
+                Ok(Flow::Value(Value::Newtype { .. }))
+            ));
+        }
+        let mut runtime = Interpreter::new(&package, Budget::default()).unwrap();
+        let body = query(optional_pointer.clone(), nominal(3));
+        let mut env = Environment::from([
+            (
+                INPUT,
+                Value::Optional {
+                    ty: optional_pointer,
+                    value: None,
+                },
+            ),
+            (TRACE, Value::Bool(false)),
+        ]);
+        assert!(matches!(
+            runtime.eval(&body, &mut env),
+            Ok(Flow::Value(Value::Newtype { .. }))
+        ));
+        assert_eq!(
+            runtime.local_value(&env, TRACE, Some(SOURCE)).unwrap(),
+            Value::Bool(true)
+        );
+    }
+    #[test]
+    fn concrete_iir_conversion_uses_full_instance_storage_domains() {
+        let declaration = DeclarationId {
+            package: 0,
+            local: 1,
+        };
+        let boolean = Term::Primitive(Primitive::Bool);
+        let optional_pointer = Term::Optional(Box::new(Term::Pointer(Box::new(boolean.clone()))));
+        let safe = Term::Nominal {
+            declaration,
+            arguments: vec![boolean.clone()],
+        };
+        let unsafe_storage = Term::Nominal {
+            declaration,
+            arguments: vec![Term::Primitive(Primitive::Char)],
+        };
+        let graph = iir::Package {
+            nominals: [
+                (safe.clone(), boolean.clone()),
+                (unsafe_storage.clone(), optional_pointer.clone()),
+            ]
+            .into_iter()
+            .map(|(ty, representation)| iir::NominalInstance {
+                ty,
+                definition: iir::NominalDefinition::Newtype(nir::newtypes::Newtype {
+                    declaration,
+                    name: "Applied".into(),
+                    type_parameters: vec![],
+                    parameter_types: vec![],
+                    capture_count: 0,
+                    requirements: vec![],
+                    capabilities: vec![],
+                    representation,
+                }),
+            })
+            .collect(),
+            ..Default::default()
+        };
+        for compiled in [false, true] {
+            let mut vm = Interpreter::from_iir_for_comptime(&graph, Budget::default()).unwrap();
+            for (input, output, value, accepted) in [
+                (boolean.clone(), safe.clone(), Value::Bool(true), true),
+                (
+                    optional_pointer.clone(),
+                    unsafe_storage.clone(),
+                    Value::Optional {
+                        ty: optional_pointer.clone(),
+                        value: None,
+                    },
+                    false,
+                ),
+                (boolean.clone(), safe.clone(), Value::Bool(false), true),
+            ] {
+                let body = query(input, output);
+                let code = Arc::new(comptime_compiler::compile(&body, &mut 10000).unwrap());
+                let mut env = Environment::from([(INPUT, value), (TRACE, Value::Bool(false))]);
+                let result = execute(&mut vm, &body, &code, &mut env, compiled);
+                if accepted {
+                    assert!(matches!(result, Ok(Flow::Value(Value::Newtype { .. }))));
+                } else {
+                    assert_eq!(result.unwrap_err().kind, ErrorKind::PhaseMismatch);
+                }
+                assert_eq!(
+                    vm.local_value(&env, TRACE, Some(SOURCE)).unwrap(),
+                    Value::Bool(accepted)
+                );
+            }
+            let before = vm.remaining_steps();
+            vm.check_comptime_domain(&safe, SOURCE).unwrap();
+            let cost = before - vm.remaining_steps();
+            for steps in 0..cost {
+                vm.budget.steps = steps;
+                assert_eq!(
+                    vm.check_comptime_domain(&safe, SOURCE).unwrap_err().kind,
+                    ErrorKind::StepsExhausted
+                );
+            }
+            vm.budget.steps = 100_000;
+            vm.check_comptime_domain(&safe, SOURCE).unwrap();
         }
     }
 }
