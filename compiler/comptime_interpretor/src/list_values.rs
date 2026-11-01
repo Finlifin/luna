@@ -1,4 +1,5 @@
-//! Owned list payloads invalidate structural summaries before mutable access.
+//! Persistent list payloads invalidate structural summaries before mutable access.
+mod storage;
 use super::Value;
 use std::{
     fmt,
@@ -39,23 +40,15 @@ pub(super) fn scalar_tag(value: &Value) -> Option<std::mem::Discriminant<Value>>
 
 /// List payload storage. The summary describes closed representation work and
 /// scalar discriminants, never nominal admission, assumptions or type equality.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ListValues {
-    values: Vec<Value>,
+    values: storage::Storage,
     summary: OnceLock<Summary>,
 }
 impl ListValues {
-    /// Bound slot relocation by the existing capacity. An in-place extension
-    /// moves only the suffix; growth may also relocate every prefix slot.
-    /// Nested payloads are moved with their owners, not recursively copied.
+    /// Share immutable payloads and charge the newly allocated tree paths.
+    /// Concatenation does not recursively copy either input's elements.
     pub(crate) fn append_payload(&mut self, other: Self) -> usize {
-        let moved = other.len().saturating_add(
-            if other.len() > self.values.capacity() - self.values.len() {
-                self.values.len()
-            } else {
-                0
-            },
-        );
         let combined = self
             .summary()
             .zip(other.summary())
@@ -73,14 +66,27 @@ impl ListValues {
                 })
             });
         self.summary.take();
-        self.values.extend(other.values);
+        let moved = self.values.append(other.values);
         if let Some(summary) = combined {
             self.remember(summary);
         }
         moved
     }
     pub fn into_vec(self) -> Vec<Value> {
-        self.values
+        self.values.into_vec()
+    }
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    pub fn first(&self) -> Option<&Value> {
+        self.values.first()
+    }
+    pub fn truncate(&mut self, len: usize) {
+        self.summary.take();
+        self.values.truncate(len);
     }
     pub(super) fn summary(&self) -> Option<Summary> {
         self.summary.get().copied()
@@ -89,10 +95,15 @@ impl ListValues {
         let _ = self.summary.set(summary);
     }
 }
+impl Default for ListValues {
+    fn default() -> Self {
+        Vec::new().into()
+    }
+}
 impl From<Vec<Value>> for ListValues {
     fn from(values: Vec<Value>) -> Self {
         Self {
-            values,
+            values: values.into(),
             summary: OnceLock::new(),
         }
     }
@@ -105,27 +116,27 @@ impl FromIterator<Value> for ListValues {
 impl Deref for ListValues {
     type Target = Vec<Value>;
     fn deref(&self) -> &Self::Target {
-        &self.values
+        self.values.flat()
     }
 }
 impl DerefMut for ListValues {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.summary.take();
-        &mut self.values
+        self.values.flat_mut()
     }
 }
 impl IntoIterator for ListValues {
     type Item = Value;
     type IntoIter = std::vec::IntoIter<Value>;
     fn into_iter(self) -> Self::IntoIter {
-        self.values.into_iter()
+        self.values.into_vec().into_iter()
     }
 }
 impl<'a> IntoIterator for &'a ListValues {
     type Item = &'a Value;
     type IntoIter = std::slice::Iter<'a, Value>;
     fn into_iter(self) -> Self::IntoIter {
-        self.values.iter()
+        self.values.flat().iter()
     }
 }
 impl<'a> IntoIterator for &'a mut ListValues {
@@ -137,17 +148,17 @@ impl<'a> IntoIterator for &'a mut ListValues {
 }
 impl PartialEq for ListValues {
     fn eq(&self, other: &Self) -> bool {
-        self.values == other.values
+        self.values.flat() == other.values.flat()
     }
 }
 impl PartialEq<Vec<Value>> for ListValues {
     fn eq(&self, other: &Vec<Value>) -> bool {
-        &self.values == other
+        self.values.flat() == other
     }
 }
 impl fmt::Debug for ListValues {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.values.fmt(f)
+        self.values.flat().fmt(f)
     }
 }
 

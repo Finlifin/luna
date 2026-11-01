@@ -348,9 +348,10 @@ impl Value {
             .map(|(copy, _)| copy)
     }
 
-    /// Separate the size of an owned copy from the work of inspecting the
-    /// current representation. Cached list summaries skip inspection only;
-    /// actual copies still pay for every element and all payload bytes.
+    /// Separate expanded representation size from inspection work. Sharing a
+    /// list payload does not discount its semantic size or depth limits. Copy
+    /// callers currently use this size as a conservative work allowance; cached
+    /// summaries only reduce the inspection component returned here.
     fn scoped_representation_work(
         &self,
         parameters: &BTreeSet<DeclarationId>,

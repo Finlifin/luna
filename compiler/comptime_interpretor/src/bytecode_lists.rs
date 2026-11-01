@@ -426,12 +426,14 @@ fn fused_append_preserves_aliases_and_reuses_owned_buffers() {
                     }
                     if carrier == 0 {
                         let after = match &env[&input] {
-                            Value::List { values, .. } => values.as_ptr() as usize,
+                            Value::List { values, .. } => {
+                                values.first().unwrap() as *const Value as usize
+                            }
                             _ => unreachable!(),
                         };
                         assert_eq!(
                             after, buffer,
-                            "owned list must reuse its existing allocation"
+                            "append must share the immutable prefix allocation"
                         );
                     }
                     drop(storage);
@@ -1023,7 +1025,9 @@ fn list_growth_accounts_for_relocation_and_rolls_back_on_budget_failure() {
         .unwrap();
     let in_place_cost = before - vm.budget.steps;
     let mut growing = make(0);
-    let original = growing.clone();
+    // Keep the expected value independent: cloning now shares a persistent
+    // payload and would select the non-relocating concatenation path.
+    let original = make(0);
     vm.budget.steps = in_place_cost;
     let error = vm
         .complete_list_append(&mut growing, suffix(), &ty, SOURCE)

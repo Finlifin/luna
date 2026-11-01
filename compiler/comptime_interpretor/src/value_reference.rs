@@ -1043,7 +1043,7 @@ mod append_tests {
                 unreachable!()
             };
             assert_eq!(values.len(), 2);
-            assert_eq!(values.as_ptr(), buffer);
+            assert_eq!(values.first().unwrap() as *const Value, buffer);
         }
         let updated = storage.read().unwrap();
         assert_eq!(
