@@ -347,6 +347,7 @@ pub enum Op {
     CommitScope,
 
     PrepareOptional {
+        destination: Register,
         ty: Arc<Term>,
         input: Option<(Arc<Term>, SourceRange)>,
     },
@@ -984,8 +985,12 @@ impl fmt::Display for Program {
                 Op::NonExhaustiveMatch => write!(f, "(non-exhaustive-match)")?,
                 Op::InvalidControlFlow => write!(f, "(invalid-control-flow)")?,
                 Op::CommitScope => write!(f, "(commit-scope)")?,
-                Op::PrepareOptional { ty, input } => {
-                    write!(f, "(prepare-optional {ty} (input")?;
+                Op::PrepareOptional {
+                    destination,
+                    ty,
+                    input,
+                } => {
+                    write!(f, "(prepare-optional %{destination} {ty} (input")?;
                     if let Some((ty, at)) = input {
                         write!(f, " {ty} (source {} {})", at.start, at.end)?;
                     }
@@ -2609,7 +2614,14 @@ fn compile_root<'a>(
                                 ))
                             })
                             .transpose()?;
-                        emit(&mut work, Op::PrepareOptional { ty, input });
+                        emit(
+                            &mut work,
+                            Op::PrepareOptional {
+                                destination: dst,
+                                ty,
+                                input,
+                            },
+                        );
                     }
                     K::ErrorConvert { conversion, value } => {
                         let conversion = Arc::new(ErrorConversion {

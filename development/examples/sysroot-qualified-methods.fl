@@ -38,10 +38,47 @@ const checked_text = text_at_comptime();
 
 
 test {
-    inline if checked_text {
+    inline if checked_text and checked_associated_optionals {
         let passed = run();
         assumes passed;
     } else {
         assumes false;
     };
 }
+
+trait OptionalElement {
+    assoc Item: Type;
+}
+
+impl OptionalElement for bool {
+    assoc Item: Type = bool;
+}
+
+comptime fn associated_present(comptime T: Type, value: T.as(OptionalElement).Item) -> ?T.as(OptionalElement).Item
+where requires T :- OptionalElement
+{
+    value
+}
+
+comptime fn associated_absent(comptime T: Type) -> ?T.as(OptionalElement).Item
+where requires T :- OptionalElement
+{
+    null
+}
+
+comptime fn associated_nested(comptime T: Type, value: ?T.as(OptionalElement).Item) -> ??T.as(OptionalElement).Item
+where requires T :- OptionalElement
+{
+    value
+}
+
+comptime fn associated_optionals() -> bool {
+    let present = associated_present(bool, true);
+    let missing = associated_absent(bool);
+    let retained = associated_nested(bool, missing);
+    (present match { value? => value, null => false })
+        and missing.is_none()
+        and (retained match { inner? => inner.is_none(), null => false })
+}
+
+const checked_associated_optionals = associated_optionals();

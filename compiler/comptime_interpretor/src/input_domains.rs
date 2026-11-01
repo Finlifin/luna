@@ -160,8 +160,8 @@ impl Interpreter<'_> {
                 return Ok(());
             }
             Kind::Null => {
-                self.prepare_optional(expected, None, source)?;
-                Prepared::Literal(self.complete_optional(expected, None, source)?)
+                let ty = self.prepare_optional(expected, None, source)?;
+                Prepared::Literal(self.complete_optional(&ty, None, source)?)
             }
             Kind::Unit => Prepared::Literal(self.normal_unit_value(expected, source)?),
             Kind::Integer(spelling, negative) => {

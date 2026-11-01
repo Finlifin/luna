@@ -15,6 +15,7 @@ pub(super) struct Frame {
     calls: BTreeMap<usize, PendingCall>,
     newtype_conversions: BTreeMap<usize, nir::newtypes::Conversion>,
     list_types: BTreeMap<usize, Term>,
+    optional_types: BTreeMap<usize, Term>,
     append_types: BTreeMap<usize, Term>,
     list_operations: BTreeMap<usize, (Term, Option<Term>)>,
     instance_origins: BTreeMap<usize, Option<(DeclarationId, usize)>>,
@@ -1059,6 +1060,7 @@ impl<'a> Interpreter<'a> {
             calls: BTreeMap::new(),
             newtype_conversions: BTreeMap::new(),
             list_types: BTreeMap::new(),
+            optional_types: BTreeMap::new(),
             append_types: BTreeMap::new(),
             list_operations: BTreeMap::new(),
             instance_origins: BTreeMap::new(),
@@ -2182,24 +2184,33 @@ impl<'a> Interpreter<'a> {
                     return Err(self.failure(ErrorKind::NonExhaustiveMatch, Some(source)));
                 }
 
-                Op::PrepareOptional { ty, input } => {
-                    self.prepare_optional(
+                Op::PrepareOptional {
+                    destination,
+                    ty,
+                    input,
+                } => {
+                    let ty = self.prepare_optional(
                         ty,
                         input.as_ref().map(|(ty, at)| (ty.as_ref(), *at)),
                         source,
                     )?;
+                    frame.optional_types.insert(*destination, ty);
                 }
                 Op::Optional {
                     destination,
-                    ty,
+                    ty: _,
                     value,
                     value_source,
                 } => {
+                    let ty = frame
+                        .optional_types
+                        .remove(destination)
+                        .ok_or_else(missing)?;
                     let value = value
                         .map(|slot| frame.slots[slot].take().ok_or_else(missing))
                         .transpose()?;
                     frame.slots[*destination] =
-                        Some(self.complete_optional(ty, value, *value_source)?);
+                        Some(self.complete_optional(&ty, value, *value_source)?);
                 }
                 Op::PrepareError(conversion) => {
                     self.prepare_error_conversion(
