@@ -319,7 +319,15 @@ impl Context {
     /// Validate a concrete counterexample against this exact scope, without
     /// rerunning proof search or trusting the producer's Boolean assignment.
     pub fn verify_witness(&self, witness: &Witness, budget: Budget) -> Result<(), ProofError> {
-        let mut fuel = budget.steps;
+        self.verify_witness_metered(witness, &mut { budget })
+    }
+    /// Replay consumes the caller's shared search allowance, including failures.
+    pub fn verify_witness_metered(
+        &self,
+        witness: &Witness,
+        budget: &mut Budget,
+    ) -> Result<(), ProofError> {
+        let fuel = &mut budget.steps;
         let limit = budget.max_depth.min(256);
         for formula in self
             .assumptions
@@ -327,21 +335,22 @@ impl Context {
             .chain(&witness.assumptions)
             .chain(std::iter::once(&witness.goal))
         {
-            if !within_limits(formula, limit, &mut fuel) {
+            if !within_limits(formula, limit, fuel) {
                 return Err(ProofError::BudgetExhausted);
             }
         }
         for ty in witness.types.values() {
-            if !within_input_limits(Input::Term(ty), limit, &mut fuel) {
+            if !within_input_limits(Input::Term(ty), limit, fuel) {
                 return Err(ProofError::BudgetExhausted);
             }
             if ty.check_scope(&[]).is_err() || !closed_type(ty, &self.nominal_constructors) {
                 return Err(ProofError::Invalid);
             }
         }
-        if fuel < witness.integers.len() {
+        if *fuel < witness.integers.len() {
             return Err(ProofError::BudgetExhausted);
         }
+        *fuel -= witness.integers.len();
         if witness.scope != *self.scope
             || witness.assumptions != *self.assumptions
             || witness.nominal_constructors != *self.nominal_constructors
@@ -350,8 +359,7 @@ impl Context {
         {
             return Err(ProofError::Invalid);
         }
-        let applications =
-            model_applications::index(&witness.applications, self, &mut fuel, limit)?;
+        let applications = model_applications::index(&witness.applications, self, fuel, limit)?;
         let mut atoms = Vec::new();
         let mut terms = Terms::default();
         for formula in self
@@ -362,50 +370,54 @@ impl Context {
             collect(formula, &mut atoms, &mut terms, 0, limit, &self.scope)
                 .map_err(|_| ProofError::Invalid)?;
         }
-        let evaluation_fuel = std::cell::Cell::new(fuel);
-        if atoms.iter().any(|atom| {
-            model_atom(
-                atom,
-                &witness.types,
-                &applications,
-                &evaluation_fuel,
-                &witness.integers,
-                &self.nominal_constructors,
-                &self.tuple_heads,
-            )
-            .is_none()
-        }) {
-            return Err(if evaluation_fuel.get() == 0 {
-                ProofError::BudgetExhausted
+        let evaluation_fuel = std::cell::Cell::new(*fuel);
+        let result = (|| {
+            if atoms.iter().any(|atom| {
+                model_atom(
+                    atom,
+                    &witness.types,
+                    &applications,
+                    &evaluation_fuel,
+                    &witness.integers,
+                    &self.nominal_constructors,
+                    &self.tuple_heads,
+                )
+                .is_none()
+            }) {
+                return Err(if evaluation_fuel.get() == 0 {
+                    ProofError::BudgetExhausted
+                } else {
+                    ProofError::Invalid
+                });
+            }
+            let evaluate = |formula| {
+                evaluate_model(
+                    formula,
+                    &witness.types,
+                    &applications,
+                    &evaluation_fuel,
+                    &witness.integers,
+                    &self.nominal_constructors,
+                    &self.tuple_heads,
+                )
+            };
+            if self
+                .assumptions
+                .iter()
+                .all(|fact| evaluate(fact) == Some(true))
+                && evaluate(&witness.goal) == Some(false)
+            {
+                Ok(())
             } else {
-                ProofError::Invalid
-            });
-        }
-        let evaluate = |formula| {
-            evaluate_model(
-                formula,
-                &witness.types,
-                &applications,
-                &evaluation_fuel,
-                &witness.integers,
-                &self.nominal_constructors,
-                &self.tuple_heads,
-            )
-        };
-        if self
-            .assumptions
-            .iter()
-            .all(|fact| evaluate(fact) == Some(true))
-            && evaluate(&witness.goal) == Some(false)
-        {
-            Ok(())
-        } else {
-            Err(if evaluation_fuel.get() == 0 {
-                ProofError::BudgetExhausted
-            } else {
-                ProofError::Invalid
-            })
-        }
+                Err(if evaluation_fuel.get() == 0 {
+                    ProofError::BudgetExhausted
+                } else {
+                    ProofError::Invalid
+                })
+            }
+        })();
+        *fuel = evaluation_fuel.get();
+        result
     }
     /// Recover an already-mentioned structural type using equality evidence.
     /// This is an operation-local view, never normal-form reduction. Candidates

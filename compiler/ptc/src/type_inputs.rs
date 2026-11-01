@@ -2,6 +2,7 @@
 //! exported binding additionally needs entailment under the supplied problem.
 //! This does not authorize treating an unproved function requirement as a fact.
 use super::*;
+mod ambiguity;
 mod symbolic;
 
 #[derive(Clone, Debug)]
@@ -110,7 +111,18 @@ impl Context {
                         alternative,
                     };
                 }
-                Ok(false) => return TypeInputOutcome::Unknown(UnknownReason::UnvalidatedModel),
+                Ok(false) => {
+                    return match ambiguity::alternative(&problem, &model, variable, inputs, budget)
+                    {
+                        Ok(Some(alternative)) => TypeInputOutcome::Ambiguous {
+                            variable,
+                            candidate: model,
+                            alternative,
+                        },
+                        Ok(None) => TypeInputOutcome::Unknown(UnknownReason::UnvalidatedModel),
+                        Err(reason) => TypeInputOutcome::Unknown(reason),
+                    };
+                }
                 Err(reason) => return TypeInputOutcome::Unknown(reason),
             }
         }

@@ -400,3 +400,122 @@ fn dependent_search_never_exports_partial_or_unproved_bindings() {
         assert!(context.assumptions().is_empty());
     }
 }
+
+#[test]
+fn ambiguity_search_keeps_the_ambient_world_fixed() {
+    let inequality = F::equal(var(0), var(9)).negate();
+    for constraint in [
+        inequality.clone(),
+        F::And(vec![
+            inequality,
+            F::int_le(
+                ptc::IntegerTerm::variable(id(20), 0),
+                ptc::IntegerTerm::constant(7),
+            ),
+        ]),
+    ] {
+        let context = Context::default();
+
+        let outcome =
+            context.search_type_inputs(&[id(0)], constraint.clone(), &mut Budget::default());
+        let O::Ambiguous {
+            variable,
+            candidate,
+            alternative,
+        } = outcome
+        else {
+            panic!("two distinct types can differ from the same ambient type: {outcome}");
+        };
+        assert_eq!(variable, id(0));
+        assert_eq!(candidate.integers, alternative.integers);
+        assert_eq!(candidate.types[&id(9)], alternative.types[&id(9)]);
+        assert_ne!(candidate.types[&id(0)], alternative.types[&id(0)]);
+        let problem = context
+            .type_input_context(&[id(0)], constraint, &mut Budget::default())
+            .unwrap();
+        problem
+            .verify_witness(&candidate, Budget::default())
+            .unwrap();
+        problem
+            .verify_witness(&alternative, Budget::default())
+            .unwrap();
+    }
+}
+
+#[test]
+fn fixed_ambient_ambiguity_is_budgeted_and_retryable() {
+    let context = Context::default();
+    let constraint = F::equal(var(0), var(9)).negate();
+    let mut measured = Budget::default();
+    let initial = measured.steps;
+    assert!(matches!(
+        context.search_type_inputs(&[id(0)], constraint.clone(), &mut measured),
+        O::Ambiguous { .. }
+    ));
+    let consumed = initial - measured.steps;
+    for steps in [0, 1, consumed / 2, consumed - 1, consumed] {
+        let mut budget = Budget {
+            steps,
+            ..Budget::default()
+        };
+        let result = context.search_type_inputs(&[id(0)], constraint.clone(), &mut budget);
+        match result {
+            O::Ambiguous {
+                candidate,
+                alternative,
+                ..
+            } => {
+                let problem = context
+                    .type_input_context(&[id(0)], constraint.clone(), &mut Budget::default())
+                    .unwrap();
+                problem
+                    .verify_witness(&candidate, Budget::default())
+                    .unwrap();
+                problem
+                    .verify_witness(&alternative, Budget::default())
+                    .unwrap();
+                assert_eq!(candidate.types[&id(9)], alternative.types[&id(9)]);
+            }
+            O::Unknown(UnknownReason::BudgetExhausted) if steps < consumed => {}
+            other => panic!("{steps}: {other}"),
+        }
+        assert!(budget.steps <= steps);
+        assert!(context.assumptions().is_empty());
+    }
+}
+
+#[test]
+fn witness_replay_consumes_shared_fuel_on_success_and_rejection() {
+    let context = Context::default();
+    let ptc::Outcome::NotEntailed(witness) =
+        context.prove(F::equal(var(0), boolean()), Budget::default())
+    else {
+        panic!("a free input admits a counterexample");
+    };
+    let mut budget = Budget::default();
+    let initial = budget.steps;
+    context
+        .verify_witness_metered(&witness, &mut budget)
+        .unwrap();
+    assert!(budget.steps < initial);
+    let used = initial - budget.steps;
+    let mut short = Budget {
+        steps: used - 1,
+        ..Budget::default()
+    };
+    assert_eq!(
+        context.verify_witness_metered(&witness, &mut short),
+        Err(ptc::ProofError::BudgetExhausted)
+    );
+    let mut invalid = witness.clone();
+    invalid.types.insert(id(0), boolean());
+    let before = budget.steps;
+    assert_eq!(
+        context.verify_witness_metered(&invalid, &mut budget),
+        Err(ptc::ProofError::Invalid)
+    );
+    assert!(budget.steps < before);
+    context
+        .verify_witness_metered(&witness, &mut budget)
+        .unwrap();
+}

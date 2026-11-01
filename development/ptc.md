@@ -907,3 +907,35 @@ Validation from `/home/fin/luna`:
 - Source Type-input acceptance: seven passed (`/tmp/luna-tools-ef65o0jd/result.json`).
 - Workspace formatting passed (`/tmp/luna-tools-0wgz6p71/result.json`); `git diff --check` passed.
 - Real sysroot type-factory identity acceptance passed (`/tmp/luna-tools-ga78p5nv/result.json`): `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_type_factories_keep_identity_through_comptime_parameters`.
+
+### Fixed-environment ambiguity witnesses
+
+Type-input search previously returned Unknown for `T != U` when only T was
+requested: its two models changed the ambient U as well as T. The new fallback
+pins the first model's ambient Type/integer assignments and finite opaque
+application interpretation in a private fork, then searches for a different T.
+It exports only a pair with identical ambient interpretations and independently
+replays the alternative against the original problem after removing the pinning
+premises. A proof of uniqueness under those private premises never supplies a
+binding. This improves ambiguity reporting without expanding implicit inference
+or converting model assignments into regional equality facts.
+
+Witness replay now has a shared-budget entry point; success and invalid-model
+failure both debit the caller's allowance. Integer model traversal is charged,
+and the existing by-value API delegates to the same implementation.
+
+Validation from `/home/fin/luna`:
+
+- The new inequality regression failed before implementation with
+  `Unknown(UnvalidatedModel)` (`/tmp/luna-tools-1sa9gp6v/result.json`, exit 101).
+- `python3 -B development/check.py --timeout 900 -- test -p ptc -p type_resolution`
+  passed (`/tmp/luna-tools-wwod8ouv/result.json`, exit 0), including pinned-world
+  uniqueness rejection, budget interruption/recovery and invalid witness replay.
+- After extending coverage to ambient integers, `development/check.py --timeout
+  900 -- test -p ptc --test type_inputs` passed all 13 tests
+  (`/tmp/luna-tools-jqn3yxwq/result.json`, exit 0).
+- Workspace formatting passed (`/tmp/luna-tools-mm_v_wj0/result.json`, exit 0).
+
+This is bounded model search, not complete ambiguity decision: unavailable theory
+models, exhausted fuel, and opaque application tables that cannot be kept
+identical still return Unknown. No source or library interface was changed.
