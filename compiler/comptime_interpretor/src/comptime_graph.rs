@@ -63,9 +63,39 @@ impl Interpreter<'_> {
                     self.check_comptime_graph_inner(&entry.value().value, source, depth + 1, seen)?;
                 }
             }
-            Value::Tuple(values)
-            | Value::Record { fields: values, .. }
-            | Value::Variant { fields: values, .. } => {
+            Value::Record {
+                declaration,
+                arguments,
+                fields,
+            }
+            | Value::Variant {
+                declaration,
+                arguments,
+                fields,
+                ..
+            } => {
+                // A shared cell can change after capture. Inspect the actual
+                // nominal domain, including inactive enum alternatives, rather
+                // than trusting the closure's original environment signature.
+                let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+                let mut fuel = before;
+                let charged = arguments.iter().try_for_each(|argument| {
+                    nir::type_computations::charge_term(argument, &mut fuel)
+                });
+                self.budget.steps -= (before - fuel) as u64;
+                charged.map_err(|_| self.failure(ErrorKind::StepsExhausted, Some(source)))?;
+                self.check_comptime_domain(
+                    &Term::Nominal {
+                        declaration: *declaration,
+                        arguments: arguments.clone(),
+                    },
+                    source,
+                )?;
+                for value in fields {
+                    self.check_comptime_graph_inner(value, source, depth + 1, seen)?;
+                }
+            }
+            Value::Tuple(values) => {
                 for value in values {
                     self.check_comptime_graph_inner(value, source, depth + 1, seen)?;
                 }

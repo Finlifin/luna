@@ -146,7 +146,35 @@ mod tests {
     }
     #[test]
     fn shared_closure_cells_are_rechecked_after_mutation() {
-        let package = package();
+        let mut package = package();
+        let declaration = DeclarationId {
+            package: 81,
+            local: 2,
+        };
+        package.enums.push(nir::program::Enum {
+            declaration,
+            name: "Packet".into(),
+            is_intrinsic: false,
+            type_parameters: vec![],
+            parameter_types: vec![],
+            requirements: vec![],
+            capabilities: vec![],
+            groups: vec![],
+            encoding: None,
+            symbol_encoding: None,
+            variants: vec![
+                nir::program::Variant {
+                    name: "empty".into(),
+                    shape: nir::program::VariantShape::Unit,
+                    fields: vec![],
+                },
+                nir::program::Variant {
+                    name: "pointer".into(),
+                    shape: nir::program::VariantShape::Tuple,
+                    fields: vec![Term::Pointer(Box::new(Term::Primitive(Primitive::Bool)))],
+                },
+            ],
+        });
         let cell = Storage::new(Value::Bool(true));
         let binding = LocalId { owner: 2, index: 0 };
         let ty = Term::Closure {
@@ -185,6 +213,18 @@ mod tests {
             );
             *cell.0.lock().unwrap() =
                 Value::Pointer(target.pointer(Term::Primitive(Primitive::Bool), vec![]));
+            assert_eq!(
+                vm.invoke(package.functions[0].declaration, vec![object.clone()])
+                    .unwrap_err()
+                    .kind,
+                ErrorKind::PhaseMismatch
+            );
+            *cell.0.lock().unwrap() = Value::Variant {
+                declaration,
+                arguments: vec![],
+                index: 0,
+                fields: vec![],
+            };
             assert_eq!(
                 vm.invoke(package.functions[0].declaration, vec![object.clone()])
                     .unwrap_err()

@@ -10951,3 +10951,29 @@ Validation from `/home/fin/luna`:
 
 This closes variant construction admission; it does not claim complete generic
 elaboration/invocation suspension or a general post-specialization phase pass.
+
+
+### Mutable capture graphs recheck nominal storage identities
+
+The live invocation graph checker previously traversed only the active fields
+of record and variant values. A host-updated shared capture cell could therefore
+contain an empty variant of an enum with an inactive pointer alternative and
+pass the comptime boundary. The existing mutation/recovery regression now
+reproduces this case (`/tmp/luna-tools-8d6xu3tb/result.json`, exit 101).
+
+Graph admission now reconstructs each nominal value's declared domain from its
+actual declaration and arguments, charges the argument copy before allocation,
+and validates that domain against the current nominal catalog. Field traversal
+still follows, and visited cell identities remain local to one observation.
+The boundary does not trust an old closure environment signature or cache a
+successful check across mutations. This is invocation-boundary validation of
+live host values, not a new source-language mutation facility.
+
+Validation from `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor`:
+  passed, exit 0 (`/tmp/luna-tools-tiazz4e9/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test
+  comptime_storage_domains --test closure_environment_parameters`: passed,
+  exit 0 (`/tmp/luna-tools-bqmsod5w/result.json`).
+- Workspace formatting passed (`/tmp/luna-tools-1j8xuvt0/result.json`);
+  `git diff --check` passed.
