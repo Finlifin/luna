@@ -75,9 +75,21 @@ impl Interpreter<'_> {
         let length = self.list_value_length(&list, source)?;
         let position = self.list_position(index, length, source)?;
         match list {
-            Value::List { mut values, .. } => Ok(values.swap_remove(position)),
+            Value::List { values, .. } => self.read_list_element(&values, position, source),
             _ => unreachable!(),
         }
+    }
+    fn read_list_element(
+        &mut self,
+        values: &ListValues,
+        position: usize,
+        source: SourceRange,
+    ) -> Result<Value, Error> {
+        let (value, work) = values
+            .element(position)
+            .ok_or_else(|| self.failure(ErrorKind::IndexOutOfBounds, Some(source)))?;
+        self.integer_operation(Some(source), |budget| budget.consume(work))?;
+        self.checkpoint_representation(value, source)
     }
     pub(super) fn read_local_list_index(
         &mut self,
@@ -129,9 +141,7 @@ impl Interpreter<'_> {
         };
         let position = self.list_position(value, length, source)?;
         let value = match list {
-            Value::List { values, .. } => {
-                self.checkpoint_representation(&values[position], source)?
-            }
+            Value::List { values, .. } => self.read_list_element(values, position, source)?,
             _ => unreachable!(),
         };
         Ok(Flow::Value(value))

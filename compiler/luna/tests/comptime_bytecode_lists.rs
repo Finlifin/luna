@@ -163,6 +163,42 @@ fn list_indices_preserve_bounds_snapshots_and_type_values() {
 }
 
 #[test]
+fn persistent_list_indexing_keeps_the_snapshot_before_index_effects() {
+    let package = support::compile_with_tuple(
+        "typealias Type = .Type'builtin;
+        typealias Integer = .Integer'builtin;
+        typealias List<T> = TupleElements<T>;
+        const concat = .list_concat'builtin;
+        comptime fn build() -> List<bool> {
+            var values: List<bool> = [];
+            var i: Integer = 0;
+            while i < 64 {
+                values = concat(bool, values, [true]);
+                i += 1;
+            }
+            values
+        }
+        comptime fn run() -> bool {
+            var values = build();
+            let old = values[do { values = [false]; 63 }];
+            old and not values[0] and build()[31]
+        }",
+    );
+    for bytecode in [false, true] {
+        let mut vm = if bytecode {
+            Interpreter::for_comptime(&package, Budget::default())
+        } else {
+            Interpreter::for_comptime_tree(&package, Budget::default())
+        }
+        .unwrap();
+        assert_eq!(
+            vm.invoke(support::id(&package, "run"), vec![]).unwrap(),
+            Value::Bool(true)
+        );
+    }
+}
+
+#[test]
 fn repeated_append_keeps_copies_and_callback_snapshots() {
     let package = support::compile_with_tuple(
         "typealias Type = .Type'builtin;

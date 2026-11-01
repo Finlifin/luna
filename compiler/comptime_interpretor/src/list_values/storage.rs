@@ -143,6 +143,27 @@ impl Storage {
     pub fn first(&self) -> Option<&Value> {
         self.root.first()
     }
+    pub fn element(&self, mut index: usize) -> Option<(&Value, usize)> {
+        if index >= self.len() {
+            return None;
+        }
+        let mut node = self.root.as_ref();
+        let mut work = 1;
+        loop {
+            match node {
+                Node::Leaf(values) => return Some((&values[index], work)),
+                Node::Branch { left, right, .. } => {
+                    node = if index < left.len() {
+                        left
+                    } else {
+                        index -= left.len();
+                        right
+                    };
+                    work += 1;
+                }
+            }
+        }
+    }
     pub fn append(&mut self, other: Self) -> usize {
         // Preserve the contiguous fast path when no snapshot shares either
         // leaf. Shared prefixes use persistent joins instead of copy-on-write.
@@ -323,5 +344,24 @@ mod tests {
             );
         }
         assert_eq!(original.len(), 200);
+    }
+
+    #[test]
+    fn element_reads_visit_only_a_balanced_path_without_flattening() {
+        let mut list = Storage::from(vec![]);
+        for i in 0..4096 {
+            // Retain each prefix during concatenation, as ordinary calls do.
+            let snapshot = list.clone();
+            list.append(Storage::from(vec![Value::UnsignedInteger(i)]));
+            assert_eq!(snapshot.len(), i as usize);
+        }
+        for i in 0..4096 {
+            let (value, work) = list.element(i).unwrap();
+            assert_eq!(*value, Value::UnsignedInteger(i as u128));
+            assert!(work <= 16, "index {i}: {work}");
+        }
+        assert!(list.element(4096).is_none());
+        assert!(list.element(usize::MAX).is_none());
+        assert!(list.flat.get().is_none());
     }
 }

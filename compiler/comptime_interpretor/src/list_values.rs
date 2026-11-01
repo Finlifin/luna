@@ -84,6 +84,11 @@ impl ListValues {
     pub fn first(&self) -> Option<&Value> {
         self.values.first()
     }
+    /// Read one immutable element without materializing a contiguous payload.
+    /// The work count includes each visited tree node, including the leaf.
+    pub(crate) fn element(&self, index: usize) -> Option<(&Value, usize)> {
+        self.values.element(index)
+    }
     pub fn truncate(&mut self, len: usize) {
         self.summary.take();
         self.values.truncate(len);
