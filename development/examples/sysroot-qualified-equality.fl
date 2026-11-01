@@ -1,0 +1,77 @@
+{- Runtime equality consumes affine wrappers and cleans every owned payload. -}
+struct Key {value: u8, retired: *bool}
+impl Drop for Key {
+    fn drop(*self) {
+        assumes not self.retired.*.*;
+        self.retired.*.* = true;
+    }
+}
+impl Eq for Key {
+    fn eq(self, other: Self) -> bool {
+        self.value == other.value
+    }
+}
+
+fn optional_trial(left_present: bool, right_present: bool) -> bool {
+    var left_retired = false;
+    var right_retired = false;
+    let left: ?Key = if left_present {Key {value: 7, retired: left_retired.ref}} else {null};
+    let right: ?Key = if right_present {Key {value: 7, retired: right_retired.ref}} else {null};
+    let equal = left.eq(right);
+    equal == (left_present == right_present)
+        and left_retired == left_present and right_retired == right_present
+}
+
+test optional_affine_cleanup {
+    let result = optional_trial(false, false);
+    assumes result;
+    let result = optional_trial(true, false);
+    assumes result;
+    let result = optional_trial(false, true);
+    assumes result;
+    let result = optional_trial(true, true);
+    assumes result;
+}
+
+fn error_trial(left_error: bool, right_error: bool) -> bool {
+    var left_retired = false;
+    var right_retired = false;
+    let left: !Key Key = if left_error {error Key {value: 7, retired: left_retired.ref}} else {Key {value: 7, retired: left_retired.ref}};
+    let right: !Key Key = if right_error {error Key {value: 7, retired: right_retired.ref}} else {Key {value: 7, retired: right_retired.ref}};
+    let equal = left.eq(right);
+    equal == (left_error == right_error) and left_retired and right_retired
+}
+
+test error_affine_cleanup {
+    let result = error_trial(false, false);
+    assumes result;
+    let result = error_trial(true, false);
+    assumes result;
+    let result = error_trial(false, true);
+    assumes result;
+    let result = error_trial(true, true);
+    assumes result;
+}
+
+struct PhaseKey {}
+impl Eq for PhaseKey { fn eq(self, other: Self) -> bool {false} }
+comptime impl ComptimeEq for PhaseKey { comptime fn eq(self, other: Self) -> bool {true} }
+comptime fn staged_equal() -> bool {
+    let left: ?PhaseKey = PhaseKey {};
+    let right: ?PhaseKey = PhaseKey {};
+    let failure: !PhaseKey PhaseKey = error PhaseKey {};
+    let same: !PhaseKey PhaseKey = error PhaseKey {};
+    left.eq(right) and failure.eq(same)
+}
+
+test comparison_phase_selection {
+    let left: ?PhaseKey = PhaseKey {};
+    let right: ?PhaseKey = PhaseKey {};
+    let equal = left.eq(right);
+    assumes not equal;
+    let failure: !PhaseKey PhaseKey = error PhaseKey {};
+    let same: !PhaseKey PhaseKey = error PhaseKey {};
+    let equal_errors = failure.eq(same);
+    assumes not equal_errors;
+    inline if staged_equal() {assumes true;} else {assumes false;}
+}

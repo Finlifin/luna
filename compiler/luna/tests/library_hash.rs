@@ -686,3 +686,22 @@ fn integer_key_protocol_recovers_from_budget_exhaustion_without_target_data() {
     assert_eq!(protocol.hash(&negative, &mut context).unwrap(), other);
     assert_eq!(protocol.hash(&positive, &mut context).unwrap(), first);
 }
+
+#[test]
+fn runtime_qualified_equality_requires_payload_evidence() {
+    for domain in ["?Key", "!Key bool", "!bool Key"] {
+        let input = source(&format!(
+            "mod qualified_equality {{ {} }}
+             struct Key {{value:bool}}
+             fn invalid(left:{domain},right:{domain})->bool {{left.as(Eq).eq(right)}}",
+            include_str!("../../../library/builtin/types/equality.fl")
+        ));
+        let failure = support::compile_with_protocols(&input, &Default::default())
+            .err()
+            .expect("missing runtime payload Eq must reject the call");
+        assert!(
+            failure.contains("trait") || failure.contains("method"),
+            "{failure}"
+        );
+    }
+}

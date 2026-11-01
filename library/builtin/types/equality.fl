@@ -1,0 +1,26 @@
+use primitives.bool;
+use comparison.Eq;
+
+{- Runtime comparison consumes wrappers through ordinary affine matching. -}
+impl Eq for ?T where T:- Eq {
+    fn eq(self, other: Self) -> bool = self match {
+        left? => other match {
+            right? => left.as(Eq).eq(right),
+            null => false,
+        },
+        null => other matches null,
+    };
+}
+
+impl Eq for !E T where T:- Eq, E:- Eq {
+    fn eq(self, other: Self) -> bool = self match {
+        left! => other match {
+            right! => left.as(Eq).eq(right),
+            error _ => false,
+        },
+        error left => other match {
+            _! => false,
+            error right => left.as(Eq).eq(right),
+        },
+    };
+}
