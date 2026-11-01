@@ -223,57 +223,65 @@ fn failed_bit_writeback_preserves_completed_rhs_writes() {
     };
     for compiled in [false, true] {
         let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
-        for (start, end, valid) in [(7, 11, false), (0, 3, false), (0, 4, true)] {
-            let body = expr(
-                Primitive::Void,
-                K::BitAssign {
-                    place: Place {
-                        root,
-                        fields: vec![],
-                    },
-                    storage_type: Term::Primitive(Primitive::U8),
-                    start,
-                    end,
-                    value: Box::new(expr(
-                        Primitive::BitVec(4),
-                        K::Block {
-                            statements: vec![expr(
-                                Primitive::Void,
-                                K::Assign {
-                                    place: Place {
-                                        root,
-                                        fields: vec![],
-                                    },
-                                    value: Box::new(expr(
-                                        Primitive::U8,
-                                        K::Literal(Literal::UnsignedInteger(0xa0)),
-                                    )),
-                                },
-                            )],
-                            result: Some(Box::new(expr(
-                                Primitive::BitVec(4),
-                                K::Literal(Literal::BitVec {
-                                    width: 4,
-                                    words: vec![5],
-                                }),
-                            ))),
+        for referenced in [false, true] {
+            for (start, end, valid) in [(7, 11, false), (0, 3, false), (0, 4, true)] {
+                let body = expr(
+                    Primitive::Void,
+                    K::BitAssign {
+                        place: Place {
+                            root,
+                            fields: vec![],
                         },
-                    )),
-                },
-            );
-            let mut environment = Environment::from([(root, Value::UnsignedInteger(0))]);
-            let result = if compiled {
-                let code = Arc::new(comptime_compiler::compile(&body, &mut 10000).unwrap());
-                assert!(code.to_string().contains("(write-bits "));
-                vm.execute_code(&code, &mut environment)
-            } else {
-                vm.eval(&body, &mut environment)
-            };
-            assert_eq!(result.is_ok(), valid);
-            assert_eq!(
-                vm.local_value(&environment, root, Some(source)).unwrap(),
-                Value::UnsignedInteger(if valid { 0xa5 } else { 0xa0 })
-            );
+                        storage_type: Term::Primitive(Primitive::U8),
+                        start,
+                        end,
+                        value: Box::new(expr(
+                            Primitive::BitVec(4),
+                            K::Block {
+                                statements: vec![expr(
+                                    Primitive::Void,
+                                    K::Assign {
+                                        place: Place {
+                                            root,
+                                            fields: vec![],
+                                        },
+                                        value: Box::new(expr(
+                                            Primitive::U8,
+                                            K::Literal(Literal::UnsignedInteger(0xa0)),
+                                        )),
+                                    },
+                                )],
+                                result: Some(Box::new(expr(
+                                    Primitive::BitVec(4),
+                                    K::Literal(Literal::BitVec {
+                                        width: 4,
+                                        words: vec![5],
+                                    }),
+                                ))),
+                            },
+                        )),
+                    },
+                );
+                let initial = Value::UnsignedInteger(0);
+                let initial = if referenced {
+                    Value::ComptimeReference(ValueReference::owned(initial))
+                } else {
+                    initial
+                };
+                let mut environment = Environment::from([(root, initial)]);
+                let result = if compiled {
+                    let code = Arc::new(comptime_compiler::compile(&body, &mut 10000).unwrap());
+                    assert!(code.to_string().contains("(write-bits "));
+                    vm.execute_code(&code, &mut environment)
+                } else {
+                    vm.eval(&body, &mut environment)
+                };
+                assert_eq!(result.is_ok(), valid);
+                assert_eq!(
+                    vm.local_value(&environment, root, Some(source)).unwrap(),
+                    Value::UnsignedInteger(if valid { 0xa5 } else { 0xa0 })
+                );
+            }
         }
     }
 }

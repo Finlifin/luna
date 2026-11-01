@@ -9863,3 +9863,38 @@ Validation from `/home/fin/luna`: `python3 -B development/check.py --timeout
 imports (`/tmp/luna-tools-217g7ce8/result.json`); the fixture now declares its
 builtin dependency and imports the centralized aliases. Workspace formatting
 and `git diff --check` passed.
+
+### Bit writeback through comptime value references
+
+Migrating `comptime_memory` exposed a real missing execution path: `self.word`
+bit updates reached `write_bit_place` with a `ComptimeReference` root, which the
+helper treated as an ordinary record and rejected with `Type`. The helper now
+projects the receiver's checked field path, reads the current value after RHS
+execution, constructs the bounded replacement, then commits through the same
+permission-checked value reference used by ordinary assignments. It does not
+create a source pointer or consult runtime Copy/Drop protocols.
+
+The source memory suite now checks value semantics for enum/newtype snapshots,
+nested records, generic receivers, constant/Type preparation, exact numbers,
+comptime callable fields and opaque Type values. Its Type-result memoization
+cases no longer demand runtime resource bindings for local copies or Eq/Hash
+implementation temporaries. The former pointer lifetime and runtime aggregate
+Copy-permission assertions were invalid comptime contracts and are removed;
+they are not claimed as equivalent value-reference coverage. General pointer
+rejection and other suites' legacy comptime pointer fixtures remain unfinished.
+
+Both execution engines exercise successful and failed bit updates through value
+references, including preservation of completed RHS writes. Additional checks
+cover forbidden rebinding, invalid projection paths and exhausted budgets without
+committing a replacement. Source cases cover early returns and empty bit ranges.
+
+Validation from `/home/fin/luna`:
+
+- Initial migrated source tests exposed the writeback failure:
+  `/tmp/luna-tools-y0acr7h8/result.json` (13 passed, one failed).
+- After the VM fix, `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_memory --test comptime_receivers` passed (14 and 10 cases;
+  `/tmp/luna-tools-wkr7ac05/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib` passed (372 cases;
+  `/tmp/luna-tools-qb9iy50f/result.json`).
+- Workspace formatting passed (`/tmp/luna-tools-qblzhuc2/result.json`);
+  `git diff --check` passed.
