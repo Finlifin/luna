@@ -405,6 +405,11 @@ fn shipped_type_factories_keep_identity_through_comptime_parameters() {
     input.write(
         "input.fl",
         "
+        comptime fn forward(value: A) -> Integer
+        where A, U, requires A == List<U>
+        {
+            value.length()
+        }
         comptime fn Apply(factory:pure comptime fn<Type> -> Type, input:Type) -> Type {
             factory<input>
         }
@@ -413,8 +418,9 @@ fn shipped_type_factories_keep_identity_through_comptime_parameters() {
         }
         const SEQUENCE=Apply(List, bool);
         const PRODUCT=Collect(Tuple);
+        const LENGTH=forward<List<bool>,bool>([true, false]);
         fn run()->bool {
-            const same = SEQUENCE == List<bool> and PRODUCT == Tuple<bool,u8>;
+            const same = SEQUENCE == List<bool> and PRODUCT == Tuple<bool,u8> and LENGTH == 2;
             same
         }
     ",

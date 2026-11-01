@@ -253,10 +253,11 @@ fn normal_form_bodies_are_not_unfolded_and_congruence_requires_admission() {
         local: 7,
     });
     proved(&context, goal);
-    assert!(matches!(
-        context.prove(eq(head(7, vec![a.clone()]), a), Budget::default()),
-        Outcome::Unknown { .. }
-    ));
+    let outcome = context.prove(eq(head(7, vec![a.clone()]), a), Budget::default());
+    let Outcome::NotEntailed(witness) = outcome else {
+        panic!("{outcome}")
+    };
+    context.verify_witness(&witness, Budget::default()).unwrap();
 }
 #[test]
 fn congruent_calls_are_not_injective_or_disjoint_without_a_contract() {
@@ -613,7 +614,7 @@ fn nominal_countermodels_are_concrete_scoped_and_independently_verified() {
 }
 
 #[test]
-fn unregistered_nominal_and_normal_form_countermodels_remain_unknown() {
+fn opaque_countermodels_require_registered_semantics_and_complete_tables() {
     let declaration = DeclarationId {
         package: 8,
         local: 3,
@@ -637,18 +638,20 @@ fn unregistered_nominal_and_normal_form_countermodels_remain_unknown() {
         sort: Sort::Type,
         arguments: vec![ty],
     };
+    let goal = eq(opaque(ty(P::Bool)), opaque(ty(P::Char)));
     assert!(matches!(
-        context.prove(
-            eq(opaque(ty(P::Bool)), opaque(ty(P::Char))),
-            Budget::default()
-        ),
+        Context::default().prove(goal.clone(), Budget::default()),
         Outcome::Unknown { .. }
     ));
-    context.assume(F::Or(vec![F::True, eq(opaque(ty(P::Bool)), ty(P::Bool))]));
-    assert!(matches!(
-        context.prove(F::False, Budget::default()),
-        Outcome::Unknown { .. }
-    ));
+    for goal in [goal, F::False] {
+        let outcome = context.prove(goal, Budget::default());
+        let Outcome::NotEntailed(witness) = outcome else {
+            panic!("{outcome}")
+        };
+        context.verify_witness(&witness, Budget::default()).unwrap();
+        // Even an atom hidden by a Boolean shortcut must have an interpretation.
+        context.assume(F::Or(vec![F::True, eq(opaque(ty(P::Bool)), ty(P::Bool))]));
+    }
 }
 
 #[test]

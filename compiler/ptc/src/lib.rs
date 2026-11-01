@@ -11,9 +11,11 @@ use conflicts::Conflict;
 mod effects;
 mod error_results;
 mod learning;
+mod model_applications;
 mod search;
 mod type_candidates;
 mod type_inputs;
+pub use model_applications::TypeApplication;
 pub use type_inputs::{TypeInputOutcome, TypeInputSolution};
 mod theory_state;
 use theory_state::Classes;
@@ -166,6 +168,7 @@ pub enum ProofTree {
 }
 #[derive(Clone, Debug)]
 pub struct Witness {
+    pub applications: Vec<TypeApplication>,
     pub tuple_heads: BTreeSet<DeclarationId>,
     pub scope: Vec<Vec<Sort>>,
     pub nominal_constructors: BTreeSet<DeclarationId>,
@@ -344,6 +347,8 @@ impl Context {
         {
             return Err(ProofError::Invalid);
         }
+        let applications =
+            model_applications::index(&witness.applications, self, &mut fuel, limit)?;
         let mut atoms = Vec::new();
         let mut terms = Terms::default();
         for formula in self
@@ -354,22 +359,31 @@ impl Context {
             collect(formula, &mut atoms, &mut terms, 0, limit, &self.scope)
                 .map_err(|_| ProofError::Invalid)?;
         }
+        let evaluation_fuel = std::cell::Cell::new(fuel);
         if atoms.iter().any(|atom| {
             model_atom(
                 atom,
                 &witness.types,
+                &applications,
+                &evaluation_fuel,
                 &witness.integers,
                 &self.nominal_constructors,
                 &self.tuple_heads,
             )
             .is_none()
         }) {
-            return Err(ProofError::Invalid);
+            return Err(if evaluation_fuel.get() == 0 {
+                ProofError::BudgetExhausted
+            } else {
+                ProofError::Invalid
+            });
         }
         let evaluate = |formula| {
             evaluate_model(
                 formula,
                 &witness.types,
+                &applications,
+                &evaluation_fuel,
                 &witness.integers,
                 &self.nominal_constructors,
                 &self.tuple_heads,
@@ -383,7 +397,11 @@ impl Context {
         {
             Ok(())
         } else {
-            Err(ProofError::Invalid)
+            Err(if evaluation_fuel.get() == 0 {
+                ProofError::BudgetExhausted
+            } else {
+                ProofError::Invalid
+            })
         }
     }
     /// Recover an already-mentioned structural type using equality evidence.
@@ -609,6 +627,7 @@ impl Context {
                 tree: conflict.tree,
             }),
             SearchResult::Model(model) => Outcome::NotEntailed(Witness {
+                applications: model.applications,
                 tuple_heads: (*self.tuple_heads).clone(),
                 scope: (*self.scope).clone(),
                 nominal_constructors: (*self.nominal_constructors).clone(),
@@ -1250,6 +1269,7 @@ struct Search<'a> {
     max_depth: usize,
 }
 struct Model {
+    applications: Vec<TypeApplication>,
     types: BTreeMap<DeclarationId, Term>,
     integers: BTreeMap<DeclarationId, i128>,
 }
@@ -1620,7 +1640,8 @@ impl Search<'_> {
                     sort: Sort::Type,
                     ..
                 }
-            ) {
+            ) && !model_applications::admitted(term, self.context)
+            {
                 representatives.entry(classes.root(id)).or_insert(id);
             }
         }
@@ -1657,17 +1678,82 @@ impl Search<'_> {
                 types.insert(*declaration, value);
             }
         }
+        let mut applications = Vec::new();
+        let mut keys = HashMap::new();
+        for (id, term) in self.terms.nodes.iter().enumerate() {
+            self.steps = self.steps.checked_sub(1)?;
+            if !model_applications::admitted(term, self.context) {
+                continue;
+            }
+            let Term::NormalForm {
+                head, arguments, ..
+            } = term
+            else {
+                unreachable!()
+            };
+            let mut concrete = Vec::new();
+            for argument in arguments {
+                concrete.push(reify(
+                    self.terms.ids[argument],
+                    self.terms,
+                    classes,
+                    &representatives,
+                    &mut free,
+                    &mut BTreeSet::new(),
+                    &self.context.nominal_constructors,
+                    &mut self.steps,
+                )?);
+            }
+            let result = reify(
+                id,
+                self.terms,
+                classes,
+                &representatives,
+                &mut free,
+                &mut BTreeSet::new(),
+                &self.context.nominal_constructors,
+                &mut self.steps,
+            )?;
+            for value in concrete.iter().chain(std::iter::once(&result)) {
+                nir::type_computations::charge_term(value, &mut self.steps).ok()?;
+            }
+            let key = (*head, concrete.clone());
+            if let Some(previous) = keys.get(&key) {
+                if previous != &result {
+                    return None;
+                }
+            } else {
+                keys.insert(key, result.clone());
+                applications.push(TypeApplication {
+                    head: *head,
+                    arguments: concrete,
+                    result,
+                });
+            }
+        }
+        let application_index = model_applications::index(
+            &applications,
+            self.context,
+            &mut self.steps,
+            self.max_depth.min(128),
+        )
+        .ok()?;
         // A Boolean short circuit must not conceal an uninterpreted atom in
         // a purported concrete model (opaque calls still require evidence).
         let mut atom_values = Vec::new();
+        let evaluation_fuel = std::cell::Cell::new(self.steps);
         for atom in self.atoms {
-            atom_values.push(model_atom(
+            let value = model_atom(
                 atom,
                 &types,
+                &application_index,
+                &evaluation_fuel,
                 &theory.integers,
                 &self.context.nominal_constructors,
                 &self.context.tuple_heads,
-            )?);
+            );
+            self.steps = evaluation_fuel.get();
+            atom_values.push(value?);
         }
         let cnf = self
             .boolean
@@ -1677,6 +1763,7 @@ impl Search<'_> {
         cnf.accepts(&atom_values, &mut self.steps)
             .ok()?
             .then_some(Model {
+                applications,
                 types,
                 integers: theory.integers.clone(),
             })
@@ -1704,17 +1791,29 @@ fn evaluate_kind_with_heads(
 fn evaluate_model(
     formula: &Formula,
     types: &BTreeMap<DeclarationId, Term>,
+    applications: &model_applications::Applications,
+    fuel: &std::cell::Cell<usize>,
     integers: &BTreeMap<DeclarationId, i128>,
     nominal: &BTreeSet<DeclarationId>,
     tuple_heads: &BTreeSet<DeclarationId>,
 ) -> Option<bool> {
     evaluate(formula, &|atom| {
-        model_atom(atom, types, integers, nominal, tuple_heads)
+        model_atom(
+            atom,
+            types,
+            applications,
+            fuel,
+            integers,
+            nominal,
+            tuple_heads,
+        )
     })
 }
 fn model_atom(
     atom: &Atom,
     types: &BTreeMap<DeclarationId, Term>,
+    applications: &model_applications::Applications,
+    fuel: &std::cell::Cell<usize>,
     integers: &BTreeMap<DeclarationId, i128>,
     nominal: &BTreeSet<DeclarationId>,
     tuple_heads: &BTreeSet<DeclarationId>,
@@ -1734,15 +1833,15 @@ fn model_atom(
             } else {
                 evaluate_kind_with_heads(
                     query.kind,
-                    &substitute_types(&query.ty, types, nominal)?,
+                    &substitute_types(&query.ty, types, applications, fuel, nominal)?,
                     nominal,
                     tuple_heads,
                 )
             }
         }
         Atom::TypeEqual(atom) => {
-            let a = substitute_types(&atom.0, types, nominal)?;
-            let b = substitute_types(&atom.1, types, nominal)?;
+            let a = substitute_types(&atom.0, types, applications, fuel, nominal)?;
+            let b = substitute_types(&atom.1, types, applications, fuel, nominal)?;
             if !closed_type(&a, nominal) || !closed_type(&b, nominal) {
                 return None;
             }
@@ -1890,18 +1989,40 @@ fn rebuild(
 fn substitute_types(
     term: &Term,
     types: &BTreeMap<DeclarationId, Term>,
+    applications: &model_applications::Applications,
+    fuel: &std::cell::Cell<usize>,
     nominal: &BTreeSet<DeclarationId>,
 ) -> Option<Term> {
+    let Some(remaining) = fuel.get().checked_sub(1) else {
+        fuel.set(0);
+        return None;
+    };
+    fuel.set(remaining);
     if let Term::Rigid {
         declaration,
         sort: Sort::Type,
     } = term
     {
-        return types.get(declaration).cloned();
+        return model_applications::copy(types.get(declaration)?, fuel);
     }
-    rebuild(term, nominal, &mut |child| {
-        substitute_types(child, types, nominal)
-    })
+    if let Term::NormalForm {
+        head,
+        sort: Sort::Type,
+        arguments,
+    } = term
+    {
+        let arguments = arguments
+            .iter()
+            .map(|arg| substitute_types(arg, types, applications, fuel, nominal))
+            .collect::<Option<Vec<_>>>()?;
+        // Child substitution charged each ground argument before hashing it.
+        return model_applications::copy(applications.get(&(*head, arguments))?, fuel);
+    }
+    let value = rebuild(term, nominal, &mut |child| {
+        substitute_types(child, types, applications, fuel, nominal)
+    })?;
+    model_applications::charge(&value, fuel)?;
+    Some(value)
 }
 fn closed_type(term: &Term, nominal: &BTreeSet<DeclarationId>) -> bool {
     if matches!(term, Term::Nominal { declaration, arguments } if !arguments.is_empty() && !nominal.contains(declaration))
@@ -2005,6 +2126,10 @@ impl fmt::Display for Outcome {
                 }
                 for (id, value) in &witness.integers {
                     write!(f, " (integer {id} {value})")?;
+                }
+                f.write_str(") (applications")?;
+                for application in &witness.applications {
+                    write!(f, " {application}")?;
                 }
                 write!(f, ") (goal {}) (nominal-constructors", witness.goal)?;
                 for head in &witness.nominal_constructors {

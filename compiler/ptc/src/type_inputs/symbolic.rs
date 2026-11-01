@@ -118,12 +118,28 @@ pub(super) fn same_ambient(
                 return Err(UnknownReason::BudgetExhausted);
             }
         }
+        for application in &model.applications {
+            for value in application
+                .arguments
+                .iter()
+                .chain(std::iter::once(&application.result))
+            {
+                if !within_input_limits(
+                    Input::Term(value),
+                    budget.max_depth.min(128),
+                    &mut budget.steps,
+                ) {
+                    return Err(UnknownReason::BudgetExhausted);
+                }
+            }
+        }
         budget.steps = budget
             .steps
             .checked_sub(model.integers.len())
             .ok_or(UnknownReason::BudgetExhausted)?;
     }
-    Ok(first.integers == second.integers
+    Ok(first.applications == second.applications
+        && first.integers == second.integers
         && first
             .types
             .iter()

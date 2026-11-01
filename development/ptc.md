@@ -313,3 +313,45 @@ required. For example `T = F<S>, S = U` with opaque F can still return Unknown
 because that initial model cannot be reified, even though candidate substitution
 and congruence prove `T = F<U>`; the unit test exercises those latter operations
 without pretending the full search succeeded.
+
+
+## Finite interpretations for admitted opaque Type applications
+
+The previous dependency-closure limitation for `T = F<S>, S = U` came from
+model reification, not failure to prove the symbolic equality. Witnesses now
+carry an ordered finite table of admitted opaque Type applications, with ground
+Type arguments and closed structural results. Congruence-class reification uses
+those results without interpreting function bodies or treating opaque heads as
+injective constructors. Nested calls and equations such as `T = F<T>` can have
+finite interpretations without creating recursive structural Types.
+
+The independent witness verifier checks registration, closed inputs/results,
+unique ground application keys, all observed atoms, and the complete assumptions
+and negated goal. Missing, duplicate or forged table entries are rejected. Model
+substitution and table admission charge the shared budget; failures cannot
+publish partial input solutions. S-expression counterexample dumps include the
+ordered application table. Relative ambiguity checks additionally retain the
+same function interpretation, conservatively returning Unknown when the two
+tables differ.
+
+These tables are model evidence only. They never enter regional assumptions or
+replace the proof needed for an exported Type input. The solver can now recover
+`T = F<U>` with a replayable equality proof, while `F<A> = F<B>` still does not
+prove `A = B`. Two solver tests that required Unknown after congruence admission
+now require independently verified countermodels; unregistered heads remain
+Unknown.
+
+The supported fragment covers admitted opaque heads whose arguments and result
+are Type-sort. Value arguments, implementation-world trait evidence and trusted
+Tuple layout/classification interpretations remain outside this model table.
+This is not a complete symbolic model implementation.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p ptc -p type_resolution`: 451 passed (`/tmp/luna-tools-sb6gv6qz/result.json`).
+- After adding cyclic-application coverage, `python3 -B development/check.py --timeout 900 -- test -p ptc --test opaque_models`: 5 passed (`/tmp/luna-tools-27ujwler/result.json`).
+- `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: passed (`/tmp/luna-tools-24ezdqvm/result.json`).
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_type_factories_keep_identity_through_comptime_parameters`: passed (`/tmp/luna-tools-hopp3w1w/result.json`). Real sysroot imports now also exercise `A == List<U>` forwarding to `List.length()`; the Integer assertion stays comptime and only its bool result enters runtime. Earlier fixture attempts correctly rejected a runtime pointer to comptime-only List, an incorrectly spelled method, and runtime use of Integer; no phase rule was relaxed.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`: 3 passed (`/tmp/luna-tools-zdnj4cdw/result.json`).
+- `git diff --check`: passed.
