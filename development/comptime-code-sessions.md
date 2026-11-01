@@ -58,6 +58,29 @@ per-input graph preparation now retains the most recent Type specialization, as 
 A generic body whose parameter telescope depends on ordinary invocation values
 can still require a fresh per-call body after declaration specialization.
 
+## Source snapshot phase evidence
+
+Source indexes now retain their exact owning package and certify successful
+comptime preparation, including the full phase traversal. Warm source-session
+construction reuses this evidence instead of revisiting every body and default.
+The internal constructor checks allocation identity before accepting the indexes;
+equal declaration IDs do not authorize reuse. Keeping the owner alive prevents
+address reuse, and copy-on-write package changes acquire a different identity.
+
+Failed phase validation or exhausted preparation cannot publish these indexes.
+Ordinary constructors and mismatched snapshots still validate independently.
+Trait relationships and formation preparation still run, and world-table fuel
+remains conservatively charged. Input admission, contracts, solver callbacks,
+execution and result admission are invocation-local. This removes a redundant
+traversal; it does not yet share the complete source VM world, and no measured
+wall-clock speedup is claimed.
+
+Verification from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib code_session`: three passed (`/tmp/luna-tools-8bps5xms/result.json`). Covers invalid snapshot isolation, failed publication, budget exhaustion, fresh VM state and recovery. An initial fixture used the wrong Rust enum import; corrected before this passing run.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_memory --test execution memoized_`: fifteen passed (`/tmp/luna-tools-aod73lqn/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_memory`: twenty passed (`/tmp/luna-tools-1iawix2l/result.json`), including repeated non-Type execution and generic ordinary-input isolation.
+
 ## Generic declaration specialization
 
 The source session also retains closed, noncapturing declaration specializations

@@ -107,7 +107,8 @@ impl<'program> Interpreter<'program> {
     }
 
     /// Construct a fresh execution state using this snapshot's declaration index.
-    /// Phase, trait and formation checks still run with the current allowance.
+    /// Successful phase validation belongs to the exact immutable snapshot;
+    /// trait and formation preparation still consume the current allowance.
     pub fn for_comptime_in_session(
         package: &'program Package,
         session: &mut CodeSession,
@@ -129,6 +130,7 @@ impl<'program> Interpreter<'program> {
         }
         let indexes = session.indexes.get_or_insert_with(|| {
             Arc::new(declaration_index::SourceIndexes {
+                source: source.clone(),
                 method_contracts: vm.method_contracts.entries.clone(),
                 normal_forms: vm.normal_forms.positions.clone(),
                 newtypes: vm.newtypes.positions.clone(),
@@ -200,6 +202,93 @@ impl<'program> Interpreter<'program> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_phase_evidence_cannot_cross_snapshot_or_failed_publication() {
+        let body = Expr {
+            ty: Term::Primitive(Primitive::Bool),
+            kind: K::Literal(nir::program::Literal::Bool(true)),
+            source: SourceRange { start: 1, end: 2 },
+        };
+        let source = Arc::new(Package {
+            functions: vec![nir::program::Function {
+                declaration: DeclarationId {
+                    package: 1,
+                    local: 1,
+                },
+                name: "answer".into(),
+                phase: nir::program::FunctionPhase::Comptime,
+                inline: false,
+                pure: false,
+                is_unsafe: false,
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                entry_snapshots: vec![],
+                capabilities: vec![],
+                requirements: vec![],
+                type_parameters: vec![],
+                signature: Term::Function {
+                    parameters: vec![],
+                    result: Box::new(Term::Primitive(Primitive::Bool)),
+                },
+                parameters: vec![],
+                defaults: vec![],
+                body: body.clone(),
+            }],
+            ..Default::default()
+        });
+        let mut session = CodeSession::new(source.clone());
+        Interpreter::for_comptime_in_session(&source, &mut session, &mut Budget::default())
+            .unwrap();
+        let evidence = session.indexes.clone().unwrap();
+        // Same declaration IDs and bodies, but an invalid parameter frame.
+        let mut changed = source.as_ref().clone();
+        changed.functions[0].defaults.push((0, body));
+        let changed = Arc::new(changed);
+        let mut failed = CodeSession::new(changed.clone());
+        for _ in 0..2 {
+            assert_eq!(
+                Interpreter::for_comptime_in_session(
+                    &changed, &mut failed, &mut Budget::default(),
+                ).err().unwrap().kind,
+                ErrorKind::PhaseMismatch,
+            );
+            assert!(failed.indexes.is_none());
+            assert_eq!(
+                Interpreter::for_comptime_in_session(
+                    &changed,
+                    &mut session,
+                    &mut Budget::default(),
+                )
+                .err()
+                .unwrap()
+                .kind,
+                ErrorKind::PhaseMismatch,
+            );
+            // Also defend the internal constructor, rather than depending only
+            // on the public session entry point to establish world identity.
+            assert_eq!(
+                Interpreter::for_comptime_with_index(
+                    &changed,
+                    &[],
+                    Budget::default(),
+                    Some(evidence.clone()),
+                )
+                .err()
+                .unwrap()
+                .kind,
+                ErrorKind::PhaseMismatch,
+            );
+        }
+        let recovered =
+            Interpreter::for_comptime_in_session(&source, &mut session, &mut Budget::default())
+                .unwrap();
+        assert!(recovered.comptime_only);
+        assert!(recovered.events().is_empty());
+        assert!(Arc::ptr_eq(&evidence, session.indexes.as_ref().unwrap()));
+        assert!(Arc::ptr_eq(&source, &evidence.source));
+    }
 
     #[test]
     fn source_index_is_shared_without_reusing_execution_state() {

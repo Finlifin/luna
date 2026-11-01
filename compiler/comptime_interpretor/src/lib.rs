@@ -1914,14 +1914,20 @@ impl<'a> Interpreter<'a> {
         budget: Budget,
         positions: Option<Arc<declaration_index::SourceIndexes>>,
     ) -> Result<Self, Error> {
-        // Reject an undersized world allowance before phase validation walks
-        // declarations. Actual charging occurs once in with_assumptions.
-        let mut phase_allowance = budget;
-        invocation_budget::charge_world_tables(package, &mut phase_allowance)?;
-        nir::phases::validate(package).map_err(|error| Error {
-            kind: ErrorKind::PhaseMismatch,
-            source: Some(error.source),
-        })?;
+        // Index publication certifies successful phase validation of this exact
+        // owned snapshot. Never transfer that evidence by declaration identity
+        // or structural equality. Caller assumptions are not phase evidence.
+        let positions = positions.filter(|index| std::ptr::eq(package, index.source.as_ref()));
+        if positions.is_none() {
+            // Reject an undersized allowance before traversing bodies. Actual
+            // charging still occurs once in with_assumptions_and_index.
+            let mut phase_allowance = budget;
+            invocation_budget::charge_world_tables(package, &mut phase_allowance)?;
+            nir::phases::validate(package).map_err(|error| Error {
+                kind: ErrorKind::PhaseMismatch,
+                source: Some(error.source),
+            })?;
+        }
         let mut interpreter =
             Self::with_assumptions_and_index(package, assumptions, budget, positions)?;
         interpreter.comptime_only = true;
