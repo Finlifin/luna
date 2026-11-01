@@ -171,6 +171,15 @@ fn normalize(
             sort: *sort,
             arguments: many(arguments, fuel)?,
         },
+        Term::MethodValue(method) => Term::MethodValue(Box::new(TraitMethodIdentity {
+            interface: InterfaceInstance {
+                declaration: method.interface.declaration,
+                arguments: many(&method.interface.arguments, fuel)?,
+            },
+            subject: normalize(&method.subject, values, fuel, depth + 1)?,
+            member: method.member,
+            method_arguments: many(&method.method_arguments, fuel)?,
+        })),
         Term::FunctionValue {
             declaration,
             arguments,

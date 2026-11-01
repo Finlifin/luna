@@ -20,6 +20,9 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), &'static str> {
         }
         charge(fuel, 1)?;
         let width = match ty {
+            Term::MethodValue(method) => 1usize
+                .saturating_add(method.interface.arguments.len())
+                .saturating_add(method.method_arguments.len()),
             Term::ErrorResult { errors, .. } => errors.len().saturating_add(1),
             Term::Computation { effects, .. } => {
                 charge(fuel, effects.len())?;
@@ -54,6 +57,7 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), &'static str> {
         charge(fuel, width)?;
         let mut children = Vec::new();
         match ty {
+            Term::MethodValue(method) => children.extend(method.terms()),
             Term::ErrorResult { errors, result } => {
                 children.push(result.as_ref());
                 children.extend(errors);

@@ -175,6 +175,8 @@ comptime fn reducers_and_searches() -> bool {
 }
 
 test comptime_list_collectors {
+    let staged_default_result = staged_default_dispatch(bool);
+    assumes staged_default_result;
     inline if run() {
         assumes true;
     } else {
@@ -394,4 +396,19 @@ comptime fn staged_methods_stored() -> bool {
     let methods = saved_staged_methods;
     let saved = methods;
     saved.length() == 1 and (saved.first() matches _?)
+}
+
+comptime fn returned_staged_method() -> fn(comptime bool) -> bool
+where T
+{
+    saved_staged_methods.first() match {
+        method? => method,
+        null => bool.select,
+    }
+}
+
+fn staged_default_dispatch(comptime T: Type,
+    comptime .action: fn(comptime bool) -> bool = returned_staged_method<T>()) -> bool
+{
+    action(true)
 }

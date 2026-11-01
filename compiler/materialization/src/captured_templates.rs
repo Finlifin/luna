@@ -24,102 +24,106 @@ fn copied(value: &n::Expr, fuel: &mut usize) -> Result<n::Expr, String> {
 
 pub(super) fn storage(
     functions: &[iir::FunctionInstance],
+    frozen_methods: &[n::Expr],
     package: &n::Package,
     dispatch: &[n::DispatchInstance],
     type_cores: &mut nir::TypeInterner,
     fuel: &mut usize,
 ) -> Result<Vec<iir::template_storage::TemplateStorage>, String> {
     let mut tables: Vec<iir::template_storage::TemplateStorage> = Vec::new();
-    for function in functions {
-        iir::visit::expressions(&function.function, fuel, |expr, fuel| {
-            if !staged(&expr.ty) {
+    let mut retain = |expr: &n::Expr, fuel: &mut usize| {
+        if !staged(&expr.ty) {
+            return Ok(());
+        }
+        let key = match &expr.kind {
+            K::Function(declaration) => iir::InstanceKey {
+                declaration: *declaration,
+                arguments: vec![].into(),
+            },
+            K::FunctionInstance {
+                declaration,
+                arguments,
+            } => {
+                nir::type_computations::charge_term(&expr.ty, fuel).map_err(|e| e.to_string())?;
+                for argument in arguments {
+                    nir::type_computations::charge_term(argument, fuel)
+                        .map_err(|e| e.to_string())?;
+                }
+                iir::InstanceKey {
+                    declaration: *declaration,
+                    arguments: arguments.clone().into(),
+                }
+            }
+            K::TraitMethod {
+                interface,
+                interface_arguments,
+                subject,
+                member,
+                method_arguments,
+            } => {
+                *fuel = fuel
+                    .checked_sub(dispatch.len().saturating_add(1))
+                    .ok_or("template method selection budget exhausted")?;
+                let selected = dispatch
+                    .iter()
+                    .find(|selected| {
+                        selected.interface == *interface
+                            && selected.interface_arguments == *interface_arguments
+                            && selected.subject == *subject
+                    })
+                    .ok_or("template method has no selected implementation")?;
+                *fuel = fuel
+                    .checked_sub(selected.methods.len().saturating_add(1))
+                    .ok_or("template method selection budget exhausted")?;
+                let method = selected
+                    .methods
+                    .iter()
+                    .find(|method| {
+                        method.member == *member && method.method_arguments == *method_arguments
+                    })
+                    .ok_or("template method has no selected body")?;
+                for argument in &method.arguments {
+                    nir::type_computations::charge_term(argument, fuel)
+                        .map_err(|e| e.to_string())?;
+                }
+                iir::InstanceKey {
+                    declaration: method.body,
+                    arguments: method.arguments.clone().into(),
+                }
+            }
+            _ => return Ok(()),
+        };
+        for table in &tables {
+            *fuel = fuel
+                .checked_sub(table.targets().len().saturating_add(1))
+                .ok_or("captured template lookup budget exhausted")?;
+            for target in table.targets() {
+                for argument in target.arguments.iter() {
+                    nir::type_computations::charge_term(argument, fuel)
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+            if table.targets().contains(&key) {
+                if table.logical_type() != &expr.ty {
+                    return Err("captured template has inconsistent logical types".into());
+                }
                 return Ok(());
             }
-            let key = match &expr.kind {
-                K::Function(declaration) => iir::InstanceKey {
-                    declaration: *declaration,
-                    arguments: vec![].into(),
-                },
-                K::FunctionInstance {
-                    declaration,
-                    arguments,
-                } => {
-                    nir::type_computations::charge_term(&expr.ty, fuel)
-                        .map_err(|e| e.to_string())?;
-                    for argument in arguments {
-                        nir::type_computations::charge_term(argument, fuel)
-                            .map_err(|e| e.to_string())?;
-                    }
-                    iir::InstanceKey {
-                        declaration: *declaration,
-                        arguments: arguments.clone().into(),
-                    }
-                }
-                K::TraitMethod {
-                    interface,
-                    interface_arguments,
-                    subject,
-                    member,
-                    method_arguments,
-                } => {
-                    *fuel = fuel
-                        .checked_sub(dispatch.len().saturating_add(1))
-                        .ok_or("template method selection budget exhausted")?;
-                    let selected = dispatch
-                        .iter()
-                        .find(|selected| {
-                            selected.interface == *interface
-                                && selected.interface_arguments == *interface_arguments
-                                && selected.subject == *subject
-                        })
-                        .ok_or("template method has no selected implementation")?;
-                    *fuel = fuel
-                        .checked_sub(selected.methods.len().saturating_add(1))
-                        .ok_or("template method selection budget exhausted")?;
-                    let method = selected
-                        .methods
-                        .iter()
-                        .find(|method| {
-                            method.member == *member && method.method_arguments == *method_arguments
-                        })
-                        .ok_or("template method has no selected body")?;
-                    for argument in &method.arguments {
-                        nir::type_computations::charge_term(argument, fuel)
-                            .map_err(|e| e.to_string())?;
-                    }
-                    iir::InstanceKey {
-                        declaration: method.body,
-                        arguments: method.arguments.clone().into(),
-                    }
-                }
-                _ => return Ok(()),
-            };
-            for table in &tables {
-                *fuel = fuel
-                    .checked_sub(table.targets().len().saturating_add(1))
-                    .ok_or("captured template lookup budget exhausted")?;
-                for target in table.targets() {
-                    for argument in target.arguments.iter() {
-                        nir::type_computations::charge_term(argument, fuel)
-                            .map_err(|e| e.to_string())?;
-                    }
-                }
-                if table.targets().contains(&key) {
-                    if table.logical_type() != &expr.ty {
-                        return Err("captured template has inconsistent logical types".into());
-                    }
-                    return Ok(());
-                }
-            }
-            tables.push(iir::template_storage::TemplateStorage::from_package_in(
-                expr.ty.clone(),
-                vec![key],
-                package,
-                type_cores,
-                fuel,
-            )?);
-            Ok(())
-        })?;
+        }
+        tables.push(iir::template_storage::TemplateStorage::from_package_in(
+            expr.ty.clone(),
+            vec![key],
+            package,
+            type_cores,
+            fuel,
+        )?);
+        Ok(())
+    };
+    for function in functions {
+        iir::visit::expressions(&function.function, fuel, &mut retain)?;
+    }
+    for expression in frozen_methods {
+        retain(expression, fuel)?;
     }
     Ok(tables)
 }

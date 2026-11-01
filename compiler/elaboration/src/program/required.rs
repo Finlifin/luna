@@ -1557,9 +1557,11 @@ impl Checker<'_, '_> {
                     .iter()
                     .filter(|(binding, _, _)| free.contains(binding))
                     .map(|(_, _, value)| value),
+                &mut live_methods,
                 &mut self.required_steps,
                 expr.span,
             )?);
+            members.extend(live_methods.iter().map(|method| method.member));
             for (binding, _, value) in live {
                 if !free.contains(binding) {
                     continue;
@@ -2376,6 +2378,7 @@ impl Checker<'_, '_> {
 // completed aggregate. Data types are not unfolded and no factory is invoked.
 pub(super) fn frozen_references<'a>(
     values: impl IntoIterator<Item = &'a Term>,
+    methods: &mut Vec<comptime_interpretor::TraitMethodIdentity>,
     steps: &mut u64,
     span: Span,
 ) -> Result<BTreeSet<DeclarationId>, Error> {
@@ -2389,6 +2392,10 @@ pub(super) fn frozen_references<'a>(
         let mut pending = vec![value];
         while let Some(value) = pending.pop() {
             match value {
+                Term::MethodValue(method) => {
+                    methods.push((**method).clone());
+                    pending.extend(method.terms());
+                }
                 Term::FunctionValue {
                     declaration,
                     arguments,

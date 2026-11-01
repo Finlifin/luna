@@ -2855,6 +2855,34 @@ fn constant<'layout>(
                 value: Some(Box::new(constant(heads, value, fuel, depth + 1)?)),
             }
         }
+        (
+            K::TraitMethod {
+                interface,
+                interface_arguments,
+                subject,
+                member,
+                method_arguments,
+            },
+            ty,
+        ) => {
+            crate::completed_type(ty, &BTreeSet::new(), fuel)?;
+            for argument in std::iter::once(subject)
+                .chain(interface_arguments)
+                .chain(method_arguments)
+            {
+                nir::type_computations::charge_term(argument, fuel).map_err(|e| e.to_string())?;
+                crate::completed_type(argument, &BTreeSet::new(), fuel)?;
+            }
+            Term::MethodValue(Box::new(nir::TraitMethodIdentity {
+                interface: nir::program::InterfaceInstance {
+                    declaration: *interface,
+                    arguments: interface_arguments.clone(),
+                },
+                subject: subject.clone(),
+                member: *member,
+                method_arguments: method_arguments.clone(),
+            }))
+        }
         (K::Function(declaration), ty)
             if matches!(
                 ty,

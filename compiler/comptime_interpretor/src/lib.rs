@@ -224,26 +224,7 @@ impl fmt::Display for ObjectValue {
         )
     }
 }
-#[derive(Clone, Debug, PartialEq)]
-pub struct TraitMethodIdentity {
-    pub interface: InterfaceInstance,
-    pub subject: Term,
-    pub member: DeclarationId,
-    pub method_arguments: Vec<Term>,
-}
-impl fmt::Display for TraitMethodIdentity {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "(runtime-trait-method {} (subject {}) (member {}) (method-arguments",
-            self.interface, self.subject, self.member
-        )?;
-        for argument in &self.method_arguments {
-            write!(f, " {argument}")?;
-        }
-        f.write_str("))")
-    }
-}
+pub use nir::TraitMethodIdentity;
 impl Value {
     /// Inspect the owned invocation graph without copying storage or executing
     /// callbacks. Shared closures and storage are visited once. Weak pointers
@@ -6736,6 +6717,9 @@ fn scoped_term_value_work_with_callables_in<'signature>(
             return None;
         }
         let children = match ty {
+            Term::MethodValue(method) => 1usize
+                .saturating_add(method.interface.arguments.len())
+                .saturating_add(method.method_arguments.len()),
             Term::OptionalValue { value, .. } => 1 + usize::from(value.is_some()),
             Term::ErrorValue { .. } => 3,
             Term::ListConcat { parts: fields, .. } | Term::NominalValue { fields, .. } => {
@@ -6844,6 +6828,9 @@ fn scoped_term_value_work_with_callables_in<'signature>(
             }
         }
         match ty {
+            Term::MethodValue(method) => {
+                pending.extend(method.terms().map(|term| (term, depth + 1, frames.clone())));
+            }
             Term::OptionalValue { ty, value } => {
                 pending.push((ty, depth + 1, frames.clone()));
                 if let Some(value) = value {

@@ -110,6 +110,7 @@ struct Builder<'a> {
     interface_contracts: Vec<iir::InterfaceContract>,
     effect_contracts: Vec<iir::effects::Contract>,
     effect_instances: HashSet<nir::effects::Operation>,
+    frozen_methods: Vec<n::Expr>,
     callable_identities: Vec<iir::CallableIdentity>,
     type_cores: nir::TypeInterner,
 }
@@ -330,6 +331,7 @@ pub fn instantiate_with_types(
         expansion_sources,
         effect_contracts,
         callable_identities,
+        frozen_methods,
         mut type_cores,
         remaining: mut publication_fuel,
     } = build(
@@ -343,6 +345,7 @@ pub fn instantiate_with_types(
     )?;
     let templates = captured_templates::storage(
         &functions,
+        &frozen_methods,
         package,
         &dispatch,
         &mut type_cores,
@@ -404,6 +407,7 @@ struct BuildResult {
     remaining: usize,
     expansion_sources: Vec<n::ExpansionSource>,
     effect_contracts: Vec<iir::effects::Contract>,
+    frozen_methods: Vec<n::Expr>,
     callable_identities: Vec<iir::CallableIdentity>,
     type_cores: nir::TypeInterner,
 }
@@ -473,6 +477,7 @@ fn build(
         interface_contracts: vec![],
         effect_contracts: vec![],
         effect_instances: HashSet::new(),
+        frozen_methods: vec![],
         callable_identities: vec![],
         type_cores: nir::TypeInterner::default(),
     };
@@ -633,6 +638,7 @@ fn build(
         remaining: builder.fuel,
         expansion_sources: builder.quote_sources,
         effect_contracts: builder.effect_contracts,
+        frozen_methods: builder.frozen_methods,
         callable_identities: builder.callable_identities,
         type_cores: builder.type_cores,
     })
@@ -2259,6 +2265,58 @@ impl Builder<'_> {
         }
         let mut children = Vec::new();
         match &ty {
+            Term::MethodValue(method) => {
+                let slot = self.interface(method.interface.clone(), method.subject.clone())?;
+                let interface = self.output[slot].interface_instance();
+                let subject = self.output[slot].subject.clone();
+                let selected = self.specialize_method(
+                    slot,
+                    &interface,
+                    &subject,
+                    method.member,
+                    &method.method_arguments,
+                )?;
+                if self.instances.is_some() {
+                    let contract = self
+                        .interface_contracts
+                        .iter()
+                        .find(|c| c.interface == interface && c.subject == subject)
+                        .and_then(|c| {
+                            c.methods.iter().find(|m| {
+                                m.declaration == method.member
+                                    && m.type_arguments == method.method_arguments
+                            })
+                        })
+                        .ok_or("frozen method has no retained contract")?;
+                    let signature = contract
+                        .signature
+                        .callable_signature()
+                        .map_err(|e| e.to_string())?;
+                    nir::type_computations::charge_term(signature, &mut self.fuel)
+                        .map_err(|e| e.to_string())?;
+                    let signature = signature.clone();
+                    if !signature.is_comptime_callable()
+                        && matches!(signature.callable_signature(), Term::Function { parameters, .. }
+                        if parameters.iter().any(|p| p.sort != nir::Sort::Runtime))
+                    {
+                        self.frozen_methods.push(n::Expr {
+                            source: n::SourceRange { start: 0, end: 0 },
+                            ty: signature,
+                            kind: K::TraitMethod {
+                                interface: interface.declaration,
+                                interface_arguments: interface.arguments,
+                                subject,
+                                member: method.member,
+                                method_arguments: method.method_arguments.clone(),
+                            },
+                        });
+                    } else {
+                        self.queue
+                            .push_back(Task::Function(selected.body, selected.arguments));
+                    }
+                }
+                children.extend(method.terms().cloned());
+            }
             Term::FunctionValue {
                 declaration,
                 arguments,

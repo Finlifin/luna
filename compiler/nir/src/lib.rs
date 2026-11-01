@@ -77,3 +77,6 @@ pub mod intrinsics;
 pub mod type_budget;
 
 pub mod freshening;
+
+mod method_identity;
+pub use method_identity::TraitMethodIdentity;

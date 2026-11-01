@@ -37,6 +37,11 @@ impl Term {
                     visit(argument)?;
                 }
             }
+            Self::MethodValue(method) => {
+                for argument in method.terms() {
+                    visit(argument)?;
+                }
+            }
             Self::Nominal { arguments, .. }
             | Self::NormalForm { arguments, .. }
             | Self::FunctionValue { arguments, .. }

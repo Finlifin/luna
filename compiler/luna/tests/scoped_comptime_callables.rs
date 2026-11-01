@@ -288,3 +288,48 @@ fn materialized_callable_signatures_share_cores_without_merging_identities() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn staged_method_defaults_keep_interface_identity_through_freezing() {
+    let source = include_str!("../../../development/repros/staged-method-default-freeze.fl");
+    let package = support::compile_with_protocols(source, &Default::default()).unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    let key = iir::InstanceKey {
+        declaration: support::id(&package, "run"),
+        arguments: vec![].into(),
+    };
+    let mut graph = elaboration::materialization::instantiate(
+        &package,
+        &[key],
+        Default::default(),
+        elaboration::ptc::Budget::default(),
+    )
+    .unwrap();
+    assert!(
+        !graph.templates.is_empty(),
+        "frozen method targets must survive specialization"
+    );
+    graph.dispatch.clear();
+    assert!(
+        graph.validate(&mut 100_000).is_err(),
+        "a frozen method cannot outlive its dispatch evidence"
+    );
+}
+
+#[test]
+fn unstaged_runtime_method_defaults_preserve_the_selected_contract() {
+    let source = "typealias Type = .Type'builtin;
+        trait Selector { fn select() -> bool; }
+        impl Selector for bool { fn select() -> bool { true } }
+        comptime fn callback() -> fn() -> bool where T { bool.select }
+        fn dispatch(comptime T: Type, comptime .action: fn() -> bool = callback<T>()) -> bool { action() }
+        fn run() -> bool { dispatch(bool) }";
+    let package = support::compile_with_protocols(source, &Default::default()).unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}

@@ -4,6 +4,13 @@ use nir::DeclarationId;
 use std::collections::{HashMap, HashSet};
 
 pub(super) struct TypeLinks<'a> {
+    methods: HashSet<(
+        DeclarationId,
+        &'a [Term],
+        &'a Term,
+        DeclarationId,
+        &'a [Term],
+    )>,
     callables: HashSet<(DeclarationId, &'a [Term])>,
     nominals: HashMap<&'a Term, &'a NominalDefinition>,
     heads: HashMap<DeclarationId, &'a nir::normal_forms::Head>,
@@ -22,6 +29,7 @@ fn charge(ty: &Term, fuel: &mut usize) -> Result<(), String> {
 impl<'a> TypeLinks<'a> {
     pub(super) fn new(package: &'a Package, fuel: &mut usize) -> Result<Self, String> {
         let mut result = Self {
+            methods: HashSet::new(),
             callables: HashSet::new(),
             nominals: HashMap::new(),
             heads: HashMap::new(),
@@ -34,6 +42,26 @@ impl<'a> TypeLinks<'a> {
             result
                 .callables
                 .insert((identity.key.declaration, &identity.key.arguments));
+        }
+        for dispatch in &package.dispatch {
+            tick(fuel)?;
+            charge(&dispatch.subject, fuel)?;
+            for argument in &dispatch.interface_arguments {
+                charge(argument, fuel)?;
+            }
+            for method in &dispatch.methods {
+                tick(fuel)?;
+                for argument in &method.method_arguments {
+                    charge(argument, fuel)?;
+                }
+                result.methods.insert((
+                    dispatch.interface,
+                    &dispatch.interface_arguments,
+                    &dispatch.subject,
+                    method.member,
+                    &method.method_arguments,
+                ));
+            }
         }
         for nominal in &package.nominals {
             tick(fuel)?;
@@ -99,6 +127,20 @@ impl<'a> TypeLinks<'a> {
         while let Some(ty) = pending.pop() {
             tick(fuel)?;
             match ty {
+                Term::MethodValue(method) => {
+                    for argument in method.terms() {
+                        charge(argument, fuel)?;
+                    }
+                    if !self.methods.contains(&(
+                        method.interface.declaration,
+                        method.interface.arguments.as_slice(),
+                        &method.subject,
+                        method.member,
+                        method.method_arguments.as_slice(),
+                    )) {
+                        return Err("IIR frozen method has no dispatch evidence".into());
+                    }
+                }
                 Term::FunctionValue {
                     declaration,
                     arguments,

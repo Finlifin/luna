@@ -9,6 +9,27 @@ impl Interpreter<'_> {
         ty: &Term,
     ) -> Result<Value, Error> {
         let value = match (term, ty) {
+            (Term::MethodValue(method), ty) if !ty.is_comptime_callable() => {
+                self.admit_runtime_method_identity(method)?;
+                let expression = Expr {
+                    source: SourceRange { start: 0, end: 0 },
+                    ty: ty.clone(),
+                    kind: K::TraitMethod {
+                        interface: method.interface.declaration,
+                        interface_arguments: method.interface.arguments.clone(),
+                        subject: method.subject.clone(),
+                        member: method.member,
+                        method_arguments: method.method_arguments.clone(),
+                    },
+                };
+                let Flow::Value(value) = self.eval(&expression, &mut Environment::new())? else {
+                    return Err(self.failure(ErrorKind::InvalidCallPlan, None));
+                };
+                if !self.has_type(&value, ty) {
+                    return Err(self.failure(ErrorKind::Type, None));
+                }
+                value
+            }
             (Term::Bool(value), _) => Value::Bool(*value),
             (Term::Char(value), _) => Value::Char(*value),
             (Term::String(value), _) => Value::String(value.clone()),

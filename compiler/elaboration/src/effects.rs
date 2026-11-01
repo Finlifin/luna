@@ -219,6 +219,12 @@ fn charge(term: &Term, fuel: &mut usize, depth: usize) -> Result<(), Error> {
                 .saturating_add(value.exponent().bit_len().div_ceil(32)),
         ),
         Term::BitVec(value) => bytes(fuel, value.words().len()),
+        Term::MethodValue(method) => {
+            for term in method.terms() {
+                charge(term, fuel, depth - 1)?;
+            }
+            Ok(())
+        }
         Term::Nominal { arguments, .. }
         | Term::ClosureSnapshot { arguments, .. }
         | Term::FunctionValue { arguments, .. }

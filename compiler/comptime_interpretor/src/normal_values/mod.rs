@@ -23,7 +23,7 @@ impl Interpreter<'_> {
         if !reconstruct_callables
             && matches!(
                 term,
-                Term::ClosureSnapshot { .. } | Term::FunctionValue { .. }
+                Term::ClosureSnapshot { .. } | Term::FunctionValue { .. } | Term::MethodValue(_)
             )
         {
             return Err(self.failure(ErrorKind::Type, None));

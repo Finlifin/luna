@@ -173,6 +173,7 @@ fn local_identity(
             | Term::ClosureContextValue(_)
             | Term::ClosureSnapshot { .. }
             | Term::Primitive(_)
+            | Term::MethodValue(_)
             | Term::FunctionValue { .. }
             | Term::Unit
             | Term::Bool(_)

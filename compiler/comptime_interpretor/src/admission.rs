@@ -434,6 +434,12 @@ impl Interpreter<'_> {
                     self.admit_type(ty, depth + 1)?;
                 }
             }
+            Term::MethodValue(method) => {
+                self.admit_runtime_method_identity(method)?;
+                for argument in method.terms() {
+                    self.admit_type(argument, depth + 1)?;
+                }
+            }
             Term::FunctionValue {
                 declaration,
                 arguments,

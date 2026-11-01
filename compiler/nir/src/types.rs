@@ -308,6 +308,9 @@ pub enum Term {
     /// Immutable UTF-8 contents, compared by value rather than allocation identity.
     String(Arc<str>),
     Symbol(Arc<str>),
+    /// Retained interface method identity, distinct from its selected body.
+    /// Formation and dispatch evidence must be checked by the receiving world.
+    MethodValue(Box<crate::TraitMethodIdentity>),
     /// Immutable identity of a named callable declaration and its instance inputs.
     /// Execution phase and responsibility come from the declaration and value domain;
     /// freezing an identity never grants permission to invoke it.
@@ -515,6 +518,11 @@ impl Term {
                 } => {
                     pending.push(*subject);
                     pending.extend(arguments);
+                }
+                Self::MethodValue(method) => {
+                    pending.push(method.subject);
+                    pending.extend(method.interface.arguments);
+                    pending.extend(method.method_arguments);
                 }
                 Self::ClosureSnapshot { arguments, .. }
                 | Self::FunctionValue { arguments, .. }
@@ -897,6 +905,7 @@ impl Term {
             | Self::String(_)
             | Self::ClosureSnapshot { .. }
             | Self::Symbol(_)
+            | Self::MethodValue(_)
             | Self::FunctionValue { .. }
             | Self::Float(_)
             | Self::Integer(_)
@@ -1338,6 +1347,15 @@ impl Term {
                 factory: *factory,
                 arguments: many(arguments, leaf)?,
             },
+            Self::MethodValue(method) => Self::MethodValue(Box::new(crate::TraitMethodIdentity {
+                interface: crate::program::InterfaceInstance {
+                    declaration: method.interface.declaration,
+                    arguments: many(&method.interface.arguments, leaf)?,
+                },
+                subject: method.subject.rewrite(nesting, leaf)?,
+                member: method.member,
+                method_arguments: many(&method.method_arguments, leaf)?,
+            })),
             Self::FunctionValue {
                 declaration,
                 arguments,
@@ -1889,6 +1907,11 @@ fn collect_runtime_dependencies(term: &Term, result: &mut BTreeSet<RuntimeId>) {
         Term::Runtime(id) => {
             result.insert(*id);
         }
+        Term::MethodValue(method) => {
+            for argument in method.terms() {
+                collect_runtime_dependencies(argument, result);
+            }
+        }
         Term::Nominal { arguments, .. }
         | Term::ClosureSnapshot { arguments, .. }
         | Term::FunctionValue { arguments, .. }
@@ -2328,6 +2351,12 @@ fn validate(
                 validate(argument, holes, frames, allow_free, core)?;
             }
         }
+        Term::MethodValue(method) => {
+            require_sort(&method.subject, Sort::Type)?;
+            for argument in method.terms() {
+                validate(argument, holes, frames, allow_free, core)?;
+            }
+        }
         Term::ClosureSnapshot { arguments, .. } => {
             for argument in arguments {
                 require_sort(argument, Sort::Type)?;
@@ -2606,6 +2635,7 @@ impl fmt::Display for Term {
             Self::Integer(value) => write!(f, "{value}"),
             Self::Float(value) => write!(f, "(comptime-float {value})"),
             Self::Char(value) => write!(f, "(char {})", *value as u32),
+            Self::MethodValue(method) => write!(f, "(method-value {method})"),
             Self::ClosureSnapshot { factory, arguments } => {
                 write!(f, "(closure-snapshot (factory {factory}) (arguments")?;
                 for argument in arguments {

@@ -631,6 +631,26 @@ impl Value {
                 _ => None,
             };
             if invocation {
+                if let Value::RuntimeTraitMethod(method) = value {
+                    budget.consume(1).map_err(|_| ErrorKind::StepsExhausted)?;
+                    for argument in method.terms() {
+                        nir::type_computations::charge_term(argument, &mut budget.steps)
+                            .map_err(|_| ErrorKind::StepsExhausted)?;
+                        argument.check_scope(&[]).map_err(|_| ErrorKind::Type)?;
+                        let work = scoped_term_value_work_with_layouts(
+                            argument,
+                            &BTreeMap::new(),
+                            parameters,
+                            |_, _, _| None,
+                        )
+                        .ok_or(ErrorKind::Type)?;
+                        budget
+                            .consume(work)
+                            .map_err(|_| ErrorKind::StepsExhausted)?;
+                    }
+                    return Ok(Term::MethodValue(method.clone()));
+                }
+
                 if let Some((declaration, arguments)) = instance {
                     budget.consume(1).map_err(|_| ErrorKind::StepsExhausted)?;
                     for argument in arguments {

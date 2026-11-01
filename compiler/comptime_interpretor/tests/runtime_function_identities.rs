@@ -1778,3 +1778,87 @@ fn immutable_method_handles_recheck_interface_formation_without_execution() {
         ErrorKind::StepsExhausted
     );
 }
+
+#[test]
+fn frozen_method_inputs_retain_origin_and_recheck_receiving_contracts() {
+    let mut world = trait_package();
+    let callable = signature(Term::Primitive(Primitive::Bool));
+    let binding = nir::program::LocalId {
+        owner: 99,
+        index: 0,
+    };
+    let mut accept = world.functions[0].clone();
+    accept.declaration = id(99);
+    accept.name = "accept_method".into();
+    accept.signature = Term::Function {
+        parameters: vec![nir::Parameter {
+            sort: Sort::ComptimeValue,
+            ty: callable.clone(),
+        }],
+        result: Box::new(callable.clone()),
+    };
+    accept.parameters = vec![binding];
+    accept.body = Expr {
+        source: SourceRange { start: 1, end: 2 },
+        ty: callable.clone(),
+        kind: K::Local(binding),
+    };
+    world.functions.push(accept);
+    for bytecode in [false, true] {
+        let mut vm = if bytecode {
+            Interpreter::for_comptime(&world, Budget::default())
+        } else {
+            Interpreter::for_comptime_tree(&world, Budget::default())
+        }
+        .unwrap();
+        let value = vm.invoke(id(1), vec![]).unwrap();
+        let term = value
+            .clone()
+            .into_scoped_invocation_term(&mut Default::default(), &Default::default())
+            .unwrap();
+        assert!(
+            matches!(&term, Term::MethodValue(method) if method.interface.declaration == id(4) && method.member == id(5))
+        );
+        assert_eq!(
+            vm.invoke_with_normal_arguments(id(99), vec![(callable.clone(), term.clone())])
+                .unwrap(),
+            value
+        );
+        assert!(!vm.events().iter().any(|event| matches!(event, comptime_interpretor::Event::EnterFunction(declaration) if *declaration == id(2))));
+        let mut changed = world.clone();
+        changed.traits[0].methods[0].requirements = vec![nir::program::TypePredicate::Bool(false)];
+        let mut changed = Interpreter::for_comptime(&changed, Budget::default()).unwrap();
+        assert_eq!(
+            changed
+                .invoke_with_normal_arguments(id(99), vec![(callable.clone(), term.clone())])
+                .unwrap_err()
+                .kind,
+            ErrorKind::TypeContractRejected
+        );
+        assert!(changed.events().is_empty());
+        let mut missing = term.clone();
+        let Term::MethodValue(method) = &mut missing else {
+            unreachable!()
+        };
+        method.member = id(88);
+        assert!(
+            vm.invoke_with_normal_arguments(id(99), vec![(callable.clone(), missing)])
+                .is_err()
+        );
+        assert_eq!(
+            vm.invoke_with_normal_arguments(id(99), vec![(callable.clone(), term)])
+                .unwrap(),
+            value
+        );
+        assert_eq!(
+            value.into_scoped_invocation_term(
+                &mut comptime_runtime::Budget {
+                    steps: 0,
+                    max_limbs: 4096
+                },
+                &Default::default()
+            ),
+            Err(ErrorKind::StepsExhausted)
+        );
+    }
+}

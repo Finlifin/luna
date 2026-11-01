@@ -6581,13 +6581,16 @@ impl Checker<'_, '_> {
         // A definition-side snapshot cannot contain a callable declaration
         // supplied only at this call site. Rebuild its dependency closure with
         // the completed inputs, just as for an active closure environment.
+        let mut method_inputs = Vec::new();
         let callable_input = annotation.is_pending()
             && !required::frozen_references(
                 symbols.iter().flatten(),
+                &mut method_inputs,
                 &mut self.required_steps,
                 span,
             )?
             .is_empty();
+        let callable_input = callable_input || !method_inputs.is_empty();
         // A generated Type supplied by this caller may postdate the frozen
         // declaration snapshot. Reprepare completed source with these inputs;
         // never graft current inference state into a saved computation.
