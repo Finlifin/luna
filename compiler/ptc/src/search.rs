@@ -2,24 +2,20 @@
 //! branch restoration and backjumping no longer depend on the Rust call stack.
 use super::{Conflict, Search, SearchResult, UnknownReason, boolean, learning};
 use std::fmt;
+mod trail;
+use trail::{Origin, Trail};
 
 #[cfg(test)]
 thread_local! { static BACKJUMPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
 fn backjump(
     frames: &mut Vec<Frame>,
-    assignment: &mut [Option<bool>],
-    levels: &mut [usize],
+    assignment: &mut Trail<'_>,
     decision_level: &mut usize,
     target: usize,
 ) {
     debug_assert!(target < *decision_level);
-    for (value, level) in assignment.iter_mut().zip(levels) {
-        if *level > target {
-            *value = None;
-            *level = 0;
-        }
-    }
+    assignment.backjump(target);
     while *decision_level > target {
         match frames
             .pop()
@@ -96,25 +92,14 @@ impl Search<'_> {
         mut depth: usize,
     ) -> SearchResult {
         let entry_depth = depth;
-        let entry_assignments = assignment.iter().filter(|v| v.is_some()).count();
+        let mut assignment = Trail::new(assignment);
         let mut frames = Vec::new();
-        let mut levels = vec![0usize; assignment.len()];
         let mut decision_level = 0usize;
         'search: loop {
-            let mut result = match self.enter(assignment, depth) {
+            let mut result = match self.enter(&mut assignment, depth, decision_level) {
                 Step::Descend(frame, child_depth) => {
-                    match &frame {
-                        Frame::Boolean(trail) => {
-                            for (index, _) in trail {
-                                levels[*index] = decision_level;
-                            }
-                        }
-                        Frame::Learned { index, .. } => levels[*index] = decision_level,
-                        Frame::Negative { index, .. } => {
-                            decision_level += 1;
-                            levels[*index] = decision_level;
-                        }
-                        Frame::Positive { .. } => unreachable!(),
+                    if matches!(frame, Frame::Negative { .. }) {
+                        decision_level += 1;
                     }
                     frames.push(frame);
                     depth = child_depth;
@@ -126,22 +111,15 @@ impl Search<'_> {
             loop {
                 let (next, jump) = self.learn_first_uip(
                     result,
-                    assignment,
-                    &levels,
+                    assignment.values(),
+                    assignment.levels(),
                     decision_level,
                     &mut learned_at,
                 );
                 result = next;
                 if let Some(target) = jump {
-                    backjump(
-                        &mut frames,
-                        assignment,
-                        &mut levels,
-                        &mut decision_level,
-                        target,
-                    );
-                    depth = entry_depth + assignment.iter().filter(|v| v.is_some()).count()
-                        - entry_assignments;
+                    backjump(&mut frames, &mut assignment, &mut decision_level, target);
+                    depth = entry_depth + assignment.len();
                     continue 'search;
                 }
                 let Some(frame) = frames.pop() else {
@@ -150,7 +128,7 @@ impl Search<'_> {
                     // eliminated the final decision-resolution frame.
                     return match result {
                         SearchResult::Unsat(conflict) => {
-                            SearchResult::Unsat(self.learn_resolved(conflict, assignment))
+                            SearchResult::Unsat(self.learn_resolved(conflict, assignment.values()))
                         }
                         other => other,
                     };
@@ -160,35 +138,25 @@ impl Search<'_> {
                         for (index, value) in trail.into_iter().rev() {
                             let (next, jump) = self.learn_first_uip(
                                 result,
-                                assignment,
-                                &levels,
+                                assignment.values(),
+                                assignment.levels(),
                                 decision_level,
                                 &mut learned_at,
                             );
                             result = next;
                             if let Some(target) = jump {
-                                backjump(
-                                    &mut frames,
-                                    assignment,
-                                    &mut levels,
-                                    &mut decision_level,
-                                    target,
-                                );
-                                depth = entry_depth
-                                    + assignment.iter().filter(|v| v.is_some()).count()
-                                    - entry_assignments;
+                                backjump(&mut frames, &mut assignment, &mut decision_level, target);
+                                depth = entry_depth + assignment.len();
                                 continue 'search;
                             }
-                            assignment[index] = None;
-                            levels[index] = 0;
+                            assignment.undo(index);
                             if let SearchResult::Unsat(proof) = result {
                                 if !proof.support.contains(&index) {
                                     result = SearchResult::Unsat(proof);
                                     continue;
                                 }
-                                assignment[index] = Some(!value);
-                                let reason = self.boolean_reason(assignment);
-                                assignment[index] = None;
+                                let reason = assignment
+                                    .probe(index, !value, |values| self.boolean_reason(values));
                                 let (negative, positive) = if value {
                                     (reason, proof)
                                 } else {
@@ -208,8 +176,7 @@ impl Search<'_> {
                         value,
                         reason,
                     } => {
-                        assignment[index] = None;
-                        levels[index] = 0;
+                        assignment.undo(index);
                         if let SearchResult::Unsat(proof) = result {
                             let (negative, positive) = if value {
                                 (reason, proof)
@@ -225,15 +192,14 @@ impl Search<'_> {
                         }
                     }
                     Frame::Negative { index, child_depth } => {
-                        assignment[index] = None;
+                        assignment.undo(index);
                         if matches!(result, SearchResult::Model(_))
                             || matches!(&result, SearchResult::Unsat(conflict) if !conflict.support.contains(&index))
                         {
-                            levels[index] = 0;
                             decision_level -= 1;
                             continue;
                         }
-                        assignment[index] = Some(true);
+                        assignment.assign(index, true, decision_level, Origin::Decision);
                         frames.push(Frame::Positive {
                             index,
                             negative: result,
@@ -242,8 +208,7 @@ impl Search<'_> {
                         continue 'search;
                     }
                     Frame::Positive { index, negative } => {
-                        assignment[index] = None;
-                        levels[index] = 0;
+                        assignment.undo(index);
                         decision_level -= 1;
                         if matches!(&result, SearchResult::Unsat(conflict) if !conflict.support.contains(&index))
                         {
@@ -257,7 +222,9 @@ impl Search<'_> {
                                     negative,
                                     positive,
                                 );
-                                SearchResult::Unsat(self.learn_resolved(conflict, assignment))
+                                SearchResult::Unsat(
+                                    self.learn_resolved(conflict, assignment.values()),
+                                )
                             }
                             (_, model @ SearchResult::Model(_)) => model,
                             (SearchResult::Unknown(reason), _)
@@ -346,7 +313,7 @@ impl Search<'_> {
         conflict
     }
 
-    fn enter(&mut self, assignment: &mut [Option<bool>], depth: usize) -> Step {
+    fn enter(&mut self, assignment: &mut Trail<'_>, depth: usize, decision_level: usize) -> Step {
         if depth >= self.max_depth || self.tick().is_err() {
             return Step::Return(SearchResult::Unknown(UnknownReason::BudgetExhausted));
         }
@@ -362,20 +329,20 @@ impl Search<'_> {
             .boolean
             .as_ref()
             .unwrap()
-            .propagate(assignment, &mut self.steps)
+            .propagate(assignment.values(), &mut self.steps)
         {
             Ok(result) => result,
             Err(()) => return Step::Return(SearchResult::Unknown(UnknownReason::BudgetExhausted)),
         };
         if propagation.truth == Some(false) {
-            let mut conflict = Conflict::boolean(assignment);
+            let mut conflict = Conflict::boolean(assignment.values());
             if let Some(support) = propagation.conflict_support {
                 conflict.support = support;
             }
             return Step::Return(SearchResult::Unsat(conflict));
         }
         let forced = propagation.literals;
-        match self.propagate_learned(assignment) {
+        match self.propagate_learned(assignment.values()) {
             Err(reason) => return Step::Return(SearchResult::Unknown(reason)),
             Ok(learning::Propagation::Conflict(proof)) => {
                 return Step::Return(SearchResult::Unsat(proof));
@@ -385,7 +352,7 @@ impl Search<'_> {
                 value,
                 reason,
             }) => {
-                assignment[index] = Some(value);
+                assignment.assign(index, value, decision_level, Origin::Learned);
                 return Step::Descend(
                     Frame::Learned {
                         index,
@@ -402,14 +369,14 @@ impl Search<'_> {
                 .boolean
                 .as_mut()
                 .unwrap()
-                .propagate_clauses(assignment, &mut self.steps);
+                .propagate_clauses(assignment.values(), &mut self.steps);
             use boolean::cnf::Propagation;
             match result {
                 Err(()) => {
                     return Step::Return(SearchResult::Unknown(UnknownReason::BudgetExhausted));
                 }
                 Ok(Propagation::Conflict(trace)) => {
-                    let conflict = self.clause_conflict(trace, assignment);
+                    let conflict = self.clause_conflict(trace, assignment.values());
                     return Step::Return(SearchResult::Unsat(conflict));
                 }
                 Ok(Propagation::Unit {
@@ -417,9 +384,9 @@ impl Search<'_> {
                     value,
                     trace,
                 }) => {
-                    assignment[index] = Some(!value);
-                    let reason = self.clause_conflict(trace, assignment);
-                    assignment[index] = Some(value);
+                    let reason = assignment
+                        .probe(index, !value, |values| self.clause_conflict(trace, values));
+                    assignment.assign(index, value, decision_level, Origin::RootClause);
                     return Step::Descend(
                         Frame::Learned {
                             index,
@@ -432,28 +399,32 @@ impl Search<'_> {
                 Ok(Propagation::None) => {}
             }
         }
-        let classes = match self.theory_cached(assignment) {
+        let classes = match self.theory_cached(assignment.values()) {
             Ok(Some(classes)) => classes,
-            Ok(None) => return Step::Return(SearchResult::Unsat(self.learn_conflict(assignment))),
+            Ok(None) => {
+                return Step::Return(SearchResult::Unsat(
+                    self.learn_conflict(assignment.values()),
+                ));
+            }
             Err(reason) => return Step::Return(SearchResult::Unknown(reason)),
         };
         if !forced.is_empty() {
             let mut trail = Vec::new();
             for (index, value) in forced {
-                if let Some(previous) = assignment[index] {
+                if let Some(previous) = assignment.values()[index] {
                     if previous != value {
                         break;
                     }
                     continue;
                 }
-                assignment[index] = Some(value);
+                assignment.assign(index, value, decision_level, Origin::Boolean);
                 trail.push((index, value));
             }
             let child_depth = depth + trail.len();
             return Step::Descend(Frame::Boolean(trail), child_depth);
         }
-        if let Some(index) = assignment.iter().position(Option::is_none) {
-            assignment[index] = Some(false);
+        if let Some(index) = assignment.values().iter().position(Option::is_none) {
+            assignment.assign(index, false, decision_level + 1, Origin::Decision);
             Step::Descend(
                 Frame::Negative {
                     index,
@@ -653,20 +624,25 @@ mod tests {
             Some(false),
             Some(false),
         ];
-        let mut levels = vec![0, 1, 1, 2, 2, 3, 3];
+        let initial = assignment.clone();
+        assignment.fill(None);
+        let mut assignment = Trail::new(&mut assignment);
+        for (index, (value, level)) in initial.into_iter().zip([0, 1, 1, 2, 2, 3, 3]).enumerate() {
+            assignment.assign(index, value.unwrap(), level, Origin::Boolean);
+        }
         let mut level = 3;
-        backjump(&mut frames, &mut assignment, &mut levels, &mut level, 1);
+        backjump(&mut frames, &mut assignment, &mut level, 1);
         assert_eq!(level, 1);
         assert_eq!(frames.len(), 3);
         assert_eq!(
-            assignment,
+            assignment.values(),
             vec![Some(true), Some(false), Some(false), None, None, None, None]
         );
-        assert_eq!(levels, vec![0, 1, 1, 0, 0, 0, 0]);
-        backjump(&mut frames, &mut assignment, &mut levels, &mut level, 0);
+        assert_eq!(assignment.levels(), vec![0, 1, 1, 0, 0, 0, 0]);
+        backjump(&mut frames, &mut assignment, &mut level, 0);
         assert_eq!(frames.len(), 1);
         assert_eq!(
-            assignment,
+            assignment.values(),
             vec![Some(true), None, None, None, None, None, None]
         );
     }
@@ -726,7 +702,8 @@ mod tests {
             steps: 100000,
             max_depth: 128,
         };
-        let mut assignment = [None, Some(true)];
+        let mut values = [None, Some(true)];
+        let mut assignment = Trail::new(&mut values);
         let Step::Descend(
             Frame::Learned {
                 index,
@@ -734,13 +711,13 @@ mod tests {
                 reason,
             },
             _,
-        ) = search.enter(&mut assignment, 0)
+        ) = search.enter(&mut assignment, 0, 0)
         else {
             panic!("root clauses must supply a unit");
         };
         assert_eq!((index, value), (0, true));
         assert_eq!(reason.support, std::collections::BTreeSet::from([0]));
-        assert_eq!(assignment, [Some(true), Some(true)]);
+        assert_eq!(assignment.values(), [Some(true), Some(true)]);
         search
             .check_tree(&reason.tree, &mut [Some(false), None], 0)
             .unwrap();

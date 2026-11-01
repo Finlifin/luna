@@ -423,3 +423,33 @@ Validation from `/home/fin/luna`:
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`: four passed (`/tmp/luna-tools-el942yz6/result.json`), including rejection of a model satisfying only one regional alternative.
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_type_factories_keep_identity_through_comptime_parameters`: passed (`/tmp/luna-tools-x5v118in/result.json`), exercising real library List identity and method forwarding.
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check`: passed (`/tmp/luna-tools-0yuiomdl/result.json`); `git diff --check` passed.
+
+## Search-owned assignment trail
+
+Search decisions, circuit-forced atoms, root-clause units and learned-clause
+units now write through one chronological assignment owner. Entries retain their
+literal, decision level and origin. Normal unwind and nonchronological backjump
+remove entries in reverse order; backjump no longer scans every atom to clear
+higher-level assignments, and logical depth is recovered from the retained trail
+length. Entry premises remain outside the removable search suffix.
+
+Proof explanation uses a scoped temporary opposite-value view. The callback sees
+only a read-only assignment slice; the original value is restored on return or
+unwind, without changing the live trail or decision levels. Dropping the search
+owner restores its caller's entry assignment even during host unwinding.
+S-expression dumps identify each assignment's level and source.
+
+This is a shared assignment ownership boundary, not yet the final shared reason
+arena. Proof-resolution continuations still retain learned/root reasons; root
+auxiliaries have their own reversible trail, and root/learned/theory consumers
+still synchronize assignment snapshots rather than consuming mutation events.
+The existing conservative backjump fuel reservation is unchanged. Independent
+proof/model validation and explicit Type-input admission remain unchanged.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p ptc -p type_resolution`: 459 passed (`/tmp/luna-tools-kjzsqluw/result.json`).
+- After restricting probe callbacks to read-only slices and adding whole-search unwind coverage, `python3 -B development/check.py --timeout 900 -- test -p ptc --lib search`: six passed (`/tmp/luna-tools-t210xi2o/result.json`). Includes first-UIP learning, lower-level-prefix retention, proof support, all search exit kinds across budget cutoffs, and temporary-probe restoration.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`: four passed (`/tmp/luna-tools-ieh8wiss/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_type_factories_keep_identity_through_comptime_parameters`: passed with the shipped library (`/tmp/luna-tools-7o16fj8w/result.json`).
+- Formatting check and `git diff --check` passed (`/tmp/luna-tools-l3m0bbla/result.json`).
