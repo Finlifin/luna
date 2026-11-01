@@ -282,3 +282,45 @@ fn metered_discovery_returns_unused_fuel_and_charges_failed_queries() {
     ));
     assert!(budget.steps < before);
 }
+
+#[test]
+fn closed_receiver_refutation_returns_proof_without_reserving_inference_fuel() {
+    let candidate = head(ty(Primitive::Bool), &[], vec![]);
+    let subject = Term::Optional(Box::new(ty(Primitive::Char)));
+    let context = Context::default();
+    let mut budget = Budget {
+        steps: 10_000,
+        ..Budget::default()
+    };
+    let result = candidate.infer_interface_from_subject_metered(
+        &subject,
+        &context,
+        &mut budget,
+        &BTreeMap::new(),
+        None,
+    );
+    let Err(TypeAssessment::Excluded(proof)) = result else {
+        panic!("closed incompatible receiver must have a refutation")
+    };
+    context.verify_proof(&proof, Budget::default()).unwrap();
+    assert!(budget.steps > 5_000 && budget.steps < 10_000);
+}
+
+#[test]
+fn opaque_receiver_names_do_not_authorize_closed_head_exclusion() {
+    let candidate = head(ty(Primitive::Bool), &[], vec![]);
+    let subject = Term::NormalForm {
+        head: id(777),
+        sort: Sort::Type,
+        arguments: vec![],
+    };
+    let mut budget = Budget::default();
+    let result = candidate.infer_interface_from_subject_metered(
+        &subject,
+        &Context::default(),
+        &mut budget,
+        &BTreeMap::new(),
+        None,
+    );
+    assert!(matches!(result, Err(TypeAssessment::Pending(_))));
+}

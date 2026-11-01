@@ -4,7 +4,7 @@ use builtin.{Type, bool};
 pub const List: pure comptime fn<T: Type> -> Type = .List'builtin;
 
 {- Comptime data, arithmetic, reflection, and checked definition builders. -}
-use data.{object, integer, list, optional, errors, text, patterns, hashing};
+use data.{object, integer, list, list_equality, optional, errors, text, patterns, hashing};
 use definitions.{structs, enums, newtypes};
 use numeric.{scalar_math, equality};
 use reflection.structure;

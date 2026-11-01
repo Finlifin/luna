@@ -143,6 +143,38 @@ impl fmt::Display for HeadMatch {
     }
 }
 impl ImplementationHead {
+    /// Refute a closed head before reserving a full inference allowance.
+    /// Opaque heads are compared by PTC, never by their spelling or layout.
+    /// Generic heads need fresh inference inputs and must use normal matching.
+    pub(crate) fn refute_closed_subject_metered(
+        &self,
+        subject: &Term,
+        context: &Context,
+        budget: &mut Budget,
+    ) -> Option<Proof> {
+        if !self.type_parameters.is_empty() {
+            return None;
+        }
+        let mut probe = Budget {
+            steps: budget.steps / 4,
+            ..*budget
+        };
+        let before = probe.steps;
+        let result = (|| {
+            nir::type_computations::charge_term(&self.subject, &mut probe.steps).ok()?;
+            nir::type_computations::charge_term(subject, &mut probe.steps).ok()?;
+            match context.prove_metered(
+                Formula::equal(self.subject.clone(), subject.clone()).negate(),
+                &mut probe,
+            ) {
+                Outcome::Entailed(proof) => Some(proof),
+                _ => None,
+            }
+        })();
+        budget.steps -= before - probe.steps;
+        result
+    }
+
     /// Replay head matching only. Success does not discharge the retained
     /// requirements or authorize selection/dispatch of this implementation.
     pub fn verify_head_match(
@@ -521,6 +553,9 @@ impl ImplementationHead {
         let interface = self.interface.ok_or_else(|| {
             TypeAssessment::Pending("interface discovery requires a fixed trait head".into())
         })?;
+        if let Some(proof) = self.refute_closed_subject_metered(subject, context, budget) {
+            return Err(TypeAssessment::Excluded(proof));
+        }
         budget.steps = budget
             .steps
             .checked_sub(self.type_parameters.len())
@@ -1410,30 +1445,40 @@ impl Index {
         budget: Budget,
         mut qualify: impl FnMut(&TypeEvidence, Budget) -> super::Applicability,
     ) -> Result<TypeResolution, Error> {
-        self.resolve_assessed_with(interface, arguments, subject, budget, |head, allowance| {
-            let assessment = match head.match_types_with_layouts(
-                subject,
-                arguments,
-                context,
-                allowance,
-                &self.parameter_domains,
-                Some(&self.nominal_layouts),
-            ) {
-                Ok(matched) => matched.discharge_with(|goal, budget| context.prove(goal, budget)),
-                Err(assessment) => assessment,
-            };
-            let state = match &assessment {
-                TypeAssessment::Applicable(evidence) => qualify(evidence, allowance),
-                _ => assessment.applicability(),
-            };
-            (assessment, state)
-        })
+        self.resolve_assessed_with(
+            interface,
+            arguments,
+            subject,
+            context,
+            budget,
+            |head, allowance| {
+                let assessment = match head.match_types_with_layouts(
+                    subject,
+                    arguments,
+                    context,
+                    allowance,
+                    &self.parameter_domains,
+                    Some(&self.nominal_layouts),
+                ) {
+                    Ok(matched) => {
+                        matched.discharge_with(|goal, budget| context.prove(goal, budget))
+                    }
+                    Err(assessment) => assessment,
+                };
+                let state = match &assessment {
+                    TypeAssessment::Applicable(evidence) => qualify(evidence, allowance),
+                    _ => assessment.applicability(),
+                };
+                (assessment, state)
+            },
+        )
     }
     pub(crate) fn resolve_assessed_with(
         &self,
         interface: DeclarationId,
         arguments: &[Term],
         subject: &Term,
+        context: &Context,
         budget: Budget,
         assess: impl FnMut(&ImplementationHead, Budget) -> (TypeAssessment, Applicability),
     ) -> Result<TypeResolution, Error> {
@@ -1441,6 +1486,7 @@ impl Index {
             interface,
             arguments,
             subject,
+            context,
             &mut { budget },
             assess,
         )
@@ -1450,6 +1496,7 @@ impl Index {
         interface: DeclarationId,
         arguments: &[Term],
         subject: &Term,
+        context: &Context,
         budget: &mut Budget,
         mut assess: impl FnMut(&ImplementationHead, Budget) -> (TypeAssessment, Applicability),
     ) -> Result<TypeResolution, Error> {
@@ -1471,14 +1518,30 @@ impl Index {
         {
             candidates.fixed_interface = true;
         }
+        // The structural index deliberately retains opaque candidates. Prove
+        // closed-head exclusions before dividing fuel among unresolved heads;
+        // unrelated scalar implementations must not consume inference slots.
+        let mut excluded = BTreeMap::new();
+        for id in &candidates.declarations {
+            if let Some(proof) = self.entries[id]
+                .head
+                .refute_closed_subject_metered(subject, context, budget)
+            {
+                excluded.insert(*id, proof);
+            }
+        }
         let candidate_budget = Budget {
             // Search has already charged its actual work above. Unused search
             // allowance belongs to the remaining candidate budget.
-            steps: budget.steps / candidates.declarations.len().max(1),
+            steps: budget.steps / (candidates.declarations.len() - excluded.len()).max(1),
             max_depth: budget.max_depth,
         };
         let mut assessments = BTreeMap::new();
         let selection = self.select(&candidates, |head| {
+            if let Some(proof) = excluded.remove(&head.declaration) {
+                assessments.insert(head.declaration, TypeAssessment::Excluded(proof));
+                return Applicability::Excluded;
+            }
             let (assessment, state) = assess(head, candidate_budget);
             assessments.insert(head.declaration, assessment);
             state

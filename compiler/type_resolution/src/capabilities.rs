@@ -571,6 +571,7 @@ impl Solver<'_, '_> {
                 interface.declaration,
                 &interface.arguments,
                 subject,
+                context,
                 &mut search_budget,
                 |head, allowance| {
                     let assessment = match head.match_types_with_layouts(

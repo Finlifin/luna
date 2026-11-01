@@ -1,0 +1,23 @@
+use builtin.{bool, Integer};
+use List;
+use numeric.equality.ComptimeEq;
+
+{-
+    List equality follows the element protocol, not compiler representation
+    identity. Compare lengths first, then stop at the first unequal element.
+    Both inputs remain snapshots even when an element comparison has effects.
+-}
+comptime impl ComptimeEq for List<T> where T:- ComptimeEq {
+    comptime fn eq(self, other: Self) -> bool {
+        let left = self;
+        let right = other;
+        let count = left.length();
+        if count != right.length() { return false; }
+        var index: Integer = 0;
+        while index < count {
+            if not left[index].as(ComptimeEq).eq(right[index]) { return false; }
+            index = index + 1;
+        }
+        true
+    }
+}

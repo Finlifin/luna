@@ -2,6 +2,25 @@
 
 list.fl 将列表操作 impl 到 meta.List；object.fl 提供有序 Object 查询与编辑；integer.fl 提供编译期整数操作。List 的编译器绑定 normal-form 头仍在包根，避免更改公开 meta.List 身份。
 
+## 列表的编译期相等协议
+
+当元素 `T` 实现 `ComptimeEq` 时，`List<T>` 也实现该协议。`eq` 先比较
+长度，再按索引顺序调用元素的 `eq`，遇到第一个不等元素立即返回；`ne`
+复用协议的默认实现。空列表不调用元素方法，长度不同也不比较元素。
+
+比较使用两份输入快照，不按编译器内部表示比较元素，也不绕过用户定义的
+相等关系。嵌套列表通过同一条泛型实现递归比较；元素协议缺失时拒绝调用。
+元素比较的错误和副作用遵循普通 comptime 调用规则，不因比较而被隐藏。
+这项实现仅提供相等协议，尚未提供列表的 `ComptimeHash`。
+
+```flurry
+comptime fn same_lists() -> bool {
+    let first: List<Integer> = [1, 2];
+    let second: List<Integer> = [1, 2];
+    first.eq(second) and not first.ne(second)
+}
+```
+
 ## 可选值与错误限定值
 
 `ComptimeOptionalOps` 与 `ComptimeErrorResultOps` 已采用 `pure comptime trait`，
