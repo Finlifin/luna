@@ -7008,7 +7008,7 @@ fn generator_temporary_pointer_writes_reject_stage_leaks_and_wrong_pointees() {
         ),
         (
             "pure comptime fn bad()-><|-*bool> {var value=false;let pointer=value.ref;'(pointer)} fn run()->*bool {~<bad()>}",
-            "runtime binding",
+            "pointer operations cannot execute at comptime",
         ),
         (
             "fn select(p:*bool)->*bool {p} pure comptime fn bad()-><|-bool> {var value=false;select(value.ref).* = true;'(value)}",
@@ -8030,7 +8030,7 @@ fn generator_captures_reject_exposed_storage() {
     for (factory, anchor) in [(
         "comptime fn touch(pointer:*bool)->bool {pointer.* = not pointer.*;pointer.*}
           comptime fn make()->Reader {var flag=false;|| touch(flag.ref)}",
-        "exposes captured storage",
+        "pointer operations cannot execute at comptime",
     )] {
         let source = format!("{prefix} {factory} fn run()->bool {{~<build(make())>}}");
         let error = support::compile_with_protocols(&source, &Default::default()).unwrap_err();
@@ -8086,7 +8086,7 @@ fn generator_readonly_nominal_captures_reject_pointer_fields_and_field_addresses
             comptime fn build(reader:Reader)-><|-bool> {let value=reader();'(value)}
             comptime fn outer()-><|-bool> {let flag=true;build(make(Data {pointer:flag.ref}))}
             fn run()->bool {~<outer()>}",
-            "immutable capture graph",
+            "pointer operations cannot execute at comptime",
         ),
         (
             "struct Data {flag:bool}
@@ -8095,7 +8095,7 @@ fn generator_readonly_nominal_captures_reject_pointer_fields_and_field_addresses
             comptime fn make(data:Data)->Reader {|| touch(data.flag.ref)}
             comptime fn build(reader:Reader)-><|-bool> {let value=reader();'(value)}
             fn run()->bool {~<build(make(Data {flag:true}))>}",
-            "exposes captured storage",
+            "pointer operations cannot execute at comptime",
         ),
     ] {
         let error = support::compile_with_protocols(source, &Default::default()).unwrap_err();

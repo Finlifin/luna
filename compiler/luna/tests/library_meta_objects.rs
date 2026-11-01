@@ -205,16 +205,19 @@ fn indexed_object_queries_preserve_order_domains_and_optional_layers() {
 fn object_queries_preserve_type_identity_and_evaluate_inputs_once_in_order() {
     let value=invoke("
         struct A {} struct B {}
-        comptime fn make(state:*bool)->meta.Object {state.* = not state.*; let item=A {}; let result={stored:item}; result}
-        comptime fn index(state:*bool)->.Integer'builtin {
-            if state.* {state.* = false; return 0;} 9
+        struct State {flag:bool}
+        impl State {
+        comptime fn make(self)->meta.Object {self.flag=not self.flag; let item=A {}; let result={stored:item}; result}
+        comptime fn index(self)->.Integer'builtin {
+            if self.flag {self.flag = false; return 0;} 9
+        }
         }
         comptime fn run()->bool {
-            var state=false;
-            let got=meta.Object.value<A>(make(state.ref),index(state.ref));
+            let state=State {flag:false};
+            let got=meta.Object.value<A>(state.make(),state.index());
             let item=A {};
             let object={stored:item, kind:.u8'builtin};
-            not state and (got match {_?=>true,null=>false})
+            not state.flag and (got match {_?=>true,null=>false})
                 and (meta.Object.value<B>(object,0) match {_?=>false,null=>true})
                 and (meta.Object.value<.Type'builtin>(object,1) match {T?=>T==.u8'builtin,null=>false})
         }
@@ -457,15 +460,18 @@ fn object_edits_check_indices_and_runtime_phase() {
 #[test]
 fn object_edits_evaluate_once_in_order_and_keep_optional_payloads() {
     let value=invoke("
-        comptime fn make(state:*bool)->meta.Object {state.* = not state.*; let object={flag:true}; object}
-        comptime fn index(state:*bool)->.Integer'builtin {if state.* {state.* = false; return 0;} 9}
+        struct State {flag:bool}
+        impl State {
+        comptime fn make(self)->meta.Object {self.flag=not self.flag; let object={flag:true}; object}
+        comptime fn index(self)->.Integer'builtin {if self.flag {self.flag = false; return 0;} 9}
+        }
         comptime fn run()->bool {
-            var state=false;
+            let state=State {flag:false};
             let absent:?bool=null;
-            let replaced=meta.Object.replace(make(state.ref),index(state.ref),absent);
+            let replaced=meta.Object.replace(state.make(),state.index(),absent);
             let empty=meta.Object.remove(replaced,0);
             let combined=meta.Object.concat(empty,replaced);
-            not state and meta.Object.length(empty)==0
+            not state.flag and meta.Object.length(empty)==0
                 and (meta.Object.value<?bool>(combined,0) match {v?=>v match {_?=>false,null=>true},null=>false})
         }
     ").unwrap();
@@ -572,9 +578,7 @@ fn object_normal_inputs_do_not_freeze_active_pointers() {
     )
     .unwrap_err();
     assert!(
-        error.contains("Unsupported")
-            || error.contains("freeze")
-            || error.contains("comptime input"),
+        error.contains("pointer operations cannot execute at comptime"),
         "{error}"
     );
 }

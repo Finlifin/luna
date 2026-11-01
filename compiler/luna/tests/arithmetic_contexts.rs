@@ -77,37 +77,30 @@ fn bit_compound_assignment_prepares_location_and_preserves_rhs_updates() {
             word'bitvec[4..4] += do {word=0xB0;true};word == 0xB0}";
     let mut selectors = luna::protocols::type_constructors::Selectors::default();
     selectors.arithmetic[Operator::Add as usize] = Some("input.Operation");
-    for source in [source.to_owned(), source.replace("fn ", "comptime fn ")] {
-        let package =
-            compile_with_source_bindings(&source, &Default::default(), selectors).unwrap();
-        if !source.contains("comptime fn run") {
-            let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
-            let mut vm = Interpreter::from_iir(&graph, Budget::default()).unwrap();
-            assert_eq!(
-                vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
-                Value::Bool(true)
-            );
-            assert_eq!(
-                calls(&package, &vm),
-                vec!["run", "target", "low", "high", "payload", "add"]
-            );
-        }
-        for name in [
-            "run",
-            "local",
-            "early",
-            "early_rhs",
-            "nested",
-            "rebound",
-            "empty",
-        ] {
-            let result = if source.contains("comptime fn run") {
-                luna::invocation::invoke(&package, name, 100_000)
-            } else {
-                luna::execution::interpret(&package, name, 100_000)
-            };
-            assert_eq!(result.unwrap(), Value::Bool(true));
-        }
+    let package = compile_with_source_bindings(source, &Default::default(), selectors).unwrap();
+    let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
+    let mut vm = Interpreter::from_iir(&graph, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        calls(&package, &vm),
+        vec!["run", "target", "low", "high", "payload", "add"]
+    );
+    for name in [
+        "run",
+        "local",
+        "early",
+        "early_rhs",
+        "nested",
+        "rebound",
+        "empty",
+    ] {
+        assert_eq!(
+            luna::execution::interpret(&package, name, 100_000).unwrap(),
+            Value::Bool(true)
+        );
     }
     let immutable = source.replace("var word:Word", "let word:Word");
     let failure =
@@ -350,4 +343,44 @@ fn compound_remainder_assignment_uses_explicit_signed_rounding_protocol() {
     );
     assert_eq!(calls(&package, &vm), ["run", "rem"]);
     assert!(support::compile_with_protocols(source, &Default::default()).is_err());
+}
+
+#[test]
+fn comptime_bit_compound_assignment_preserves_value_receiver_updates() {
+    let source="typealias Word=.u8'builtin;typealias Bits=.BitVec'builtin<4>;
+        typealias Empty=.BitVec'builtin<0>;typealias Count=.Integer'builtin;
+        trait Operation where Rhs {assoc Output:.Type'builtin;comptime fn add(self,rhs:Rhs)->Output;}
+        impl Operation<Bits> for Bits {assoc Output:.Type'builtin=Bits;
+            comptime fn add(self,rhs:Bits)->Bits {self or rhs}}
+        impl Operation<bool> for Empty {assoc Output:.Type'builtin=Empty;
+            comptime fn add(self,rhs:bool)->Empty {self}}
+        struct State {word:Word,trace:Count}
+        impl State {
+            comptime fn payload(self)->Bits {self.trace=self.trace * 10 + 3;self.word=0xB0;2}
+            comptime fn low(self)->result:Word where ensures result==0 {self.trace=self.trace * 10 + 1;0}
+            comptime fn high(self)->result:Word where ensures result==4 {self.trace=self.trace * 10 + 2;4}
+            comptime fn update(self)->bool {
+                self.word'bitvec[self.low()..self.high()] += self.payload();self.word==0xB3
+            }
+        }
+        comptime fn run()->bool {let state=State {word:0xA1,trace:0};state.update() and state.word==0xB3 and state.trace==123}
+        comptime fn local()->bool {var word:Word=0xA1;word'bitvec[0..4] += 2;word==0xA3}
+        comptime fn early()->bool {let state=State {word:0xA1,trace:0};
+            state.word'bitvec[do {return true;}..4] += state.payload();false}
+        comptime fn early_rhs()->bool {var word:Word=0xA1;
+            word'bitvec[0..4] += do {return true;};false}
+        comptime fn nested()->bool {var word:Word=0xA1;
+            word'bitvec[0..8][0..4] += 2;word==0xA3}
+        comptime fn empty()->bool {var word:Word=0;
+            word'bitvec[4..4] += do {word=0xB0;true};word==0xB0}";
+    let mut selectors = luna::protocols::type_constructors::Selectors::default();
+    selectors.arithmetic[Operator::Add as usize] = Some("input.Operation");
+    let package = compile_with_source_bindings(source, &Default::default(), selectors).unwrap();
+    for name in ["run", "local", "early", "early_rhs", "nested", "empty"] {
+        assert_eq!(
+            luna::invocation::invoke(&package, name, 100_000).unwrap(),
+            Value::Bool(true),
+            "{name}"
+        );
+    }
 }

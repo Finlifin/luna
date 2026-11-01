@@ -540,6 +540,24 @@ pub fn machine_arithmetic_functions(
                         }
                     }
                     let error = |message| fail(expr.source, message);
+                    // Pointer type construction describes runtime storage and is
+                    // legal comptime data. Executing a pointer operation is not:
+                    // receiver updates use ComptimeReference and ordinary places.
+                    if ct
+                        && matches!(
+                            expr.kind,
+                            K::AddressOf(_)
+                                | K::ReadPointer(_)
+                                | K::WritePointer { .. }
+                                | K::PointerField { .. }
+                                | K::PointerAnonymousField { .. }
+                                | K::BitWritePointer { .. }
+                        )
+                    {
+                        return Err(error(
+                            "pointer operations cannot execute at comptime; use value-reference self",
+                        ));
+                    }
                     if let Some(message) =
                         crate::program::pointer_operation_error_in(expr, package.target)
                     {

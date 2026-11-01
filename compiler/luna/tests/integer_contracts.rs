@@ -192,12 +192,13 @@ fn unbounded_integer_contract_copy_equality_keeps_operand_symmetry() {
 }
 
 #[test]
-fn unbounded_integer_contract_addressed_locals_lose_written_facts() {
+fn unbounded_integer_contract_receiver_writes_invalidate_prior_facts() {
     let source = "typealias Int=.Integer'builtin;
         comptime fn positive(n:Int)->bool where requires n > 0 {true}
-        comptime fn clear(n:*Int) {n.* = 0;}
+        struct State {value:Int}
+        impl State {comptime fn clear(self) {self.value=0;}}
         comptime fn forward(n:Int)->bool where requires n > 10 {
-            var current=n;clear(current.ref);positive(current)
+            let current=State {value:n};current.clear();positive(current.value)
         }
         fn run()->bool {const result=forward(11);result}";
     let failure = compile_with_protocols(source, &Default::default()).unwrap_err();

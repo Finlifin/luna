@@ -50,18 +50,14 @@ fn package() -> Package {
             signature: Term::Function {
                 parameters: vec![nir::Parameter {
                     sort: nir::Sort::Runtime,
-                    ty: Term::Pointer(Box::new(boolean())),
+                    ty: boolean(),
                 }],
                 result: Box::new(boolean()),
             },
             body: Expr {
                 source: SourceRange { start: 1, end: 2 },
                 ty: boolean(),
-                kind: K::ReadPointer(Box::new(Expr {
-                    source: SourceRange { start: 1, end: 2 },
-                    ty: Term::Pointer(Box::new(boolean())),
-                    kind: K::Local(binding),
-                })),
+                kind: K::Local(binding),
             },
         }],
         ..Default::default()
@@ -84,9 +80,10 @@ fn install_retains_existing_calls_storage_and_events_and_admits_forward_pointer_
     let later = [structure(22, vec![("entry", ty(20))])];
     let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     let storage = memory::Storage::new(Value::Bool(true));
-    let pointer = Value::Pointer(storage.pointer(boolean(), vec![]));
+    let reference = ValueReference::from_storage(storage.clone());
     assert_eq!(
-        vm.invoke(id(1), vec![pointer.clone()]).unwrap(),
+        vm.invoke(id(1), vec![Value::ComptimeReference(reference.clone())])
+            .unwrap(),
         Value::Bool(true)
     );
     let events = vm.events().to_vec();
@@ -94,7 +91,11 @@ fn install_retains_existing_calls_storage_and_events_and_admits_forward_pointer_
     vm.install_generated_structs(&definitions).unwrap();
     assert!(vm.remaining_steps() < before);
     assert_eq!(vm.events(), events);
-    assert_eq!(vm.invoke(id(1), vec![pointer]).unwrap(), Value::Bool(true));
+    assert_eq!(
+        vm.invoke(id(1), vec![Value::ComptimeReference(reference.clone())])
+            .unwrap(),
+        Value::Bool(true)
+    );
     assert_eq!(storage.read().unwrap(), Value::Bool(true));
     assert_eq!(
         vm.reflect_struct(&ty(20)).unwrap().fields[0].ty,
