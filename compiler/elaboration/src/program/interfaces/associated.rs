@@ -382,10 +382,18 @@ impl Checker<'_, '_> {
                     self.required_steps -= (before - fuel) as u64;
                     let template = specialized.map_err(|e| error(span, e))?.into_expression();
                     let before = fuel;
-                    let completed = nir::completed_values::validate_with_layout_evidence_in(
+                    let completed = nir::completed_values::validate_with_collection_evidence_in(
                         &template,
                         self.newtypes.values(),
                         &|ty| self.bound_tuple_elements(ty),
+                        &|ty, fuel| {
+                            let element = self.list_element_type(ty);
+                            if let Some(element) = element {
+                                nir::type_computations::charge_term(element, fuel)
+                                    .map_err(|_| "completed collection budget exhausted")?;
+                            }
+                            Ok(element.cloned())
+                        },
                         &|id, fuel| {
                             *fuel = fuel.checked_sub(1)?;
                             match (self.structs.get(&id), self.enums.get(&id)) {

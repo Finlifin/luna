@@ -881,6 +881,25 @@ pub enum ContractOutcome {
 pub type MethodResolver<'a> =
     dyn Fn(&Expr, &mut u64) -> Result<nir::program::MethodInstance, Error> + 'a;
 
+/// A compiler-selected associated program, distinct from its evaluated result.
+pub struct AssociatedSelection {
+    pub initializer: nir::associated_initializers::AssociatedInitializer,
+    /// False requires compiler evidence that the program is a completed value.
+    pub requires_invocation: bool,
+}
+impl std::fmt::Display for AssociatedSelection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "(associated-selection (requires-invocation {}) {})",
+            self.requires_invocation, self.initializer
+        )
+    }
+}
+/// Resolve against the same frozen declaration world; never execute the program.
+pub type AssociatedResolver<'a> =
+    dyn Fn(&Expr, &mut u64) -> Result<AssociatedSelection, Error> + 'a;
+
 enum TypeSolver<'a> {
     Unmetered(&'a dyn Fn(&nir::program::TypePredicate) -> ContractOutcome),
     Budgeted(&'a dyn Fn(&nir::program::TypePredicate, &mut u64) -> ContractOutcome),
@@ -938,6 +957,7 @@ pub struct Interpreter<'a> {
     abstract_value_parameters: BTreeMap<DeclarationId, Term>,
     type_solver: Option<TypeSolver<'a>>,
     method_resolver: Option<&'a MethodResolver<'a>>,
+    associated_resolver: Option<&'a AssociatedResolver<'a>>,
     pointer_copy: Option<PointerCopyPermission<'a>>,
     declaration_parameter_sorts: Arc<BTreeMap<DeclarationId, nir::Sort>>,
     declaration_parameter_domains: Arc<BTreeMap<DeclarationId, Term>>,
@@ -1595,7 +1615,7 @@ impl<'a> Interpreter<'a> {
                 // Reconstruction cannot invoke arbitrary code or capture the
                 // invoking function's lexical environment.
                 let mut value_fuel = usize::try_from(budget.steps).unwrap_or(usize::MAX);
-                nir::completed_values::validate_with_layout_evidence_in(
+                nir::completed_values::validate_with_collection_evidence_in(
                     value,
                     package.newtypes.iter(),
                     &|ty| {
@@ -1604,12 +1624,16 @@ impl<'a> Interpreter<'a> {
                         };
                         completed_tuple_heads.get(head)?.tuple_elements(ty)
                     },
+                    &|ty, fuel| {
+                        nir::normal_forms::list_element_budgeted(package, ty, fuel)
+                            .map_err(|_| "invalid completed collection layout evidence")
+                    },
                     &|id, fuel| nir::completed_values::lookup_nominal(package, id, fuel),
                     package.target,
                     &mut value_fuel,
                 )
                 .map_err(|_| invalid())?;
-                nir::completed_values::validate_with_layout_evidence_in(
+                nir::completed_values::validate_with_collection_evidence_in(
                     original,
                     package.newtypes.iter(),
                     &|ty| {
@@ -1617,6 +1641,10 @@ impl<'a> Interpreter<'a> {
                             return None;
                         };
                         completed_tuple_heads.get(head)?.tuple_elements(ty)
+                    },
+                    &|ty, fuel| {
+                        nir::normal_forms::list_element_budgeted(package, ty, fuel)
+                            .map_err(|_| "invalid completed collection layout evidence")
                     },
                     &|id, fuel| nir::completed_values::lookup_nominal(package, id, fuel),
                     package.target,
@@ -1960,6 +1988,12 @@ impl<'a> Interpreter<'a> {
         budget.steps = interpreter.remaining_steps();
         Ok(interpreter)
     }
+    /// Resolve associated programs in this source VM's frozen world.
+    pub fn with_associated_resolver(mut self, resolver: &'a AssociatedResolver<'a>) -> Self {
+        self.associated_resolver = Some(resolver);
+        self
+    }
+
     /// Resolve invocation-demanded methods in this source VM's frozen world.
     pub fn with_method_resolver(mut self, resolver: &'a MethodResolver<'a>) -> Self {
         self.method_resolver = Some(resolver);
@@ -4333,7 +4367,7 @@ impl<'a> Interpreter<'a> {
         let (selected, key) =
             self.prepare_associated_value(interface, subject, *member, &expr.ty, expr.source)?;
         // Initializers cannot read the caller's lexical environment.
-        let result = self.eval(selected, &mut Environment::default());
+        let result = self.eval(selected.expression(), &mut Environment::default());
         self.complete_associated_value(key, &expr.ty, expr.source, result)
     }
 
@@ -4344,7 +4378,13 @@ impl<'a> Interpreter<'a> {
         member: DeclarationId,
         ty: &Term,
         source: SourceRange,
-    ) -> Result<(&'a Expr, Option<(InterfaceInstance, Term, DeclarationId)>), Error> {
+    ) -> Result<
+        (
+            invocation::Body<'a>,
+            Option<(InterfaceInstance, Term, DeclarationId)>,
+        ),
+        Error,
+    > {
         let selected_subject = self.selected_type_view(subject, Some(source))?;
         let selected_arguments = interface
             .arguments
@@ -4356,16 +4396,61 @@ impl<'a> Interpreter<'a> {
             arguments: selected_arguments,
         };
         let key = (selected_interface, selected_subject, member);
+        if !self.associated_values.contains_key(&key)
+            && !self.associated_initializers.contains_key(&key)
+        {
+            let resolver = self
+                .associated_resolver
+                .filter(|_| self.comptime_only && self.graph.is_none())
+                .ok_or_else(|| self.failure(ErrorKind::UnmaterializedDispatch, Some(source)))?;
+            self.charge_copy_work(Some(source), |fuel| {
+                for term in std::iter::once(&key.1)
+                    .chain(&key.0.arguments)
+                    .chain(std::iter::once(ty))
+                {
+                    nir::copy_budget::charge_type_substitution(term, &[], &[], fuel)?;
+                }
+                Ok(())
+            })?;
+            let access = Expr {
+                source,
+                ty: ty.clone(),
+                kind: K::AssociatedValue {
+                    interface: key.0.clone(),
+                    subject: key.1.clone(),
+                    member,
+                },
+            };
+            let before = self.budget.steps;
+            let selected = resolver(&access, &mut self.budget.steps);
+            if self.budget.steps > before {
+                self.budget.steps = 0;
+                return Err(self.failure(ErrorKind::StepsExhausted, Some(source)));
+            }
+            let selected = selected?;
+            let expression = selected.initializer.into_expression();
+            nir::copy_budget::charge_expression(&expression, &mut self.budget.steps)
+                .map_err(|_| self.failure(ErrorKind::StepsExhausted, Some(source)))?;
+            if !selected_types::same(&expression.ty, ty, &self.associated_values) {
+                return Err(self.failure(ErrorKind::Type, Some(source)));
+            }
+            let catalog = if selected.requires_invocation {
+                &mut self.associated_initializers
+            } else {
+                &mut self.associated_values
+            };
+            catalog.insert_owned(key.clone(), Arc::new(expression));
+        }
         let selected = self
             .associated_values
-            .get(&key)
+            .get_body(&key)
             .or_else(|| {
                 self.comptime_only
-                    .then(|| self.associated_initializers.get(&key))
+                    .then(|| self.associated_initializers.get_body(&key))
                     .flatten()
             })
             .ok_or_else(|| self.failure(ErrorKind::UnmaterializedDispatch, Some(source)))?;
-        if !selected_types::same(&selected.ty, ty, &self.associated_values) {
+        if !selected_types::same(&selected.expression().ty, ty, &self.associated_values) {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         }
         let initializing = self.associated_initializers.contains_key(&key);

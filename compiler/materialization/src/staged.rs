@@ -166,6 +166,16 @@ impl Builder<'_> {
                 _ => ContractOutcome::Unknown,
             }
         };
+        let associated_resolver = |access: &n::Expr, remaining: &mut u64| {
+            let world = crate::capabilities::World {
+                index: self.world.index(),
+                implementations: &snapshot.implementations,
+                traits: &snapshot.traits,
+                assumptions: self.world.assumptions(),
+                context: self.world.context(),
+            };
+            resolve_associated_value_for_invocation(&world, access, remaining)
+        };
         let method_resolver = |callee: &n::Expr, remaining: &mut u64| {
             let mut fuel = usize::try_from(*remaining).unwrap_or(usize::MAX);
             let before = fuel;
@@ -192,7 +202,8 @@ impl Builder<'_> {
         )
         .map_err(|error| format!("staged comptime preparation: {error}"))?
         .with_type_solver(&solver)
-        .with_method_resolver(&method_resolver);
+        .with_method_resolver(&method_resolver)
+        .with_associated_resolver(&associated_resolver);
         let value = interpreter.invoke(entry, vec![]);
         self.fuel = usize::try_from(interpreter.remaining_steps()).unwrap_or(usize::MAX);
         let value = value.map_err(|error| format!("staged comptime invocation: {error}"))?;

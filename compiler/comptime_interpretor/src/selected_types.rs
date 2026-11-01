@@ -1,7 +1,31 @@
-//! Type views use only compiler-selected associated values. No implementation
-//! search, default substitution or normal-form head evaluation occurs here.
+//! Passive type views use compiler-selected values. Invocation-owned views may
+//! demand missing selections through the frozen compiler world; normal-form
+//! heads remain opaque and initialized Type observations stay query-local.
 use super::*;
 type Values<'a> = associated_catalog::Catalog<'a>;
+
+type Key = (InterfaceInstance, Term, DeclarationId);
+trait Lookup {
+    fn get(&self, key: &Key) -> Option<&Expr>;
+}
+impl Lookup for Values<'_> {
+    fn get(&self, key: &Key) -> Option<&Expr> {
+        self.get(key)
+    }
+}
+struct Tracked<'v, 'p> {
+    values: &'v Values<'p>,
+    missing: std::cell::RefCell<Option<Key>>,
+}
+impl Lookup for Tracked<'_, '_> {
+    fn get(&self, key: &Key) -> Option<&Expr> {
+        let value = self.values.get(key);
+        if value.is_none() {
+            *self.missing.borrow_mut() = Some(key.clone());
+        }
+        value
+    }
+}
 
 impl Interpreter<'_> {
     pub(super) fn selected_type_view(
@@ -9,11 +33,61 @@ impl Interpreter<'_> {
         ty: &Term,
         source: Option<SourceRange>,
     ) -> Result<Term, Error> {
-        let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
-        let mut fuel = before;
-        let selected = view_budgeted(ty, &self.associated_values, &mut fuel);
-        self.budget.steps -= (before - fuel) as u64;
-        selected.map_err(|kind| self.failure(kind, source))
+        let mut temporary = Vec::new();
+        let result = (|| loop {
+            let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+            let mut fuel = before;
+            let tracked = Tracked {
+                values: &self.associated_values,
+                missing: Default::default(),
+            };
+            let selected =
+                charge_copy(ty, &mut fuel).and_then(|_| normalize(ty, &tracked, &mut fuel, 0));
+            let missing = tracked.missing.into_inner();
+            self.budget.steps -= (before - fuel) as u64;
+            let Some(key) = missing.filter(|_| {
+                self.comptime_only && self.graph.is_none() && self.associated_resolver.is_some()
+            }) else {
+                return selected.map_err(|kind| self.failure(kind, source));
+            };
+            let source = source.unwrap_or(SourceRange { start: 0, end: 0 });
+            let access = Expr {
+                source,
+                ty: Term::Primitive(Primitive::Type),
+                kind: K::AssociatedValue {
+                    interface: key.0.clone(),
+                    subject: key.1.clone(),
+                    member: key.2,
+                },
+            };
+            let value = self.eval_associated_value(&access)?;
+            // A program remains a program in the persistent catalogue. Retain
+            // its observed Type only for this normalization, including nested
+            // projections; subsequent observations execute it again.
+            if !self.associated_values.contains_key(&key) {
+                let value = match value {
+                    Flow::Value(Value::Type(ty)) => ty,
+                    Flow::Value(Value::TypeParameter(declaration)) => Term::Rigid {
+                        declaration,
+                        sort: nir::Sort::Type,
+                    },
+                    _ => return Err(self.failure(ErrorKind::Type, Some(source))),
+                };
+                self.associated_values.insert_owned(
+                    key.clone(),
+                    Arc::new(Expr {
+                        source,
+                        ty: Term::Primitive(Primitive::Type),
+                        kind: K::TypeValue(value),
+                    }),
+                );
+                temporary.push(key);
+            }
+        })();
+        for key in temporary {
+            self.associated_values.remove_owned(&key);
+        }
+        result
     }
 }
 
@@ -28,16 +102,6 @@ pub(super) fn same(a: &Term, b: &Term, values: &Values<'_>) -> bool {
 }
 pub(super) fn view(ty: &Term, values: &Values<'_>) -> Result<Term, ErrorKind> {
     normalize(ty, values, &mut 100_000, 0)
-}
-/// Invocation-owned budget for explicit type observation. Admission remains
-/// the caller's responsibility; this uses only already selected evidence.
-pub(super) fn view_budgeted(
-    ty: &Term,
-    values: &Values<'_>,
-    fuel: &mut usize,
-) -> Result<Term, ErrorKind> {
-    charge_copy(ty, fuel)?;
-    normalize(ty, values, fuel, 0)
 }
 fn charge_copy(ty: &Term, fuel: &mut usize) -> Result<(), ErrorKind> {
     nir::copy_budget::charge_type_substitution(ty, &[], &[], fuel).map_err(|error| match error {
@@ -96,7 +160,7 @@ pub(super) fn predicate(
 
 fn normalize(
     ty: &Term,
-    values: &Values<'_>,
+    values: &impl Lookup,
     fuel: &mut usize,
     depth: usize,
 ) -> Result<Term, ErrorKind> {

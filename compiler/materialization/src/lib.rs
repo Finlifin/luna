@@ -1,7 +1,9 @@
 //! Compile-time closure of concrete function/interface dependencies. Templates
 //! stay in NIR; only fixed selections are exported to the execution table.
+mod associated_selection;
 #[cfg(test)]
 mod callable_tests;
+pub use associated_selection::resolve_associated_value_for_invocation;
 mod captured_templates;
 mod conditional_calls;
 mod dead_tails;

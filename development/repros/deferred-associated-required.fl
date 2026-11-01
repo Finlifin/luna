@@ -1,5 +1,5 @@
-{- Known gap: required computations defer bodies with ordinary Type inputs,
-   but their VM cannot yet prepare missing associated-value selections. -}
+{- Regression: required computations prepare associated-value selections
+   after binding ordinary Type inputs in their frozen declaration world. -}
 typealias Type=.Type'builtin; typealias char=.char'builtin;
 trait Flag { assoc enabled:bool; }
 impl Flag for bool { assoc enabled:bool=true; }

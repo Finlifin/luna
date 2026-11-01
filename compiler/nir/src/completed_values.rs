@@ -279,6 +279,28 @@ pub fn validate_with_layout_evidence_in<'d>(
     target: Option<crate::target::TargetData>,
     fuel: &mut usize,
 ) -> Result<(), &'static str> {
+    validate_with_collection_evidence_in(
+        value,
+        definitions,
+        tuple_fields,
+        &|_, _| Ok(None),
+        lookup,
+        target,
+        fuel,
+    )
+}
+
+/// Collection reconstruction requires declaration-owned element-domain evidence.
+/// The lookup and every child validation share the caller's budget.
+pub fn validate_with_collection_evidence_in<'d>(
+    value: &Expr,
+    definitions: impl Iterator<Item = &'d crate::newtypes::Newtype> + Clone,
+    tuple_fields: &impl for<'t> Fn(&'t Term) -> Option<&'t [Term]>,
+    list_element: &impl Fn(&Term, &mut usize) -> Result<Option<Term>, &'static str>,
+    lookup: &impl Fn(crate::DeclarationId, &mut usize) -> Option<NominalValueDeclaration<'d>>,
+    target: Option<crate::target::TargetData>,
+    fuel: &mut usize,
+) -> Result<(), &'static str> {
     value_in(
         value,
         fuel,
@@ -286,6 +308,7 @@ pub fn validate_with_layout_evidence_in<'d>(
         0,
         &definitions,
         tuple_fields,
+        list_element,
         lookup,
         target,
     )
@@ -297,6 +320,7 @@ fn value_in<'a, 'd>(
     depth: usize,
     definitions: &(impl Iterator<Item = &'d crate::newtypes::Newtype> + Clone),
     tuple_fields: &impl for<'t> Fn(&'t Term) -> Option<&'t [Term]>,
+    list_element: &impl Fn(&Term, &mut usize) -> Result<Option<Term>, &'static str>,
     lookup: &impl Fn(crate::DeclarationId, &mut usize) -> Option<NominalValueDeclaration<'d>>,
     target: Option<crate::target::TargetData>,
 ) -> Result<(), &'static str> {
@@ -311,6 +335,28 @@ fn value_in<'a, 'd>(
         }
     }
     match &value.kind {
+        K::TypeList(elements) => {
+            let element = list_element(&value.ty, fuel)?
+                .ok_or("completed collection lacks declared layout evidence")?;
+            charge(fuel, elements.len())?;
+            for item in elements {
+                if item.ty != element {
+                    return Err("completed collection element type mismatch");
+                }
+                value_in(
+                    item,
+                    fuel,
+                    scope,
+                    depth + 1,
+                    definitions,
+                    tuple_fields,
+                    list_element,
+                    lookup,
+                    target,
+                )?;
+            }
+            Ok(())
+        }
         K::OptionalAbsent if matches!(value.ty, Term::Optional(_)) => Ok(()),
         K::OptionalPresent(payload) => {
             let Term::Optional(inner) = &value.ty else {
@@ -326,6 +372,7 @@ fn value_in<'a, 'd>(
                 depth + 1,
                 definitions,
                 tuple_fields,
+                list_element,
                 lookup,
                 target,
             )
@@ -384,6 +431,7 @@ fn value_in<'a, 'd>(
                     depth + 1,
                     definitions,
                     tuple_fields,
+                    list_element,
                     lookup,
                     target,
                 )?;
@@ -406,6 +454,7 @@ fn value_in<'a, 'd>(
                     depth + 1,
                     definitions,
                     tuple_fields,
+                    list_element,
                     lookup,
                     target,
                 )?;
@@ -432,6 +481,7 @@ fn value_in<'a, 'd>(
                     depth + 1,
                     definitions,
                     tuple_fields,
+                    list_element,
                     lookup,
                     target,
                 )?;
@@ -512,6 +562,7 @@ fn value_in<'a, 'd>(
                     depth + 1,
                     definitions,
                     tuple_fields,
+                    list_element,
                     lookup,
                     target,
                 )?;
@@ -543,6 +594,7 @@ fn value_in<'a, 'd>(
                 depth + 1,
                 definitions,
                 tuple_fields,
+                list_element,
                 lookup,
                 target,
             )
@@ -567,6 +619,7 @@ fn value_in<'a, 'd>(
                 depth + 1,
                 definitions,
                 tuple_fields,
+                list_element,
                 lookup,
                 target,
             )
@@ -625,6 +678,7 @@ fn value_in<'a, 'd>(
                     depth + 1,
                     definitions,
                     tuple_fields,
+                    list_element,
                     lookup,
                     target,
                 )?;
@@ -670,6 +724,7 @@ fn value_in<'a, 'd>(
                 depth + 1,
                 definitions,
                 tuple_fields,
+                list_element,
                 lookup,
                 target,
             )
@@ -694,6 +749,7 @@ fn value_in<'a, 'd>(
                         depth + 1,
                         definitions,
                         tuple_fields,
+                        list_element,
                         lookup,
                         target,
                     )?;
@@ -711,6 +767,7 @@ fn value_in<'a, 'd>(
                     depth + 1,
                     definitions,
                     tuple_fields,
+                    list_element,
                     lookup,
                     target,
                 )

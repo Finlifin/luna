@@ -134,6 +134,7 @@ impl<'a> Interpreter<'a> {
             newtype_builder: None,
             type_solver: None,
             method_resolver: None,
+            associated_resolver: None,
             pointer_copy: None,
             method_parameters,
             declaration_parameter_sorts,

@@ -289,6 +289,11 @@ fn execute_prepared(
     let solver = |predicate: &nir::program::TypePredicate, remaining: &mut u64| {
         crate::implementation_world::solve_metered(&world, predicate, preparation_budget, remaining)
     };
+    let associated_resolver = |access: &nir::program::Expr, remaining: &mut u64| {
+        elaboration::materialization::resolve_associated_value_for_invocation(
+            &world, access, remaining,
+        )
+    };
     let method_resolver = |callee: &nir::program::Expr, remaining: &mut u64| {
         let mut fuel = usize::try_from(*remaining).unwrap_or(usize::MAX);
         let before = fuel;
@@ -324,6 +329,7 @@ fn execute_prepared(
     let mut interpreter = interpreter
         .map_err(|error| format!("cannot prepare comptime invocation: {error}"))?
         .with_method_resolver(&method_resolver)
+        .with_associated_resolver(&associated_resolver)
         .with_budgeted_type_solver(&solver)
         .with_budgeted_pointer_copy_permission(&pointer_copy);
     let builder = |request: &comptime_interpretor::StructBuildRequest, remaining: &mut u64| {

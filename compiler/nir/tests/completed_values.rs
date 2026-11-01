@@ -1159,3 +1159,89 @@ fn completed_objects_preserve_order_and_validate_each_entry_domain() {
     assert!(nir::completed_values::validate(&object, &mut 1).is_err());
     validate(&object).unwrap();
 }
+
+#[test]
+fn completed_collections_require_layout_and_completed_elements() {
+    use nir::normal_forms::{Head, Kind, Parameter, Role};
+    use nir::{DeclarationId, Sort};
+    let owner = DeclarationId {
+        package: 43,
+        local: 1,
+    };
+    let metadata = Head {
+        declaration: owner,
+        role: Role::TypeList,
+        collector: None,
+        requirements: vec![],
+        parameters: vec![Parameter {
+            declaration: DeclarationId {
+                package: 43,
+                local: 2,
+            },
+            binding: id(0),
+            kind: Kind::Type,
+            ty: Term::Primitive(Primitive::Type),
+        }],
+    };
+    let domain = |element| Term::NormalForm {
+        head: owner,
+        sort: Sort::Type,
+        arguments: vec![element],
+    };
+    let check = |value: &Expr, fuel: &mut usize| {
+        nir::completed_values::validate_with_collection_evidence_in(
+            value,
+            std::iter::empty(),
+            &|_| None,
+            &|ty, fuel| {
+                let element = metadata.list_element(ty);
+                if let Some(element) = element {
+                    nir::type_computations::charge_term(element, fuel)
+                        .map_err(|_| "budget exhausted")?;
+                }
+                Ok(element.cloned())
+            },
+            &|_, _| None,
+            None,
+            fuel,
+        )
+    };
+    let flag = expr(boolean(), K::Literal(Literal::Bool(true)));
+    let good = expr(domain(boolean()), K::TypeList(vec![flag.clone()]));
+    check(&good, &mut 10000).unwrap();
+    assert!(validate(&good).is_err());
+    check(&expr(domain(boolean()), K::TypeList(vec![])), &mut 10000).unwrap();
+    check(
+        &expr(
+            domain(Term::Primitive(Primitive::Type)),
+            K::TypeList(vec![expr(
+                Term::Primitive(Primitive::Type),
+                K::TypeValue(boolean()),
+            )]),
+        ),
+        &mut 10000,
+    )
+    .unwrap();
+    for bad in [
+        expr(boolean(), good.kind.clone()),
+        expr(domain(Term::Primitive(Primitive::Char)), good.kind.clone()),
+        expr(
+            domain(boolean()),
+            K::TypeList(vec![expr(boolean(), K::Local(id(9)))]),
+        ),
+        expr(
+            Term::NormalForm {
+                head: DeclarationId {
+                    package: 43,
+                    local: 99,
+                },
+                sort: Sort::Type,
+                arguments: vec![boolean()],
+            },
+            good.kind.clone(),
+        ),
+    ] {
+        assert!(check(&bad, &mut 10000).is_err());
+    }
+    assert!(check(&good, &mut 1).is_err());
+}

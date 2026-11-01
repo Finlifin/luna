@@ -1518,7 +1518,7 @@ fn charge_completed_value(
     context: &crate::ptc::Context,
     fuel: &mut usize,
 ) -> Result<(), String> {
-    nir::completed_values::validate_with_layout_evidence_in(
+    nir::completed_values::validate_with_collection_evidence_in(
         value,
         layouts.newtypes.iter(),
         &|ty| {
@@ -1543,6 +1543,10 @@ fn charge_completed_value(
                 return None;
             }
             heads[slot].tuple_elements(ty)
+        },
+        &|ty, fuel| {
+            nir::normal_forms::list_element_budgeted(layouts, ty, fuel)
+                .map_err(|_| "invalid completed collection layout evidence")
         },
         &|id, fuel| nir::completed_values::lookup_nominal(layouts, id, fuel),
         layouts.target,

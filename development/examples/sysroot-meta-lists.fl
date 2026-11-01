@@ -57,7 +57,7 @@ comptime fn run() -> bool {
         and (nested[0] match { null => true, _? => false })
         and unused.length() == 0 and unused_filter.length() == 0
         and reducers_and_searches() and named_metadata() and stable_sorting()
-        and exact_integer_division() and value_receivers() and indexed_pairing() and bulk_extension()
+        and associated_flags() and exact_integer_division() and value_receivers() and indexed_pairing() and bulk_extension()
         and prefix_layout() and adjacent_groups() and checked_queries() and fallible_collectors() and fallible_terminals()
 }
 
@@ -440,3 +440,23 @@ typealias SelectedMethodCarrier = MethodCarrier<returned_staged_method<bool>()>;
 
 pure comptime fn MethodsCarrier<methods: meta.List<fn(comptime bool) -> bool>> -> Type { bool }
 typealias SelectedMethodsCarrier = MethodsCarrier<saved_staged_methods>;
+
+trait FlagValues {
+    assoc values: meta.List<bool>;
+}
+
+impl FlagValues for bool {
+    assoc values: meta.List<bool> = [true, false];
+}
+
+comptime fn flag_values(comptime T: Type) -> meta.List<bool>
+where requires T :- FlagValues
+{
+    T.as(FlagValues).values
+}
+
+const saved_flag_values = flag_values(bool);
+
+comptime fn associated_flags() -> bool {
+    saved_flag_values.length() == 2 and saved_flag_values[0] and not saved_flag_values[1]
+}

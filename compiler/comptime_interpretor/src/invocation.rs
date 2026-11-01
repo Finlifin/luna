@@ -2,12 +2,12 @@
 //! These boundaries are shared by the migration interpreter and linear bodies.
 use super::*;
 
-enum Body<'a> {
+pub(super) enum Body<'a> {
     Package(&'a Expr),
     Owned(Arc<Expr>),
 }
 impl Body<'_> {
-    fn expression(&self) -> &Expr {
+    pub(super) fn expression(&self) -> &Expr {
         match self {
             Self::Package(body) => body,
             Self::Owned(body) => body,
@@ -46,7 +46,7 @@ struct Activation<'a> {
 
 enum Execution<'a> {
     Associated {
-        expression: &'a Expr,
+        expression: Body<'a>,
         access: Arc<comptime_compiler::associated::Access>,
         key: Option<(InterfaceInstance, Term, DeclarationId)>,
         source: SourceRange,
@@ -70,7 +70,7 @@ impl Execution<'_> {
                 expression,
                 environment,
                 ..
-            } => (expression, None, environment),
+            } => (expression.expression(), None, environment),
             Self::Invocation(activation) => {
                 let frame = &mut activation.frame;
                 (
@@ -231,7 +231,10 @@ impl<'a> Interpreter<'a> {
                     _ => None,
                 };
                 let code = if let Execution::Associated { expression, .. } = &active {
-                    self.borrowed_invocation_code(expression)
+                    match expression {
+                        Body::Package(expression) => self.borrowed_invocation_code(expression),
+                        Body::Owned(expression) => self.owned_invocation_code(expression),
+                    }
                 } else {
                     let (expression, identity, _) = active.parts();
                     match owned {

@@ -278,6 +278,18 @@ impl PreparedRequired {
             Some(reason) => format!("{message}; pointer Copy evidence: {reason}"),
             None => message,
         };
+        let associated_resolver = |access: &n::Expr, remaining: &mut u64| {
+            let world = crate::capabilities::World {
+                index: &implementation_index,
+                implementations: &package.implementations,
+                traits: &package.traits,
+                assumptions: &invocation_assumptions,
+                context: invocation_type_context,
+            };
+            crate::materialization::resolve_associated_value_for_invocation(
+                &world, access, remaining,
+            )
+        };
         let method_resolver = |callee: &n::Expr, remaining: &mut u64| {
             let mut fuel = usize::try_from(*remaining).unwrap_or(usize::MAX);
             let before = fuel;
@@ -323,7 +335,9 @@ impl PreparedRequired {
                     format!("required comptime preparation failed: {failure}"),
                 )
             })?;
-            session = session.with_method_resolver(&method_resolver);
+            session = session
+                .with_method_resolver(&method_resolver)
+                .with_associated_resolver(&associated_resolver);
             if builder.is_some() {
                 session = session
                     .with_struct_builder(&build)
@@ -391,7 +405,9 @@ impl PreparedRequired {
                 .with_enum_builder(&build_enum)
                 .with_newtype_builder(&build_newtype);
         }
-        interpreter = interpreter.with_method_resolver(&method_resolver);
+        interpreter = interpreter
+            .with_method_resolver(&method_resolver)
+            .with_associated_resolver(&associated_resolver);
         interpreter = interpreter.with_budgeted_type_solver(&type_solver);
         interpreter = interpreter.with_budgeted_pointer_copy_permission(&pointer_copy);
         let scope = interpreter

@@ -168,3 +168,162 @@ fn borrowed_code_cache_does_not_poison_retries_after_compilation_budget_failure(
     vm.bytecode_enabled = false;
     assert!(vm.borrowed_invocation_code(&body).unwrap().is_none());
 }
+
+#[test]
+fn owned_associated_selection_checks_type_phase_and_budget_before_publication() {
+    use std::cell::Cell;
+    let package = Package::default();
+    for compiled in [false, true] {
+        let calls = Cell::new(0);
+        let resolver = |_: &Expr, fuel: &mut u64| {
+            *fuel -= 1;
+            calls.set(calls.get() + 1);
+            let mut value = expr(K::Literal(Literal::Bool(true)));
+            if calls.get() == 1 {
+                value.ty = Term::Primitive(Primitive::Char);
+            }
+            Ok(AssociatedSelection {
+                initializer: nir::associated_initializers::AssociatedInitializer::new(
+                    value, &mut 1000,
+                )
+                .unwrap(),
+                requires_invocation: true,
+            })
+        };
+        let mut vm = Interpreter::for_comptime(&package, Budget::default())
+            .unwrap()
+            .with_associated_resolver(&resolver);
+        let mut env = Environment::default();
+        assert_eq!(
+            run(&mut vm, &read(2), &mut env, compiled).unwrap_err().kind,
+            ErrorKind::Type
+        );
+        assert!(!vm.associated_initializers.contains_key(&key(2)));
+        for _ in 0..2 {
+            assert!(matches!(
+                run(&mut vm, &read(2), &mut env, compiled).unwrap(),
+                Flow::Value(Value::Bool(true))
+            ));
+        }
+        assert_eq!(calls.get(), 2);
+        assert!(vm.active_associated_initializers.is_empty());
+        let mut runtime = Interpreter::new(&package, Budget::default())
+            .unwrap()
+            .with_associated_resolver(&resolver);
+        assert_eq!(
+            run(&mut runtime, &read(2), &mut env, compiled)
+                .unwrap_err()
+                .kind,
+            ErrorKind::UnmaterializedDispatch
+        );
+        assert_eq!(calls.get(), 2);
+        let refill = |_: &Expr, fuel: &mut u64| {
+            *fuel += 1;
+            Err(Error {
+                kind: ErrorKind::UnmaterializedDispatch,
+                source: None,
+            })
+        };
+        let mut rejected = Interpreter::for_comptime(&package, Budget::default())
+            .unwrap()
+            .with_associated_resolver(&refill);
+        assert_eq!(
+            run(&mut rejected, &read(2), &mut env, compiled)
+                .unwrap_err()
+                .kind,
+            ErrorKind::StepsExhausted
+        );
+        assert_eq!(rejected.remaining_steps(), 0);
+    }
+}
+
+#[test]
+fn owned_associated_cycles_and_budget_failures_release_active_keys() {
+    let package = Package::default();
+    let resolver = |access: &Expr, fuel: &mut u64| {
+        *fuel -= 1;
+        let K::AssociatedValue { member, .. } = &access.kind else {
+            unreachable!()
+        };
+        let value = if member.local < 34 {
+            read(member.local + 1)
+        } else {
+            expr(K::Literal(Literal::Bool(true)))
+        };
+        Ok(AssociatedSelection {
+            initializer: nir::associated_initializers::AssociatedInitializer::new(value, &mut 1000)
+                .unwrap(),
+            requires_invocation: true,
+        })
+    };
+    let mut vm = Interpreter::for_comptime(&package, Budget::default())
+        .unwrap()
+        .with_associated_resolver(&resolver);
+    vm.budget.depth = 8;
+    let mut env = Environment::default();
+    assert!(matches!(
+        run(&mut vm, &read(2), &mut env, true).unwrap(),
+        Flow::Value(Value::Bool(true))
+    ));
+    vm.budget.steps = 100;
+    assert_eq!(
+        run(&mut vm, &read(2), &mut env, true).unwrap_err().kind,
+        ErrorKind::StepsExhausted
+    );
+    assert!(vm.active_associated_initializers.is_empty());
+    vm.budget.steps = Budget::default().steps;
+    assert!(matches!(
+        run(&mut vm, &read(2), &mut env, true).unwrap(),
+        Flow::Value(Value::Bool(true))
+    ));
+    vm.associated_initializers
+        .insert_owned(key(34), Arc::new(read(2)));
+    assert_eq!(
+        run(&mut vm, &read(2), &mut env, true).unwrap_err().kind,
+        ErrorKind::InvalidControlFlow
+    );
+    assert!(vm.active_associated_initializers.is_empty());
+}
+
+#[test]
+fn initialized_type_views_are_query_local_and_preserve_nested_projection_structure() {
+    let package = Package::default();
+    let resolver = |_: &Expr, fuel: &mut u64| {
+        *fuel -= 1;
+        Ok(AssociatedSelection {
+            initializer: nir::associated_initializers::AssociatedInitializer::new(
+                Expr {
+                    source: SOURCE,
+                    ty: Term::Primitive(Primitive::Type),
+                    kind: K::TypeValue(Term::Primitive(Primitive::Bool)),
+                },
+                &mut 1000,
+            )
+            .unwrap(),
+            requires_invocation: true,
+        })
+    };
+    let mut vm = Interpreter::for_comptime(&package, Budget::default())
+        .unwrap()
+        .with_associated_resolver(&resolver);
+    let projection = Term::AssociatedType {
+        origin: Box::new(nir::AssociatedTypeOrigin {
+            interface: id(1),
+            member: id(2),
+        }),
+        arguments: vec![],
+        subject: Box::new(Term::Primitive(Primitive::Bool)),
+    };
+    let nested = Term::Optional(Box::new(projection));
+    for _ in 0..2 {
+        let before = vm.remaining_steps();
+        assert_eq!(
+            vm.selected_type_view(&nested, Some(SOURCE)).unwrap(),
+            Term::Optional(Box::new(Term::Primitive(Primitive::Bool)))
+        );
+        assert!(vm.remaining_steps() < before);
+        assert!(!vm.associated_values.contains_key(&key(2)));
+        assert!(vm.associated_initializers.contains_key(&key(2)));
+        assert!(vm.active_associated_initializers.is_empty());
+    }
+}

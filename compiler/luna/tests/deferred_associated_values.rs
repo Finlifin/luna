@@ -71,3 +71,48 @@ fn associated_domains_keep_ordinary_interface_argument_scope() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn required_computations_select_associated_values_after_type_binding() {
+    let source = include_str!("../../../development/repros/deferred-associated-required.fl");
+    let package = support::compile_with_protocols(source, &Default::default()).unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "result", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn demanded_associated_initializers_execute_in_the_required_world() {
+    let source = include_str!("../../../development/repros/deferred-associated-required.fl")
+        .replace("assoc enabled:bool=true;", "assoc enabled:bool=initial();")
+        + "pure comptime fn initial()->bool { true }";
+    let package = support::compile_with_protocols(&source, &Default::default()).unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "result", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn required_type_results_preserve_selected_associated_types() {
+    let source = "typealias Type=.Type'builtin;
+        trait Shape { assoc Item:Type; }
+        impl Shape for bool { assoc Item:Type=bool; }
+        comptime fn Selected(comptime T:Type)->Type
+        where requires T :- Shape
+        { T.as(Shape).Item }
+        typealias SelectedBool=Selected(bool);
+        comptime fn run()->Type { SelectedBool }";
+    for source in [
+        source.to_owned(),
+        source.replace("assoc Item:Type=bool;", "assoc Item:Type=Initialized();")
+            + "pure comptime fn Initialized()->Type {bool}",
+    ] {
+        let package = support::compile_with_protocols(&source, &Default::default()).unwrap();
+        assert_eq!(
+            luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+            Value::Type(nir::Term::Primitive(nir::Primitive::Bool))
+        );
+    }
+}
