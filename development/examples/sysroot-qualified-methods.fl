@@ -38,7 +38,7 @@ const checked_text = text_at_comptime();
 
 
 test {
-    inline if checked_text and checked_associated_optionals {
+    inline if checked_text and checked_associated_optionals and checked_associated_errors {
         let passed = run();
         assumes passed;
     } else {
@@ -82,3 +82,37 @@ comptime fn associated_optionals() -> bool {
 }
 
 const checked_associated_optionals = associated_optionals();
+
+comptime fn associated_good(comptime T: Type, value: T.as(OptionalElement).Item) -> !char T.as(OptionalElement).Item
+where requires T :- OptionalElement
+{
+    value
+}
+
+comptime fn associated_bad(comptime T: Type, value: T.as(OptionalElement).Item) -> !T.as(OptionalElement).Item char
+where requires T :- OptionalElement
+{
+    error value
+}
+
+comptime fn associated_errors() -> bool {
+    let success = associated_good(bool, true);
+    let failure = associated_bad(bool, false);
+    (success match { value! => value, error _ => false })
+        and (failure match { _! => false, error value => not value })
+        and success.is_ok() and failure.is_err()
+        and associated_error_tail()
+}
+
+const checked_associated_errors = associated_errors();
+
+impl OptionalElement for u8 {
+    assoc Item: Type = !u8 bool;
+}
+
+comptime fn associated_error_tail() -> bool {
+    let success: !u8 bool = true;
+    let failure: !u8 bool = error 7;
+    (associated_good(u8, success) match { value! => value, error _ => false })
+        and (associated_good(u8, failure) match { _! => false, error _ => true })
+}

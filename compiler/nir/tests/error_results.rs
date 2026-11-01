@@ -1539,3 +1539,63 @@ fn whole_type_evidence_admits_generic_error_transport_without_choosing_tags() {
         .is_err()
     );
 }
+
+#[test]
+fn symbolic_conversions_validate_the_lexical_scope_without_relaxing_closed_checks() {
+    use nir::error_results::{Conversion as C, validate_conversion, validate_conversion_in_scope};
+    let input = Term::Bound {
+        depth: 1,
+        index: 0,
+        sort: Sort::Type,
+    };
+    let output = physical_result(vec![Term::Primitive(P::Char)], input.clone());
+    let frames = vec![vec![Sort::Type], vec![Sort::ComptimeValue]];
+    for (kind, from, to) in [
+        (C::Success, input.clone(), output.clone()),
+        (
+            C::Failure,
+            input.clone(),
+            physical_result(vec![input.clone()], Term::Primitive(P::Bool)),
+        ),
+        (
+            C::Embed,
+            output.clone(),
+            physical_result(
+                vec![Term::Primitive(P::Bool), Term::Primitive(P::Char)],
+                input.clone(),
+            ),
+        ),
+        (
+            C::Product,
+            Term::Tuple(vec![output.clone()]),
+            Term::Tuple(vec![output.clone()]),
+        ),
+    ] {
+        let equal = &mut |a: &Term, b: &Term| a == b;
+        assert_eq!(
+            validate_conversion(kind, &from, &to, &mut 1000, equal),
+            Err(Error::InvalidType)
+        );
+        assert!(validate_conversion_in_scope(kind, &from, &to, &frames, &mut 1000, equal).is_ok());
+        assert_eq!(
+            validate_conversion_in_scope(kind, &from, &to, &[vec![Sort::Type]], &mut 1000, equal),
+            Err(Error::InvalidType)
+        );
+        assert_eq!(
+            validate_conversion_in_scope(
+                kind,
+                &from,
+                &to,
+                &[vec![Sort::ComptimeValue], vec![Sort::Type]],
+                &mut 1000,
+                equal
+            ),
+            Err(Error::InvalidType)
+        );
+        assert_eq!(
+            validate_conversion_in_scope(kind, &from, &to, &frames, &mut 0, equal),
+            Err(Error::Budget)
+        );
+        assert!(validate_conversion_in_scope(kind, &from, &to, &frames, &mut 1000, equal).is_ok());
+    }
+}

@@ -8365,14 +8365,24 @@ impl Checker<'_, '_> {
         conversion: nir::error_results::Conversion,
         span: Span,
     ) -> Result<n::Expr, Error> {
-        nir::error_results::validate_conversion(
+        let frames = self.context.scope().to_vec();
+        nir::error_results::validate_conversion_in_scope(
             conversion,
             &value.ty,
             target,
+            &frames,
             &mut 100_000,
             &mut |a, b| self.require(a, b, span).is_ok(),
         )
-        .map_err(|e| error(span, format!("error result conversion: {e}")))?;
+        .map_err(|e| {
+            error(
+                span,
+                format!(
+                    "error result conversion: {e}; input {}; output {target}",
+                    value.ty
+                ),
+            )
+        })?;
         Ok(n::Expr {
             // Conversion and operand are distinct runtime cleanup boundaries,
             // even when an implicit conversion shares the operand's syntax.

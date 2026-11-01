@@ -4,7 +4,9 @@
 //! must never prove that two symbolic error labels are distinct.
 pub mod specialize;
 mod transport;
-pub use transport::{RepresentationTransport, transport_plan_with_layouts};
+pub use transport::{
+    RepresentationTransport, transport_plan_in_scope_with_layouts, transport_plan_with_layouts,
+};
 
 use crate::{Sort, Term};
 use std::fmt;
@@ -46,8 +48,11 @@ fn charge(ty: &Term, fuel: &mut usize) -> Result<(), Error> {
     crate::type_computations::charge_term(ty, fuel).map_err(|_| Error::Budget)
 }
 fn type_input(ty: &Term, fuel: &mut usize) -> Result<(), Error> {
+    type_input_in_scope(ty, &[], fuel)
+}
+fn type_input_in_scope(ty: &Term, frames: &[Vec<Sort>], fuel: &mut usize) -> Result<(), Error> {
     charge(ty, fuel)?;
-    if ty.sort() != Sort::Type || ty.check_scope(&[]).is_err() {
+    if ty.sort() != Sort::Type || ty.check_scope(frames).is_err() {
         return Err(Error::InvalidType);
     }
     Ok(())
@@ -544,7 +549,20 @@ pub fn validate_conversion(
     fuel: &mut usize,
     equal: &mut impl FnMut(&Term, &Term) -> bool,
 ) -> Result<(), Error> {
-    validate_conversion_with_tuple(conversion, input, output, fuel, equal, &|_| None)
+    validate_conversion_in_scope(conversion, input, output, &[], fuel, equal)
+}
+
+/// Validate symbolic conversion domains in their lexical Type scope. This
+/// admits bound inputs but does not provide executable tag-layout evidence.
+pub fn validate_conversion_in_scope(
+    conversion: Conversion,
+    input: &Term,
+    output: &Term,
+    frames: &[Vec<Sort>],
+    fuel: &mut usize,
+    equal: &mut impl FnMut(&Term, &Term) -> bool,
+) -> Result<(), Error> {
+    validate_conversion_with_tuple(conversion, input, output, frames, fuel, equal, &|_| None)
 }
 
 /// Validate conversions with declaration-owned product fields. Scalar error
@@ -569,16 +587,25 @@ fn validate_conversion_with_tuple(
     conversion: Conversion,
     input: &Term,
     output: &Term,
+    frames: &[Vec<Sort>],
     fuel: &mut usize,
     equal: &mut impl FnMut(&Term, &Term) -> bool,
     tuple_fields: &impl for<'t> Fn(&'t Term) -> Option<&'t [Term]>,
 ) -> Result<(), Error> {
     if conversion == Conversion::Product {
-        transport_plan_with_layouts(input, output, true, fuel, equal, tuple_fields)?;
+        transport_plan_in_scope_with_layouts(
+            input,
+            output,
+            true,
+            frames,
+            fuel,
+            equal,
+            tuple_fields,
+        )?;
         return Ok(());
     }
-    type_input(input, fuel)?;
-    type_input(output, fuel)?;
+    type_input_in_scope(input, frames, fuel)?;
+    type_input_in_scope(output, frames, fuel)?;
     let Term::ErrorResult { errors, result } = output else {
         return Err(Error::InvalidType);
     };

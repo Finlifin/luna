@@ -16,6 +16,7 @@ pub(super) struct Frame {
     newtype_conversions: BTreeMap<usize, nir::newtypes::Conversion>,
     list_types: BTreeMap<usize, Term>,
     optional_types: BTreeMap<usize, Term>,
+    error_conversions: BTreeMap<usize, comptime_compiler::ErrorConversion>,
     append_types: BTreeMap<usize, Term>,
     list_operations: BTreeMap<usize, (Term, Option<Term>)>,
     instance_origins: BTreeMap<usize, Option<(DeclarationId, usize)>>,
@@ -1061,6 +1062,7 @@ impl<'a> Interpreter<'a> {
             newtype_conversions: BTreeMap::new(),
             list_types: BTreeMap::new(),
             optional_types: BTreeMap::new(),
+            error_conversions: BTreeMap::new(),
             append_types: BTreeMap::new(),
             list_operations: BTreeMap::new(),
             instance_origins: BTreeMap::new(),
@@ -2212,19 +2214,27 @@ impl<'a> Interpreter<'a> {
                     frame.slots[*destination] =
                         Some(self.complete_optional(&ty, value, *value_source)?);
                 }
-                Op::PrepareError(conversion) => {
-                    self.prepare_error_conversion(
+                Op::PrepareError {
+                    destination,
+                    conversion,
+                } => {
+                    let plan = self.prepare_error_conversion(
                         conversion.conversion,
                         &conversion.input,
                         &conversion.output,
                         source,
                     )?;
+                    frame.error_conversions.insert(*destination, plan);
                 }
                 Op::ErrorConvert {
                     destination,
                     value,
-                    conversion,
+                    conversion: _,
                 } => {
+                    let conversion = frame
+                        .error_conversions
+                        .remove(destination)
+                        .ok_or_else(missing)?;
                     let value = frame.slots[*value].take().ok_or_else(missing)?;
                     if !self.has_type(&value, &conversion.input) {
                         return Err(self.failure(ErrorKind::Type, Some(source)));

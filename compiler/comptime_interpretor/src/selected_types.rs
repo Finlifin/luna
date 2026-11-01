@@ -179,10 +179,21 @@ fn normalize(
             .collect()
     };
     Ok(match ty {
-        Term::ErrorResult { errors, result } => Term::error_result(
-            many(errors, fuel)?,
-            normalize(result, values, fuel, depth + 1)?,
-        ),
+        Term::ErrorResult { errors, result } => {
+            let observed_errors = many(errors, fuel)?;
+            let observed_result = normalize(result, values, fuel, depth + 1)?;
+            // An already selected row may carry an explicit physical order.
+            // Observation must not silently retag its existing payload.
+            charge_copy(ty, fuel)?;
+            if observed_errors == *errors && observed_result == **result {
+                Term::ErrorResult {
+                    errors: observed_errors,
+                    result: Box::new(observed_result),
+                }
+            } else {
+                Term::error_result(observed_errors, observed_result)
+            }
+        }
         Term::Computation { effects, result } => {
             *fuel = fuel
                 .checked_sub(effects.len())

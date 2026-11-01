@@ -782,10 +782,12 @@ impl Checker<'_, '_> {
                 else {
                     return Err("invalid pending error conversion".into());
                 };
-                nir::error_results::validate_conversion(
+                let frames = self.context.scope().to_vec();
+                nir::error_results::validate_conversion_in_scope(
                     *conversion,
                     &payload.ty,
                     &target,
+                    &frames,
                     &mut 100_000,
                     &mut |a, b| self.require(a, b, span).is_ok(),
                 )

@@ -24,8 +24,21 @@ pub fn transport_plan_with_layouts(
     equal: &mut impl FnMut(&Term, &Term) -> bool,
     tuple_fields: &impl for<'t> Fn(&'t Term) -> Option<&'t [Term]>,
 ) -> Result<RepresentationTransport, Error> {
-    type_input(input, fuel)?;
-    type_input(output, fuel)?;
+    transport_plan_in_scope_with_layouts(input, output, exact_rows, &[], fuel, equal, tuple_fields)
+}
+
+/// Scope-aware symbolic transport checking; closed consumers use the wrapper.
+pub fn transport_plan_in_scope_with_layouts(
+    input: &Term,
+    output: &Term,
+    exact_rows: bool,
+    frames: &[Vec<Sort>],
+    fuel: &mut usize,
+    equal: &mut impl FnMut(&Term, &Term) -> bool,
+    tuple_fields: &impl for<'t> Fn(&'t Term) -> Option<&'t [Term]>,
+) -> Result<RepresentationTransport, Error> {
+    type_input_in_scope(input, frames, fuel)?;
+    type_input_in_scope(output, frames, fuel)?;
     build(input, output, exact_rows, fuel, equal, tuple_fields, 0)
 }
 fn build(

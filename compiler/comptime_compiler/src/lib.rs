@@ -357,7 +357,10 @@ pub enum Op {
         value: Option<Register>,
         value_source: SourceRange,
     },
-    PrepareError(Arc<ErrorConversion>),
+    PrepareError {
+        destination: Register,
+        conversion: Arc<ErrorConversion>,
+    },
     ErrorConvert {
         destination: Register,
         value: Register,
@@ -1012,7 +1015,10 @@ impl fmt::Display for Program {
                         value_source.start, value_source.end
                     )?;
                 }
-                Op::PrepareError(conversion) => write!(f, "(prepare-error {conversion})")?,
+                Op::PrepareError {
+                    destination,
+                    conversion,
+                } => write!(f, "(prepare-error %{destination} {conversion})")?,
                 Op::ErrorConvert {
                     destination,
                     value,
@@ -2639,7 +2645,13 @@ fn compile_root<'a>(
                             },
                         );
                         work.push(Work::Expression(value, slot));
-                        emit(&mut work, Op::PrepareError(conversion));
+                        emit(
+                            &mut work,
+                            Op::PrepareError {
+                                destination: dst,
+                                conversion,
+                            },
+                        );
                     }
                     K::UnsafeScope(body) => work.push(Work::Expression(body, dst)),
                     K::Intrinsic {
