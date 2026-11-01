@@ -95,7 +95,6 @@ use environment::Environment;
 // in the owned NIR or reused across calls.
 enum PreparedNormalInput {
     Value(Value),
-    TypeTuple(Option<DeclarationId>),
     ListType(Term),
 }
 /// Invocation-only input transport. Live graphs retain their storage identity;
@@ -3601,51 +3600,6 @@ impl<'a> Interpreter<'a> {
         )?))
     }
 
-    fn contextual_tuple_type(
-        &mut self,
-        head: Option<DeclarationId>,
-        elements: Vec<Term>,
-        source: SourceRange,
-    ) -> Result<Value, Error> {
-        match head {
-            Some(head) => {
-                let metadata = self
-                    .normal_forms
-                    .get(&head)
-                    .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
-                let [parameter] = metadata.parameters.as_slice() else {
-                    return Err(self.failure(ErrorKind::Type, Some(source)));
-                };
-                if metadata.role != nir::normal_forms::Role::Tuple
-                    || parameter.kind != nir::normal_forms::Kind::Value
-                    || self.list_element(&parameter.ty) != Some(&Term::Primitive(Primitive::Type))
-                {
-                    return Err(self.failure(ErrorKind::Type, Some(source)));
-                }
-                let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
-                let mut remaining = before;
-                let value = nir::comptime_values::freeze_admitted_list(
-                    &parameter.ty,
-                    elements,
-                    &mut remaining,
-                );
-                self.budget.steps -= (before - remaining) as u64;
-                let value = value.map_err(|error| {
-                    self.failure(
-                        if error == nir::comptime_values::Error::Budget {
-                            ErrorKind::StepsExhausted
-                        } else {
-                            ErrorKind::Type
-                        },
-                        Some(source),
-                    )
-                })?;
-                self.complete_normal_type(head, vec![value], source)
-            }
-            None => Ok(Value::Type(Term::Tuple(elements))),
-        }
-    }
-
     fn complete_normal_type(
         &mut self,
         head: DeclarationId,
@@ -3875,10 +3829,7 @@ impl<'a> Interpreter<'a> {
                 let value = match prepared {
                     normal_types::Prepared::Literal(value) => PreparedNormalInput::Value(value),
                     normal_types::Prepared::List { ty, .. } => PreparedNormalInput::ListType(ty),
-                    normal_types::Prepared::Tuple {
-                        head: Some(head), ..
-                    } => PreparedNormalInput::TypeTuple(head),
-                    normal_types::Prepared::Tuple { head: None, .. } => return,
+                    normal_types::Prepared::Tuple { .. } => return,
                 };
                 literals.insert(key, value);
             },
@@ -3911,7 +3862,7 @@ impl<'a> Interpreter<'a> {
                 .remove(key)
                 .and_then(|prepared| match prepared {
                     PreparedNormalInput::Value(value) => Some(Flow::Value(value)),
-                    PreparedNormalInput::TypeTuple(_) | PreparedNormalInput::ListType(_) => None,
+                    PreparedNormalInput::ListType(_) => None,
                 })
                 .ok_or_else(|| self.failure(ErrorKind::Type, Some(input.source()))),
             A::If {
@@ -3966,12 +3917,7 @@ impl<'a> Interpreter<'a> {
                         &key.child(index)
                     )));
                 }
-                let head = match literals.remove(key) {
-                    Some(PreparedNormalInput::TypeTuple(head)) => Some(head),
-                    _ => None,
-                };
-                self.finish_contextual_tuple(head, values, input.source())
-                    .map(Flow::Value)
+                Ok(Flow::Value(Value::Tuple(values)))
             }
             A::Match {
                 source,

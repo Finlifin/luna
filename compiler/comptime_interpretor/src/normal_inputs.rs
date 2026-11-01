@@ -345,11 +345,7 @@ impl Interpreter<'_> {
                         });
                         work.push(Work::Enter(item, depth + 1));
                     } else {
-                        let head = match literals.remove(&key) {
-                            Some(PreparedNormalInput::TypeTuple(head)) => Some(head),
-                            _ => None,
-                        };
-                        completed = Some(self.finish_contextual_tuple(head, values, source)?);
+                        completed = Some(Value::Tuple(values));
                     }
                 }
             }

@@ -268,27 +268,8 @@ impl Interpreter<'_> {
     ) -> Result<Value, Error> {
         match container {
             Prepared::List { ty, values } => self.finish_normal_list(ty, values),
-            Prepared::Tuple { head, values } => self.finish_contextual_tuple(head, values, source),
+            Prepared::Tuple { values } => Ok(Value::Tuple(values)),
             _ => Err(self.failure(ErrorKind::Type, Some(source))),
-        }
-    }
-    /// All operands have already run. Preserve abstract Type authority and
-    /// the registered tuple head regardless of when the input domain arrived.
-    pub(super) fn finish_contextual_tuple(
-        &mut self,
-        type_head: Option<Option<DeclarationId>>,
-        values: Vec<Value>,
-        source: SourceRange,
-    ) -> Result<Value, Error> {
-        match type_head {
-            Some(head) => {
-                let types = values
-                    .into_iter()
-                    .map(|value| self.type_description_term(value, source))
-                    .collect::<Result<_, _>>()?;
-                self.contextual_tuple_type(head, types, source)
-            }
-            None => Ok(Value::Tuple(values)),
         }
     }
     pub(super) fn normal_unit_value(
@@ -410,14 +391,8 @@ impl Interpreter<'_> {
 /// Prepared domains and accumulators are invocation-local, never code-cache data.
 pub(super) enum Prepared {
     Literal(Value),
-    List {
-        ty: Term,
-        values: Vec<Value>,
-    },
-    Tuple {
-        head: Option<Option<DeclarationId>>,
-        values: Vec<Value>,
-    },
+    List { ty: Term, values: Vec<Value> },
+    Tuple { values: Vec<Value> },
 }
 impl fmt::Display for Prepared {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -427,12 +402,8 @@ impl fmt::Display for Prepared {
                 write!(f, "(list (type {ty})")?;
                 ("values", values)
             }
-            Self::Tuple { head, values } => {
-                write!(f, "(tuple (type-tuple {}) (head", head.is_some())?;
-                if let Some(Some(head)) = head {
-                    write!(f, " {head}")?;
-                }
-                write!(f, ")")?;
+            Self::Tuple { values } => {
+                write!(f, "(tuple")?;
                 ("values", values)
             }
         };

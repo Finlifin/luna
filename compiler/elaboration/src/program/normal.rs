@@ -2110,7 +2110,6 @@ impl Checker<'_, '_> {
         if let H::Tuple(items) = &input.kind {
             return Ok(n::NormalFormArgument::Tuple {
                 source: source(input.span),
-                type_head: self.bound_tuple_head(input.span)?,
                 items: items
                     .iter()
                     .map(|value| self.dependent_normal_argument(value, depth + 1))

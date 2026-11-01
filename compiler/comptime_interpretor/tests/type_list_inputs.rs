@@ -397,7 +397,7 @@ fn list_domain_uses_ordinary_value_metadata_and_registered_layout() {
 }
 
 #[test]
-fn contextual_tuple_types_preserve_the_head_before_and_after_their_context_arrives() {
+fn explicit_type_factories_preserve_the_head_before_and_after_their_context_arrives() {
     use nir::program::{NormalFormInputPlan, TypePredicate};
     let mut package = package();
     package.normal_forms[1].role = nir::normal_forms::Role::Tuple;
@@ -457,14 +457,26 @@ fn contextual_tuple_types_preserve_the_head_before_and_after_their_context_arriv
                     }),
                     arguments: vec![
                         type_input(ty(P::Type)),
-                        NormalFormArgument::Tuple {
+                        NormalFormArgument::Value(Expr {
                             source,
-                            type_head: Some(id(2)),
-                            items: elements.iter().cloned().map(type_input).collect(),
-                        },
+                            ty: ty(P::Type),
+                            kind: K::NormalFormType {
+                                head: id(2),
+                                plan: None,
+                                arguments: vec![NormalFormArgument::List {
+                                    source,
+                                    items: elements.iter().cloned().map(type_input).collect(),
+                                }],
+                            },
+                        }),
                     ],
                 };
-                assert!(package.functions[0].body.to_string().contains("(type-head"));
+                assert!(
+                    package.functions[0]
+                        .body
+                        .to_string()
+                        .contains("(normal-form-type")
+                );
                 let expected = Value::Type(Term::NormalForm {
                     head: id(4),
                     sort: Sort::Type,
@@ -485,21 +497,21 @@ fn contextual_tuple_types_preserve_the_head_before_and_after_their_context_arriv
                         },
                     ],
                 });
-                let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+                let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
                 assert_eq!(vm.invoke(id(3), vec![]).unwrap(), expected);
 
-                // A contextual Tuple construction must enforce the inner head's
+                // An explicit type construction must enforce the inner head's
                 // formation contract, not just the surrounding normal-form contract.
                 let mut denied = package.clone();
                 denied.normal_forms[1]
                     .requirements
                     .push(TypePredicate::Equal(ty(P::Bool), ty(P::U8)));
-                let mut vm = Interpreter::new(&denied, Budget::default()).unwrap();
+                let mut vm = Interpreter::for_comptime(&denied, Budget::default()).unwrap();
                 assert!(vm.invoke(id(3), vec![]).is_err());
                 let mut unbound = package.clone();
                 unbound.normal_forms[1].role = nir::normal_forms::Role::Opaque;
-                let mut vm = Interpreter::new(&unbound, Budget::default()).unwrap();
-                assert!(vm.invoke(id(3), vec![]).is_err());
+                let mut vm = Interpreter::for_comptime(&unbound, Budget::default()).unwrap();
+                assert_eq!(vm.invoke(id(3), vec![]).unwrap(), expected);
             }
         }
     }

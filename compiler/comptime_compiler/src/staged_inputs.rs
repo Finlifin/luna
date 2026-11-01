@@ -163,7 +163,6 @@ mod tests {
                 },
                 A::Tuple {
                     source: SOURCE,
-                    type_head: None,
                     items: vec![A::Unit { source: SOURCE }],
                 },
             ],

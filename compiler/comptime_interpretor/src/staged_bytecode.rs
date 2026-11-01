@@ -255,7 +255,6 @@ mod tests {
             source: SOURCE,
             diverges: false,
             kind: ShapeKind::Tuple {
-                head: None,
                 items: [1, 2]
                     .map(|slot| Shape {
                         slot,

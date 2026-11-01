@@ -4063,7 +4063,6 @@ mod tests {
         };
         let wide = root(A::Tuple {
             source: location,
-            type_head: None,
             items: vec![A::Unit { source: location }; 512],
         });
         assert!(charge_copy(&wide, &mut 64, span).is_err());

@@ -1389,3 +1389,37 @@ fn deferred_unit_inputs_remain_values_when_the_domain_becomes_type() {
         }
     }
 }
+
+#[test]
+fn deferred_parenthesized_inputs_never_construct_types() {
+    let package = support::compile(
+        "typealias Type = .Type'builtin;
+        pure comptime fn Stamp<T, value: T> -> Type { bool }
+        pure comptime fn Named<.T: Type = Type, value: T> -> Type { bool }
+        comptime fn Build(T: Type) -> Type { Stamp<T, (bool, bool)> }
+        comptime fn Late(T: Type) -> Type { Named<(bool, bool), .T = T> }",
+    );
+    for name in ["Build", "Late"] {
+        for tree in [false, true] {
+            let mut vm = if tree {
+                Interpreter::for_comptime_tree(&package, Budget::default()).unwrap()
+            } else {
+                Interpreter::for_comptime(&package, Budget::default()).unwrap()
+            };
+            let entry = support::id(&package, name);
+            let failure = vm
+                .invoke(entry, vec![Value::Type(Term::Primitive(P::Type))])
+                .unwrap_err();
+            assert_eq!(failure.kind, comptime_interpretor::ErrorKind::Type);
+            let domain = Term::Tuple(vec![Term::Primitive(P::Type); 2]);
+            let value = vm.invoke(entry, vec![Value::Type(domain.clone())]).unwrap();
+            let Value::Type(Term::NormalForm { arguments, .. }) = value else {
+                panic!("the factory must preserve its normal-form head");
+            };
+            assert_eq!(
+                arguments,
+                vec![domain, Term::TupleValue(vec![Term::Primitive(P::Bool); 2])]
+            );
+        }
+    }
+}

@@ -19,7 +19,7 @@ enum Kind<'a> {
     Block(bool),
     Match(usize),
     List(usize),
-    Tuple(Option<DeclarationId>, usize),
+    Tuple(usize),
 }
 
 impl<'a> Node<'a> {
@@ -47,9 +47,7 @@ impl<'a> Node<'a> {
                 A::Block { result, .. } => Kind::Block(result.is_some()),
                 A::Match { arms, .. } => Kind::Match(arms.len()),
                 A::List { items, .. } => Kind::List(items.len()),
-                A::Tuple {
-                    type_head, items, ..
-                } => Kind::Tuple(*type_head, items.len()),
+                A::Tuple { items, .. } => Kind::Tuple(items.len()),
             },
             Self::Compiled(shape) => match &shape.kind {
                 ShapeKind::Scalar(Scalar::Value(ty)) => Kind::Value(ty),
@@ -65,7 +63,7 @@ impl<'a> Node<'a> {
                 ShapeKind::Block { result } => Kind::Block(result.is_some()),
                 ShapeKind::Match(arms) => Kind::Match(arms.len()),
                 ShapeKind::List(items) => Kind::List(items.len()),
-                ShapeKind::Tuple { head, items } => Kind::Tuple(*head, items.len()),
+                ShapeKind::Tuple { items } => Kind::Tuple(items.len()),
             },
         }
     }
@@ -153,133 +151,109 @@ impl Interpreter<'_> {
             return Err(self.failure(ErrorKind::DepthExhausted, Some(source)));
         }
         self.tick(Some(source))?;
-        let value =
-            match node.kind() {
-                Kind::Value(ty) => {
-                    self.prepare_normal_value_type(ty, expected, source)?;
-                    return Ok(());
+        let value = match node.kind() {
+            Kind::Value(ty) => {
+                self.prepare_normal_value_type(ty, expected, source)?;
+                return Ok(());
+            }
+            Kind::Unit => Prepared::Literal(self.normal_unit_value(expected, source)?),
+            Kind::Integer(spelling, negative) => {
+                Prepared::Literal(self.normal_integer_value(expected, spelling, negative, source)?)
+            }
+            Kind::Choice(condition, condition_source) => {
+                if !matches!(
+                    condition,
+                    Term::Primitive(Primitive::Bool | Primitive::Never)
+                ) {
+                    return Err(self.failure(ErrorKind::Type, Some(condition_source)));
                 }
-                Kind::Unit => Prepared::Literal(self.normal_unit_value(expected, source)?),
-                Kind::Integer(spelling, negative) => Prepared::Literal(
-                    self.normal_integer_value(expected, spelling, negative, source)?,
-                ),
-                Kind::Choice(condition, condition_source) => {
-                    if !matches!(
-                        condition,
-                        Term::Primitive(Primitive::Bool | Primitive::Never)
-                    ) {
-                        return Err(self.failure(ErrorKind::Type, Some(condition_source)));
-                    }
-                    for index in 0..2 {
-                        self.prepare_input_domain(
-                            node.child(index),
-                            expected,
-                            node.child_key(index, &key),
-                            depth + 1,
-                            emit,
-                        )?;
-                    }
-                    return Ok(());
+                for index in 0..2 {
+                    self.prepare_input_domain(
+                        node.child(index),
+                        expected,
+                        node.child_key(index, &key),
+                        depth + 1,
+                        emit,
+                    )?;
                 }
-                Kind::Block(has_result) => {
-                    if has_result {
-                        self.prepare_input_domain(
-                            node.child(0),
-                            expected,
-                            node.child_key(0, &key),
-                            depth + 1,
-                            emit,
-                        )?;
-                    } else if !node.diverges() {
-                        self.check_type_contract(
-                            &nir::program::TypePredicate::Equal(
-                                Term::Primitive(Primitive::Void),
-                                expected.clone(),
-                            ),
-                            source,
-                        )?;
-                    }
-                    return Ok(());
+                return Ok(());
+            }
+            Kind::Block(has_result) => {
+                if has_result {
+                    self.prepare_input_domain(
+                        node.child(0),
+                        expected,
+                        node.child_key(0, &key),
+                        depth + 1,
+                        emit,
+                    )?;
+                } else if !node.diverges() {
+                    self.check_type_contract(
+                        &nir::program::TypePredicate::Equal(
+                            Term::Primitive(Primitive::Void),
+                            expected.clone(),
+                        ),
+                        source,
+                    )?;
                 }
-                Kind::Match(count) => {
-                    for index in 0..count {
-                        if let Some((ty, source)) = node.guard(index) {
-                            if !matches!(ty, Term::Primitive(Primitive::Bool | Primitive::Never)) {
-                                return Err(self.failure(ErrorKind::Type, Some(source)));
-                            }
-                        }
-                        self.prepare_input_domain(
-                            node.child(index),
-                            expected,
-                            node.child_key(index, &key),
-                            depth + 1,
-                            emit,
-                        )?;
-                    }
-                    return Ok(());
-                }
-                Kind::List(count) => {
-                    let element = self.normal_list_domain(expected, count, source)?;
-                    for index in 0..count {
-                        self.prepare_input_domain(
-                            node.child(index),
-                            if node.spread(index) {
-                                expected
-                            } else {
-                                &element
-                            },
-                            node.child_key(index, &key),
-                            depth + 1,
-                            emit,
-                        )?;
-                    }
-                    Prepared::List {
-                        ty: expected.clone(),
-                        values: vec![],
-                    }
-                }
-                Kind::Tuple(head, count) => {
-                    let type_tuple = *expected == Term::Primitive(Primitive::Type);
-                    if type_tuple {
-                        for index in 0..count {
-                            self.prepare_input_domain(
-                                node.child(index),
-                                expected,
-                                node.child_key(index, &key),
-                                depth + 1,
-                                emit,
-                            )?;
-                        }
-                        if let Some(head) = head {
-                            if !self.normal_forms.get(&head).is_some_and(|metadata| {
-                                metadata.role == nir::normal_forms::Role::Tuple
-                            }) {
-                                return Err(self.failure(ErrorKind::Type, Some(source)));
-                            }
-                        }
-                    } else {
-                        let types = self
-                            .tuple_input_elements(expected)
-                            .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
-                        if types.len() != count {
-                            return Err(self.failure(ErrorKind::Arity, Some(source)));
-                        }
-                        for (index, ty) in types.iter().enumerate() {
-                            self.prepare_input_domain(
-                                node.child(index),
-                                ty,
-                                node.child_key(index, &key),
-                                depth + 1,
-                                emit,
-                            )?;
+                return Ok(());
+            }
+            Kind::Match(count) => {
+                for index in 0..count {
+                    if let Some((ty, source)) = node.guard(index) {
+                        if !matches!(ty, Term::Primitive(Primitive::Bool | Primitive::Never)) {
+                            return Err(self.failure(ErrorKind::Type, Some(source)));
                         }
                     }
-                    Prepared::Tuple {
-                        head: type_tuple.then_some(head),
-                        values: vec![],
-                    }
+                    self.prepare_input_domain(
+                        node.child(index),
+                        expected,
+                        node.child_key(index, &key),
+                        depth + 1,
+                        emit,
+                    )?;
                 }
-            };
+                return Ok(());
+            }
+            Kind::List(count) => {
+                let element = self.normal_list_domain(expected, count, source)?;
+                for index in 0..count {
+                    self.prepare_input_domain(
+                        node.child(index),
+                        if node.spread(index) {
+                            expected
+                        } else {
+                            &element
+                        },
+                        node.child_key(index, &key),
+                        depth + 1,
+                        emit,
+                    )?;
+                }
+                Prepared::List {
+                    ty: expected.clone(),
+                    values: vec![],
+                }
+            }
+            Kind::Tuple(count) => {
+                let types = self
+                    .tuple_input_elements(expected)
+                    .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
+                if types.len() != count {
+                    return Err(self.failure(ErrorKind::Arity, Some(source)));
+                }
+                for (index, ty) in types.iter().enumerate() {
+                    self.prepare_input_domain(
+                        node.child(index),
+                        ty,
+                        node.child_key(index, &key),
+                        depth + 1,
+                        emit,
+                    )?;
+                }
+                Prepared::Tuple { values: vec![] }
+            }
+        };
         emit(key, value);
         Ok(())
     }

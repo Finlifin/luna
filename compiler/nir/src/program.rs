@@ -367,8 +367,6 @@ pub enum NormalFormArgument {
     },
     Tuple {
         source: SourceRange,
-        /// Trusted Tuple identity used if the contextual result is a Type.
-        type_head: Option<DeclarationId>,
         items: Vec<Self>,
     },
     Match {
@@ -674,16 +672,8 @@ impl fmt::Display for NormalFormArgument {
                 }
                 f.write_str("))")
             }
-            Self::Tuple {
-                source,
-                type_head,
-                items,
-            } => {
-                write!(f, "(contextual-tuple-input (source {source}) (type-head")?;
-                if let Some(head) = type_head {
-                    write!(f, " {head}")?;
-                }
-                f.write_str(") (items")?;
+            Self::Tuple { source, items } => {
+                write!(f, "(contextual-tuple-input (source {source}) (items")?;
                 for item in items {
                     write!(f, " {item}")?;
                 }

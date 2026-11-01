@@ -10766,3 +10766,54 @@ Still outstanding: `input_domains::Kind::Tuple` and its `type_head` metadata ret
 another legacy branch producing Type from nonempty contextual tuple syntax. That
 branch and its positive legacy fixtures require removal; the unit fix does not
 claim the entire contextual-input representation has been corrected.
+
+### Contextual tuple syntax no longer synthesizes Type
+
+Removed the remaining Type-producing branch from contextual tuple preparation.
+A parenthesized input now requires a tuple value domain and checks its fields
+against that domain; Type is not a tuple domain. Completion always returns a
+value tuple. This closes the nonempty counterpart of the preceding unit fix,
+including operands staged before the expected domain is available.
+
+Removed `NormalFormArgument::Tuple.type_head`, the compiled shape's head field,
+the prepared TypeTuple marker and both tuple-Type finishing helpers. Elaboration
+no longer looks up the bound Tuple factory merely to defer a tuple value input.
+Updated S-expression displays and all source/compiled/staged consumers. Pattern
+TypeTuple and structural tuple layout views remain unrelated, legitimate views.
+
+Migrated positive Type-construction tests to explicit ordinary NF calls with a
+List value input. These still check scoped inputs, input order, list head identity
+and inner formation requirements; an opaque factory needs no special Tuple role
+to be called. The integration fixture now runs in comptime mode, as required by
+its nested comptime expression. The initial full run exposed its old use of the
+runtime interpreter (`/tmp/luna-tools-tz9cxtdt/result.json`, exit 101); no runtime
+phase rule was weakened to retain that fixture.
+
+New source coverage uses `(bool, bool)` as the deferred operand: both engines
+reject a later Type domain, then accept a tuple-of-Type value domain in the same
+VM. This uses positional and explicitly named domain parameters. The existing
+source test for tuple operand effects and default fields also passes, preserving
+ordinary value construction and evaluation order.
+
+Evidence from `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 900 -- test -p nir
+  -p comptime_compiler -p comptime_interpretor`: 1120 passed, exit 0
+  (`/tmp/luna-tools-cuc6jtc8/result.json`).
+- `development/check.py --timeout 900 -- test -p luna --test
+  function_type_parameters deferred_parenthesized_inputs_never_construct_types`:
+  passed, exit 0 (`/tmp/luna-tools-ol8n14fs/result.json`).
+- `development/check.py --timeout 900 -- test -p luna --test newtypes
+  normal_tuple_inputs_preserve_element_effects_and_default_fields`: passed,
+  exit 0 (`/tmp/luna-tools-rl0faj9i/result.json`).
+- Formatting passed (`/tmp/luna-tools-gdw544b5/result.json`, exit 0);
+  `git diff --check` passed. No contextual type-head markers or tuple-Type
+  finishing helpers remain in the compiler sources.
+
+The broader contextual input tree, NF roles and structural tuple representation
+are still present. This removes a specific semantic shortcut rather than claiming
+completion of the entire audit's NF representation migration.
+- Real sysroot type-factory acceptance passed: `development/check.py --timeout
+  900 -- test -p luna --test sysroot_preludes
+  shipped_type_factories_keep_identity_through_comptime_parameters`, exit 0
+  (`/tmp/luna-tools-je8xuxoi/result.json`). List/Tuple callable inputs retain
+  their normal-form identities through the shipped bindings and public methods.

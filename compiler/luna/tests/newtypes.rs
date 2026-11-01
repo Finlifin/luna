@@ -5243,12 +5243,6 @@ fn normal_tuple_inputs_preserve_element_effects_and_default_fields() {
     };
     // Retain the contextual tuple tree explicitly, independently of how early
     // source elaboration discovers this concrete tuple domain.
-    let tuple = package
-        .functions
-        .iter()
-        .find(|f| f.name == "Tuple")
-        .unwrap()
-        .declaration;
     let build = package
         .functions
         .iter_mut()
@@ -5261,7 +5255,6 @@ fn normal_tuple_inputs_preserve_element_effects_and_default_fields() {
                 if let nir::program::ExprKind::Tuple(items) = &value.kind {
                     arguments[0] = nir::program::NormalFormArgument::Tuple {
                         source: value.source,
-                        type_head: Some(tuple),
                         items: items
                             .iter()
                             .cloned()

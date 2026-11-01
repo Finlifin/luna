@@ -24,7 +24,6 @@ fn nested_inputs_preserve_depth_limits_and_recover() {
                 for _ in 0..nesting {
                     input = A::Tuple {
                         source: SOURCE,
-                        type_head: None,
                         items: vec![input],
                     };
                 }
@@ -183,7 +182,6 @@ fn staged_inputs_survive_cloning_with_selected_shapes_and_delayed_preflight() {
     for invalid in [false, true] {
         let input = A::Tuple {
             source: SOURCE,
-            type_head: None,
             items: vec![
                 A::Block {
                     source: SOURCE,
@@ -357,7 +355,6 @@ fn prepared_contextual_inputs_survive_cloning_without_source_range_keys() {
     };
     let input = A::Tuple {
         source: SOURCE,
-        type_head: None,
         items: vec![
             literal("7"),
             A::If {
@@ -417,7 +414,6 @@ fn source_and_compiled_domain_preparation_share_diagnostics_and_work() {
         },
         A::Tuple {
             source: SOURCE,
-            type_head: None,
             items: vec![literal("7")],
         },
     ];

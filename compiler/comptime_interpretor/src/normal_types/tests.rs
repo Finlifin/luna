@@ -525,7 +525,6 @@ fn nested_contextual_containers_preserve_domains_and_tuple_heads() {
     };
     let tuple = |items| A::Tuple {
         source: SOURCE,
-        type_head: None,
         items,
     };
     let boolean = || A::Value(expr(Primitive::Bool, K::Literal(Literal::Bool(true))));
@@ -1206,7 +1205,7 @@ fn planned_contextual_inputs_recover_after_deferred_literal_failure() {
 }
 
 #[test]
-fn contextual_type_tuples_accept_scoped_parameters_in_every_input_order() {
+fn explicit_type_factories_accept_scoped_parameters_in_every_input_order() {
     use nir::program::NormalFormInputPlan;
     let package = container_package();
     let authorized = DeclarationId {
@@ -1238,17 +1237,23 @@ fn contextual_type_tuples_accept_scoped_parameters_in_every_input_order() {
     for mode in 0..4 {
         let mut body = container_body(
             Term::Primitive(Primitive::Type),
-            A::Tuple {
-                source: SOURCE,
-                type_head: Some(tuple_head),
-                items: vec![
-                    A::Value(expr(Primitive::Type, K::Local(local))),
-                    A::Value(expr(
-                        Primitive::Type,
-                        K::TypeValue(Term::Primitive(Primitive::U8)),
-                    )),
-                ],
-            },
+            A::Value(expr(
+                Primitive::Type,
+                K::NormalFormType {
+                    head: tuple_head,
+                    plan: None,
+                    arguments: vec![A::List {
+                        source: SOURCE,
+                        items: vec![
+                            A::Value(expr(Primitive::Type, K::Local(local))),
+                            A::Value(expr(
+                                Primitive::Type,
+                                K::TypeValue(Term::Primitive(Primitive::U8)),
+                            )),
+                        ],
+                    }],
+                },
+            )),
         );
         if mode >= 2 {
             let K::NormalFormType { plan, .. } = &mut body.kind else {

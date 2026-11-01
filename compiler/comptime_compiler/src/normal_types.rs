@@ -65,7 +65,6 @@ pub enum ShapeKind {
     },
     List(Vec<(bool, Shape)>),
     Tuple {
-        head: Option<nir::DeclarationId>,
         items: Vec<Shape>,
     },
 }
@@ -118,12 +117,8 @@ impl fmt::Display for Shape {
                 }
                 write!(f, ")")?;
             }
-            ShapeKind::Tuple { head, items } => {
-                write!(f, "(tuple (head")?;
-                if let Some(head) = head {
-                    write!(f, " {head}")?;
-                }
-                write!(f, ")")?;
+            ShapeKind::Tuple { items } => {
+                write!(f, "(tuple")?;
                 for item in items {
                     write!(f, " {item}")?;
                 }
@@ -290,10 +285,7 @@ pub(super) fn compile_input<'a>(
                             .map(|(item, shape)| (matches!(item, A::ListSpread(_)), shape))
                             .collect(),
                     ),
-                    A::Tuple { type_head, .. } => ShapeKind::Tuple {
-                        head: *type_head,
-                        items,
-                    },
+                    A::Tuple { .. } => ShapeKind::Tuple { items },
                     _ => unreachable!(),
                 };
                 code.push(Work::Emit(
@@ -524,7 +516,6 @@ mod tests {
         for _ in 0..127 {
             input = A::Tuple {
                 source: SOURCE,
-                type_head: None,
                 items: vec![input],
             };
         }
@@ -542,7 +533,6 @@ mod tests {
         assert_eq!(code.len(), 1 + 127 * 2);
         input = A::Tuple {
             source: SOURCE,
-            type_head: None,
             items: vec![input],
         };
         assert!(matches!(
