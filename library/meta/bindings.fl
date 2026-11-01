@@ -59,13 +59,9 @@ pub pure comptime fn from_usize(value: usize) -> Integer {
     compiler_comptime_integer_convert(Integer, value)
 }
 
-pub pure comptime fn div_trunc(left: Integer, right: Integer) -> Integer {
-    compiler_comptime_integer_div_trunc(left, right)
-}
+pub const div_trunc: comptime fn(Integer, Integer) -> Integer = compiler_comptime_integer_div_trunc;
 
-pub pure comptime fn rem_trunc(left: Integer, right: Integer) -> Integer {
-    compiler_comptime_integer_rem_trunc(left, right)
-}
+pub const rem_trunc: comptime fn(Integer, Integer) -> Integer = compiler_comptime_integer_rem_trunc;
 
 pub pure comptime fn object_length(value: Object) -> Integer {
     compiler_object_length(value)

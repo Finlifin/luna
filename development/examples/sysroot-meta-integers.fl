@@ -16,8 +16,26 @@ pure comptime fn integer_algorithms() -> bool {
         and Integer.from_usize(zero.to_usize()) == 0
 }
 
-const correct = integer_algorithms();
+const correct = run();
 
 test {
     inline if correct { assumes true; } else { assumes false; };
+}
+
+comptime fn apply(operation: comptime fn(Integer, Integer) -> Integer,
+    left: Integer, right: Integer) -> Integer
+{
+    operation(left, right)
+}
+
+comptime fn callbacks() -> bool {
+    let operations: meta.List<comptime fn(Integer, Integer) -> Integer> = [
+        meta.div_trunc, meta.rem_trunc,
+    ];
+    apply(operations[0], -9, 2) == -4
+        and apply(operations[1], -9, 2) == -1
+}
+
+comptime fn run() -> bool {
+    integer_algorithms() and callbacks()
 }

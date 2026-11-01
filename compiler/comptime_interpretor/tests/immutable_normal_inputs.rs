@@ -599,3 +599,71 @@ fn contextual_closure_snapshots_check_context_and_signature_dependencies() {
     };
     check(&quantified).unwrap();
 }
+
+#[test]
+fn immutable_function_references_check_the_current_declaration_world() {
+    let world = world();
+    let value = Value::Tuple(vec![Value::Function(id(3))]);
+    let ty = Term::Tuple(vec![callable()]);
+    assert!(value.immutable_copy_work().is_some());
+    let mut vm = Interpreter::for_comptime(&world, Budget::default()).unwrap();
+    vm.validate_immutable_input(&value, &ty).unwrap();
+    let empty = Package::default();
+    let mut missing = Interpreter::for_comptime(&empty, Budget::default()).unwrap();
+    assert!(missing.validate_immutable_input(&value, &ty).is_err());
+    let mut changed = world.clone();
+    changed.functions[2].phase = FunctionPhase::Runtime;
+    changed
+        .functions
+        .retain(|function| function.declaration == id(3));
+    let mut wrong_phase = Interpreter::for_comptime(&changed, Budget::default()).unwrap();
+    assert!(wrong_phase.validate_immutable_input(&value, &ty).is_err());
+    vm.validate_immutable_input(&value, &ty).unwrap();
+}
+
+#[test]
+fn immutable_prepared_functions_keep_session_body_authority() {
+    let world = world();
+    let key = |local| iir::InstanceKey {
+        declaration: id(local),
+        arguments: vec![].into(),
+    };
+    let graph = iir::Package {
+        roots: vec![key(1)],
+        functions: world
+            .functions
+            .iter()
+            .cloned()
+            .map(|function| iir::FunctionInstance {
+                key: key(function.declaration.local),
+                function,
+            })
+            .collect(),
+        ..Default::default()
+    };
+    for bytecode in [false, true] {
+        let mut vm = if bytecode {
+            Interpreter::from_iir_for_comptime(&graph, Budget::default())
+        } else {
+            Interpreter::from_iir_for_comptime_tree(&graph, Budget::default())
+        }
+        .unwrap();
+        let value = vm.invoke_instance(&key(1), vec![]).unwrap();
+        assert!(matches!(&value, Value::Closure(_)));
+        let value = Value::Tuple(vec![value]);
+        let ty = Term::Tuple(vec![callable()]);
+        vm.validate_immutable_input(&value, &ty).unwrap();
+        let mut foreign = Interpreter::from_iir_for_comptime(&graph, Budget::default()).unwrap();
+        // Preparing the same declaration and signature does not transfer body
+        // authority. Explicit normal-term transport remains a separate API.
+        let own = Value::Tuple(vec![foreign.invoke_instance(&key(1), vec![]).unwrap()]);
+        assert!(foreign.validate_immutable_input(&value, &ty).is_err());
+        foreign.validate_immutable_input(&own, &ty).unwrap();
+        vm.charge_preparation(vm.remaining_steps() as usize)
+            .unwrap();
+        assert_eq!(
+            vm.validate_immutable_input(&value, &ty).unwrap_err().kind,
+            ErrorKind::StepsExhausted
+        );
+    }
+}

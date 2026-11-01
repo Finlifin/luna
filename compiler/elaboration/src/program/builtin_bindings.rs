@@ -1,6 +1,7 @@
 //! Named bindings for compiler operations retain their checked call lowering.
 use super::*;
 mod signatures;
+mod values;
 
 fn operation(name: &str) -> bool {
     matches!(
@@ -164,9 +165,19 @@ impl Checker<'_, '_> {
 
     pub(super) fn compiler_operation_binding(
         &mut self,
-        mut owner: OwnerId,
+        owner: OwnerId,
         span: Span,
     ) -> Result<Option<hir::Symbol>, Error> {
+        Ok(self
+            .resolve_compiler_operation(owner, span)?
+            .map(|(name, _)| name))
+    }
+
+    fn resolve_compiler_operation(
+        &mut self,
+        mut owner: OwnerId,
+        span: Span,
+    ) -> Result<Option<(hir::Symbol, OwnerId)>, Error> {
         let mut visited = BTreeSet::new();
         let mut annotations = Vec::new();
         loop {
@@ -216,7 +227,7 @@ impl Checker<'_, '_> {
                             }
                         }
                     }
-                    return Ok(Some(name));
+                    return Ok(Some((name, owner)));
                 }
                 H::ResolvedDef { def_id, .. } => {
                     let Some(next) = self.package.definition_owner(*def_id) else {

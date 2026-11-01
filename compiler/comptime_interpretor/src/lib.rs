@@ -455,12 +455,37 @@ impl Value {
                         (total <= 100_000).then_some(total)
                     })?
                 }
+                // A closed declaration reference owns no capture or storage.
+                // Its signature and phase are checked against the current VM;
+                // it must never qualify for uniform-scalar type admission.
+                Value::Function(_) => 0,
+                Value::Closure(closure) => {
+                    let (_, arguments) = closure.declaration_instance()?;
+                    let mut total = scoped_type_value_work_with_evidence(
+                        &closure.ty,
+                        &BTreeMap::new(),
+                        parameters,
+                        value_parameters,
+                        |_, _, _| None,
+                    )?;
+                    for argument in arguments {
+                        total = total.checked_add(scoped_term_value_work_with_evidence(
+                            argument,
+                            &BTreeMap::new(),
+                            parameters,
+                            value_parameters,
+                            |_, _, _| None,
+                        )?)?;
+                        if total > 100_000 {
+                            return None;
+                        }
+                    }
+                    total
+                }
                 Value::Code(_)
                 | Value::Pointer(_)
                 | Value::Storage(_)
                 | Value::ComptimeReference(_)
-                | Value::Closure(_)
-                | Value::Function(_)
                 | Value::FunctionInstance { .. }
                 | Value::RuntimeTraitMethod(_) => return None,
                 _ => 0,

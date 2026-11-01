@@ -152,6 +152,19 @@ impl Interpreter<'_> {
         }
         self.tick(None)?;
         match value {
+            Value::Closure(closure) => {
+                let (declaration, arguments) = closure
+                    .declaration_instance()
+                    .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
+                // Prepared bodies are session-owned handles. A matching type or
+                // declaration id cannot authorize a body imported from another
+                // VM. Normal-term transport reconstructs instances separately.
+                let current = self.instances.lookup(declaration, arguments);
+                if !current.is_some_and(|current| Arc::ptr_eq(current, closure)) {
+                    return Err(self.failure(ErrorKind::Type, None));
+                }
+                self.admit_type(&closure.ty, depth + 1)?;
+            }
             Value::List { ty, values } => {
                 self.admit_type(ty, depth + 1)?;
                 // Uniform primitive leaves contain no embedded type descriptions.
@@ -219,7 +232,7 @@ impl Interpreter<'_> {
                     self.admit_value_types(&entry.value().value, depth + 1)?;
                 }
             }
-            _ => {} // immutable_copy_work already rejected storage and callables.
+            _ => {} // Representation admission already rejected storage and captures.
         }
         Ok(())
     }

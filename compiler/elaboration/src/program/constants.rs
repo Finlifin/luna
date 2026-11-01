@@ -1132,11 +1132,8 @@ impl Checker<'_, '_> {
         if let Some(value) = self.builtin_normal_form_constant(owner, span)? {
             return Ok(value);
         }
-        if self.compiler_operation_binding(owner, span)?.is_some() {
-            return Err(error(
-                span,
-                "compiler operation binding requires a direct call",
-            ));
+        if let Some(value) = self.compiler_operation_value(owner, span)? {
+            return Ok(value);
         }
         // A generic member is a computation in its container's environment,
         // not a completed module constant. Keep it residual until the enclosing

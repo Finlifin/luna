@@ -172,17 +172,15 @@ fn typed_operation_bindings_reject_wrong_signatures_even_without_calls() {
 }
 
 #[test]
-fn typed_operation_bindings_preserve_phase_and_value_escape_checks() {
-    for (body, diagnostic) in [
-        (
-            "fn bad() -> Integer { divide(8, 2) }",
-            "requires comptime invocation",
-        ),
-        (
-            "comptime fn bad() { let escaped = divide; }",
-            "requires a direct call",
-        ),
-    ] {
+fn typed_operation_bindings_preserve_phase_checks() {
+    assert!(compile(
+        "const divide: comptime fn(Integer, Integer) -> Integer = .comptime_integer_div_trunc'builtin;
+        fn bad() -> Integer { let operation = divide; operation(8, 2) }"
+    ).is_err());
+    for (body, diagnostic) in [(
+        "fn bad() -> Integer { divide(8, 2) }",
+        "requires comptime invocation",
+    )] {
         let source = format!(
             "const divide: comptime fn(Integer, Integer) -> Integer = .comptime_integer_div_trunc'builtin; {body}"
         );
@@ -220,4 +218,153 @@ fn typed_reflection_signatures_preserve_normal_form_identity() {
     )
     .unwrap_err();
     assert!(error.contains("signature mismatch"), "{error}");
+}
+
+fn run_all_carriers(source: &str) -> nir::program::Package {
+    use comptime_interpretor::{Budget, Interpreter};
+    let package = compile(source).unwrap();
+    let entry = support::id(&package, "run");
+    for bytecode in [false, true] {
+        let mut vm = if bytecode {
+            Interpreter::for_comptime(&package, Budget::default())
+        } else {
+            Interpreter::for_comptime_tree(&package, Budget::default())
+        }
+        .unwrap();
+        assert_eq!(
+            vm.invoke(entry, vec![])
+                .unwrap_or_else(|error| panic!("bytecode={bytecode}: {error:?}\n{package}")),
+            Value::Bool(true)
+        );
+    }
+    let key = iir::InstanceKey {
+        declaration: entry,
+        arguments: vec![].into(),
+    };
+    let graph = elaboration::materialization::instantiate(
+        &package,
+        &[key.clone()],
+        Default::default(),
+        elaboration::ptc::Budget::default(),
+    )
+    .unwrap();
+    for bytecode in [false, true] {
+        let mut vm = if bytecode {
+            Interpreter::from_iir_for_comptime(&graph, Budget::default())
+        } else {
+            Interpreter::from_iir_for_comptime_tree(&graph, Budget::default())
+        }
+        .unwrap();
+        assert_eq!(vm.invoke_instance(&key, vec![]).unwrap(), Value::Bool(true));
+    }
+    package
+}
+
+#[test]
+fn fixed_operation_values_use_ordinary_callbacks_and_container_storage() {
+    let package = run_all_carriers(
+        "const divide: comptime fn(Integer, Integer) -> Integer = .comptime_integer_div_trunc'builtin;
+        const alias = divide;
+        const remainder = .comptime_integer_rem_trunc'builtin;
+        comptime fn apply(op: comptime fn(Integer, Integer) -> Integer, a: Integer, b: Integer) -> Integer {
+            op(a, b)
+        }
+        const prepared = apply(alias, 12, 3);
+        comptime fn user_add(a: Integer, b: Integer) -> Integer { a + b }
+        comptime fn run() -> bool {
+            let functions: List<comptime fn(Integer, Integer) -> Integer> = [divide, alias, remainder, user_add];
+            apply(functions[0], 9, 2) == 4 and functions[1](15, 3) == 5
+                and functions[2](9, 2) == 1 and prepared == 4 and functions[3](9, 2) == 11
+        }"
+    );
+    let functions: Vec<_> = package
+        .functions
+        .iter()
+        .filter(|function| function.name.starts_with("<compiler-operation."))
+        .collect();
+    assert_eq!(functions.len(), 2);
+    assert!(
+        functions
+            .iter()
+            .all(|function| function.phase == nir::program::FunctionPhase::Comptime)
+    );
+}
+
+#[test]
+fn fixed_reflection_and_object_operations_are_callable_values() {
+    run_all_carriers(
+        "typealias Object = .Object'builtin;
+        typealias Symbol = .Symbol'builtin;
+        const fields = .struct_field_types'builtin;
+        const Representation = .newtype_representation'builtin;
+        const length = .object_length'builtin;
+        const concatenate = .object_concat'builtin;
+        const key = .object_key'builtin;
+        const shapes = .enum_variant_shapes'builtin;
+        const list_length = .list_length'builtin;
+        struct Record { flag: bool }
+        newtype Wrapper = bool;
+        enum Choice { empty, payload(bool) }
+        comptime fn observe(subject: Type, inspect: comptime fn(Type) -> List<Type>) -> bool {
+            inspect(subject)[0] == bool
+        }
+        comptime fn run() -> bool {
+            let inspect = fields;
+            let Repr = Representation;
+            let size = length;
+            let join = concatenate;
+            let lookup = key;
+            let variants = shapes;
+            let entries: Object = join({flag: true}, {tail: false});
+            observe(Record, inspect) and Repr(Wrapper) == bool
+                and size(entries) == 2 and (lookup(entries, 0) matches .flag?)
+                and list_length(variants(Choice)) == 2
+        }",
+    );
+}
+
+#[test]
+fn operation_callback_failure_does_not_poison_later_invocation() {
+    use comptime_interpretor::{Budget, Interpreter};
+    let package = compile(
+        "const divide = .comptime_integer_div_trunc'builtin;
+        comptime fn run(a: Integer, b: Integer) -> Integer {
+            let operation = divide;
+            operation(a, b)
+        }",
+    )
+    .unwrap();
+    let entry = support::id(&package, "run");
+    let key = iir::InstanceKey {
+        declaration: entry,
+        arguments: vec![].into(),
+    };
+    let graph = elaboration::materialization::instantiate(
+        &package,
+        &[key.clone()],
+        Default::default(),
+        elaboration::ptc::Budget::default(),
+    )
+    .unwrap();
+    let number = |n| Value::Integer(comptime_runtime::Integer::from_u128(n));
+    for bytecode in [false, true] {
+        for instantiated in [false, true] {
+            let mut vm = match (instantiated, bytecode) {
+                (false, false) => Interpreter::for_comptime_tree(&package, Budget::default()),
+                (false, true) => Interpreter::for_comptime(&package, Budget::default()),
+                (true, false) => Interpreter::from_iir_for_comptime_tree(&graph, Budget::default()),
+                (true, true) => Interpreter::from_iir_for_comptime(&graph, Budget::default()),
+            }
+            .unwrap();
+            let mut invoke = |arguments| {
+                if instantiated {
+                    vm.invoke_instance(&key, arguments)
+                } else {
+                    vm.invoke(entry, arguments)
+                }
+            };
+            assert!(invoke(vec![number(9), number(0)]).is_err());
+            assert_eq!(invoke(vec![number(9), number(2)]).unwrap(), number(4));
+        }
+    }
 }
