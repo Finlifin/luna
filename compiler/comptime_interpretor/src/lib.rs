@@ -2116,42 +2116,33 @@ impl<'a> Interpreter<'a> {
         else {
             return None;
         };
-        if let Some(graph) = self.graph {
-            for nominal in &graph.nominals {
-                nir::type_computations::charge_term(&nominal.ty, fuel).ok()?;
-                if nominal.ty != *ty {
-                    continue;
-                }
-                return match (&nominal.definition, variant) {
-                    (iir::NominalDefinition::Enum(definition), Some(index)) => {
-                        instantiate_value_fields(
-                            &[],
-                            &[],
-                            &[],
-                            definition.variants.get(index as usize)?.fields.iter(),
-                            fuel,
-                        )
-                    }
-                    (iir::NominalDefinition::Newtype(definition), None) => {
-                        instantiate_value_fields(
-                            &[],
-                            &[],
-                            &[],
-                            std::iter::once(&definition.representation),
-                            fuel,
-                        )
-                    }
-                    (iir::NominalDefinition::Struct(definition), None) => instantiate_value_fields(
+        if self.graph.is_some() {
+            return match (self.concrete_nominal(ty)?, variant) {
+                (iir::NominalDefinition::Enum(definition), Some(index)) => {
+                    instantiate_value_fields(
                         &[],
                         &[],
                         &[],
-                        definition.fields.iter().map(|(_, ty)| ty),
+                        definition.variants.get(index as usize)?.fields.iter(),
                         fuel,
-                    ),
-                    _ => None,
-                };
-            }
-            return None;
+                    )
+                }
+                (iir::NominalDefinition::Newtype(definition), None) => instantiate_value_fields(
+                    &[],
+                    &[],
+                    &[],
+                    std::iter::once(&definition.representation),
+                    fuel,
+                ),
+                (iir::NominalDefinition::Struct(definition), None) => instantiate_value_fields(
+                    &[],
+                    &[],
+                    &[],
+                    definition.fields.iter().map(|(_, ty)| ty),
+                    fuel,
+                ),
+                _ => None,
+            };
         }
         if let Some(index) = variant {
             let definition = self.enums.get(declaration)?;
@@ -2670,18 +2661,14 @@ impl<'a> Interpreter<'a> {
             else {
                 return false;
             };
-            if let Some(graph) = self.graph {
-                return graph
-                    .nominals
-                    .iter()
-                    .find(|n| n.ty == *ty)
-                    .is_some_and(|n| {
-                        if let iir::NominalDefinition::Newtype(d) = &n.definition {
-                            self.has_type_at(value, &d.representation, depth + 1)
-                        } else {
-                            false
-                        }
-                    });
+            if self.graph.is_some() {
+                return self.concrete_nominal(ty).is_some_and(|definition| {
+                    if let iir::NominalDefinition::Newtype(definition) = definition {
+                        self.has_type_at(value, &definition.representation, depth + 1)
+                    } else {
+                        false
+                    }
+                });
             }
             return self.newtypes.get(declaration).is_some_and(|d| {
                 d.validate_completed_arguments_with_collections_in(
@@ -2711,16 +2698,16 @@ impl<'a> Interpreter<'a> {
                 return self.has_type_at(value, &selected, depth + 1);
             }
         }
-        if let Some(graph) = self.graph {
+        if self.graph.is_some() {
             if let Term::Nominal {
                 declaration,
                 arguments,
             } = ty
             {
-                let Some(nominal) = graph.nominals.iter().find(|n| &n.ty == ty) else {
+                let Some(definition) = self.concrete_nominal(ty) else {
                     return false;
                 };
-                return match (value, &nominal.definition) {
+                return match (value, definition) {
                     (
                         Value::Record {
                             declaration: actual,

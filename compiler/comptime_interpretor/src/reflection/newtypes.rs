@@ -36,15 +36,11 @@ impl Interpreter<'_> {
         let result = (|| {
             nir::type_computations::charge_term(ty, &mut fuel)
                 .map_err(|_| nir::newtypes::ConversionError::Budget)?;
-            if let Some(graph) = self.graph {
+            if self.graph.is_some() {
                 nir::type_computations::charge_term(&selected, &mut fuel)
                     .map_err(|_| nir::newtypes::ConversionError::Budget)?;
-                let index = self
-                    .graph_indexes
-                    .as_ref()
-                    .and_then(|indexes| indexes.nominals.get(&selected));
                 let Some(iir::NominalDefinition::Newtype(definition)) =
-                    index.map(|index| &graph.nominals[*index].definition)
+                    self.concrete_nominal(&selected)
                 else {
                     return Ok(None);
                 };

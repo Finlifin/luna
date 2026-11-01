@@ -23,7 +23,7 @@ impl Interpreter<'_> {
         if !self.comptime_only {
             return Ok(());
         }
-        if let Some(graph) = self.graph {
+        if self.graph.is_some() {
             let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
             let mut fuel = before;
             let checked = nir::phases::validate_comptime_storage_with_layouts(
@@ -36,8 +36,7 @@ impl Interpreter<'_> {
                             nir::type_computations::charge_term(ty, fuel)
                                 .map_err(|_| *fuel = 0)
                                 .ok()?;
-                            let index = self.graph_indexes.as_ref()?.nominals.get(ty)?;
-                            let definition = &graph.nominals[*index].definition;
+                            let definition = self.concrete_nominal(ty)?;
                             let count = match definition {
                                 iir::NominalDefinition::Struct(def) => def.fields.len(),
                                 iir::NominalDefinition::Enum(def) => {

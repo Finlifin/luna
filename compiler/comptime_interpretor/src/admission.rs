@@ -234,20 +234,17 @@ impl Interpreter<'_> {
                 declaration,
                 arguments,
             } => {
-                if let Some(graph) = self.graph {
+                if self.graph.is_some() {
                     let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
                     let mut fuel = before;
                     let charged = nir::type_computations::charge_term(ty, &mut fuel);
                     self.budget.steps -= (before - fuel) as u64;
                     charged.map_err(|_| self.failure(ErrorKind::StepsExhausted, None))?;
-                    let index = self
-                        .graph_indexes
-                        .as_ref()
-                        .and_then(|indexes| indexes.nominals.get(ty))
+                    let definition = self
+                        .concrete_nominal(ty)
                         .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-                    let nominal = &graph.nominals[*index];
                     // Concrete descriptors already substituted their declaration telescope.
-                    let (requirements, capabilities) = match &nominal.definition {
+                    let (requirements, capabilities) = match definition {
                         iir::NominalDefinition::Struct(d) => (&d.requirements, &d.capabilities),
                         iir::NominalDefinition::Enum(d) => (&d.requirements, &d.capabilities),
                         iir::NominalDefinition::Newtype(d) => (&d.requirements, &d.capabilities),

@@ -161,19 +161,9 @@ impl Interpreter<'_> {
                 }
             }
             Term::Nominal { .. } => {
-                let graph = self
-                    .graph
+                let definition = self
+                    .concrete_nominal_metered(ty)?
                     .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, None))?;
-                let mut found = None;
-                for nominal in &graph.nominals {
-                    self.tick(None)?;
-                    if &nominal.ty == ty {
-                        found = Some(&nominal.definition);
-                        break;
-                    }
-                }
-                let definition =
-                    found.ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, None))?;
                 match definition {
                     iir::NominalDefinition::Newtype(definition) => {
                         return self.cleanup_value_context(

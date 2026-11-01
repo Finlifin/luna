@@ -224,11 +224,11 @@ impl Interpreter<'_> {
                     },
                     None if self.graph.map_or_else(
                         || self.newtypes.contains_key(declaration),
-                        |graph| {
-                            graph.nominals.iter().any(|n| {
-                                n.ty == *ty
-                                    && matches!(n.definition, iir::NominalDefinition::Newtype(_))
-                            })
+                        |_| {
+                            matches!(
+                                self.concrete_nominal(ty),
+                                Some(iir::NominalDefinition::Newtype(_))
+                            )
                         },
                     ) =>
                     {

@@ -66,3 +66,28 @@ impl GraphIndexes {
         })
     }
 }
+
+impl<'a> Interpreter<'a> {
+    /// Exact immutable instance lookup. Callers that already budget traversal of
+    /// the type may use this directly; this stores no formation verdicts.
+    pub(crate) fn concrete_nominal(&self, ty: &Term) -> Option<&'a iir::NominalDefinition> {
+        let index = self.graph_indexes.as_ref()?.nominals.get(ty)?;
+        Some(&self.graph?.nominals[*index].definition)
+    }
+
+    pub(crate) fn concrete_nominal_metered(
+        &mut self,
+        ty: &Term,
+    ) -> Result<Option<&'a iir::NominalDefinition>, Error> {
+        self.tick(None)?;
+        let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+        let mut fuel = before;
+        let result = nir::type_computations::charge_term(ty, &mut fuel);
+        self.budget.steps -= (before - fuel) as u64;
+        result.map_err(|_| self.failure(ErrorKind::StepsExhausted, None))?;
+        Ok(self.concrete_nominal(ty))
+    }
+}
+
+#[cfg(test)]
+mod tests;

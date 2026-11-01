@@ -84,22 +84,13 @@ impl<'a> Interpreter<'a> {
         let Term::Nominal { declaration, .. } = ty else {
             return Err(self.failure(ErrorKind::Type, None));
         };
-        let definition = if let Some(graph) = self.graph {
-            let mut selected = None;
-            for nominal in &graph.nominals {
-                let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
-                let mut fuel = before;
-                let result = nir::type_computations::charge_term(&nominal.ty, &mut fuel);
-                self.budget.steps -= (before - fuel) as u64;
-                result.map_err(|_| self.failure(ErrorKind::StepsExhausted, None))?;
-                if nominal.ty == *ty {
-                    if let iir::NominalDefinition::Enum(definition) = &nominal.definition {
-                        selected = Some(generated_enums::EnumDefinition::Borrowed(definition));
-                    }
-                    break;
+        let definition = if self.graph.is_some() {
+            match self.concrete_nominal_metered(ty)? {
+                Some(iir::NominalDefinition::Enum(definition)) => {
+                    Some(generated_enums::EnumDefinition::Borrowed(definition))
                 }
+                _ => None,
             }
-            selected
         } else {
             self.enums.get(declaration).cloned()
         }

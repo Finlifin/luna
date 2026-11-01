@@ -11188,3 +11188,37 @@ Validation from `/home/fin/luna`:
   public_newtype_builder_reflection_rejects_other_type_kinds).
 - Workspace formatting passed (`/tmp/luna-tools-rjws0wqp/result.json`);
   `git diff --check` passed.
+
+
+### Shared concrete nominal lookup across VM consumers
+
+All interpreter consumers of concrete nominal instances now use the immutable
+IIR session's full-key index. This covers value/layout admission, frozen nominal
+decoding, struct/enum/newtype reflection, enum names and bit representations,
+cleanup context inspection, and direct newtype conversions. Conversion checks
+only its endpoint instances and retains the shared NIR conversion validator.
+The IIR package's independent validation path is unchanged.
+
+Lookups never cache mutable values or formation verdicts. Metered callers charge
+key traversal; callers already charging complete input traversal reuse the same
+lookup. Bit observations select the checked value's complete nominal identity:
+an associated input view is not itself a concrete instance key. Tests distinguish
+two instances of the same enum using different bit encodings after association.
+
+A padded-world regression compares zero and 128 unrelated declarations and
+asserts equal per-operation fuel for concrete value decoding, reflection and
+conversion. Additional coverage rejects wrong-instance payloads and missing
+instances, sweeps all insufficient decoding budgets and retries successfully.
+This verifies lookup/budget behavior; no wall-time speedup ratio is claimed.
+Source-world newtype conversion and standalone IIR validation can still scan
+source declarations; they are not covered by this concrete-session improvement.
+
+Validation from `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor`:
+  passed, exit 0 (`/tmp/luna-tools-7bqw6fit/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test
+  comptime_iir_bytecode --test encoded_enums --test match_cleanup --test
+  comptime_bytecode_bits`: passed, exit 0
+  (`/tmp/luna-tools-0b2e3p_6/result.json`).
+- Workspace formatting passed (`/tmp/luna-tools-_7jue7yl/result.json`);
+  `git diff --check` passed.

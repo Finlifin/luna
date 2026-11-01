@@ -186,11 +186,11 @@ impl Interpreter<'_> {
                 let Term::Nominal { declaration, .. } = input else {
                     unreachable!()
                 };
-                let is_enum = if let Some(graph) = self.graph {
-                    graph.nominals.iter().any(|nominal| {
-                        nominal.ty == *input
-                            && matches!(nominal.definition, iir::NominalDefinition::Enum(_))
-                    })
+                let is_enum = if self.graph.is_some() {
+                    matches!(
+                        self.concrete_nominal(input),
+                        Some(iir::NominalDefinition::Enum(_))
+                    )
                 } else {
                     self.enums.contains_key(declaration)
                 };
@@ -256,21 +256,17 @@ impl Interpreter<'_> {
                 else {
                     return Err(self.failure(ErrorKind::Type, Some(source)));
                 };
-                let definition = if let Some(graph) = self.graph {
-                    graph
-                        .nominals
-                        .iter()
-                        .find(|nominal| {
-                            matches!(&nominal.ty,
-                        Term::Nominal { declaration: actual, arguments: actual_args }
-                            if *actual == declaration && *actual_args == arguments)
-                        })
-                        .and_then(|nominal| match &nominal.definition {
-                            iir::NominalDefinition::Enum(definition) => {
-                                Some(generated_enums::EnumDefinition::Borrowed(definition))
-                            }
-                            _ => None,
-                        })
+                let definition = if self.graph.is_some() {
+                    let subject = Term::Nominal {
+                        declaration,
+                        arguments,
+                    };
+                    match self.concrete_nominal_metered(&subject)? {
+                        Some(iir::NominalDefinition::Enum(definition)) => {
+                            Some(generated_enums::EnumDefinition::Borrowed(definition))
+                        }
+                        _ => None,
+                    }
                 } else {
                     self.enums.get(&declaration).cloned()
                 };

@@ -27,21 +27,19 @@ impl Interpreter<'_> {
                 else {
                     unreachable!()
                 };
-                let definition = if let Some(graph) = self.graph {
-                    graph
-                        .nominals
-                        .iter()
-                        .find(|nominal| {
-                            matches!(&nominal.ty,
-                                Term::Nominal {declaration:actual,arguments:actual_args}
-                                    if *actual == declaration && *actual_args == arguments)
-                        })
-                        .and_then(|nominal| match &nominal.definition {
-                            iir::NominalDefinition::Enum(definition) => {
-                                Some(generated_enums::EnumDefinition::Borrowed(definition))
-                            }
-                            _ => None,
-                        })
+                let definition = if self.graph.is_some() {
+                    // has_type may have selected an associated input view. Use
+                    // the checked value's full concrete identity for lookup.
+                    let subject = Term::Nominal {
+                        declaration,
+                        arguments,
+                    };
+                    match self.concrete_nominal_metered(&subject)? {
+                        Some(iir::NominalDefinition::Enum(definition)) => {
+                            Some(generated_enums::EnumDefinition::Borrowed(definition))
+                        }
+                        _ => None,
+                    }
                 } else {
                     self.enums.get(&declaration).cloned()
                 };

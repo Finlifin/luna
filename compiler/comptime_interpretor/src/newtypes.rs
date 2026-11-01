@@ -24,11 +24,25 @@ impl Interpreter<'_> {
     ) -> Result<nir::newtypes::Conversion, Error> {
         let mut fuel = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
         let before = fuel;
-        let plan = if let Some(graph) = self.graph {
-            // IIR descriptors are already instantiated, so their nominal keys
-            // must select the concrete representation rather than reapplying
-            // declaration arguments to an empty telescope.
-            graph.newtype_conversion(input, output, &mut fuel)
+        let plan = if self.graph.is_some() {
+            // Only the two endpoint instances can establish a direct edge.
+            // Their IIR descriptors already substituted the source telescope.
+            (|| {
+                for endpoint in [input, output] {
+                    nir::type_computations::charge_term(endpoint, &mut fuel)
+                        .map_err(|_| nir::newtypes::ConversionError::Budget)?;
+                    if let Some(iir::NominalDefinition::Newtype(definition)) =
+                        self.concrete_nominal(endpoint)
+                    {
+                        if let Some(plan) = nir::newtypes::instance_conversion(
+                            definition, endpoint, input, output, &mut fuel,
+                        )? {
+                            return Ok(Some(plan));
+                        }
+                    }
+                }
+                Ok(None)
+            })()
         } else {
             nir::newtypes::conversion_from(self.newtypes.values(), input, output, &[], &mut fuel)
         };
