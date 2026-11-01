@@ -41,8 +41,9 @@ impl Interpreter<'_> {
                 values: &self.associated_values,
                 missing: Default::default(),
             };
-            let selected =
-                charge_copy(ty, &mut fuel).and_then(|_| normalize(ty, &tracked, &mut fuel, 0));
+            // normalize meters each node and variable-size payload before
+            // constructing it; a second full-tree copy preflight is redundant.
+            let selected = normalize(ty, &tracked, &mut fuel, 0);
             let missing = tracked.missing.into_inner();
             self.budget.steps -= (before - fuel) as u64;
             let Some(key) = missing.filter(|_| {

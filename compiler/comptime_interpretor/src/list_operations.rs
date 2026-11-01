@@ -53,7 +53,7 @@ impl Interpreter<'_> {
             self.depth += 1;
             self.tick(Some(left.source))?;
             self.depth += 1;
-            self.check_list_append(&environment[&place.root], &left.ty, left.source)?;
+            let ty = self.check_list_append(&environment[&place.root], &left.ty, left.source)?;
             self.depth -= 1;
             let suffix = match self.eval(right, environment)? {
                 Flow::Value(value) => value,
@@ -62,7 +62,7 @@ impl Interpreter<'_> {
             self.complete_list_append(
                 environment.get_mut(&place.root).unwrap(),
                 suffix,
-                &value.ty,
+                &ty,
                 value.source,
             )?;
             Ok(Flow::Value(Value::Unit))
@@ -81,7 +81,8 @@ impl Interpreter<'_> {
             K::ListConcat(left, right) => (left, Some(right)),
             _ => unreachable!(),
         };
-        self.prepare_list_operation(&expr.ty, &left.ty, right.map(|v| &v.ty), expr.source)?;
+        let (list_ty, right_ty) =
+            self.prepare_list_operation(&expr.ty, &left.ty, right.map(|v| &v.ty), expr.source)?;
         if right.is_none()
             && self.comptime_only
             && self.cleanup_schedule.is_none()
@@ -95,13 +96,13 @@ impl Interpreter<'_> {
             let local = environment
                 .get(&binding)
                 .ok_or_else(|| self.failure(ErrorKind::MissingBinding, Some(left.source)))?;
-            return self.local_list_length(local, &left.ty, left.source, expr.source);
+            return self.local_list_length(local, &list_ty, left.source, expr.source);
         }
         let value = match self.eval(left, environment)? {
             Flow::Value(value) => value,
             flow => return Ok(flow),
         };
-        self.validate_immutable_input(&value, &left.ty)?;
+        self.validate_immutable_input(&value, &list_ty)?;
         let length = match &value {
             Value::List { values, .. } => values.len(),
             _ => return Err(self.failure(ErrorKind::Type, Some(expr.source))),
@@ -113,7 +114,7 @@ impl Interpreter<'_> {
             Flow::Value(value) => value,
             flow => return Ok(flow),
         };
-        self.validate_immutable_input(&other, &right.ty)?;
+        self.validate_immutable_input(&other, right_ty.as_ref().unwrap())?;
         let other_length = match &other {
             Value::List { values, .. } => values.len(),
             _ => return Err(self.failure(ErrorKind::Type, Some(expr.source))),
@@ -122,28 +123,39 @@ impl Interpreter<'_> {
     }
 
     pub(super) fn prepare_list_operation(
-        &self,
+        &mut self,
         ty: &Term,
         left: &Term,
         right: Option<&Term>,
         source: SourceRange,
-    ) -> Result<(), Error> {
+    ) -> Result<(Term, Option<Term>), Error> {
+        // Primitive result domains have no deferred selections or payload to
+        // traverse. Keep the ordinary length observation a constant-time check.
+        let ty = match ty {
+            Term::Primitive(_) => ty.clone(),
+            _ => self.selected_type_view(ty, Some(source))?,
+        };
+        let left = self.selected_type_view(left, Some(source))?;
+        let right = right
+            .map(|ty| self.selected_type_view(ty, Some(source)))
+            .transpose()?;
+        let right_view = right.as_ref();
         let never = Term::Primitive(Primitive::Never);
-        let diverges = *left == never || right.is_some_and(|right| *right == never);
+        let diverges = left == never || right_view.is_some_and(|right| *right == never);
         let expected = if diverges {
             &never
         } else if right.is_some() {
-            left
+            &left
         } else {
             &Term::Primitive(Primitive::Integer)
         };
-        if *ty != *expected
-            || (*left != never && self.list_element(left).is_none())
-            || right.is_some_and(|right| *right != never && *left != never && *right != *left)
+        if ty != *expected
+            || (left != never && self.list_element(&left).is_none())
+            || right_view.is_some_and(|right| *right != never && left != never && *right != left)
         {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         }
-        Ok(())
+        Ok((left, right))
     }
 
     pub(super) fn local_list_length(

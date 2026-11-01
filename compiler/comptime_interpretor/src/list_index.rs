@@ -3,22 +3,25 @@ use super::*;
 
 impl Interpreter<'_> {
     pub(super) fn prepare_list_index(
-        &self,
+        &mut self,
         ty: &Term,
         list: &Term,
         index: &Term,
         source: SourceRange,
-    ) -> Result<(), Error> {
+    ) -> Result<Term, Error> {
+        let ty = self.selected_type_view(ty, Some(source))?;
+        let list = self.selected_type_view(list, Some(source))?;
+        let index = self.selected_type_view(index, Some(source))?;
         let element = self
-            .list_element(list)
+            .list_element(&list)
             .cloned()
             .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
-        let expected = if *index == Term::Primitive(Primitive::Never) {
-            index
+        let expected = if index == Term::Primitive(Primitive::Never) {
+            &index
         } else {
             &element
         };
-        if ty != expected
+        if &ty != expected
             || !matches!(
                 index,
                 Term::Primitive(Primitive::Integer | Primitive::Never)
@@ -26,7 +29,7 @@ impl Interpreter<'_> {
         {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         }
-        Ok(())
+        Ok(list)
     }
     pub(super) fn index_list_length(
         &mut self,
@@ -141,7 +144,7 @@ impl Interpreter<'_> {
         let K::TypeListIndex(values, index) = &expr.kind else {
             unreachable!()
         };
-        self.prepare_list_index(&expr.ty, &values.ty, &index.ty, expr.source)?;
+        let list_ty = self.prepare_list_index(&expr.ty, &values.ty, &index.ty, expr.source)?;
         if self.comptime_only
             && self.cleanup_schedule.is_none()
             && let K::Local(binding) = values.kind
@@ -157,7 +160,7 @@ impl Interpreter<'_> {
             };
             return self.read_local_list_index(
                 local,
-                &values.ty,
+                &list_ty,
                 independent,
                 values.source,
                 expr.source,
@@ -175,7 +178,7 @@ impl Interpreter<'_> {
             Flow::Value(value) => value,
             flow => return Ok(flow),
         };
-        self.index_list_length(&list, &values.ty, expr.source)?;
+        self.index_list_length(&list, &list_ty, expr.source)?;
         let index = match self.eval(index, environment)? {
             Flow::Value(value) => value,
             flow => return Ok(flow),

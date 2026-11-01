@@ -1215,3 +1215,180 @@ fn associated_list_domains_are_prepared_before_elements_and_retained_at_completi
         assert!(vm.active_associated_initializers.is_empty());
     }
 }
+
+#[test]
+fn associated_list_operations_retain_domains_across_reads_and_writes() {
+    let package = package();
+    let projection = Term::AssociatedType {
+        origin: Box::new(nir::AssociatedTypeOrigin {
+            interface: id(80),
+            member: id(81),
+        }),
+        arguments: vec![],
+        subject: Box::new(Term::Primitive(Primitive::Bool)),
+    };
+    let contextual = Term::NormalForm {
+        head: id(2),
+        sort: nir::Sort::Type,
+        arguments: vec![projection.clone()],
+    };
+    let resolver = |_: &Expr, fuel: &mut u64| {
+        *fuel -= 1;
+        Ok(AssociatedSelection {
+            initializer: nir::associated_initializers::AssociatedInitializer::new(
+                expr(
+                    Term::Primitive(Primitive::Type),
+                    K::TypeValue(Term::Primitive(Primitive::Bool)),
+                ),
+                &mut 1000,
+            )
+            .unwrap(),
+            requires_invocation: true,
+        })
+    };
+
+    let input = LocalId {
+        owner: 83,
+        index: 0,
+    };
+    let local = expr(contextual.clone(), K::Local(input));
+    let zero = expr(
+        Term::Primitive(Primitive::Integer),
+        K::Literal(Literal::Integer("0".into())),
+    );
+    let append = expr(
+        Term::Primitive(Primitive::Void),
+        K::Assign {
+            place: Place {
+                root: input,
+                fields: vec![],
+            },
+            value: Box::new(expr(
+                contextual.clone(),
+                K::ListConcat(
+                    Box::new(local.clone()),
+                    Box::new(expr(
+                        contextual.clone(),
+                        K::TypeList(vec![expr(
+                            Term::Primitive(Primitive::Bool),
+                            K::Literal(Literal::Bool(false)),
+                        )]),
+                    )),
+                ),
+            )),
+        },
+    );
+    for compiled in [false, true] {
+        let mut vm = Interpreter::for_comptime(&package, Budget::default())
+            .unwrap()
+            .with_associated_resolver(&resolver);
+        let original = Value::List {
+            ty: list(Primitive::Bool),
+            values: vec![Value::Bool(true)].into(),
+        };
+        let mut env = Environment::from([(input, original.clone())]);
+        for wrapped in [false, true] {
+            let receiver = if wrapped {
+                expr(
+                    contextual.clone(),
+                    K::Block {
+                        statements: vec![],
+                        result: Some(Box::new(local.clone())),
+                    },
+                )
+            } else {
+                local.clone()
+            };
+            let index = expr(
+                projection.clone(),
+                K::TypeListIndex(Box::new(receiver.clone()), Box::new(zero.clone())),
+            );
+            assert!(matches!(
+                run(&mut vm, &index, &mut env, compiled).unwrap(),
+                Flow::Value(Value::Bool(true))
+            ));
+            let length = expr(
+                Term::Primitive(Primitive::Integer),
+                K::ListLength(Box::new(receiver.clone())),
+            );
+            let Flow::Value(Value::Integer(count)) =
+                run(&mut vm, &length, &mut env, compiled).unwrap()
+            else {
+                panic!()
+            };
+            assert_eq!(count.to_u128().unwrap(), 1);
+            let concat = expr(
+                contextual.clone(),
+                K::ListConcat(Box::new(receiver), Box::new(local.clone())),
+            );
+            let Flow::Value(Value::List { ty, values }) =
+                run(&mut vm, &concat, &mut env, compiled).unwrap()
+            else {
+                panic!()
+            };
+            assert_eq!(ty, list(Primitive::Bool));
+            assert_eq!(values.len(), 2);
+            assert_eq!(env[&input], original);
+        }
+        // A rejected receiver does not poison preparation for a later invocation.
+        env.insert(
+            input,
+            Value::List {
+                ty: list(Primitive::Char),
+                values: vec![Value::Char('x')].into(),
+            },
+        );
+        let invalid = env[&input].clone();
+        assert_eq!(
+            run(&mut vm, &append, &mut env, compiled).unwrap_err().kind,
+            ErrorKind::Type
+        );
+        assert_eq!(env[&input], invalid);
+        env.insert(input, original);
+        run(&mut vm, &append, &mut env, compiled).unwrap();
+        let Value::List { ty, values } = &env[&input] else {
+            panic!()
+        };
+        assert_eq!(*ty, list(Primitive::Bool));
+        assert_eq!(
+            values.iter().collect::<Vec<_>>(),
+            vec![&Value::Bool(true), &Value::Bool(false)]
+        );
+        assert!(vm.active_associated_initializers.is_empty());
+    }
+}
+
+#[test]
+fn divergent_concat_operands_cannot_return_a_list_value() {
+    let package = package();
+    let input = LocalId {
+        owner: 84,
+        index: 0,
+    };
+    for compiled in [false, true] {
+        for right_diverges in [false, true] {
+            let ordinary = expr(list(Primitive::Bool), K::Local(input));
+            let divergent = expr(Term::Primitive(Primitive::Never), K::Local(input));
+            let (left, right) = if right_diverges {
+                (ordinary, divergent)
+            } else {
+                (divergent, ordinary)
+            };
+            let body = expr(
+                Term::Primitive(Primitive::Never),
+                K::ListConcat(Box::new(left), Box::new(right)),
+            );
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            let original = Value::List {
+                ty: list(Primitive::Bool),
+                values: vec![Value::Bool(true)].into(),
+            };
+            let mut env = Environment::from([(input, original.clone())]);
+            assert_eq!(
+                run(&mut vm, &body, &mut env, compiled).unwrap_err().kind,
+                ErrorKind::Type
+            );
+            assert_eq!(env[&input], original);
+        }
+    }
+}

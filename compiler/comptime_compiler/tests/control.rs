@@ -536,7 +536,7 @@ fn list_code_retains_declared_domains_and_checks_concat_before_right_input() {
         .instructions()
         .iter()
         .filter_map(|instruction| match instruction.op {
-            Op::PrepareListOperation(_) => Some("prepare-concat"),
+            Op::PrepareListOperation { .. } => Some("prepare-concat"),
             Op::PrepareList { .. } => Some("prepare-list"),
             Op::List { .. } => Some("list"),
             Op::CheckListOperand { .. } => Some("check"),
@@ -608,7 +608,7 @@ fn list_index_compilation_distinguishes_leaf_reads_from_computed_indices() {
         assert_eq!(dump.contains("(local-list-index "), mode != 2, "{dump}");
         assert_eq!(dump.contains("(check-indexed-list "), mode == 2, "{dump}");
         assert!(
-            dump.contains("(prepare-list-index (list-index-contract"),
+            dump.contains("(prepare-list-index %") && dump.contains("(list-index-contract"),
             "{dump}"
         );
         assert_eq!(dump, compile(&body, &mut 1000).unwrap().to_string());

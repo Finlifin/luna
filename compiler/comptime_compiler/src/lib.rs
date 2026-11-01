@@ -224,8 +224,12 @@ pub enum Op {
         suffix: Register,
         ty: Term,
     },
-    PrepareListIndex(Arc<lists::Index>),
+    PrepareListIndex {
+        destination: Register,
+        contract: Arc<lists::Index>,
+    },
     CheckIndexedList {
+        prepared: Register,
         value: Register,
         contract: Arc<lists::Index>,
     },
@@ -250,8 +254,13 @@ pub enum Op {
         list: Arc<lists::Construction>,
         values: Vec<Register>,
     },
-    PrepareListOperation(Arc<lists::Operation>),
+    PrepareListOperation {
+        destination: Register,
+        operation: Arc<lists::Operation>,
+    },
     CheckListOperand {
+        right: bool,
+        prepared: Register,
         value: Register,
         ty: Arc<Term>,
     },
@@ -737,10 +746,18 @@ impl fmt::Display for Program {
                 Op::ListAppend { local, suffix, ty } => {
                     write!(f, "(list-append %{local} %{suffix} {ty})")?
                 }
-                Op::PrepareListIndex(contract) => write!(f, "(prepare-list-index {contract})")?,
-                Op::CheckIndexedList { value, contract } => {
-                    write!(f, "(check-indexed-list %{value} {contract})")?
-                }
+                Op::PrepareListIndex {
+                    destination,
+                    contract,
+                } => write!(f, "(prepare-list-index %{destination} {contract})")?,
+                Op::CheckIndexedList {
+                    prepared,
+                    value,
+                    contract,
+                } => write!(
+                    f,
+                    "(check-indexed-list %{value} (prepared %{prepared}) {contract})"
+                )?,
                 Op::ListIndex {
                     destination,
                     list,
@@ -771,12 +788,19 @@ impl fmt::Display for Program {
                     }
                     write!(f, "))")?;
                 }
-                Op::PrepareListOperation(operation) => {
-                    write!(f, "(prepare-list-operation {operation})")?
-                }
-                Op::CheckListOperand { value, ty } => {
-                    write!(f, "(check-list-operand %{value} {ty})")?
-                }
+                Op::PrepareListOperation {
+                    destination,
+                    operation,
+                } => write!(f, "(prepare-list-operation %{destination} {operation})")?,
+                Op::CheckListOperand {
+                    right,
+                    prepared,
+                    value,
+                    ty,
+                } => write!(
+                    f,
+                    "(check-list-operand %{value} (prepared %{prepared}) (right {right}) {ty})"
+                )?,
                 Op::ListLength {
                     destination,
                     value,
@@ -2241,13 +2265,20 @@ fn compile_root<'a>(
                             emit(
                                 &mut work,
                                 Op::CheckIndexedList {
+                                    prepared: dst,
                                     value: list_slot,
                                     contract: contract.clone(),
                                 },
                             );
                             work.push(Work::Expression(list, list_slot));
                         }
-                        emit(&mut work, Op::PrepareListIndex(contract));
+                        emit(
+                            &mut work,
+                            Op::PrepareListIndex {
+                                destination: dst,
+                                contract,
+                            },
+                        );
                     }
                     K::TypeList(fields) => {
                         *fuel = fuel
@@ -2321,6 +2352,8 @@ fn compile_root<'a>(
                             emit(
                                 &mut work,
                                 Op::CheckListOperand {
+                                    right: true,
+                                    prepared: dst,
                                     value: right_slot,
                                     ty: Arc::new(operation.right.as_ref().unwrap().clone()),
                                 },
@@ -2342,13 +2375,21 @@ fn compile_root<'a>(
                             emit(
                                 &mut work,
                                 Op::CheckListOperand {
+                                    right: false,
+                                    prepared: dst,
                                     value: left_slot,
                                     ty: Arc::new(operation.left.clone()),
                                 },
                             );
                             work.push(Work::Expression(left, left_slot));
                         }
-                        emit(&mut work, Op::PrepareListOperation(operation));
+                        emit(
+                            &mut work,
+                            Op::PrepareListOperation {
+                                destination: dst,
+                                operation,
+                            },
+                        );
                     }
                     K::TypeEqual(left, right) => {
                         let left_slot = fresh();

@@ -7,8 +7,8 @@ impl Interpreter<'_> {
         target: &Value,
         ty: &Term,
         source: SourceRange,
-    ) -> Result<(), Error> {
-        self.prepare_list_operation(ty, ty, Some(ty), source)?;
+    ) -> Result<Term, Error> {
+        let (ty, _) = self.prepare_list_operation(ty, ty, Some(ty), source)?;
         let reference = match target {
             Value::ComptimeReference(reference) => Some(reference.clone()),
             Value::Storage(storage) => Some(
@@ -46,8 +46,8 @@ impl Interpreter<'_> {
         if !summarized {
             self.check_borrowed_representation(value, source, 0)?;
         }
-        self.list_operand_length(value, ty, source)?;
-        Ok(())
+        self.list_operand_length(value, &ty, source)?;
+        Ok(ty)
     }
 
     pub(super) fn complete_list_append(

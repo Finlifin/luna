@@ -15,6 +15,8 @@ pub(super) struct Frame {
     calls: BTreeMap<usize, PendingCall>,
     newtype_conversions: BTreeMap<usize, nir::newtypes::Conversion>,
     list_types: BTreeMap<usize, Term>,
+    append_types: BTreeMap<usize, Term>,
+    list_operations: BTreeMap<usize, (Term, Option<Term>)>,
     instance_origins: BTreeMap<usize, Option<(DeclarationId, usize)>>,
     instance_methods: BTreeMap<usize, comptime_compiler::methods::Method>,
     closures: BTreeMap<usize, PendingClosure>,
@@ -1057,6 +1059,8 @@ impl<'a> Interpreter<'a> {
             calls: BTreeMap::new(),
             newtype_conversions: BTreeMap::new(),
             list_types: BTreeMap::new(),
+            append_types: BTreeMap::new(),
+            list_operations: BTreeMap::new(),
             instance_origins: BTreeMap::new(),
             instance_methods: BTreeMap::new(),
             normal_types: BTreeMap::new(),
@@ -1503,28 +1507,48 @@ impl<'a> Interpreter<'a> {
                     }
                 }
                 Op::CheckListAppend { local, ty } => {
-                    self.check_list_append(
+                    let observed = self.check_list_append(
                         frame.slots[*local].as_ref().ok_or_else(missing)?,
                         ty,
                         source,
                     )?;
+                    frame.append_types.insert(*local, observed);
                 }
-                Op::ListAppend { local, suffix, ty } => {
+                Op::ListAppend {
+                    local,
+                    suffix,
+                    ty: _,
+                } => {
+                    let ty = frame.append_types.remove(local).ok_or_else(missing)?;
                     let suffix = frame.slots[*suffix].take().ok_or_else(missing)?;
                     self.complete_list_append(
                         frame.slots[*local].as_mut().ok_or_else(missing)?,
                         suffix,
-                        ty,
+                        &ty,
                         source,
                     )?;
                 }
-                Op::PrepareListIndex(contract) => {
-                    self.prepare_list_index(&contract.ty, &contract.list, &contract.index, source)?
+                Op::PrepareListIndex {
+                    destination,
+                    contract,
+                } => {
+                    let ty = self.prepare_list_index(
+                        &contract.ty,
+                        &contract.list,
+                        &contract.index,
+                        source,
+                    )?;
+                    frame.list_types.insert(*destination, ty);
                 }
-                Op::CheckIndexedList { value, contract } => {
+                Op::CheckIndexedList {
+                    prepared,
+                    value,
+                    contract: _,
+                } => {
+                    let ty = frame.list_types.get(prepared).ok_or_else(missing)?;
                     self.index_list_length(
                         frame.slots[*value].as_ref().ok_or_else(missing)?,
-                        &contract.list,
+                        ty,
                         source,
                     )?;
                 }
@@ -1533,6 +1557,7 @@ impl<'a> Interpreter<'a> {
                     list,
                     index,
                 } => {
+                    frame.list_types.remove(destination).ok_or_else(missing)?;
                     let list = frame.slots[*list].take().ok_or_else(missing)?;
                     let index = frame.slots[*index].take().ok_or_else(missing)?;
                     frame.slots[*destination] =
@@ -1540,11 +1565,12 @@ impl<'a> Interpreter<'a> {
                 }
                 Op::LocalListIndex {
                     destination,
-                    contract,
+                    contract: _,
                     list,
                     list_source,
                     index,
                 } => {
+                    let ty = frame.list_types.remove(destination).ok_or_else(missing)?;
                     use comptime_compiler::leaf_inputs::Selector;
                     use leaf_inputs::LocalSelector;
                     self.tick(Some(*list_source))?;
@@ -1564,7 +1590,7 @@ impl<'a> Interpreter<'a> {
                     );
                     let Flow::Value(value) = self.read_local_list_index(
                         list,
-                        &contract.list,
+                        &ty,
                         independent,
                         *list_source,
                         source,
@@ -1596,13 +1622,30 @@ impl<'a> Interpreter<'a> {
                     frame.slots[*destination] =
                         Some(self.complete_list_construction(&ty, values, source)?);
                 }
-                Op::PrepareListOperation(operation) => self.prepare_list_operation(
-                    &operation.ty,
-                    &operation.left,
-                    operation.right.as_ref(),
-                    source,
-                )?,
-                Op::CheckListOperand { value, ty } => {
+                Op::PrepareListOperation {
+                    destination,
+                    operation,
+                } => {
+                    let ty = self.prepare_list_operation(
+                        &operation.ty,
+                        &operation.left,
+                        operation.right.as_ref(),
+                        source,
+                    )?;
+                    frame.list_operations.insert(*destination, ty);
+                }
+                Op::CheckListOperand {
+                    right,
+                    prepared,
+                    value,
+                    ty: _,
+                } => {
+                    let (left, rhs) = frame.list_operations.get(prepared).ok_or_else(missing)?;
+                    let ty = if *right {
+                        rhs.as_ref().ok_or_else(missing)?
+                    } else {
+                        left
+                    };
                     self.list_operand_length(
                         frame.slots[*value].as_ref().ok_or_else(missing)?,
                         ty,
@@ -1612,16 +1655,20 @@ impl<'a> Interpreter<'a> {
                 Op::ListLength {
                     destination,
                     value,
-                    ty,
+                    ty: _,
                     local,
                     value_source,
                 } => {
+                    let (ty, _) = frame
+                        .list_operations
+                        .remove(destination)
+                        .ok_or_else(missing)?;
                     let value = frame.slots[*value].as_ref().ok_or_else(|| {
                         self.failure(ErrorKind::MissingBinding, Some(*value_source))
                     })?;
                     let flow = if *local {
                         self.tick(Some(*value_source))?;
-                        self.local_list_length(value, ty, *value_source, source)?
+                        self.local_list_length(value, &ty, *value_source, source)?
                     } else {
                         let length = self.list_value_length(value, source)?;
                         self.list_length_value(length, source)?
@@ -1636,6 +1683,10 @@ impl<'a> Interpreter<'a> {
                     left,
                     right,
                 } => {
+                    frame
+                        .list_operations
+                        .remove(destination)
+                        .ok_or_else(missing)?;
                     let left = frame.slots[*left].take().ok_or_else(missing)?;
                     let right = frame.slots[*right].take().ok_or_else(missing)?;
                     let length = self.list_value_length(&left, source)?;

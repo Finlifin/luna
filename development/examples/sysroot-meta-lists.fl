@@ -462,6 +462,8 @@ const saved_flag_values = flag_values(bool);
 comptime fn associated_flags() -> bool {
     flag_count(bool, flag_inputs(bool, saved_flag_values)) == 2 and saved_flag_values[0] and not saved_flag_values[1]
         and flag_singleton(bool, true)[0] and flag_empty(bool).length() == 0
+        and flag_first(bool, saved_flag_values)
+        and flag_updated(bool, saved_flag_values, true)[2]
 }
 
 comptime fn flag_inputs(comptime T: Type, values: meta.List<T.as(FlagValues).Item>) -> meta.List<T.as(FlagValues).Item>
@@ -486,4 +488,18 @@ comptime fn flag_empty(comptime T: Type) -> meta.List<T.as(FlagValues).Item>
 where requires T :- FlagValues
 {
     []
+}
+
+comptime fn flag_first(comptime T: Type, values: meta.List<T.as(FlagValues).Item>) -> T.as(FlagValues).Item
+where requires T :- FlagValues
+{
+    values[0]
+}
+
+comptime fn flag_updated(comptime T: Type, values: meta.List<T.as(FlagValues).Item>, value: T.as(FlagValues).Item) -> meta.List<T.as(FlagValues).Item>
+where requires T :- FlagValues
+{
+    var result = values;
+    result.append(value);
+    result
 }
