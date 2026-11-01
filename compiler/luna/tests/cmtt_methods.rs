@@ -1910,69 +1910,84 @@ fn generator_failed_let_else_guard_keeps_outer_receiver_writeback() {
 }
 
 #[test]
-fn generator_tuple_iteration_keeps_live_pointer_aliases() {
-    let source = "comptime fn build()-><|-bool> {
-        var first=false;var second=false;
-        let pointers=(first.ref,second.ref,first.ref);
-        inline for (index,pointer) in pointers'tuple_enumerate {
-            pointer.* = not pointer.*;
-        }
-        let result=not first and second;'(result)
-    }
-    fn run()->bool {~<build()>}";
-    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
-}
-
-#[test]
-fn generator_live_tuple_iteration_keeps_guard_and_continue_writes() {
-    let source = "comptime fn build()-><|-bool> {
-        var first=false;var second=false;var third=false;
-        inline for (index,pointer) if do {pointer.* = true;index != 0}
-            in (first.ref,second.ref,third.ref)'tuple_enumerate {
-            if index == 1 {pointer.* = false;continue;}
-            break;
-        }
-        let result=first and not second and third;'(result)
-    }
-    fn run()->bool {~<build()>}";
-    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
-}
-
-#[test]
-fn generator_tuple_iteration_preserves_nominal_pointer_fields() {
-    let source = "struct Link {pointer:*bool,value:bool}
+fn generator_tuple_iteration_preserves_shared_owned_callbacks() {
+    let source = "typealias Toggle=%{flag:bool} comptime fn()->bool;
+        comptime fn toggle()->Toggle {var flag=false;|| {flag=not flag;flag}}
         comptime fn build()-><|-bool> {
-            var first=false;var second=true;
-            let items=(Link {pointer:first.ref,value:true},Link {pointer:second.ref,value:false});
-            inline for (index,item) in items'tuple_enumerate {
-                item.pointer.* = item.value;
-            }
-            let result=first and not second;'(result)
+            let first=toggle();let second=toggle();
+            let actions=(first,second,first);
+            inline for (index,action) in actions'tuple_enumerate {action();}
+            let result=first() and not second();'(result)
         }
         fn run()->bool {~<build()>}";
     assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
 }
 
 #[test]
-fn generator_live_tuple_elements_keep_binding_and_escape_restrictions() {
-    let source = "comptime fn build()-><|-bool> {
-        var flag=false;
-        inline for (index,pointer) in (flag.ref,flag.ref)'tuple_enumerate {
-            pointer=flag.ref;
+fn generator_tuple_iteration_preserves_guard_continue_and_break_effects() {
+    let source = "typealias Cell=%{flag:bool} comptime fn(bool)->bool;
+        comptime fn cell(initial:bool)->Cell {
+            var flag=initial;|value:bool| {let before=flag;flag=value;before}
         }
-        '(true)
-    }
-    fn run()->bool {~<build()>}";
-    let error = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+        comptime fn build()-><|-bool> {
+            let first=cell(false);let second=cell(false);let third=cell(false);let fourth=cell(false);
+            inline for (index,action) if do {action(true);index != 0}
+                in (first,second,third,fourth)'tuple_enumerate {
+                if index == 1 {action(false);continue;}
+                break;
+            }
+            let result=first(false) and not second(false) and third(false) and not fourth(false);
+            '(result)
+        }
+        fn run()->bool {~<build()>}";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn generator_tuple_iteration_preserves_nominal_callback_fields() {
+    let source = "typealias Cell=%{flag:bool} comptime fn(bool)->bool;
+        comptime fn cell(initial:bool)->Cell {
+            var flag=initial;|value:bool| {let before=flag;flag=value;before}
+        }
+        struct Action {update:Cell,value:bool}
+        comptime fn build()-><|-bool> {
+            let first=cell(false);let second=cell(true);
+            let items=(Action {update:first,value:true},Action {update:second,value:false});
+            inline for (index,item) in items'tuple_enumerate {item.update(item.value);}
+            let result=first(false) and not second(false);'(result)
+        }
+        fn run()->bool {~<build()>}";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn generator_tuple_callback_elements_keep_binding_and_stage_restrictions() {
+    let prefix = "typealias Toggle=%{flag:bool} comptime fn()->bool;
+        comptime fn toggle()->Toggle {var flag=false;|| {flag=not flag;flag}}";
+    let source = format!(
+        "{prefix}
+        comptime fn build()-><|-bool> {{
+            let action=toggle();
+            inline for (index,next) in (action,action)'tuple_enumerate {{next=action;}}
+            '(true)
+        }}
+        fn run()->bool {{~<build()>}}"
+    );
+    let error = support::compile_with_protocols(&source, &Default::default()).unwrap_err();
     assert!(error.contains("immutable"), "{error}");
-    let source = "comptime fn build()-><|-*bool> {
-        var flag=false;
-        inline for (index,pointer) in (flag.ref,flag.ref)'tuple_enumerate {
-            return '(pointer);
-        }
-    }
-    fn run()->*bool {~<build()>}";
-    assert!(support::compile_with_protocols(source, &Default::default()).is_err());
+    let source = format!(
+        "{prefix}
+        comptime fn build()-><|-Toggle> {{
+            let action=toggle();
+            inline for (index,next) in (action,action)'tuple_enumerate {{return '(next);}}
+        }}
+        fn run()->Toggle {{~<build()>}}"
+    );
+    let error = support::compile_with_protocols(&source, &Default::default()).unwrap_err();
+    assert!(
+        error.contains("comptime") || error.contains("capture"),
+        "{error}"
+    );
 }
 
 #[test]
