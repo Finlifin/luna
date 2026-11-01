@@ -9433,13 +9433,17 @@ fn inferred_pattern_branches_check_all_definition_interfaces() {
 
 #[test]
 fn inferred_pattern_control_evaluates_only_selected_producers_once() {
-    let source =
-        "comptime fn bump(count:*.u8'builtin)->bool {assumes count.* < 255;count.* += 1;true}
-        comptime fn produce(count:*.u8'builtin)-><bool -| value:bool> {bump(count);'<value>}
+    let source = "typealias Count=.Integer'builtin;
+        typealias Counter=%{visits:Count} comptime fn()->Count;
+        comptime fn counter()->Counter {var visits:Count=0;|| {visits+=1;visits}}
+        comptime fn produce(next:Counter)-><bool -| value:bool> {
+            let visit=next();let wanted=visit == 2;'<value if value and wanted>
+        }
+        comptime fn never()-><bool -| value:bool> {while true {} '<value>}
         comptime fn emit()-><|-bool> {
-            var count:.u8'builtin=0;
-            const p=if bump(count.ref) {produce(count.ref)} else {produce(count.ref)};
-            let correct=count==2;
+            let next=counter();
+            const p=if next() == 1 {produce(next)} else {never()};
+            let correct=next()==3;
             '(correct and (true match {~<p> => value,_=>false}))
         }
         fn run()->bool {~<emit()>}";
@@ -11113,4 +11117,32 @@ fn mutable_generator_callback_snapshots_freeze_current_state_independently() {
             ~<first> and ~<second>
         }";
     assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn generator_callback_packets_preserve_shared_state_and_runtime_identities() {
+    let source = "typealias Count=.Integer'builtin;
+        typealias Counter=%{visits:Count} comptime fn()->Count;
+        struct Packet {first:Counter,second:Counter,action:fn()->bool}
+        fn enabled()->bool where T {true}
+        comptime fn counter()->Counter {var visits:Count=0;|| {visits+=1;visits}}
+        comptime fn build(packet:Packet)-><|-bool> {
+            let first=packet.first();let second=packet.second();
+            let correct=first == 1 and second == 2;let action=packet.action;
+            '(correct and action())
+        }
+        comptime fn outer()-><|-bool> {
+            let next=counter();
+            let code=build(Packet {first:next,second:next,action:enabled<bool>});
+            let correct=next() == 3;
+            '(correct and ~<code>)
+        }
+        fn run()->bool {~<outer()>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let invalid = source.replace(
+        "let action=packet.action;",
+        "let action=packet.action;action();",
+    );
+    let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+    assert!(failure.contains("execution phase"), "{failure}");
 }

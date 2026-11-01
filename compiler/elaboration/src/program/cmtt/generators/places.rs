@@ -104,11 +104,19 @@ impl Checker<'_, '_> {
                     pending.push((value, depth + 1))
                 }
                 Value::Closure(closure) if closure.ty().is_comptime_callable() => {
+                    // Within one invocation, forwarding an owned environment
+                    // must preserve its identity and subsequent state updates.
+                    // Snapshot materialization is a separate staging boundary.
+                    live |= closure.captured_values().len() != 0;
                     callbacks.push(value)
                 }
-                Value::Closure(_)
-                | Value::FunctionInstance { .. }
-                | Value::RuntimeTraitMethod(_) => runtime_callback = true,
+                // Declaration identities carry no runtime capture storage.
+                // Validate their instance inputs alongside owned callbacks;
+                // actual invocation remains subject to the phase checker.
+                Value::FunctionInstance { .. } | Value::RuntimeTraitMethod(_) => {
+                    callbacks.push(value)
+                }
+                Value::Closure(_) => runtime_callback = true,
                 _ => {}
             }
         }
