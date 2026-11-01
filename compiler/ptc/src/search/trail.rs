@@ -10,6 +10,7 @@ pub(super) enum Reason {
     Boolean(std::sync::Arc<BTreeSet<usize>>),
     RootClause(Conflict),
     Learned(Conflict),
+    Theory(Conflict),
 }
 #[derive(Clone, Copy)]
 pub(super) enum Consumer {
@@ -153,6 +154,7 @@ impl fmt::Display for Trail<'_> {
                 Reason::Boolean(_) => "boolean",
                 Reason::RootClause(_) => "root-clause",
                 Reason::Learned(_) => "learned",
+                Reason::Theory(_) => "theory",
             };
             write!(
                 f,
@@ -160,7 +162,7 @@ impl fmt::Display for Trail<'_> {
                 entry.index, entry.value, entry.level
             )?;
             match &entry.reason {
-                Reason::RootClause(proof) | Reason::Learned(proof) => {
+                Reason::RootClause(proof) | Reason::Learned(proof) | Reason::Theory(proof) => {
                     write!(f, " (reason {proof})")?
                 }
                 Reason::Boolean(support) => {

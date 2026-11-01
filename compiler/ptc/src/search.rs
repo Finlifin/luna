@@ -7,6 +7,9 @@ mod trail;
 use trail::{Consumer, Reason, Trail};
 
 #[cfg(test)]
+thread_local! { static THEORY_UNITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
+#[cfg(test)]
 thread_local! { static BACKJUMPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
 fn backjump(
@@ -147,7 +150,9 @@ impl Search<'_> {
                                             self.boolean_reason(index, &support, values)
                                         })
                                     }
-                                    Reason::RootClause(reason) | Reason::Learned(reason) => reason,
+                                    Reason::RootClause(reason)
+                                    | Reason::Learned(reason)
+                                    | Reason::Theory(reason) => reason,
                                     Reason::Decision => {
                                         unreachable!("decision inside propagation frame")
                                     }
@@ -409,6 +414,20 @@ impl Search<'_> {
             }
             Err(reason) => return Step::Return(SearchResult::Unknown(reason)),
         };
+        if next_unassigned.is_some() {
+            if let Some(unit) = self.equality_unit(assignment.values()) {
+                #[cfg(test)]
+                THEORY_UNITS.with(|n| n.set(n.get() + 1));
+                let start = assignment.len();
+                assignment.assign(
+                    unit.index,
+                    unit.value,
+                    decision_level,
+                    Reason::Theory(unit.reason),
+                );
+                return Step::Descend(Frame::Propagated { start }, depth + 1);
+            }
+        }
         if let Some(index) = next_unassigned {
             assignment.assign(index, false, decision_level + 1, Reason::Decision);
             Step::Descend(
@@ -511,6 +530,63 @@ mod tests {
             }
         }
         assert!(saw_unknown && saw_model && saw_unsat);
+    }
+
+    #[test]
+    fn search_propagates_theory_equalities_before_deciding_them() {
+        let rigid = |local| Term::Rigid {
+            declaration: DeclarationId {
+                package: 101,
+                local,
+            },
+            sort: Sort::Type,
+        };
+        let implied = Formula::equal(rigid(0), rigid(2));
+        for contradiction in [false, true] {
+            let tail = if contradiction {
+                let other = Formula::equal(rigid(3), Term::Primitive(Primitive::Bool));
+                Formula::And(vec![
+                    Formula::Or(vec![implied.clone().negate(), other.clone()]),
+                    Formula::Or(vec![implied.clone().negate(), other.negate()]),
+                ])
+            } else {
+                Formula::Or(vec![implied.clone(), implied.clone().negate()])
+            };
+            let formula = Formula::And(vec![
+                Formula::equal(rigid(0), rigid(1)),
+                Formula::equal(rigid(1), rigid(2)),
+                tail,
+            ]);
+            let context = Context::default();
+            let mut atoms = Vec::new();
+            let mut terms = Terms::default();
+            collect(&formula, &mut atoms, &mut terms, 0, 128, &[]).unwrap();
+            let mut search = Search {
+                boolean: None,
+                theory_state: None,
+                learned: learning::Clauses::default(),
+                context: &context,
+                formula: &formula,
+                atoms: &atoms,
+                terms: &terms,
+                steps: 100000,
+                max_depth: 128,
+            };
+            let mut assignment = vec![None; atoms.len()];
+            THEORY_UNITS.with(|n| n.set(0));
+            match search.solve(&mut assignment, 0) {
+                SearchResult::Model(_) => assert!(!contradiction),
+                SearchResult::Unsat(proof) => {
+                    assert!(contradiction);
+                    assert!(proof.support.is_empty());
+                    search.steps = 100000;
+                    search.check_tree(&proof.tree, &mut assignment, 0).unwrap();
+                }
+                SearchResult::Unknown(reason) => panic!("unexpected {reason:?}"),
+            }
+            assert!(THEORY_UNITS.with(|n| n.get()) > 0);
+            assert!(assignment.iter().all(Option::is_none));
+        }
     }
 
     #[test]

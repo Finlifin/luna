@@ -1,6 +1,7 @@
 //! Query-local reversible equality closure. Checkers and conflict minimization
 //! deliberately use fresh classes rather than this search acceleration state.
 use super::{Search, TheoryModel, UnknownReason};
+mod propagation;
 use std::{collections::BTreeSet, fmt};
 
 pub(super) enum Check {

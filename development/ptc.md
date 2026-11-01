@@ -671,3 +671,35 @@ Validation from `/home/fin/luna`:
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`: four passed (`/tmp/luna-tools-r8nkny3j/result.json`).
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_type_factories_keep_identity_through_comptime_parameters`: passed (`/tmp/luna-tools-blu7g9h4/result.json`).
 - Formatting check and `git diff --check` passed (`/tmp/luna-tools-ql8mge5h/result.json`).
+
+## Explained equality-theory propagation
+
+After a successful theory synchronization, search now asks the retained equality
+closure for an unassigned type-equality literal. Equal roots imply a positive
+literal; a retained negative equality implies a negative literal for another
+pair with the same unordered roots. This includes transitivity and structural
+congruence already established by the ordinary closure, without treating model
+representatives as equalities or introducing library-specific cases.
+
+Each unit carries a theory-conflict proof under the admitted source premises
+and the opposite target literal. It enters the assignment trail at the current
+decision level with a theory origin and participates in the same unwind and
+first-UIP analysis as other explained propagations. Premises are conservative
+rather than minimized. Independent replay rebuilds theory from those source
+premises; it never trusts the retained closure as a certificate.
+
+This optional scan has a bounded fuel allowance, charges root traversal and
+explanation construction, and leaves closure state unchanged on interruption.
+Large scans may decline propagation and continue ordinary search. This stage
+covers equality and transported disequality only; it does not yet provide
+explained propagation for every kind, trait, or arithmetic atom, or replace
+full theory scans with an incremental theory agenda.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p ptc -p type_resolution`: 471 passed (`/tmp/luna-tools-6_jzdjzp/result.json`).
+- All 81 partial assignments over four equalities are visited in both directions; each produced positive/negative unit is checked by fresh theory and independent proof replay. Another 512 budgets check interruption without retained-state mutation. Unconstrained variables do not propagate merely because a model can choose equal representatives.
+- Production search tests require actual theory-unit insertion before either successful model production or a subsequent Boolean contradiction; the contradiction proof independently replays and both paths restore the entry assignment.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`: four passed (`/tmp/luna-tools-qdkw061p/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_type_factories_keep_identity_through_comptime_parameters`: passed (`/tmp/luna-tools-i7pz6xcx/result.json`).
+- Formatting check and `git diff --check` passed (`/tmp/luna-tools-ts09fqd0/result.json`).

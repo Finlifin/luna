@@ -78,7 +78,7 @@ impl Search<'_> {
                         support,
                     }
                 }
-                Reason::RootClause(reason) | Reason::Learned(reason) => {
+                Reason::RootClause(reason) | Reason::Learned(reason) | Reason::Theory(reason) => {
                     let Some(reason) = copy_reason(reason, &mut work) else {
                         break;
                     };
