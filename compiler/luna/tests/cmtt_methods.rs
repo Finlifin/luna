@@ -1670,19 +1670,19 @@ fn pointer_aggregates_do_not_admit_runtime_callbacks() {
 }
 
 #[test]
-fn generator_live_variadic_inputs_preserve_aliases_and_frozen_siblings() {
-    let source = "comptime fn write(...items:Tuple<*bool,*bool,bool>)-><|-bool> {
-        let (first,second,value)=items;
-        first.* = value;
-        let observed=second.*;
-        '(observed)
-    }
-    comptime fn outer()-><|-bool> {
-        var flag=false;
-        let code=write(flag.ref,flag.ref,true);
-        if flag {code} else {'(false)}
-    }
-    fn run()->bool {~<outer()>}";
+fn generator_variadic_inputs_preserve_callback_identity_and_value_siblings() {
+    let source = "typealias Count=.Integer'builtin;
+        typealias Counter=%{visits:Count} comptime fn()->Count;
+        comptime fn counter()->Counter {var visits:Count=0;|| {visits+=1;visits}}
+        comptime fn write(...items:Tuple<Counter,Counter,bool>)-><|-bool> {
+            let (first,second,value)=items;
+            let one=first();let two=second();let result=value and one == 1 and two == 2;'(result)
+        }
+        comptime fn outer()-><|-bool> {
+            let next=counter();let code=write(next,next,true);
+            let complete=next() == 3;'(complete and ~<code>)
+        }
+        fn run()->bool {~<outer()>}";
     assert_eq!(
         support::run_iir_with_tuple(source, "run", vec![]),
         Value::Bool(true)
@@ -1690,27 +1690,30 @@ fn generator_live_variadic_inputs_preserve_aliases_and_frozen_siblings() {
 }
 
 #[test]
-fn generator_live_spread_packets_evaluate_once_before_later_arguments() {
+fn generator_callback_spread_packets_evaluate_once_before_later_arguments() {
     for signature in [
-        "first:*bool,second:*bool,value:bool",
-        "...items:Tuple<*bool,*bool,bool>",
+        "first:Counter,second:Counter,value:bool",
+        "...items:Tuple<Counter,Counter,bool>",
     ] {
         let binding = if signature.starts_with("...") {
-            "let(first,second,value)=items;"
+            "let (first,second,value)=items;"
         } else {
             ""
         };
         let source = format!(
-            "comptime fn write({signature})-><|-bool> {{
-            {binding}
-            first.* = value;let result=second.*;'(result)
-        }}
-        comptime fn outer()-><|-bool> {{
-            var flag=false;var visited=false;
-            let code=write(...do {{visited=not visited;(flag.ref,flag.ref)}},visited);
-            if flag and visited {{code}} else {{'(false)}}
-        }}
-        fn run()->bool {{~<outer()>}}"
+            "typealias Count=.Integer'builtin;
+            typealias Counter=%{{visits:Count}} comptime fn()->Count;
+            comptime fn counter()->Counter {{var visits:Count=0;|| {{visits+=1;visits}}}}
+            comptime fn write({signature})-><|-bool> {{
+                {binding}let one=first();let two=second();
+                let correct=value and one == 3 and two == 4;'(correct)
+            }}
+            comptime fn outer()-><|-bool> {{
+                let next=counter();
+                let code=write(...do {{let step=next();assumes step == 1;(next,next)}},next() == 2);
+                let complete=next() == 5;'(complete and ~<code>)
+            }}
+            fn run()->bool {{~<outer()>}}"
         );
         assert_eq!(
             support::run_iir_with_tuple(&source, "run", vec![]),
@@ -1720,19 +1723,21 @@ fn generator_live_spread_packets_evaluate_once_before_later_arguments() {
 }
 
 #[test]
-fn generator_live_property_packets_preserve_writeback() {
-    let source = "comptime fn schema(...properties:T)->T where T {properties}
-    typealias Fields=(do {let flag=false;schema {pointer:flag.ref,value:true}})'type;
-    comptime fn write(...fields:Fields)-><|-bool> {
-        fields.pointer.* = fields.value;
-        let result=fields.pointer.*;'(result)
-    }
-    comptime fn outer()-><|-bool> {
-        var flag=false;
-        let code=write {pointer:flag.ref,value:true};
-        if flag {code} else {'(false)}
-    }
-    fn run()->bool {~<outer()>}";
+fn generator_property_packets_preserve_callback_state_and_value_fields() {
+    let source = "typealias Count=.Integer'builtin;
+        typealias Counter=%{visits:Count} comptime fn()->Count;
+        comptime fn counter()->Counter {var visits:Count=0;|| {visits+=1;visits}}
+        comptime fn schema(...properties:T)->T where T {properties}
+        typealias Fields=(schema {action:counter(),enabled:true})'type;
+        comptime fn write(...fields:Fields)-><|-bool> {
+            let visit=fields.action();let correct=fields.enabled and visit == 2;'(correct)
+        }
+        comptime fn outer()-><|-bool> {
+            let next=counter();
+            let code=write {action:next,enabled:next() == 1};
+            let complete=next() == 3;'(complete and ~<code>)
+        }
+        fn run()->bool {~<outer()>}";
     assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
 }
 
