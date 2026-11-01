@@ -51,6 +51,7 @@ struct Provider {
     quotes: Cell<usize>,
     effects: Cell<usize>,
     fail: bool,
+    remaining_after_effects: Option<usize>,
 }
 impl Expansion for Provider {
     fn quotes(
@@ -83,9 +84,12 @@ impl Expansion for Provider {
         _: &mut u32,
         _: &mut Vec<n::ExpansionSource>,
         _: &mut Vec<n::Enum>,
-        _: &mut usize,
+        fuel: &mut usize,
     ) -> Result<(usize, usize), String> {
         self.effects.set(self.effects.get() + 1);
+        if let Some(remaining) = self.remaining_after_effects {
+            *fuel = (*fuel).min(remaining);
+        }
         Ok((0, 0))
     }
     fn quote(
@@ -247,4 +251,55 @@ fn closure_context_inputs_retain_capture_layouts() {
     .unwrap();
     assert!(graph.nominals.iter().any(|instance| instance.ty == nominal));
     graph.validate(&mut 100_000).unwrap();
+}
+
+#[test]
+fn publication_cannot_replenish_the_expansion_allowance() {
+    let (package, root) = fixture();
+    let before = package.clone();
+    let mut rejected = 0;
+    let mut accepted = 0;
+    for remaining in 0..256 {
+        let provider = Provider {
+            remaining_after_effects: Some(remaining),
+            ..Default::default()
+        };
+        match instantiate(
+            &package,
+            std::slice::from_ref(&root),
+            BTreeSet::new(),
+            Budget::default(),
+            &provider,
+        ) {
+            Ok(output) => {
+                accepted += 1;
+                // Publication includes final graph validation. Even that pass
+                // alone must fit in the allowance left by source expansion;
+                // graph construction and template storage also draw from it.
+                let mut validation = remaining;
+                output
+                    .validate(&mut validation)
+                    .expect("publication silently replenished the expansion allowance");
+                assert_eq!(output.roots, vec![root.clone()]);
+            }
+            Err(error) => {
+                rejected += 1;
+                assert!(
+                    error.contains("budget") || error.ends_with("within the type inspection limit"),
+                    "{error}"
+                );
+            }
+        }
+        assert_eq!(package, before);
+    }
+    assert!(rejected > 0 && accepted > 0);
+    let output = instantiate(
+        &package,
+        &[root],
+        BTreeSet::new(),
+        Budget::default(),
+        &Provider::default(),
+    )
+    .unwrap();
+    assert_eq!(output.functions.len(), 1);
 }

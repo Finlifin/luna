@@ -10537,3 +10537,35 @@ finite graph, low-budget rejection/retry, deterministic dumps, returned callable
 behavior, and recursive helper entry counts. This is a generated-name correction,
 not a new recursive factory algorithm. The separate instance-copy budget failure
 remains unresolved.
+
+
+IIR publication consumes remaining materialization fuel
+------------------------------------------------------
+
+While investigating the outstanding instance-copy test, source inspection found
+that captured-template storage and final IIR validation each restarted with the
+original caller allowance. They now consume the dependency builder's remaining
+fuel in sequence. A new public-entrypoint test depletes the expansion allowance
+across 256 boundaries: successful graphs must at least be independently validatable
+within the residual allowance, failures preserve the source package, and a fresh
+full-allowance attempt succeeds. Before the fix it published a graph whose final
+validation alone exceeded that allowance (`/tmp/luna-tools-lc8eydih/result.json`).
+
+Validation from `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 900 -- test -p materialization`:
+  16 unit + 5 integration tests passed, exit 0
+  (`/tmp/luna-tools-_bid3bjg/result.json`). Budget exhaustion can be reported by
+  IIR runtime-domain inspection as its inspection-limit diagnostic; the new test
+  recognizes that existing diagnostic as well as explicit budget errors.
+- `development/check.py --timeout 900 -- test -p luna --test instantiation
+  --test function_type_parameters --no-fail-fast`: 55 + 56 passed, one existing
+  failure (`/tmp/luna-tools-hlbs4ky0/result.json`, exit 101). The phantom-argument
+  case still exhausts its 3000-step construction budget at the same assertion
+  and diagnostic as the pre-change targeted run
+  (`/tmp/luna-tools-4b9zkmld/result.json`). Neither its budget nor assertions changed.
+- Workspace formatting passed (`/tmp/luna-tools-clb4lq5o/result.json`), diff checks
+  passed; no validation process remains live.
+
+This fixes two allowance resets; it does not establish that every preparation,
+copy or validation operation is fully metered. The phantom baseline and earlier
+execution-budget and memory-proof failures remain open.

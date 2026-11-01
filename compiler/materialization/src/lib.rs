@@ -331,7 +331,7 @@ pub fn instantiate_with_types(
         effect_contracts,
         callable_identities,
         mut type_cores,
-        ..
+        remaining: mut publication_fuel,
     } = build(
         package,
         budget,
@@ -341,13 +341,12 @@ pub fn instantiate_with_types(
         None,
         Some(expansion),
     )?;
-    let mut template_fuel = budget.steps;
     let templates = captured_templates::storage(
         &functions,
         package,
         &dispatch,
         &mut type_cores,
-        &mut template_fuel,
+        &mut publication_fuel,
     )?;
     // A selected interface may have conditionally available or simply unused
     // methods. Publish executable links only for demanded concrete bodies.
@@ -380,8 +379,7 @@ pub fn instantiate_with_types(
         normal_forms: package.normal_forms.clone(),
         callable_identities,
     };
-    let mut validation_fuel = budget.steps;
-    output.validate(&mut validation_fuel)?;
+    output.validate(&mut publication_fuel)?;
     Ok(output)
 }
 
