@@ -2500,3 +2500,54 @@ fn explicit_template_property_collectors_keep_generic_domains() {
         comptime_interpretor::Value::Bool(true)
     );
 }
+
+#[test]
+fn shared_function_templates_link_only_their_granted_body_ports() {
+    let declaration = "template fn with_current(value:bool,quote lambda body:<current:bool |- bool>)->bool {let current=value;~<body>}";
+    let source = format!(
+        "{declaration} fn first use with_current {{current}} fn second use with_current {{not current}}"
+    );
+    let Artifact::Hir(dump) = compile(&source, Emit::Hir).unwrap() else {
+        panic!("expected HIR")
+    };
+    assert_eq!(
+        dump.matches("(function-template-body-interface ").count(),
+        2,
+        "{dump}"
+    );
+    // Each instance has one runtime parameter and one contextual body port.
+    assert_eq!(
+        dump.matches("(function-template-input ").count(),
+        4,
+        "{dump}"
+    );
+    assert!(dump.contains("(body-ports "), "{dump}");
+    for private in ["value", "body"] {
+        let invalid = format!("{declaration} fn invalid use with_current {{{private}}}");
+        assert!(
+            compile(&invalid, Emit::Hir).is_err(),
+            "private binding escaped: {private}"
+        );
+    }
+    let failure = compile(&source, Emit::Nir)
+        .err()
+        .expect("shared body expansion remains pending");
+    assert!(failure.contains("shared CMTT body"), "{failure}");
+}
+
+#[test]
+fn shared_template_context_types_remain_in_the_declaration_scope() {
+    let Artifact::Hir(dump)=compile_with_modules(
+        "typealias Flag=*bool;use provider.with_current;fn instance use with_current {current}",
+        &[("provider.fl","typealias Flag=bool;pub template fn with_current(value:Flag,quote lambda body:<current:Flag |- Flag>)->Flag {let current=value;~<body>}")],
+        Emit::Hir,
+    ).unwrap() else {panic!("expected HIR")};
+    assert!(
+        dump.contains("(function-template-body-interface "),
+        "{dump}"
+    );
+    assert!(
+        dump.contains("(resolved-local (name \"current\")"),
+        "{dump}"
+    );
+}

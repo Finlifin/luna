@@ -40,6 +40,9 @@ pub enum ItemKind<'hir> {
         explicit_parameters: Option<&'hir [crate::common::FnParam<'hir>]>,
         parameters: Vec<FunctionTemplateInput>,
         clause_bindings: Vec<FunctionTemplateClause>,
+        /// Shared-body interface keeps declaration types and fresh lexical ports.
+        body_interface: Option<FunctionTemplateInterface<'hir>>,
+        body_ports: Vec<FunctionTemplateInput>,
         modifiers: FnModifiers,
         body: BodyId,
     },
@@ -101,6 +104,12 @@ pub struct FunctionTemplateInput {
     pub name: Ident,
     pub binding: HirId,
     pub formal: Option<HirId>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FunctionTemplateInterface<'hir> {
+    pub parameter: HirId,
+    pub ty: &'hir Expr<'hir>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

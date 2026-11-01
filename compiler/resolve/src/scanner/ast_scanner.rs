@@ -359,9 +359,12 @@ impl<'a> AstScanner<'a> {
             let entries = self.ast.get_children(item)[1];
             let mut parameters = Vec::new();
             let mut known = true;
+            let mut body_contexts = Vec::new();
             for &entry in self.ast.get_multi_child_slice(entries).unwrap_or(&[]) {
                 let source_entry = entry;
                 let mut staged = false;
+                let mut quoted = false;
+                let mut lambda = false;
                 let mut entry = entry;
                 loop {
                     match self.ast.get_node_kind(entry) {
@@ -372,12 +375,16 @@ impl<'a> AstScanner<'a> {
                             staged = true;
                             entry = self.ast.get_children(entry)[0];
                         }
+                        Some(NodeKind::QuoteParam) => {
+                            quoted = true;
+                            entry = self.ast.get_children(entry)[0];
+                        }
+                        Some(NodeKind::LambdaParam) => {
+                            lambda = true;
+                            entry = self.ast.get_children(entry)[0];
+                        }
                         Some(
-                            NodeKind::ImplicitParam
-                            | NodeKind::LambdaParam
-                            | NodeKind::ErrorParam
-                            | NodeKind::CatchParam
-                            | NodeKind::QuoteParam,
+                            NodeKind::ImplicitParam | NodeKind::ErrorParam | NodeKind::CatchParam,
                         ) => entry = self.ast.get_children(entry)[0],
                         _ => break,
                     }
@@ -392,6 +399,27 @@ impl<'a> AstScanner<'a> {
                         continue;
                     }
                 };
+                if quoted
+                    && lambda
+                    && self.ast.get_node_kind(entry) == Some(NodeKind::TypeBoundParam)
+                {
+                    let ty = self.ast.get_children(entry)[1];
+                    if self.ast.get_node_kind(ty) == Some(NodeKind::ContextualExprType) {
+                        let mut ports = Vec::new();
+                        for &port in self
+                            .ast
+                            .get_multi_child_slice(self.ast.get_children(ty)[1])
+                            .unwrap_or(&[])
+                        {
+                            let name = self.ast.get_children(port)[0];
+                            ports.push((
+                                self.extract_name(name)?,
+                                self.ast.get_span(name).unwrap_or_default(),
+                            ));
+                        }
+                        body_contexts.push((self.extract_name(name)?, ports));
+                    }
+                }
                 if staged {
                     scope.staged_parameters.push((
                         AstNodeRef::new(self.file_id, source_entry),
@@ -404,6 +432,9 @@ impl<'a> AstScanner<'a> {
                 ));
             }
             scope.function_parameters = known.then_some(parameters);
+            if body_contexts.len() == 1 && self.ast.get_children(item)[4] != 0 {
+                scope.function_body_context = body_contexts.pop();
+            }
             let mut result = self.ast.get_children(item)[2];
             if self.ast.get_node_kind(result) == Some(NodeKind::ResultWithId) {
                 result = self.ast.get_children(result)[1];

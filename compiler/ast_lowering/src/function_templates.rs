@@ -53,7 +53,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 .and_then(|scope| scope.function_parameters.clone()),
             _ => None,
         };
-        let Some(names) = names else {
+        let Some(mut names) = names else {
             self.emit_unsupported_node(
                 "function template instance requires a declared parameter interface",
                 span,
@@ -61,6 +61,17 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             self.current_owner = previous;
             return self.make_error_item(span);
         };
+        let body_context = match head.kind {
+            ExprKind::ResolvedDef { def_id, .. } => self
+                .resolver
+                .find_scope_for_def(def_id)
+                .and_then(|scope| self.resolver.scope_tree().get(scope))
+                .and_then(|scope| scope.function_body_context.clone()),
+            _ => None,
+        };
+        if let Some((body, _)) = &body_context {
+            names.retain(|(name, _)| name != body);
+        }
         let inherited_clauses = match head.kind {
             ExprKind::ResolvedDef { def_id, .. } => self
                 .resolver
@@ -88,6 +99,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 clause_bindings.push(FunctionTemplateClause { formal, binding });
             }
         }
+        let parameter_rib = self.local_enter(RibKind::FnParam);
         let mut parameters = Vec::new();
         let mut seen = std::collections::HashSet::new();
         let explicit_parameters = if explicit {
@@ -134,6 +146,34 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             }
             None
         };
+        let mut body_ports = Vec::new();
+        let body_rib = if let Some((_, names)) = body_context {
+            // The supplied body sees only the contextual ports, not the
+            // template's private parameters or its code-valued body slot.
+            self.local_exit(parameter_rib);
+            let body_rib = self.local_enter(RibKind::FnParam);
+            let site = self.ast_node_ref(node);
+            let mut seen = std::collections::HashSet::new();
+            for (index, (name, span)) in names.into_iter().enumerate() {
+                if !seen.insert(name) {
+                    self.emit_malformed("duplicate function template context binding", span);
+                    continue;
+                }
+                let name = Ident::new(name, span);
+                let binding = self.next_hir_id();
+                let index = (parameters.len() + index) as u32;
+                self.expanded_locals.insert((site, index), binding);
+                self.define_symbol(name, BindingKind::ExpandedLocal(site, index));
+                body_ports.push(FunctionTemplateInput {
+                    name,
+                    binding,
+                    formal: None,
+                });
+            }
+            body_rib
+        } else {
+            parameter_rib
+        };
         let value = self.lower_expr(ExprContext::RuntimeFunctionBody, body_node);
         let body = self.alloc_body(
             HirId::make_owner(owner),
@@ -142,6 +182,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 value: self.arena.alloc_expr(value),
             },
         );
+        self.local_exit(body_rib);
         self.local_exit(rib);
         let item = self.arena.alloc_item(Item {
             owner_id: owner,
@@ -153,6 +194,8 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 explicit_parameters,
                 parameters,
                 clause_bindings,
+                body_interface: None,
+                body_ports,
                 modifiers,
                 body,
             },
@@ -194,6 +237,8 @@ pub(crate) fn link<'hir>(
             signature,
             explicit_parameters,
             parameters,
+            body_interface,
+            body_ports,
             ..
         } = &mut item.kind
         else {
@@ -218,10 +263,65 @@ pub(crate) fn link<'hir>(
             if !formal.modifiers.is_function_template {
                 return Err("function instance target is not a function template");
             }
-            if parameters.len() != formal.params.len() {
+            let body_parameters = formal
+                .params
+                .iter()
+                .filter(|parameter| {
+                    matches!(declaration.kind, ItemKind::Fn(..))
+                        && parameter.ty.is_quote()
+                        && parameter.ty.is_lambda()
+                })
+                .collect::<Vec<_>>();
+            if body_parameters.len() > 1 {
+                return Err("function template requires a unique quote-lambda body interface");
+            }
+            if let Some(parameter) = body_parameters.first() {
+                if !matches!(declaration.kind, ItemKind::Fn(..)) {
+                    return Err("contextual body parameter requires a shared template body");
+                }
+                let hir::common::TyParamKind::Positional(ty) = parameter.ty.kind else {
+                    return Err(
+                        "function template body requires a contextual expression interface",
+                    );
+                };
+                let ExprKind::ContextualExprType(formals, _) = &ty.kind else {
+                    return Err(
+                        "function template body interface must be an explicit contextual expression type",
+                    );
+                };
+                if body_ports.len() != formals.len()
+                    || body_ports
+                        .iter()
+                        .zip(formals)
+                        .any(|(actual, formal)| actual.name.name != formal.name.name)
+                {
+                    return Err(
+                        "function template body ports disagree with its declared interface",
+                    );
+                }
+                for (actual, formal) in body_ports.iter_mut().zip(formals) {
+                    actual.formal = Some(formal.hir_id);
+                }
+                *body_interface = Some(FunctionTemplateInterface {
+                    parameter: parameter.hir_id,
+                    ty,
+                });
+            } else if !body_ports.is_empty() {
+                return Err("signature-only template has unexpected body ports");
+            }
+            let ordinary = formal
+                .params
+                .iter()
+                .filter(|parameter| {
+                    !body_parameters
+                        .iter()
+                        .any(|body| body.hir_id == parameter.hir_id)
+                })
+                .collect::<Vec<_>>();
+            if parameters.len() != ordinary.len() {
                 return Err("function template instance parameter count mismatch");
             }
-            for (input, parameter) in parameters.iter_mut().zip(formal.params) {
+            for (input, parameter) in parameters.iter_mut().zip(ordinary) {
                 if explicit_parameters.is_none() && input.name.name != parameter.name.name {
                     return Err("function template inherited parameter name mismatch");
                 }

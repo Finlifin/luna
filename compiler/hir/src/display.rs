@@ -314,13 +314,16 @@ impl Display for ItemKind<'_> {
                 explicit_parameters,
                 parameters,
                 clause_bindings,
+                body_interface,
+                body_ports,
                 modifiers,
                 body,
             } => {
                 form!(f, "function-template-instance", "template" => template,
                     "signature" => Maybe(signature.as_ref()),
                     "explicit-parameters" => Maybe(explicit_parameters.map(List)),
-                    "parameters" => List(parameters), "clause-bindings" => List(clause_bindings), "modifiers" => modifiers, "body" => body)
+                    "parameters" => List(parameters), "clause-bindings" => List(clause_bindings),
+                    "body-interface" => Maybe(body_interface.as_ref()), "body-ports" => List(body_ports), "modifiers" => modifiers, "body" => body)
             }
             Self::TestTemplateInstance {
                 interface,
@@ -1080,5 +1083,11 @@ impl Display for TestTemplateInterface<'_> {
 impl Display for crate::item::FunctionTemplateClause {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         form!(f, "function-template-clause", "formal" => self.formal, "binding" => self.binding)
+    }
+}
+
+impl Display for crate::item::FunctionTemplateInterface<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        form!(f, "function-template-body-interface", "parameter" => self.parameter, "type" => self.ty)
     }
 }

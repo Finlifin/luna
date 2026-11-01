@@ -82,8 +82,12 @@ pub(super) fn validate(item: &Item<'_>, fuel: &mut usize) -> Result<(), Error> {
         ItemKind::FunctionTemplateInstance {
             explicit_parameters,
             parameters,
+            body_ports,
             ..
         } => {
+            for port in body_ports {
+                members.id(port.binding)?;
+            }
             // Linked signatures and formal IDs belong to the template declaration.
             if let Some(params) = explicit_parameters {
                 members.parameters(params)?;
@@ -267,6 +271,8 @@ mod tests {
                 template: &template,
                 signature: None,
                 clause_bindings: vec![],
+                body_interface: None,
+                body_ports: vec![],
                 explicit_parameters: Some(std::slice::from_ref(&param)),
                 parameters: vec![FunctionTemplateInput {
                     name: name(),
@@ -280,6 +286,19 @@ mod tests {
         assert!(validate(&make(id(1)), &mut 20).is_ok());
         assert!(validate(&make(id(2)), &mut 20).is_err());
         assert!(validate(&make(foreign), &mut 20).is_err());
+        let mut with_port = make(id(1));
+        if let ItemKind::FunctionTemplateInstance { body_ports, .. } = &mut with_port.kind {
+            body_ports.push(FunctionTemplateInput {
+                name: name(),
+                binding: id(5),
+                formal: Some(foreign),
+            });
+        }
+        assert!(validate(&with_port, &mut 30).is_ok());
+        if let ItemKind::FunctionTemplateInstance { body_ports, .. } = &mut with_port.kind {
+            body_ports[0].binding = foreign;
+        }
+        assert!(validate(&with_port, &mut 30).is_err());
     }
     #[test]
     fn nested_variants_share_identity_namespace_and_budget() {

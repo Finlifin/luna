@@ -70,6 +70,7 @@ pub(super) fn expand<'h>(source: &Package<'h>, arena: &'h HirArena) -> Result<Pa
             clause_bindings,
             modifiers,
             body,
+            ..
         } = &item.kind
         else {
             continue;

@@ -62,6 +62,8 @@ pub struct Scope {
     pub test_template_context: Option<Vec<(Symbol, rustc_span::Span)>>,
     /// Parameter names only; declaration-side types are linked from HIR later.
     pub function_parameters: Option<Vec<(Symbol, rustc_span::Span)>>,
+    /// Lexical ports of a unique quote-lambda body parameter.
+    pub function_body_context: Option<(Symbol, Vec<(Symbol, rustc_span::Span)>)>,
     /// Source identities of explicitly staged ordinary parameters.
     pub staged_parameters: Vec<(crate::ids::AstNodeRef, DefId)>,
     /// Syntactic parent heads. None means their source is not statically known.
@@ -93,6 +95,7 @@ impl Scope {
             pattern_result_outputs: None,
             test_template_context: None,
             function_parameters: None,
+            function_body_context: None,
             staged_parameters: Vec::new(),
             trait_parent_paths: None,
             children: Vec::new(),
@@ -120,6 +123,7 @@ impl fmt::Debug for Scope {
             .field("pattern_result_outputs", &self.pattern_result_outputs)
             .field("test_template_context", &self.test_template_context)
             .field("function_parameters", &self.function_parameters)
+            .field("function_body_context", &self.function_body_context)
             .field("staged_parameters", &self.staged_parameters)
             .field("trait_parent_paths", &self.trait_parent_paths)
             .field("children", &self.children)
