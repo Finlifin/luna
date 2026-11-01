@@ -9949,14 +9949,20 @@ fn error_generator_data_cannot_hide_pointer_escape_or_runtime_execution() {
 }
 
 #[test]
-fn error_generator_data_live_pointer_payload_preserves_aliases() {
-    let source = "comptime fn build(data:!*bool bool)->< |- bool> {
-            let flag=data match {value! => value,error pointer=>{pointer.* = true;pointer.*}};
-            '(flag)
+fn error_generator_data_payload_mutation_preserves_caller_snapshots() {
+    let source = "struct State {flag:bool}
+        impl State {comptime fn mark(self)->bool {self.flag=true;self.flag}}
+        comptime fn build(data:!State bool)-><|-bool> {
+            let original=data;
+            let flag=data match {value! => value,error state=>state.mark()};
+            let unchanged=original match {value! => value,error state=>not state.flag};
+            '(flag and unchanged)
         }
-        comptime fn outer()->< |- bool> {var flag=false;let code=build(error flag.ref);
-            let observed=flag;'(observed and ~<code>)}
-        fn run()->bool {~<outer()>}";
+        comptime fn outer()-><|-bool> {
+            let state=State {flag:false};let code=build(error state);
+            let unchanged=not state.flag;'(unchanged and ~<code>)
+        }
+        fn run()->bool {~<outer()> and ~<build(true)>}";
     assert_eq!(run(source, "run", vec![]), Value::Bool(true));
 }
 
@@ -9984,17 +9990,23 @@ fn error_generator_data_quotes_snapshot_before_later_assignment() {
 }
 
 #[test]
-fn error_generator_data_cannot_conceal_mixed_live_callback_graph() {
-    let source = "struct Packet {data:!*bool bool,callback:fn()->bool}
+fn error_generator_packets_preserve_runtime_callback_phase() {
+    let source = "struct State {flag:bool}
+        struct Packet {data:!State bool,callback:fn()->bool}
         fn action()->bool {true}
-        comptime fn build()->< |- bool> {var flag=false;
-            let packet=Packet {data:error flag.ref,callback:action};'(true)}
+        comptime fn build()-><|-bool> {
+            let state=State {flag:false};
+            let packet=Packet {data:error state,callback:action};
+            state.flag=true;
+            '(packet.callback() and (packet.data match {
+                value! => value,error saved=>not saved.flag
+            }))
+        }
         fn run()->bool {~<build()>}";
-    let failure = support::compile_with_protocols(source, &Default::default()).unwrap_err();
-    assert!(
-        failure.contains("live generator aggregate contains a runtime callback"),
-        "{failure}"
-    );
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let invalid = source.replace("state.flag=true;", "state.flag=packet.callback();");
+    let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+    assert!(failure.contains("execution phase"), "{failure}");
 }
 
 #[test]
