@@ -3442,7 +3442,6 @@ impl<'a> Interpreter<'a> {
                 self.eval_observation(expr, environment)
             }
             K::TypeListIndex(..) => self.eval_type_list_index(expr, environment),
-            K::TupleType(..) => self.eval_tuple_type(expr, environment),
             K::TypeList(..) => self.eval_type_list(expr, environment),
             K::BitVecType(..) => self.eval_bit_vec_type(expr, environment),
             K::Literal(..) => self.eval_literal(expr, environment),
@@ -4204,45 +4203,6 @@ impl<'a> Interpreter<'a> {
                 Some(source),
             )
         })
-    }
-
-    #[inline(never)]
-    fn eval_tuple_type(
-        &mut self,
-        expr: &Expr,
-        environment: &mut Environment,
-    ) -> Result<Flow, Error> {
-        let K::TupleType(fields) = &expr.kind else {
-            unreachable!()
-        };
-        let expected = if fields
-            .iter()
-            .any(|field| field.ty == Term::Primitive(Primitive::Never))
-        {
-            Primitive::Never
-        } else {
-            Primitive::Type
-        };
-        if expr.ty != Term::Primitive(expected)
-            || fields.iter().any(|field| {
-                !matches!(
-                    field.ty,
-                    Term::Primitive(Primitive::Type | Primitive::Never)
-                )
-            })
-        {
-            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-        }
-        self.integer_operation(Some(expr.source), |budget| {
-            budget.consume(fields.len().saturating_add(1))
-        })?;
-        let mut types = Vec::with_capacity(fields.len());
-        for field in fields {
-            let value = value!(self.eval(field, environment));
-            let ty = self.type_description_term(value, field.source)?;
-            types.push(ty);
-        }
-        Ok(Flow::Value(Value::Type(Term::Tuple(types))))
     }
 
     #[inline(never)]

@@ -388,7 +388,6 @@ fn walk_roots<'a>(
                         parameters: fields, ..
                     }
                     | K::TypeList(fields)
-                    | K::TupleType(fields)
                     | K::Intrinsic { inputs: fields, .. }
                     | K::Tuple(fields) => work.extend(fields.iter().map(Node::Expr)),
                     K::BitAssign { value, .. }
@@ -802,7 +801,6 @@ fn walk_mut(
                         parameters: fields, ..
                     }
                     | K::TypeList(fields)
-                    | K::TupleType(fields)
                     | K::Intrinsic { inputs: fields, .. }
                     | K::Tuple(fields) => work.extend(fields.iter_mut().map(Node::Expr)),
                     K::BitAssign { value, .. }

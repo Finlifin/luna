@@ -1170,8 +1170,6 @@ pub enum ExprKind {
     ScalarLess(Box<Expr>, Box<Expr>),
     ScalarGreater(Box<Expr>, Box<Expr>),
     ScalarGreaterEqual(Box<Expr>, Box<Expr>),
-    /// Evaluates Type-valued fields in source order and constructs a tuple type.
-    TupleType(Vec<Expr>),
     NominalType {
         preparations: Vec<NormalFormPreparation>,
         /// Invocation-local input bindings, available to omitted defaults.
@@ -3607,13 +3605,6 @@ impl fmt::Display for ExprKind {
                 f,
                 "(function-result-type-value (signature {signature}) (result {result}))"
             ),
-            Self::TupleType(fields) => {
-                f.write_str("(tuple-type-value (fields")?;
-                for field in fields {
-                    write!(f, " {field}")?;
-                }
-                f.write_str("))")
-            }
             Self::BitVecType(width) => write!(f, "(bitvec-type-value (width {width}))"),
             Self::FloatNegate(value) => write!(f, "(float-negate (value {value}))"),
             Self::FloatBinary { op, left, right } => {
@@ -3970,7 +3961,6 @@ impl Expr {
                     | ExprKind::Call { .. }
                     | ExprKind::FunctionType { .. }
                     | ExprKind::TypeList(_)
-                    | ExprKind::TupleType(_)
                     | ExprKind::Intrinsic { .. }
                     | ExprKind::Tuple(_)
                     | ExprKind::Object { .. }
@@ -4105,7 +4095,6 @@ impl Expr {
                     parameters: fields, ..
                 }
                 | ExprKind::TypeList(fields)
-                | ExprKind::TupleType(fields)
                 | ExprKind::Intrinsic { inputs: fields, .. }
                 | ExprKind::Tuple(fields)
                 | ExprKind::Object { fields, .. }
@@ -4388,7 +4377,6 @@ impl Expr {
                 parameters: fields, ..
             }
             | ExprKind::TypeList(fields)
-            | ExprKind::TupleType(fields)
             | ExprKind::Intrinsic { inputs: fields, .. }
             | ExprKind::Tuple(fields)
             | ExprKind::Object { fields, .. }

@@ -1219,7 +1219,6 @@ pub fn machine_arithmetic_functions(
                             work.extend(parameters.iter().map(|e| Work::Expr(e, false, ct)));
                         }
                         K::TypeList(fields)
-                        | K::TupleType(fields)
                         | K::Tuple(fields)
                         | K::Record { fields, .. }
                         | K::Variant { fields, .. } => {

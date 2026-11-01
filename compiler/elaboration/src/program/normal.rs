@@ -1599,12 +1599,6 @@ impl Checker<'_, '_> {
                 }
                 freeze_known_list(&expr.ty, element, fields, budget)
             }
-            K::TupleType(values) => Some(Term::Tuple(
-                values
-                    .iter()
-                    .map(|value| self.known_normal_input_in(value, depth + 1, budget, bindings))
-                    .collect::<Option<Vec<_>>>()?,
-            )),
             K::Object { names, fields }
                 if expr.ty == p(P::Object) && names.len() == fields.len() =>
             {

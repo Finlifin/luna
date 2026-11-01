@@ -10693,3 +10693,43 @@ Evidence from `/home/fin/luna`: `python3 -B development/check.py --timeout 900
 interpreter_depth_budget_fires_on_a_two_mebibyte_host_stack_and_recovers`
 passed (exit 0, `/tmp/luna-tools-zopafb3q/result.json`). Workspace formatting
 passed (exit 0, `/tmp/luna-tools-hj5nqvo1/result.json`).
+
+### Remove the obsolete TupleType expression path
+
+The current frontend has no producer for `ExprKind::TupleType`. Its remaining
+references were generic traversals, an eager folding branch, a dedicated tree
+interpreter operation and legacy integration fixtures. That operation built a
+structural `Term::Tuple` directly from evaluated Type fields instead of following
+the language's ordinary bound Tuple factory and opaque normal-form identity.
+
+Removed the expression variant, its S-expression printer, evaluator and consumer
+branches across NIR, elaboration, materialization and verification. No replacement
+Tuple-specific opcode was added. The existing structural tuple views/layout data
+remain; this is not completion of the wider Term/TypeRef or NF-input migration.
+Effects and runtime pointer operations found during the fallback audit remain
+separate concerns; they are not newly admitted at comptime by this change.
+
+Migrated the old tuple-type expression fixtures to ordinary opaque normal-form
+construction in `tests/type_construction.rs`. They retain single evaluation and
+source ordering, failure before later inputs, malformed-input rejection,
+specialization, budget failure and recovery. The success case asserts three
+bytecode invocations and the preserved opaque head. A value operand passed where
+Type evidence is needed now checks the ordinary input compiler's existing
+`TypeContractUnresolved` diagnostic rather than the removed evaluator's Type
+error; no production diagnostic behavior was weakened.
+
+Evidence from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir
+  -p comptime_compiler -p comptime_interpretor`: 1120 passed, exit 0
+  (`/tmp/luna-tools-3q4160af/result.json`).
+- Workspace formatting passed (`/tmp/luna-tools-fq57rl1s/result.json`, exit 0);
+  `git diff --check` passed. Repository search finds no remaining expression
+  variant or evaluator references; similarly named source fixture declarations
+  are ordinary user definitions.
+- Real sysroot acceptance passed: `development/check.py --timeout 900 -- test
+  -p luna --test sysroot_preludes
+  shipped_type_factories_keep_identity_through_comptime_parameters`, exit 0
+  (`/tmp/luna-tools-4nwv8u11/result.json`). This also rebuilt the downstream
+  frontend, verification, materialization and driver consumers. The case passes
+  List and Tuple as ordinary comptime callable values and checks their identities.

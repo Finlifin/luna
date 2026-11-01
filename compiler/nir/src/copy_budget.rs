@@ -462,7 +462,6 @@ fn charge_node_observed(
                         0
                     }
                     K::TypeList(items)
-                    | K::TupleType(items)
                     | K::Intrinsic { inputs: items, .. }
                     | K::Tuple(items)
                     | K::AnonymousRecord { fields: items }

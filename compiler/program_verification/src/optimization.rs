@@ -248,7 +248,6 @@ fn visit(
             parameters: fields, ..
         }
         | K::TypeList(fields)
-        | K::TupleType(fields)
         | K::Intrinsic { inputs: fields, .. }
         | K::Tuple(fields)
         | K::Object { fields, .. }

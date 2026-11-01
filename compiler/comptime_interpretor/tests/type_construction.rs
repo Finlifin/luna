@@ -42,6 +42,50 @@ fn function(local: u32, body: Expr) -> Function {
         body,
     }
 }
+fn construction(fields: Vec<Expr>) -> Expr {
+    expr(
+        p(P::Type),
+        K::NormalFormType {
+            head: id(100),
+            arguments: fields
+                .into_iter()
+                .map(nir::program::NormalFormArgument::Value)
+                .collect(),
+            plan: None,
+        },
+    )
+}
+fn result(fields: Vec<Term>) -> Term {
+    Term::NormalForm {
+        head: id(100),
+        sort: Sort::Type,
+        arguments: fields,
+    }
+}
+fn world(functions: Vec<Function>, arity: usize) -> Package {
+    use nir::normal_forms::{Head, Kind, Parameter, Role};
+    Package {
+        functions,
+        normal_forms: vec![Head {
+            declaration: id(100),
+            role: Role::Opaque,
+            collector: None,
+            requirements: vec![],
+            parameters: (0..arity)
+                .map(|index| Parameter {
+                    declaration: id(200 + index as u32),
+                    binding: nir::program::LocalId {
+                        owner: 100,
+                        index: index as u32,
+                    },
+                    kind: Kind::Type,
+                    ty: p(P::Type),
+                })
+                .collect(),
+        }],
+        ..Default::default()
+    }
+}
 fn call(local: u32) -> Expr {
     let signature = Term::Function {
         parameters: vec![],
@@ -59,19 +103,19 @@ fn call(local: u32) -> Expr {
 }
 
 #[test]
-fn fields_execute_once_in_order_and_construct_types_not_tuple_values() {
-    let package = Package {
-        functions: vec![
-            function(0, expr(p(P::Type), K::TupleType(vec![call(1), call(2)]))),
+fn inputs_execute_once_in_order_and_preserve_the_opaque_type_head() {
+    let package = world(
+        vec![
+            function(0, construction(vec![call(1), call(2)])),
             function(1, value(p(P::Bool))),
             function(2, value(p(P::Char))),
         ],
-        ..Default::default()
-    };
+        2,
+    );
     let mut interpreter = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     assert_eq!(
         interpreter.invoke(id(0), vec![]).unwrap(),
-        Value::Type(Term::Tuple(vec![p(P::Bool), p(P::Char)]))
+        Value::Type(result(vec![p(P::Bool), p(P::Char)]))
     );
     let entered: Vec<_> = interpreter
         .events()
@@ -82,29 +126,34 @@ fn fields_execute_once_in_order_and_construct_types_not_tuple_values() {
         })
         .collect();
     assert_eq!(entered, vec![id(0), id(1), id(2)]);
+    assert_eq!(interpreter.bytecode_invocations(), 3);
 }
 
 #[test]
 fn malformed_fields_fail_and_a_later_valid_invocation_recovers() {
-    for malformed in [
-        expr(p(P::Bool), K::TupleType(vec![value(p(P::Bool))])),
-        expr(
-            p(P::Type),
-            K::TupleType(vec![expr(
+    let mut wrong_output = construction(vec![value(p(P::Bool))]);
+    wrong_output.ty = p(P::Bool);
+    for (malformed, expected) in [
+        (wrong_output, ErrorKind::Type),
+        // A value-shaped operand lacks the Type evidence required by the
+        // ordinary normal-form input compiler. It must not fall back to a tree.
+        (
+            construction(vec![expr(
                 p(P::Bool),
                 K::Literal(nir::program::Literal::Bool(true)),
             )]),
+            ErrorKind::TypeContractUnresolved,
         ),
-        expr(p(P::Type), K::TupleType(vec![value(Term::Bool(true))])),
+        (construction(vec![value(Term::Bool(true))]), ErrorKind::Type),
     ] {
-        let package = Package {
-            functions: vec![function(0, malformed), function(1, value(p(P::Char)))],
-            ..Default::default()
-        };
-        let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
+        let package = world(
+            vec![function(0, malformed), function(1, value(p(P::Char)))],
+            1,
+        );
+        let mut interpreter = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         assert_eq!(
             interpreter.invoke(id(0), vec![]).unwrap_err().kind,
-            ErrorKind::Type
+            expected
         );
         assert_eq!(
             interpreter.invoke(id(1), vec![]).unwrap(),
@@ -114,26 +163,20 @@ fn malformed_fields_fail_and_a_later_valid_invocation_recovers() {
 }
 
 #[test]
-fn tuple_type_construction_is_budgeted_and_specialization_visits_fields() {
+fn normal_form_construction_is_budgeted_and_specialization_visits_inputs() {
     let parameter = id(9);
-    let body = expr(
-        p(P::Type),
-        K::TupleType(vec![
-            value(Term::Rigid {
-                declaration: parameter,
-                sort: Sort::Type
-            });
-            16
-        ]),
-    );
+    let body = construction(vec![
+        value(Term::Rigid {
+            declaration: parameter,
+            sort: Sort::Type
+        });
+        16
+    ]);
     let specialized = body.instantiate_types(&[parameter], &[p(P::Bool)]).unwrap();
     assert_ne!(body, specialized);
-    assert!(body.to_string().contains("tuple-type-value"));
-    let package = Package {
-        functions: vec![function(0, specialized)],
-        ..Default::default()
-    };
-    let mut interpreter = Interpreter::new(
+    assert!(body.to_string().contains("normal-form-type"));
+    let package = world(vec![function(0, specialized)], 16);
+    let mut interpreter = Interpreter::for_comptime(
         &package,
         Budget {
             steps: 8,
@@ -145,10 +188,10 @@ fn tuple_type_construction_is_budgeted_and_specialization_visits_fields() {
         interpreter.invoke(id(0), vec![]).unwrap_err().kind,
         ErrorKind::StepsExhausted
     );
-    let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
+    let mut interpreter = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     assert_eq!(
         interpreter.invoke(id(0), vec![]).unwrap(),
-        Value::Type(Term::Tuple(vec![p(P::Bool); 16]))
+        Value::Type(result(vec![p(P::Bool); 16]))
     );
 }
 
@@ -161,14 +204,14 @@ fn a_failed_field_does_not_execute_later_fields() {
             K::Literal(nir::program::Literal::Integer("-1".into())),
         ))),
     );
-    let package = Package {
-        functions: vec![
-            function(0, expr(p(P::Type), K::TupleType(vec![bad_width, call(1)]))),
+    let package = world(
+        vec![
+            function(0, construction(vec![bad_width, call(1)])),
             function(1, value(p(P::Bool))),
         ],
-        ..Default::default()
-    };
-    let mut interpreter = Interpreter::new(&package, Budget::default()).unwrap();
+        2,
+    );
+    let mut interpreter = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     assert_eq!(
         interpreter.invoke(id(0), vec![]).unwrap_err().kind,
         ErrorKind::InvalidBitWidth

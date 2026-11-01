@@ -2644,7 +2644,6 @@ pub(super) fn references(
                     parameters: fields, ..
                 }
                 | K::TypeList(fields)
-                | K::TupleType(fields)
                 | K::Intrinsic { inputs: fields, .. }
                 | K::Tuple(fields)
                 | K::Object { fields, .. }

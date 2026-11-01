@@ -226,7 +226,7 @@ pub fn stable_default(expr: &n::Expr) -> bool {
         | K::BitConcat(a, b)
         | K::And(a, b)
         | K::Or(a, b) => stable_default(a) && stable_default(b),
-        K::TypeList(items) | K::TupleType(items) => items.iter().all(stable_default),
+        K::TypeList(items) => items.iter().all(stable_default),
         K::Let { value, .. } => stable_observation(value),
         K::LetPattern {
             pattern,

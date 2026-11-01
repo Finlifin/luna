@@ -3223,7 +3223,6 @@ impl Builder<'_> {
                 parameters: fields, ..
             }
             | K::TypeList(fields)
-            | K::TupleType(fields)
             | K::Tuple(fields) => {
                 for e in fields {
                     self.expr(e, depth + 1)?;

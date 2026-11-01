@@ -251,8 +251,7 @@ impl Analyzer<'_, '_, '_, '_> {
                     pattern,
                     input.map(|e| &e.kind),
                 ) {
-                    (Pattern::Tuple(_), Some(K::Tuple(values)))
-                    | (Pattern::TypeTuple(_), Some(K::TupleType(values))) => {
+                    (Pattern::Tuple(_), Some(K::Tuple(values))) => {
                         (Some(fields.len() == values.len()), Some(values))
                     }
                     (

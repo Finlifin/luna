@@ -5874,7 +5874,6 @@ impl Walker<'_> {
                 }
             }
             K::TypeList(arguments)
-            | K::TupleType(arguments)
             | K::FunctionType {
                 parameters: arguments,
                 ..
