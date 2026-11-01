@@ -318,3 +318,16 @@ hash 使用 FNV-1a：先输入符号字节（非负为 0，负为 1），再输�
 
 真实 sysroot 验收：
 `python3 -B development/library_check.py --stage sysroot-hash`。
+
+## 可选类型的编译期相等
+
+`?T` 在 `T :- ComptimeEq` 时实现 `ComptimeEq`，通过默认 meta prelude
+使用 `eq`／`ne`。两个 null 相等，只有一个 null 时不等；两边都存在时调用
+载荷的 `ComptimeEq`，不以存储结构相等替代用户协议。嵌套可选类型逐层比较。
+
+比较使用值快照；载荷方法修改自身不会修改原可选值。空值分支不调用载荷
+协议，已执行的载荷方法失败则正常传播。仅有 runtime 相等实现不足以获得
+这项 comptime 能力。本阶段没有为可选类型新增 Hash 实现。
+
+真实 sysroot 的 `development/examples/sysroot-hash.fl` 包含自定义载荷和
+嵌套可选类型的调用验收。

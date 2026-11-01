@@ -2,6 +2,7 @@
    for self and value parameters for callbacks; no comptime pointers. -}
 
 use builtin.{Type, bool};
+use numeric.equality.ComptimeEq;
 
 pub pure comptime trait ComptimeOptionalOps where T {
     comptime fn is_some(self) -> bool;
@@ -69,5 +70,16 @@ comptime impl ComptimeOptionalOps<T> for ?T where T {
             null => null,
         },
         null => null,
+    };
+}
+
+{- Compare only matching present layers, using the payload's own protocol. -}
+comptime impl ComptimeEq for ?T where T:- ComptimeEq {
+    comptime fn eq(self, other: Self) -> bool = self match {
+        left? => other match {
+            right? => left.as(ComptimeEq).eq(right),
+            null => false,
+        },
+        null => other matches null,
     };
 }

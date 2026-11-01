@@ -118,3 +118,18 @@ comptime fn list_protocol_hashing() -> bool {
 test list_element_hash_protocol {
     inline if list_protocol_hashing() {assumes true;} else {assumes false;}
 }
+
+comptime fn optional_protocol_equality() -> bool {
+    let empty: ?FoldedKey = null;
+    let left: ?FoldedKey = FoldedKey {value: 12};
+    let right: ?FoldedKey = FoldedKey {value: 22};
+    let different: ?FoldedKey = FoldedKey {value: 23};
+    let nested: ??FoldedKey = left;
+    let nested_same: ??FoldedKey = right;
+    empty.eq(empty) and empty.ne(left) and left.ne(empty)
+        and left.eq(right) and left.ne(different) and nested.eq(nested_same)
+}
+
+test optional_payload_equality_protocol {
+    inline if optional_protocol_equality() {assumes true;} else {assumes false;}
+}

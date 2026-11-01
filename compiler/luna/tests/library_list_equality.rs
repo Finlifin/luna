@@ -98,22 +98,75 @@ fn list_equality_uses_element_methods_and_stops_before_unneeded_comparisons() {
 }
 
 #[test]
-fn list_equality_requires_the_comptime_element_protocol() {
+fn aggregate_equality_requires_the_comptime_payload_protocol() {
     for declaration in [
         "struct Key { value: bool }",
         "struct Key { value: bool }
          trait RuntimeEq {fn eq(self, other:Self)->bool;}
          impl RuntimeEq for Key {fn eq(self, other:Self)->bool {true}}",
     ] {
-        let result = compile(&format!(
-            "{declaration} comptime fn bad(a:List<Key>,b:List<Key>)->bool {{a.as(ComptimeEq).eq(b)}}"
-        ));
-        let failure = result
-            .err()
-            .expect("accepted missing comptime element evidence");
-        assert!(
-            failure.contains("trait") || failure.contains("method"),
-            "{failure}"
-        );
+        for domain in ["List<Key>", "?Key"] {
+            let result = compile(&format!(
+                "{declaration} comptime fn bad(a:{domain},b:{domain})->bool {{a.as(ComptimeEq).eq(b)}}"
+            ));
+            let failure = result
+                .err()
+                .expect("accepted missing comptime element evidence");
+            assert!(
+                failure.contains("trait") || failure.contains("method"),
+                "{failure}"
+            );
+        }
     }
+}
+
+#[test]
+fn optional_equality_uses_payload_protocol_and_skips_absent_layers() {
+    let package = compile(
+        "struct Key {value:Integer}
+        comptime impl ComptimeEq for Key {
+            comptime fn eq(self,other:Self)->bool {
+                let observed = 1.div_trunc(if self.value == 99 {0} else {1});
+                let before = self.value;
+                self.value = 99;
+                before.rem_euclid(10) == other.value.rem_euclid(10) and observed == 1
+            }
+        }
+        comptime fn run()->bool {
+            let a:?Key = Key {value:12};
+            let b:?Key = Key {value:22};
+            let none:?Key = null;
+            let poison:?Key = Key {value:99};
+            a.eq(b) and a.eq(b) and none.eq(none)
+                and none.ne(poison) and poison.ne(none)
+        }
+        comptime fn wrap(value:?Key)->??Key {value}
+        comptime fn nested()->bool {
+            let inner:?Key = null;
+            let absent:??Key = null;
+            let present = wrap(inner);
+            present.eq(present) and absent.ne(present) and present.ne(absent)
+        }
+        comptime fn fail()->bool {let a:?Key = Key {value:99}; a.eq(a)}",
+    )
+    .unwrap();
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke(support::id(&package, "run"), vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        vm.invoke(support::id(&package, "nested"), vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        vm.invoke(support::id(&package, "fail"), vec![])
+            .unwrap_err()
+            .kind,
+        ErrorKind::DivisionByZero
+    );
+    assert_eq!(
+        vm.invoke(support::id(&package, "run"), vec![]).unwrap(),
+        Value::Bool(true)
+    );
 }
