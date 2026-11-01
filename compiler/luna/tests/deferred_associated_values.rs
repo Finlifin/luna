@@ -116,3 +116,20 @@ fn required_type_results_preserve_selected_associated_types() {
         );
     }
 }
+
+#[test]
+fn required_associated_values_use_the_selected_member_domain() {
+    let source = "typealias Type=.Type'builtin;
+        trait Source { assoc Item:Type; assoc initial:Self.as(Source).Item; }
+        impl Source for bool { assoc Item:Type=bool; assoc initial:bool=true; }
+        comptime fn initial(comptime T:Type)->T.as(Source).Item
+        where requires T :- Source
+        { T.as(Source).initial }
+        const saved=initial(bool);
+        comptime fn run()->bool { saved }";
+    let package = support::compile_with_protocols(source, &Default::default()).unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}

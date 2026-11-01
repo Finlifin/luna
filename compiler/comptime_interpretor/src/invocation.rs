@@ -47,7 +47,7 @@ struct Activation<'a> {
 enum Execution<'a> {
     Associated {
         expression: Body<'a>,
-        access: Arc<comptime_compiler::associated::Access>,
+        result_type: Term,
         key: Option<(InterfaceInstance, Term, DeclarationId)>,
         source: SourceRange,
         environment: Environment,
@@ -381,10 +381,10 @@ impl<'a> Interpreter<'a> {
                         &access.ty,
                         source,
                     ) {
-                        Ok((expression, key)) => {
+                        Ok((expression, key, result_type)) => {
                             execution = Some(Execution::Associated {
                                 expression,
-                                access,
+                                result_type,
                                 key,
                                 source,
                                 environment: Environment::default(),
@@ -466,12 +466,12 @@ impl<'a> Interpreter<'a> {
     ) -> Completion {
         match execution {
             Execution::Associated {
-                access,
+                result_type,
                 key,
                 source,
                 ..
             } => Completion::Ordinary {
-                flow: self.complete_associated_value(key, &access.ty, source, flow),
+                flow: self.complete_associated_value(key, &result_type, source, flow),
                 defaults: None,
             },
             Execution::Invocation(activation) => Completion::Ordinary {
@@ -800,6 +800,7 @@ impl<'a> Interpreter<'a> {
         result_type
             .check_scope(&[])
             .map_err(|_| self.failure(ErrorKind::Type, None))?;
+        let result_type = self.selected_type_view(&result_type, Some(body.source))?;
         self.check_comptime_domain(&result_type, body.source)?;
         if let Term::Computation { effects, .. } = &result_type {
             self.check_effect_environment(effects, None)?;

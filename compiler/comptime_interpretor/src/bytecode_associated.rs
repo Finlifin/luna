@@ -327,3 +327,59 @@ fn initialized_type_views_are_query_local_and_preserve_nested_projection_structu
         assert!(vm.active_associated_initializers.is_empty());
     }
 }
+
+#[test]
+fn associated_result_domains_survive_query_local_type_observations() {
+    let package = Package::default();
+    let projection = Term::AssociatedType {
+        origin: Box::new(nir::AssociatedTypeOrigin {
+            interface: id(1),
+            member: id(3),
+        }),
+        arguments: vec![],
+        subject: Box::new(Term::Primitive(Primitive::Bool)),
+    };
+    let resolver = |access: &Expr, fuel: &mut u64| {
+        *fuel -= 1;
+        let K::AssociatedValue { member, .. } = access.kind else {
+            unreachable!()
+        };
+        let value = if member == id(3) {
+            Expr {
+                source: SOURCE,
+                ty: Term::Primitive(Primitive::Type),
+                kind: K::TypeValue(Term::Primitive(Primitive::Bool)),
+            }
+        } else {
+            expr(K::Literal(Literal::Bool(true)))
+        };
+        Ok(AssociatedSelection {
+            initializer: nir::associated_initializers::AssociatedInitializer::new(value, &mut 1000)
+                .unwrap(),
+            requires_invocation: true,
+        })
+    };
+    for compiled in [false, true] {
+        let mut vm = Interpreter::for_comptime(&package, Budget::default())
+            .unwrap()
+            .with_associated_resolver(&resolver);
+        let mut access = read(2);
+        access.ty = projection.clone();
+        for _ in 0..2 {
+            assert!(matches!(
+                run(&mut vm, &access, &mut Environment::default(), compiled).unwrap(),
+                Flow::Value(Value::Bool(true))
+            ));
+            assert!(!vm.associated_values.contains_key(&key(3)));
+            assert!(vm.active_associated_initializers.is_empty());
+        }
+        access.ty = Term::Primitive(Primitive::Char);
+        assert_eq!(
+            run(&mut vm, &access, &mut Environment::default(), compiled)
+                .unwrap_err()
+                .kind,
+            ErrorKind::Type
+        );
+        assert!(vm.active_associated_initializers.is_empty());
+    }
+}

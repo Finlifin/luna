@@ -4364,11 +4364,11 @@ impl<'a> Interpreter<'a> {
         else {
             unreachable!()
         };
-        let (selected, key) =
+        let (selected, key, result_type) =
             self.prepare_associated_value(interface, subject, *member, &expr.ty, expr.source)?;
         // Initializers cannot read the caller's lexical environment.
         let result = self.eval(selected.expression(), &mut Environment::default());
-        self.complete_associated_value(key, &expr.ty, expr.source, result)
+        self.complete_associated_value(key, &result_type, expr.source, result)
     }
 
     fn prepare_associated_value(
@@ -4382,6 +4382,7 @@ impl<'a> Interpreter<'a> {
         (
             invocation::Body<'a>,
             Option<(InterfaceInstance, Term, DeclarationId)>,
+            Term,
         ),
         Error,
     > {
@@ -4396,6 +4397,9 @@ impl<'a> Interpreter<'a> {
             arguments: selected_arguments,
         };
         let key = (selected_interface, selected_subject, member);
+        // Observe the result domain once, before entering the initializer.
+        // Its associated Type programs must not be re-run at return checking.
+        let result_type = self.selected_type_view(ty, Some(source))?;
         if !self.associated_values.contains_key(&key)
             && !self.associated_initializers.contains_key(&key)
         {
@@ -4431,7 +4435,7 @@ impl<'a> Interpreter<'a> {
             let expression = selected.initializer.into_expression();
             nir::copy_budget::charge_expression(&expression, &mut self.budget.steps)
                 .map_err(|_| self.failure(ErrorKind::StepsExhausted, Some(source)))?;
-            if !selected_types::same(&expression.ty, ty, &self.associated_values) {
+            if self.selected_type_view(&expression.ty, Some(source))? != result_type {
                 return Err(self.failure(ErrorKind::Type, Some(source)));
             }
             let catalog = if selected.requires_invocation {
@@ -4450,14 +4454,14 @@ impl<'a> Interpreter<'a> {
                     .flatten()
             })
             .ok_or_else(|| self.failure(ErrorKind::UnmaterializedDispatch, Some(source)))?;
-        if !selected_types::same(&selected.expression().ty, ty, &self.associated_values) {
+        if self.selected_type_view(&selected.expression().ty, Some(source))? != result_type {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         }
         let initializing = self.associated_initializers.contains_key(&key);
         if initializing && !self.active_associated_initializers.insert(key.clone()) {
             return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source)));
         }
-        Ok((selected, initializing.then_some(key)))
+        Ok((selected, initializing.then_some(key), result_type))
     }
 
     fn complete_associated_value(

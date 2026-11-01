@@ -442,14 +442,16 @@ pure comptime fn MethodsCarrier<methods: meta.List<fn(comptime bool) -> bool>> -
 typealias SelectedMethodsCarrier = MethodsCarrier<saved_staged_methods>;
 
 trait FlagValues {
-    assoc values: meta.List<bool>;
+    assoc Item: Type;
+    assoc values: meta.List<Self.as(FlagValues).Item>;
 }
 
 impl FlagValues for bool {
+    assoc Item: Type = bool;
     assoc values: meta.List<bool> = [true, false];
 }
 
-comptime fn flag_values(comptime T: Type) -> meta.List<bool>
+comptime fn flag_values(comptime T: Type) -> meta.List<T.as(FlagValues).Item>
 where requires T :- FlagValues
 {
     T.as(FlagValues).values
