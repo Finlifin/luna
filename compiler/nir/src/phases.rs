@@ -4,6 +4,8 @@ use crate::program::{Expr, ExprKind as K, FunctionPhase as Phase, Package, Patte
 use crate::{Primitive, Sort, Term};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod comptime_storage;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Error {
     pub source: SourceRange,
@@ -1701,6 +1703,21 @@ pub fn machine_arithmetic_functions(
         .chain(&package.quote_templates)
         .chain(&interface_summaries)
     {
+        if let Term::Function { parameters, result } = function.signature.callable_signature() {
+            let ct = function.phase != Phase::Runtime;
+            let frames = vec![parameters.iter().map(|parameter| parameter.sort).collect()];
+            for domain in parameters
+                .iter()
+                .filter(|parameter| ct || parameter.sort != Sort::Runtime)
+                .map(|parameter| &parameter.ty)
+                .chain(ct.then_some(result.as_ref()))
+            {
+                comptime_storage::validate(domain, package, &frames).map_err(|message| Error {
+                    source: function.body.source,
+                    message,
+                })?;
+            }
+        }
         crate::call_safety::validate(function, &mut 100_000).map_err(|_| Error {source: function.body.source, message: "unsafe function call requires an unsafe boundary or declaration telescope is invalid"})?;
     }
     Ok(machine_owners)
