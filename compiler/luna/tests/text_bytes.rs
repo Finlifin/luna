@@ -238,3 +238,45 @@ fn explicit_runtime_text_trait_does_not_bypass_comptime_phase_checks() {
         "{error}"
     );
 }
+
+#[test]
+fn runtime_symbol_operation_bindings_keep_alias_identity_and_argument_order() {
+    let package = compile_text(&source(
+        "const length = bindings.symbol_byte_length;
+        const byte = bindings.symbol_byte;
+        fn run() -> bool {
+            var trace: u64 = 0;
+            let count = length(do {trace = trace * 10 + 1; .hello});
+            let last = byte(do {trace = trace * 10 + 2; .hello},
+                do {trace = trace * 10 + 3; 4});
+            trace == 123 and count == 5
+                and (last match {value? => value == 111, null => false})
+                and (byte(.hello, 5) match {_? => false, null => true})
+        }
+        fn early() -> bool {
+            byte(do {return true; .hello}, 0);
+            false
+        }",
+    ));
+    for name in ["run", "early"] {
+        assert_eq!(
+            luna::execution::interpret(&package, name, 100_000).unwrap(),
+            Value::Bool(true)
+        );
+    }
+    for name in ["symbol_byte_length", "symbol_byte"] {
+        let functions = package
+            .functions
+            .iter()
+            .filter(|function| {
+                function.name == format!("<compiler-operation.{name}>")
+                    && function.phase == nir::program::FunctionPhase::Runtime
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            functions.len(),
+            1,
+            "aliases must share the original operation body"
+        );
+    }
+}
