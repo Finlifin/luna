@@ -1419,21 +1419,35 @@ fn trait_reference_code_methods_share_state_and_keep_earlier_quotes() {
 }
 
 #[test]
-fn pointer_generator_inputs_preserve_writeback_and_check_contracts() {
+fn generator_receiver_writeback_checks_entry_and_exit_contracts() {
     let source = "struct Builder {flag:bool}
-        comptime fn build(state:*Builder)-><|-bool> where requires not state.*.flag {
-            state.*.flag=true;let flag=state.*.flag;'(flag)
+        impl Builder {
+            comptime fn build(self)-><|-bool>
+            where requires not self.flag, ensures self.flag and not self'old.flag
+            {
+                self.flag=true;let flag=self.flag;'(flag)
+            }
         }
         comptime fn outer()-><|-bool> {
-            var builder=Builder {flag:false};
-            let code=build(builder.ref);
+            let builder=Builder {flag:false};
+            let code=builder.build();
             if builder.flag {code} else {'(false)}
         }
         fn run()->bool {~<outer()>}";
     assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
-    let invalid = source.replace("Builder {flag:false}", "Builder {flag:true}");
-    let error = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
-    assert!(error.contains("precondition"), "{error}");
+    for (from, to, diagnostic) in [
+        (
+            "Builder {flag:false}",
+            "Builder {flag:true}",
+            "precondition",
+        ),
+        ("self.flag=true", "self.flag=false", "postcondition"),
+        ("not self'old.flag", "self'old.flag", "postcondition"),
+    ] {
+        let invalid = source.replace(from, to);
+        let error = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+        assert!(error.contains(diagnostic), "{error}");
+    }
 }
 
 #[test]
@@ -1448,15 +1462,20 @@ fn code_methods_cannot_treat_value_receivers_as_runtime_pointers() {
 }
 
 #[test]
-fn pointer_generator_arguments_evaluate_once_in_source_order() {
-    let source = "struct Builder {flag:bool}
-        comptime fn build(state:*Builder,flag:bool)-><|-bool> {
-            state.*.flag=flag;let saved=state.*.flag;'(saved)
+fn generator_callback_arguments_evaluate_once_in_source_order() {
+    let source = "typealias Count=.Integer'builtin;
+        typealias Cell=%{flag:bool} comptime fn(bool)->bool;
+        comptime fn cell()->Cell {
+            var flag=false;|value:bool| {let before=flag;flag=value;before}
+        }
+        comptime fn build(update:Cell,flag:bool)-><|-bool> {
+            let before=update(flag);'(not before and flag)
         }
         comptime fn outer()-><|-bool> {
-            var builder=Builder {flag:false};var count=0;
-            let code=build(do {count+=1;builder.ref}, do {count+=1;count == 2});
-            if builder.flag and count == 2 {code} else {'(false)}
+            let update=cell();var count:Count=0;
+            let code=build(do {count+=1;update}, do {count+=1;count == 2});
+            let changed=update(false);
+            if changed and count == 2 {code} else {'(false)}
         }
         fn run()->bool {~<outer()>}";
     assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
