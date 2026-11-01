@@ -285,6 +285,7 @@ pub struct IncrementalChecker<'a> {
 pub struct PreparedRepresentations {
     definitions: Arc<[n::Struct]>,
     enums: Arc<[n::Enum]>,
+    newtypes: Arc<[nir::newtypes::Newtype]>,
     done: HashSet<Term>,
     identity: Arc<()>,
     revision: u64,
@@ -325,11 +326,11 @@ impl<'a> IncrementalChecker<'a> {
                         .map(|def| (def.declaration, Description::Borrowed(def)))
                         .collect(),
                 ),
-                newtypes: Descriptions::References(
+                newtypes: Descriptions::Shared(
                     package
                         .newtypes
                         .iter()
-                        .map(|def| (def.declaration, def))
+                        .map(|def| (def.declaration, Description::Borrowed(def)))
                         .collect(),
                 ),
                 done: HashSet::new(),
@@ -359,11 +360,23 @@ impl<'a> IncrementalChecker<'a> {
         enums: Arc<[n::Enum]>,
         fuel: &mut usize,
     ) -> Result<PreparedRepresentations, Failure> {
+        self.prepare_nominals(definitions, enums, Arc::from([]), fuel)
+    }
+
+    /// Newtype representations participate in the same finite-storage graph.
+    pub fn prepare_nominals(
+        &self,
+        definitions: Arc<[n::Struct]>,
+        enums: Arc<[n::Enum]>,
+        newtypes: Arc<[nir::newtypes::Newtype]>,
+        fuel: &mut usize,
+    ) -> Result<PreparedRepresentations, Failure> {
         *fuel = fuel
             .checked_sub(
                 definitions
                     .len()
                     .saturating_add(enums.len())
+                    .saturating_add(newtypes.len())
                     .saturating_mul(3)
                     .saturating_add(1),
             )
@@ -391,11 +404,25 @@ impl<'a> IncrementalChecker<'a> {
                 return Err(Failure::invalid("enum representation identity collision"));
             }
         }
+        let mut newtype_additions = BTreeMap::new();
+        for def in newtypes.iter() {
+            if self.world.structs.get(&def.declaration).is_some()
+                || self.world.enums.get(&def.declaration).is_some()
+                || self.world.newtypes.get(&def.declaration).is_some()
+                || additions.contains_key(&def.declaration)
+                || enum_additions.contains_key(&def.declaration)
+                || newtype_additions.insert(def.declaration, def).is_some()
+            {
+                return Err(Failure::invalid(
+                    "newtype representation identity collision",
+                ));
+            }
+        }
         let mut candidate = Checker {
             tuple: self.world.tuple,
             structs: Descriptions::Overlay(&self.world.structs, additions),
             enums: Descriptions::Overlay(&self.world.enums, enum_additions),
-            newtypes: Descriptions::Overlay(&self.world.newtypes, BTreeMap::new()),
+            newtypes: Descriptions::Overlay(&self.world.newtypes, newtype_additions),
             done: HashSet::new(),
             prior_done: Some(&self.world.done),
         };
@@ -403,6 +430,7 @@ impl<'a> IncrementalChecker<'a> {
             .iter()
             .map(|def| def.declaration)
             .chain(enums.iter().map(|def| def.declaration))
+            .chain(newtypes.iter().map(|def| def.declaration))
         {
             candidate.check(
                 &Term::Nominal {
@@ -423,6 +451,7 @@ impl<'a> IncrementalChecker<'a> {
         Ok(PreparedRepresentations {
             definitions,
             enums,
+            newtypes,
             done,
             identity: Arc::clone(&self.identity),
             revision: self.revision,
@@ -457,6 +486,15 @@ impl<'a> IncrementalChecker<'a> {
                 Description::Shared(Arc::clone(&prepared.enums), index),
             );
         }
+        let Descriptions::Shared(table) = &mut self.world.newtypes else {
+            unreachable!()
+        };
+        for (index, def) in prepared.newtypes.iter().enumerate() {
+            table.insert(
+                def.declaration,
+                Description::Shared(Arc::clone(&prepared.newtypes), index),
+            );
+        }
         self.world.done.extend(prepared.done);
         self.revision = next.unwrap();
         Ok(())
@@ -485,6 +523,10 @@ impl std::fmt::Display for PreparedRepresentations {
         }
         f.write_str(") (enums")?;
         for def in self.enums.iter() {
+            write!(f, " {}", def.declaration)?;
+        }
+        f.write_str(") (newtypes")?;
+        for def in self.newtypes.iter() {
             write!(f, " {}", def.declaration)?;
         }
         write!(f, ") (proved {}))", self.done.len())

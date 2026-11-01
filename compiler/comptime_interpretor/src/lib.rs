@@ -70,6 +70,8 @@ pub use definition_diagnostics::DefinitionBuildError;
 mod enum_build;
 pub use enum_build::{EnumBuildRequest, PreparedEnumBuild};
 mod definition_build;
+mod newtype_build;
+pub use newtype_build::{NewtypeBuildRequest, PreparedNewtypeBuild};
 mod struct_build;
 pub use struct_build::{PreparedStructBuild, StructBuildRequest};
 mod reflection;

@@ -1,7 +1,8 @@
 //! A single source identity frontier for all supported concrete builder requests.
 use super::{CheckedDefinitionPublisher, PublishedDefinitions, StructBuildService};
 use comptime_interpretor::{
-    EnumBuildRequest, Error, ErrorKind, PreparedEnumBuild, PreparedStructBuild, StructBuildRequest,
+    EnumBuildRequest, Error, ErrorKind, NewtypeBuildRequest, PreparedEnumBuild,
+    PreparedNewtypeBuild, PreparedStructBuild, StructBuildRequest,
 };
 use nir::{DeclarationId, program as n};
 use std::cell::{Cell, RefCell};
@@ -45,6 +46,15 @@ impl<'a> AllocatedDefinitionPublisher<'a> {
         let identity = self.reserve(request.source, |fuel| request.charge_assembly(fuel))?;
         self.checked
             .prepare_struct_request(identity, request, steps)
+    }
+    pub fn prepare_newtype<'s>(
+        &'s self,
+        request: &NewtypeBuildRequest,
+        steps: &mut u64,
+    ) -> Result<PreparedNewtypeBuild<'s>, Error> {
+        let identity = self.reserve(request.source, |fuel| request.charge_assembly(fuel))?;
+        self.checked
+            .prepare_newtype_request(identity, request, steps)
     }
     pub fn prepare_enum<'s>(
         &'s self,

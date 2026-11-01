@@ -214,3 +214,53 @@ fn enum_request_dump_preserves_shapes_and_escapes_symbols() {
     assert!(dump.contains("(shape tuple)"));
     assert!(dump.contains("(shape (named \"field\\\"name\"))"));
 }
+
+#[test]
+fn newtype_requests_share_the_frontier_and_keep_exact_representations() {
+    use comptime_interpretor::NewtypeBuildRequest;
+    let baseline = Package::default();
+    let publisher = AllocatedDefinitionPublisher::new(&baseline, 75, 100, 100_000);
+    {
+        let mut steps = 1_000_000;
+        let mut vm = Interpreter::for_comptime(&baseline, Default::default()).unwrap();
+        let request = NewtypeBuildRequest {
+            name: "Flag".into(),
+            representation: boolean(),
+            source: source(),
+        };
+        assert!(
+            request
+                .to_string()
+                .contains("(newtype-build (name \"Flag\")")
+        );
+        let abandoned = publisher.prepare_newtype(&request, &mut steps).unwrap();
+        assert_eq!(abandoned.result, id(100));
+        drop(abandoned);
+        let first = publisher.prepare_newtype(&request, &mut steps).unwrap();
+        assert_eq!(first.result, id(101));
+        assert_eq!(first.definitions[0].representation, boolean());
+        vm.install_owned_generated_newtypes_with(first.definitions, first.commit)
+            .unwrap();
+        let second = publisher
+            .prepare_struct(&structure(ty(101)), &mut steps)
+            .unwrap();
+        assert_eq!(second.result, id(102));
+        vm.install_owned_generated_structs_with(second.definitions, second.commit)
+            .unwrap();
+        let request = NewtypeBuildRequest {
+            name: "Wrapped".into(),
+            representation: ty(102),
+            source: source(),
+        };
+        let third = publisher.prepare_newtype(&request, &mut steps).unwrap();
+        assert_eq!(third.result, id(103));
+        vm.install_owned_generated_newtypes_with(third.definitions, third.commit)
+            .unwrap();
+        drop(vm);
+    }
+    let (published, next) = publisher.finish();
+    assert_eq!(next, 104);
+    assert_eq!(published.newtypes.len(), 2);
+    assert_eq!(published.newtypes[1][0].representation, ty(102));
+    assert_eq!(published.structs[0][0].fields[0].1, ty(101));
+}

@@ -284,3 +284,133 @@ fn forward_enum_batch_is_retained_together_and_external_rejection_publishes_noth
         .commit()
         .unwrap();
 }
+
+fn newtype(local: u32, representation: Term) -> nir::newtypes::Newtype {
+    nir::newtypes::Newtype {
+        declaration: id(local),
+        name: "GeneratedNewtype".into(),
+        type_parameters: vec![],
+        parameter_types: vec![],
+        capture_count: 0,
+        requirements: vec![],
+        capabilities: vec![],
+        representation,
+    }
+}
+
+#[test]
+fn newtype_publication_rejects_cycles_without_poisoning_reused_identities() {
+    let world = Package::default();
+    let publisher = CheckedDefinitionPublisher::new(&world);
+    let mut budget = fuel();
+    for definitions in [
+        vec![newtype(1, ty(1))],
+        vec![newtype(1, ty(2)), newtype(2, ty(1))],
+    ] {
+        let error = match publisher.prepare_newtypes(definitions.into(), source(), &mut budget) {
+            Ok(_) => panic!("invalid storage published"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind, ErrorKind::Type);
+        assert_eq!(error.source, Some(source()));
+        assert_eq!(publisher.published_definition_count(), 0);
+    }
+    let valid = publisher
+        .prepare_newtypes(vec![newtype(1, boolean())].into(), source(), &mut budget)
+        .unwrap();
+    valid.commit().unwrap();
+    let consumer = publisher
+        .prepare_structs(structs(2, ty(1)), source(), &mut budget)
+        .unwrap();
+    consumer.commit().unwrap();
+    let outer = publisher
+        .prepare_newtypes(vec![newtype(3, ty(2))].into(), source(), &mut budget)
+        .unwrap();
+    outer.commit().unwrap();
+    // Finite representation is distinct from runtime storage eligibility.
+    // A wrapper over Type is a valid comptime domain.
+    publisher
+        .prepare_newtypes(
+            vec![newtype(4, Term::Primitive(Primitive::Type))].into(),
+            source(),
+            &mut budget,
+        )
+        .unwrap()
+        .commit()
+        .unwrap();
+    assert_eq!(publisher.published_definition_count(), 4);
+    let published = publisher.into_definitions();
+    assert_eq!(published.newtypes.len(), 3);
+    assert_eq!(published.newtypes[1][0].representation, ty(2));
+}
+
+#[test]
+fn newtype_pointer_cycles_and_competing_receipts_use_one_committed_world() {
+    let world = Package::default();
+    let publisher = CheckedDefinitionPublisher::new(&world);
+    let mut budget = fuel();
+    let descriptions: Arc<[nir::newtypes::Newtype]> = vec![
+        newtype(1, Term::Pointer(Box::new(ty(2)))),
+        newtype(2, Term::Pointer(Box::new(ty(1)))),
+    ]
+    .into();
+    let weak = Arc::downgrade(&descriptions);
+    let prepared = publisher
+        .prepare_newtypes(descriptions, source(), &mut budget)
+        .unwrap();
+    let stale = publisher
+        .prepare_enums(
+            vec![enumeration(3, boolean())].into(),
+            source(),
+            &mut budget,
+        )
+        .unwrap();
+    prepared.commit().unwrap();
+    assert_eq!(stale.commit().unwrap_err().kind, ErrorKind::InvalidCallPlan);
+    assert!(
+        publisher
+            .prepare_structs(structs(1, boolean()), source(), &mut budget)
+            .is_err()
+    );
+    assert_eq!(publisher.published_definition_count(), 2);
+    assert!(weak.upgrade().is_some());
+    drop(publisher);
+    assert!(weak.upgrade().is_none());
+}
+
+#[test]
+fn mixed_representation_candidates_include_newtypes_and_keep_proofs_transactional() {
+    let world = Package::default();
+    let mut steps = 100_000;
+    let mut checker =
+        elaboration::representations::IncrementalChecker::new(&world, &mut steps).unwrap();
+    assert!(
+        checker
+            .prepare_nominals(
+                structs(1, ty(2)),
+                Arc::from([]),
+                vec![newtype(2, ty(1))].into(),
+                &mut steps
+            )
+            .is_err()
+    );
+    let good = checker
+        .prepare_nominals(
+            structs(1, ty(2)),
+            Arc::from([]),
+            vec![newtype(2, boolean())].into(),
+            &mut steps,
+        )
+        .unwrap();
+    assert!(good.to_string().contains("(newtypes"));
+    checker.commit(good).unwrap();
+    let next = checker
+        .prepare_nominals(
+            Arc::from([]),
+            vec![enumeration(3, ty(1))].into(),
+            vec![newtype(4, ty(3))].into(),
+            &mut steps,
+        )
+        .unwrap();
+    checker.commit(next).unwrap();
+}

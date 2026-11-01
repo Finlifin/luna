@@ -586,6 +586,9 @@ impl BuilderInvocation<'_> {
         for batch in definitions.enums {
             nir.enums.extend(batch.iter().cloned());
         }
+        for batch in definitions.newtypes {
+            nir.newtypes.extend(batch.iter().cloned());
+        }
         let completed = nir;
         crate::protocols::type_constructors::validate(&completed, protocols)?;
         Ok(completed)

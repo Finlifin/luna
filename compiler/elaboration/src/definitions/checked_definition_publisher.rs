@@ -1,7 +1,8 @@
 //! Transactional publication of completed, concrete nominal descriptions.
 use comptime_interpretor::{
     Budget, DefinitionAdmissionSession, EnumPublicationError, Error, ErrorKind,
-    PreparedEnumAdmission, PreparedStructAdmission, StructPublicationError,
+    NewtypePublicationError, PreparedEnumAdmission, PreparedNewtypeAdmission,
+    PreparedStructAdmission, StructPublicationError,
 };
 use nir::program::{Enum, Package, SourceRange, Struct};
 use std::{cell::RefCell, fmt, sync::Arc};
@@ -11,6 +12,7 @@ use std::{cell::RefCell, fmt, sync::Arc};
 pub struct PublishedDefinitions {
     pub structs: Vec<Arc<[Struct]>>,
     pub enums: Vec<Arc<[Enum]>>,
+    pub newtypes: Vec<Arc<[nir::newtypes::Newtype]>>,
 }
 
 /// One immutable candidate. Its descriptors cannot be replaced after checking.
@@ -30,9 +32,16 @@ impl fmt::Display for PreparedDefinitions<'_> {
     }
 }
 
+enum Kind {
+    Struct,
+    Enum,
+    Newtype,
+}
+
 enum Candidate {
     Structs(Arc<[Struct]>, PreparedStructAdmission),
     Enums(Arc<[Enum]>, PreparedEnumAdmission),
+    Newtypes(Arc<[nir::newtypes::Newtype]>, PreparedNewtypeAdmission),
 }
 
 /// Combines formation admission and finite-storage proofs in one committed world.
@@ -67,6 +76,11 @@ impl<'a> CheckedDefinitionPublisher<'a> {
                 .iter()
                 .map(|batch| batch.len())
                 .sum::<usize>()
+            + published
+                .newtypes
+                .iter()
+                .map(|batch| batch.len())
+                .sum::<usize>()
     }
     pub fn last_diagnostic(&self) -> Option<String> {
         self.diagnostic.borrow().clone()
@@ -83,7 +97,14 @@ impl<'a> CheckedDefinitionPublisher<'a> {
         source: SourceRange,
         budget: &mut Budget,
     ) -> Result<PreparedDefinitions<'s>, Error> {
-        self.prepare(definitions, Arc::from([]), false, source, budget)
+        self.prepare(
+            definitions,
+            Arc::from([]),
+            Arc::from([]),
+            Kind::Struct,
+            source,
+            budget,
+        )
     }
     pub fn prepare_enums<'s>(
         &'s self,
@@ -91,35 +112,61 @@ impl<'a> CheckedDefinitionPublisher<'a> {
         source: SourceRange,
         budget: &mut Budget,
     ) -> Result<PreparedDefinitions<'s>, Error> {
-        self.prepare(Arc::from([]), definitions, true, source, budget)
+        self.prepare(
+            Arc::from([]),
+            definitions,
+            Arc::from([]),
+            Kind::Enum,
+            source,
+            budget,
+        )
+    }
+    pub fn prepare_newtypes<'s>(
+        &'s self,
+        definitions: Arc<[nir::newtypes::Newtype]>,
+        source: SourceRange,
+        budget: &mut Budget,
+    ) -> Result<PreparedDefinitions<'s>, Error> {
+        self.prepare(
+            Arc::from([]),
+            Arc::from([]),
+            definitions,
+            Kind::Newtype,
+            source,
+            budget,
+        )
     }
     fn prepare<'s>(
         &'s self,
         structs: Arc<[Struct]>,
         enums: Arc<[Enum]>,
-        is_enum: bool,
+        newtypes: Arc<[nir::newtypes::Newtype]>,
+        kind: Kind,
         source: SourceRange,
         budget: &mut Budget,
     ) -> Result<PreparedDefinitions<'s>, Error> {
         self.set_diagnostic(None);
         let result = (|| {
-            let count = structs.len() + enums.len();
+            let count = structs.len() + enums.len() + newtypes.len();
             let candidate = {
                 let mut admission = self.admission.borrow_mut();
                 if admission.is_none() {
                     *admission = Some(DefinitionAdmissionSession::new(self.baseline, budget)?);
                 }
                 let admission = admission.as_mut().unwrap();
-                if is_enum {
-                    Candidate::Enums(
+                match kind {
+                    Kind::Enum => Candidate::Enums(
                         Arc::clone(&enums),
                         admission.prepare_enums(Arc::clone(&enums), budget)?,
-                    )
-                } else {
-                    Candidate::Structs(
+                    ),
+                    Kind::Struct => Candidate::Structs(
                         Arc::clone(&structs),
                         admission.prepare(Arc::clone(&structs), budget)?,
-                    )
+                    ),
+                    Kind::Newtype => Candidate::Newtypes(
+                        Arc::clone(&newtypes),
+                        admission.prepare_newtypes(Arc::clone(&newtypes), budget)?,
+                    ),
                 }
             };
             let before = usize::try_from(budget.steps).unwrap_or(usize::MAX);
@@ -135,7 +182,7 @@ impl<'a> CheckedDefinitionPublisher<'a> {
                 representations
                     .as_ref()
                     .unwrap()
-                    .prepare_batch(structs, enums, &mut fuel)
+                    .prepare_nominals(structs, enums, newtypes, &mut fuel)
             })();
             budget.steps -= (before - fuel) as u64;
             let representation = checked.map_err(|failure| {
@@ -156,42 +203,56 @@ impl<'a> CheckedDefinitionPublisher<'a> {
                     let mut published = self.published.borrow_mut();
                     let mut representations = self.representations.borrow_mut();
                     let mut admission = self.admission.borrow_mut();
-                    let finish = |published: &mut PublishedDefinitions, structs, enums| {
-                        representations
-                            .as_mut()
-                            .unwrap()
-                            .commit(representation)
-                            .map_err(|failure| {
-                                self.set_diagnostic(Some(failure.to_string()));
-                                Error {
-                                    kind: ErrorKind::InvalidCallPlan,
-                                    source: Some(source),
-                                }
-                            })?;
-                        if let Some(batch) = structs {
-                            published.structs.push(batch);
-                        }
-                        if let Some(batch) = enums {
-                            published.enums.push(batch);
-                        }
-                        Ok::<_, Error>(())
-                    };
+                    let finish =
+                        |published: &mut PublishedDefinitions, structs, enums, newtypes| {
+                            representations
+                                .as_mut()
+                                .unwrap()
+                                .commit(representation)
+                                .map_err(|failure| {
+                                    self.set_diagnostic(Some(failure.to_string()));
+                                    Error {
+                                        kind: ErrorKind::InvalidCallPlan,
+                                        source: Some(source),
+                                    }
+                                })?;
+                            if let Some(batch) = structs {
+                                published.structs.push(batch);
+                            }
+                            if let Some(batch) = enums {
+                                published.enums.push(batch);
+                            }
+                            if let Some(batch) = newtypes {
+                                published.newtypes.push(batch);
+                            }
+                            Ok::<_, Error>(())
+                        };
                     let result = match candidate {
                         Candidate::Structs(definitions, receipt) => admission
                             .as_mut()
                             .unwrap()
                             .commit_with(receipt, || {
-                                finish(&mut published, Some(definitions), None)
+                                finish(&mut published, Some(definitions), None, None)
                             })
                             .map_err(|error| match error {
                                 StructPublicationError::Admission(error)
                                 | StructPublicationError::Commit(error) => error,
                             }),
+                        Candidate::Newtypes(definitions, receipt) => admission
+                            .as_mut()
+                            .unwrap()
+                            .commit_newtypes_with(receipt, || {
+                                finish(&mut published, None, None, Some(definitions))
+                            })
+                            .map_err(|error| match error {
+                                NewtypePublicationError::Admission(error)
+                                | NewtypePublicationError::Commit(error) => error,
+                            }),
                         Candidate::Enums(definitions, receipt) => admission
                             .as_mut()
                             .unwrap()
                             .commit_enums_with(receipt, || {
-                                finish(&mut published, None, Some(definitions))
+                                finish(&mut published, None, Some(definitions), None)
                             })
                             .map_err(|error| match error {
                                 EnumPublicationError::Admission(error)

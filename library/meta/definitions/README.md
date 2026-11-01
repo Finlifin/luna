@@ -188,6 +188,9 @@ comptime fn MirroredInstruction() -> Type {
 newtype builder 的发布基础：VM 已支持受检的具体 newtype 描述批次，
 包括动态身份保留、表示类型检查、显式包装／解包以及失败回滚；
 `DefinitionAdmissionSession` 中它与 struct、enum 共用 revision 和身份空间。
-这仍是编译器宿主接口，尚未导出 `meta.NewtypeBuilder`。后续须接通源码构造请求、
-普通 declaration publisher、NIR/字节码入口与真实 sysroot 验收，不能用 struct
-包装代替 newtype 身份和表示语义。泛型及捕获子句的 builder 仍未交付。
+具体 newtype 请求已接入 `AllocatedDefinitionPublisher`，复用全局身份前沿、
+`CheckedDefinitionPublisher` 的 formation admission 和有限表示检查；newtype、
+struct、enum 共用表示依赖图，拒绝按值循环，允许指针间接循环。
+这仍是编译器宿主接口，尚未导出 `meta.NewtypeBuilder`。后续须接通源码构造请求的
+NIR/字节码入口、VM callback、库绑定与真实 sysroot 验收，不能用 struct 包装代替
+newtype 身份和表示语义。泛型及捕获子句的 builder 仍未交付。

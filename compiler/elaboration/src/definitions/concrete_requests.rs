@@ -1,8 +1,8 @@
 //! Charged request assembly for the shared concrete publisher.
 use super::CheckedDefinitionPublisher;
 use comptime_interpretor::{
-    Budget, EnumBuildRequest, Error, ErrorKind, PreparedEnumBuild, PreparedStructBuild,
-    StructBuildRequest,
+    Budget, EnumBuildRequest, Error, ErrorKind, NewtypeBuildRequest, PreparedEnumBuild,
+    PreparedNewtypeBuild, PreparedStructBuild, StructBuildRequest,
 };
 use nir::{DeclarationId, program as n};
 use std::sync::Arc;
@@ -38,6 +38,41 @@ impl CheckedDefinitionPublisher<'_> {
             let prepared =
                 self.prepare_structs(Arc::clone(&definitions), request.source, &mut budget)?;
             Ok(PreparedStructBuild {
+                definitions,
+                result: identity,
+                commit: Box::new(move || prepared.commit()),
+            })
+        })();
+        *steps = budget.steps;
+        self.request_result(result, request.source)
+    }
+    pub fn prepare_newtype_request<'s>(
+        &'s self,
+        identity: DeclarationId,
+        request: &NewtypeBuildRequest,
+        steps: &mut u64,
+    ) -> Result<PreparedNewtypeBuild<'s>, Error> {
+        self.set_diagnostic(None);
+        let mut budget = Budget {
+            steps: std::mem::take(steps),
+            depth: 128,
+        };
+        let result = (|| {
+            charge_request(&mut budget, |fuel| request.charge_assembly(fuel))?;
+            let definitions: Arc<[nir::newtypes::Newtype]> = vec![nir::newtypes::Newtype {
+                declaration: identity,
+                name: request.name.clone(),
+                type_parameters: vec![],
+                parameter_types: vec![],
+                capture_count: 0,
+                requirements: vec![],
+                capabilities: vec![],
+                representation: request.representation.clone(),
+            }]
+            .into();
+            let prepared =
+                self.prepare_newtypes(Arc::clone(&definitions), request.source, &mut budget)?;
+            Ok(PreparedNewtypeBuild {
                 definitions,
                 result: identity,
                 commit: Box::new(move || prepared.commit()),

@@ -11015,3 +11015,38 @@ VM request dispatch, library bindings and a real-sysroot test. Generic/captured
 newtype descriptions remain unsupported at this boundary. As for struct/enum
 installation, ordinary declaration and layout-cycle checking belongs to the
 publisher; this VM entry is not a replacement for that service.
+
+
+### Checked concrete newtype requests and representation publication
+
+NewtypeBuildRequest now carries the requested name and exact representation,
+with charged descriptor assembly and an S-expression display. The allocated
+publisher reserves from the same identity frontier as struct/enum requests;
+rejected or abandoned reservations are not reused. The checked publisher uses
+the shared admission session and now retains newtype batches in its output.
+
+Incremental representation checking accepts newtypes in the same tentative
+world as struct/enum descriptions. Forward edges cross kinds, by-value cycles
+are rejected, pointer cycles terminate normally, and failed candidate proofs
+are discarded. Commit retains shared descriptions and invalidates competing
+receipts. Both elaboration result registration and CLI package collection now
+retain published newtypes for subsequent consumers.
+
+The test draft initially treated a Type representation as invalid storage.
+That conflated runtime eligibility with finite representation; it was corrected
+to explicitly accept a comptime Type wrapper, without weakening production
+checking. Cycle rejection and identity reuse after failed checking are covered
+separately from allocation-frontier non-reuse.
+
+Validation from `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --test
+  checked_definition_publisher --test allocated_definition_publisher --test
+  representations`: 33 passed, exit 0 (`/tmp/luna-tools-g5_udrk_/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test newtypes`:
+  212 passed, exit 0 (`/tmp/luna-tools-x2keyl10/result.json`).
+- Workspace formatting passed (`/tmp/luna-tools-1zwcg7dt/result.json`);
+  `git diff --check` passed.
+
+Source lowering, VM callback dispatch and meta.NewtypeBuilder remain the next
+vertical stage. No new public Flurry builder API is claimed by this host-level
+publication work, and generic/captured builder descriptions remain unsupported.

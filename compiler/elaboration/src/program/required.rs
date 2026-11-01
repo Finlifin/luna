@@ -1143,7 +1143,10 @@ impl Checker<'_, '_> {
             identity,
             &mut self.next_definition_identity,
         )?;
-        if definitions.structs.is_empty() && definitions.enums.is_empty() {
+        if definitions.structs.is_empty()
+            && definitions.enums.is_empty()
+            && definitions.newtypes.is_empty()
+        {
             return Ok(result);
         }
         for batch in definitions.structs {
@@ -1191,6 +1194,26 @@ impl Checker<'_, '_> {
                 self.context
                     .admit_nominal_constructor(definition.declaration);
                 self.enums
+                    .insert(definition.declaration, definition.clone());
+            }
+        }
+        for batch in definitions.newtypes {
+            for definition in batch.iter() {
+                let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                let mut fuel = before;
+                let copied = (|| {
+                    fuel = fuel
+                        .checked_sub(definition.name.len().saturating_add(1))
+                        .ok_or(())?;
+                    nir::type_computations::charge_term(&definition.representation, &mut fuel)
+                        .map_err(|_| ())
+                })();
+                self.required_steps -= (before - fuel) as u64;
+                copied
+                    .map_err(|_| error(span, "generated newtype registration budget exhausted"))?;
+                self.context
+                    .admit_nominal_constructor(definition.declaration);
+                self.newtypes
                     .insert(definition.declaration, definition.clone());
             }
         }
