@@ -28559,32 +28559,48 @@ fn type_defaults_reuse_computed_inputs_once_in_source_order() {
             ("Make", vec!["Make", "First"]),
             ("Explicit", vec!["Explicit", "Second", "First"]),
         ] {
-            let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
-            let value = vm.invoke(id(&package, entry), vec![]).unwrap();
-            let Value::Type(ty) = value else {
-                panic!("expected Type")
-            };
-            let actual = if let Some(fields) = nir::normal_forms::tuple_fields(Some(&package), &ty)
-            {
-                fields.to_vec()
-            } else {
-                match ty {
-                    nir::Term::Tuple(arguments) | nir::Term::Nominal { arguments, .. } => arguments,
-                    other => panic!("unexpected {other}"),
+            for tree in [false, true] {
+                let mut vm = if tree {
+                    Interpreter::for_comptime_tree(&package, Budget::default())
+                } else {
+                    Interpreter::for_comptime(&package, Budget::default())
                 }
-            };
-            assert_eq!(
-                actual,
-                vec![
-                    nir::Term::Primitive(nir::Primitive::Bool),
-                    nir::Term::Primitive(if entry == "Make" {
-                        nir::Primitive::Bool
+                .unwrap();
+                let value = vm
+                    .invoke(id(&package, entry), vec![])
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "{definition} {entry}: {error:?}; calls: {:?}",
+                            calls(&package, &vm)
+                        )
+                    });
+                let Value::Type(ty) = value else {
+                    panic!("expected Type")
+                };
+                let actual =
+                    if let Some(fields) = nir::normal_forms::tuple_fields(Some(&package), &ty) {
+                        fields.to_vec()
                     } else {
-                        nir::Primitive::Char
-                    })
-                ]
-            );
-            assert_eq!(calls(&package, &vm), order, "{definition}");
+                        match ty {
+                            nir::Term::Tuple(arguments) | nir::Term::Nominal { arguments, .. } => {
+                                arguments
+                            }
+                            other => panic!("unexpected {other}"),
+                        }
+                    };
+                assert_eq!(
+                    actual,
+                    vec![
+                        nir::Term::Primitive(nir::Primitive::Bool),
+                        nir::Term::Primitive(if entry == "Make" {
+                            nir::Primitive::Bool
+                        } else {
+                            nir::Primitive::Char
+                        })
+                    ]
+                );
+                assert_eq!(calls(&package, &vm), order, "{definition}");
+            }
         }
     }
 }
