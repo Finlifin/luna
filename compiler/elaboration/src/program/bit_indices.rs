@@ -8,7 +8,8 @@ impl Checker<'_, '_> {
         &mut self,
         expr: &Expr<'_>,
         op: &BinOp,
-        pointer: n::Expr,
+        operand: n::Expr,
+        place: Option<n::Place>,
         input_width: usize,
         indices: &[&Expr<'_>],
         rhs: &Expr<'_>,
@@ -20,7 +21,13 @@ impl Checker<'_, '_> {
             let (mut selections, width, rhs, ty) =
                 self.bit_writeback_plan(expr, input_width, indices, rhs, expected, true)?;
             let mut statements = Vec::new();
-            let pointer = self.prepare_bit_operand(pointer, &mut statements, expr.span)?;
+            // A local place needs no address value. Preserve it structurally;
+            // only an actual runtime pointer operand is evaluated up front.
+            let operand = if place.is_some() {
+                operand
+            } else {
+                self.prepare_bit_operand(operand, &mut statements, expr.span)?
+            };
             for selection in &mut selections {
                 match selection {
                     n::BitSelection::Static { .. } => {}
@@ -42,13 +49,17 @@ impl Checker<'_, '_> {
                     }
                 }
             }
-            let Term::Pointer(storage_type) = &pointer.ty else {
-                unreachable!()
-            };
-            let read = n::Expr {
-                ty: (**storage_type).clone(),
-                source: source(expr.span),
-                kind: K::ReadPointer(Box::new(pointer.clone())),
+            let read = if place.is_some() {
+                operand.clone()
+            } else {
+                let Term::Pointer(storage_type) = &operand.ty else {
+                    unreachable!()
+                };
+                n::Expr {
+                    ty: (**storage_type).clone(),
+                    source: source(expr.span),
+                    kind: K::ReadPointer(Box::new(operand.clone())),
+                }
             };
             let mut read = n::Expr {
                 ty: p(P::BitVec(input_width)),
@@ -121,10 +132,18 @@ impl Checker<'_, '_> {
                     result: Some(Box::new(n::Expr {
                         ty,
                         source: source(expr.span),
-                        kind: K::BitWritePointer {
-                            pointer: Box::new(pointer),
-                            selections,
-                            value: Box::new(computed),
+                        kind: match place {
+                            Some(place) => K::BitUpdate {
+                                place,
+                                storage_type: operand.ty,
+                                selections,
+                                value: Box::new(computed),
+                            },
+                            None => K::BitWritePointer {
+                                pointer: Box::new(operand),
+                                selections,
+                                value: Box::new(computed),
+                            },
                         },
                     })),
                 },

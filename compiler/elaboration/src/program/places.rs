@@ -266,27 +266,51 @@ impl Checker<'_, '_> {
             false
         };
         if take_bits || !indices.is_empty() {
-            let pointer = if let Some(pointer) = self.dereferenced_place(storage)? {
-                pointer
+            let (operand, place) = if let Some(pointer) = self.dereferenced_place(storage)? {
+                (pointer, None)
             } else {
-                if let H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id) = storage.kind {
-                    if self.immutable.contains(&local(id)) {
-                        return Err(error(
-                            target.span,
-                            "cannot reassign a let binding; use var for whole-value assignment",
-                        ));
+                let read = self.expr(storage, None)?;
+                let mut base = &read;
+                let mut fields = Vec::new();
+                loop {
+                    match &base.kind {
+                        K::Field {
+                            value,
+                            declaration,
+                            index,
+                        } => {
+                            fields.push((n::FieldOwner::Nominal(*declaration), *index));
+                            base = value;
+                        }
+                        K::AnonymousField { value, index, .. } => {
+                            fields.push((n::FieldOwner::Anonymous, *index));
+                            base = value;
+                        }
+                        _ => break,
                     }
                 }
-                self.expr(
-                    &Expr {
-                        kind: H::Ref(storage),
-                        ..storage.clone()
-                    },
-                    None,
-                )?
+                let K::Local(root) = base.kind else {
+                    return Err(error(
+                        target.span,
+                        "bit compound assignment requires a stable local field or dereferenced place",
+                    ));
+                };
+                fields.reverse();
+                if fields.is_empty() && self.immutable.contains(&root) {
+                    return Err(error(
+                        target.span,
+                        "cannot reassign a let binding; use var for whole-value assignment",
+                    ));
+                }
+                (read, Some(n::Place { root, fields }))
             };
-            let Term::Pointer(ty) = &pointer.ty else {
-                unreachable!()
+            let ty = if place.is_some() {
+                &operand.ty
+            } else {
+                let Term::Pointer(ty) = &operand.ty else {
+                    unreachable!()
+                };
+                ty
             };
             let shape = self.structural_type(ty, target.span)?;
             let width = match shape {
@@ -307,8 +331,9 @@ impl Checker<'_, '_> {
                     ));
                 }
             };
-            return self
-                .bit_compound_writeback(expression, op, pointer, width, &indices, value, expected);
+            return self.bit_compound_writeback(
+                expression, op, operand, place, width, &indices, value, expected,
+            );
         }
         let Some(pointer) = self.dereferenced_place(target)? else {
             // Restrict this rewrite to stable local field paths. Indexing needs
