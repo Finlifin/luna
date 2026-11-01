@@ -329,27 +329,46 @@ impl Term {
 
 impl Trait {
     pub fn parameter_binders(&self, fuel: &mut usize) -> Result<Vec<DeclarationParameter>, String> {
+        self.parameter_binders_checked(fuel)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn binders_with_self(&self, fuel: &mut usize) -> Result<Vec<DeclarationParameter>, String> {
+        self.binders_with_self_checked(fuel)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn parameter_binders_checked(
+        &self,
+        fuel: &mut usize,
+    ) -> Result<Vec<DeclarationParameter>, crate::type_computations::Error> {
         *fuel = fuel
             .checked_sub(self.type_parameters.len().saturating_add(1))
-            .ok_or("trait parameter budget exhausted")?;
+            .ok_or(crate::type_computations::Error::Budget)?;
         if !self.parameter_types.is_empty()
             && self.parameter_types.len() != self.type_parameters.len()
         {
-            return Err("trait parameter domain count mismatch".into());
+            return Err(crate::type_computations::Error::Structure(
+                "trait parameter domain count mismatch".into(),
+            ));
         }
         let mut seen = BTreeSet::from([self.self_parameter]);
         let mut result = Vec::new();
         for (index, declaration) in self.type_parameters.iter().enumerate() {
             if !seen.insert(*declaration) {
-                return Err("duplicate trait parameter identity".into());
+                return Err(crate::type_computations::Error::Structure(
+                    "duplicate trait parameter identity".into(),
+                ));
             }
             let domain = self
                 .parameter_types
                 .get(index)
                 .unwrap_or(&Term::Primitive(Primitive::Type));
-            crate::type_computations::charge_term(domain, fuel).map_err(|e| e.to_string())?;
+            crate::type_computations::charge_term(domain, fuel)?;
             if domain.sort() != Sort::Type {
-                return Err("trait parameter domain must be a Type".into());
+                return Err(crate::type_computations::Error::Structure(
+                    "trait parameter domain must be a Type".into(),
+                ));
             }
             result.push(DeclarationParameter {
                 declaration: *declaration,
@@ -363,8 +382,11 @@ impl Trait {
         Ok(result)
     }
 
-    pub fn binders_with_self(&self, fuel: &mut usize) -> Result<Vec<DeclarationParameter>, String> {
-        let parameters = self.parameter_binders(fuel)?;
+    pub fn binders_with_self_checked(
+        &self,
+        fuel: &mut usize,
+    ) -> Result<Vec<DeclarationParameter>, crate::type_computations::Error> {
+        let parameters = self.parameter_binders_checked(fuel)?;
         Ok(std::iter::once(DeclarationParameter {
             declaration: self.self_parameter,
             sort: Sort::Type,
@@ -967,16 +989,34 @@ impl crate::program::Package {
         &self,
         fuel: &mut usize,
     ) -> Result<std::collections::BTreeMap<crate::DeclarationId, Term>, String> {
+        self.declaration_parameter_domains_checked(fuel)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Preserve budget exhaustion separately from malformed declaration domains.
+    pub fn declaration_parameter_domains_checked(
+        &self,
+        fuel: &mut usize,
+    ) -> Result<
+        std::collections::BTreeMap<crate::DeclarationId, Term>,
+        crate::type_computations::Error,
+    > {
         let mut result = std::collections::BTreeMap::new();
         for declaration in &self.traits {
-            for (index, binder) in declaration.binders_with_self(fuel)?.into_iter().enumerate() {
+            for (index, binder) in declaration
+                .binders_with_self_checked(fuel)?
+                .into_iter()
+                .enumerate()
+            {
                 let domain = index
                     .checked_sub(1)
                     .and_then(|i| declaration.parameter_types.get(i))
                     .unwrap_or(&Term::Primitive(Primitive::Type));
-                crate::type_computations::charge_term(domain, fuel).map_err(|e| e.to_string())?;
+                crate::type_computations::charge_term(domain, fuel)?;
                 if result.insert(binder.declaration, domain.clone()).is_some() {
-                    return Err("duplicate trait parameter identity across declarations".into());
+                    return Err(crate::type_computations::Error::Structure(
+                        "duplicate trait parameter identity across declarations".into(),
+                    ));
                 }
             }
         }
@@ -984,14 +1024,18 @@ impl crate::program::Package {
         for declaration in &self.function_parameters {
             *fuel = fuel
                 .checked_sub(declaration.parameters.len().saturating_add(1))
-                .ok_or("function parameter budget exhausted")?;
+                .ok_or(crate::type_computations::Error::Budget)?;
             if !callable_ids.insert(declaration.declaration) {
-                return Err("duplicate function parameter declaration".into());
+                return Err(crate::type_computations::Error::Structure(
+                    "duplicate function parameter declaration".into(),
+                ));
             }
             for domain in &declaration.domains {
-                crate::type_computations::charge_term(domain, fuel).map_err(|e| e.to_string())?;
+                crate::type_computations::charge_term(domain, fuel)?;
             }
-            declaration.binders().map_err(|e| e.to_string())?;
+            declaration
+                .binders()
+                .map_err(crate::type_computations::Error::Scope)?;
         }
         let mut inherited_domains = std::collections::BTreeMap::new();
         for (ids, domains) in self
@@ -1011,12 +1055,12 @@ impl crate::program::Package {
         {
             *fuel = fuel
                 .checked_sub(ids.len())
-                .ok_or("declaration parameter budget exhausted")?;
+                .ok_or(crate::type_computations::Error::Budget)?;
             for domain in domains {
-                crate::type_computations::charge_term(domain, fuel).map_err(|e| e.to_string())?;
+                crate::type_computations::charge_term(domain, fuel)?;
             }
             for (index, binder) in crate::declaration_parameters(ids, domains)
-                .map_err(|e| e.to_string())?
+                .map_err(crate::type_computations::Error::Scope)?
                 .into_iter()
                 .enumerate()
             {
@@ -1028,12 +1072,16 @@ impl crate::program::Package {
                 // binder identities. Reuse is valid only with the same domain.
                 if let Some(previous) = inherited_domains.get(&binder.declaration) {
                     if previous != &domain {
-                        return Err("conflicting inherited declaration parameter domain".into());
+                        return Err(crate::type_computations::Error::Structure(
+                            "conflicting inherited declaration parameter domain".into(),
+                        ));
                     }
                     continue;
                 }
                 if result.insert(binder.declaration, domain.clone()).is_some() {
-                    return Err("duplicate declaration parameter identity".into());
+                    return Err(crate::type_computations::Error::Structure(
+                        "duplicate declaration parameter identity".into(),
+                    ));
                 }
                 inherited_domains.insert(binder.declaration, domain);
             }
@@ -1058,12 +1106,12 @@ impl crate::program::Package {
         {
             *fuel = fuel
                 .checked_sub(ids.len())
-                .ok_or("captured declaration parameter budget exhausted")?;
+                .ok_or(crate::type_computations::Error::Budget)?;
             for domain in domains {
-                crate::type_computations::charge_term(domain, fuel).map_err(|e| e.to_string())?;
+                crate::type_computations::charge_term(domain, fuel)?;
             }
             for (index, binder) in crate::declaration_parameters(ids, domains)
-                .map_err(|e| e.to_string())?
+                .map_err(crate::type_computations::Error::Scope)?
                 .into_iter()
                 .enumerate()
             {
@@ -1073,7 +1121,9 @@ impl crate::program::Package {
                     .unwrap_or(Term::Primitive(Primitive::Type));
                 if let Some(previous) = result.get(&binder.declaration) {
                     if previous != &domain {
-                        return Err("conflicting captured declaration parameter domain".into());
+                        return Err(crate::type_computations::Error::Structure(
+                            "conflicting captured declaration parameter domain".into(),
+                        ));
                     }
                 } else {
                     result.insert(binder.declaration, domain);

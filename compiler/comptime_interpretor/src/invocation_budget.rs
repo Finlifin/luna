@@ -98,3 +98,50 @@ impl<'program> Interpreter<'program> {
         operation(&mut scope.interpreter)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nir::{DeclarationId, Primitive, Term};
+
+    #[test]
+    fn declaration_domain_budget_failure_is_not_an_invalid_call_plan() {
+        let parameter = nir::function_parameters::Declaration {
+            declaration: DeclarationId {
+                package: 1,
+                local: 1,
+            },
+            parameters: vec![DeclarationId {
+                package: 1,
+                local: 2,
+            }],
+            domains: vec![Term::Optional(Box::new(Term::Primitive(Primitive::Bool)))],
+        };
+        let mut package = Package {
+            function_parameters: vec![parameter.clone()],
+            ..Default::default()
+        };
+        let mut succeeded = false;
+        for steps in 0..256 {
+            match Interpreter::for_comptime(&package, Budget { steps, depth: 128 }) {
+                Ok(_) => {
+                    succeeded = true;
+                    break;
+                }
+                Err(error) => assert_eq!(error.kind, ErrorKind::StepsExhausted, "budget {steps}"),
+            }
+        }
+        assert!(
+            succeeded,
+            "valid metadata must succeed with sufficient fuel"
+        );
+        package.function_parameters.push(parameter);
+        assert_eq!(
+            Interpreter::new(&package, Budget::default())
+                .err()
+                .unwrap()
+                .kind,
+            ErrorKind::InvalidCallPlan
+        );
+    }
+}

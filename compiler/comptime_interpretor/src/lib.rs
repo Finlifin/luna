@@ -1195,8 +1195,14 @@ impl<'a> Interpreter<'a> {
                 )
             } else {
                 let declaration_parameter_domains = package
-                    .declaration_parameter_domains(&mut trait_parameter_fuel)
-                    .map_err(|_| invalid())?;
+                    .declaration_parameter_domains_checked(&mut trait_parameter_fuel)
+                    .map_err(|reason| match reason {
+                        nir::type_computations::Error::Budget => Error {
+                            kind: ErrorKind::StepsExhausted,
+                            source: None,
+                        },
+                        _ => invalid(),
+                    })?;
                 let declaration_parameter_sorts: BTreeMap<_, _> = declaration_parameter_domains
                     .iter()
                     .map(|(id, domain)| {
