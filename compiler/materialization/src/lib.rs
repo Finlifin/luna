@@ -798,6 +798,15 @@ impl Builder<'_> {
             }
         };
         if self.instances.is_some() {
+            if function.phase == n::FunctionPhase::Comptime
+                && matches!(function.signature.callable_signature(), Term::Function { parameters, .. }
+                    if parameters.iter().any(|parameter| parameter.sort != nir::Sort::Runtime))
+            {
+                return Err(format!(
+                    "comptime function `{}` requires invocation input staging before IIR materialization",
+                    function.name
+                ));
+            }
             function.signature = self.normalized_type(&function.signature)?;
             iir::completed_type(&function.signature, &self.runtime_bindings, &mut self.fuel)?;
         }

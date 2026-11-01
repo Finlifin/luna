@@ -11,7 +11,21 @@ comptime fn run() -> bool {
         and changed.EntryType(1) == bool
         and (changed.value<bool>(1) matches false?)
         and (result.get<bool>(.tail) matches true?)
-        and mutable_entries() and nominal_storage() and ranges()
+        and mutable_entries() and nominal_storage() and ranges() and callbacks()
+}
+
+{- A single stored callable retains its explicit Type input at every invocation. -}
+comptime fn lookup(comptime T: Type, object: Object, key: Symbol) -> ?T {
+    object.get<T>(key)
+}
+
+comptime fn callbacks() -> bool {
+    let queries: meta.List<comptime fn(comptime T: Type, Object, Symbol) -> ?T> = [lookup];
+    let object: Object = {flag: true, count: 7};
+    (queries[0](bool, object, .flag) matches true?)
+        and (queries[0](Integer, object, .count) matches 7?)
+        and (queries[0](bool, object, .count) matches null)
+        and (queries[0](bool, object, .missing) matches null)
 }
 
 

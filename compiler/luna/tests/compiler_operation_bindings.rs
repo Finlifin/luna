@@ -218,9 +218,25 @@ fn typed_reflection_signatures_preserve_normal_form_identity() {
 }
 
 fn run_all_carriers(source: &str) -> nir::program::Package {
+    run_carriers(source, "run", "run")
+}
+
+// Generic comptime bodies execute in the engine. Only their completed result
+// crosses into a runtime instance; IIR must not retain their open Type inputs.
+fn run_staged_carriers(source: &str) -> nir::program::Package {
+    run_carriers(
+        &format!(
+            "{source}\nfn run() -> bool {{ inline if compute() {{ true }} else {{ false }} }}"
+        ),
+        "compute",
+        "run",
+    )
+}
+
+fn run_carriers(source: &str, invocation: &str, instance: &str) -> nir::program::Package {
     use comptime_interpretor::{Budget, Interpreter};
     let package = compile(source).unwrap();
-    let entry = support::id(&package, "run");
+    let entry = support::id(&package, invocation);
     for bytecode in [false, true] {
         let mut vm = if bytecode {
             Interpreter::for_comptime(&package, Budget::default())
@@ -235,7 +251,7 @@ fn run_all_carriers(source: &str) -> nir::program::Package {
         );
     }
     let key = iir::InstanceKey {
-        declaration: entry,
+        declaration: support::id(&package, instance),
         arguments: vec![].into(),
     };
     let graph = elaboration::materialization::instantiate(
@@ -245,6 +261,11 @@ fn run_all_carriers(source: &str) -> nir::program::Package {
         elaboration::ptc::Budget::default(),
     )
     .unwrap();
+    if invocation != instance {
+        let mut vm = Interpreter::from_iir(&graph, Budget::default()).unwrap();
+        assert_eq!(vm.invoke_instance(&key, vec![]).unwrap(), Value::Bool(true));
+        return package;
+    }
     for bytecode in [false, true] {
         let mut vm = if bytecode {
             Interpreter::from_iir_for_comptime(&graph, Budget::default())
@@ -655,6 +676,115 @@ fn staged_runtime_methods_can_be_stored_as_comptime_list_data() {
         assert_eq!(
             vm.invoke_instance(&key, vec![]).unwrap_err().kind,
             comptime_interpretor::ErrorKind::TypeContractRejected
+        );
+    }
+}
+
+#[test]
+fn dependent_object_operation_values_use_explicit_type_inputs() {
+    run_staged_carriers(
+        "typealias Object = .Object'builtin;
+        typealias Symbol = .Symbol'builtin;
+        const lookup: comptime fn(comptime T: Type, Object, Symbol) -> ?T = .object_get'builtin;
+        const at: comptime fn(comptime T: Type, Object, Integer) -> ?T = .object_value'builtin;
+        const alias = lookup;
+        comptime fn apply(op: comptime fn(comptime T: Type, Object, Symbol) -> ?T, object: Object) -> ?bool {
+            op(bool, object, .flag)
+        }
+        const checked = apply(alias, {flag: true});
+        comptime fn compute() -> bool {
+            let functions: List<comptime fn(comptime T: Type, Object, Symbol) -> ?T> = [lookup, alias];
+            let index = at;
+            let object: Object = {flag: true, count: 7};
+            (checked matches true?) and (apply(functions[0], object) matches true?)
+                and (functions[1](Integer, object, .count) matches 7?)
+                and (functions[0](bool, object, .count) matches null)
+                and (functions[0](bool, object, .missing) matches null)
+                and (index(bool, object, 0) matches true?)
+                and (index(Integer, object, 1) matches 7?)
+                and (index(bool, object, 1) matches null)
+        }",
+    );
+}
+
+#[test]
+fn dependent_source_callable_values_keep_invocation_binders() {
+    run_staged_carriers(
+        "comptime fn select(comptime T: Type, value: T) -> T { value }
+        comptime fn compute() -> bool {
+            let functions: List<comptime fn(comptime T: Type, value: T) -> T> = [select];
+            functions[0](bool, true)
+        }",
+    );
+}
+
+#[test]
+fn open_comptime_invocation_inputs_do_not_become_iir_instances() {
+    let package = compile("comptime fn select(comptime T: Type, value: T) -> T { value }").unwrap();
+    let key = iir::InstanceKey {
+        declaration: support::id(&package, "select"),
+        arguments: vec![].into(),
+    };
+    let error = elaboration::materialization::instantiate(
+        &package,
+        &[key],
+        Default::default(),
+        elaboration::ptc::Budget::default(),
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("requires invocation input staging before IIR"),
+        "{error}"
+    );
+}
+
+#[test]
+fn dependent_object_operation_annotations_preserve_phase_and_result_dependency() {
+    for signature in [
+        "comptime fn(Type, Object, Integer) -> ?bool",
+        "comptime fn(comptime T: Type, Object, Integer) -> T",
+        "comptime fn(comptime T: Type, Object, Integer) -> ?bool",
+        "fn(comptime T: Type, Object, Integer) -> ?T",
+    ] {
+        let source = format!(
+            "typealias Object = .Object'builtin; const wrong: {signature} = .object_value'builtin;"
+        );
+        let error = compile(&source).unwrap_err();
+        assert!(error.contains("signature mismatch"), "{signature}: {error}");
+    }
+}
+
+#[test]
+fn dependent_object_callback_bounds_fail_without_poisoning_the_next_call() {
+    use comptime_interpretor::{Budget, ErrorKind, Interpreter};
+    let package = compile(
+        "typealias Object = .Object'builtin;
+        const at = .object_value'builtin;
+        comptime fn run(index: Integer) -> ?bool {
+            let callback = at;
+            callback(bool, {flag: true}, index)
+        }",
+    )
+    .unwrap();
+    for bytecode in [false, true] {
+        let mut vm = if bytecode {
+            Interpreter::for_comptime(&package, Budget::default())
+        } else {
+            Interpreter::for_comptime_tree(&package, Budget::default())
+        }
+        .unwrap();
+        let entry = support::id(&package, "run");
+        let number = |n| Value::Integer(comptime_runtime::Integer::from_u128(n));
+        assert_eq!(
+            vm.invoke(entry, vec![number(9)]).unwrap_err().kind,
+            ErrorKind::IndexOutOfBounds
+        );
+        assert_eq!(
+            vm.invoke(entry, vec![number(0)]).unwrap(),
+            Value::Optional {
+                ty: nir::Term::Optional(Box::new(nir::Term::Primitive(nir::Primitive::Bool))),
+                value: Some(Box::new(Value::Bool(true))),
+            }
         );
     }
 }

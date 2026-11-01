@@ -1,11 +1,38 @@
-//! Fixed compiler-operation contracts. Dependent operations require their own
-//! ordinary callable telescope; a monomorphic annotation cannot specialize them.
+//! Compiler-operation contracts use ordinary callable telescopes, including
+//! explicit Type inputs and dependent result domains.
 use super::*;
 
-pub(super) fn fixed(
+pub(super) fn callable(
     name: &str,
     list_head: Option<DeclarationId>,
 ) -> Result<Option<Term>, &'static str> {
+    if matches!(name, "object_value" | "object_get") {
+        return Ok(Some(Term::ComptimeFunction(Box::new(Term::Function {
+            parameters: vec![
+                Parameter {
+                    sort: Sort::Type,
+                    ty: p(P::Type),
+                },
+                Parameter {
+                    sort: Sort::Runtime,
+                    ty: p(P::Object),
+                },
+                Parameter {
+                    sort: Sort::Runtime,
+                    ty: p(if name == "object_get" {
+                        P::Symbol
+                    } else {
+                        P::Integer
+                    }),
+                },
+            ],
+            result: Box::new(Term::Optional(Box::new(Term::Bound {
+                depth: 0,
+                index: 0,
+                sort: Sort::Type,
+            }))),
+        }))));
+    }
     let list = |ty| {
         Ok::<_, &'static str>(Term::NormalForm {
             head: list_head.ok_or("compiler operation signature requires a bound meta.List")?,

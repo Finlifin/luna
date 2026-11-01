@@ -11,8 +11,8 @@ const compiler_comptime_integer_rem_trunc: comptime fn(Integer, Integer) -> Inte
 pub const compiler_object_length: comptime fn(Object) -> Integer = .object_length'builtin;
 pub const compiler_object_key: comptime fn(Object, Integer) -> ?Symbol = .object_key'builtin;
 pub const CompilerObjectEntryType: comptime fn(Object, Integer) -> Type = .object_entry_type'builtin;
-pub const compiler_object_value = .object_value'builtin;
-pub const compiler_object_get = .object_get'builtin;
+pub const compiler_object_value: comptime fn(comptime T: Type, Object, Integer) -> ?T = .object_value'builtin;
+pub const compiler_object_get: comptime fn(comptime T: Type, Object, Symbol) -> ?T = .object_get'builtin;
 const compiler_object_concat: comptime fn(Object, Object) -> Object = .object_concat'builtin;
 const compiler_object_append = .object_append'builtin;
 const compiler_object_replace = .object_replace'builtin;

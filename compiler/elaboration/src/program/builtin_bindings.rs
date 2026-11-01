@@ -181,12 +181,14 @@ impl Checker<'_, '_> {
         let Some(name) = self.compiler_operation_binding(owner, span)? else {
             return Ok(None);
         };
-        // Fixed contracts are ordinary callable values. Keep the temporary
+        // Established contracts are ordinary callable values. Keep the temporary
         // direct lowering only for operations awaiting callable contracts.
-        Ok(signatures::fixed(name.as_str(), self.protocols.meta_list)
-            .map_err(|message| error(span, message))?
-            .is_none()
-            .then_some(name))
+        Ok(
+            signatures::callable(name.as_str(), self.protocols.meta_list)
+                .map_err(|message| error(span, message))?
+                .is_none()
+                .then_some(name),
+        )
     }
 
     fn resolve_compiler_operation(
@@ -220,7 +222,7 @@ impl Checker<'_, '_> {
                 H::Builtin(name) if operation(name.as_str()) => {
                     let name = *name;
                     if !annotations.is_empty() {
-                        let expected = signatures::fixed(name.as_str(), self.protocols.meta_list)
+                        let expected = signatures::callable(name.as_str(), self.protocols.meta_list)
                             .map_err(|message| error(span, message))?
                             .ok_or_else(|| error(span, "typed compiler operation requires a supported callable signature contract"))?;
                         for (owner, annotation) in annotations {

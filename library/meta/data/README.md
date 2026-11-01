@@ -73,6 +73,18 @@ comptime fn distinct_sizes() -> List<Integer> {
 真实 sysroot 用例位于 `development/examples/sysroot-meta-lists.fl`，同时覆盖
 有状态比较器、输入快照、排序组合与不调用回调的边界。
 
+## Object 依赖查询函数值
+
+`get<T>` 与 `value<T>` 的底层绑定使用普通依赖函数签名：先传入显式
+`comptime T: Type`，结果为 `?T`。同一函数值可以保存在列表中或传给
+高阶函数，再以不同的 `T` 调用。键不存在或元素域不匹配时返回空值；
+位置越界仍使 invocation 失败。实现不为这两个操作增加 VM callable 类别。
+
+独立 comptime 函数在 engine 中完成调用，供 runtime 使用的结果再进入
+IIR。带有尚未绑定的 comptime 输入的通用函数体不是完成实例，不能直接
+将其当作 IIR 可执行函数。相关验收覆盖源码解释、字节码调用，以及完成
+结果进入 runtime 实例的路径。
+
 ## Object 区间编辑
 
 `object.slice(start, end)` 返回半开区间 `[start, end)` 内的条目。

@@ -1,4 +1,4 @@
-//! Fixed operation values use ordinary checked function bodies and invocation.
+//! Operation values use ordinary checked function bodies and invocation.
 //! Aliases retain the original binding identity; no VM-specific callable tag.
 use super::*;
 
@@ -11,7 +11,7 @@ impl Checker<'_, '_> {
         let Some((name, canonical)) = self.resolve_compiler_operation(owner, span)? else {
             return Ok(None);
         };
-        let ty = signatures::fixed(name.as_str(), self.protocols.meta_list)
+        let ty = signatures::callable(name.as_str(), self.protocols.meta_list)
             .map_err(|message| error(span, message))?
             .ok_or_else(|| error(span, "compiler operation binding requires a direct call until its callable contract is available"))?;
         let identity = declaration(self.package, &self.package_identities, canonical);
@@ -114,6 +114,11 @@ fn operation_body(name: &str, mut inputs: Vec<n::Expr>, source: n::SourceRange) 
         };
     }
     if name.starts_with("object_") {
+        // The explicit Type input is already bound by ordinary invocation.
+        // Its identity lives in the result domain, not the Object query packet.
+        if matches!(name, "object_value" | "object_get") {
+            inputs.remove(0);
+        }
         let subject = Box::new(n::Expr {
             source,
             ty: Term::Tuple(inputs.iter().map(|input| input.ty.clone()).collect()),
@@ -132,6 +137,14 @@ fn operation_body(name: &str, mut inputs: Vec<n::Expr>, source: n::SourceRange) 
                 subject,
                 query: O::EntryType,
             },
+            "object_value" => K::ObjectQuery {
+                subject,
+                query: O::Value,
+            },
+            "object_get" => K::ObjectQuery {
+                subject,
+                query: O::NamedValue,
+            },
             "object_concat" => K::ObjectEdit {
                 subject,
                 operation: E::Concat,
@@ -144,7 +157,7 @@ fn operation_body(name: &str, mut inputs: Vec<n::Expr>, source: n::SourceRange) 
                 subject,
                 operation: E::Slice,
             },
-            _ => unreachable!("fixed object contract has no body"),
+            _ => unreachable!("Object callable contract has no body"),
         };
     }
     let subject = Box::new(inputs.pop().unwrap());
