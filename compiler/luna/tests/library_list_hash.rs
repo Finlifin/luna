@@ -244,3 +244,52 @@ fn key_helpers_resolve_traits_after_binding_ordinary_type_inputs() {
     assert!(protocol.equivalent(&yes, &yes, &mut context).unwrap());
     assert!(!protocol.equivalent(&yes, &no, &mut context).unwrap());
 }
+
+#[test]
+fn key_helpers_resolve_associated_values_after_binding_type_inputs() {
+    use comptime_executor::{Context, KeyProtocol};
+    let package = compile(
+        "use meta.builtin.Type;
+        pure comptime trait Tag {assoc code:u64;}
+        comptime impl Tag for bool {assoc code:u64 = 17;}
+        comptime fn tag_code(value:u64)->u64 {if value == 28 {29} else {17}}
+        comptime impl Tag for u64 {assoc code:u64 = tag_code(28);}
+        comptime fn code(comptime T:Type)->u64
+        where requires T:-Tag
+        {T.as(Tag).code}
+        struct Key {value:bool}
+        comptime impl ComptimeEq for Key {
+            comptime fn eq(self,other:Self)->bool {
+                self.value == other.value and code(bool) == 17 and code(u64) == 29
+            }
+        }
+        comptime impl ComptimeHash for Key {
+            comptime fn hash(self)->u64 {
+                if self.value {code(bool)} else {code(u64)}
+            }
+        }
+        comptime fn make(value:bool)->Key {Key {value:value}}",
+    )
+    .unwrap();
+    let make = support::id(&package, "make");
+    let signature = &package
+        .functions
+        .iter()
+        .find(|f| f.declaration == make)
+        .unwrap()
+        .signature;
+    let nir::Term::Function { result, .. } = signature.callable_signature() else {
+        panic!("function signature")
+    };
+    let mut protocol = prepare_protocol(&package, result);
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let yes = vm.invoke(make, vec![Value::Bool(true)]).unwrap();
+    let no = vm.invoke(make, vec![Value::Bool(false)]).unwrap();
+    assert!(protocol.hash(&yes, &mut Context::new(1)).is_err());
+    let mut context = Context::new(1_000_000);
+    let first = protocol.hash(&yes, &mut context).unwrap();
+    assert_eq!(first, protocol.hash(&yes, &mut context).unwrap());
+    assert_ne!(first, protocol.hash(&no, &mut context).unwrap());
+    assert!(protocol.equivalent(&yes, &yes, &mut context).unwrap());
+    assert!(!protocol.equivalent(&yes, &no, &mut context).unwrap());
+}

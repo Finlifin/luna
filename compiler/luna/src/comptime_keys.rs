@@ -232,12 +232,18 @@ impl Protocol {
                 source: Some(callee.source),
             })
         };
+        let associated_resolver = |access: &nir::program::Expr, remaining: &mut u64| {
+            elaboration::materialization::resolve_associated_value_for_invocation(
+                &world, access, remaining,
+            )
+        };
         let steps = u64::try_from(context.remaining()).unwrap_or(u64::MAX);
         let mut interpreter =
             Interpreter::for_comptime(&self.package, Budget { steps, depth: 128 })
                 .map_err(|e| Error::Protocol(e.to_string()))?
                 .with_budgeted_type_solver(&solver)
                 .with_method_resolver(&method_resolver)
+                .with_associated_resolver(&associated_resolver)
                 .with_budgeted_pointer_copy_permission(&pointer_copy);
         let result = action(&mut interpreter);
         context.spend::<String>((steps - interpreter.remaining_steps()) as usize)?;
