@@ -9839,3 +9839,27 @@ Validation from `/home/fin/luna`:
 - `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`: passed (`/tmp/luna-tools-co0ot044/result.json`).
 - Workspace formatting passed (`/tmp/luna-tools-avc_nuss/result.json`); `git diff --check` passed.
 - `python3 -B development/library_check.py --stage sysroot-fixed-enum --timeout 900`: three native tests passed (`/tmp/luna-library-lcbredh4/summary.json`), including reflected base Type, masks/values, named-field offsets, fresh identity and reconstructed machine bits.
+
+### Reflection fixtures use comptime value-reference receivers
+
+The source reflection and live builder-copy acceptance cases now record subject
+invocations through ordinary `self` methods on a counter. They no longer pass
+comptime pointers, take addresses or dereference storage. Integer counts replace
+boolean toggles in the builder cases, detecting any repeated evaluation rather
+than only an even number of evaluations. Draft snapshot independence, fresh
+published identities and opaque field identities remain checked.
+
+This corrects these acceptance fixtures, not the general phase boundary.
+`expression_values/places.rs` still lowers pointer operations in comptime bodies,
+and `nir::phases` currently validates pointer operation shapes without rejecting
+all comptime execution of those operations. Other legacy comptime memory fixtures
+still need migration. Runtime pointer Type descriptors used in reflection are
+legal comptime data and must remain supported when execution checks are tightened.
+
+Validation from `/home/fin/luna`: `python3 -B development/check.py --timeout
+900 -- test -p luna --test source_reflection --test builder_invocations` passed
+(79 builder cases and 17 reflection cases;
+`/tmp/luna-tools-sa2j34ae/result.json`). The first run rejected missing fixture
+imports (`/tmp/luna-tools-217g7ce8/result.json`); the fixture now declares its
+builtin dependency and imports the centralized aliases. Workspace formatting
+and `git diff --check` passed.

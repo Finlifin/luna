@@ -414,6 +414,11 @@ impl Fixture {
                     alias: "builtin".into(),
                     provider: 43,
                 },
+                resolve::DependencyEdge {
+                    requester: 17,
+                    alias: "builtin".into(),
+                    provider: 43,
+                },
             ],
             17,
             None,
@@ -1895,15 +1900,19 @@ fn struct_builder_copies_instantiated_fields_and_extends_the_draft() {
 fn struct_builder_copies_live_types_once_and_keeps_drafts_independent() {
     let fixture = Fixture::new(
         "
-        comptime fn Subject(visited:*bool) -> .Type'builtin {
-            visited.* = not visited.*;
-            var builder = meta.StructBuilder.new(.name = .Source);
-            builder.add_field(.first, bool);
-            builder.Build()
+        use builtin.{Type, Integer};
+        struct Counter { calls: Integer }
+        impl Counter {
+            comptime fn Subject(self) -> Type {
+                self.calls = self.calls + 1;
+                var builder = meta.StructBuilder.new(.name = .Source);
+                builder.add_field(.first, bool);
+                builder.Build()
+            }
         }
         comptime fn run() -> bool {
-            var visited = false;
-            var draft = meta.StructBuilder.from_type(Subject(visited.ref));
+            let counter = Counter { calls: 0 };
+            var draft = meta.StructBuilder.from_type(counter.Subject());
             let saved = draft;
             draft.add_field(.second, bool);
             let extended = draft.Build();
@@ -1911,7 +1920,7 @@ fn struct_builder_copies_live_types_once_and_keeps_drafts_independent() {
             let copied = meta.StructBuilder.from_type(original).Build();
             let names = meta.struct_field_names(extended);
             let types = meta.struct_field_types(copied);
-            visited and original != copied and original != extended
+            counter.calls == 1 and original != copied and original != extended
                 and (meta.struct_field_names(original)).length() == 1
                 and names.length() == 2 and names[0] == .first and names[1] == .second
                 and types[0] == bool
@@ -2028,11 +2037,24 @@ fn enum_reflection_evaluates_each_subject_once() {
         "meta.enum_variant_field_names",
         "meta.enum_variant_field_types",
     ] {
-        let fixture = Fixture::new(&format!("
+        let fixture = Fixture::new(&format!(
+            "
+            use builtin.{{Type, Integer}};
             enum Source {{one}}
-            comptime fn Subject(flag:*bool) -> .Type'builtin {{flag.* = not flag.*; Source}}
-            comptime fn run() -> bool {{var visited = false; let observed = {call}(Subject(visited.ref)); visited}}
-        "));
+            struct Counter {{calls: Integer}}
+            impl Counter {{
+                comptime fn Subject(self) -> Type {{
+                    self.calls = self.calls + 1;
+                    Source
+                }}
+            }}
+            comptime fn run() -> bool {{
+                let counter = Counter {{calls: 0}};
+                let observed = {call}(counter.Subject());
+                counter.calls == 1
+            }}
+        "
+        ));
         assert_eq!(
             fixture.invoke_meta("run").unwrap().1,
             Value::Bool(true),

@@ -63,14 +63,18 @@ fn reflection_evaluates_the_subject_once_and_preserves_opaque_fields() {
         typealias Integer = .Integer'builtin;
         pure comptime fn Identity<T> -> Type {T}
         struct Sample { field: Identity<bool> }
-        comptime fn Selected(count: *Integer) -> Type {
-            count.* = count.* + 1; Sample
+        struct Counter { calls: Integer }
+        impl Counter {
+            comptime fn Selected(self) -> Type {
+                self.calls = self.calls + 1;
+                Sample
+            }
         }
         comptime fn run() -> bool {
-            var count: Integer = 0;
-            let types = meta.struct_field_types(Selected(count.ref));
-            let names = meta.struct_field_names(Selected(count.ref));
-            count == 2 and types[0] == Identity<bool> and names[0] == .field
+            let counter = Counter { calls: 0 };
+            let types = meta.struct_field_types(counter.Selected());
+            let names = meta.struct_field_names(counter.Selected());
+            counter.calls == 2 and types[0] == Identity<bool> and names[0] == .field
         }
         comptime fn bad() -> Type {meta.struct_field_types(Identity<Sample>)[0]}
     ",
