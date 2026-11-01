@@ -861,6 +861,7 @@ pub struct Interpreter<'a> {
     bytecode_input_preparations: usize,
     bytecode_compilations: usize,
     bytecode_compilation_steps: u64,
+    compilation_session: comptime_compiler::CompilationSession,
     bytecode_cache: bytecode::CodeCache,
     borrowed_code_cache: bytecode::BorrowedCodeCache<'a>,
     input_body_cache: input_bodies::Cache,

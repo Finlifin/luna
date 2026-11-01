@@ -102,6 +102,7 @@ impl<'a> Interpreter<'a> {
             bytecode_input_preparations: 0,
             bytecode_compilations: 0,
             bytecode_compilation_steps: 0,
+            compilation_session: Default::default(),
             bytecode_cache: Default::default(),
             borrowed_code_cache: Default::default(),
             input_body_cache: Default::default(),

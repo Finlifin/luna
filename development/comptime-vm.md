@@ -9727,3 +9727,32 @@ Validation from `/home/fin/luna`:
 - Workspace formatting passed (`/tmp/luna-tools-0lp1h321/result.json`); `git diff --check` passed.
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode --test comptime_iir_bytecode --test comptime_bytecode_types --test comptime_bytecode_lists --test comptime_staged_values`: 39 passed (`/tmp/luna-tools-5mhq7u4r/result.json`).
 - Real sysroot stateful List.fold acceptance passed (`/tmp/luna-tools-r_n8qi87/result.json`): `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_list_fold_retains_comptime_callback_state`.
+
+### Share constant payloads across a code session
+
+`CompilationSession` now owns a bounded weak constant index used by ordinary,
+staged and contextual-input compilation. Standalone compilation functions keep
+their API and create a temporary session. VM compilation uses its retained
+session, and source/IIR `CodeSession` exchanges that state alongside compiled
+code only for the matching immutable world. Separate fresh VMs can therefore
+reuse payloads held by already compiled code without reusing invocation values.
+
+The index holds at most 4,096 weak entries with FIFO replacement. Dead entries
+can be replaced on demand; no global scan or strong payload retention is needed.
+Hash collisions replace optimization entries only after exact kind/type/payload
+comparison has ruled out sharing. Eviction cannot invalidate instructions,
+which own their constant Arcs. Failed compilation drops partial code and leaves
+no owned payload in the index. Hash-table iteration does not affect code or dump
+order, and per-load admission/evaluation remain unchanged.
+
+This closes cross-function payload sharing for the connected source/IIR code
+session paths. It does not introduce indexed constant opcodes, a serialized
+module constant table, or cross-process code sharing. Cache capacity and eviction
+only affect sharing opportunities, never constant identity or evaluation.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`: 624 passed (`/tmp/luna-tools-yxoss3qy/result.json`). New tests cover matching-session reuse across fresh VMs, different-world isolation, payload release, bounded dead-entry metadata, forced hash collision, failed compilation and recovery.
+- Workspace formatting passed (`/tmp/luna-tools-rj4f763u/result.json`); `git diff --check` passed.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_iir_bytecode --test scoped_comptime_callables --test comptime_staged_values --test comptime_bytecode`: 30 passed (`/tmp/luna-tools-sn126b1a/result.json`).
+- Real sysroot stateful List.fold acceptance passed (`/tmp/luna-tools-kl8srvo1/result.json`): `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_list_fold_retains_comptime_callback_state`.

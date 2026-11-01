@@ -709,12 +709,15 @@ impl<'a> Interpreter<'a> {
     }
 
     fn compile_body(&mut self, body: &Expr) -> Result<Option<Program>, Error> {
-        self.compile_bytecode(|fuel| comptime_compiler::compile(body, fuel))
+        self.compile_bytecode(|session, fuel| session.compile(body, fuel))
     }
 
     pub(super) fn compile_bytecode<T>(
         &mut self,
-        compile: impl FnOnce(&mut usize) -> Result<T, comptime_compiler::Error>,
+        compile: impl FnOnce(
+            &mut comptime_compiler::CompilationSession,
+            &mut usize,
+        ) -> Result<T, comptime_compiler::Error>,
     ) -> Result<Option<T>, Error> {
         self.bytecode_compilations += 1;
         // Compilation is actual invocation work, including unsuccessful probes.
@@ -723,7 +726,7 @@ impl<'a> Interpreter<'a> {
         let before = self.budget.steps;
         let available = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
         let mut remaining = available;
-        let result = compile(&mut remaining);
+        let result = compile(&mut self.compilation_session, &mut remaining);
         self.budget.steps -= (available - remaining) as u64;
         self.bytecode_compilation_steps = self
             .bytecode_compilation_steps

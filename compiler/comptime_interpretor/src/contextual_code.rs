@@ -89,15 +89,15 @@ impl Interpreter<'_> {
         }
         let before = self.budget.steps;
         let code = if let Some(expected) = expected {
-            self.compile_bytecode(|fuel| {
-                comptime_compiler::compile_contextual_input(input, expected, fuel)
+            self.compile_bytecode(|session, fuel| {
+                session.compile_contextual_input(input, expected, fuel)
             })?
             .map(|program| Code {
                 program: Arc::new(program),
                 shape: None,
             })
         } else {
-            self.compile_bytecode(|fuel| comptime_compiler::compile_staged_input(input, fuel))?
+            self.compile_bytecode(|session, fuel| session.compile_staged_input(input, fuel))?
                 .map(|(program, shape)| Code {
                     program: Arc::new(program),
                     shape: Some(Arc::new(shape)),

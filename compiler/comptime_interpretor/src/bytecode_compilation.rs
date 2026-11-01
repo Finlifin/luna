@@ -267,3 +267,50 @@ fn typed_constants_preserve_formation_admission_and_diagnostics() {
         }
     }
 }
+
+#[test]
+fn independent_compilations_share_constants_only_in_the_matching_code_session() {
+    fn constant(program: &Program) -> &Arc<comptime_compiler::constants::Constant> {
+        program
+            .instructions()
+            .iter()
+            .find_map(|instruction| {
+                if let Op::Constant { value, .. } = &instruction.op {
+                    Some(value)
+                } else {
+                    None
+                }
+            })
+            .unwrap()
+    }
+    let package = Arc::new(Package::default());
+    let mut session = CodeSession::new(package.clone());
+    let first = {
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        vm.with_code_session(&mut session, |vm| {
+            vm.compile_body(&body()).unwrap().unwrap()
+        })
+    };
+    let mut other_body = body();
+    other_body.source = SourceRange { start: 5, end: 7 };
+    let second = {
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        vm.with_code_session(&mut session, |vm| {
+            vm.compile_body(&other_body).unwrap().unwrap()
+        })
+    };
+    assert!(Arc::ptr_eq(constant(&first), constant(&second)));
+    let different_world = Package::default();
+    let mut vm = Interpreter::for_comptime(&different_world, Budget::default()).unwrap();
+    let isolated = vm.with_code_session(&mut session, |vm| {
+        vm.compile_body(&body()).unwrap().unwrap()
+    });
+    assert!(!Arc::ptr_eq(constant(&first), constant(&isolated)));
+    let weak = Arc::downgrade(constant(&first));
+    drop(first);
+    drop(second);
+    assert!(
+        weak.upgrade().is_none(),
+        "the session must not own constant payloads"
+    );
+}

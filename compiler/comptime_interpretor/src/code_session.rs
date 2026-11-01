@@ -8,6 +8,7 @@ pub struct CodeSession {
     world: CodeWorld,
     graph_indexes: Option<Arc<iir_execution::GraphIndexes>>,
     indexes: Option<Arc<declaration_index::SourceIndexes>>,
+    compilation: comptime_compiler::CompilationSession,
     bytecode: bytecode::CodeCache,
     inputs: input_bodies::Cache,
     defaults: default_code::Cache,
@@ -24,6 +25,7 @@ impl CodeSession {
             world: CodeWorld::Source(package),
             graph_indexes: None,
             indexes: None,
+            compilation: Default::default(),
             bytecode: Default::default(),
             inputs: Default::default(),
             defaults: Default::default(),
@@ -39,6 +41,7 @@ impl CodeSession {
             world: CodeWorld::Graph(graph),
             graph_indexes: None,
             indexes: None,
+            compilation: Default::default(),
             bytecode: Default::default(),
             inputs: Default::default(),
             defaults: Default::default(),
@@ -62,6 +65,7 @@ impl CodeSession {
     }
 
     fn exchange(&mut self, vm: &mut Interpreter<'_>) {
+        std::mem::swap(&mut self.compilation, &mut vm.compilation_session);
         std::mem::swap(&mut self.bytecode, &mut vm.bytecode_cache);
         std::mem::swap(&mut self.inputs, &mut vm.input_body_cache);
         std::mem::swap(&mut self.defaults, &mut vm.default_code_cache);

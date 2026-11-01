@@ -1230,10 +1230,39 @@ enum Work<'a> {
     EndScope(SourceRange),
 }
 
+/// Compilation state for one immutable code world. Only bounded weak constant
+/// identities are retained; invocation values and source bodies are not cached.
+#[derive(Default)]
+pub struct CompilationSession {
+    constants: constants::Pool,
+}
+impl CompilationSession {
+    pub fn compile(&mut self, body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
+        compile_root(Root::Expression(body), fuel, &mut self.constants).map(|(program, _)| program)
+    }
+    pub fn compile_staged_input(
+        &mut self,
+        input: &nir::program::NormalFormArgument,
+        fuel: &mut usize,
+    ) -> Result<(Program, normal_types::Shape), Error> {
+        compile_root(Root::Staged(input), fuel, &mut self.constants)
+            .map(|(program, shape)| (program, shape.unwrap()))
+    }
+    pub fn compile_contextual_input(
+        &mut self,
+        input: &nir::program::NormalFormArgument,
+        expected: &Term,
+        fuel: &mut usize,
+    ) -> Result<Program, Error> {
+        compile_root(Root::Contextual(input, expected), fuel, &mut self.constants)
+            .map(|(program, _)| program)
+    }
+}
+
 /// Compile structured control using a heap worklist, not host recursion. Fuel
 /// bounds traversal and register/code allocation, including unreachable code.
 pub fn compile(body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
-    compile_root(Root::Expression(body), fuel).map(|(program, _)| program)
+    CompilationSession::default().compile(body, fuel)
 }
 
 /// Compile operands while retaining contextual literal/container placeholders.
@@ -1242,7 +1271,7 @@ pub fn compile_staged_input(
     input: &nir::program::NormalFormArgument,
     fuel: &mut usize,
 ) -> Result<(Program, normal_types::Shape), Error> {
-    compile_root(Root::Staged(input), fuel).map(|(program, shape)| (program, shape.unwrap()))
+    CompilationSession::default().compile_staged_input(input, fuel)
 }
 
 /// Compile an input with a known domain, prechecking its entire contextual
@@ -1252,7 +1281,7 @@ pub fn compile_contextual_input(
     expected: &Term,
     fuel: &mut usize,
 ) -> Result<Program, Error> {
-    compile_root(Root::Contextual(input, expected), fuel).map(|(program, _)| program)
+    CompilationSession::default().compile_contextual_input(input, expected, fuel)
 }
 
 enum Root<'a> {
@@ -1263,6 +1292,7 @@ enum Root<'a> {
 fn compile_root<'a>(
     root: Root<'a>,
     fuel: &mut usize,
+    constants: &mut constants::Pool,
 ) -> Result<(Program, Option<normal_types::Shape>), Error> {
     let source = match root {
         Root::Expression(body) => body.source,
@@ -1270,7 +1300,6 @@ fn compile_root<'a>(
     };
     let initial_fuel = *fuel;
     let mut instructions = Vec::new();
-    let mut constants = constants::Pool::default();
     let mut locals = BTreeMap::new();
     let mut registers = 1;
     let mut labels = Vec::new();
