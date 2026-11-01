@@ -14,11 +14,7 @@ pub(super) struct Frame {
     waiting: Option<Waiting>,
     calls: BTreeMap<usize, PendingCall>,
     newtype_conversions: BTreeMap<usize, nir::newtypes::Conversion>,
-    list_types: BTreeMap<usize, Term>,
-    optional_types: BTreeMap<usize, Term>,
-    aggregate_types: BTreeMap<usize, Term>,
     error_conversions: BTreeMap<usize, comptime_compiler::ErrorConversion>,
-    append_types: BTreeMap<usize, Term>,
     list_operations: BTreeMap<usize, (Term, Option<Term>)>,
     instance_origins: BTreeMap<usize, Option<(DeclarationId, usize)>>,
     instance_methods: BTreeMap<usize, comptime_compiler::methods::Method>,
@@ -28,6 +24,7 @@ pub(super) struct Frame {
     staged: Option<Box<staged_bytecode::State>>,
     pc: usize,
     slots: Vec<Option<Value>>,
+    prepared_types: Vec<Option<Term>>,
     scopes: Vec<PatternScope>,
     pattern_inputs: BTreeMap<usize, (usize, usize)>,
     type_patterns: BTreeMap<usize, super::type_patterns::TypePattern>,
@@ -42,6 +39,20 @@ struct PatternScope {
 }
 
 impl Frame {
+    fn prepare_type(&mut self, register: usize, ty: Term) {
+        let slot = self
+            .code
+            .prepared_type_slot(register)
+            .expect("compiled preparation slot");
+        self.prepared_types[slot] = Some(ty);
+    }
+    fn prepared_type(&self, register: usize) -> Option<&Term> {
+        self.prepared_types[self.code.prepared_type_slot(register)?].as_ref()
+    }
+    fn take_type(&mut self, register: usize) -> Option<Term> {
+        self.prepared_types[self.code.prepared_type_slot(register)?].take()
+    }
+
     fn pattern_binding(
         &mut self,
         slot: usize,
@@ -1049,7 +1060,7 @@ impl<'a> Interpreter<'a> {
         environment: &mut Environment,
     ) -> Result<Frame, Error> {
         self.effect_charge(
-            code.registers(),
+            code.registers().saturating_add(code.prepared_type_count()),
             code.instructions().first().map(|i| i.source),
         )?;
         let mut frame = Frame {
@@ -1061,11 +1072,7 @@ impl<'a> Interpreter<'a> {
             waiting: None,
             calls: BTreeMap::new(),
             newtype_conversions: BTreeMap::new(),
-            list_types: BTreeMap::new(),
-            optional_types: BTreeMap::new(),
-            aggregate_types: BTreeMap::new(),
             error_conversions: BTreeMap::new(),
-            append_types: BTreeMap::new(),
             list_operations: BTreeMap::new(),
             instance_origins: BTreeMap::new(),
             instance_methods: BTreeMap::new(),
@@ -1078,6 +1085,7 @@ impl<'a> Interpreter<'a> {
             pattern_inputs: BTreeMap::new(),
             type_patterns: BTreeMap::new(),
             slots: (0..code.registers()).map(|_| None).collect(),
+            prepared_types: (0..code.prepared_type_count()).map(|_| None).collect(),
         };
         for &(binding, slot) in code.locals() {
             if let Some(value) = frame.environment.remove(&binding) {
@@ -1518,14 +1526,14 @@ impl<'a> Interpreter<'a> {
                         ty,
                         source,
                     )?;
-                    frame.append_types.insert(*local, observed);
+                    frame.prepare_type(*local, observed);
                 }
                 Op::ListAppend {
                     local,
                     suffix,
                     ty: _,
                 } => {
-                    let ty = frame.append_types.remove(local).ok_or_else(missing)?;
+                    let ty = frame.take_type(*local).ok_or_else(missing)?;
                     let suffix = frame.slots[*suffix].take().ok_or_else(missing)?;
                     self.complete_list_append(
                         frame.slots[*local].as_mut().ok_or_else(missing)?,
@@ -1544,14 +1552,14 @@ impl<'a> Interpreter<'a> {
                         &contract.index,
                         source,
                     )?;
-                    frame.list_types.insert(*destination, ty);
+                    frame.prepare_type(*destination, ty);
                 }
                 Op::CheckIndexedList {
                     prepared,
                     value,
                     contract: _,
                 } => {
-                    let ty = frame.list_types.get(prepared).ok_or_else(missing)?;
+                    let ty = frame.prepared_type(*prepared).ok_or_else(missing)?;
                     self.index_list_length(
                         frame.slots[*value].as_ref().ok_or_else(missing)?,
                         ty,
@@ -1563,7 +1571,7 @@ impl<'a> Interpreter<'a> {
                     list,
                     index,
                 } => {
-                    frame.list_types.remove(destination).ok_or_else(missing)?;
+                    frame.take_type(*destination).ok_or_else(missing)?;
                     let list = frame.slots[*list].take().ok_or_else(missing)?;
                     let index = frame.slots[*index].take().ok_or_else(missing)?;
                     frame.slots[*destination] =
@@ -1576,7 +1584,7 @@ impl<'a> Interpreter<'a> {
                     list_source,
                     index,
                 } => {
-                    let ty = frame.list_types.remove(destination).ok_or_else(missing)?;
+                    let ty = frame.take_type(*destination).ok_or_else(missing)?;
                     use comptime_compiler::leaf_inputs::Selector;
                     use leaf_inputs::LocalSelector;
                     self.tick(Some(*list_source))?;
@@ -1613,14 +1621,14 @@ impl<'a> Interpreter<'a> {
                 Op::PrepareList { destination, list } => {
                     let (ty, _) =
                         self.prepare_list_construction(&list.ty, list.inputs.iter(), source)?;
-                    frame.list_types.insert(*destination, ty);
+                    frame.prepare_type(*destination, ty);
                 }
                 Op::List {
                     destination,
                     list: _,
                     values,
                 } => {
-                    let ty = frame.list_types.remove(destination).ok_or_else(missing)?;
+                    let ty = frame.take_type(*destination).ok_or_else(missing)?;
                     let values = values
                         .iter()
                         .map(|slot| frame.slots[*slot].take().ok_or_else(missing))
@@ -2198,7 +2206,7 @@ impl<'a> Interpreter<'a> {
                         input.as_ref().map(|(ty, at)| (ty.as_ref(), *at)),
                         source,
                     )?;
-                    frame.optional_types.insert(*destination, ty);
+                    frame.prepare_type(*destination, ty);
                 }
                 Op::Optional {
                     destination,
@@ -2206,10 +2214,7 @@ impl<'a> Interpreter<'a> {
                     value,
                     value_source,
                 } => {
-                    let ty = frame
-                        .optional_types
-                        .remove(destination)
-                        .ok_or_else(missing)?;
+                    let ty = frame.take_type(*destination).ok_or_else(missing)?;
                     let value = value
                         .map(|slot| frame.slots[slot].take().ok_or_else(missing))
                         .transpose()?;
@@ -2252,7 +2257,7 @@ impl<'a> Interpreter<'a> {
 
                 Op::PrepareAggregate { destination, ty } => {
                     let ty = self.prepare_aggregate(ty, source)?;
-                    frame.aggregate_types.insert(*destination, ty);
+                    frame.prepare_type(*destination, ty);
                 }
                 Op::Variant {
                     destination,
@@ -2261,10 +2266,7 @@ impl<'a> Interpreter<'a> {
                     ty: _,
                     fields,
                 } => {
-                    let ty = frame
-                        .aggregate_types
-                        .remove(destination)
-                        .ok_or_else(missing)?;
+                    let ty = frame.take_type(*destination).ok_or_else(missing)?;
                     let values = fields
                         .iter()
                         .map(|field| frame.slots[*field].take().ok_or_else(missing))
@@ -2279,10 +2281,7 @@ impl<'a> Interpreter<'a> {
                     ty: _,
                     fields,
                 } => {
-                    let ty = frame
-                        .aggregate_types
-                        .remove(destination)
-                        .ok_or_else(missing)?;
+                    let ty = frame.take_type(*destination).ok_or_else(missing)?;
                     let values = fields
                         .iter()
                         .map(|field| frame.slots[*field].take().ok_or_else(missing))

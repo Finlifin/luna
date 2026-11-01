@@ -524,6 +524,8 @@ pub struct Program {
     instructions: Vec<Instruction>,
     locals: Vec<(LocalId, Register)>,
     registers: usize,
+    prepared_type_slots: Vec<usize>,
+    prepared_type_count: usize,
     storage_work: usize,
 }
 impl Program {
@@ -544,6 +546,17 @@ impl Program {
     pub fn registers(&self) -> usize {
         self.registers
     }
+    /// Compact frame-local slots for observed domains; ordinary value registers
+    /// do not allocate Type storage. The index table is shared with the code.
+    pub fn prepared_type_slot(&self, register: Register) -> Option<usize> {
+        self.prepared_type_slots
+            .get(register)
+            .copied()
+            .filter(|slot| *slot != usize::MAX)
+    }
+    pub fn prepared_type_count(&self) -> usize {
+        self.prepared_type_count
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -560,6 +573,12 @@ impl fmt::Display for Program {
         write!(f, "(engine-code (registers {}) (locals", self.registers)?;
         for (local, slot) in &self.locals {
             write!(f, " ({local} {slot})")?;
+        }
+        write!(f, ") (prepared-types")?;
+        for (register, slot) in self.prepared_type_slots.iter().enumerate() {
+            if *slot != usize::MAX {
+                write!(f, " (%{register} {slot})")?;
+            }
         }
         write!(f, ") (constants")?;
         for (index, value) in self.constants.iter().enumerate() {
@@ -3161,8 +3180,28 @@ fn compile_root<'a>(
             }
         }
     }
+    let mut prepared_type_slots = Vec::new();
+    let mut prepared_type_count = 0;
     for instruction in &mut instructions {
         *fuel = fuel.checked_sub(1).ok_or(Error::Budget(source))?;
+        let prepared = match &instruction.op {
+            Op::PrepareList { destination, .. }
+            | Op::PrepareListIndex { destination, .. }
+            | Op::PrepareOptional { destination, .. }
+            | Op::PrepareAggregate { destination, .. } => Some(*destination),
+            Op::CheckListAppend { local, .. } => Some(*local),
+            _ => None,
+        };
+        if let Some(register) = prepared {
+            if prepared_type_slots.is_empty() {
+                *fuel = fuel.checked_sub(registers).ok_or(Error::Budget(source))?;
+                prepared_type_slots.resize(registers, usize::MAX);
+            }
+            if prepared_type_slots[register] == usize::MAX {
+                prepared_type_slots[register] = prepared_type_count;
+                prepared_type_count += 1;
+            }
+        }
         if let Op::TypeInputPlan {
             expression,
             environment,
@@ -3202,6 +3241,8 @@ fn compile_root<'a>(
             instructions,
             locals: locals.into_iter().collect(),
             registers,
+            prepared_type_slots,
+            prepared_type_count,
             storage_work: initial_fuel - *fuel,
         },
         shape,

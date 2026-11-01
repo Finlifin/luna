@@ -212,3 +212,51 @@ fn aggregates_observe_domains_before_fields_and_retain_completed_arguments() {
         }
     }
 }
+
+#[test]
+fn compact_preparation_slots_isolate_nested_domains_and_failed_frames() {
+    let package = Package::default();
+    let boolean = Term::Primitive(Primitive::Bool);
+    let optional = Term::Optional(Box::new(boolean.clone()));
+    let record = Term::Record(vec![("item".into(), optional.clone())]);
+    let outer = Term::Optional(Box::new(record.clone()));
+    let body = expr(
+        outer.clone(),
+        K::OptionalPresent(Box::new(expr(
+            record,
+            K::AnonymousRecord {
+                fields: vec![expr(
+                    optional.clone(),
+                    K::OptionalPresent(Box::new(expr(boolean.clone(), K::Local(INPUT)))),
+                )],
+            },
+        ))),
+    );
+    let code = Arc::new(comptime_compiler::compile(&body, &mut 10000).unwrap());
+    assert_eq!(code.prepared_type_count(), 3);
+    assert!(code.prepared_type_count() < code.registers());
+    assert!(code.to_string().contains("(prepared-types"));
+    let plain = comptime_compiler::compile(&expr(boolean, K::Local(INPUT)), &mut 1000).unwrap();
+    assert_eq!(plain.prepared_type_count(), 0);
+    assert!((0..plain.registers()).all(|register| plain.prepared_type_slot(register).is_none()));
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    for input in [Value::Bool(true), Value::Char('x'), Value::Bool(false)] {
+        let mut env = Environment::from([(INPUT, input.clone())]);
+        let result = vm.execute_code(&code, &mut env);
+        if let Value::Bool(value) = input {
+            let expected = Value::Optional {
+                ty: outer.clone(),
+                value: Some(Box::new(Value::AnonymousRecord(vec![(
+                    "item".into(),
+                    Value::Optional {
+                        ty: optional.clone(),
+                        value: Some(Box::new(Value::Bool(value))),
+                    },
+                )]))),
+            };
+            assert!(matches!(result.unwrap(), Flow::Value(actual) if actual == expected));
+        } else {
+            assert_eq!(result.unwrap_err().kind, ErrorKind::Type);
+        }
+    }
+}
