@@ -703,3 +703,34 @@ Validation from `/home/fin/luna`:
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`: four passed (`/tmp/luna-tools-qdkw061p/result.json`).
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_type_factories_keep_identity_through_comptime_parameters`: passed (`/tmp/luna-tools-i7pz6xcx/result.json`).
 - Formatting check and `git diff --check` passed (`/tmp/luna-tools-ts09fqd0/result.json`).
+
+## Explained kind and trait propagation
+
+The theory-unit scan now also indexes trait truth by declaration identity and
+the equality roots of every input (subject plus Type/comptime arguments). A
+known positive or negative literal transfers only to the same proposition under
+congruence. Missing implementation evidence still produces no literal; the
+implementation-world adapter remains responsible for proving selection or
+absence. Different declarations, arities, or noncongruent inputs remain separate.
+
+Kind units use either an existing class member's audited classification or an
+explicit kind premise on that class. The classification helper expresses the
+existing inclusion, disjointness, and contrapositive rules and is shared with
+consistency checking. A negative signed-integer fact does not establish unsigned
+integer, and an integer fact does not choose a signedness. No opaque factory
+body is unfolded to manufacture a classification.
+
+Equality, kind, and trait units share the same conservative source-premise proof
+builder, trail ownership, and first-UIP path. The scan remains bounded and
+nonmutating; arithmetic propagation and a fully incremental theory agenda remain
+unfinished. This expands the preceding equality-only stage without changing
+model admission or making inference more implicit.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p ptc -p type_resolution`: 473 passed (`/tmp/luna-tools-bxjy1a2k/result.json`).
+- Exhaustive partial assignments in both directions cover primitive classification through equality, kind implications/disjointness, trait subjects and Type arguments, distinct trait declarations, and distinct comptime-value indices. Each propagated reason independently replays; unconstrained predicates stay unassigned.
+- Production search tests require positive and negative kind/trait propagation, then independently replay the resulting complete contradiction proofs. Existing equality interruption and rollback coverage remains active.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`: four passed (`/tmp/luna-tools-rrqas4q0/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_type_factories_keep_identity_through_comptime_parameters`: passed (`/tmp/luna-tools-0rmpdwz8/result.json`).
+- Formatting check and `git diff --check` passed (`/tmp/luna-tools-w1j693_g/result.json`).

@@ -415,7 +415,7 @@ impl Search<'_> {
             Err(reason) => return Step::Return(SearchResult::Unknown(reason)),
         };
         if next_unassigned.is_some() {
-            if let Some(unit) = self.equality_unit(assignment.values()) {
+            if let Some(unit) = self.theory_unit(assignment.values()) {
                 #[cfg(test)]
                 THEORY_UNITS.with(|n| n.set(n.get() + 1));
                 let start = assignment.len();
@@ -586,6 +586,87 @@ mod tests {
             }
             assert!(THEORY_UNITS.with(|n| n.get()) > 0);
             assert!(assignment.iter().all(Option::is_none));
+        }
+    }
+
+    #[test]
+    fn search_uses_positive_and_negative_predicate_theory_reasons() {
+        let rigid = |local| Term::Rigid {
+            declaration: DeclarationId {
+                package: 103,
+                local,
+            },
+            sort: Sort::Type,
+        };
+        for trait_query in [false, true] {
+            for truth in [false, true] {
+                let predicate = |local, kind| {
+                    if trait_query {
+                        Formula::Trait(crate::TraitQuery {
+                            interface: DeclarationId {
+                                package: 103,
+                                local: 10,
+                            },
+                            subject: rigid(local),
+                            arguments: vec![rigid(2)],
+                        })
+                    } else {
+                        Formula::Kind(crate::KindQuery {
+                            ty: rigid(local),
+                            kind,
+                        })
+                    }
+                };
+                let premise = predicate(
+                    0,
+                    if truth {
+                        crate::TypeKind::SignedInteger
+                    } else {
+                        crate::TypeKind::Integer
+                    },
+                );
+                let target = predicate(
+                    1,
+                    if truth {
+                        crate::TypeKind::Integer
+                    } else {
+                        crate::TypeKind::UnsignedInteger
+                    },
+                );
+                let denied = if truth { target.negate() } else { target };
+                let other = Formula::equal(rigid(3), Term::Primitive(Primitive::Bool));
+                let formula = Formula::And(vec![
+                    Formula::equal(rigid(0), rigid(1)),
+                    if truth { premise } else { premise.negate() },
+                    Formula::Or(vec![denied.clone(), other.clone()]),
+                    Formula::Or(vec![denied, other.negate()]),
+                ]);
+                let context = Context::default();
+                let mut atoms = Vec::new();
+                let mut terms = Terms::default();
+                collect(&formula, &mut atoms, &mut terms, 0, 128, &[]).unwrap();
+                let mut search = Search {
+                    boolean: None,
+                    theory_state: None,
+                    learned: learning::Clauses::default(),
+                    context: &context,
+                    formula: &formula,
+                    atoms: &atoms,
+                    terms: &terms,
+                    steps: 100000,
+                    max_depth: 128,
+                };
+                let mut assignment = vec![None; atoms.len()];
+                THEORY_UNITS.with(|n| n.set(0));
+                let SearchResult::Unsat(proof) = search.solve(&mut assignment, 0) else {
+                    panic!("predicate consequence was not proved")
+                };
+                assert!(THEORY_UNITS.with(|n| n.get()) > 0);
+                assert!(proof.support.is_empty());
+                search.steps = 100000;
+                search.check_tree(&proof.tree, &mut assignment, 0).unwrap();
+                assert!(assignment.iter().all(Option::is_none));
+            }
         }
     }
 

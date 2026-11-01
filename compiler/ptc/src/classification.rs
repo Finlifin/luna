@@ -28,6 +28,15 @@ impl TypeKind {
         // possible integer descriptions (e.g. mathematical Integer).
         !self.implies(other) && !other.implies(self)
     }
+    pub(super) fn consequence(self, truth: bool, query: Self) -> Option<bool> {
+        if truth && self.implies(query) {
+            Some(true)
+        } else if (truth && self.disjoint(query)) || (!truth && query.implies(self)) {
+            Some(false)
+        } else {
+            None
+        }
+    }
     pub fn evaluate(self, ty: &Term) -> Option<bool> {
         let actual = match ty {
             Term::Primitive(P::Bool) => Self::Boolean,

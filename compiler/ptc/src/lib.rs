@@ -1610,9 +1610,9 @@ impl Search<'_> {
             }
             for &(other_root, other, truth) in &kinds {
                 if root == other_root
-                    && ((*value && truth && query.kind.disjoint(other))
-                        || (*value && !truth && query.kind.implies(other))
-                        || (!*value && truth && other.implies(query.kind)))
+                    && other
+                        .consequence(truth, query.kind)
+                        .is_some_and(|inferred| inferred != *value)
                 {
                     return Ok(None);
                 }
