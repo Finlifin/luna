@@ -2093,6 +2093,11 @@ impl Checker<'_, '_> {
         if depth >= 128 {
             return Err(error(input.span, "contextual input nesting limit exceeded"));
         }
+        if matches!(input.kind, H::Null) {
+            return Ok(n::NormalFormArgument::Null {
+                source: source(input.span),
+            });
+        }
         if matches!(input.kind, H::Unit) {
             return Ok(n::NormalFormArgument::Unit {
                 source: source(input.span),
@@ -3419,7 +3424,8 @@ impl Checker<'_, '_> {
                                 })? {
                                     Some(value) => value,
                                     None => match self.dependent_normal_argument(value, 0)? {
-                                        argument @ n::NormalFormArgument::Integer { .. } => {
+                                        argument @ (n::NormalFormArgument::Integer { .. }
+                                        | n::NormalFormArgument::Null { .. }) => {
                                             collected.push(argument);
                                             continue;
                                         }

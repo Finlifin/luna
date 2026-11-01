@@ -346,6 +346,10 @@ pub enum NormalFormArgument {
     Value(Expr),
     /// Expand a completed list of the collector's exact contextual list type.
     ListSpread(Expr),
+    /// Absence whose optional domain is supplied by earlier or staged inputs.
+    Null {
+        source: SourceRange,
+    },
     Unit {
         source: SourceRange,
     },
@@ -409,7 +413,7 @@ impl NormalFormArgument {
         while let Some(input) = pending.pop() {
             match input {
                 Self::ListSpread(value) | Self::Value(value) => result.push(value),
-                Self::Integer { .. } | Self::Unit { .. } => {}
+                Self::Integer { .. } | Self::Unit { .. } | Self::Null { .. } => {}
                 Self::If {
                     condition,
                     then_input,
@@ -452,7 +456,7 @@ impl NormalFormArgument {
         while let Some(input) = pending.pop() {
             match input {
                 Self::ListSpread(value) | Self::Value(value) => result.push(value),
-                Self::Integer { .. } | Self::Unit { .. } => {}
+                Self::Integer { .. } | Self::Unit { .. } | Self::Null { .. } => {}
                 Self::If {
                     condition,
                     then_input,
@@ -583,7 +587,9 @@ impl NormalFormArgument {
                 Work::Input(Self::ListSpread(value) | Self::Value(value)) => {
                     results.push(never(value))
                 }
-                Work::Input(Self::Integer { .. } | Self::Unit { .. }) => results.push(false),
+                Work::Input(Self::Integer { .. } | Self::Unit { .. } | Self::Null { .. }) => {
+                    results.push(false)
+                }
                 Work::Input(Self::If {
                     condition,
                     then_input,
@@ -626,7 +632,8 @@ impl NormalFormArgument {
     pub fn source(&self) -> SourceRange {
         match self {
             Self::ListSpread(value) | Self::Value(value) => value.source,
-            Self::Unit { source }
+            Self::Null { source }
+            | Self::Unit { source }
             | Self::Integer { source, .. }
             | Self::If { source, .. }
             | Self::Block { source, .. }
@@ -693,6 +700,7 @@ impl fmt::Display for NormalFormArgument {
                 }
                 f.write_str("))")
             }
+            Self::Null { source } => write!(f, "(contextual-null-input (source {source}))"),
             Self::Unit { source } => write!(f, "(contextual-unit-input (source {source}))"),
             Self::Integer {
                 source,

@@ -10851,3 +10851,50 @@ Evidence from `/home/fin/luna`:
   shipped_type_factories_keep_identity_through_comptime_parameters`, exit 0
   (`/tmp/luna-tools-zts1eb6b/result.json`). It checks delayed `Tuple<>` input
   identity against direct construction through the shipped binding.
+
+### Deferred null inputs use ordinary optional admission
+
+The optional-type contract (`docs/type/qualified-types/optional-type.md`) gives
+untyped null the target optional's outermost absence. A dependent NF input lacked
+a residual literal for this case and rejected `Stamp<T,null>` before T could be
+supplied. The new source regression reproduced that frontend rejection
+(`/tmp/luna-tools-2wlus291/result.json`, exit 101).
+
+Added a contextual Null leaf with S-expression display, bounded traversal/copy
+handling, linear compilation and invocation-local staging. Once the domain is
+available, the shared input adapter invokes existing optional preparation and
+completion. Positional, late named, conditional, block and atomic variadic
+collector inputs use this path; it does not infer an optional target, unfold a
+head or create a dedicated optional NF parameter sort.
+
+The new negative cases also exposed acceptance of a null value in `?*bool` at
+comptime (`/tmp/luna-tools-fqkto2ts/result.json`, exit 101). Optional preparation
+now checks the full comptime storage domain even for absence, then performs its
+usual type admission. This shared check covers existing optional constructors as
+well as the new literal path. Runtime preparation remains unchanged, and Type
+values describing runtime pointer types remain metadata rather than pointer
+values.
+
+Source coverage checks both engines, outer absence for nested optionals,
+non-optional and pointer-domain rejection, same-VM recovery, and block effects
+before a later named domain operand. The real sysroot case additionally collects
+nulls through `List<?bool>` and compares resulting opaque NF identities. An
+intermediate test draft used an unconditional null default for unrestricted T;
+that correctly failed definition checking and was replaced by valid contextual
+branch/block scenarios, without weakening default contracts.
+
+Validation from `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 900 -- test -p nir
+  -p comptime_compiler -p comptime_interpretor`: 1121 passed, exit 0
+  (`/tmp/luna-tools-xptwcb2n/result.json`).
+- `development/check.py --timeout 900 -- test -p luna --test
+  function_type_parameters`: 58 passed, exit 0
+  (`/tmp/luna-tools-dcx1lg0b/result.json`).
+- `development/check.py --timeout 900 -- test -p luna --test sysroot_preludes
+  shipped_type_factories_keep_identity_through_comptime_parameters`: passed,
+  exit 0 (`/tmp/luna-tools-esb3gtyk/result.json`).
+- Workspace formatting passed (`/tmp/luna-tools-13_p1b3q/result.json`, exit 0);
+  `git diff --check` passed.
+
+This completes the null-literal path within the existing contextual input model;
+it does not replace that model with general suspended elaboration.

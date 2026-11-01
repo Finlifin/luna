@@ -5210,7 +5210,7 @@ impl Walker<'_> {
                     ty.clone(),
                 ))
             }
-            A::Unit { .. }
+            A::Unit { .. } | A::Null { .. }
                 if matches!(
                     domain,
                     Some(Term::Primitive(nir::Primitive::Void | nir::Primitive::Type))

@@ -422,8 +422,13 @@ fn shipped_type_factories_keep_identity_through_comptime_parameters() {
         pure comptime fn EmptyTag<T, value:T> -> Type {bool}
         comptime fn Empty(T:Type) -> Type {EmptyTag<T,()>}
         const EMPTY=Empty(Tuple<>);
+        comptime fn Missing(T:Type) -> Type {EmptyTag<T,null>}
+        const NONE=Missing(?bool);
+        pure comptime fn Nones<.T:Type=?bool,...values:List<T>> -> Type {bool}
+        comptime fn Batch(T:Type) -> Type {Nones<null,null,.T=T>}
+        const BATCH=Batch(?bool);
         fn run()->bool {
-            const same = SEQUENCE == List<bool> and PRODUCT == Tuple<bool,u8> and LENGTH == 2 and EMPTY == EmptyTag<Tuple<>,()>;
+            const same = SEQUENCE == List<bool> and PRODUCT == Tuple<bool,u8> and LENGTH == 2 and EMPTY == EmptyTag<Tuple<>,()> and NONE == EmptyTag<?bool,null> and BATCH == Nones<null,null>;
             same
         }
     ",

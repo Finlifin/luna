@@ -139,7 +139,11 @@ fn argument_binds(
                 step(fuel, items.len())?;
                 pending.extend(items);
             }
-            A::ListSpread(_) | A::Value(_) | A::Unit { .. } | A::Integer { .. } => {}
+            A::ListSpread(_)
+            | A::Value(_)
+            | A::Unit { .. }
+            | A::Null { .. }
+            | A::Integer { .. } => {}
         }
     }
     Ok(())

@@ -11,6 +11,7 @@ impl Interpreter<'_> {
         let Term::Optional(payload_ty) = ty else {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         };
+        self.check_comptime_domain(ty, source)?;
         self.admit_type(ty, 0)?;
         if let Some((input, at)) = input {
             if input != payload_ty.as_ref() {

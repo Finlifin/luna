@@ -3858,7 +3858,7 @@ impl<'a> Interpreter<'a> {
         self.depth += 1;
         let result = (|| match input {
             A::ListSpread(value) | A::Value(value) => self.eval(value, environment),
-            A::Integer { .. } | A::Unit { .. } => literals
+            A::Integer { .. } | A::Unit { .. } | A::Null { .. } => literals
                 .remove(key)
                 .and_then(|prepared| match prepared {
                     PreparedNormalInput::Value(value) => Some(Flow::Value(value)),

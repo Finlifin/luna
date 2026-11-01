@@ -1429,3 +1429,56 @@ fn deferred_parenthesized_inputs_never_construct_types() {
         }
     }
 }
+
+#[test]
+fn deferred_null_inputs_use_the_completed_optional_domain() {
+    let package = support::compile(
+        "typealias Type = .Type'builtin;
+        pure comptime fn Stamp<T, value:T> -> Type {bool}
+        pure comptime fn Named<.T:Type=Type, value:T> -> Type {bool}
+        comptime fn Build(T:Type) -> Type {Stamp<T,null>}
+        comptime fn Late(T:Type) -> Type {Named<null,.T=T>}
+        comptime fn Branch(T:Type) -> Type {Stamp<T,if true {null} else {null}>}
+        comptime fn Block(T:Type) -> Type {
+            var seen=false;
+            Named<do {seen=true;null},.T=do {if not seen {return bool;} T}>
+        }",
+    );
+    for name in ["Build", "Late", "Branch", "Block"] {
+        for tree in [false, true] {
+            let mut vm = if tree {
+                Interpreter::for_comptime_tree(&package, Budget::default()).unwrap()
+            } else {
+                Interpreter::for_comptime(&package, Budget::default()).unwrap()
+            };
+            let entry = support::id(&package, name);
+            for domain in [
+                Term::Primitive(P::Bool),
+                Term::Primitive(P::Type),
+                Term::Optional(Box::new(Term::Pointer(Box::new(Term::Primitive(P::Bool))))),
+            ] {
+                assert!(
+                    vm.invoke(entry, vec![Value::Type(domain.clone())]).is_err(),
+                    "{name} tree={tree} accepted {domain}"
+                );
+            }
+            let optional = Term::Optional(Box::new(Term::Primitive(P::Bool)));
+            for domain in [optional.clone(), Term::Optional(Box::new(optional))] {
+                let value = vm.invoke(entry, vec![Value::Type(domain.clone())]).unwrap();
+                let Value::Type(Term::NormalForm { arguments, .. }) = value else {
+                    panic!("ordinary factory identity");
+                };
+                assert_eq!(
+                    arguments,
+                    vec![
+                        domain.clone(),
+                        Term::OptionalValue {
+                            ty: Box::new(domain),
+                            value: None
+                        }
+                    ]
+                );
+            }
+        }
+    }
+}

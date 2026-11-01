@@ -24,6 +24,7 @@ impl fmt::Display for Constructor {
 pub enum Input {
     Value(Term),
     Unit,
+    Null,
     Integer { spelling: String, negative: bool },
 }
 impl Input {
@@ -35,6 +36,7 @@ impl fmt::Display for Input {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Value(ty) => write!(f, "(value {ty})"),
+            Self::Null => write!(f, "(null)"),
             Self::Unit => write!(f, "(unit)"),
             Self::Integer { spelling, negative } => {
                 write!(f, "(integer {spelling:?} (negative {negative}))")
@@ -324,6 +326,7 @@ pub(super) fn compile_input<'a>(
                         Some(Input::Value(copy_term(&value.ty, fuel, value.source)?))
                     }
                     A::Unit { .. } => Some(Input::Unit),
+                    A::Null { .. } => Some(Input::Null),
                     A::Integer {
                         spelling, negative, ..
                     } => {

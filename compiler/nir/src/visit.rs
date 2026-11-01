@@ -647,7 +647,7 @@ fn walk_mut(
                 use crate::program::NormalFormArgument as A;
                 match argument {
                     A::ListSpread(value) | A::Value(value) => work.push(Node::Expr(value)),
-                    A::Unit { .. } | A::Integer { .. } => {}
+                    A::Unit { .. } | A::Null { .. } | A::Integer { .. } => {}
                     A::If {
                         condition,
                         then_input,

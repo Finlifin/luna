@@ -14,6 +14,7 @@ pub(super) enum Node<'a> {
 enum Kind<'a> {
     Value(&'a Term),
     Unit,
+    Null,
     Integer(&'a str, bool),
     Choice(&'a Term, SourceRange),
     Block(bool),
@@ -39,6 +40,7 @@ impl<'a> Node<'a> {
         match self {
             Self::Source(input) => match input {
                 A::Value(value) | A::ListSpread(value) => Kind::Value(&value.ty),
+                A::Null { .. } => Kind::Null,
                 A::Unit { .. } => Kind::Unit,
                 A::Integer {
                     spelling, negative, ..
@@ -51,6 +53,7 @@ impl<'a> Node<'a> {
             },
             Self::Compiled(shape) => match &shape.kind {
                 ShapeKind::Scalar(Scalar::Value(ty)) => Kind::Value(ty),
+                ShapeKind::Scalar(Scalar::Null) => Kind::Null,
                 ShapeKind::Scalar(Scalar::Unit) => Kind::Unit,
                 ShapeKind::Scalar(Scalar::Integer { spelling, negative }) => {
                     Kind::Integer(spelling, *negative)
@@ -155,6 +158,10 @@ impl Interpreter<'_> {
             Kind::Value(ty) => {
                 self.prepare_normal_value_type(ty, expected, source)?;
                 return Ok(());
+            }
+            Kind::Null => {
+                self.prepare_optional(expected, None, source)?;
+                Prepared::Literal(self.complete_optional(expected, None, source)?)
             }
             Kind::Unit => Prepared::Literal(self.normal_unit_value(expected, source)?),
             Kind::Integer(spelling, negative) => {

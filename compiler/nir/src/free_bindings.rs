@@ -526,7 +526,7 @@ fn normal(
                 normal(&arm.body, &inner, free, fuel, depth + 1, dependencies)?;
             }
         }
-        A::Integer { .. } | A::Unit { .. } => {}
+        A::Integer { .. } | A::Unit { .. } | A::Null { .. } => {}
     }
     Ok(())
 }

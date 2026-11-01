@@ -144,7 +144,7 @@ impl Interpreter<'_> {
                                     self.eval(value, environment)
                                 )));
                             }
-                            A::Integer { .. } | A::Unit { .. } => {
+                            A::Integer { .. } | A::Unit { .. } | A::Null { .. } => {
                                 values.push(StagedNormalInput::Literal(key))
                             }
                             A::List { items, .. } | A::Tuple { items, .. } => {

@@ -723,7 +723,7 @@ fn charge_node_observed(
                         0
                     }
                     A::Integer { spelling, .. } => spelling.len(),
-                    A::Unit { .. } => 0,
+                    A::Unit { .. } | A::Null { .. } => 0,
                     A::Tuple { items, .. } | A::List { items, .. } => {
                         charge_width(steps, items.len())?;
                         work.extend(items.iter().map(|value| (Node::Argument(value), depth + 1)));
