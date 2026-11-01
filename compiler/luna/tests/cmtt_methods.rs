@@ -2158,36 +2158,38 @@ fn expression_method_results_receive_partial_result_context() {
 }
 
 #[test]
-fn generator_refutable_tuple_filters_preserve_live_aliases_and_failed_writes() {
+fn generator_refutable_tuple_filters_preserve_callback_state_and_failed_writes() {
     for (pattern, guard, body, expected) in [
         (
-            "(1,pointer)",
+            "(1,action)",
             "",
-            "pointer.* = true;",
-            "not first and second",
+            "action(true);",
+            "not first(false) and second(false)",
         ),
         (
-            "(index,pointer if do {pointer.* = not pointer.*;false})",
+            "(index,action if do {let before=action(false);action(not before);false})",
             "",
-            "pointer.* = false;",
-            "not first and second",
+            "action(false);",
+            "not first(false) and second(false)",
         ),
         (
-            "(9,pointer)",
-            "if do {pointer.* = true;true}",
-            "pointer.* = true;",
-            "not first and not second",
+            "(9,action)",
+            "if do {action(true);true}",
+            "action(true);",
+            "not first(false) and not second(false)",
         ),
         (
-            "((0 or 1) as index,pointer)",
+            "((0 or 1) as index,action)",
             "",
-            "pointer.* = true;continue;",
-            "first and second",
+            "action(true);continue;",
+            "first(false) and second(false)",
         ),
     ] {
-        let source = format!("comptime fn build()-><|-bool> {{
-            var first=false;var second=false;
-            inline for {pattern} {guard} in (first.ref,second.ref,first.ref)'tuple_enumerate {{ {body} }}
+        let source = format!("typealias Cell=%{{flag:bool}} comptime fn(bool)->bool;
+        comptime fn cell()->Cell {{var flag=false;|value:bool| {{let before=flag;flag=value;before}}}}
+        comptime fn build()-><|-bool> {{
+            let first=cell();let second=cell();
+            inline for {pattern} {guard} in (first,second,first)'tuple_enumerate {{ {body} }}
             let result={expected};'(result)
         }} fn run()->bool {{~<build()>}}");
         assert_eq!(
@@ -2199,16 +2201,19 @@ fn generator_refutable_tuple_filters_preserve_live_aliases_and_failed_writes() {
 }
 
 #[test]
-fn generator_range_pattern_failure_keeps_state_and_live_aliases() {
+fn generator_range_pattern_failure_keeps_receiver_updates() {
     for pattern in [
-        "(index if do {flag=not flag;false})",
-        "(index and do {pointer.* = not pointer.*;false} is true)",
+        "(index if do {state.toggle();false})",
+        "(index and do {state.toggle();false} is true)",
     ] {
         let source = format!(
-            "comptime fn build()-><|-bool> {{
-            var flag=false;let pointer=flag.ref;
-            inline for {pattern} in 0..3 {{flag=false;}}
-            '(flag)
+            "typealias Count=.Integer'builtin;
+        struct State {{flag:bool,visits:Count}}
+        impl State {{comptime fn toggle(self) {{self.flag=not self.flag;self.visits+=1;}}}}
+        comptime fn build()-><|-bool> {{
+            let state=State {{flag:false,visits:0}};
+            inline for {pattern} in 0..3 {{state.flag=false;}}
+            let result=state.flag and state.visits == 3;'(result)
         }} fn run()->bool {{~<build()>}}"
         );
         assert_eq!(
@@ -2220,22 +2225,24 @@ fn generator_range_pattern_failure_keeps_state_and_live_aliases() {
 }
 
 #[test]
-fn generator_range_patterns_export_live_pointers_and_keep_candidate_effects() {
-    let source = "comptime fn build()-><|-bool> {
-        var flag=false;
-        inline for (index and flag.ref is pointer) in 0..3 {
-            pointer.* = not pointer.*;
-        }
-        '(flag)
-    } fn run()->bool {~<build()>}";
+fn generator_range_patterns_export_callbacks_and_keep_candidate_effects() {
+    let source = "typealias Count=.Integer'builtin;
+        typealias Counter=%{visits:Count} comptime fn()->Count;
+        comptime fn counter()->Counter {var visits:Count=0;|| {visits+=1;visits}}
+        comptime fn build()-><|-bool> {
+            let next=counter();
+            inline for (index and next is action) in 0..3 {action();}
+            let result=next() == 4;'(result)
+        } fn run()->bool {~<build()>}";
     assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
-    let source = "comptime fn build()-><|-bool> {
-        var flag=false;var visits=0;
-        inline for ((index if do {flag=not flag;false}) or index) in 0..3 {
-            visits += 1;
-        }
-        let result=flag and visits == 3;'(result)
-    } fn run()->bool {~<build()>}";
+    let source = "typealias Count=.Integer'builtin;
+        comptime fn build()-><|-bool> {
+            var flag=false;var visits:Count=0;
+            inline for ((index if do {flag=not flag;false}) or index) in 0..3 {
+                visits += 1;
+            }
+            let result=flag and visits == 3;'(result)
+        } fn run()->bool {~<build()>}";
     assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
 }
 
@@ -2293,30 +2300,44 @@ fn generator_var_else_failure_discards_candidate_bindings_but_keeps_writes() {
 }
 
 #[test]
-fn generator_var_else_rebinding_preserves_pointer_targets() {
-    let source = "comptime fn build()-><|-bool> {
-        var first=false;var second=false;
-        var pointer if do {pointer=second.ref;true} = first.ref
-            else {return '(false);};
-        pointer.* = true;
-        let result=not first and second;'(result)
-    } fn run()->bool {~<build()>}";
+fn generator_var_else_rebinding_preserves_callback_identity() {
+    let source = "typealias Cell=%{flag:bool} comptime fn(bool)->bool;
+        comptime fn cell()->Cell {var flag=false;|value:bool| {let before=flag;flag=value;before}}
+        comptime fn build()-><|-bool> {
+            let first=cell();let second=cell();
+            var action if do {action=second;true} = first
+                else {return '(false);};
+            action(true);
+            let result=not first(false) and second(false);'(result)
+        } fn run()->bool {~<build()>}";
     assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
 }
 
 #[test]
 fn generator_irrefutable_bindings_share_pattern_computation_state() {
     for declaration in [
-        "let (value and do {flag=true;flag} is observed)=false;",
-        "let (pointer and do {pointer.* = true;flag} is observed)=flag.ref;",
-        "let (value and flag.ref is pointer)=false;pointer.* = true;let observed=flag;",
-        "var (value and do {value=true;flag=value;value} is observed)=false;",
+        "let (value and do {state.flag=true;state.flag} is observed)=false;",
+        "let (action and do {action();state.flag=true;state.flag} is observed)=next;",
+        "let (value and next is action)=false;action();state.flag=true;let observed=state.flag;",
+        "var (value and do {value=true;state.flag=value;value} is observed)=false;",
     ] {
         let source = format!(
-            "comptime fn build()-><|-bool> {{
-            var flag=false;{declaration}
-            let result=flag and observed;'(result)
+            "typealias Count=.Integer'builtin;
+        typealias Counter=%{{visits:Count}} comptime fn()->Count;
+        comptime fn counter()->Counter {{var visits:Count=0;|| {{visits+=1;visits}}}}
+        struct State {{flag:bool}}
+        comptime fn build()-><|-bool> {{
+            let state=State {{flag:false}};let next=counter();{declaration}
+            let calls=next();let result=state.flag and observed and calls == EXPECTED;'(result)
         }} fn run()->bool {{~<build()>}}"
+        );
+        let source = source.replace(
+            "EXPECTED",
+            if declaration.contains("action") {
+                "2"
+            } else {
+                "1"
+            },
         );
         assert_eq!(
             support::run_iir(&source, "run", vec![]),
@@ -2327,26 +2348,20 @@ fn generator_irrefutable_bindings_share_pattern_computation_state() {
 }
 
 #[test]
-fn generator_irrefutable_tuple_patterns_share_state_and_export_pointers() {
-    for (pattern, body) in [
-        (
-            "(1,(value and flag.ref is pointer))",
-            "pointer.* = not pointer.*;",
-        ),
-        (
-            "(index,(value and do {flag=not flag;true} is observed))",
-            "",
-        ),
-        (
-            "(index,(value and flag.ref is pointer))",
-            "pointer.* = not pointer.*;",
-        ),
+fn generator_irrefutable_tuple_patterns_export_shared_callbacks() {
+    for (pattern, body, count) in [
+        ("(1,(value and next is action))", "action();", 2),
+        ("(index,(value and next() is observed))", "", 4),
+        ("(index,(value and next is action))", "action();", 4),
     ] {
         let source = format!(
-            "comptime fn build()-><|-bool> {{
-            var flag=false;
+            "typealias Count=.Integer'builtin;
+        typealias Counter=%{{visits:Count}} comptime fn()->Count;
+        comptime fn counter()->Counter {{var visits:Count=0;|| {{visits+=1;visits}}}}
+        comptime fn build()-><|-bool> {{
+            let next=counter();
             inline for {pattern} in (true,false,true)'tuple_enumerate {{{body}}}
-            '(flag)
+            let result=next() == {count};'(result)
         }} fn run()->bool {{~<build()>}}"
         );
         assert_eq!(
