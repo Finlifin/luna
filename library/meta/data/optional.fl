@@ -1,7 +1,8 @@
 {- Comptime operations on native optional/error values use value references
    for self and value parameters for callbacks; no comptime pointers. -}
 
-use builtin.{Type, bool};
+use builtin.{Type, bool, u64};
+use hashing.{ComptimeHash, mix_byte, mix_digest};
 use numeric.equality.ComptimeEq;
 
 pub pure comptime trait ComptimeOptionalOps where T {
@@ -81,5 +82,13 @@ comptime impl ComptimeEq for ?T where T:- ComptimeEq {
             null => false,
         },
         null => other matches null,
+    };
+}
+
+{- Presence is encoded before the payload digest; absent values never call it. -}
+comptime impl ComptimeHash for ?T where T:- ComptimeHash {
+    comptime fn hash(self) -> u64 = self match {
+        value? => mix_digest(mix_byte(14695981039346656037, 1), value.as(ComptimeHash).hash()),
+        null => mix_byte(14695981039346656037, 0),
     };
 }

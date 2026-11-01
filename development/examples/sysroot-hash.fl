@@ -133,3 +133,15 @@ comptime fn optional_protocol_equality() -> bool {
 test optional_payload_equality_protocol {
     inline if optional_protocol_equality() {assumes true;} else {assumes false;}
 }
+
+comptime fn optional_protocol_hashing() -> bool {
+    let left: ?FoldedKey = FoldedKey {value: 12};
+    let right: ?FoldedKey = FoldedKey {value: 22};
+    let empty: ?FoldedKey = null;
+    left.eq(right) and left.hash() == right.hash()
+        and empty.hash() == 12638153115695167455
+}
+
+test optional_payload_hash_protocol {
+    inline if optional_protocol_hashing() {assumes true;} else {assumes false;}
+}

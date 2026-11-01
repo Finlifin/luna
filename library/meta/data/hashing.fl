@@ -180,3 +180,17 @@ comptime impl ComptimeHash for Integer {
         mix_byte(state, integer_byte(magnitude))
     }
 }
+
+{- Mix a complete protocol digest in target-independent little-endian order. -}
+pub pure comptime fn mix_digest(state: u64, digest: u64) -> u64 {
+    var mixed = state;
+    mixed = mix_byte(mixed, digest'bitvec[0..8].as(u8));
+    mixed = mix_byte(mixed, digest'bitvec[8..16].as(u8));
+    mixed = mix_byte(mixed, digest'bitvec[16..24].as(u8));
+    mixed = mix_byte(mixed, digest'bitvec[24..32].as(u8));
+    mixed = mix_byte(mixed, digest'bitvec[32..40].as(u8));
+    mixed = mix_byte(mixed, digest'bitvec[40..48].as(u8));
+    mixed = mix_byte(mixed, digest'bitvec[48..56].as(u8));
+    mixed = mix_byte(mixed, digest'bitvec[56..64].as(u8));
+    mixed
+}

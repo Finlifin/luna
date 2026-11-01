@@ -95,16 +95,19 @@ fn custom_hashes_preserve_snapshots_and_propagate_failures() {
 }
 
 #[test]
-fn equality_alone_does_not_supply_list_hashing() {
-    let failure=compile(
-        "struct Key {value:bool}
+fn equality_alone_does_not_supply_aggregate_hashing() {
+    for domain in ["List<Key>", "?Key"] {
+        let source = "struct Key {value:bool}
         comptime impl ComptimeEq for Key {comptime fn eq(self,other:Self)->bool {self.value==other.value}}
-        comptime fn bad(values:List<Key>)->u64 {values.as(ComptimeHash).hash()}",
-    ).err().expect("missing element hash must reject the call");
-    assert!(
-        failure.contains("trait") || failure.contains("method"),
-        "{failure}"
-    );
+        comptime fn bad(values:DOMAIN)->u64 {values.as(ComptimeHash).hash()}".replace("DOMAIN", domain);
+        let failure = compile(&source)
+            .err()
+            .expect("missing payload hash must reject the call");
+        assert!(
+            failure.contains("trait") || failure.contains("method"),
+            "{failure}"
+        );
+    }
 }
 
 #[test]
@@ -292,4 +295,65 @@ fn key_helpers_resolve_associated_values_after_binding_type_inputs() {
     assert_ne!(first, protocol.hash(&no, &mut context).unwrap());
     assert!(protocol.equivalent(&yes, &yes, &mut context).unwrap());
     assert!(!protocol.equivalent(&yes, &no, &mut context).unwrap());
+}
+
+#[test]
+fn optional_hashes_encode_presence_and_complete_payload_digests() {
+    let package = compile(
+        "comptime fn absent()->u64 {let v:?u64=null; v.hash()}
+         comptime fn present()->u64 {let v:?u64=18446744073709551615; v.hash()}
+         comptime fn wrap(value:?u64)->??u64 {value}
+         comptime fn nested()->u64 {let inner:?u64=null; wrap(inner).hash()}
+         struct Key {value:Integer}
+         comptime impl ComptimeHash for Key {
+             comptime fn hash(self)->u64 {
+                 let observed=1.div_trunc(if self.value==99 {0} else {1});
+                 let before=self.value;
+                 self.value=99;
+                 before.rem_euclid(10).hash()
+             }
+         }
+         comptime fn snapshots()->bool {
+             let a:?Key=Key {value:12}; let b:?Key=Key {value:22};
+             a.hash()==b.hash() and a.hash()==b.hash()
+         }
+         comptime fn empty_key()->u64 {let a:?Key=null; a.hash()}
+         comptime fn fail()->u64 {let a:?Key=Key {value:99}; a.hash()}",
+    )
+    .unwrap();
+    let digest = |value: Option<u64>| {
+        std::iter::once(u8::from(value.is_some()))
+            .chain(value.into_iter().flat_map(u64::to_le_bytes))
+            .fold(14695981039346656037u64, |state, byte| {
+                (state ^ u64::from(byte)).wrapping_mul(1099511628211)
+            })
+    };
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    for (name, expected) in [
+        ("absent", digest(None)),
+        ("present", digest(Some(u64::MAX))),
+        ("nested", digest(Some(digest(None)))),
+        ("empty_key", digest(None)),
+    ] {
+        assert_eq!(
+            vm.invoke(support::id(&package, name), vec![]).unwrap(),
+            Value::UnsignedInteger(expected.into())
+        );
+    }
+    assert_eq!(
+        vm.invoke(support::id(&package, "snapshots"), vec![])
+            .unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        vm.invoke(support::id(&package, "fail"), vec![])
+            .unwrap_err()
+            .kind,
+        ErrorKind::DivisionByZero
+    );
+    assert_eq!(
+        vm.invoke(support::id(&package, "snapshots"), vec![])
+            .unwrap(),
+        Value::Bool(true)
+    );
 }
