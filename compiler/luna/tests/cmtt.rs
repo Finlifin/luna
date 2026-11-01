@@ -5762,13 +5762,14 @@ fn generator_local_schema_aliases_preserve_structural_type_evidence() {
 }
 
 #[test]
-fn generator_schema_addressing_preserves_storage_and_extracted_type_identity() {
-    let source = "struct Types {word:.Type'builtin,changed:bool}
+fn generator_schema_updates_preserve_extracted_type_identity() {
+    let source = "typealias Type=.Type'builtin;typealias Byte=.u8'builtin;
+        struct Types {word:Type,changed:bool}
+        impl Types {comptime fn mark(self) {self.changed=true;}}
         comptime fn build()-><|-bool> {
-            let schema=Types {word:.u8'builtin,changed:false};
+            let schema=Types {word:Byte,changed:false};
             let Word=schema.word;
-            let pointer=schema.changed.ref;
-            pointer.* = true;
+            schema.mark();
             let value:Word=17;
             let changed=schema.changed;
             '(changed and value == 17)
@@ -5777,46 +5778,28 @@ fn generator_schema_addressing_preserves_storage_and_extracted_type_identity() {
 }
 
 #[test]
-fn generator_schema_pointer_copy_requires_type_and_outer_capabilities() {
-    let source = "trait Duplicate {} trait Retire {fn drop(*self);}
-        impl Duplicate for .Type'builtin {}
-        struct Types {word:.Type'builtin} impl Duplicate for Types {}
+fn generator_schema_snapshots_need_no_runtime_copy_capability() {
+    let source = "typealias Type=.Type'builtin;typealias Byte=.u8'builtin;
+        typealias Character=.char'builtin;
+        struct Types {word:Type}
+        impl Types {
+            comptime fn replace(self,word:Type) {self.word=word;}
+        }
         comptime fn build()-><|-bool> {
-            let schema=Types {word:.u8'builtin};
+            let schema=Types {word:Byte};
+            let original=schema;
             let Word=schema.word;
-            let pointer=schema.ref;
-            pointer.*.word = .char'builtin;
-            let copied=pointer.*;
+            schema.replace(Character);
+            let copied=schema;
+            schema.replace(bool);
             let value:Word=17;
-            let changed=copied.word == .char'builtin;
-            '(changed and value == 17)
+            let unchanged=original.word == Byte;
+            let changed=copied.word == Character and schema.word == bool;
+            '(unchanged and changed and value == 17)
         } fn run()->bool {~<build()>}";
-    let compile = |source: &str| {
-        support::compile_with_source_bindings(
-            source,
-            &Default::default(),
-            luna::protocols::type_constructors::Selectors {
-                copy: Some("Duplicate"),
-                drop: Some("Retire"),
-                ..Default::default()
-            },
-        )
-    };
-    let package = compile(source).unwrap();
-    assert_eq!(
-        luna::execution::interpret(&package, "run", 100_000).unwrap(),
-        Value::Bool(true)
-    );
-    for implementation in [
-        "impl Duplicate for .Type'builtin {}",
-        "impl Duplicate for Types {}",
-    ] {
-        let failure = compile(&source.replace(implementation, "")).unwrap_err();
-        assert!(
-            failure.contains("Copy component has no Copy capability"),
-            "{failure}"
-        );
-    }
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let wrong = source.replace("let value:Word=17", "let value:Word='x'");
+    assert!(support::compile_with_protocols(&wrong, &Default::default()).is_err());
 }
 
 #[test]
