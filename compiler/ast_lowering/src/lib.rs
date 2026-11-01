@@ -122,7 +122,9 @@ pub struct LoweringContext<'hir, 'ast, 'resolver> {
 
     pub(crate) surrouding_ctx: Vec<SurroundingContext>,
     pub(crate) refinement_depth: usize,
-    pub(crate) test_template_ports: HashMap<resolve::DefId, Vec<hir::common::Ident>>,
+    pub(crate) pending_function_template: bool,
+    pub(crate) template_body_ports:
+        HashMap<function_templates::BodyBinding, Vec<hir::common::Ident>>,
 }
 
 impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
@@ -153,7 +155,8 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             pattern_code_outputs: HashMap::new(),
             surrouding_ctx: Vec::new(),
             refinement_depth: 0,
-            test_template_ports: HashMap::new(),
+            pending_function_template: false,
+            template_body_ports: HashMap::new(),
         }
     }
 

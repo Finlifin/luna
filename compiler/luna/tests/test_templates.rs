@@ -2551,3 +2551,105 @@ fn shared_template_context_types_remain_in_the_declaration_scope() {
         "{dump}"
     );
 }
+
+#[test]
+fn shared_template_splice_resolves_lexical_bindings_before_expansion() {
+    let source = "template fn fixture(flag:bool,quote lambda body:<flag:bool |- bool>)->bool {
+        let flag = false;
+        { let flag = true; ~<body> }
+    }";
+    let Artifact::Hir(dump) = compile(source, Emit::Hir).unwrap() else {
+        panic!("expected HIR")
+    };
+    let substitution = dump.split("(substitute (port ").nth(1).unwrap();
+    let target = substitution
+        .split("(target ")
+        .nth(1)
+        .unwrap()
+        .split(")))")
+        .next()
+        .unwrap();
+    let bindings = dump
+        .split("(pattern (id ")
+        .skip(1)
+        .map(|part| part.split(")))").next().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(bindings.len(), 2, "{dump}");
+    assert_ne!(bindings[0], bindings[1]);
+    assert_eq!(
+        target, bindings[1],
+        "splice must retain inner identity: {dump}"
+    );
+
+    let source =
+        "template fn fixture(flag:bool,quote lambda body:<flag:bool |- bool>)->bool {~<body>}";
+    let Artifact::Hir(dump) = compile(source, Emit::Hir).unwrap() else {
+        panic!("expected HIR")
+    };
+    let substitution = dump.split("(substitute (port ").nth(1).unwrap();
+    assert!(
+        substitution.contains("(resolved-fn-param (name \"flag\")"),
+        "{dump}"
+    );
+}
+
+#[test]
+fn shared_template_splice_requires_available_local_ports() {
+    for body in [
+        "~<body>",
+        "~<body>; let flag=true; false",
+        "{let flag=true;} ~<body>",
+    ] {
+        let source = format!(
+            "fn flag()->bool {{true}}
+            template fn fixture(quote lambda body:<flag:bool |- bool>)->bool {{{body}}}"
+        );
+        let failure = compile(&source, Emit::Hir)
+            .err()
+            .expect("missing lexical port");
+        assert!(
+            failure.contains("no local binding for context port `flag`"),
+            "{failure}"
+        );
+    }
+    let source = "template fn fixture(quote lambda body:<flag:bool,flag:bool |- bool>)->bool {let flag=true;~<body>}";
+    let failure = compile(source, Emit::Hir)
+        .err()
+        .expect("duplicate ports without instance");
+    assert!(
+        failure.contains("duplicate function template context binding"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn shared_template_explicit_ports_override_implicit_connections() {
+    let source = "template fn fixture(actual:bool,quote lambda body:<flag:bool |- bool>)->bool {~[flag=actual]<body>}";
+    let Artifact::Hir(dump) = compile(source, Emit::Hir).unwrap() else {
+        panic!("expected HIR")
+    };
+    assert_eq!(dump.matches("(substitute (port ").count(), 1, "{dump}");
+    let substitution = dump.split("(substitute (port ").nth(1).unwrap();
+    assert!(
+        substitution.contains("(resolved-fn-param (name \"actual\")"),
+        "{dump}"
+    );
+    for (splice, message) in [
+        (
+            "~[flag=actual,flag=actual]<body>",
+            "duplicate function template splice port",
+        ),
+        (
+            "~[missing=actual]<body>",
+            "unknown function template splice port",
+        ),
+        ("~[flag=global]<body>", "requires a local binding"),
+    ] {
+        let source = format!("fn global()->bool {{true}}
+            template fn fixture(actual:bool,quote lambda body:<flag:bool |- bool>)->bool {{{splice}}}");
+        let failure = compile(&source, Emit::Hir)
+            .err()
+            .expect("invalid explicit connection");
+        assert!(failure.contains(message), "{splice}: {failure}");
+    }
+}

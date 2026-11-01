@@ -7,6 +7,14 @@ use hir::{
 };
 use resolve::{BindingKind, RibKind};
 
+/// Declaration-bound code inputs use distinct identities for clause inputs
+/// and function parameters. Port completion never keys a code value by name.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum BodyBinding {
+    Clause(resolve::DefId),
+    Parameter(HirId),
+}
+
 impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
     pub(crate) fn lower_function_template_instance(
         &mut self,

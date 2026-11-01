@@ -120,7 +120,11 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 self.lower_function_template_instance(node, FnModifiers::default())
             }
             NodeKind::FunctionTemplateDef => {
+                // Consume the marker at the function entry, before lowering
+                // its signature or body. Nested declarations do not inherit it.
+                let saved_template = std::mem::replace(&mut self.pending_function_template, true);
                 let owner = self.lower_top_level_node(children[0]);
+                self.pending_function_template = saved_template;
                 let mut item = self
                     .package
                     .item(owner)
@@ -618,7 +622,8 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
 
     /// Lower `Function`: a, N, b, N, c
     ///   (id, params, return_type, clauses, body)
-    fn lower_function(&mut self, node: NodeIndex, modifiers: FnModifiers) -> OwnerId {
+    fn lower_function(&mut self, node: NodeIndex, mut modifiers: FnModifiers) -> OwnerId {
+        modifiers.is_function_template |= std::mem::take(&mut self.pending_function_template);
         self.lower_callable(node, modifiers, None)
     }
 
@@ -829,7 +834,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 self.define_local(binding.name, node, binding.hir_id);
             }
         }
-        let saved_template_ports = self.test_template_ports.clone();
+        let saved_template_ports = self.template_body_ports.clone();
         if let Ok(Some(parameter)) = fn_sig.test_template_body() {
             let mut kind = &parameter.kind;
             while let hir::ClauseParamKind::Quote(inner) = kind {
@@ -847,9 +852,36 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                         }
                     }
                     if let Some(definition) = parameter.definition {
-                        self.test_template_ports
-                            .insert(definition, entries.iter().map(|entry| entry.name).collect());
+                        self.template_body_ports.insert(
+                            crate::function_templates::BodyBinding::Clause(definition),
+                            entries.iter().map(|entry| entry.name).collect(),
+                        );
                     }
+                }
+            }
+        }
+        if modifiers.is_function_template {
+            for parameter in params_slice {
+                if !parameter.ty.is_quote() || !parameter.ty.is_lambda() {
+                    continue;
+                }
+                let hir::common::TyParamKind::Positional(ty) = parameter.ty.kind else {
+                    continue;
+                };
+                if let ExprKind::ContextualExprType(entries, _) = &ty.kind {
+                    let mut names = std::collections::HashSet::new();
+                    for entry in entries {
+                        if !names.insert(entry.name.name) {
+                            self.emit_malformed(
+                                "duplicate function template context binding",
+                                entry.name.span,
+                            );
+                        }
+                    }
+                    self.template_body_ports.insert(
+                        crate::function_templates::BodyBinding::Parameter(parameter.hir_id),
+                        entries.iter().map(|entry| entry.name).collect(),
+                    );
                 }
             }
         }
@@ -862,7 +894,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             },
             body_node,
         );
-        self.test_template_ports = saved_template_ports;
+        self.template_body_ports = saved_template_ports;
         let body_expr_ref = self.arena.alloc_expr(body_expr);
 
         // Build Body with params

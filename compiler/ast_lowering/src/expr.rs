@@ -305,19 +305,30 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     })
                     .collect();
                 if kind == NodeKind::SpliceExpr {
-                    if let ExprKind::ResolvedClauseParam(_, definition) = body.kind {
-                        if let Some(ports) = self.test_template_ports.get(&definition).cloned() {
+                    use crate::function_templates::BodyBinding;
+                    let input = match body.kind {
+                        ExprKind::ResolvedClauseParam(_, definition) => {
+                            Some((BodyBinding::Clause(definition), "test template"))
+                        }
+                        ExprKind::ResolvedFnParam(_, binding)
+                        | ExprKind::ResolvedLocal(_, binding) => {
+                            Some((BodyBinding::Parameter(binding), "function template"))
+                        }
+                        _ => None,
+                    };
+                    if let Some((binding, category)) = input {
+                        if let Some(ports) = self.template_body_ports.get(&binding).cloned() {
                             let mut explicit = std::collections::HashSet::new();
                             for entry in &substitutions {
                                 if !explicit.insert(entry.port.name) {
                                     self.emit_malformed(
-                                        "duplicate test template splice port",
+                                        &format!("duplicate {category} splice port"),
                                         entry.port.span,
                                     );
                                 }
                                 if !ports.iter().any(|port| port.name == entry.port.name) {
                                     self.emit_malformed(
-                                        "unknown test template splice port",
+                                        &format!("unknown {category} splice port"),
                                         entry.port.span,
                                     );
                                 }
@@ -325,7 +336,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                                     entry.binding.kind,
                                     ExprKind::ResolvedLocal(..) | ExprKind::ResolvedFnParam(..)
                                 ) {
-                                    self.emit_malformed("test template substitution requires a local binding, not a computed value or global declaration", entry.binding.span);
+                                    self.emit_malformed(&format!("{category} substitution requires a local binding, not a computed value or global declaration"), entry.binding.span);
                                 }
                             }
                             for port in ports {
@@ -358,7 +369,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                                             _ => None,
                                         });
                                 let Some(binding_kind) = binding_kind else {
-                                    self.emit_malformed(&format!("test template splice has no local binding for context port `{}`; supply an explicit substitution", port.name), span);
+                                    self.emit_malformed(&format!("{category} splice has no local binding for context port `{}`; supply an explicit substitution", port.name), span);
                                     continue;
                                 };
                                 let binding = Expr {
