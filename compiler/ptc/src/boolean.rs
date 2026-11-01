@@ -159,13 +159,13 @@ impl Circuit {
         let mut index_cost = self
             .nodes
             .len()
-            .saturating_mul(2)
+            .saturating_mul(5)
             .saturating_add(assignment.len());
         for id in 0..self.nodes.len() {
             values.push(self.node_value(id, &values, assignment, fuel)?);
             index_cost = index_cost.saturating_add(match &self.nodes[id] {
                 Node::Not(_) => 1,
-                Node::And(inputs) | Node::Or(inputs) => inputs.len(),
+                Node::And(inputs) | Node::Or(inputs) => inputs.len().saturating_mul(2),
                 _ => 0,
             });
         }

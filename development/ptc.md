@@ -832,3 +832,32 @@ Validation from `/home/fin/luna`:
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`: four passed (`/tmp/luna-tools-j9qhz343/result.json`).
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_type_factories_keep_identity_through_comptime_parameters`: passed (`/tmp/luna-tools-byjfqnl3/result.json`).
 - Formatting check and `git diff --check` passed (`/tmp/luna-tools-nza7nmmp/result.json`).
+
+## Incremental truth counts for wide Boolean gates
+
+Warmed reverse-dependency indices now retain false/true/unknown child counts
+for each conjunction and disjunction. A changed child updates each parent edge's
+counts before the parent is evaluated in topological order. Gate truth follows
+from those counts without rescanning siblings. Repeated input occurrences count
+separately even though the dirty-node set deduplicates the parent. Negations,
+constants, and atom leaves keep their existing direct evaluation rules.
+
+Count allocation and initialization are included in the reserved index cost.
+The demand-driven warmup policy therefore waits for enough actual reuse before
+installing the larger index. Interrupted updates still discard the entire
+session, including partially updated counters. S-expression cache dumps expose
+the count state alongside node values; independent full/source evaluation stays
+available for validation.
+
+This removes the preceding stage's wide-gate value scan. Unit extraction and
+conflict explanations can still traverse wide child lists, so the result is a
+local evaluation improvement rather than constant-time whole propagation.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p ptc -p type_resolution`: 482 passed (`/tmp/luna-tools-g77kfifn/result.json`).
+- New tests compare complete cached values against full evaluation through six false/true/unknown transitions for wide AND and OR gates, including duplicate edges to one child. The 16- and 4,096-input versions consume identical local update fuel (at most 16 units per transition), with conserved occurrence counts.
+- Existing exhaustive partial assignments, interrupted cache updates, new epochs, sparse subtree updates, and short-query budget checks remain passing. Warmup tests now wait for actual indexed state rather than assuming a fixed construction pass count.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`: four passed (`/tmp/luna-tools-r5s3szvc/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_type_factories_keep_identity_through_comptime_parameters`: passed (`/tmp/luna-tools-zypxapuu/result.json`).
+- Formatting check and `git diff --check` passed (`/tmp/luna-tools-wsq1h7qt/result.json`).

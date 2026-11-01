@@ -11,12 +11,17 @@ pub(super) struct State {
 struct Dependencies {
     parents: Vec<Vec<usize>>,
     atoms: Vec<Vec<usize>>,
+    counts: Vec<[usize; 3]>,
+}
+fn truth_index(value: Option<bool>) -> usize {
+    value.map_or(2, |value| value as usize)
 }
 impl Dependencies {
     // The full cost is reserved from a prior evaluation's node/edge counts.
-    fn new(circuit: &Circuit, atoms_count: usize) -> Self {
+    fn new(circuit: &Circuit, atoms_count: usize, values: &[Option<bool>]) -> Self {
         let mut parents = vec![Vec::new(); circuit.nodes.len()];
         let mut atoms = vec![Vec::new(); atoms_count];
+        let mut counts = vec![[0; 3]; circuit.nodes.len()];
         for (id, node) in circuit.nodes.iter().enumerate() {
             match node {
                 Node::Atom(index) => atoms[*index].push(id),
@@ -24,12 +29,17 @@ impl Dependencies {
                 Node::And(inputs) | Node::Or(inputs) => {
                     for &input in inputs {
                         parents[input].push(id);
+                        counts[id][truth_index(values[input])] += 1;
                     }
                 }
                 Node::Constant(_) => {}
             }
         }
-        Self { parents, atoms }
+        Self {
+            parents,
+            atoms,
+            counts,
+        }
     }
 }
 impl State {
@@ -49,7 +59,7 @@ impl State {
         changed: &BTreeSet<usize>,
         fuel: &mut usize,
     ) -> Result<(), ()> {
-        let Some(dependencies) = &self.dependencies else {
+        let Some(dependencies) = &mut self.dependencies else {
             let before = *fuel;
             let (values, index_cost) = circuit.evaluate(assignment, fuel)?;
             self.values = values;
@@ -58,7 +68,8 @@ impl State {
             // query fuel. Cold and short-lived circuits keep direct evaluation.
             if self.evaluated_work >= index_cost && index_cost <= *fuel / 16 {
                 *fuel -= index_cost;
-                self.dependencies = Some(Dependencies::new(circuit, assignment.len()));
+                self.dependencies =
+                    Some(Dependencies::new(circuit, assignment.len(), &self.values));
             }
             return Ok(());
         };
@@ -73,11 +84,32 @@ impl State {
         // Node IDs are topological. Every changed child is processed before
         // its parents, including duplicated occurrences of a source atom.
         while let Some(node) = dirty.pop_first() {
-            let value = circuit.node_value(node, &self.values, assignment, fuel)?;
+            let value = match &circuit.nodes[node] {
+                Node::And(_) | Node::Or(_) => {
+                    charge(fuel)?;
+                    let absorbing = matches!(circuit.nodes[node], Node::Or(_));
+                    let counts = dependencies.counts[node];
+                    if counts[absorbing as usize] > 0 {
+                        Some(absorbing)
+                    } else if counts[2] > 0 {
+                        None
+                    } else {
+                        Some(!absorbing)
+                    }
+                }
+                _ => circuit.node_value(node, &self.values, assignment, fuel)?,
+            };
             if value != self.values[node] {
+                let previous = self.values[node];
                 self.values[node] = value;
                 for &parent in &dependencies.parents[node] {
                     charge(fuel)?;
+                    if matches!(circuit.nodes[parent], Node::And(_) | Node::Or(_)) {
+                        charge(fuel)?;
+                        let counts = &mut dependencies.counts[parent];
+                        counts[truth_index(previous)] -= 1;
+                        counts[truth_index(value)] += 1;
+                    }
                     dirty.insert(parent);
                 }
             }
@@ -122,6 +154,19 @@ impl fmt::Display for State {
                 None => write!(f, " (node {id} unknown)")?,
             }
         }
+        if let Some(dependencies) = &self.dependencies {
+            write!(f, " (counts")?;
+            for (id, counts) in dependencies.counts.iter().enumerate() {
+                if *counts != [0; 3] {
+                    write!(
+                        f,
+                        " (node {id} (false {}) (true {}) (unknown {}))",
+                        counts[0], counts[1], counts[2]
+                    )?;
+                }
+            }
+            write!(f, ")")?;
+        }
         write!(f, ")")
     }
 }
@@ -131,6 +176,20 @@ mod tests {
     use super::*;
     use crate::{Atom, Equality, Formula};
     use nir::{DeclarationId, Primitive, Sort, Term};
+    fn warm(circuit: &mut Circuit, assignment: &[Option<bool>]) {
+        circuit
+            .propagate_changes(assignment, None, &mut 10000000)
+            .unwrap();
+        for _ in 0..16 {
+            circuit
+                .propagate_changes(assignment, Some(&BTreeSet::new()), &mut 10000000)
+                .unwrap();
+            if circuit.evaluation.as_ref().unwrap().dependencies.is_some() {
+                return;
+            }
+        }
+        panic!("reused circuit never installed its index");
+    }
     fn example() -> (Formula, Vec<Atom>) {
         let atoms: Vec<_> = (0..4)
             .map(|local| {
@@ -214,14 +273,7 @@ mod tests {
         let mut completed = false;
         for budget in 0..128 {
             let mut circuit = Circuit::compile(&formula, &atoms, &mut 100000).unwrap();
-            circuit
-                .propagate_changes(&initial, None, &mut 100000)
-                .unwrap();
-            for _ in 0..3 {
-                circuit
-                    .propagate_changes(&initial, Some(&BTreeSet::new()), &mut 100000)
-                    .unwrap();
-            }
+            warm(&mut circuit, &initial);
             assert!(circuit.evaluation.as_ref().unwrap().dependencies.is_some());
             match circuit.propagate_changes(&next, Some(&changed), &mut { budget }) {
                 Ok(_) => completed = true,
@@ -241,6 +293,65 @@ mod tests {
         }
         assert!(interrupted && completed);
     }
+    #[test]
+    fn wide_gate_updates_count_occurrences_without_scanning_siblings() {
+        for disjunction in [false, true] {
+            let mut costs = Vec::new();
+            for count in [16, 4096] {
+                let mut nodes: Vec<_> = (0..count).map(Node::Atom).collect();
+                let mut inputs: Vec<_> = (0..count).collect();
+                // A shared child occurs twice; reverse edges and counters
+                // must retain multiplicity even though the dirty set dedups.
+                inputs.push(0);
+                nodes.push(if disjunction {
+                    Node::Or(inputs)
+                } else {
+                    Node::And(inputs)
+                });
+                let mut circuit = Circuit {
+                    nodes,
+                    clauses: None,
+                    propagation: None,
+                    evaluation: None,
+                };
+                let mut assignment = vec![Some(!disjunction); count];
+                warm(&mut circuit, &assignment);
+                let mut state = circuit.evaluation.take().unwrap();
+                let mut work = Vec::new();
+                for value in [
+                    None,
+                    Some(disjunction),
+                    Some(!disjunction),
+                    Some(disjunction),
+                    None,
+                    Some(!disjunction),
+                ] {
+                    assignment[0] = value;
+                    let mut fuel = 1000;
+                    state
+                        .update(&circuit, &assignment, &BTreeSet::from([0]), &mut fuel)
+                        .unwrap();
+                    work.push(1000 - fuel);
+                    assert_eq!(
+                        state.values,
+                        circuit.evaluate(&assignment, &mut 1000000).unwrap().0
+                    );
+                    assert_eq!(state.values[count], value);
+                    let counts = state.dependencies.as_ref().unwrap().counts[count];
+                    assert_eq!(counts.iter().sum::<usize>(), count + 1);
+                    assert_eq!(counts[2], if value.is_none() { 2 } else { 0 });
+                }
+                assert!(state.to_string().contains("(counts (node"));
+                costs.push(work);
+            }
+            assert_eq!(costs[0], costs[1]);
+            assert!(
+                costs[0].iter().all(|cost| *cost <= 16),
+                "wide gate update work {costs:?}"
+            );
+        }
+    }
+
     #[test]
     fn settled_subtrees_avoid_visiting_unrelated_nodes() {
         let mut costs = Vec::new();
@@ -267,12 +378,7 @@ mod tests {
                 evaluation: None,
             };
             let mut assignment = vec![Some(false); count];
-            circuit
-                .propagate_changes(&assignment, None, &mut 10000000)
-                .unwrap();
-            circuit
-                .propagate_changes(&assignment, Some(&BTreeSet::new()), &mut 10000000)
-                .unwrap();
+            warm(&mut circuit, &assignment);
             assert!(circuit.evaluation.as_ref().unwrap().dependencies.is_some());
             assert_eq!(
                 circuit
