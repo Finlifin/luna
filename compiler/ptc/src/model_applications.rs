@@ -72,6 +72,21 @@ fn argument_with_types(term: &Term, type_leaf: &impl Fn(&Term) -> bool) -> bool 
                         .iter()
                         .all(|value| visit(value, depth + 1, remaining, type_leaf))
             }
+            Term::OptionalValue { ty, value } => {
+                matches!(ty.as_ref(), Term::Optional(_))
+                    && visit(ty, depth + 1, remaining, type_leaf)
+                    && value
+                        .as_ref()
+                        .is_none_or(|value| visit(value, depth + 1, remaining, type_leaf))
+            }
+            Term::ErrorValue { ty, label, value } => {
+                matches!(ty.as_ref(), Term::ErrorResult { .. })
+                    && visit(ty, depth + 1, remaining, type_leaf)
+                    && label
+                        .as_ref()
+                        .is_none_or(|label| visit(label, depth + 1, remaining, type_leaf))
+                    && visit(value, depth + 1, remaining, type_leaf)
+            }
             Term::TupleValue(values) => values
                 .iter()
                 .all(|value| visit(value, depth + 1, remaining, type_leaf)),
