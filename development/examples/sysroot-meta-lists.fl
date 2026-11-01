@@ -384,8 +384,14 @@ impl StagedSelector for bool {
     fn select(comptime value: bool) -> bool { true }
 }
 
+comptime fn staged_methods() -> meta.List<fn(comptime bool) -> bool> {
+    [bool.select]
+}
+
+const saved_staged_methods = staged_methods();
+
 comptime fn staged_methods_stored() -> bool {
-    let methods: meta.List<fn(comptime bool) -> bool> = [bool.select];
+    let methods = saved_staged_methods;
     let saved = methods;
     saved.length() == 1 and (saved.first() matches _?)
 }

@@ -1,0 +1,9 @@
+{- Known gap: dispatch preparation defers ordinary Type-input bodies, but
+   invocation does not yet prepare their demanded method selections. -}
+typealias Type = .Type'builtin;
+trait Selector { fn select(comptime value: bool) -> bool; }
+impl Selector for bool { fn select(comptime value: bool) -> bool { true } }
+comptime fn callback(comptime T: Type) -> fn(comptime bool) -> bool { bool.select }
+fn dispatch(comptime T: Type,
+    comptime .action: fn(comptime bool) -> bool = callback(T)) -> bool { action(true) }
+fn run() -> bool { dispatch(bool) }

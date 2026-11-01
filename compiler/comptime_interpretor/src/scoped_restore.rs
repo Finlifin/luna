@@ -302,7 +302,18 @@ impl Restore<'_> {
             Value::Closure(closure) => self.closure(closure, depth)?,
 
             Value::Code(code) => self.code(code)?,
-            Value::Pointer(_) | Value::ComptimeReference(_) | Value::RuntimeTraitMethod(_) => {
+            Value::RuntimeTraitMethod(method) => {
+                Value::RuntimeTraitMethod(Box::new(TraitMethodIdentity {
+                    interface: InterfaceInstance {
+                        declaration: method.interface.declaration,
+                        arguments: self.types(&method.interface.arguments)?,
+                    },
+                    subject: self.ty(&method.subject)?,
+                    member: method.member,
+                    method_arguments: self.types(&method.method_arguments)?,
+                }))
+            }
+            Value::Pointer(_) | Value::ComptimeReference(_) => {
                 return Err(ErrorKind::Unsupported);
             }
             value => {
@@ -589,6 +600,78 @@ mod tests {
         assert_eq!(
             Value::Bool(true).restore_scoped_types(&parameters, &arguments, &[], &mut 100),
             Ok(Value::Bool(true))
+        );
+    }
+}
+
+#[cfg(test)]
+mod method_identity_tests {
+    use super::*;
+    fn id(local: u32) -> DeclarationId {
+        DeclarationId { package: 98, local }
+    }
+    #[test]
+    fn method_results_restore_every_input_into_the_caller_telescope() {
+        let parameters = [
+            nir::DeclarationParameter {
+                declaration: id(1),
+                sort: nir::Sort::Type,
+            },
+            nir::DeclarationParameter {
+                declaration: id(2),
+                sort: nir::Sort::ComptimeValue,
+            },
+        ];
+        let rigid = |index: usize| Term::Rigid {
+            declaration: parameters[index].declaration,
+            sort: parameters[index].sort,
+        };
+        let identity = TraitMethodIdentity {
+            interface: InterfaceInstance {
+                declaration: id(3),
+                arguments: vec![rigid(0), rigid(1)],
+            },
+            subject: Term::Optional(Box::new(rigid(0))),
+            member: id(4),
+            method_arguments: vec![rigid(1), rigid(0)],
+        };
+        let input = Value::Tuple(vec![Value::RuntimeTraitMethod(Box::new(identity.clone()))]);
+        let arguments = [
+            Term::Bound {
+                depth: 0,
+                index: 0,
+                sort: nir::Sort::Type,
+            },
+            Term::Bool(true),
+        ];
+        let frames = [vec![nir::Sort::Type]];
+        let expected = Value::Tuple(vec![Value::RuntimeTraitMethod(Box::new(
+            TraitMethodIdentity {
+                interface: InterfaceInstance {
+                    declaration: id(3),
+                    arguments: arguments.to_vec(),
+                },
+                subject: Term::Optional(Box::new(arguments[0].clone())),
+                member: id(4),
+                method_arguments: vec![arguments[1].clone(), arguments[0].clone()],
+            },
+        ))]);
+        let restore =
+            |steps: &mut u64| input.restore_scoped_types(&parameters, &arguments, &frames, steps);
+        let mut steps = 10_000;
+        assert_eq!(restore(&mut steps).unwrap(), expected);
+        let cost = 10_000 - steps;
+        for mut budget in 0..cost {
+            assert_eq!(restore(&mut budget), Err(ErrorKind::StepsExhausted));
+        }
+        assert_eq!(restore(&mut cost.clone()).unwrap(), expected);
+        assert_eq!(
+            input,
+            Value::Tuple(vec![Value::RuntimeTraitMethod(Box::new(identity))])
+        );
+        assert_eq!(
+            input.restore_scoped_types(&parameters, &arguments, &[], &mut 10_000),
+            Err(ErrorKind::Type)
         );
     }
 }

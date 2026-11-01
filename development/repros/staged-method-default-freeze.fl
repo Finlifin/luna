@@ -1,0 +1,9 @@
+{- Known gap: restoring the method identity succeeds, but staging the
+   method-valued default still lacks a stable invocation-term carrier. -}
+typealias Type = .Type'builtin;
+trait Selector { fn select(comptime value: bool) -> bool; }
+impl Selector for bool { fn select(comptime value: bool) -> bool { true } }
+comptime fn callback() -> fn(comptime bool) -> bool where T { bool.select }
+fn dispatch(comptime T: Type,
+    comptime .action: fn(comptime bool) -> bool = callback<T>()) -> bool { action(true) }
+fn run() -> bool { dispatch(bool) }

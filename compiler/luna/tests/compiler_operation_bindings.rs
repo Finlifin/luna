@@ -614,8 +614,10 @@ fn staged_runtime_methods_can_be_stored_as_comptime_list_data() {
         "trait Selector { fn select(comptime value: bool) -> bool; }
         impl Selector for bool { fn select(comptime value: bool) -> bool { true } }
         const length = .list_length'builtin;
+        comptime fn callbacks() -> List<fn(comptime bool) -> bool> { [bool.select] }
+        const saved = callbacks();
         comptime fn run() -> bool {
-            let methods: List<fn(comptime bool) -> bool> = [bool.select];
+            let methods = saved;
             let copied = methods;
             length(copied) == 1
         }",
