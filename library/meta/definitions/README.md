@@ -93,6 +93,20 @@ fn preserve(comptime T: Type,
 `development/examples/sysroot-scoped-descriptors.fl`。这提供泛型描述数据的
 传递能力；尚不意味着 StructBuilder 已能发布带泛型子句的定义。
 
+编译器内部的 `assemble_struct_definition` 与 `DefinitionBatch` 已有普通 HIR
+泛型发布路径：子句参数使用独立声明身份，字段通过 `ResolvedClauseParam`
+引用它们，整个候选经过普通 elaboration 后才提交。生成字段的默认值同样在
+定义端检查；不能把只适用于 bool 的默认值当作任意 T 的默认值。失败保留草稿
+和既有包，修复草稿后可以重试。对应行为由
+`compiler/elaboration/tests/definitions.rs` 的泛型发布用例验证。
+
+这与公开 `Build() -> Type` 是两层接口。当前 VM 的具体 struct／enum／newtype
+请求不携带泛型绑定、形成子句或正文；不能删除其“无参数”检查就宣称支持泛型
+定义。后续公开声明构造能力需要把绑定、表达式及其解析证据交给上述普通发布链，
+并保留候选检查与提交边界，而不是在具体字段 Type 中塞入未绑定变量。此接口
+尚未接入 Flurry 库；内部发布验证不代表用户已经能生成泛型声明。
+
+
 Type 参数也可供 requires 中的描述函数调用使用，例如先声明
 `pure comptime fn Layout<fields: meta.List<Descriptor>> -> Type { bool }`，
 再约束 `Layout<describe(T)> == Layout<[Descriptor {kind: T}]>`。

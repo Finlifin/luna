@@ -391,3 +391,105 @@ fn generated_struct_nodes_publish_only_after_defaults_typecheck() {
         Some(Node::FieldDef(_))
     ));
 }
+
+#[test]
+fn generated_generic_structs_check_defaults_before_preserving_parameter_identity() {
+    fn description<'a>(arena: &'a HirArena, owner: OwnerId, default: bool) -> OwnerInfo<'a> {
+        hir::definitions::assemble_struct_definition(
+            arena,
+            owner,
+            Ident::new(Symbol::intern("Generated"), DUMMY_SP),
+            DUMMY_SP,
+            &mut 1000,
+            |nodes, fuel| {
+                let root = nodes.root();
+                let name = Ident::new(Symbol::intern("T"), DUMMY_SP);
+                let identity = hir::common::DefId::new(0, 100);
+                let parameters = arena.alloc_clause_param_slice([ClauseParam {
+                    hir_id: nodes.reserve(root, fuel)?,
+                    definition: Some(identity),
+                    name,
+                    kind: ClauseParamKind::Type(name),
+                    span: DUMMY_SP,
+                }]);
+                nodes.register(Node::ClauseParam(&parameters[0]), fuel)?;
+                let field = nodes.reserve(root, fuel)?;
+                let ty = arena.alloc_expr(Expr {
+                    hir_id: nodes.reserve(field, fuel)?,
+                    kind: ExprKind::ResolvedClauseParam(name.name, identity),
+                    span: DUMMY_SP,
+                });
+                nodes.register(Node::Expr(ty), fuel)?;
+                let default = if default {
+                    let value = arena.alloc_expr(Expr {
+                        hir_id: nodes.reserve(field, fuel)?,
+                        kind: ExprKind::Lit(Lit {
+                            kind: LitKind::Bool(true),
+                            span: DUMMY_SP,
+                        }),
+                        span: DUMMY_SP,
+                    });
+                    nodes.register(Node::Expr(value), fuel)?;
+                    Some(value as &Expr<'_>)
+                } else {
+                    None
+                };
+                Ok(StructDef {
+                    fields: arena.alloc_field_def_slice([FieldDef {
+                        hir_id: field,
+                        ident: Ident::new(Symbol::intern("value"), DUMMY_SP),
+                        ty,
+                        default,
+                        span: DUMMY_SP,
+                    }]),
+                    clause_params: parameters,
+                    clause_constraints: &[],
+                    nested_items: vec![],
+                })
+            },
+        )
+        .unwrap()
+    }
+    let arena = HirArena::new();
+    let mut package = Package::new();
+    let mut batch = DefinitionBatch::new(&mut package);
+    let owner = batch.reserve().unwrap();
+    batch
+        .define(description(&arena, owner, true), None, None)
+        .unwrap();
+    let before = batch.to_string();
+    let rejected = publish(
+        &mut batch,
+        &mut 10000,
+        &BTreeMap::new(),
+        &Protocols::default(),
+        None,
+    );
+    assert!(
+        matches!(rejected, Err(PublicationError::Check(_))),
+        "{rejected:?}"
+    );
+    assert_eq!(batch.to_string(), before);
+    assert_eq!(batch.published().num_defs(), 0);
+    batch
+        .define(description(&arena, owner, false), None, None)
+        .unwrap();
+    let (_, checked) = publish(
+        &mut batch,
+        &mut 10000,
+        &BTreeMap::new(),
+        &Protocols::default(),
+        None,
+    )
+    .unwrap();
+    let generated = &checked.structs[0];
+    assert_eq!(generated.type_parameters.len(), 1);
+    assert_eq!(
+        generated.fields[0].1,
+        nir::Term::Rigid {
+            declaration: generated.type_parameters[0],
+            sort: nir::Sort::Type,
+        }
+    );
+    assert_eq!(batch.published().num_defs(), 1);
+}
