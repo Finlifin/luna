@@ -1,5 +1,5 @@
-{- Known gap: dispatch preparation defers ordinary Type-input bodies, but
-   invocation does not yet prepare their demanded method selections. -}
+{- Regression: ordinary Type-input bodies defer dispatch preparation;
+   invocation selects demanded methods after binding those inputs. -}
 typealias Type = .Type'builtin;
 trait Selector { fn select(comptime value: bool) -> bool; }
 impl Selector for bool { fn select(comptime value: bool) -> bool { true } }

@@ -1,0 +1,13 @@
+{- Known gap: dependent default requirements lose the ordinary input binder
+   while elaborating callback(T), before invocation can select a method. -}
+typealias Type = .Type'builtin; typealias char = .char'builtin;
+trait Selector { fn select(comptime value: bool) -> bool; }
+impl Selector for bool { fn select(comptime value: bool) -> bool { true } }
+impl Selector for char { fn select(comptime value: bool) -> bool { false } }
+comptime fn callback(comptime T: Type) -> fn(comptime bool) -> bool
+where requires T :- Selector
+{ T.as(Selector).select }
+fn dispatch(comptime T: Type, comptime .action: fn(comptime bool) -> bool = callback(T)) -> bool
+where requires T :- Selector
+{ action(true) }
+fn run() -> bool { dispatch(bool) and not dispatch(char) and dispatch(bool) }

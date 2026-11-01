@@ -875,6 +875,12 @@ pub enum ContractOutcome {
     Unknown,
 }
 
+/// Compiler-owned selection service for the same immutable declaration world.
+/// Selection must discharge implementation and member formation obligations;
+/// the VM additionally validates inputs, phase and public signature before use.
+pub type MethodResolver<'a> =
+    dyn Fn(&Expr, &mut u64) -> Result<nir::program::MethodInstance, Error> + 'a;
+
 enum TypeSolver<'a> {
     Unmetered(&'a dyn Fn(&nir::program::TypePredicate) -> ContractOutcome),
     Budgeted(&'a dyn Fn(&nir::program::TypePredicate, &mut u64) -> ContractOutcome),
@@ -931,6 +937,7 @@ pub struct Interpreter<'a> {
     abstract_type_parameters: BTreeSet<DeclarationId>,
     abstract_value_parameters: BTreeMap<DeclarationId, Term>,
     type_solver: Option<TypeSolver<'a>>,
+    method_resolver: Option<&'a MethodResolver<'a>>,
     pointer_copy: Option<PointerCopyPermission<'a>>,
     declaration_parameter_sorts: Arc<BTreeMap<DeclarationId, nir::Sort>>,
     declaration_parameter_domains: Arc<BTreeMap<DeclarationId, Term>>,
@@ -942,6 +949,8 @@ pub struct Interpreter<'a> {
     assumed_interfaces: HashSet<(InterfaceInstance, Term)>,
     method_bodies:
         Arc<HashMap<(InterfaceInstance, Term, DeclarationId), (DeclarationId, Vec<Term>)>>,
+    resolved_method_bodies:
+        HashMap<(InterfaceInstance, Term, DeclarationId), (DeclarationId, Vec<Term>)>,
     associated_values: associated_catalog::Catalog<'a>,
     associated_initializers: associated_catalog::Catalog<'a>,
     active_associated_initializers: HashSet<(InterfaceInstance, Term, DeclarationId)>,
@@ -1951,6 +1960,12 @@ impl<'a> Interpreter<'a> {
         budget.steps = interpreter.remaining_steps();
         Ok(interpreter)
     }
+    /// Resolve invocation-demanded methods in this source VM's frozen world.
+    pub fn with_method_resolver(mut self, resolver: &'a MethodResolver<'a>) -> Self {
+        self.method_resolver = Some(resolver);
+        self
+    }
+
     /// Supply the host's type theory without coupling the interpreter to the
     /// elaborator. The callback receives an instantiated type predicate only.
     pub fn with_type_solver(
@@ -2990,8 +3005,8 @@ impl<'a> Interpreter<'a> {
                     member,
                     method_arguments,
                 } = identity.as_ref();
-                self.method_bodies
-                    .contains_key(&(interface.clone(), subject.clone(), *member))
+                (self.method_bodies.contains_key(&(interface.clone(), subject.clone(), *member))
+                    || self.resolved_method_bodies.contains_key(&(interface.clone(), subject.clone(), *member)))
                     && self
                         .method_contracts
                         .get(&(interface.declaration, *member))

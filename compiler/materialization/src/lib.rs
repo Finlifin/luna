@@ -205,6 +205,40 @@ pub fn resolve_method_instance(
     }
 }
 
+/// Prepare an invocation-demanded method identity in the frozen source world.
+/// No implementation body is traversed or executed by this selection.
+pub fn resolve_method_identity_in_context(
+    package: &n::Package,
+    callee: &n::Expr,
+    context: &Context,
+    assumptions: &[n::TraitRequirement],
+    fuel: &mut usize,
+) -> Result<n::MethodInstance, String> {
+    let mut selected = None;
+    let result = build(
+        package,
+        Budget {
+            steps: *fuel,
+            ..Budget::default()
+        },
+        Roots::MethodIdentity(callee, &mut selected),
+        BTreeSet::new(),
+        &[],
+        Some((context, assumptions)),
+        None,
+    );
+    match result {
+        Ok(result) => {
+            *fuel = result.remaining;
+            selected.ok_or("method selection produced no identity".into())
+        }
+        Err(reason) => {
+            *fuel = 0;
+            Err(reason)
+        }
+    }
+}
+
 /// Normalize annotations on a private expansion candidate without invoking
 /// code, selecting bodies or publishing an executable instance. Unresolved
 /// definition-side projections remain views; opaque heads retain identity.
@@ -395,6 +429,7 @@ enum Roots<'a> {
     Iir(&'a [iir::InstanceKey]),
     Method(&'a n::Expr, &'a mut Option<n::MethodInstance>),
     QuoteMethod(&'a n::Expr, &'a mut Option<n::MethodInstance>),
+    MethodIdentity(&'a n::Expr, &'a mut Option<n::MethodInstance>),
 }
 // The immutable type arena belongs to the entire materialization, including
 // the storage pass that runs after dependency discovery. Analysis-only callers
@@ -421,7 +456,7 @@ fn build(
     context: Option<(&Context, &[n::TraitRequirement])>,
     expansion: Option<&dyn Expansion>,
 ) -> Result<BuildResult, String> {
-    let quote_selection = matches!(roots, Roots::QuoteMethod(..));
+    let body_free_selection = matches!(roots, Roots::QuoteMethod(..) | Roots::MethodIdentity(..));
     // NIR interpretation retains all unconditional concrete implementations.
     // Their parent/capability worlds must remain closed even when only a few
     // function bodies are reachable. IIR instead owns its reachable world.
@@ -507,7 +542,10 @@ fn build(
                 .queue
                 .push_back(Task::Function(root.declaration, root.arguments.to_vec()));
         }
-    } else if let Roots::Method(callee, selected) | Roots::QuoteMethod(callee, selected) = roots {
+    } else if let Roots::Method(callee, selected)
+    | Roots::QuoteMethod(callee, selected)
+    | Roots::MethodIdentity(callee, selected) = roots
+    {
         let K::TraitMethod {
             interface,
             interface_arguments,
@@ -529,7 +567,7 @@ fn build(
         let subject = builder.output[slot].subject.clone();
         let method =
             builder.specialize_method(slot, &instance, &subject, *member, method_arguments)?;
-        if !quote_selection {
+        if !body_free_selection {
             builder
                 .queue
                 .push_back(Task::Function(method.body, method.arguments.clone()));

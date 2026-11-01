@@ -166,6 +166,22 @@ impl Builder<'_> {
                 _ => ContractOutcome::Unknown,
             }
         };
+        let method_resolver = |callee: &n::Expr, remaining: &mut u64| {
+            let mut fuel = usize::try_from(*remaining).unwrap_or(usize::MAX);
+            let before = fuel;
+            let result = resolve_method_identity_in_context(
+                snapshot,
+                callee,
+                self.world.context(),
+                self.world.assumptions(),
+                &mut fuel,
+            );
+            *remaining -= (before - fuel) as u64;
+            result.map_err(|_| comptime_interpretor::Error {
+                kind: comptime_interpretor::ErrorKind::UnmaterializedDispatch,
+                source: Some(callee.source),
+            })
+        };
         let mut interpreter = Interpreter::for_comptime_with_assumptions(
             snapshot,
             self.world.assumptions(),
@@ -175,7 +191,8 @@ impl Builder<'_> {
             },
         )
         .map_err(|error| format!("staged comptime preparation: {error}"))?
-        .with_type_solver(&solver);
+        .with_type_solver(&solver)
+        .with_method_resolver(&method_resolver);
         let value = interpreter.invoke(entry, vec![]);
         self.fuel = usize::try_from(interpreter.remaining_steps()).unwrap_or(usize::MAX);
         let value = value.map_err(|error| format!("staged comptime invocation: {error}"))?;

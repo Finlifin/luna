@@ -305,6 +305,14 @@ impl<'a> Session<'a> {
     ) -> Result<Self, Error> {
         Ok(Self::new(package, context, budget)?.with_struct_builder(builder))
     }
+    pub(crate) fn with_method_resolver(
+        mut self,
+        resolver: &'a comptime_interpretor::MethodResolver<'a>,
+    ) -> Self {
+        self.interpreter = self.interpreter.with_method_resolver(resolver);
+        self
+    }
+
     pub(crate) fn with_newtype_builder(
         mut self,
         builder: &'a dyn Fn(

@@ -139,18 +139,70 @@ impl Interpreter<'_> {
             .iter()
             .map(|argument| self.selected_type_view(argument, Some(source)))
             .collect::<Result<Vec<_>, _>>()?;
-        let (body, mut arguments) = self
+        let key = (
+            InterfaceInstance {
+                declaration: interface,
+                arguments: selected_arguments,
+            },
+            selected_subject,
+            member,
+        );
+        let (binding, pending) = if let Some(binding) = self
             .method_bodies
-            .get(&(
-                InterfaceInstance {
-                    declaration: interface,
-                    arguments: selected_arguments,
-                },
-                selected_subject,
-                member,
-            ))
+            .get(&key)
+            .or_else(|| self.resolved_method_bodies.get(&key))
             .cloned()
-            .ok_or_else(|| self.failure(ErrorKind::UnmaterializedDispatch, Some(source)))?;
+        {
+            (binding, false)
+        } else {
+            let resolver = self
+                .method_resolver
+                .filter(|_| self.comptime_only && self.graph.is_none())
+                .ok_or_else(|| self.failure(ErrorKind::UnmaterializedDispatch, Some(source)))?;
+            self.charge_copy_work(Some(source), |fuel| {
+                for term in std::iter::once(&key.1)
+                    .chain(&key.0.arguments)
+                    .chain(method_arguments)
+                    .chain(std::iter::once(output))
+                {
+                    nir::copy_budget::charge_type_substitution(term, &[], &[], fuel)?;
+                }
+                Ok(())
+            })?;
+            let expression = Expr {
+                source,
+                ty: output.clone(),
+                kind: K::TraitMethod {
+                    interface,
+                    interface_arguments: key.0.arguments.clone(),
+                    subject: key.1.clone(),
+                    member,
+                    method_arguments: method_arguments.to_vec(),
+                },
+            };
+            let before = self.budget.steps;
+            let selected = resolver(&expression, &mut self.budget.steps);
+            if self.budget.steps > before {
+                self.budget.steps = 0;
+                return Err(self.failure(ErrorKind::StepsExhausted, Some(source)));
+            }
+            let selected = selected?;
+            self.charge_copy_work(Some(source), |fuel| {
+                for argument in selected.arguments.iter().chain(&selected.method_arguments) {
+                    nir::copy_budget::charge_type_substitution(argument, &[], &[], fuel)?;
+                }
+                Ok(())
+            })?;
+            if selected.member != member
+                || selected.method_arguments != method_arguments
+                || !selected.arguments.ends_with(method_arguments)
+            {
+                return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
+            }
+            let prefix = selected.arguments.len() - method_arguments.len();
+            ((selected.body, selected.arguments[..prefix].to_vec()), true)
+        };
+        let (body, mut arguments) = binding.clone();
         arguments.extend(method_arguments.iter().cloned());
         if let Some(identity) = self.runtime_function_identities.get(&body) {
             self.admit_function_inputs(&identity.type_parameters, &arguments, source)?;
@@ -162,6 +214,10 @@ impl Interpreter<'_> {
                 || (!contract.program.preconditions.is_empty() && !retained_template)
             {
                 return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
+            }
+            if pending {
+                self.resolved_method_bodies
+                    .insert(key.clone(), binding.clone());
             }
             return Ok(Selection::Value(Value::RuntimeTraitMethod(Box::new(
                 TraitMethodIdentity {
@@ -179,6 +235,12 @@ impl Interpreter<'_> {
             .functions
             .get(&body)
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source)))?;
+        if pending {
+            if definition.phase == nir::program::FunctionPhase::NormalForm {
+                return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
+            }
+            self.admit_function_inputs(&definition.type_parameters, &arguments, source)?;
+        }
         let ty = definition
             .signature
             .instantiate_parameters(&self.input_binders(&definition.type_parameters), &arguments)
@@ -195,6 +257,10 @@ impl Interpreter<'_> {
             }
             // Transport the public interface identity even when this
             // snapshot also contains its implementation's runtime body.
+            if pending {
+                self.resolved_method_bodies
+                    .insert(key.clone(), binding.clone());
+            }
             return Ok(Selection::Value(Value::RuntimeTraitMethod(Box::new(
                 TraitMethodIdentity {
                     interface: InterfaceInstance {
@@ -206,6 +272,9 @@ impl Interpreter<'_> {
                     method_arguments: method_arguments.to_vec(),
                 },
             ))));
+        }
+        if pending {
+            self.resolved_method_bodies.insert(key, binding);
         }
         Ok(Selection::Function {
             declaration: body,

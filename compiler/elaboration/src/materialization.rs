@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 
 pub use ::materialization::{
     dispatch_instances, dispatch_instances_for_invocation, dispatch_instances_for_roots,
-    resolve_method_instance,
+    resolve_method_identity_in_context, resolve_method_instance,
 };
 pub(crate) use ::materialization::{
     dispatch_instances_in_context, normalize_inline_annotations, resolve_quote_method_instance,

@@ -1928,3 +1928,70 @@ fn method_normal_inputs_validate_origins_argument_partitions_and_contracts() {
     vm.validate_immutable_input(&nf(argument), &type_domain)
         .unwrap();
 }
+
+#[test]
+fn deferred_method_selection_is_transactional_and_comptime_only() {
+    use std::cell::Cell;
+    let mut world = trait_package();
+    world
+        .dispatch_instances
+        .push(nir::program::DispatchInstance {
+            interface: id(4),
+            interface_arguments: vec![],
+            subject: Term::Primitive(Primitive::Bool),
+            implementation: id(6),
+            arguments: vec![],
+            methods: vec![],
+            associated: vec![],
+            associated_initializers: vec![],
+        });
+    let calls = Cell::new(0);
+    let resolver = |_: &Expr, fuel: &mut u64| {
+        *fuel -= 1;
+        calls.set(calls.get() + 1);
+        Ok(nir::program::MethodInstance {
+            member: id(5),
+            method_arguments: vec![Term::Primitive(Primitive::Bool)],
+            body: if calls.get() == 1 { id(98) } else { id(2) },
+            arguments: vec![Term::Primitive(Primitive::Bool)],
+        })
+    };
+    let mut vm = Interpreter::for_comptime(&world, Budget::default())
+        .unwrap()
+        .with_method_resolver(&resolver);
+    assert_eq!(
+        vm.invoke(id(1), vec![]).unwrap_err().kind,
+        ErrorKind::UnknownFunction
+    );
+    let value = vm.invoke(id(1), vec![]).unwrap();
+    assert!(matches!(value, Value::RuntimeTraitMethod(_)));
+    assert_eq!(vm.invoke(id(1), vec![]).unwrap(), value);
+    assert_eq!(
+        calls.get(),
+        2,
+        "validated binding should stay local to this invocation world"
+    );
+    let mut runtime = Interpreter::new(&world, Budget::default())
+        .unwrap()
+        .with_method_resolver(&resolver);
+    assert_eq!(
+        runtime.invoke(id(1), vec![]).unwrap_err().kind,
+        ErrorKind::UnmaterializedDispatch
+    );
+    assert_eq!(calls.get(), 2);
+    let refill = |_: &Expr, fuel: &mut u64| {
+        *fuel += 1;
+        Err(comptime_interpretor::Error {
+            kind: ErrorKind::UnmaterializedDispatch,
+            source: None,
+        })
+    };
+    let mut rejected = Interpreter::for_comptime(&world, Budget::default())
+        .unwrap()
+        .with_method_resolver(&refill);
+    assert_eq!(
+        rejected.invoke(id(1), vec![]).unwrap_err().kind,
+        ErrorKind::StepsExhausted
+    );
+    assert_eq!(rejected.remaining_steps(), 0);
+}

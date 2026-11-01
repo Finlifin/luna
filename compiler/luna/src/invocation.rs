@@ -289,6 +289,22 @@ fn execute_prepared(
     let solver = |predicate: &nir::program::TypePredicate, remaining: &mut u64| {
         crate::implementation_world::solve_metered(&world, predicate, preparation_budget, remaining)
     };
+    let method_resolver = |callee: &nir::program::Expr, remaining: &mut u64| {
+        let mut fuel = usize::try_from(*remaining).unwrap_or(usize::MAX);
+        let before = fuel;
+        let result = elaboration::materialization::resolve_method_identity_in_context(
+            package,
+            callee,
+            &context,
+            &[],
+            &mut fuel,
+        );
+        *remaining -= (before - fuel) as u64;
+        result.map_err(|_| comptime_interpretor::Error {
+            kind: comptime_interpretor::ErrorKind::UnmaterializedDispatch,
+            source: Some(callee.source),
+        })
+    };
     let mut budget = Budget {
         steps: fuel,
         depth: 128,
@@ -307,6 +323,7 @@ fn execute_prepared(
     };
     let mut interpreter = interpreter
         .map_err(|error| format!("cannot prepare comptime invocation: {error}"))?
+        .with_method_resolver(&method_resolver)
         .with_budgeted_type_solver(&solver)
         .with_budgeted_pointer_copy_permission(&pointer_copy);
     let builder = |request: &comptime_interpretor::StructBuildRequest, remaining: &mut u64| {

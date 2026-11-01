@@ -278,6 +278,22 @@ impl PreparedRequired {
             Some(reason) => format!("{message}; pointer Copy evidence: {reason}"),
             None => message,
         };
+        let method_resolver = |callee: &n::Expr, remaining: &mut u64| {
+            let mut fuel = usize::try_from(*remaining).unwrap_or(usize::MAX);
+            let before = fuel;
+            let result = crate::materialization::resolve_method_identity_in_context(
+                &package,
+                callee,
+                invocation_type_context,
+                &invocation_assumptions,
+                &mut fuel,
+            );
+            *remaining -= (before - fuel) as u64;
+            result.map_err(|_| comptime_interpretor::Error {
+                kind: comptime_interpretor::ErrorKind::UnmaterializedDispatch,
+                source: Some(callee.source),
+            })
+        };
         if result_type == p(P::Type) {
             // Required Type computations use the same committed scheduler as
             // saved residual calls. Source capture has already excluded any
@@ -307,6 +323,7 @@ impl PreparedRequired {
                     format!("required comptime preparation failed: {failure}"),
                 )
             })?;
+            session = session.with_method_resolver(&method_resolver);
             if builder.is_some() {
                 session = session
                     .with_struct_builder(&build)
@@ -374,6 +391,7 @@ impl PreparedRequired {
                 .with_enum_builder(&build_enum)
                 .with_newtype_builder(&build_newtype);
         }
+        interpreter = interpreter.with_method_resolver(&method_resolver);
         interpreter = interpreter.with_budgeted_type_solver(&type_solver);
         interpreter = interpreter.with_budgeted_pointer_copy_permission(&pointer_copy);
         let scope = interpreter

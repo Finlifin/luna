@@ -415,3 +415,32 @@ fn method_normal_form_inputs_restore_caller_type_arguments() {
     }
     assert_ne!(input("concrete", 0), input("other", 0));
 }
+
+#[test]
+fn ordinary_type_inputs_prepare_demanded_method_identities() {
+    let source = include_str!("../../../development/repros/staged-type-input-method-result.fl");
+    let package = support::compile_with_protocols(source, &Default::default()).unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn ordinary_type_inputs_select_methods_for_each_receiver_type() {
+    let source = "typealias Type = .Type'builtin; typealias char = .char'builtin;
+        trait Selector { fn select(comptime value: bool) -> bool; }
+        impl Selector for bool { fn select(comptime value: bool) -> bool { true } }
+        impl Selector for char { fn select(comptime value: bool) -> bool { false } }
+        comptime fn callback(comptime T: Type) -> fn(comptime bool) -> bool
+        where requires T :- Selector
+        { T.as(Selector).select }
+        fn dispatch_bool(comptime .action: fn(comptime bool) -> bool = callback(bool)) -> bool { action(true) }
+        fn dispatch_char(comptime .action: fn(comptime bool) -> bool = callback(char)) -> bool { action(true) }
+        fn run() -> bool { dispatch_bool() and not dispatch_char() and dispatch_bool() }";
+    let package = support::compile_with_protocols(source, &Default::default()).unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
