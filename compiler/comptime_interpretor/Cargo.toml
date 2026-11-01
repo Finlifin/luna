@@ -36,3 +36,7 @@ harness = false
 [[bench]]
 name = "list_summary"
 harness = false
+
+[[bench]]
+name = "source_session"
+harness = false

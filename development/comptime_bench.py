@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and repeatedly measure invocation-only workloads, retaining raw evidence."""
+"""Build and measure isolated VM workloads, retaining raw evidence."""
 import argparse
 import os
 from pathlib import Path
@@ -13,7 +13,7 @@ TARGET = Path('/tmp/luna-dev-002/target')
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--repeat', type=int, default=5)
-    parser.add_argument('--bench', choices=('invocation', 'type_list_index', 'list_length', 'list_append', 'borrowed_aggregate', 'object_queries'), default='invocation')
+    parser.add_argument('--bench', choices=('invocation', 'type_list_index', 'list_length', 'list_append', 'borrowed_aggregate', 'object_queries', 'source_session'), default='invocation')
     parser.add_argument('--iterations', type=int, help='invocations per workload and process')
     parser.add_argument('--binary', type=Path, help='measure a previously saved executable')
     args = parser.parse_args()
