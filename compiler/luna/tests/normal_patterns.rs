@@ -68,11 +68,12 @@ fn dynamic_member_inputs_execute_once_before_checked_arithmetic() {
         "typealias Type=.Type'builtin;typealias Byte=.u8'builtin;
         struct Holder where T {pub typealias Payload=T;}
         typealias Alias<T> = Holder<T>;
-        comptime fn choose(count:*Byte)->Type {count.* = 254;bool}
+        struct Counter {value:Byte}
+        impl Counter {comptime fn Choose(self)->Type {self.value=254;bool}}
         comptime fn Run()->Byte {
-            var count:Byte=0;
-            let selected=Alias<choose(count.ref)>.Payload;
-            if count < 255 {count + 1} else {0}
+            let count=Counter {value:0};
+            let selected=Alias<count.Choose()>.Payload;
+            if count.value < 255 {count.value + 1} else {0}
         }",
     );
     let mut vm =
@@ -86,7 +87,7 @@ fn dynamic_member_inputs_execute_once_before_checked_arithmetic() {
     let choose = package
         .functions
         .iter()
-        .find(|f| f.name == "choose")
+        .find(|f| f.name == "Choose")
         .unwrap()
         .declaration;
     assert_eq!(vm.invoke(run, vec![]).unwrap(), Value::UnsignedInteger(255));
@@ -183,15 +184,16 @@ fn dependent_type_pattern_guards_preserve_effects_and_candidate_order() {
     let package = compile(
         "typealias Type=.Type'builtin; typealias Bool=bool; typealias Int=.Integer'builtin;
         pure comptime fn Box<T,value:T>->Type {T}
-        comptime fn Tick(counter:*Int,result:Bool)->Bool {counter.* = counter.* + 1;result}
+        struct Counter {value:Int}
+        impl Counter {comptime fn tick(self,result:Bool)->Bool {self.value+=1;result}}
         comptime fn Probe(value:Type)->Int {
-            var count:Int=0;
+            let count=Counter {value:0};
             let matched:Int=value match {
-                Box<('Bool if Tick(count.ref,false)),item> => if item {100} else {101},
-                Box<('Bool and Tick(count.ref,true) is true),item> => if item {10} else {20},
+                Box<('Bool if count.tick(false)),item> => if item {100} else {101},
+                Box<('Bool and count.tick(true) is true),item> => if item {10} else {20},
                 _ => 30,
             };
-            count + matched
+            count.value + matched
         }
         comptime fn Hit()->Int {Probe(Box<Bool,true>)}
         comptime fn OtherValue()->Int {Probe(Box<Bool,false>)}
@@ -1184,15 +1186,16 @@ fn computed_tuple_type_evidence_preserves_candidate_effects_and_fallbacks() {
     let package=execution_support::compile_with_tuple(
         "typealias Type=.Type'builtin;typealias Int=.Integer'builtin;
         pure comptime fn Box<T,value:T>->Type {T}
-        comptime fn Tick(count:*Int,result:bool)->bool {count.* = count.* + 1;result}
+        struct Counter {value:Int}
+        impl Counter {comptime fn tick(self,result:bool)->bool {self.value+=1;result}}
         comptime fn Probe(value:Type)->Int {
-            var count:Int=0;
+            let count=Counter {value:0};
             let matched:Int=value match {
-                Box<( < Tuple<bool,bool> > if Tick(count.ref,false)),(a,b)> => 100,
-                Box<( < Tuple<bool,bool> > and Tick(count.ref,true) is true),(a,b)> => if a and not b {10} else {20},
+                Box<( < Tuple<bool,bool> > if count.tick(false)),(a,b)> => 100,
+                Box<( < Tuple<bool,bool> > and count.tick(true) is true),(a,b)> => if a and not b {10} else {20},
                 _=>30,
             };
-            count + matched
+            count.value + matched
         }
         comptime fn Hit()->Int {Probe(Box<Tuple<bool,bool>,(true,false)>)}
         comptime fn Other()->Int {Probe(Box<Tuple<bool,bool>,(false,true)>)}
