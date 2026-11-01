@@ -10569,3 +10569,29 @@ Validation from `/home/fin/luna`:
 This fixes two allowance resets; it does not establish that every preparation,
 copy or validation operation is fully metered. The phantom baseline and earlier
 execution-budget and memory-proof failures remain open.
+
+
+Instance-copy baseline: compare costs without freezing pipeline overhead
+------------------------------------------------------------------------
+
+A temporary exhaustion backtrace localized the phantom test's 3000-step failure
+to the materialization dependency queue, at depth zero with fuel zero
+(`/tmp/luna-tools-t83dye32/result.json`). It was not a substitution of the unused
+input into the body. The temporary instrumentation was removed; production
+materialization code is unchanged in this follow-up.
+
+The regression now finds a bounded successful allowance for the phantom graph
+and requires the repeated-substitution graph to fail during template copying at
+that same allowance. It retains the original 3000-step copy-stage rejection,
+full-budget successful retry and unchanged-source assertion. It additionally
+validates the phantom graph and its root identity. Non-budget failures during
+the bounded search fail the test rather than being silently skipped. This keeps
+the expanded-occurrence cost contract without freezing all surrounding passes'
+combined overhead to one historical number. No performance improvement is claimed.
+
+Validation from `/home/fin/luna`: `python3 -B development/check.py --timeout 900
+-- test -p luna --test instantiation` passed all 57 cases, exit 0
+(`/tmp/luna-tools-9dmjtc6n/result.json`). Workspace formatting passed
+(`/tmp/luna-tools-0dklk0na/result.json`); diff checks passed. No process remains
+live. The earlier phantom baseline is resolved as a test-contract issue; the
+separate execution depth, memory-proof and diagnostic failures remain open.

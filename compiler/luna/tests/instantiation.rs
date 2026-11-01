@@ -2190,16 +2190,41 @@ fn instance_copy_budget_counts_expanded_parameter_occurrences_and_recovers() {
             .declaration,
         arguments: key.arguments.clone().into(),
     };
-    elaboration::materialization::instantiate(
-        &source,
-        &[phantom],
-        Default::default(),
-        elaboration::ptc::Budget {
-            steps: 3000,
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    // Pipeline passes share one allowance, so their exact overhead is not a
+    // language contract. Find a budget that completes the unused input case,
+    // then require repeated substitution to fail at copying under that same
+    // allowance. Do not accept an arbitrary later materialization failure.
+    let (shared_budget, phantom_graph) = (3_000..=10_000)
+        .step_by(500)
+        .find_map(|steps| {
+            match elaboration::materialization::instantiate(
+                &source,
+                std::slice::from_ref(&phantom),
+                Default::default(),
+                elaboration::ptc::Budget {
+                    steps,
+                    ..Default::default()
+                },
+            ) {
+                Ok(graph) => Some((steps, graph)),
+                Err(error) => {
+                    assert!(
+                        error.contains("budget")
+                            || error.ends_with("within the type inspection limit"),
+                        "{error}"
+                    );
+                    None
+                }
+            }
+        })
+        .expect("unused Type input must fit below repeated-substitution work");
+    phantom_graph.validate(&mut 100_000).unwrap();
+    assert_eq!(phantom_graph.roots, vec![phantom]);
+    let error = attempt(shared_budget).unwrap_err();
+    assert!(
+        error.contains("dispatch template copy budget exhausted"),
+        "{error}"
+    );
     let graph = attempt(100_000).unwrap();
     graph.validate(&mut 100_000).unwrap();
     assert_eq!(graph.roots, vec![key]);
