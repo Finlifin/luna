@@ -11308,3 +11308,33 @@ Validation from `/home/fin/luna`:
 - All 10 comptime_iir_bytecode integration cases passed, exit 0
   (`/tmp/luna-tools-fo9bkbvr/result.json`). This target was rerun separately
   because Cargo stopped at the earlier builder fixture failures.
+
+### Validate concrete list operation contracts before execution
+
+IIR previously validated list constructors but accepted index, length and concat
+nodes with unrelated result types or incompatible operands. The regression in
+comptime_lists reproduced this before the fix (exit 101,
+`/tmp/luna-tools-erq57oe9/result.json`). These operations now share a dedicated
+list contract validator with construction: registered layout lookup establishes
+the element domain, indexing returns that domain, length returns Integer, and
+concatenation preserves both operands' complete list identity. Domain comparisons
+are charged, and early-return Never propagation is checked rather than erased.
+
+This validation runs for both bodies and contract expressions. It does not
+execute inputs, infer an element type, choose an NF model, or unfold a head.
+Runtime bounds checks remain invocation work. Legacy list layout roles and IR
+names still need their separate architectural migration.
+
+Validation from `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 900 -- test -p iir`: passed,
+  exit 0 (`/tmp/luna-tools-zry6xrgv/result.json`). New cases cover ordinary and
+  nested list domains, malformed index/result types, opaque layout rejection,
+  divergence and every insufficient validation budget followed by retry.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor`:
+  passed, exit 0 (`/tmp/luna-tools-lh8wdy59/result.json`).
+- Concrete public builder and bytecode integration cases passed, exit 0:
+  `python3 -B development/check.py --timeout 900 -- test -p luna
+  --test builder_invocations --test comptime_iir_bytecode concrete`
+  (`/tmp/luna-tools-__xctszs/result.json`).
+- Formatting check passed, exit 0 (`/tmp/luna-tools-yhbgpeni/result.json`);
+  `git diff --check` passed.

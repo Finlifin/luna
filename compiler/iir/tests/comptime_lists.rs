@@ -558,3 +558,95 @@ fn concrete_list_construction_checks_ordinary_and_nested_element_domains() {
             .contains("element type")
     );
 }
+
+#[test]
+fn concrete_list_operations_reject_inconsistent_domains_before_execution() {
+    let scalar = Term::Primitive(Primitive::Bool);
+    let values = list(scalar.clone(), vec![boolean(true)]);
+    let selected = index(values.clone(), scalar.clone(), "0");
+    let length = expr(
+        Term::Primitive(Primitive::Integer),
+        K::ListLength(Box::new(values.clone())),
+    );
+    let joined = expr(
+        values.ty.clone(),
+        K::ListConcat(Box::new(values.clone()), Box::new(values.clone())),
+    );
+    for valid in [selected.clone(), length.clone(), joined.clone()] {
+        graph_for_list(valid.clone())
+            .validate(&mut 100_000)
+            .unwrap();
+        let mut wrong_result = valid;
+        wrong_result.ty = Term::Primitive(Primitive::Type);
+        assert!(graph_for_list(wrong_result).validate(&mut 100_000).is_err());
+    }
+    let invalid_index = expr(
+        scalar.clone(),
+        K::TypeListIndex(Box::new(values.clone()), Box::new(boolean(false))),
+    );
+    assert!(
+        graph_for_list(invalid_index)
+            .validate(&mut 100_000)
+            .is_err()
+    );
+    let invalid_length = expr(
+        Term::Primitive(Primitive::Integer),
+        K::ListLength(Box::new(boolean(true))),
+    );
+    assert!(
+        graph_for_list(invalid_length)
+            .validate(&mut 100_000)
+            .is_err()
+    );
+    let nested = list(values.ty.clone(), vec![values.clone()]);
+    let mixed = expr(
+        values.ty.clone(),
+        K::ListConcat(Box::new(values.clone()), Box::new(nested.clone())),
+    );
+    assert!(graph_for_list(mixed).validate(&mut 100_000).is_err());
+    graph_for_list(index(nested, values.ty.clone(), "0"))
+        .validate(&mut 100_000)
+        .unwrap();
+    let mut opaque = graph_for_list(selected);
+    opaque.normal_forms[0].role = Role::Opaque;
+    assert!(opaque.validate(&mut 100_000).is_err());
+}
+
+#[test]
+fn concrete_list_operations_preserve_divergence_and_charge_domain_checks() {
+    let never = Term::Primitive(Primitive::Never);
+    let early_return = expr(never.clone(), K::Return(Some(Box::new(boolean(true)))));
+    let values = list(Term::Primitive(Primitive::Bool), vec![boolean(false)]);
+    let operations = [
+        expr(
+            never.clone(),
+            K::TypeListIndex(Box::new(values.clone()), Box::new(early_return.clone())),
+        ),
+        expr(never.clone(), K::ListLength(Box::new(early_return.clone()))),
+        expr(
+            never.clone(),
+            K::ListConcat(Box::new(values.clone()), Box::new(early_return.clone())),
+        ),
+        expr(
+            never.clone(),
+            K::ListConcat(Box::new(early_return), Box::new(values)),
+        ),
+    ];
+    for operation in operations {
+        let mut graph = graph_for_list(operation);
+        graph.functions[0].function.signature = Term::Function {
+            parameters: vec![],
+            result: Box::new(Term::Primitive(Primitive::Bool)),
+        };
+        let mut remaining = 100_000;
+        graph.validate(&mut remaining).unwrap();
+        let cost = 100_000 - remaining;
+        for mut allowance in 0..cost {
+            assert!(graph.validate(&mut allowance).is_err());
+        }
+        let mut exact = cost;
+        graph.validate(&mut exact).unwrap();
+        graph.functions[0].function.body.ty = Term::Primitive(Primitive::Integer);
+        assert!(graph.validate(&mut 100_000).is_err());
+    }
+}

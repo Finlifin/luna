@@ -3,6 +3,7 @@
 pub mod effect_values;
 pub mod effects;
 mod index;
+mod lists;
 mod type_links;
 use type_links::TypeLinks;
 pub mod staging;
@@ -532,6 +533,7 @@ impl Package {
     ) -> Result<(), String> {
         use nir::program::ExprKind as K;
         self.validate_type(&links, &expr.ty, fuel)?;
+        lists::validate(&self.normal_forms, expr, fuel)?;
         if let K::BuildMetadata {
             selector, entries, ..
         } = &expr.kind
@@ -665,39 +667,6 @@ impl Package {
                     .is_none()
                 {
                     return Err("IIR newtype conversion has no direct representation edge".into());
-                }
-            }
-            K::TypeList(fields) => {
-                *fuel = fuel
-                    .checked_sub(fields.len())
-                    .ok_or("IIR list budget exhausted")?;
-                if fields
-                    .iter()
-                    .any(|field| field.ty == Term::Primitive(nir::Primitive::Never))
-                {
-                    if expr.ty != Term::Primitive(nir::Primitive::Never) {
-                        return Err("IIR diverging list construction must be Never".into());
-                    }
-                    return Ok(());
-                }
-                let mut element = None;
-                for head in &self.normal_forms {
-                    *fuel = fuel
-                        .checked_sub(1)
-                        .ok_or("IIR list metadata budget exhausted")?;
-                    if let Some(ty) = head.list_element(&expr.ty) {
-                        element = Some(ty);
-                        break;
-                    }
-                }
-                let element = element
-                    .ok_or("IIR list construction requires registered list layout metadata")?;
-                for field in fields {
-                    nir::type_computations::charge_term(&field.ty, fuel)
-                        .map_err(|_| "IIR list element budget exhausted")?;
-                    if &field.ty != element {
-                        return Err("IIR list operand does not match its element type".into());
-                    }
                 }
             }
             K::TypeValue(ty) => {
