@@ -2454,6 +2454,12 @@ impl Checker<'_, '_> {
         for (slot, (parameter, (sort, annotation))) in
             sig.params.iter().zip(&definition.parameters).enumerate()
         {
+            // A staged fragment of a runtime function cannot read runtime
+            // inputs (checked above), nor store them as synthetic comptime
+            // arguments merely because they occur in the enclosing signature.
+            if self.in_staged_input && !sig.modifiers.is_comptime && *sort == Sort::Runtime {
+                continue;
+            }
             if let Annotation::Known(ty) = annotation {
                 mapping[slot] = Some(Term::Bound {
                     depth: 0,
