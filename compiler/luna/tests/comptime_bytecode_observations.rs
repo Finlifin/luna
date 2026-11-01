@@ -8,7 +8,7 @@ use comptime_interpretor::{Budget, Interpreter, Value};
 fn text_and_names_use_bytecode_with_utf8_byte_boundaries() {
     let source = format!(
         "{}
-        const symbol_byte=.symbol_byte'builtin;
+        const symbol_byte: comptime fn(Symbol,u64)->?u8 = .symbol_byte'builtin;
         enum Event {{ready,stopped}}
         comptime fn length(value:str)->u64 {{value.byte_length()}}
         comptime fn read_byte(value:str,index:u64)->?u8 {{value.byte(index)}}
@@ -27,13 +27,13 @@ fn text_and_names_use_bytecode_with_utf8_byte_boundaries() {
             "length",
             vec![Value::String("a🦀".into())],
             Value::UnsignedInteger(5),
-            2,
+            3,
         ),
         (
             "length",
             vec![Value::String("".into())],
             Value::UnsignedInteger(0),
-            2,
+            3,
         ),
         (
             "symbol",
@@ -82,7 +82,7 @@ fn text_and_names_use_bytecode_with_utf8_byte_boundaries() {
             assert_eq!(value.map(|v| *v), expected.map(Value::UnsignedInteger));
             assert_eq!(
                 vm.bytecode_invocations() - before,
-                if name == "read_byte" { 2 } else { 1 }
+                if name == "read_byte" { 3 } else { 2 }
             );
         }
     }

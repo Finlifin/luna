@@ -170,7 +170,7 @@ impl Checker<'_, '_> {
     ) -> Result<Option<hir::Symbol>, Error> {
         Ok(self
             .resolve_compiler_operation(owner, span)?
-            .map(|(name, _)| name))
+            .map(|(name, _, _)| name))
     }
 
     pub(super) fn direct_compiler_operation(
@@ -178,24 +178,19 @@ impl Checker<'_, '_> {
         owner: OwnerId,
         span: Span,
     ) -> Result<Option<hir::Symbol>, Error> {
-        let Some(name) = self.compiler_operation_binding(owner, span)? else {
+        let Some((name, _, signature)) = self.resolve_compiler_operation(owner, span)? else {
             return Ok(None);
         };
         // Established contracts are ordinary callable values. Keep the temporary
         // direct lowering only for operations awaiting callable contracts.
-        Ok(
-            signatures::callable(name.as_str(), self.protocols.meta_list)
-                .map_err(|message| error(span, message))?
-                .is_none()
-                .then_some(name),
-        )
+        Ok(signature.is_none().then_some(name))
     }
 
     fn resolve_compiler_operation(
         &mut self,
         mut owner: OwnerId,
         span: Span,
-    ) -> Result<Option<(hir::Symbol, OwnerId)>, Error> {
+    ) -> Result<Option<(hir::Symbol, OwnerId, Option<Term>)>, Error> {
         let mut visited = BTreeSet::new();
         let mut annotations = Vec::new();
         loop {
@@ -221,20 +216,45 @@ impl Checker<'_, '_> {
             match &initializer.kind {
                 H::Builtin(name) if operation(name.as_str()) => {
                     let name = *name;
+                    // Legacy phase-neutral bindings retain direct lowering.
+                    // Only the original declaration may establish a phase;
+                    // an alias cannot turn an untyped token into a function.
+                    if signatures::text_query(name.as_str()).is_some()
+                        && !annotations.iter().any(|(annotated, _)| *annotated == owner)
+                    {
+                        if let Some((_, annotation)) = annotations.first() {
+                            return Err(error(
+                                annotation.span,
+                                "typed compiler operation requires an explicit phase on its original binding",
+                            ));
+                        }
+                        return Ok(Some((name, owner, None)));
+                    }
+                    let mut signature =
+                        signatures::callable(name.as_str(), self.protocols.meta_list)
+                            .map_err(|message| error(span, message))?;
                     if !annotations.is_empty() {
-                        let expected = signatures::callable(name.as_str(), self.protocols.meta_list)
-                            .map_err(|message| error(span, message))?
-                            .ok_or_else(|| error(span, "typed compiler operation requires a supported callable signature contract"))?;
-                        for (owner, annotation) in annotations {
-                            if !self.active_signatures.insert(owner) {
+                        let mut expected = signature.clone().ok_or_else(|| error(span, "typed compiler operation requires a supported callable signature contract"))?;
+                        for (annotated_owner, annotation) in annotations.into_iter().rev() {
+                            if !self.active_signatures.insert(annotated_owner) {
                                 return Err(error(
                                     annotation.span,
                                     "cyclic compiler operation signature",
                                 ));
                             }
                             let actual = self.type_expr(annotation);
-                            self.active_signatures.remove(&owner);
+                            self.active_signatures.remove(&annotated_owner);
                             let actual = actual?;
+                            // Phase-neutral primitive operations may establish
+                            // either phase at their original typed binding.
+                            // Aliases retain that binding's phase and identity.
+                            if annotated_owner == owner
+                                && signatures::text_query(name.as_str()).is_some()
+                                && actual == Term::ComptimeFunction(Box::new(expected.clone()))
+                            {
+                                expected = actual.clone();
+                                signature = Some(expected.clone());
+                            }
                             if actual != expected {
                                 return Err(error(
                                     annotation.span,
@@ -245,7 +265,7 @@ impl Checker<'_, '_> {
                             }
                         }
                     }
-                    return Ok(Some((name, owner)));
+                    return Ok(Some((name, owner, signature)));
                 }
                 H::ResolvedDef { def_id, .. } => {
                     let Some(next) = self.package.definition_owner(*def_id) else {

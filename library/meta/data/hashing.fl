@@ -1,8 +1,8 @@
 use builtin.{bool, char, str, Symbol, u8, u16, u32, u64, u128,
     i8, i16, i32, i64, i128, usize, isize};
-use builtin.compiler.{str_byte_length as hash_str_byte_length, str_byte as hash_str_byte,
-    symbol_byte_length as hash_symbol_byte_length, symbol_byte as hash_symbol_byte,
-    integer_representation as hash_integer_representation};
+use text_impl.bindings.{byte_length as hash_str_byte_length, byte as hash_str_byte,
+    symbol_byte_length as hash_symbol_byte_length, symbol_byte as hash_symbol_byte};
+use builtin.compiler.{integer_representation as hash_integer_representation};
 
 {-
     The same representation/content hashes as builtin.Hash, with independent

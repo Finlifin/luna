@@ -6,7 +6,7 @@ use comptime_interpretor::Value;
 
 fn source(body: &str) -> String {
     format!(
-        "mod primitives {{ {} }} use primitives.*;\nmod bindings {{ {} }}\nmod comparison {{ {} }}\nmod resources {{ {} }}\nmod conversion {{ {} }}\nmod traits {{ {} }}\nmod builtin {{pub use primitives.*;pub mod compiler {{pub use bindings.*;}}}}\nmod comptime_comparison {{ {} }}\nmod comptime_hashing {{ {} }}\npub use comptime_comparison.ComptimeEq;pub use comptime_hashing.ComptimeHash;pub use traits.*;\n{body}",
+        "mod primitives {{ {} }} use primitives.*;\nmod bindings {{ {} }}\nmod comparison {{ {} }}\nmod resources {{ {} }}\nmod conversion {{ {} }}\nmod traits {{ {} }}\nmod builtin {{pub use primitives.*;pub mod compiler {{pub use bindings.*;}}}}\nmod comptime_comparison {{ {} }}\nmod text_impl {{ mod bindings {{ {} }} }}\nmod comptime_hashing {{ {} }}\npub use comptime_comparison.ComptimeEq;pub use comptime_hashing.ComptimeHash;pub use traits.*;\n{body}",
         include_str!("../../../library/builtin/primitives.fl"),
         include_str!("../../../library/builtin/bindings.fl"),
         support::with_attrs(include_str!(
@@ -16,6 +16,7 @@ fn source(body: &str) -> String {
         include_str!("../../../library/builtin/protocols/conversion.fl"),
         support::with_attrs(include_str!("../../../library/builtin/protocols/traits.fl")),
         include_str!("../../../library/meta/numeric/equality.fl"),
+        include_str!("../../../library/meta/text_impl/bindings.fl"),
         include_str!("../../../library/meta/data/hashing.fl"),
     )
 }
@@ -493,8 +494,8 @@ fn shipped_text_hash_runs_its_loop_in_bytecode() {
     assert_eq!(result, Value::UnsignedInteger(0x0ac21707b7181e01));
     assert_eq!(
         vm.bytecode_invocations(),
-        2,
-        "wrapper and shipped hash body must both compile"
+        5,
+        "wrapper, hash body, length and both byte calls must compile"
     );
 }
 
@@ -505,6 +506,7 @@ fn shipped_text_hash_body_uses_bytecode_for_all_bytes() {
     let package = support::compile(&source(""));
     let method=package.functions.iter().find(|function| {
         function.phase==nir::program::FunctionPhase::Comptime
+        && function.name == "hash"
         && matches!(function.signature.callable_signature(), Term::Function {parameters,result}
             if parameters.len()==1 && parameters[0].ty==Term::Primitive(Primitive::Str)
             && **result==Term::Primitive(Primitive::U64))
@@ -520,7 +522,7 @@ fn shipped_text_hash_body_uses_bytecode_for_all_bytes() {
             vm.invoke(method, vec![Value::String(text.into())]).unwrap(),
             Value::UnsignedInteger(expected)
         );
-        assert_eq!(vm.bytecode_invocations() - before, 1);
+        assert_eq!(vm.bytecode_invocations() - before, 2 + text.len());
     }
 }
 

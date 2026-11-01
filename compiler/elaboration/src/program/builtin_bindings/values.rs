@@ -8,11 +8,11 @@ impl Checker<'_, '_> {
         owner: OwnerId,
         span: Span,
     ) -> Result<Option<n::Expr>, Error> {
-        let Some((name, canonical)) = self.resolve_compiler_operation(owner, span)? else {
+        let Some((name, canonical, signature)) = self.resolve_compiler_operation(owner, span)?
+        else {
             return Ok(None);
         };
-        let ty = signatures::callable(name.as_str(), self.protocols.meta_list)
-            .map_err(|message| error(span, message))?
+        let ty = signature
             .ok_or_else(|| error(span, "compiler operation binding requires a direct call until its callable contract is available"))?;
         let identity = declaration(self.package, &self.package_identities, canonical);
         self.required_steps = self
@@ -56,7 +56,11 @@ impl Checker<'_, '_> {
             self.generated_functions.push(n::Function {
                 declaration: identity,
                 name: format!("<compiler-operation.{}>", name.as_str()),
-                phase: n::FunctionPhase::Comptime,
+                phase: if matches!(ty, Term::ComptimeFunction(_)) {
+                    n::FunctionPhase::Comptime
+                } else {
+                    n::FunctionPhase::Runtime
+                },
                 inline: false,
                 pure: !signatures::publishes_definition(name.as_str()),
                 is_unsafe: false,
@@ -82,6 +86,12 @@ impl Checker<'_, '_> {
 }
 
 fn operation_body(name: &str, mut inputs: Vec<n::Expr>, source: n::SourceRange) -> K {
+    if let Some(query) = signatures::text_query(name) {
+        return K::TextQuery {
+            query,
+            subject: Box::new(packet(inputs, source)),
+        };
+    }
     use n::{
         EnumBitQuery as B, EnumStructureQuery as Q, ObjectEditKind as E, ObjectQueryKind as O,
     };

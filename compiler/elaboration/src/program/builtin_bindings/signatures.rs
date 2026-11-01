@@ -6,6 +6,26 @@ pub(super) fn callable(
     name: &str,
     list_head: Option<DeclarationId>,
 ) -> Result<Option<Term>, &'static str> {
+    if let Some(query) = text_query(name) {
+        let mut parameters = vec![Parameter {
+            sort: Sort::Runtime,
+            ty: p(if query.is_symbol() { P::Symbol } else { P::Str }),
+        }];
+        if !query.is_length() {
+            parameters.push(Parameter {
+                sort: Sort::Runtime,
+                ty: p(P::U64),
+            });
+        }
+        return Ok(Some(Term::Function {
+            parameters,
+            result: Box::new(if query.is_length() {
+                p(P::U64)
+            } else {
+                Term::Optional(Box::new(p(P::U8)))
+            }),
+        }));
+    }
     if matches!(name, "object_append" | "object_replace") {
         return Ok(Some(Term::ComptimeFunction(Box::new(Term::Function {
             parameters: vec![
@@ -175,6 +195,16 @@ pub(super) fn callable(
             .collect(),
         result: Box::new(output),
     }))))
+}
+
+pub(super) fn text_query(name: &str) -> Option<n::TextQueryKind> {
+    Some(match name {
+        "str_byte_length" => n::TextQueryKind::ByteLength,
+        "str_byte" => n::TextQueryKind::Byte,
+        "symbol_byte_length" => n::TextQueryKind::SymbolByteLength,
+        "symbol_byte" => n::TextQueryKind::SymbolByte,
+        _ => return None,
+    })
 }
 
 // Definition publication allocates a new nominal identity on every invocation.

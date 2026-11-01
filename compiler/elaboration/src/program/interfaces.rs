@@ -2935,7 +2935,7 @@ impl Checker<'_, '_> {
         }
         // Calling a stored comptime function does not transfer that function
         // value to runtime. Only the invocation's eventual result is spliced.
-        if self.protocols.splice.is_some() && self.runtime_value_context() {
+        if self.runtime_value_context() {
             if let H::ResolvedDef { def_id, .. } = callee.kind {
                 if let Some(owner) = self.package.definition_owner(def_id) {
                     if matches!(
@@ -2947,7 +2947,17 @@ impl Checker<'_, '_> {
                         } else {
                             self.constant_value(owner, callee.span)?
                         };
-                        if value.ty.is_comptime_callable() {
+                        if (self.protocols.splice.is_some() && value.ty.is_comptime_callable())
+                            || (!value.ty.is_comptime_callable()
+                                && matches!(
+                                    value.kind,
+                                    K::Function(_) | K::FunctionInstance { .. }
+                                ))
+                        {
+                            // A completed declaration identity used as the
+                            // callee selects code, rather than transporting a
+                            // function value into runtime storage. This also
+                            // applies to ordinary source function aliases.
                             return Ok(value);
                         }
                     }

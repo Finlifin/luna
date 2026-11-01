@@ -14,6 +14,19 @@ fn compile_text(source: &str) -> nir::program::Package {
 }
 
 #[test]
+fn static_function_alias_callees_select_code_without_runtime_data_conversion() {
+    let package = compile_text(&source(
+        "fn identity(value: bool) -> bool { value }
+        const alias = identity;
+        fn run() -> bool { alias(true) }",
+    ));
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
 fn utf8_bytes_and_boundaries_agree_in_both_phases() {
     let body = r#"
         fn run()->bool {

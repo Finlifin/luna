@@ -734,6 +734,43 @@ fn dependent_list_operations_are_ordinary_callable_values() {
 }
 
 #[test]
+fn text_operation_values_use_comptime_callbacks_and_list_storage() {
+    run_staged_carriers(
+        "typealias str = .str'builtin; typealias Symbol = .Symbol'builtin;
+        typealias u64 = .u64'builtin; typealias u8 = .u8'builtin;
+        const length: comptime fn(str) -> u64 = .str_byte_length'builtin;
+        const byte: comptime fn(str, u64) -> ?u8 = .str_byte'builtin;
+        const symbol_length: comptime fn(Symbol) -> u64 = .symbol_byte_length'builtin;
+        const symbol_byte: comptime fn(Symbol, u64) -> ?u8 = .symbol_byte'builtin;
+        comptime fn count(f: comptime fn(str) -> u64, text: str) -> u64 { f(text) }
+        comptime fn compute() -> bool {
+            let readers: List<comptime fn(str, u64) -> ?u8> = [byte];
+            let read = readers[0];
+            let last = read(\"é\", 1) match { value? => value == 169, null => false };
+            let past = symbol_byte(.hello, 5) match { _? => false, null => true };
+            count(length, \"é\") == 2 and symbol_length(.hello) == 5 and last and past
+        }",
+    );
+}
+
+#[test]
+fn text_operation_aliases_cannot_change_the_original_phase() {
+    for declarations in [
+        "const original: fn(str) -> u64 = .str_byte_length'builtin;
+         const alias: comptime fn(str) -> u64 = original;",
+        "const original: comptime fn(str) -> u64 = .str_byte_length'builtin;
+         const alias: fn(str) -> u64 = original;",
+        "const alias: comptime fn(str) -> bool = .str_byte_length'builtin;",
+    ] {
+        let error = compile(&format!(
+            "typealias str = .str'builtin; typealias u64 = .u64'builtin; {declarations}"
+        ))
+        .unwrap_err();
+        assert!(error.contains("signature mismatch"), "{error}");
+    }
+}
+
+#[test]
 fn dependent_list_binding_signatures_use_the_bound_constructor() {
     let package = support::compile_with_source_bindings(
         "typealias Type = .Type'builtin;
@@ -870,4 +907,18 @@ fn dependent_object_callback_bounds_fail_without_poisoning_the_next_call() {
             }
         );
     }
+}
+
+#[test]
+fn a_text_operation_alias_cannot_establish_the_original_phase() {
+    let error = compile(
+        "typealias str = .str'builtin; typealias u64 = .u64'builtin;
+        const original = .str_byte_length'builtin;
+        const alias: comptime fn(str) -> u64 = original;",
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("explicit phase on its original binding"),
+        "{error}"
+    );
 }
