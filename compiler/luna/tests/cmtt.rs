@@ -6431,16 +6431,21 @@ fn generator_explicit_producer_hints_keep_constraints_and_execution_phase() {
 #[test]
 fn generator_explicit_producer_hints_keep_argument_order_and_single_evaluation() {
     let source = "typealias Byte=.u8'builtin;
-        comptime fn input(value:T,count:*Byte)->T where T, requires count.* == 1 {
-            count.* += 1;value
+        struct Counter {value:Byte}
+        impl Counter {
+            comptime fn input(self,value:T)->T
+            where T, requires self.value == 1
+            {
+                self.value += 1;value
+            }
         }
         comptime fn build(action:comptime fn(T)->T,value:T)-><|-T> where T {
             let result=action(value);'(result)
         }
         comptime fn outer()-><|-bool> {
-            var count:Byte=0;
-            let code=build(do {count+=1;|value| not value},input<bool>(false,count.ref));
-            if count == 2 {code} else {'(false)}
+            let count=Counter {value:0};
+            let code=build(do {count.value+=1;|value| not value},count.input<bool>(false));
+            if count.value == 2 {code} else {'(false)}
         } fn run()->bool {~<outer()>}";
     assert_eq!(run(source, "run", vec![]), Value::Bool(true));
 }
@@ -11003,4 +11008,29 @@ fn generator_method_result_evidence_keeps_impl_and_method_inputs_distinct() {
         }
         fn run()->bool {~<emit()>}";
     assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn generator_explicit_method_result_evidence_preserves_impl_inputs_and_defaults() {
+    let source = "typealias Type=.Type'builtin;
+        struct Source where T {value:T}
+        impl Source<T> where T {
+            comptime fn choose(self,value:U)->U where .U:Type=T {value}
+        }
+        comptime fn build(action:comptime fn(U)->bool,value:U)-><|-bool> where U {
+            let result=action(value);'(result)
+        }
+        comptime fn emit()-><|-bool> {
+            let source=Source<bool> {value:true};
+            let first=build(|value| value == 'x',source.choose<.U=char>('x'));
+            let second=build(|value| not value,source.choose<>(false));
+            first
+        }
+        typealias char=.char'builtin;
+        fn run()->bool {~<emit()>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let defaults = source.replace("            first\n", "            second\n");
+    assert_eq!(run(&defaults, "run", vec![]), Value::Bool(true));
+    let invalid = source.replace("source.choose<.U=char>('x')", "source.choose<.U=bool>('x')");
+    assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
 }

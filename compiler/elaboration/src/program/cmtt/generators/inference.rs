@@ -168,19 +168,25 @@ impl Checker<'_, '_> {
                         base,
                         name.name.as_str(),
                         arguments,
+                        None,
                         value,
                         depth + 1,
                     )? {
                         return Ok(Some(result));
                     }
                 }
-                if let H::NFApplication(head, arguments) = callee.kind {
-                    return self.generator_explicit_signature_hint(
-                        head,
-                        arguments,
-                        depth + 1,
-                        true,
-                    );
+                if let H::NFApplication(head, clauses) = callee.kind {
+                    if let H::Projection(base, name) = head.kind {
+                        return self.generator_method_result_hint(
+                            base,
+                            name.name.as_str(),
+                            arguments,
+                            Some(clauses),
+                            value,
+                            depth + 1,
+                        );
+                    }
+                    return self.generator_explicit_signature_hint(head, clauses, depth + 1, true);
                 }
                 let (signature, generic, definition) = match callee.kind {
                     H::ResolvedDef { def_id, .. } => {
@@ -264,6 +270,7 @@ impl Checker<'_, '_> {
         base: &Expr<'_>,
         name: &str,
         inputs: &[Arg<'_>],
+        clauses: Option<&[Arg<'_>]>,
         site: &Expr<'_>,
         depth: usize,
     ) -> Result<Option<Term>, Error> {
@@ -302,6 +309,16 @@ impl Checker<'_, '_> {
         }) else {
             return Ok(None);
         };
+        if let Some(clauses) = clauses {
+            return self.generator_explicit_owner_signature_hint(
+                owner,
+                site,
+                clauses,
+                depth + 1,
+                true,
+                &arguments,
+            );
+        }
         let Some(signature) = self.signatures.get(&owner) else {
             return Ok(None);
         };
@@ -1029,6 +1046,25 @@ impl Checker<'_, '_> {
         let Some(owner) = self.package.definition_owner(def_id) else {
             return Ok(None);
         };
+        self.generator_explicit_owner_signature_hint(
+            owner,
+            head,
+            arguments,
+            depth,
+            result_only,
+            &[],
+        )
+    }
+
+    fn generator_explicit_owner_signature_hint(
+        &mut self,
+        owner: hir::OwnerId,
+        head: &Expr<'_>,
+        arguments: &[Arg<'_>],
+        depth: usize,
+        result_only: bool,
+        established: &[Term],
+    ) -> Result<Option<Term>, Error> {
         let Some(ItemKind::Fn(signature, _)) = self.package.item(owner).map(|item| &item.kind)
         else {
             return Ok(None);
@@ -1067,10 +1103,10 @@ impl Checker<'_, '_> {
             .get(&owner)
             .cloned()
             .unwrap_or_default();
-        if clauses.len() != parameters.len() {
+        if clauses.len() + established.len() != parameters.len() {
             return Ok(None);
         }
-        let mut supplied = vec![None; parameters.len()];
+        let mut supplied = vec![None; clauses.len()];
         let mut positional = 0;
         for argument in arguments {
             let (name, value) = match argument {
@@ -1090,12 +1126,14 @@ impl Checker<'_, '_> {
         // Route first, then complete the declaration telescope. Later value
         // domains and defaults can depend on earlier Type or value clauses.
         let binders = self.input_binders(&parameters);
-        let mut completed = Vec::with_capacity(supplied.len());
-        for (index, supplied) in supplied.into_iter().enumerate() {
+        let mut completed = established.to_vec();
+        for (clause_index, supplied) in supplied.into_iter().enumerate() {
+            let index = established.len() + clause_index;
             let (value, bindings) = match supplied {
                 Some(value) => (value, None),
                 None => {
-                    let hir::clause::ClauseParamKind::Optional(_, _, default) = clauses[index].kind
+                    let hir::clause::ClauseParamKind::Optional(_, _, default) =
+                        clauses[clause_index].kind
                     else {
                         return Ok(None);
                     };
