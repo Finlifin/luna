@@ -1348,6 +1348,7 @@ pub fn machine_arithmetic_functions(
                         | K::EnumStructure { subject: value, .. }
                         | K::ObjectQuery { subject: value, .. }
                         | K::ObjectEdit { subject: value, .. }
+                        | K::NewtypeRepresentation(value)
                         | K::StructFieldTypes(value)
                         | K::StructFieldNames(value) => {
                             if !ct {

@@ -11154,3 +11154,37 @@ Validation from `/home/fin/luna`:
   (`/tmp/luna-tools-59z1_j_5/result.json`).
 - Workspace formatting check passed, exit 0
   (`/tmp/luna-tools-8yzfh7rq/result.json`); `git diff --check` passed.
+
+
+### Applied newtype reflection and public builder copying
+
+NewtypeRepresentation is an explicit comptime Type observation, with checked
+input/output domains and phase admission before operand evaluation. The shared
+VM operation checks formation and selects the direct representation: source
+applications substitute the declaration telescope; concrete IIR selects the full
+instance key and uses its already-instantiated descriptor. It never recursively
+unwraps a newtype or unfolds a normal-form head. Reflected pointer Types remain
+metadata, not comptime pointer values. Both carriers use the same observation.
+
+The public Type method `NewtypeRepresentation()` is backed by one centralized
+meta binding. `meta.NewtypeBuilder.from_type` copies that representation into a
+normal mutable draft; Build publishes a fresh nominal identity. Source generic
+applications and newly built Types use the same path. This does not copy methods,
+trait evidence, attributes or formation clauses, and does not generate generic
+builder declarations. The sysroot example now exercises reflected construction.
+
+Validation from `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 900 -- test -p nir
+  -p comptime_interpretor`: passed, exit 0
+  (`/tmp/luna-tools-htx0_l3q/result.json`). Coverage includes unary traversal,
+  substitution, phase rejection, bounded copying and newtype observation.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test
+  builder_invocations --test sysroot_preludes newtype_builder`: 7 passed, exit 0
+  (`/tmp/luna-tools-b8jpe4pw/result.json`), including the real sysroot CLI path.
+- Additional complete-instance tree/bytecode coverage: 4 tests passed, exit 0
+  (`/tmp/luna-tools-k92zc0hu/result.json`, interpreter --lib reflection::newtypes).
+- Additional opaque-head rejection: passed, exit 0
+  (`/tmp/luna-tools-ic28xa8b/result.json`, builder_invocations
+  public_newtype_builder_reflection_rejects_other_type_kinds).
+- Workspace formatting passed (`/tmp/luna-tools-rjws0wqp/result.json`);
+  `git diff --check` passed.

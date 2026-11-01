@@ -1119,6 +1119,7 @@ pub enum ExprKind {
     TypeListIndex(Box<Expr>, Box<Expr>),
     /// Length of a checked immutable comptime list.
     ListLength(Box<Expr>),
+    NewtypeRepresentation(Box<Expr>),
     StructFieldTypes(Box<Expr>),
     StructFieldNames(Box<Expr>),
     /// Compiler-private packet: definition name, field names, field Types.
@@ -3523,6 +3524,7 @@ impl fmt::Display for ExprKind {
                 write!(f, "(template-equal (left {left}) (right {right}))")
             }
             Self::ListLength(values) => write!(f, "(list-length {values})"),
+            Self::NewtypeRepresentation(subject) => write!(f, "(newtype-representation {subject})"),
             Self::StructFieldTypes(subject) => write!(f, "(struct-field-types {subject})"),
             Self::BuildStruct(request) => write!(f, "(build-struct {request})"),
             Self::BuildNewtype(request) => write!(f, "(build-newtype {request})"),
@@ -3916,6 +3918,7 @@ impl Expr {
                     | ExprKind::OptionalType(_)
                     | ExprKind::PointerType(_)
                     | ExprKind::ListLength(_)
+                    | ExprKind::NewtypeRepresentation(_)
                     | ExprKind::StructFieldTypes(_)
                     | ExprKind::BuildStruct(_)
                     | ExprKind::BuildNewtype(_)
@@ -4005,6 +4008,7 @@ impl Expr {
                 | ExprKind::OptionalType(value)
                 | ExprKind::PointerType(value)
                 | ExprKind::ListLength(value)
+                | ExprKind::NewtypeRepresentation(value)
                 | ExprKind::StructFieldTypes(value)
                 | ExprKind::BuildStruct(value)
                 | ExprKind::BuildNewtype(value)
@@ -4408,6 +4412,7 @@ impl Expr {
             | ExprKind::OptionalType(value)
             | ExprKind::PointerType(value)
             | ExprKind::ListLength(value)
+            | ExprKind::NewtypeRepresentation(value)
             | ExprKind::StructFieldTypes(value)
             | ExprKind::BuildStruct(value)
             | ExprKind::BuildNewtype(value)

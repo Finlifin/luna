@@ -24,6 +24,7 @@ fn operation(name: &str) -> bool {
             | "object_replace"
             | "object_remove"
             | "object_slice"
+            | "newtype_representation"
             | "struct_field_types"
             | "struct_field_names"
             | "enum_group_paths"

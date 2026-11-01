@@ -31,6 +31,7 @@ const compiler_enum_bit_base_type = .enum_bit_base_type'builtin;
 const compiler_enum_bit_masks = .enum_bit_masks'builtin;
 const compiler_enum_bit_values = .enum_bit_values'builtin;
 const compiler_enum_bit_offsets = .enum_bit_offsets'builtin;
+const CompilerNewtypeRepresentation = .newtype_representation'builtin;
 const CompilerBuildNewtype = .build_newtype'builtin;
 const CompilerBuildStruct = .build_struct'builtin;
 const CompilerBuildEnumPaths = .build_enum_paths'builtin;
@@ -187,4 +188,9 @@ pub pure comptime fn enum_bit_offsets(subject: Type) -> List<List<Integer>> {
 
 pub comptime fn BuildNewtype(name: Symbol, representation: Type) -> Type {
     CompilerBuildNewtype(name, representation)
+}
+
+
+pub pure comptime fn NewtypeRepresentation(subject: Type) -> Type {
+    CompilerNewtypeRepresentation(subject)
 }

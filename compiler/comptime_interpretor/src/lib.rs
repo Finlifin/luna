@@ -76,7 +76,8 @@ mod struct_build;
 pub use struct_build::{PreparedStructBuild, StructBuildRequest};
 mod reflection;
 pub use reflection::{
-    CallableReflection, EnumReflection, ReflectedField, ReflectedVariant, StructReflection,
+    CallableReflection, EnumReflection, NewtypeReflection, ReflectedField, ReflectedVariant,
+    StructReflection,
 };
 mod float_operations;
 mod leaf_inputs;
@@ -3446,7 +3447,7 @@ impl<'a> Interpreter<'a> {
             }
             K::ObjectEdit { .. } => self.eval_object_edit(expr, environment),
             K::ObjectQuery { .. } => self.eval_object_query(expr, environment),
-            K::StructFieldTypes(_) | K::StructFieldNames(_) => {
+            K::NewtypeRepresentation(_) | K::StructFieldTypes(_) | K::StructFieldNames(_) => {
                 self.eval_observation(expr, environment)
             }
             K::TypeListIndex(..) => self.eval_type_list_index(expr, environment),

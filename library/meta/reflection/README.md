@@ -8,6 +8,7 @@
 
 | 方法 | 返回值 |
 | --- | --- |
+| `NewtypeRepresentation()` | newtype 的直接表示 `Type` |
 | `struct_fields()` | 声明顺序的具名 Type 条目 `Object` |
 | `enum_variant_fields()` | 每个 variant 的字段描述 `List<Object>` |
 | `struct_field_names()` | 声明顺序的 `List<Symbol>` |
@@ -81,3 +82,15 @@ normal-form 头保持原身份。接收者只求值一次。返回描述是普�
 
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_reflection_objects_feed_checked_definition_builders`：通过，`/tmp/luna-tools-4vvs3v5u/result.json`。覆盖真实 sysroot、泛型与 opaque 字段、枚举字段形状、描述快照及生成结构体的使用。
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test source_reflection ordered_field_objects`：通过，`/tmp/luna-tools-5y48gdzf/result.json`。错误接收者返回 Type 错误，失败后合法 invocation 可继续执行。
+
+
+## newtype 的显式表示观察
+
+`subject.NewtypeRepresentation()` 返回已完成 newtype 实例的直接表示类型。
+formation 契约在观察前检查，参数按实例代入；例如 `Wrapper<bool>` 的表示
+是 bool，而 `Wrapper<Other>` 的表示是 Other，不继续展开 Other。普通 struct、
+enum、primitive 和 opaque normal-form 头不能冒充 newtype。
+
+返回值是 Type 元数据，可以描述 runtime 指针，不会因此在 comptime 中创建
+指针值。观察不改变类型身份、成员查找或 trait 证据。`NewtypeBuilder.from_type`
+使用这一接口复制表示，随后 Build 发布新身份。

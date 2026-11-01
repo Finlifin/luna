@@ -216,4 +216,8 @@ fn enabled() -> bool {
 
 真实 sysroot 示例：`development/examples/sysroot-newtype-builder.fl`。
 验收入口：`python3 -B development/library_check.py --stage sysroot-newtype-builder`。
-当前只支持具体表示类型；泛型／捕获子句、属性描述及 from_type 反射复制仍未交付。
+`NewtypeBuilder.from_type(subject, .name = .Generated)` 检查已经应用的 newtype，
+复制其直接表示类型。支持源码泛型实例与刚刚 Build 的类型；嵌套 newtype 保留
+一层表示边，不递归拆包装。新草稿不会复制 formation 子句、属性、方法或 trait。
+
+当前只支持构造具体表示类型；生成泛型／捕获子句和属性描述仍未交付。

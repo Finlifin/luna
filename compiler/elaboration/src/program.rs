@@ -8556,6 +8556,9 @@ impl Checker<'_, '_> {
                 H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if name.as_str() == "build_struct") => {
                     self.build_struct_builtin(expr, args, expected)
                 }
+                H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if name.as_str() == "newtype_representation") => {
+                    self.newtype_reflection_builtin(expr, args, expected)
+                }
                 H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "struct_field_types" | "struct_field_names")) => {
                     self.struct_reflection_builtin(expr, callee, args, expected)
                 }

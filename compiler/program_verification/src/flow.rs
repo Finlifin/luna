@@ -5486,7 +5486,8 @@ impl Walker<'_> {
                 self.child(index, state, depth)?;
                 result = self.unknown_value(&expr.ty)?;
             }
-            K::StructFieldTypes(subject)
+            K::NewtypeRepresentation(subject)
+            | K::StructFieldTypes(subject)
             | K::StructFieldNames(subject)
             | K::BuildStruct(subject)
             | K::BuildNewtype(subject)

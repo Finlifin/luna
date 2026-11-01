@@ -3035,3 +3035,60 @@ fn public_newtype_builder_does_not_grant_implicit_identity_conversion() {
     );
     assert!(fixture.invoke_meta("ready").is_err());
 }
+
+#[test]
+fn public_newtype_builder_reflects_applied_representation_with_fresh_identity() {
+    let fixture = Fixture::new(
+        "
+        use builtin.Type;
+        newtype Wrapper<T> = T;
+        comptime fn CloneRepresentation(subject: Type) -> Type {
+            let draft = meta.NewtypeBuilder.from_type(subject, .name = .Reflected);
+            draft.Build()
+        }
+        typealias First = CloneRepresentation(Wrapper<bool>);
+        typealias Second = CloneRepresentation(First);
+        typealias Nested = CloneRepresentation(Wrapper<First>);
+        fn run() -> bool {
+            let first = true.as(First);
+            let second = false.as(Second);
+            let nested = first.as(Nested);
+            nested.as(First).as(bool) and not second.as(bool)
+        }
+        comptime fn ready() -> bool { true }
+        ",
+    );
+    let (Artifact::Nir(package), _, _) = fixture.invoke_meta("ready").unwrap() else {
+        panic!()
+    };
+    let generated: Vec<_> = package
+        .newtypes
+        .iter()
+        .filter(|item| item.name == "Reflected")
+        .collect();
+    assert_eq!(generated.len(), 3);
+    assert_ne!(generated[0].declaration, generated[1].declaration);
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn public_newtype_builder_reflection_rejects_other_type_kinds() {
+    for subject in ["bool", "Record", "Identity<bool>"] {
+        let fixture = Fixture::new(&format!(
+            "
+            use builtin.Type;
+            struct Record {{ value: bool }}
+            pure comptime fn Identity<T> -> Type {{ T }}
+            comptime fn Invalid() -> Type {{
+                meta.NewtypeBuilder.from_type({subject}).Build()
+            }}
+            typealias InvalidType = Invalid();
+            comptime fn ready() -> bool {{ true }}
+        "
+        ));
+        assert!(fixture.invoke_meta("ready").is_err(), "{subject}");
+    }
+}

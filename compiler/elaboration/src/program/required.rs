@@ -2705,6 +2705,7 @@ pub(super) fn references(
                 | K::OptionalType(value)
                 | K::PointerType(value)
                 | K::ListLength(value)
+                | K::NewtypeRepresentation(value)
                 | K::StructFieldTypes(value)
                 | K::BuildStruct(value)
                 | K::BuildNewtype(value)

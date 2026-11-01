@@ -1,5 +1,7 @@
 //! Structure observation for comptime library adapters, independent of layout.
 use super::*;
+mod newtypes;
+pub use newtypes::NewtypeReflection;
 mod enums;
 pub use enums::{EnumReflection, ReflectedVariant};
 mod callables;

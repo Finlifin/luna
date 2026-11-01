@@ -198,6 +198,40 @@ impl Checker<'_, '_> {
         }
     }
 
+    pub(super) fn newtype_reflection_builtin(
+        &mut self,
+        expr: &Expr<'_>,
+        args: &[Arg<'_>],
+        expected: Option<&Term>,
+    ) -> Result<n::Expr, Error> {
+        let [Arg::Positional(subject)] = args else {
+            return Err(error(
+                expr.span,
+                "newtype reflection requires one positional Type input",
+            ));
+        };
+        if self.runtime_value_context() || self.in_code_body {
+            return Err(error(
+                expr.span,
+                "newtype reflection requires comptime invocation",
+            ));
+        }
+        let subject = self.expr(subject, Some(&p(P::Type)))?;
+        let ty = if is_never(&subject.ty) {
+            p(P::Never)
+        } else {
+            p(P::Type)
+        };
+        if let Some(expected) = expected {
+            self.require_expression(&ty, expected, expr.span)?;
+        }
+        Ok(n::Expr {
+            source: source(expr.span),
+            ty,
+            kind: K::NewtypeRepresentation(Box::new(subject)),
+        })
+    }
+
     pub(super) fn struct_reflection_builtin(
         &mut self,
         expr: &Expr<'_>,

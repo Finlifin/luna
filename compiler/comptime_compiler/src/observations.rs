@@ -3,6 +3,7 @@ use super::*;
 
 #[derive(Clone, Copy, Debug)]
 pub enum Kind {
+    NewtypeRepresentation,
     EnumName,
     StructFields { names: bool },
     EnumStructure(nir::program::EnumStructureQuery),
@@ -16,6 +17,7 @@ impl fmt::Display for Kind {
                 write!(f, "struct-field-{}", if *names { "names" } else { "types" })
             }
             Self::EnumStructure(query) => write!(f, "(enum-structure {query})"),
+            Self::NewtypeRepresentation => write!(f, "newtype-representation"),
             Self::EnumName => write!(f, "enum-name"),
             Self::SymbolName => write!(f, "symbol-name"),
             Self::Text(query) => write!(f, "(text {query})"),

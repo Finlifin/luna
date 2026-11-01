@@ -16,6 +16,13 @@ impl NewtypeBuilder {
         Self { name: name, representation: representation }
     }
 
+    {- Copy the applied representation only; Build still creates a fresh identity.
+       Methods, traits, formation clauses and attributes are not copied.
+    -}
+    pub comptime fn from_type(subject: Type, .name: Symbol = .Generated) -> Self {
+        Self.new(subject.NewtypeRepresentation(), .name = name)
+    }
+
     pub comptime fn set_representation(self, representation: Type) {
         self.representation = representation;
     }

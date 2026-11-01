@@ -1575,11 +1575,15 @@ fn compile_root<'a>(
                     K::EnumName(_)
                     | K::SymbolName(_)
                     | K::TextQuery { .. }
+                    | K::NewtypeRepresentation(_)
                     | K::StructFieldTypes(_)
                     | K::StructFieldNames(_)
                     | K::EnumStructure { .. } => {
                         use observations::{Kind as O, Observation};
                         let (kind, operand) = match &expr.kind {
+                            K::NewtypeRepresentation(operand) => {
+                                (O::NewtypeRepresentation, operand.as_ref())
+                            }
                             K::StructFieldTypes(operand) => {
                                 (O::StructFields { names: false }, operand.as_ref())
                             }

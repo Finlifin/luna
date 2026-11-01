@@ -78,6 +78,7 @@ impl Interpreter<'_> {
     ) -> Result<Flow, Error> {
         use comptime_compiler::observations::{Kind as O, Observation};
         let (kind, operand) = match &expr.kind {
+            K::NewtypeRepresentation(operand) => (O::NewtypeRepresentation, operand.as_ref()),
             K::StructFieldTypes(operand) => (O::StructFields { names: false }, operand.as_ref()),
             K::StructFieldNames(operand) => (O::StructFields { names: true }, operand.as_ref()),
             K::EnumStructure { subject, query } => (O::EnumStructure(*query), subject.as_ref()),
@@ -127,6 +128,18 @@ impl Interpreter<'_> {
                 };
                 if (*input == never && *output != never)
                     || (*input != never && (*input != Term::Primitive(Primitive::Type) || !valid))
+                {
+                    return Err(self.failure(ErrorKind::Type, Some(source)));
+                }
+            }
+            O::NewtypeRepresentation => {
+                if !self.comptime_only {
+                    return Err(self.failure(ErrorKind::PhaseMismatch, Some(source)));
+                }
+                let type_ty = Term::Primitive(Primitive::Type);
+                let never = Term::Primitive(Primitive::Never);
+                if !((*input == type_ty && *output == type_ty)
+                    || (*input == never && *output == never))
                 {
                     return Err(self.failure(ErrorKind::Type, Some(source)));
                 }
@@ -216,6 +229,17 @@ impl Interpreter<'_> {
         let input: &Term = observation.input.borrow();
         let output: &Term = observation.output.borrow();
         match observation.kind {
+            O::NewtypeRepresentation => {
+                let Value::Type(subject) = value else {
+                    return Err(self.failure(ErrorKind::Type, Some(source)));
+                };
+                self.reflect_newtype(&subject)
+                    .map(|view| Value::Type(view.representation))
+                    .map_err(|mut error| {
+                        error.source = Some(source);
+                        error
+                    })
+            }
             O::StructFields { names } => self.observe_struct_fields(value, output, names, source),
             O::EnumStructure(query) => self.observe_enum_structure(value, output, query, source),
             O::EnumName => {

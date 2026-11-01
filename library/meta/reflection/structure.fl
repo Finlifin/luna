@@ -37,6 +37,11 @@ pure comptime fn field_object(names: List<Symbol>, types: List<Type>) -> Object 
 }
 
 impl Type {
+    {- Read one declared representation edge without changing nominal identity. -}
+    pub pure comptime fn NewtypeRepresentation(self) -> Type {
+        bindings.NewtypeRepresentation(self)
+    }
+
     {- Explicit fixed-bit encoding only; no layout or base type is inferred. -}
     pub pure comptime fn enum_bit_width(self) -> Integer {
         bindings.enum_bit_width(self)

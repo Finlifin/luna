@@ -525,6 +525,7 @@ fn charge_node_observed(
                     | K::AddressOf(value)
                     | K::ReadPointer(value)
                     | K::ListLength(value)
+                    | K::NewtypeRepresentation(value)
                     | K::StructFieldTypes(value)
                     | K::BuildStruct(value)
                     | K::BuildNewtype(value)
