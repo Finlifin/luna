@@ -106,6 +106,31 @@ impl Interpreter<'_> {
         let input: &Term = observation.input.borrow();
         let output: &Term = observation.output.borrow();
         match observation.kind {
+            O::EnumStructure(nir::program::EnumStructureQuery::BitEncoding(query)) => {
+                use nir::program::EnumBitQuery as B;
+                if !self.comptime_only {
+                    return Err(self.failure(ErrorKind::PhaseMismatch, Some(source)));
+                }
+                let never = Term::Primitive(Primitive::Never);
+                let integer = Term::Primitive(Primitive::Integer);
+                let valid = match query {
+                    B::Width => *output == integer,
+                    B::BaseType => {
+                        *output == Term::Optional(Box::new(Term::Primitive(Primitive::Type)))
+                    }
+                    B::Masks | B::Values => self.list_element(output) == Some(&integer),
+                    B::Offsets => {
+                        self.list_element(output)
+                            .and_then(|ty| self.list_element(ty))
+                            == Some(&integer)
+                    }
+                };
+                if (*input == never && *output != never)
+                    || (*input != never && (*input != Term::Primitive(Primitive::Type) || !valid))
+                {
+                    return Err(self.failure(ErrorKind::Type, Some(source)));
+                }
+            }
             O::StructFields { .. } | O::EnumStructure(_) => {
                 if !self.comptime_only {
                     return Err(self.failure(ErrorKind::PhaseMismatch, Some(source)));

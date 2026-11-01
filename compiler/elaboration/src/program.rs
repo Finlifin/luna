@@ -8527,7 +8527,7 @@ impl Checker<'_, '_> {
                 }
                 H::Match(value, arms) => self.match_expr(expr, value, arms, expected, partial),
                 H::When(arms) => self.when_expr(expr, arms, expected, partial),
-                H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "enum_group_paths" | "enum_variant_paths" | "enum_variant_shapes" | "enum_variant_field_names" | "enum_variant_field_types" | "enum_symbol_values")) => {
+                H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "enum_group_paths" | "enum_variant_paths" | "enum_variant_shapes" | "enum_variant_field_names" | "enum_variant_field_types" | "enum_symbol_values" | "enum_bit_width" | "enum_bit_base_type" | "enum_bit_masks" | "enum_bit_values" | "enum_bit_offsets")) => {
                     self.enum_reflection_builtin(expr, callee, args, expected)
                 }
                 H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "object_concat" | "object_append" | "object_replace" | "object_remove" | "object_slice")) => {

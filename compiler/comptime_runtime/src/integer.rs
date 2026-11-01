@@ -374,6 +374,14 @@ impl Integer {
             Self::canonical(self.negative, remainder.limbs),
         ))
     }
+    /// Interpret a checked bit-vector as an unsigned mathematical Integer.
+    /// Copy the complete magnitude without narrowing through a host scalar.
+    pub fn from_bitvec(value: &crate::bitvec::BitVec, budget: &mut Budget) -> Result<Self, Error> {
+        budget.charge(value.words().len().saturating_add(1))?;
+        budget.size(value.words().len())?;
+        Ok(Self::canonical(false, value.words().to_vec()))
+    }
+
     /// Checked nonnegative literal conversion. Leading zeroes do not select
     /// width, and a narrower target never authorizes truncation.
     pub fn to_bitvec(

@@ -1,5 +1,6 @@
 use super::*;
 use nir::program::VariantShape;
+mod bits;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReflectedVariant {
@@ -70,21 +71,17 @@ impl fmt::Display for EnumReflection {
     }
 }
 
-impl Interpreter<'_> {
-    /// Observe instantiated structure and declared Symbol codes without selecting
-    /// a value's variant. The original subject identity is retained.
-    pub fn reflect_enum(&mut self, ty: &Term) -> Result<EnumReflection, Error> {
+impl<'a> Interpreter<'a> {
+    fn reflection_enum_definition(
+        &mut self,
+        ty: &Term,
+    ) -> Result<(Term, generated_enums::EnumDefinition<'a>), Error> {
         if !self.comptime_only {
             return Err(self.failure(ErrorKind::PhaseMismatch, None));
         }
-        let subject = ty;
         let selected = self.reflection_type(ty)?;
         let ty = &selected;
-        let Term::Nominal {
-            declaration,
-            arguments,
-        } = ty
-        else {
+        let Term::Nominal { declaration, .. } = ty else {
             return Err(self.failure(ErrorKind::Type, None));
         };
         let definition = if let Some(graph) = self.graph {
@@ -107,6 +104,16 @@ impl Interpreter<'_> {
             self.enums.get(declaration).cloned()
         }
         .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
+        Ok((selected, definition))
+    }
+
+    /// Observe instantiated structure and declared Symbol codes without selecting
+    /// a value's variant. The original subject identity is retained.
+    pub fn reflect_enum(&mut self, subject: &Term) -> Result<EnumReflection, Error> {
+        let (selected, definition) = self.reflection_enum_definition(subject)?;
+        let Term::Nominal { arguments, .. } = &selected else {
+            unreachable!()
+        };
         self.integer_operation(None, |budget| {
             budget.consume(
                 definition
@@ -216,6 +223,9 @@ impl Interpreter<'_> {
         source: SourceRange,
     ) -> Result<Value, Error> {
         use nir::program::EnumStructureQuery as Q;
+        if let Q::BitEncoding(query) = query {
+            return self.observe_enum_bit_encoding(value, output, query, source);
+        }
         let fail = || Error {
             kind: ErrorKind::Type,
             source: Some(source),
@@ -243,6 +253,7 @@ impl Interpreter<'_> {
         };
         let mut values = Vec::with_capacity(count);
         match query {
+            Q::BitEncoding(_) => unreachable!(),
             Q::GroupPaths | Q::VariantPaths => {
                 let paths = if query == Q::GroupPaths {
                     reflected.groups

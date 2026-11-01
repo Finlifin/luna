@@ -26,6 +26,11 @@ const compiler_enum_variant_shapes = .enum_variant_shapes'builtin;
 const compiler_enum_variant_field_names = .enum_variant_field_names'builtin;
 const compiler_enum_variant_field_types = .enum_variant_field_types'builtin;
 const compiler_enum_symbol_values = .enum_symbol_values'builtin;
+const compiler_enum_bit_width = .enum_bit_width'builtin;
+const compiler_enum_bit_base_type = .enum_bit_base_type'builtin;
+const compiler_enum_bit_masks = .enum_bit_masks'builtin;
+const compiler_enum_bit_values = .enum_bit_values'builtin;
+const compiler_enum_bit_offsets = .enum_bit_offsets'builtin;
 const CompilerBuildStruct = .build_struct'builtin;
 const CompilerBuildEnumPaths = .build_enum_paths'builtin;
 const CompilerBuildSymbolEnumPaths = .build_symbol_enum_paths'builtin;
@@ -156,4 +161,24 @@ pub comptime fn BuildBitsEnum(name: Symbol, groups: List<List<Symbol>>,
 
 pub pure comptime fn enum_symbol_values(subject: Type) -> List<Symbol> {
     compiler_enum_symbol_values(subject)
+}
+
+pub pure comptime fn enum_bit_width(subject: Type) -> Integer {
+    compiler_enum_bit_width(subject)
+}
+
+pub pure comptime fn enum_bit_base_type(subject: Type) -> ?Type {
+    compiler_enum_bit_base_type(subject)
+}
+
+pub pure comptime fn enum_bit_masks(subject: Type) -> List<Integer> {
+    compiler_enum_bit_masks(subject)
+}
+
+pub pure comptime fn enum_bit_values(subject: Type) -> List<Integer> {
+    compiler_enum_bit_values(subject)
+}
+
+pub pure comptime fn enum_bit_offsets(subject: Type) -> List<List<Integer>> {
+    compiler_enum_bit_offsets(subject)
 }

@@ -1013,6 +1013,26 @@ impl fmt::Display for ObjectQueryKind {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EnumBitQuery {
+    Width,
+    BaseType,
+    Masks,
+    Values,
+    Offsets,
+}
+impl fmt::Display for EnumBitQuery {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Width => "width",
+            Self::BaseType => "base-type",
+            Self::Masks => "masks",
+            Self::Values => "values",
+            Self::Offsets => "offsets",
+        })
+    }
+}
+
 /// Enum structure and explicit encoding; order never synthesizes a discriminant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EnumStructureQuery {
@@ -1022,10 +1042,15 @@ pub enum EnumStructureQuery {
     FieldNames,
     FieldTypes,
     SymbolValues,
+    BitEncoding(EnumBitQuery),
 }
 impl fmt::Display for EnumStructureQuery {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Self::BitEncoding(query) = self {
+            return write!(f, "(bit-encoding {query})");
+        }
         f.write_str(match self {
+            Self::BitEncoding(_) => unreachable!(),
             Self::GroupPaths => "group-paths",
             Self::VariantPaths => "variant-paths",
             Self::Shapes => "shapes",

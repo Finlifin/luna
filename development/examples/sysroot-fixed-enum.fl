@@ -34,3 +34,29 @@ test generated_instruction_payload {
     let other = destination(relay(Instruction.sub { rd: 4, rs1: 1, rs2: 6 }));
     assumes value == 7 and other == 4;
 }
+
+comptime fn MirroredInstruction() -> Type {
+    let draft = meta.EnumBuilder.from_type(Instruction, .name = .MirroredInstruction);
+    draft.BuildBits(Instruction.enum_bit_width(),
+        Instruction.enum_bit_masks(), Instruction.enum_bit_values(),
+        Instruction.enum_bit_offsets(), .base_type = Instruction.enum_bit_base_type())
+}
+
+typealias Mirror = MirroredInstruction();
+
+comptime fn inspect_encoding() -> bool {
+    let masks = Instruction.enum_bit_masks();
+    let values = Instruction.enum_bit_values();
+    let offsets = Instruction.enum_bit_offsets();
+    let base = Instruction.enum_bit_base_type() match { value? => value, null => bool };
+    Instruction.enum_bit_width() == 32 and base == u32
+        and masks[0] == 0xfe00707f and values[1] == 0x40000033
+        and offsets[0][0] == 20 and offsets[0][1] == 15 and offsets[0][2] == 7
+        and Mirror != Instruction
+}
+
+test reflected_bit_encoding_rebuild {
+    let value = Mirror.sub { rs2: 3, rd: 1, rs1: 2 };
+    let word = (value'bitvec).as(u32);
+    inline if inspect_encoding() { assumes word == 0x403100b3; } else { assumes false; };
+}

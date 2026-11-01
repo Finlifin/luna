@@ -272,7 +272,7 @@ impl Checker<'_, '_> {
         let H::Builtin(name) = &callee.kind else {
             unreachable!()
         };
-        use n::EnumStructureQuery as Q;
+        use n::{EnumBitQuery as B, EnumStructureQuery as Q};
         let query = match name.as_str() {
             "enum_group_paths" => Q::GroupPaths,
             "enum_variant_paths" => Q::VariantPaths,
@@ -280,6 +280,11 @@ impl Checker<'_, '_> {
             "enum_variant_field_names" => Q::FieldNames,
             "enum_variant_field_types" => Q::FieldTypes,
             "enum_symbol_values" => Q::SymbolValues,
+            "enum_bit_width" => Q::BitEncoding(B::Width),
+            "enum_bit_base_type" => Q::BitEncoding(B::BaseType),
+            "enum_bit_masks" => Q::BitEncoding(B::Masks),
+            "enum_bit_values" => Q::BitEncoding(B::Values),
+            "enum_bit_offsets" => Q::BitEncoding(B::Offsets),
             _ => unreachable!(),
         };
         let head = self
@@ -300,6 +305,13 @@ impl Checker<'_, '_> {
         });
         let ty = if is_never(&subject.ty) {
             p(P::Never)
+        } else if let Q::BitEncoding(query) = query {
+            match query {
+                B::Width => p(P::Integer),
+                B::BaseType => Term::Optional(Box::new(p(P::Type))),
+                B::Masks | B::Values => list(p(P::Integer)),
+                B::Offsets => list(list(p(P::Integer))),
+            }
         } else if matches!(query, Q::Shapes | Q::SymbolValues) {
             list(element)
         } else {

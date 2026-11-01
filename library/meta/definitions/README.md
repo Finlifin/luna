@@ -155,3 +155,31 @@ comptime fn Mirrored() -> Type {
 
 真实 sysroot 示例在 `development/examples/sysroot-symbol-enum.fl`，涵盖分组路径、
 不同于变体名的编码、独立生成类型身份，以及重建后 runtime 模式匹配。
+
+## 读回并重建固定 bit 编码
+
+以下 Type 方法及同名 `meta` 自由函数读取显式固定编码：
+
+- `enum_bit_width() -> Integer`：整段表示的位宽。
+- `enum_bit_base_type() -> ?Type`：声明的基础整数类型；仅声明位宽时返回 null，
+  不根据位宽猜测 u32、u64 等类型，也不推导其对齐。
+- `enum_bit_masks() -> List<Integer>`：各叶变体的固定位掩码。
+- `enum_bit_values() -> List<Integer>`：各叶变体的固定值。
+- `enum_bit_offsets() -> List<List<Integer>>`：各叶变体的字段起始位，内层按字段
+  声明顺序排列，偏移从最低位计数；无载荷的变体得到空列表。
+
+掩码与固定值是非负任意精度 Integer，超过 128 位仍完整保留。各列表与
+`enum_variant_paths()` 的顺序一致；查询不赋予原始位到枚举的构造权限。
+普通枚举、Symbol 编码枚举及非枚举 Type 会被拒绝。
+
+```flurry
+comptime fn MirroredInstruction() -> Type {
+    let draft = meta.EnumBuilder.from_type(Instruction, .name = .MirroredInstruction);
+    draft.BuildBits(Instruction.enum_bit_width(),
+        Instruction.enum_bit_masks(), Instruction.enum_bit_values(),
+        Instruction.enum_bit_offsets(), .base_type = Instruction.enum_bit_base_type())
+}
+```
+
+`BuildBits` 继续检查表示分区、载荷类型、重叠和基础类型约束，反射不会绕过发布。
+真实 sysroot 验收：`python3 -B development/library_check.py --stage sysroot-fixed-enum`。

@@ -9809,3 +9809,33 @@ Validation from `/home/fin/luna`:
 - `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`: 371 passed (`/tmp/luna-tools-5onec5zy/result.json`).
 - `python3 -B development/library_check.py --stage sysroot-symbol-enum --timeout 900`: three native tests passed (`/tmp/luna-library-ov0u7c4b/summary.json`), including grouped-code reconstruction, distinct generated identity and runtime matching.
 - Workspace formatting passed (`/tmp/luna-tools-pgrfakrb/result.json`); `git diff --check` passed.
+
+### Explicit fixed-bit enum encoding reflection
+
+Five Type methods and their `meta` free-function spellings now expose checked
+fixed encoding metadata: `enum_bit_width`, `enum_bit_base_type`, `enum_bit_masks`,
+`enum_bit_values` and `enum_bit_offsets`. Output domains are Integer, optional
+Type, Integer lists and nested Integer lists as appropriate. Admission checks
+those domains before evaluating the receiver. Fixed encoding lookup shares the
+existing source/IIR enum descriptor selection; it does not copy unrelated field
+structure or synthesize encoding from variant order.
+
+Widths and offsets retain their exact nonnegative values. Masks and fixed values
+use the new bounded `Integer::from_bitvec` magnitude conversion, preserving bits
+above the host scalar width. Width-only declarations return an absent base Type;
+no scalar identity or alignment is inferred. Ordinary, Symbol-encoded and
+non-enum inputs reject these observations. The existing builder still validates
+partitioning, overlap, payload types and base representation when rebuilding.
+
+The real sysroot example reconstructs the named-field ADD/SUB instruction enum
+from all five reflected inputs and checks the resulting runtime bit pattern.
+Generic/function/trait/impl builders and symbolic open BitVec widths are not
+completed by this metadata delivery.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_runtime --test bitvec_integer`: two passed (`/tmp/luna-tools-nmtue6kf/result.json`), covering zero through 1,024 bits, canonical zero, no narrowing, budget exhaustion and magnitude size limits.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test source_reflection`: 17 passed (`/tmp/luna-tools-1n7luia3/result.json`), including 129-bit metadata, absent base identity, rejection, VM recovery and the previous Symbol/structure paths.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`: passed (`/tmp/luna-tools-co0ot044/result.json`).
+- Workspace formatting passed (`/tmp/luna-tools-avc_nuss/result.json`); `git diff --check` passed.
+- `python3 -B development/library_check.py --stage sysroot-fixed-enum --timeout 900`: three native tests passed (`/tmp/luna-library-lcbredh4/summary.json`), including reflected base Type, masks/values, named-field offsets, fresh identity and reconstructed machine bits.

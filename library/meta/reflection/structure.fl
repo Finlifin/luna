@@ -1,5 +1,5 @@
 use bindings;
-use builtin.{Symbol, Type};
+use builtin.{Integer, Symbol, Type};
 use List;
 use bindings.Object;
 
@@ -16,6 +16,11 @@ pub use bindings.enum_variant_shapes;
 pub use bindings.enum_variant_field_names;
 pub use bindings.enum_variant_field_types;
 pub use bindings.enum_symbol_values;
+pub use bindings.enum_bit_width;
+pub use bindings.enum_bit_base_type;
+pub use bindings.enum_bit_masks;
+pub use bindings.enum_bit_values;
+pub use bindings.enum_bit_offsets;
 
 {-
     Compose the checked parallel reflection lists into ordered field entries.
@@ -32,6 +37,27 @@ pure comptime fn field_object(names: List<Symbol>, types: List<Type>) -> Object 
 }
 
 impl Type {
+    {- Explicit fixed-bit encoding only; no layout or base type is inferred. -}
+    pub pure comptime fn enum_bit_width(self) -> Integer {
+        bindings.enum_bit_width(self)
+    }
+
+    pub pure comptime fn enum_bit_base_type(self) -> ?Type {
+        bindings.enum_bit_base_type(self)
+    }
+
+    pub pure comptime fn enum_bit_masks(self) -> List<Integer> {
+        bindings.enum_bit_masks(self)
+    }
+
+    pub pure comptime fn enum_bit_values(self) -> List<Integer> {
+        bindings.enum_bit_values(self)
+    }
+
+    pub pure comptime fn enum_bit_offsets(self) -> List<List<Integer>> {
+        bindings.enum_bit_offsets(self)
+    }
+
     {-
         Read explicit Symbol codes in leaf-variant declaration order. Ordinary
         and fixed-bit enums have no Symbol codes and reject this observation.

@@ -795,3 +795,49 @@ fn explicit_symbol_codes_are_reflected_without_inventing_discriminants() {
         assert!(vm.bytecode_invocations() > before);
     }
 }
+
+#[test]
+fn fixed_encoding_reflection_keeps_wide_values_and_absent_base_identity() {
+    let zeros = "0".repeat(128);
+    let source = format!(
+        "use meta.builtin.{{Integer, Symbol}};
+        enum Wide {{ .width 129, .discrete_tag true, high:0b1{zeros}, }}
+        enum Ordinary {{ item }}
+        enum Symbolic {{ .base_type Symbol, .discrete_tag true, item = .wire, }}
+        comptime fn run() -> bool {{
+            let masks = Wide.enum_bit_masks();
+            let values = meta.enum_bit_values(Wide);
+            let offsets = Wide.enum_bit_offsets();
+            let absent = Wide.enum_bit_base_type() match {{ null => true, _ => false }};
+            Wide.enum_bit_width() == 129 and absent and masks.length() == 1
+                and masks[0] == 0x1ffffffffffffffffffffffffffffffff
+                and values[0] == 0x100000000000000000000000000000000
+                and offsets.length() == 1 and offsets[0].length() == 0
+        }}
+        comptime fn bad_width() -> Integer {{ Ordinary.enum_bit_width() }}
+        comptime fn bad_masks() -> meta.List<Integer> {{ Symbolic.enum_bit_masks() }}
+        comptime fn bad_values() -> meta.List<Integer> {{ bool.enum_bit_values() }}"
+    );
+    let package = compile(&source).unwrap();
+    let mut vm = comptime_interpretor::Interpreter::for_comptime(
+        &package,
+        comptime_interpretor::Budget {
+            steps: 2_000_000,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for name in ["run", "bad_width", "bad_masks", "bad_values", "run"] {
+        let before = vm.bytecode_invocations();
+        let result = vm.invoke(support::id(&package, name), vec![]);
+        if name == "run" {
+            assert_eq!(result.unwrap(), Value::Bool(true));
+        } else {
+            assert_eq!(
+                result.unwrap_err().kind,
+                comptime_interpretor::ErrorKind::Type
+            );
+        }
+        assert!(vm.bytecode_invocations() > before);
+    }
+}
