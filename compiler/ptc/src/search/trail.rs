@@ -1,13 +1,16 @@
 //! Search-owned assignments in chronological order. Proof probes are temporary
 //! views and never become search entries or change their decision levels.
+//! Propagation explanations live with their assignments, including across
+//! clause eviction; continuations retain only boundaries into this trail.
+use super::Conflict;
 use std::{collections::BTreeSet, fmt};
 
-#[derive(Clone, Copy)]
-pub(super) enum Origin {
+pub(super) enum Reason {
     Decision,
+    // Replayed against the restored prefix only when conflict resolution needs it.
     Boolean,
-    RootClause,
-    Learned,
+    RootClause(Conflict),
+    Learned(Conflict),
 }
 #[derive(Clone, Copy)]
 pub(super) enum Consumer {
@@ -24,7 +27,7 @@ struct Entry {
     index: usize,
     value: bool,
     level: usize,
-    origin: Origin,
+    reason: Reason,
 }
 pub(super) struct Trail<'a> {
     values: &'a mut [Option<bool>],
@@ -68,7 +71,7 @@ impl<'a> Trail<'a> {
     pub(super) fn len(&self) -> usize {
         self.entries.len()
     }
-    pub(super) fn assign(&mut self, index: usize, value: bool, level: usize, origin: Origin) {
+    pub(super) fn assign(&mut self, index: usize, value: bool, level: usize, reason: Reason) {
         assert!(
             self.values[index].is_none(),
             "search assignment overwrites a live premise"
@@ -80,15 +83,19 @@ impl<'a> Trail<'a> {
             index,
             value,
             level,
-            origin,
+            reason,
         });
     }
-    pub(super) fn undo(&mut self, index: usize) {
+    pub(super) fn undo(&mut self, index: usize) -> Reason {
         let entry = self.entries.pop().expect("missing search assignment");
         assert_eq!(entry.index, index, "search unwind must follow the trail");
         self.values[index] = None;
         self.notify(index);
         self.levels[index] = 0;
+        entry.reason
+    }
+    pub(super) fn last_literal(&self) -> Option<(usize, bool)> {
+        self.entries.last().map(|entry| (entry.index, entry.value))
     }
     pub(super) fn backjump(&mut self, target: usize) {
         while self
@@ -138,17 +145,21 @@ impl fmt::Display for Trail<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(assignment-trail")?;
         for entry in &self.entries {
-            let origin = match entry.origin {
-                Origin::Decision => "decision",
-                Origin::Boolean => "boolean",
-                Origin::RootClause => "root-clause",
-                Origin::Learned => "learned",
+            let origin = match &entry.reason {
+                Reason::Decision => "decision",
+                Reason::Boolean => "boolean",
+                Reason::RootClause(_) => "root-clause",
+                Reason::Learned(_) => "learned",
             };
             write!(
                 f,
-                " (assignment {} {} (level {}) (origin {origin}))",
+                " (assignment {} {} (level {}) (origin {origin})",
                 entry.index, entry.value, entry.level
             )?;
+            if let Reason::RootClause(proof) | Reason::Learned(proof) = &entry.reason {
+                write!(f, " (reason {proof})")?;
+            }
+            write!(f, ")")?;
         }
         write!(f, ")")
     }
@@ -158,13 +169,57 @@ impl fmt::Display for Trail<'_> {
 mod tests {
     use super::*;
     #[test]
+    fn reasons_follow_assignment_lifetime_across_jump_and_unwind() {
+        use crate::ProofTree;
+        use std::sync::Arc;
+        let retained = Arc::new(ProofTree::BooleanConflict);
+        let discarded = Arc::new(ProofTree::BooleanConflict);
+        let reason = |proof: &Arc<ProofTree>, index| Conflict {
+            tree: ProofTree::Lemma {
+                premises: Vec::new(),
+                proof: proof.clone(),
+            },
+            support: BTreeSet::from([index]),
+        };
+        let mut values = [Some(true), None, None, None];
+        {
+            let mut trail = Trail::new(&mut values);
+            trail.assign(1, true, 0, Reason::RootClause(reason(&retained, 1)));
+            trail.assign(2, false, 1, Reason::Decision);
+            trail.assign(3, true, 1, Reason::Learned(reason(&discarded, 3)));
+            assert_eq!(Arc::strong_count(&retained), 2);
+            assert_eq!(Arc::strong_count(&discarded), 2);
+            assert!(
+                trail
+                    .to_string()
+                    .contains("(origin root-clause) (reason (conflict")
+            );
+            trail.backjump(0);
+            assert_eq!(Arc::strong_count(&discarded), 1);
+            assert_eq!(Arc::strong_count(&retained), 2);
+            assert_eq!(trail.last_literal(), Some((1, true)));
+            let Reason::RootClause(explanation) = trail.undo(1) else {
+                panic!("lost root reason")
+            };
+            assert_eq!(explanation.support, BTreeSet::from([1]));
+            assert_eq!(trail.values(), &[Some(true), None, None, None]);
+            assert_eq!(Arc::strong_count(&retained), 2);
+            drop(explanation);
+            assert_eq!(Arc::strong_count(&retained), 1);
+            trail.assign(2, true, 0, Reason::Learned(reason(&discarded, 2)));
+        }
+        assert_eq!(Arc::strong_count(&discarded), 1);
+        assert_eq!(values, [Some(true), None, None, None]);
+    }
+
+    #[test]
     fn backjump_and_failed_probe_preserve_entry_premises() {
         let mut values = [Some(true), None, None, None];
         {
             let mut trail = Trail::new(&mut values);
-            trail.assign(1, false, 0, Origin::Boolean);
-            trail.assign(2, true, 1, Origin::Decision);
-            trail.assign(3, false, 1, Origin::Learned);
+            trail.assign(1, false, 0, Reason::Boolean);
+            trail.assign(2, true, 1, Reason::Decision);
+            trail.assign(3, false, 1, Reason::Learned(Conflict::boolean(&[])));
             let before = trail.to_string();
             assert!(trail.changes(Consumer::Learned).is_none());
             trail.acknowledge_changes(Consumer::Learned);
@@ -193,8 +248,8 @@ mod tests {
         assert_eq!(values, [Some(true), None, None, None]);
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut trail = Trail::new(&mut values);
-            trail.assign(1, true, 0, Origin::RootClause);
-            trail.assign(2, false, 1, Origin::Decision);
+            trail.assign(1, true, 0, Reason::RootClause(Conflict::boolean(&[])));
+            trail.assign(2, false, 1, Reason::Decision);
             panic!("interrupted search");
         }));
         assert!(panic.is_err());
@@ -207,12 +262,12 @@ mod tests {
         let mut trail = Trail::new(&mut values);
         trail.acknowledge_changes(Consumer::Learned);
         trail.acknowledge_changes(Consumer::Theory);
-        trail.assign(0, true, 0, Origin::Learned);
+        trail.assign(0, true, 0, Reason::Learned(Conflict::boolean(&[])));
         assert!(trail.changes(Consumer::Root).is_none());
         trail.acknowledge_changes(Consumer::Root);
-        trail.assign(1, false, 1, Origin::Decision);
+        trail.assign(1, false, 1, Reason::Decision);
         trail.acknowledge_changes(Consumer::Learned);
-        trail.assign(2, true, 1, Origin::Boolean);
+        trail.assign(2, true, 1, Reason::Boolean);
         assert_eq!(trail.changes(Consumer::Learned), Some(&BTreeSet::from([2])));
         assert_eq!(trail.changes(Consumer::Root), Some(&BTreeSet::from([1, 2])));
         trail.acknowledge_changes(Consumer::Root);

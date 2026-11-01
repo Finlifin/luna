@@ -555,3 +555,32 @@ Validation from `/home/fin/luna`:
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`: four passed (`/tmp/luna-tools-ktfqu0vu/result.json`).
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_type_factories_keep_identity_through_comptime_parameters`: passed (`/tmp/luna-tools-knbijlif/result.json`).
 - Formatting check and `git diff --check` passed (`/tmp/luna-tools-tb0gtz76/result.json`).
+
+## Assignment-owned propagation reasons
+
+The chronological assignment trail now owns each propagation's reason. Root
+and learned clause explanations travel with the assigned literal; Boolean
+propagation carries its deferred circuit-replay reason. Search continuations
+hold only the start of a propagated suffix rather than duplicating its literal
+list or separately owning one clause explanation. All propagation kinds now
+share the same unwind/resolution path and first-UIP observation points.
+
+Undo transfers an explanation to conflict resolution. Nonchronological jumps
+and search teardown release the discarded suffix's explanations while retaining
+the surviving prefix. Clause-store eviction cannot invalidate an assigned
+literal's owned proof (including its shared immutable lemma references). Trail
+dumps include the origin and concrete explanation in S-expression form.
+
+This is an ownership step toward complete implication-graph analysis, not a
+claim that the final shared reason arena is complete. Boolean explanations are
+still reconstructed lazily against the restored prefix; root auxiliary reasons
+remain in the CNF engine, and decisions still use explicit continuations.
+Independent proof replay and candidate-model validation are unchanged.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p ptc -p type_resolution`: 466 passed (`/tmp/luna-tools-2p3x5ny1/result.json`).
+- Reason lifetime coverage checks retained prefix evidence, discarded suffix references, ownership transfer on undo, and teardown with live explanations. Root-unit coverage now extracts the proof from its assignment and independently checks it under sufficient and insufficient premises. Existing exit-restoration and first-UIP tests exercise the unified unwind path.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`: four passed (`/tmp/luna-tools-uilrw90y/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_type_factories_keep_identity_through_comptime_parameters`: passed (`/tmp/luna-tools-8rww2_ja/result.json`).
+- Formatting check and `git diff --check` passed (`/tmp/luna-tools-z7pvo424/result.json`).
