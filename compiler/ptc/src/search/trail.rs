@@ -13,6 +13,7 @@ pub(super) enum Origin {
 pub(super) enum Consumer {
     Learned,
     Root,
+    Theory,
 }
 #[derive(Default)]
 struct Pending {
@@ -29,7 +30,7 @@ pub(super) struct Trail<'a> {
     values: &'a mut [Option<bool>],
     levels: Vec<usize>,
     entries: Vec<Entry>,
-    pending: [Pending; 2],
+    pending: [Pending; 3],
 }
 impl<'a> Trail<'a> {
     pub(super) fn new(values: &'a mut [Option<bool>]) -> Self {
@@ -205,6 +206,7 @@ mod tests {
         let mut values = [None; 3];
         let mut trail = Trail::new(&mut values);
         trail.acknowledge_changes(Consumer::Learned);
+        trail.acknowledge_changes(Consumer::Theory);
         trail.assign(0, true, 0, Origin::Learned);
         assert!(trail.changes(Consumer::Root).is_none());
         trail.acknowledge_changes(Consumer::Root);
@@ -214,7 +216,16 @@ mod tests {
         assert_eq!(trail.changes(Consumer::Learned), Some(&BTreeSet::from([2])));
         assert_eq!(trail.changes(Consumer::Root), Some(&BTreeSet::from([1, 2])));
         trail.acknowledge_changes(Consumer::Root);
+        assert_eq!(
+            trail.changes(Consumer::Theory),
+            Some(&BTreeSet::from([0, 1, 2]))
+        );
+        trail.acknowledge_changes(Consumer::Theory);
         trail.backjump(0);
+        assert_eq!(
+            trail.changes(Consumer::Theory),
+            Some(&BTreeSet::from([1, 2]))
+        );
         assert_eq!(
             trail.changes(Consumer::Learned),
             Some(&BTreeSet::from([1, 2]))

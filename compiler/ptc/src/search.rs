@@ -407,15 +407,7 @@ impl Search<'_> {
                 Ok(Propagation::None) => {}
             }
         }
-        let classes = match self.theory_cached(assignment.values()) {
-            Ok(Some(classes)) => classes,
-            Ok(None) => {
-                return Step::Return(SearchResult::Unsat(
-                    self.learn_conflict(assignment.values()),
-                ));
-            }
-            Err(reason) => return Step::Return(SearchResult::Unknown(reason)),
-        };
+        // Reach a Boolean fixed point before checking the more expensive theory.
         if !forced.is_empty() {
             let mut trail = Vec::new();
             for (index, value) in forced {
@@ -431,7 +423,26 @@ impl Search<'_> {
             let child_depth = depth + trail.len();
             return Step::Descend(Frame::Boolean(trail), child_depth);
         }
-        if let Some(index) = assignment.values().iter().position(Option::is_none) {
+        let next_unassigned = assignment.values().iter().position(Option::is_none);
+        let theory = self.theory_cached_changes(
+            assignment.values(),
+            assignment.changes(Consumer::Theory),
+            next_unassigned.is_none(),
+        );
+        if theory.is_ok() {
+            assignment.acknowledge_changes(Consumer::Theory);
+        }
+        let classes = match theory {
+            Ok(super::theory_state::Check::Model(classes)) => Some(classes),
+            Ok(super::theory_state::Check::Consistent) => None,
+            Ok(super::theory_state::Check::Conflict) => {
+                return Step::Return(SearchResult::Unsat(
+                    self.learn_conflict(assignment.values()),
+                ));
+            }
+            Err(reason) => return Step::Return(SearchResult::Unknown(reason)),
+        };
+        if let Some(index) = next_unassigned {
             assignment.assign(index, false, decision_level + 1, Origin::Decision);
             Step::Descend(
                 Frame::Negative {
@@ -442,7 +453,7 @@ impl Search<'_> {
             )
         } else {
             Step::Return(
-                self.witness(&classes)
+                self.witness(&classes.expect("complete assignment requested a theory model"))
                     .map(SearchResult::Model)
                     .unwrap_or_else(|| {
                         SearchResult::Unknown(if self.steps == 0 {

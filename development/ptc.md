@@ -520,3 +520,38 @@ Validation from `/home/fin/luna`:
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`: four passed (`/tmp/luna-tools-3zlh09t3/result.json`).
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_type_factories_keep_identity_through_comptime_parameters`: passed (`/tmp/luna-tools-2xcubrze/result.json`).
 - Formatting check and `git diff --check` passed (`/tmp/luna-tools-knh612vj/result.json`).
+
+## Sparse theory notification consumption
+
+Theory is now a third independent consumer of assignment-trail notifications.
+Its reversible equality cache stores each admitted atom once, together with its
+introduction layer. Layers retain only their new atoms and a union checkpoint,
+instead of copying the entire assignment at each successful check. Changed atoms
+identify the earliest invalid layer. Removing its suffix also queues unchanged
+atoms from later layers for readmission. Failed checks retain this pending debt;
+failed rollback reservation leaves the admitted facts and classes unchanged.
+A new consumer epoch reconstructs the cache from the complete assignment.
+
+Boolean propagation now reaches a fixed point before theory checking. Partial
+assignments still undergo theory checking before decisions, but no longer copy
+an owned equality model that search immediately discards. Only witness production
+requests that snapshot. This removed redundant work exposed by the existing
+trait-candidate budget regression: the initial cache refactor exhausted the
+negative requirement query, leaving a candidate pending. The original budget and
+selection expectation remain unchanged; diagnostic instrumentation was removed.
+
+This advances the CDCL infrastructure supporting Type-sort model search. A
+satisfying model remains only a candidate for inference: committing a Type
+solution still requires the independent entailment check under original
+constraints. Explicit language design and opaque NF identity are unchanged.
+Theory checking itself still scans assignments and term relations; notifications
+currently optimize cache synchronization, not every theory operation. Shared
+reason storage and complete CDCL integration remain unfinished.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p ptc -p type_resolution`: 465 passed (`/tmp/luna-tools-1bmieo63/result.json`).
+- Warm/fresh comparison covers all 81 four-atom partial assignments in both directions through the notification entrypoint, plus interrupted calls across 256 budgets. Sparse-layer tests use 4,096 atoms, check atomic rollback across 12 budgets, and verify unchanged later facts are readmitted. A quiescent cache preparation uses zero synchronization fuel.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`: four passed (`/tmp/luna-tools-ktfqu0vu/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_type_factories_keep_identity_through_comptime_parameters`: passed (`/tmp/luna-tools-knbijlif/result.json`).
+- Formatting check and `git diff --check` passed (`/tmp/luna-tools-tb0gtz76/result.json`).

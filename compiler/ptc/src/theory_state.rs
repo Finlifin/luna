@@ -1,7 +1,13 @@
 //! Query-local reversible equality closure. Checkers and conflict minimization
 //! deliberately use fresh classes rather than this search acceleration state.
 use super::{Search, TheoryModel, UnknownReason};
-use std::fmt;
+use std::{collections::BTreeSet, fmt};
+
+pub(super) enum Check {
+    Conflict,
+    Consistent,
+    Model(TheoryModel),
+}
 
 pub(super) struct Classes {
     parent: Vec<usize>,
@@ -69,51 +75,161 @@ impl fmt::Display for Classes {
     }
 }
 
+struct Layer {
+    atoms: Vec<usize>,
+    checkpoint: usize,
+}
 pub(super) struct State {
     classes: Classes,
-    layers: Vec<(Vec<Option<bool>>, usize)>,
+    // Each admitted atom has exactly one introduction layer, not one copy in
+    // every later layer. Pending atoms have not yet earned retained evidence.
+    facts: Vec<Option<(bool, usize)>>,
+    layers: Vec<Layer>,
+    pending: BTreeSet<usize>,
+}
+fn charge(fuel: &mut usize, work: usize) -> Result<(), UnknownReason> {
+    *fuel = fuel
+        .checked_sub(work)
+        .ok_or(UnknownReason::BudgetExhausted)?;
+    Ok(())
 }
 impl State {
-    fn new(count: usize) -> Self {
-        Self {
+    fn new(
+        count: usize,
+        assignment: &[Option<bool>],
+        fuel: &mut usize,
+    ) -> Result<Self, UnknownReason> {
+        charge(
+            fuel,
+            count.saturating_mul(2).saturating_add(assignment.len()),
+        )?;
+        Ok(Self {
             classes: Classes::new(count),
+            facts: vec![None; assignment.len()],
             layers: Vec::new(),
-        }
+            pending: assignment
+                .iter()
+                .enumerate()
+                .filter_map(|(index, value)| value.is_some().then_some(index))
+                .collect(),
+        })
     }
     fn prepare(
         &mut self,
         assignment: &[Option<bool>],
+        changed: Option<&BTreeSet<usize>>,
         fuel: &mut usize,
     ) -> Result<(), UnknownReason> {
-        while let Some((previous, _)) = self.layers.last() {
-            let mut compatible = true;
-            for (old, new) in previous.iter().zip(assignment) {
-                *fuel = fuel.checked_sub(1).ok_or(UnknownReason::BudgetExhausted)?;
-                if old.is_some() && old != new {
-                    compatible = false;
-                    break;
+        debug_assert_eq!(assignment.len(), self.facts.len());
+        if let Some(changed) = changed {
+            for &atom in changed {
+                charge(fuel, 1)?;
+                self.pending.insert(atom);
+            }
+        }
+        let mut cut = self.layers.len();
+        for &atom in &self.pending {
+            charge(fuel, 1)?;
+            if let Some((value, layer)) = self.facts[atom] {
+                if assignment[atom] != Some(value) {
+                    cut = cut.min(layer);
                 }
             }
-            if compatible {
-                break;
-            }
-            self.layers.pop();
-            let checkpoint = self.layers.last().map_or(0, |(_, checkpoint)| *checkpoint);
-            self.classes.rollback(checkpoint);
         }
+        if cut == self.layers.len() {
+            return Ok(());
+        }
+        let checkpoint = if cut == 0 {
+            0
+        } else {
+            self.layers[cut - 1].checkpoint
+        };
+        // Reserve the complete rollback before changing admitted facts/classes.
+        // On interruption only extra pending notifications may have been added.
+        for layer in &self.layers[cut..] {
+            charge(fuel, layer.atoms.len().saturating_add(1))?;
+        }
+        charge(fuel, self.classes.checkpoint() - checkpoint)?;
+        while self.layers.len() > cut {
+            let layer = self.layers.pop().unwrap();
+            for atom in layer.atoms {
+                self.facts[atom] = None;
+                self.pending.insert(atom);
+            }
+        }
+        self.classes.rollback(checkpoint);
         Ok(())
+    }
+    // Caller reserves pending traversal and snapshot work before publication.
+    fn commit(&mut self, assignment: &[Option<bool>]) {
+        let atoms: Vec<_> = self
+            .pending
+            .iter()
+            .copied()
+            .filter(|atom| self.facts[*atom].is_none() && assignment[*atom].is_some())
+            .collect();
+        if !atoms.is_empty() || self.layers.is_empty() {
+            let layer = self.layers.len();
+            for &atom in &atoms {
+                self.facts[atom] = Some((assignment[atom].unwrap(), layer));
+            }
+            self.layers.push(Layer {
+                atoms,
+                checkpoint: self.classes.checkpoint(),
+            });
+        } else {
+            self.layers.last_mut().unwrap().checkpoint = self.classes.checkpoint();
+        }
+        self.pending.clear();
+    }
+}
+impl fmt::Display for State {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(theory-state {} (facts", self.classes)?;
+        for (atom, fact) in self.facts.iter().enumerate() {
+            if let Some((value, layer)) = fact {
+                write!(f, " (atom {atom} {value} (layer {layer}))")?;
+            }
+        }
+        write!(f, ") (layers")?;
+        for layer in &self.layers {
+            write!(f, " (layer (checkpoint {}) (atoms", layer.checkpoint)?;
+            for atom in &layer.atoms {
+                write!(f, " {atom}")?;
+            }
+            write!(f, "))")?;
+        }
+        write!(f, ") (pending")?;
+        for atom in &self.pending {
+            write!(f, " {atom}")?;
+        }
+        write!(f, "))")
     }
 }
 impl Search<'_> {
+    #[cfg(test)]
     pub(super) fn theory_cached(
         &mut self,
         assignment: &[Option<bool>],
     ) -> Result<Option<TheoryModel>, UnknownReason> {
-        let mut state = self
-            .theory_state
-            .take()
-            .unwrap_or_else(|| State::new(self.terms.nodes.len()));
-        let prepared = state.prepare(assignment, &mut self.steps);
+        self.theory_cached_changes(assignment, Some(&(0..assignment.len()).collect()), true)
+            .map(|result| match result {
+                Check::Conflict => None,
+                Check::Model(model) => Some(model),
+                Check::Consistent => unreachable!("requested an owned model"),
+            })
+    }
+    pub(super) fn theory_cached_changes(
+        &mut self,
+        assignment: &[Option<bool>],
+        changed: Option<&BTreeSet<usize>>,
+        capture_model: bool,
+    ) -> Result<Check, UnknownReason> {
+        let mut state = match (self.theory_state.take(), changed) {
+            (Some(state), Some(_)) => state,
+            _ => State::new(self.terms.nodes.len(), assignment, &mut self.steps)?,
+        };
+        let prepared = state.prepare(assignment, changed, &mut self.steps);
         if let Err(error) = prepared {
             self.theory_state = Some(state);
             return Err(error);
@@ -140,25 +256,28 @@ impl Search<'_> {
         });
         let result = match result {
             Ok(Some(evidence)) => {
-                let cost = assignment
+                let cost = state
+                    .pending
                     .len()
-                    .saturating_add(self.terms.nodes.len().saturating_mul(2));
+                    .saturating_mul(2)
+                    .saturating_add(1)
+                    .saturating_add(if capture_model {
+                        self.terms.nodes.len().saturating_mul(2)
+                    } else {
+                        0
+                    });
                 if let Some(remaining) = self.steps.checked_sub(cost) {
                     self.steps = remaining;
-                    if !state
-                        .layers
-                        .last()
-                        .is_some_and(|(previous, _)| previous == assignment)
-                    {
-                        state
-                            .layers
-                            .push((assignment.to_vec(), state.classes.checkpoint()));
-                    }
-                    Ok(Some(TheoryModel {
-                        classes: state.classes.snapshot(),
-                        kinds: evidence.kinds,
-                        integers: evidence.integers,
-                    }))
+                    state.commit(assignment);
+                    Ok(if capture_model {
+                        Check::Model(TheoryModel {
+                            classes: state.classes.snapshot(),
+                            kinds: evidence.kinds,
+                            integers: evidence.integers,
+                        })
+                    } else {
+                        Check::Consistent
+                    })
                 } else {
                     state.classes.rollback(checkpoint);
                     Err(UnknownReason::BudgetExhausted)
@@ -166,7 +285,7 @@ impl Search<'_> {
             }
             other => {
                 state.classes.rollback(checkpoint);
-                other.map(|_| None)
+                other.map(|_| Check::Conflict)
             }
         };
         self.theory_state = Some(state);
@@ -177,6 +296,57 @@ impl Search<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sparse_layers_rollback_atomically_and_readmit_unchanged_facts() {
+        for budget in 0..12 {
+            let mut assignment = vec![None; 4096];
+            let mut state = State::new(4, &assignment, &mut 100000).unwrap();
+            for atom in 0..3 {
+                assignment[atom] = Some(true);
+                state
+                    .prepare(&assignment, Some(&BTreeSet::from([atom])), &mut 1000)
+                    .unwrap();
+                state.classes.merge(atom, atom + 1);
+                state.commit(&assignment);
+            }
+            assert_eq!(state.layers.iter().map(|l| l.atoms.len()).sum::<usize>(), 3);
+            state
+                .prepare(&assignment, Some(&BTreeSet::new()), &mut 0)
+                .unwrap();
+            assignment[1] = None;
+            let before = state.classes.to_string();
+            let facts = state.facts.clone();
+            if state
+                .prepare(&assignment, Some(&BTreeSet::from([1])), &mut { budget })
+                .is_err()
+            {
+                assert_eq!(state.classes.to_string(), before);
+                assert_eq!(state.facts, facts);
+            }
+            state
+                .prepare(&assignment, Some(&BTreeSet::from([1])), &mut 1000)
+                .unwrap();
+            assert_eq!(state.classes.root(0), state.classes.root(1));
+            assert_ne!(state.classes.root(1), state.classes.root(2));
+            assert_ne!(state.classes.root(2), state.classes.root(3));
+            assert!(state.pending.contains(&2));
+            // Rechecking the unchanged later fact must establish a new layer.
+            state.classes.merge(2, 3);
+            state.commit(&assignment);
+            assert_eq!(state.facts[2], Some((true, 1)));
+            assignment[2] = Some(false);
+            state
+                .prepare(&assignment, Some(&BTreeSet::from([2])), &mut 1000)
+                .unwrap();
+            assert_ne!(state.classes.root(2), state.classes.root(3));
+            assert!(
+                state
+                    .to_string()
+                    .starts_with("(theory-state (equality-classes")
+            );
+        }
+    }
+
     #[test]
     fn rollback_restores_roots_sizes_and_nested_checkpoints() {
         let mut classes = Classes::new(6);
@@ -253,6 +423,25 @@ mod tests {
                 }
             }
         };
+        let mut previous = vec![None; atoms.len()];
+        let mut pending = BTreeSet::new();
+        let mut cached = |search: &mut Search<'_>, assignment: &[Option<bool>]| {
+            for (index, (old, new)) in previous.iter_mut().zip(assignment).enumerate() {
+                if old != new {
+                    pending.insert(index);
+                    *old = *new;
+                }
+            }
+            let result = search.theory_cached_changes(assignment, Some(&pending), true);
+            if result.is_ok() {
+                pending.clear();
+            }
+            result.map(|result| match result {
+                Check::Model(model) => Some(model),
+                Check::Conflict => None,
+                Check::Consistent => unreachable!(),
+            })
+        };
         let mut consistent = 0;
         let mut inconsistent = 0;
         for code in (0..81).chain((0..81).rev()) {
@@ -265,7 +454,7 @@ mod tests {
                 })
                 .collect();
             search.steps = 100000;
-            let warm = search.theory_cached(&assignment).unwrap();
+            let warm = cached(&mut search, &assignment).unwrap();
             if warm.is_some() {
                 consistent += 1;
             } else {
@@ -277,10 +466,10 @@ mod tests {
         assert!(consistent > 0 && inconsistent > 0);
         for budget in 0..256 {
             search.steps = budget;
-            let _ = search.theory_cached(&[Some(true), None, Some(true), None]);
+            let _ = cached(&mut search, &[Some(true), None, Some(true), None]);
             search.steps = 100000;
             let assignment = [Some(false), None, Some(false), Some(true)];
-            let warm = search.theory_cached(&assignment).unwrap();
+            let warm = cached(&mut search, &assignment).unwrap();
             let fresh = search.theory(&assignment).unwrap();
             compare(warm, fresh);
         }
