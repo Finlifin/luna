@@ -8,8 +8,19 @@ impl Checker<'_, '_> {
         body: &Expr<'_>,
         result: &Term,
     ) -> Result<n::Expr, Error> {
+        self.with_function_template_body(owner, result, |checker| {
+            checker.computation_body(body, Some(result))
+        })
+    }
+
+    pub(in crate::program) fn with_function_template_body<R>(
+        &mut self,
+        owner: OwnerId,
+        result: &Term,
+        check: impl FnOnce(&mut Self) -> Result<R, Error>,
+    ) -> Result<R, Error> {
         let Some(template) = self.package.function_template_bodies.get(&owner).cloned() else {
-            return self.computation_body(body, Some(result));
+            return check(self);
         };
         let saved_locals = self.locals.clone();
         let saved_code = self.code_values.clone();
@@ -44,10 +55,9 @@ impl Checker<'_, '_> {
                     actual.ports.insert(port.name.name.to_string(), to);
                     self.locals.insert(to, ty);
                 }
-                let supplied = self
-                    .package
-                    .body(supplied)
-                    .ok_or_else(|| error(body.span, "missing supplied template body"))?;
+                let supplied = self.package.body(supplied).ok_or_else(|| {
+                    error(template.interface.ty.span, "missing supplied template body")
+                })?;
                 self.checking_code_generator = false;
                 // Return targets belong to the resulting function; ordinary
                 // quote construction continues to have no outer return target.
@@ -79,7 +89,7 @@ impl Checker<'_, '_> {
             self.code_values
                 .insert(local(template.interface.parameter), code);
             self.checking_code_generator = template.supplied.is_none();
-            self.computation_body(body, Some(result))
+            check(self)
         })();
         self.locals = saved_locals;
         self.code_values = saved_code;

@@ -1957,10 +1957,15 @@ impl Checker<'_, '_> {
                 "deferred interface and effect signatures are not yet implemented",
             ));
         };
-        if self.package.function_template_bodies.contains_key(&owner) {
+        if self.package.function_template_bodies.contains_key(&owner)
+            && (parameters
+                .iter()
+                .any(|(_, annotation)| annotation.is_pending())
+                || result.is_pending())
+        {
             return Err(error(
                 span,
-                "shared function templates with deferred signatures or staged body work are not yet implemented",
+                "shared function templates with deferred interface descriptions are not yet implemented",
             ));
         }
         if sig.modifiers.is_normal_form_head
@@ -2295,72 +2300,107 @@ impl Checker<'_, '_> {
                 D::Known(ty) => Some(ty.clone()),
                 D::Any => None,
             };
-            this.describe_open_expression(
-                body.value,
-                &mut locals,
-                Some(&result),
-                Some(&result),
-                0,
-            )?;
-            if sig.modifiers.is_pure || this.default_behavior_functions.contains(&owner) {
-                let D::Known(result_type) = declared_result else {
-                    unreachable!()
-                };
-                this.checking_open_behavior = true;
-                this.in_unselected_inline = true;
-                this.inline_selection = Some((
-                    hir::HirId::new(owner, hir::ItemLocalId::new(u32::MAX)),
-                    usize::MAX,
-                ));
-                let behavior = this.computation_body(body.value, Some(&result_type));
-                this.checking_open_behavior = false;
-                let behavior = behavior?;
-                let mut parameters: Vec<_> = definition
-                    .parameters
-                    .iter()
-                    .map(|(sort, annotation)| {
-                        let Annotation::Known(ty) = annotation else {
-                            unreachable!()
-                        };
-                        Parameter {
-                            sort: *sort,
-                            ty: ty.clone(),
+            let template_result = match &declared_result {
+                D::Known(ty) => Some(ty.clone()),
+                D::Any => None,
+            };
+            let check_body = |this: &mut Self| -> Result<(), Error> {
+                this.describe_open_expression(
+                    body.value,
+                    &mut locals,
+                    Some(&result),
+                    Some(&result),
+                    0,
+                )?;
+                if sig.modifiers.is_pure || this.default_behavior_functions.contains(&owner) {
+                    let D::Known(result_type) = declared_result else {
+                        unreachable!()
+                    };
+                    this.checking_open_behavior = true;
+                    this.in_unselected_inline = true;
+                    this.inline_selection = Some((
+                        hir::HirId::new(owner, hir::ItemLocalId::new(u32::MAX)),
+                        usize::MAX,
+                    ));
+                    let behavior = this.computation_body(body.value, Some(&result_type));
+                    this.checking_open_behavior = false;
+                    let behavior = behavior?;
+                    let mut parameters: Vec<_> = definition
+                        .parameters
+                        .iter()
+                        .map(|(sort, annotation)| {
+                            let Annotation::Known(ty) = annotation else {
+                                unreachable!()
+                            };
+                            Parameter {
+                                sort: *sort,
+                                ty: ty.clone(),
+                            }
+                        })
+                        .collect();
+                    let inputs = std::mem::take(&mut this.ordinary_behavior_inputs);
+                    parameters.extend(inputs.values().cloned().map(|ty| Parameter {
+                        sort: Sort::ComptimeValue,
+                        ty,
+                    }));
+                    // Abstract code has an arbitrary runtime result. Its pure
+                    // behavior assumption belongs only to this declaration-side
+                    // witness; each supplied body is checked again concretely.
+                    let mut abstract_inputs = BTreeMap::new();
+                    let mut fuel = usize::try_from(this.required_steps).unwrap_or(usize::MAX);
+                    let before = fuel;
+                    let observed = nir::visit::expression(&behavior, &mut fuel, |node, fuel| {
+                        if let K::Local(binding) = node.kind {
+                            if this.abstract_code_dependencies.contains_key(&binding) {
+                                nir::type_computations::charge_term(&node.ty, fuel)
+                                    .map_err(|failure| failure.to_string())?;
+                                abstract_inputs.insert(binding, node.ty.clone());
+                            }
                         }
-                    })
-                    .collect();
-                let inputs = std::mem::take(&mut this.ordinary_behavior_inputs);
-                parameters.extend(inputs.values().cloned().map(|ty| Parameter {
-                    sort: Sort::ComptimeValue,
-                    ty,
-                }));
-                let bindings = sig
-                    .params
-                    .iter()
-                    .map(|param| local(param.hir_id))
-                    .chain(inputs.keys().copied())
-                    .collect();
-                this.ordinary_behavior_functions.push(n::Function {
-                    declaration: declaration(this.package, &this.package_identities, owner),
-                    name: format!("{} [ordinary]", item.ident.name),
-                    phase: n::FunctionPhase::Runtime,
-                    pure: sig.modifiers.is_pure,
-                    is_unsafe: sig.modifiers.is_unsafe,
-                    inline: false,
-                    signature: Term::Function {
-                        parameters,
-                        result: Box::new(result_type),
-                    },
-                    parameters: bindings,
-                    body: behavior,
-                    defaults: vec![],
-                    type_parameters: this.type_parameters[&owner].clone(),
-                    preconditions,
-                    postconditions,
-                    entry_snapshots,
-                    result_binding: sig.return_binding.map(local),
-                    requirements: this.definition_requirements(owner),
-                    capabilities: this.capabilities.get(&owner).cloned().unwrap_or_default(),
-                });
+                        Ok(())
+                    });
+                    this.required_steps -= (before - fuel) as u64;
+                    observed.map_err(|message| error(item.span, message))?;
+                    parameters.extend(abstract_inputs.values().cloned().map(|ty| Parameter {
+                        sort: Sort::Runtime,
+                        ty,
+                    }));
+                    let bindings = sig
+                        .params
+                        .iter()
+                        .map(|param| local(param.hir_id))
+                        .chain(inputs.keys().copied())
+                        .chain(abstract_inputs.keys().copied())
+                        .collect();
+                    this.ordinary_behavior_functions.push(n::Function {
+                        declaration: declaration(this.package, &this.package_identities, owner),
+                        name: format!("{} [ordinary]", item.ident.name),
+                        phase: n::FunctionPhase::Runtime,
+                        pure: sig.modifiers.is_pure,
+                        is_unsafe: sig.modifiers.is_unsafe,
+                        inline: false,
+                        signature: Term::Function {
+                            parameters,
+                            result: Box::new(result_type),
+                        },
+                        parameters: bindings,
+                        body: behavior,
+                        defaults: vec![],
+                        type_parameters: this.type_parameters[&owner].clone(),
+                        preconditions,
+                        postconditions,
+                        entry_snapshots,
+                        result_binding: sig.return_binding.map(local),
+                        requirements: this.definition_requirements(owner),
+                        capabilities: this.capabilities.get(&owner).cloned().unwrap_or_default(),
+                    });
+                }
+                Ok(())
+            };
+            if let Some(result) = template_result {
+                this.with_function_template_body(owner, &result, check_body)?;
+            } else {
+                check_body(this)?;
             }
             Ok((default_types, default_dependencies))
         });
@@ -9014,7 +9054,7 @@ impl Checker<'_, '_> {
                 .package
                 .body(*body)
                 .ok_or_else(|| error(span, "missing open function body"))?;
-            let value = this.computation_body(body.value, Some(result))?;
+            let value = this.function_body(owner, body.value, result)?;
             Ok(n::Function {
                 declaration: id,
                 name: item.ident.name.as_str().into(),

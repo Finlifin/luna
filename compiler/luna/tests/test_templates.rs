@@ -2892,3 +2892,93 @@ fn shared_template_body_cannot_request_undeclared_effects() {
         assert!(!failure.contains("not implemented"), "{failure}");
     }
 }
+
+#[test]
+fn shared_template_runtime_parameters_can_depend_on_staged_type_inputs() {
+    let source = "typealias Type=.Type'builtin;
+        template fn select(comptime T:Type,value:T,quote lambda body:<current:T |- T>)->T {
+            let current=value;~<body>
+        }
+        fn first use select {current}
+        fn second use select {current}
+        fn run()->bool {first(bool,true) and not second(bool,false)}";
+    let Artifact::Nir(package) = compile(source, Emit::Nir).unwrap() else {
+        panic!("expected NIR")
+    };
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn shared_template_staged_setup_selects_before_splicing_instance_code() {
+    for category in ["", "inline ", "quote "] {
+        let source = format!("template fn select(comptime negate:bool,value:bool,quote lambda body:<current:bool |- bool>)->bool {{
+                let current=inline if negate {{not value}} else {{value}};~<body>
+            }}
+            {category}fn first use select {{return current;}}
+            {category}fn second use select {{not current}}
+            fn run()->bool {{first(false,true) and first(true,false) and second(true,true)}}");
+        let Artifact::Nir(package) =
+            compile(&source, Emit::Nir).unwrap_or_else(|e| panic!("{category}: {e}"))
+        else {
+            panic!("expected NIR")
+        };
+        let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
+        let mut vm =
+            comptime_interpretor::Interpreter::from_iir(&graph, Default::default()).unwrap();
+        assert_eq!(
+            vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+            comptime_interpretor::Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn shared_template_staged_setup_checks_unselected_paths_and_input_phases() {
+    for source in [
+        "template fn invalid(comptime choose:bool,value:bool,quote lambda body:<current:bool |- bool>)->bool {
+            let current=inline if choose {value} else {let invalid:*bool=value;false};~<body>
+        }",
+        "template fn invalid(choose:bool,value:bool,quote lambda body:<current:bool |- bool>)->bool {
+            let current=inline if choose {value} else {not value};~<body>
+        }",
+        "template fn select(comptime choose:bool,value:bool,quote lambda body:<current:bool |- bool>)->bool {
+            let current=inline if choose {value} else {not value};~<body>
+        } fn invalid use select {let invalid:*bool=current;true}",
+    ] {
+        let failure=compile(source,Emit::Nir).err().expect("ordinary definition checks must reject invalid staged templates");
+        assert!(!failure.contains("not implemented"),"{failure}");
+    }
+}
+
+#[test]
+fn shared_template_staged_setup_retains_purity_checks() {
+    let source = "template pure fn select(comptime choose:bool,value:bool,quote lambda body:<current:bool |- bool>)->bool {
+            let current=inline if choose {value} else {not value};~<body>
+        }
+        fn first use select {current}
+        fn run()->bool {first(true,true) and first(false,false)}";
+    let Artifact::Nir(package) = compile(source, Emit::Nir).unwrap() else {
+        panic!("expected NIR")
+    };
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+    let source = "template pure fn select(comptime choose:bool,pointer:*bool,quote lambda body:<current:*bool |- bool>)->bool {
+            let current=inline if choose {pointer} else {pointer};~<body>
+        } fn invalid use select {current.* = true;true}";
+    let failure = compile(source, Emit::Nir)
+        .err()
+        .expect("instance code must satisfy inherited purity");
+    assert!(failure.contains("P4 evidence"), "{failure}");
+    let source = "template pure fn invalid(comptime choose:bool,pointer:*bool,quote lambda body:<current:bool |- bool>)->bool {
+        let current=inline if choose {true} else {false};pointer.* = true;~<body>
+    }";
+    let failure = compile(source, Emit::Nir)
+        .err()
+        .expect("unused shared setup must satisfy purity");
+    assert!(failure.contains("P4 evidence"), "{failure}");
+}
