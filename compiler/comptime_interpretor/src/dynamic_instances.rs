@@ -97,6 +97,30 @@ impl Interpreter<'_> {
                 Err(self.failure(ErrorKind::Type, Some(source)))
             };
         }
+        if self.graph.is_some() {
+            // Concrete artifacts retain checked identity/signature evidence
+            // independently of executable bodies. Requiring a source function
+            // here would reject ordinary callable values inside frozen types.
+            self.tick(Some(source))?;
+            self.charge_copy_work(Some(source), |fuel| {
+                for argument in arguments {
+                    nir::copy_budget::charge_type_substitution(argument, &[], &[], fuel)?;
+                }
+                Ok(())
+            })?;
+            let admitted = self.graph_indexes.as_ref().is_some_and(|indexes| {
+                indexes
+                    .callables
+                    .get(&declaration)
+                    .is_some_and(|instances| instances.contains_key(arguments))
+            });
+            return if admitted {
+                Ok(())
+            } else {
+                Err(self.failure(ErrorKind::UnknownFunction, Some(source)))
+            };
+        }
+
         if let Some(identity) = self.runtime_function_identities.get(&declaration) {
             // Transport-only metadata is published after producer-side
             // formation checks. It cannot authorize a runtime invocation.
@@ -792,6 +816,38 @@ mod retained_signature_tests {
                 .collect(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn retained_identity_admission_is_indexed_budgeted_and_recoverable() {
+        let mut costs = Vec::new();
+        for count in [2, 128] {
+            let graph = graph(count);
+            let mut vm = Interpreter::from_iir_for_comptime(&graph, Budget::default()).unwrap();
+            let key = &graph.callable_identities[1].key;
+            let source = SourceRange { start: 1, end: 2 };
+            vm.budget.steps = 1;
+            assert_eq!(
+                vm.admit_callable_identity(key.declaration, &key.arguments, source)
+                    .unwrap_err()
+                    .kind,
+                ErrorKind::StepsExhausted
+            );
+            vm.budget.steps = 100;
+            assert_eq!(
+                vm.admit_callable_identity(key.declaration, &[argument(count + 1)], source)
+                    .unwrap_err()
+                    .kind,
+                ErrorKind::UnknownFunction
+            );
+            let before = vm.budget.steps;
+            vm.admit_callable_identity(key.declaration, &key.arguments, source)
+                .unwrap();
+            costs.push(before - vm.budget.steps);
+            assert!(vm.events().is_empty());
+        }
+        assert_eq!(costs[0], costs[1]);
+        assert!(costs[0] > 0);
     }
 
     #[test]

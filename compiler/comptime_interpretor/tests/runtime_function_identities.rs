@@ -1662,3 +1662,81 @@ fn source_session_constructor_rejects_duplicate_ids_in_another_snapshot() {
             .unwrap();
     assert!(vm.invoke(id(1), vec![]).is_ok());
 }
+
+#[test]
+fn immutable_aggregates_transport_instantiated_function_identities() {
+    let package = package();
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let callable = vm.invoke(id(1), vec![]).unwrap();
+    let value = Value::Tuple(vec![callable.clone()]);
+    let ty = Term::Tuple(vec![signature(Term::Primitive(Primitive::Bool))]);
+    assert!(value.immutable_copy_work().is_some());
+    vm.validate_immutable_input(&value, &ty).unwrap();
+    let empty = Package::default();
+    let mut absent = Interpreter::for_comptime(&empty, Budget::default()).unwrap();
+    assert!(absent.validate_immutable_input(&value, &ty).is_err());
+    let mut changed = package.clone();
+    changed.runtime_function_identities[0].signature = signature(Term::Primitive(Primitive::Char));
+    let mut changed = Interpreter::for_comptime(&changed, Budget::default()).unwrap();
+    assert!(changed.validate_immutable_input(&value, &ty).is_err());
+    vm.validate_immutable_input(&value, &ty).unwrap();
+    assert_eq!(
+        vm.invoke(id(2), vec![]).unwrap_err().kind,
+        ErrorKind::PhaseMismatch
+    );
+    vm.charge_preparation(vm.remaining_steps() as usize)
+        .unwrap();
+    assert_eq!(
+        vm.validate_immutable_input(&value, &ty).unwrap_err().kind,
+        ErrorKind::StepsExhausted
+    );
+}
+
+#[test]
+fn immutable_template_handles_use_the_current_iir_target_table() {
+    let mut source = package();
+    source.functions.clear();
+    let parameter = nir::Parameter {
+        sort: Sort::ComptimeValue,
+        ty: Term::Primitive(Primitive::Bool),
+    };
+    source.runtime_function_identities[0].signature = Term::Function {
+        parameters: vec![parameter.clone()],
+        result: Box::new(Term::Rigid {
+            declaration: id(3),
+            sort: Sort::Type,
+        }),
+    };
+    let ty = Term::Function {
+        parameters: vec![parameter],
+        result: Box::new(Term::Primitive(Primitive::Bool)),
+    };
+    let key = iir::InstanceKey {
+        declaration: id(2),
+        arguments: vec![Term::Primitive(Primitive::Bool)].into(),
+    };
+    let table = iir::template_storage::TemplateStorage::from_package(
+        ty.clone(),
+        vec![key.clone()],
+        &source,
+        &mut 100_000,
+    )
+    .unwrap();
+    let graph = iir::Package {
+        templates: vec![table],
+        ..Default::default()
+    };
+    let value = Value::Tuple(vec![Value::FunctionInstance {
+        declaration: key.declaration,
+        arguments: key.arguments.to_vec(),
+    }]);
+    let ty = Term::Tuple(vec![ty]);
+    let mut vm = Interpreter::from_iir_for_comptime(&graph, Budget::default()).unwrap();
+    vm.validate_immutable_input(&value, &ty).unwrap();
+    let empty = iir::Package::default();
+    let mut absent = Interpreter::from_iir_for_comptime(&empty, Budget::default()).unwrap();
+    assert!(absent.validate_immutable_input(&value, &ty).is_err());
+    // Storing a target table supplies no executable body.
+    assert!(vm.invoke_instance(&key, vec![]).is_err());
+    vm.validate_immutable_input(&value, &ty).unwrap();
+}

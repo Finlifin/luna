@@ -563,3 +563,47 @@ fn definition_operation_values_preserve_fresh_type_identity() {
         assert!(!function.pure, "definition publication is effectful");
     }
 }
+
+#[test]
+fn runtime_function_instances_remain_data_in_comptime_lists() {
+    let package = run_all_carriers(
+        "fn identity(value: T) -> T where T { value }
+        comptime fn pick() -> fn(bool) -> bool {
+            let choices: List<fn(bool) -> bool> = [identity<bool>];
+            choices[0]
+        }
+        pure comptime fn Carrier<callback: fn(bool) -> bool> -> Type { bool }
+        typealias Stored = Carrier<pick()>;
+        comptime fn StoredType() -> Type { Stored }
+        comptime fn run() -> bool { Stored == Carrier<identity<bool>> }",
+    );
+    let key = iir::InstanceKey {
+        declaration: support::id(&package, "StoredType"),
+        arguments: vec![].into(),
+    };
+    let graph = elaboration::materialization::instantiate(
+        &package,
+        &[key.clone()],
+        Default::default(),
+        elaboration::ptc::Budget::default(),
+    )
+    .unwrap();
+    let mut vm =
+        comptime_interpretor::Interpreter::from_iir_for_comptime(&graph, Default::default())
+            .unwrap();
+    let value = vm.invoke_instance(&key, vec![]).unwrap();
+    vm.validate_immutable_input(&value, &nir::Term::Primitive(nir::Primitive::Type))
+        .unwrap();
+    let missing = iir::Package {
+        normal_forms: graph.normal_forms.clone(),
+        ..Default::default()
+    };
+    let mut missing_vm =
+        comptime_interpretor::Interpreter::from_iir_for_comptime(&missing, Default::default())
+            .unwrap();
+    assert!(
+        missing_vm
+            .validate_immutable_input(&value, &nir::Term::Primitive(nir::Primitive::Type))
+            .is_err()
+    );
+}

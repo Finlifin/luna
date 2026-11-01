@@ -413,7 +413,9 @@ impl Value {
                 Value::Integer(value) => value.bit_len().div_ceil(32),
                 Value::BitVec(value) => value.words().len(),
                 Value::String(value) | Value::Symbol(value) => value.len(),
-                Value::Record { arguments, .. } | Value::Variant { arguments, .. } => {
+                Value::Record { arguments, .. }
+                | Value::Variant { arguments, .. }
+                | Value::FunctionInstance { arguments, .. } => {
                     if arguments.len() > 100_000 {
                         return None;
                     }
@@ -486,7 +488,6 @@ impl Value {
                 | Value::Pointer(_)
                 | Value::Storage(_)
                 | Value::ComptimeReference(_)
-                | Value::FunctionInstance { .. }
                 | Value::RuntimeTraitMethod(_) => return None,
                 _ => 0,
             };

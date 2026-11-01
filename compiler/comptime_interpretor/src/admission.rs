@@ -152,6 +152,27 @@ impl Interpreter<'_> {
         }
         self.tick(None)?;
         match value {
+            Value::Function(declaration) => {
+                self.admit_callable_identity(*declaration, &[], SourceRange { start: 0, end: 0 })?;
+            }
+            Value::FunctionInstance {
+                declaration,
+                arguments,
+            } => {
+                // Concrete IIR template targets were checked by has_type in
+                // this immutable graph. Source identities additionally need
+                // the current declaration's input and formation contracts.
+                if self.graph.is_none() {
+                    self.admit_callable_identity(
+                        *declaration,
+                        arguments,
+                        SourceRange { start: 0, end: 0 },
+                    )?;
+                }
+                for argument in arguments {
+                    self.admit_type(argument, depth + 1)?;
+                }
+            }
             Value::Closure(closure) => {
                 let (declaration, arguments) = closure
                     .declaration_instance()

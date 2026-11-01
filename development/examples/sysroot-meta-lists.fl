@@ -180,7 +180,13 @@ test comptime_list_collectors {
     } else {
         assumes false;
     };
+    inline if SelectedCarrier == CallbackCarrier<retain<bool>> {
+        assumes true;
+    } else {
+        assumes false;
+    };
 }
+
 
 {- Direct and projected list receivers update their original slots. -}
 struct ListHolder { items: meta.List<bool>, tag: bool }
@@ -353,3 +359,19 @@ comptime fn fallible_terminals() -> bool {
         and (unused matches _!) and (complete matches _!)
         and (failed matches error 3) and visits == 0
 }
+
+{- Runtime function identities are comptime data, not comptime invocations. -}
+fn retain(value: T) -> T where T { value }
+
+const available_functions: meta.List<fn(bool) -> bool> = [retain<bool>];
+
+comptime fn selected() -> fn(bool) -> bool {
+    let saved = available_functions;
+    saved.get(0) match {
+        selected? => selected,
+        null => retain<bool>,
+    }
+}
+
+pure comptime fn CallbackCarrier<function: fn(bool) -> bool> -> Type { bool }
+typealias SelectedCarrier = CallbackCarrier<selected()>;

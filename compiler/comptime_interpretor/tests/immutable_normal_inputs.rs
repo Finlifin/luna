@@ -667,3 +667,33 @@ fn immutable_prepared_functions_keep_session_body_authority() {
         );
     }
 }
+
+#[test]
+fn immutable_function_handles_recheck_formation_contracts() {
+    for instance in [false, true] {
+        let mut package = world();
+        package
+            .functions
+            .retain(|function| function.declaration == id(3));
+        package.functions[0].requirements = vec![nir::program::TypePredicate::Bool(false)];
+        let value = Value::Tuple(vec![if instance {
+            Value::FunctionInstance {
+                declaration: id(3),
+                arguments: vec![],
+            }
+        } else {
+            Value::Function(id(3))
+        }]);
+        let ty = Term::Tuple(vec![callable()]);
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        assert_eq!(
+            vm.validate_immutable_input(&value, &ty).unwrap_err().kind,
+            ErrorKind::TypeContractRejected
+        );
+        assert!(vm.events().is_empty());
+        package.functions[0].requirements = vec![nir::program::TypePredicate::Bool(true)];
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        vm.validate_immutable_input(&value, &ty).unwrap();
+        assert!(vm.events().is_empty());
+    }
+}
