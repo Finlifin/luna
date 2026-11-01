@@ -619,3 +619,146 @@ fn dynamic_instance_operands_participate_in_type_rewriting() {
     assert!(value.to_string().contains("(comptime-function-instance"));
     assert!(!value.to_string().contains("(rigid"));
 }
+
+#[test]
+fn metadata_rewriting_visits_entries_and_selector_without_changing_shared_code() {
+    let body = Arc::new(expr(K::TypeValue(rigid())));
+    let mut query = expr(K::BuildMetadata {
+        owner: 17,
+        entries: vec![
+            ("dependency".into(), 19, Some(rigid())),
+            ("missing".into(), 20, None),
+        ],
+        selector: Box::new(expr(K::Closure {
+            captures: vec![],
+            parameters: vec![],
+            body: body.clone(),
+        })),
+    });
+    let mut visits = 0;
+    query
+        .rewrite_types(&mut |ty| {
+            visits += 1;
+            assert_eq!(*ty, rigid());
+            Ok::<_, ()>(Term::Primitive(Primitive::Bool))
+        })
+        .unwrap();
+    assert_eq!(
+        visits, 5,
+        "root, entry, selector, body annotation and body operand"
+    );
+    let K::BuildMetadata {
+        owner,
+        entries,
+        selector,
+    } = &query.kind
+    else {
+        panic!()
+    };
+    assert_eq!(*owner, 17);
+    assert_eq!(
+        entries[0],
+        (
+            "dependency".into(),
+            19,
+            Some(Term::Primitive(Primitive::Bool))
+        )
+    );
+    assert_eq!(entries[1], ("missing".into(), 20, None));
+    let K::Closure {
+        body: rewritten, ..
+    } = &selector.kind
+    else {
+        panic!()
+    };
+    assert!(!Arc::ptr_eq(rewritten, &body));
+    assert_eq!(body.ty, rigid());
+    assert!(!query.to_string().contains("(rigid"));
+}
+
+#[test]
+fn metadata_selector_binding_rewrite_obeys_entry_failure_order() {
+    use nir::program::Rewriter;
+    struct Rewrite {
+        fail: bool,
+        locals: Vec<LocalId>,
+    }
+    impl Rewriter for Rewrite {
+        type Error = ();
+        fn ty(&mut self, ty: &Term) -> Result<Term, ()> {
+            if self.fail && *ty == rigid() {
+                return Err(());
+            }
+            Ok(ty.clone())
+        }
+        fn expression(&mut self, expression: &mut Expr) -> Result<bool, ()> {
+            if let K::Local(binding) = &mut expression.kind {
+                self.locals.push(*binding);
+                binding.owner = 99;
+            }
+            Ok(true)
+        }
+    }
+    let original = LocalId { owner: 2, index: 3 };
+    let make = || Expr {
+        ty: Term::Primitive(Primitive::Str),
+        source: SourceRange { start: 0, end: 1 },
+        kind: K::BuildMetadata {
+            owner: 17,
+            entries: vec![("dep".into(), 19, Some(rigid()))],
+            selector: Box::new(Expr {
+                ty: Term::Primitive(Primitive::Str),
+                source: SourceRange { start: 0, end: 1 },
+                kind: K::Local(original),
+            }),
+        },
+    };
+    let mut rejected = Rewrite {
+        fail: true,
+        locals: vec![],
+    };
+    assert!(make().rewrite_with(&mut rejected).is_err());
+    assert!(rejected.locals.is_empty());
+    let mut accepted = Rewrite {
+        fail: false,
+        locals: vec![],
+    };
+    let mut query = make();
+    query.rewrite_with(&mut accepted).unwrap();
+    assert_eq!(accepted.locals, vec![original]);
+    let K::BuildMetadata { selector, .. } = query.kind else {
+        panic!()
+    };
+    assert!(matches!(
+        selector.kind,
+        K::Local(LocalId {
+            owner: 99,
+            index: 3
+        })
+    ));
+}
+
+#[test]
+fn nested_metadata_rewrites_use_the_heap_frontier() {
+    let depth = 10_000;
+    let mut query = expr(K::TypeValue(rigid()));
+    for _ in 0..depth {
+        query = expr(K::BuildMetadata {
+            owner: 17,
+            entries: vec![],
+            selector: Box::new(query),
+        });
+    }
+    let mut visits = 0;
+    query
+        .rewrite_types(&mut |ty| {
+            visits += 1;
+            Ok::<_, ()>(ty.clone())
+        })
+        .unwrap();
+    assert_eq!(visits, depth + 2);
+    // Tear down the generated chain iteratively as well.
+    while let K::BuildMetadata { selector, .. } = query.kind {
+        query = *selector;
+    }
+}

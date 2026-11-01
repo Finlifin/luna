@@ -1638,3 +1638,43 @@ fn metadata_selector_calls_and_saved_origins_execute_as_bytecode() {
         assert_eq!(events.iter().filter(|event|matches!(event,comptime_interpretor::Event::EnterFunction(id) if *id==select)).count(),2);
     }
 }
+
+#[test]
+fn metadata_selector_in_generic_body_preserves_input_bindings() {
+    let fixture = SourceFixture::new(
+        r#"
+        comptime fn read(input:T)->bool
+        where T
+        {
+            let features=build.package_metadata(do {let saved:T=input; "dependency"}).features;
+            features.get(.enabled,bool) matches true?
+        }
+        comptime fn run()->bool {read<bool>(true) and read<bool>(false)}
+        "#,
+        "",
+    );
+    let luna::frontend::Artifact::Nir(package) = fixture
+        .compile_configured(&metadata_protocols(), None)
+        .unwrap()
+    else {
+        panic!()
+    };
+    let entry = package
+        .functions
+        .iter()
+        .find(|function| function.name == "run")
+        .unwrap()
+        .declaration;
+    let mut vm = comptime_interpretor::Interpreter::for_comptime(
+        &package,
+        comptime_interpretor::Budget {
+            steps: 1_000_000,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        vm.invoke(entry, vec![]).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}

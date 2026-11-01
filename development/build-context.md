@@ -255,3 +255,35 @@ Verification in `/home/fin/luna`:
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test build_context`: 33 passed; `/tmp/luna-tools-m70cozr1/result.json`. Includes source ownership, saved metadata functions, dependency identities, resident invalidation/recovery and real-sysroot O0/O3.
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test library_attributes --test trait_phases`: 76 passed; `/tmp/luna-tools-2ikah839/result.json`. Attribute fixture imports bool explicitly through its configured builtin dependency.
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes complete_shipped_sysroot_reuses_text_bindings_for_comptime_and_hashing`: passed; `/tmp/luna-tools-ye2qmr75/result.json`.
+
+
+## Metadata selector rewriting
+
+BuildMetadata had two overlapping branches in the generic NIR rewriter. The
+first rewrote frozen entries; the later unary selector branch was unreachable,
+so selector types, binding remaps and shared closure bodies were skipped. A
+regression observed only two callbacks instead of the expected five before the
+fix (`/tmp/luna-tools-ib3r0_14/result.json`, exit 101).
+
+Metadata now participates in the existing heap-frontier traversal: rewrite its
+annotation and available entries, then visit the selector. Failure in an entry
+stops before selector callbacks. Shared closure bodies use normal copy-on-write
+rewriting; original shared code and metadata ownership/provider identities remain
+unchanged. A 10,000-level selector chain verifies iterative traversal. The source
+fixture also reads dependency metadata from a generic comptime function whose
+selector block refers to the function's input and type parameter.
+
+Validation in `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 900 -- test -p nir --test
+  type_rewrite`: 13 passed (`/tmp/luna-tools-rq0c3735/result.json`, exit 0).
+- The build-context group passed its 33 existing tests, including real-sysroot
+  O0/O3 and resident invalidation. Its new fixture initially failed parsing due
+  to incorrectly written generic/block syntax (`/tmp/luna-tools-f9pskrio/result.json`
+  and `/tmp/luna-tools-1tw6649_/result.json`, exit 101). After correcting the
+  fixture to `where T` and `do { ... }`, the targeted generic-selector test passed
+  (`/tmp/luna-tools-w9frnjis/result.json`, exit 0). No language checks were relaxed.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test
+  build_metadata --test metadata_wire`: 21 passed
+  (`/tmp/luna-tools-tg5z9kwf/result.json`, exit 0).
+- Workspace formatting check passed (`/tmp/luna-tools-6me9faas/result.json`);
+  `git diff --check` passed.

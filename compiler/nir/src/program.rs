@@ -3978,11 +3978,22 @@ impl Expr {
                     | ExprKind::EffectRun { .. }
                     | ExprKind::EffectComputation { .. }
                     | ExprKind::EffectRequest { .. }
+                    | ExprKind::BuildMetadata { .. }
             ) {
                 expr.rewrite_operation(rewriter)?;
                 continue;
             }
             match &mut expr.kind {
+                ExprKind::BuildMetadata {
+                    entries, selector, ..
+                } => {
+                    for (_, _, value) in entries {
+                        if let Some(value) = value {
+                            *value = rewriter.ty(value)?;
+                        }
+                    }
+                    work.push(Work::Expr(selector));
+                }
                 ExprKind::Block { statements, result }
                 | ExprKind::CallPreparation { statements, result } => {
                     if let Some(result) = result {
@@ -4225,12 +4236,15 @@ impl Expr {
                     *argument = rewriter.ty(argument)?;
                 }
             }
-            ExprKind::BuildMetadata { entries, .. } => {
+            ExprKind::BuildMetadata {
+                entries, selector, ..
+            } => {
                 for (_, _, value) in entries {
                     if let Some(value) = value {
                         *value = rewriter.ty(value)?;
                     }
                 }
+                selector.rewrite_with(rewriter)?;
             }
             ExprKind::TypeValue(ty) => {
                 *ty = rewriter.ty(ty)?;
@@ -4416,9 +4430,6 @@ impl Expr {
             | ExprKind::StructFieldTypes(value)
             | ExprKind::BuildStruct(value)
             | ExprKind::BuildNewtype(value)
-            | ExprKind::BuildMetadata {
-                selector: value, ..
-            }
             | ExprKind::BuildEnum(value)
             | ExprKind::EnumStructure { subject: value, .. }
             | ExprKind::ObjectQuery { subject: value, .. }
