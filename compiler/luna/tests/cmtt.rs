@@ -8024,20 +8024,14 @@ fn generator_readonly_captures_keep_creation_snapshots() {
 }
 
 #[test]
-fn generator_readonly_captures_reject_mutation_and_exposed_storage() {
+fn generator_captures_reject_exposed_storage() {
     let prefix="typealias Reader=%{flag:bool} comptime fn()->bool;
         comptime fn build(action:Reader)-><|-bool> {let first=action();let second=action();'(first and second)}";
-    for (factory, anchor) in [
-        (
-            "comptime fn make()->Reader {var flag=false;|| {flag=not flag;flag}}",
-            "mutates captured state",
-        ),
-        (
-            "comptime fn touch(pointer:*bool)->bool {pointer.* = not pointer.*;pointer.*}
+    for (factory, anchor) in [(
+        "comptime fn touch(pointer:*bool)->bool {pointer.* = not pointer.*;pointer.*}
           comptime fn make()->Reader {var flag=false;|| touch(flag.ref)}",
-            "exposes captured storage",
-        ),
-    ] {
+        "exposes captured storage",
+    )] {
         let source = format!("{prefix} {factory} fn run()->bool {{~<build(make())>}}");
         let error = support::compile_with_protocols(&source, &Default::default()).unwrap_err();
         assert!(error.contains(anchor), "{error}");
@@ -8071,16 +8065,15 @@ fn generator_readonly_nominal_captures_keep_generic_type_arguments() {
 }
 
 #[test]
-fn generator_readonly_nominal_captures_reject_nested_mutable_callbacks() {
+fn generator_nominal_captures_preserve_nested_mutable_callbacks() {
     let source="typealias Counter=%{flag:bool} comptime fn()->bool;
         struct Action {next:Counter}
         typealias Reader=%{action:Action} comptime fn()->bool;
         comptime fn make_counter()->Counter {var flag=false;|| {flag=not flag;flag}}
         comptime fn make_reader(action:Action)->Reader {|| action.next()}
-        comptime fn build(reader:Reader)-><|-bool> {let first=reader();let second=reader();'(first and second)}
+        comptime fn build(reader:Reader)-><|-bool> {let first=reader();let second=reader();'(first and not second)}
         fn run()->bool {~<build(make_reader(Action {next:make_counter()}))>}";
-    let error = support::compile_with_protocols(source, &Default::default()).unwrap_err();
-    assert!(error.contains("mutates captured state"), "{error}");
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
 }
 
 #[test]
@@ -11061,4 +11054,63 @@ fn generator_explicit_method_result_evidence_preserves_impl_inputs_and_defaults(
     assert_eq!(run(&defaults, "run", vec![]), Value::Bool(true));
     let invalid = source.replace("source.choose<.U=char>('x')", "source.choose<.U=bool>('x')");
     assert!(support::compile_with_protocols(&invalid, &Default::default()).is_err());
+}
+
+#[test]
+fn mutable_generator_callback_snapshots_preserve_calls_and_fresh_invocations() {
+    let source = "typealias Toggle=%{flag:bool} comptime fn()->bool;
+        comptime fn make()->Toggle {var flag=false;|| {flag=not flag;flag}}
+        comptime fn build(action:Toggle)-><|-bool> {
+            let first=action();let second=action();let third=action();
+            '(first and not second and third)
+        }
+        comptime fn forward(action:Toggle)-><|-bool> {build(action)}
+        fn run()->bool {~<forward(make())> and ~<forward(make())>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn mutable_generator_callback_snapshots_preserve_shared_nested_nodes() {
+    let source = "typealias Toggle=%{flag:bool} comptime fn()->bool;
+        struct Pair {first:Toggle,second:Toggle}
+        typealias Reader=%{pair:Pair} comptime fn()->bool;
+        comptime fn make()->Toggle {var flag=false;|| {flag=not flag;flag}}
+        comptime fn wrap(pair:Pair)->Reader {|| {pair.first() and not pair.second()}}
+        comptime fn build(reader:Reader)-><|-bool> {
+            let first=reader();let second=reader();'(first and second)
+        }
+        fn run()->bool {
+            const snapshot=do {let action=make();wrap(Pair {first:action,second:action})};
+            const first=build(snapshot);const second=build(snapshot);
+            ~<first> and ~<second>
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn mutable_generator_callbacks_update_owned_capture_fields_through_self() {
+    let source = "struct State {flag:bool}
+        impl State {comptime fn toggle(self)->bool {self.flag=not self.flag;self.flag}}
+        typealias Toggle=%{state:State} comptime fn()->bool;
+        comptime fn make()->Toggle {let state=State {flag:false};|| state.toggle()}
+        comptime fn build(action:Toggle)-><|-bool> {
+            let first=action();let second=action();'(first and not second)
+        }
+        fn run()->bool {~<build(make())>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn mutable_generator_callback_snapshots_freeze_current_state_independently() {
+    let source = "typealias Toggle=%{flag:bool} comptime fn()->bool;
+        comptime fn make()->Toggle {var flag=false;|| {flag=not flag;flag}}
+        comptime fn build(action:Toggle)-><|-bool> {
+            let first=action();let second=action();'(not first and second)
+        }
+        fn run()->bool {
+            const snapshot=do {let action=make();action();action};
+            const first=build(snapshot);const second=build(snapshot);
+            ~<first> and ~<second>
+        }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
 }

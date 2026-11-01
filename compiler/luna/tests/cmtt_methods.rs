@@ -1611,19 +1611,20 @@ fn generator_pointer_records_transfer_as_live_data_inputs() {
 }
 
 #[test]
-fn pointer_aggregates_do_not_bypass_callback_capture_checks() {
-    let source = "typealias Reader=%{flag:bool} comptime fn()->bool;
-        comptime fn make()->Reader {var flag=false;|| {flag=not flag;flag}}
+fn generator_aggregates_preserve_mutable_callback_state() {
+    let source = "typealias Toggle=%{flag:bool} comptime fn()->bool;
+        comptime fn make()->Toggle {var flag=false;|| {flag=not flag;flag}}
         comptime fn build()-><|-bool> {
-            var owned=false;
-            let packet=(owned.ref,make());
-            let (pointer,action)=packet;
-            let result=action();
-            '(result)
+            let packet=(true,make());
+            let (enabled,action)=packet;
+            let first=action();let second=action();
+            '(enabled and first and not second)
         }
         fn run()->bool {~<build()>}";
-    let error = support::compile_with_protocols(source, &Default::default()).unwrap_err();
-    assert!(error.contains("mutates captured state"), "{error}");
+    assert_eq!(
+        support::run_iir_with_tuple(source, "run", vec![]),
+        Value::Bool(true)
+    );
 }
 
 #[test]

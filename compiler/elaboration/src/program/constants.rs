@@ -849,9 +849,9 @@ impl Checker<'_, '_> {
         Ok(type_scope)
     }
 
-    /// Prove that reconstructing this graph cannot reset state observable by a
-    /// callback. Shared nodes are checked once; cycles and mutable capture roots
-    /// remain unsupported instead of being silently copied.
+    /// Validate owned capture data before reconstructing a snapshot graph.
+    /// Materialization preserves shared closure nodes within that graph; mutable
+    /// owned cells are copied at their current values, never as active references.
     fn validate_closure_snapshot(
         &mut self,
         value: &Value,
@@ -1045,17 +1045,20 @@ impl Checker<'_, '_> {
                         &mut fuel,
                         |expr, _| {
                             match &expr.kind {
-                            K::Assign { place, .. } | K::BitAssign { place, .. } | K::BitUpdate { place, .. }
-                                if captured.contains(&place.root) => return Err("dependent closure input mutates captured state; shared environment transport is not yet implemented".into()),
-                            K::AddressOf(place) => {
-                                let mut root = place.as_ref();
-                                while let K::Field { value, .. } | K::AnonymousField { value, .. } = &root.kind { root = value; }
-                                if matches!(&root.kind, K::Local(binding) if captured.contains(binding)) {
-                                    return Err("dependent closure input exposes captured storage; shared environment transport is not yet implemented".into());
+                                K::AddressOf(place) => {
+                                    let mut root = place.as_ref();
+                                    while let K::Field { value, .. }
+                                    | K::AnonymousField { value, .. } = &root.kind
+                                    {
+                                        root = value;
+                                    }
+                                    if matches!(&root.kind, K::Local(binding) if captured.contains(binding))
+                                    {
+                                        return Err("dependent closure input exposes captured storage; shared environment transport is not yet implemented".into());
+                                    }
                                 }
+                                _ => {}
                             }
-                            _ => {}
-                        }
                             Ok(())
                         },
                     );
