@@ -752,11 +752,12 @@ pub fn machine_arithmetic_functions(
                                 .collect();
                             let ty = member
                                 .ty
-                                .instantiate_parameters(
+                                .instantiate_parameters_in_scope(
                                     &contract.binders_with_self(&mut 100_000).map_err(|_| {
                                         error("invalid associated value parameter domains")
                                     })?,
                                     &arguments,
+                                    &caller_frames,
                                 )
                                 .map_err(|_| {
                                     error("associated value contract substitution failed")
