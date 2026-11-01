@@ -9898,3 +9898,547 @@ Validation from `/home/fin/luna`:
   `/tmp/luna-tools-qb9iy50f/result.json`).
 - Workspace formatting passed (`/tmp/luna-tools-qblzhuc2/result.json`);
   `git diff --check` passed.
+
+### In progress: reject comptime pointer operations at the phase boundary
+
+The NIR phase traversal now rejects AddressOf, ReadPointer, WritePointer,
+PointerField, PointerAnonymousField and BitWritePointer in comptime execution
+contexts. PointerType remains a legal runtime type descriptor. This is an
+execution-operation boundary, not yet a complete recursive admission check for
+pointer-bearing comptime parameter/result domains. No opt-in mode or fixture
+exception is introduced.
+
+New source checks cover reads, writes, dead branches, closure bodies, projected
+pointer access and bit writes; runtime pointer execution, computed pointer Types
+and quoted runtime pointer operations remain legal. A pointer operation in a
+quote producer's executed body rejects before expansion. The shared generated
+struct VM fixture now reads ordinary bool snapshots; its forward/recursive
+pointer fields remain Type metadata and are still exercised.
+
+Current evidence from `/home/fin/luna`:
+
+- `comptime_pointer_phase`: five passed, including both quote boundaries
+  (`/tmp/luna-tools-tyw97byb/result.json`). Earlier attempts corrected missing
+  whitespace before pointer assignment and an unsupported anonymous type spelling;
+  no diagnostic weakening was used.
+- `comptime_memory`, `comptime_receivers` and the initial three pointer cases:
+  passed (`/tmp/luna-tools-fs10rf1h/result.json`).
+- VM library: 372 passed after correcting its shared pointer fixture
+  (`/tmp/luna-tools-827mmqvb/result.json`). The preceding run had nine failures
+  from that shared fixture (`/tmp/luna-tools-2itrryh6/result.json`).
+- Integration run: `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_list_operations --test cmtt --no-fail-fast`, report
+  `/tmp/luna-tools-c1l2db68/result.json`. CMTT completed with 537 passed and
+  47 failed; the list suite completed with 51 passed and 15 failed. The
+  wrapper terminated with exit 101 after 121 seconds; no process remains live.
+  `ordinary_package_uses_public_list_operations_without_builtin_access` is
+  among the list failures, so the real-package fixture also needs migration.
+
+This phase-boundary stage is deliberately uncommitted until affected integration
+contracts are reconciled. Many existing list/CMTT tests use source pointers for
+instrumentation or assert comptime pointer semantics. Classify each failure:
+replace invalid positive contracts with value-reference methods or lawful
+closure snapshots, preserve order/count/alias-independent checks, and retain
+runtime pointer rejection/description distinctions. In particular, an active
+self reference cannot simply be smuggled into a closure to reproduce the old
+pointer alias behavior (`docs/comptime/index.md`). Other source suites still
+contain old pointer fixtures and need targeted migration and validation. Do not
+restore pointer execution merely to make these tests green.
+
+List migration follow-up (`1c28392b`, independent of the uncommitted phase gate):
+all 66 `comptime_list_operations` cases now pass. Producers use ordinary receiver
+methods; closure callbacks mutate private captured snapshots, and named callback
+entry events check externally observable invocation counts. Search and sort
+comparison bounds remain checked inside callback state. No source pointer
+operations remain in this suite. The real-package failure was independently an
+outdated fixture missing `builtin.compiler` imports; it now includes the actual
+centralized binding module as well as primitive aliases.
+
+`compiler_operation_bindings` and `comptime_integer_division` also use receiver
+instrumentation and pass all five cases each. Combined evidence:
+`/tmp/luna-tools-jo76m1np/result.json` (76 cases). After adding exact event counts
+to binary search and filtering, all eight snapshot cases passed again:
+`/tmp/luna-tools-tt5ocd06/result.json`. Formatting and whitespace checks passed.
+The 47 CMTT failures and other unexamined legacy suites still need migration;
+the phase implementation and its boundary tests remain uncommitted.
+
+CMTT migration follow-up (`8628ac8c` is the independently committed fix): the
+new phase gate exposed compiler-generated pointers in otherwise legal compound
+BitVec assignment. `compound_assignment` now retains stable local/field paths
+and `bit_compound_writeback` emits BitUpdate for those paths. It still prepares
+actual runtime pointer operands on the old pointer path. Selectors execute once;
+the old bit payload is read before RHS execution; final writeback retains RHS
+changes to other bits and fields. This removes an implementation deviation,
+not a restriction on legal source compound assignment.
+
+Evidence: six `cmtt generator_bit_` cases passed
+(`/tmp/luna-tools-vl3aa5kd/result.json`); the new pointer-free NIR/source receiver
+case and all 29 `pure_bitvec` cases passed
+(`/tmp/luna-tools-qxot4tkw/result.json`). The broader intermediate run had 547
+passed and 38 failed CMTT cases, plus 29 passing BitVec cases
+(`/tmp/luna-tools-c1vnhorr/result.json`). Its additional bit-place test was then
+moved into the dedicated `comptime_bit_places` target and revalidated there.
+
+Uncommitted work in `cmtt.rs` migrates ten counter-based generator fixtures to
+Counter receiver methods. Four succeeded immediately, but six exposed a genuine
+producer-result hint gap: method calls do not supply the same late signature
+evidence as the former free functions. This affects future collection evidence,
+pattern type probes, direct/packet producer contracts and generic variadic /
+property producer hints. Explicit `Counter.method(count)` syntax did not repair
+the problem and was changed back to `count.method()`. Preserve the inference,
+ordering and rejection contracts; do not add annotations just to green these
+fixtures. The phase gate, generated-struct fixture correction, boundary tests
+and this migration remain uncommitted. No checks are currently running.
+
+Method-result evidence follow-up (`1b5ae7f9`): generator expression probing now
+uses established inherent implementation selection for method calls on known
+receiver types. It reads the selected signature, substitutes implementation
+inputs and withholds results that still depend on ordinary inputs or unbound
+method-local parameters. It does not execute the receiver, arguments, defaults,
+contracts or body. Callable data fields keep their existing projection path;
+actual invocation retains phase and contract checks.
+
+The ten Counter receiver migrations in `cmtt.rs` are now committed along with
+this fix. Generic implementation result substitution has an additional source
+case, including rejection after changing its method to runtime phase. Trait-view
+and explicit method-local clause evidence were not expanded by this step.
+
+Validation: `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --no-fail-fast`
+completed with 553 passed and 32 failed (`/tmp/luna-tools-ofywbi3k/result.json`).
+All six method-evidence failures from the preceding stage are resolved; the
+remaining failures are outside this change, with the separate pointer phase gate
+still uncommitted. Formatting and `git diff --check` passed. No process is live.
+
+Spread/result-layout follow-up (`8f79dafb`): generator spread planning now falls
+back to the established result-type layout when syntax does not determine packet
+width. It uses the same bounded expression evidence as argument inference; it
+does not invoke a method or use destination guessing when the result already
+provides a tuple layout. This closes the receiver-produced spread case exposed
+by counter migration.
+
+Eight additional generator counter cases now use value-reference methods:
+collected and named packets, partial callbacks, field/block/record/match/enum
+binding evidence. Quote snapshot replacement now uses ordinary mutable local
+assignment without Copy/Drop bindings; its immutable-local rejection remains
+checked. Field bit writes use ordinary fields and retain bounds/RHS checks.
+
+Validation: the final broad CMTT run reported 562 passed and 23 failed
+(`/tmp/luna-tools-llicfbfu/result.json`). One of those was the newly migrated
+immutable-local negative case expecting the ordinary-assignment diagnostic;
+the generator checker rejects earlier with `cannot assign an immutable generator
+binding`. After updating that exact diagnostic, its targeted case passed
+(`/tmp/luna-tools-vomm_6mn/result.json`). The other 22 failed cases are unchanged
+and pending; no new failure was observed outside this migration. Workspace
+formatting and `git diff --check` passed. No test process remains live.
+
+Method-local result evidence follow-up (`819c3287`): selected implementation
+arguments now seed the shared sparse argument inference path. Method-local
+parameters remain distinct from that prefix, and result probing does not execute
+receivers, inputs, contracts or bodies. Five more counter fixtures use lawful
+value-reference receivers while retaining source order and call-count checks.
+A Source<bool> method independently inferring a character argument verifies the
+implementation/method parameter boundary.
+
+Validation in /home/fin/luna: workspace formatting exited 0
+(`/tmp/luna-tools-5j75uwar/result.json`); `git diff --check` exited 0.
+`python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --no-fail-fast`
+exited 101 with 569 passed and 17 failed
+(`/tmp/luna-tools-asuiwiv7/result.json`). All changed tests and the new regression
+passed. The 17 failures remain in the uncommitted pointer-phase integration.
+An attempted migration of inferred_pattern_control_evaluates_only_selected_producers_once
+exposed missing HIR pattern-output discovery through method calls (unresolved
+`value`); that migration was withdrawn, preserving its original test until the
+HIR mechanism is repaired. Explicit method clause evidence also remains pending.
+No test process remains live.
+
+Schema/callback fixture alignment (`f8982211`, subsequent callback snapshot
+commit): removed runtime pointer/Copy assumptions from two schema cases and two
+callback cases. Schema self mutation preserves extracted Type values and
+independent snapshots; ordinary callback arguments are private snapshots even
+when passed through tuple/spread pattern producers. Runtime callback rejection
+now checks the execution-phase diagnostic.
+
+Validation in /home/fin/luna: schema filter passed 3 tests
+(`/tmp/luna-tools-c49mq_ta/result.json`). After the callback changes, the full
+CMTT check exited 101 with 573 passed and 13 failed
+(`/tmp/luna-tools-eu15dgk6/result.json`); all four migrated cases passed.
+Workspace formatting and git diff --check exited 0. No test process remains live.
+The separate pointer phase gate remains uncommitted.
+
+Pattern output discovery investigation: ast_lowering/src/pattern.rs recovers
+output names from static type containers and explicit trait views. Resolver
+accessible_type_members scans AdtBody scopes, not inherent impl declarations;
+ordinary local receivers have no receiver-to-impl output contract in this pass.
+Fixing this requires a principled deferred name-resolution path or equivalent
+cross-phase contract, not selecting a same-named method without type evidence.
+The affected inferred pattern-control fixture remains unchanged pending that
+mechanism; adding an explicit annotation merely to pass it is not the repair.
+
+Receiver range / explicit method clause follow-up (`b4cd9c02`, `17dc4f73`):
+range regression now mutates through nested self methods and retains fresh
+assumption/overflow checks. Explicit method result probing shares declaration
+clause routing with free functions, seeds established implementation inputs,
+and completes named inputs/defaults without executing the ordinary call.
+Tests distinguish a bool implementation parameter from a char method parameter,
+resolve a method default from that implementation parameter, reject mismatched
+ordinary arguments, and preserve producer order and single evaluation.
+
+Validation in /home/fin/luna: range filter passed
+(`/tmp/luna-tools-65wk9mac/result.json`). Full CMTT run after implementation
+reported 575 passed and 12 failed (`/tmp/luna-tools-yuzm3zuz/result.json`),
+including one new fixture's invalid two-splice quote. That fixture now returns
+each code path in separate runs; the explicit filter passed all 11 tests
+(`/tmp/luna-tools-goeejdgc/result.json`). The other 11 failures remain in
+pointer-phase integration. Formatting and git diff --check passed. No test
+process is live. Automatic inherent method pattern-output discovery is still
+unimplemented, and the pointer gate remains uncommitted.
+
+Error payload snapshot follow-up: replaced two pointer-sharing fixtures with
+ordinary nominal error payloads. Mutating a matched payload through self keeps
+the original error value and caller object unchanged; success also remains
+covered. Runtime callback identities can be frozen inside the quoted packet,
+but invoking the same field while constructing code is rejected by phase.
+
+Validation in /home/fin/luna: the error_generator_ filter passed all 9 tests
+(`/tmp/luna-tools-hhzgy83j/result.json`); formatting exited 0
+(`/tmp/luna-tools-qy1mhin6/result.json`) and git diff --check passed.
+No test process remains live. Full CMTT was not repeated for this fixture-only
+change; nine remaining failures from the prior integration are still pending.
+
+Further inspection: validate_closure_snapshot in elaboration/program/constants.rs
+currently limits transported dependent closures to immutable environments by
+scanning Assign/BitAssign/BitUpdate/AddressOf operations. Receiver-mode calls
+must be considered when replacing that interim restriction with proper mutable
+closure graph transport. Do not silently bless receiver calls as readonly or
+extend the old pointer capture contract. This investigation made no checker
+change and does not claim mutable closure transport is complete.
+
+Pattern argument alignment (`7f6109dc`): defaults, spreads and variadic
+arguments now use nominal value snapshots. The variadic case records the object
+at its source evaluation point (count 1), mutates only its callee-local copy,
+and verifies the caller later reaches count 4. Contract checks retain exact
+precondition/postcondition rejections and caller snapshot independence.
+The pattern_ filter passed 124 tests and failed the unchanged inferred pattern
+control case (`/tmp/luna-tools-2bs5ij60/result.json`, exit 101).
+
+Runtime pointer selection follow-up: two pointer-specific positive cases now
+place their operations inside quoted runtime bodies. They preserve single
+selection before RHS and conditional selection of distinct owned roots; the
+latter uses an explicit runtime contextual port. Both passed
+(`/tmp/luna-tools-89kxnvu0/result.json`, exit 0). Workspace formatting and
+ git diff --check passed. Commands ran in /home/fin/luna; no process is live.
+The pointer phase gate is still uncommitted. Remaining known CMTT failures are
+the inferred pattern control fixture and three pointer rejection fixtures whose
+old diagnostic contracts still assume comptime pointers can be formed.
+Broader source-suite pointer migration has not been certified complete.
+
+Owned mutable callback snapshot follow-up: removed the obsolete assignment
+scan rejection in validate_closure_snapshot. Existing materialization already
+memoizes ClosureIdentity nodes and reads owned storage at its current value;
+active ComptimeReference captures, exposed storage and cyclic graphs remain
+rejected. Regressions now cover repeated stateful calls, fresh invocations,
+shared nested callback nodes, nominal receiver mutation, aggregate callbacks,
+and independent snapshots of an already-mutated closure. CMTT documentation
+now describes this owned mutable environment support.
+
+Validation in /home/fin/luna: cmtt/cmtt_methods broad check
+(`/tmp/luna-tools-6zowc9kk/result.json`) exited 101: cmtt 586 passed/4 failed,
+cmtt_methods 114 passed/35 failed. Every failure contains the pending comptime
+pointer-operation rejection; all changed callback cases passed. After adding
+the current-state independent-materialization case, all 4 mutable callback
+cases passed (`/tmp/luna-tools-8wazx2gw/result.json`). List capture regression
+filter passed (`/tmp/luna-tools-12y7er30/result.json`). Formatting and
+ git diff --check passed. No test process is live. The broader pointer phase
+gate is still uncommitted, and its source fixture migration remains incomplete.
+
+Invocation callback identity follow-up: the new mutable snapshot support exposed
+an independent forwarding defect. The exact-count pattern branch case returned
+false because a captured callback was reconstructed on transfer to a generator,
+losing caller-observable updates. Captured comptime callbacks now request live
+invocation graph storage; snapshot materialization remains a distinct boundary.
+The packet regression also exposed overbroad rejection of runtime function
+instance identities in mixed graphs. Those identities now undergo the existing
+instance validation; captured runtime closures remain rejected and actual runtime
+calls during generation still fail the execution-phase check.
+
+Validation in /home/fin/luna: the callback branch failed with Bool(false)
+(`/tmp/luna-tools-bnl9dz77/result.json`) before the forwarding fix. The packet
+case failed with the live-runtime-callback rejection before the identity fix
+(`/tmp/luna-tools-dh5x13ga/result.json`). Final full CMTT run reports 589 passed
+and 3 failed (`/tmp/luna-tools-6m4f3mg0/result.json`, exit 101). Both regressions
+and existing mutable snapshot cases pass; remaining failures are legacy pointer
+rejection diagnostic expectations. Formatting and git diff --check pass; no
+process remains live. The method-based pattern output discovery gap remains;
+the control-flow fixture now uses a legitimate shared callback to observe
+producer counts rather than requiring that unrelated HIR mechanism.
+
+Comptime parameter/result domain inspection remains incomplete. It must recurse
+through stored payload layouts while treating Type descriptions, contextual
+code interfaces and runtime function signatures as descriptions, not pointer
+storage. No broad syntactic pointer search or new signature rejection was added.
+
+Selected contextual method exit-state follow-up: migrated five method ordering
+fixtures to self counters, then exposed a real dispatch bug with public value
+postconditions. The implementation updated its private input but public
+postconditions still read the pre-dispatch copy. selected_generator_frame now
+exports selected input data/cells back to the public call frame on success,
+remapping parameter identities; entry snapshots remain independent and ordinary
+caller values are not written back. Expression/pattern generators and contextual
+data consumers share this boundary. Default-method forwarding, old-value checks,
+postcondition failure and caller isolation are covered.
+
+Validation in /home/fin/luna: the new value contracts failed before the fix
+(`/tmp/luna-tools-y4xwa2hj/result.json`). Final cmtt/cmtt_methods check exited 101
+(`/tmp/luna-tools-n2e2vtkq/result.json`): cmtt 589 passed/3 failed; cmtt_methods
+122 passed/28 failed. All changed and new tests passed; every remaining failure
+contains the pending comptime pointer-operation rejection. Formatting and
+ git diff --check passed. No process is live.
+
+Additional exposed limitation: contextual data receiver invocation currently
+rejects with value-reference dispatch not yet implemented. Static contextual
+data consumer dispatch is covered here; receiver support was not bypassed.
+The pointer phase gate and its wider fixture migration remain uncommitted.
+
+Contextual consumer receiver follow-up: removed the explicit receiver-dispatch
+block and prepended the selected receiver to shared contextual argument routing,
+matching expression/pattern generators. Inherent, trait and default-forwarded
+calls preserve self writeback and public contracts; ordinary data arguments
+remain isolated. Regression coverage includes temporary receiver ordering,
+explicit type calls, named arguments, spreads, and retained callable-erasure
+rejection. CMTT documentation now includes the receiver consumer interface.
+
+Validation in /home/fin/luna: broad cmtt/cmtt_methods check
+(`/tmp/luna-tools-lmytrmbw/result.json`) exposed the obsolete receiver rejection
+fixture plus an invalid named-argument fixture. The former now checks supported
+receiver calls and still rejects erasure; the latter uses an explicitly named
+optional parameter. Final contextual_ check passed 56 cmtt and 4 cmtt_methods
+tests (`/tmp/luna-tools-fcwe6qbh/result.json`, exit 0). Formatting and
+ git diff --check passed. No process is live. Existing pointer-phase integration
+failures were not declared resolved; that gate remains uncommitted.
+
+Entry snapshot fixture alignment: three generator contract cases now mutate
+owned nominal fields rather than comptime pointer targets. They verify current
+versus old values, deep nested field snapshots, nested invocation entry isolation,
+caller independence and exact postcondition rejection. The aggregate pointer
+replacement case now runs inside quoted runtime code and retains its owner
+address and old-target alias behavior.
+
+Validation in /home/fin/luna: cmtt_methods broad run exited 101 with 127 passed
+and 25 failed (`/tmp/luna-tools-iz0ifqcm/result.json`). Three migrated contract
+cases passed; the new runtime fixture had a lexical error from adjacent .*=.
+After restoring separation, its targeted check passed
+(`/tmp/luna-tools-j8j7z9fx/result.json`). The other 24 failures remain pending
+pointer fixture alignment. Formatting and git diff --check passed. No process
+is live; the separate pointer phase gate remains uncommitted.
+
+Owned pattern payload follow-up: four cmtt_methods fixtures now use nominal
+value data for enum matching, let-else binding and enum replacement. They
+verify source/snapshot independence, exact guard count including skipped guards,
+retained outer self writeback on guard failure, and required else divergence.
+No runtime Copy/Drop capability is introduced for comptime payload replacement.
+
+Validation in /home/fin/luna: cmtt_methods exited 101 with 132 passed and 20
+failed (`/tmp/luna-tools-soolahus/result.json`). All four migrated cases passed;
+remaining failures are pending pointer fixtures. Formatting exited 0
+(`/tmp/luna-tools-3nqsbn0e/result.json`) and git diff --check passed. No process
+is live. Pointer phase integration and broader fixture migration remain open.
+
+Inline tuple callback follow-up: migrated three pointer iteration cases to owned
+stateful callbacks, covering repeated identities, nominal callback fields,
+failed guard effects, continue updates and break skipping a fourth element.
+The old pointer binding/escape negative now checks immutable callback iteration
+bindings and rejects exporting comptime closures into runtime code directly.
+
+Validation in /home/fin/luna: all 4 generator_tuple_ cases passed
+(`/tmp/luna-tools-9ll0skeg/result.json`, exit 0). Formatting exited 0
+(`/tmp/luna-tools-hae_rtb6/result.json`) and git diff --check passed. No process
+is live. Broader methods suite was not repeated for this fixture-only change;
+17 previously observed pointer failures remain pending, along with the separate
+uncommitted pointer phase gate and migration in other source suites.
+
+Collected callback argument follow-up: three cmtt_methods fixtures now use owned
+callback identities instead of pointer aliases, with immutable boolean siblings.
+Exact counters verify spread construction before later inputs, two selected
+callee calls and the caller's subsequent observation; both fixed and variadic
+routing are covered. Property collection preserves callback state and the value
+computed by a later field.
+
+Validation in /home/fin/luna: broad methods run exited 101, 137 passed/15 failed
+(`/tmp/luna-tools-pzxzmfm5/result.json`). The new spread fixture initially put
+an effectful callback call inside assumes; it now evaluates the callback first
+and checks the completed scalar predicate. The targeted spread check passed
+(`/tmp/luna-tools-omhb132z/result.json`). The other 14 failures are pending
+pointer fixtures. Formatting and git diff --check passed. No process is live;
+the wider pointer phase integration remains uncommitted.
+
+CMTT pointer fixture follow-up: runtime pointer aliasing checks now execute
+inside quoted runtime bodies (1a0e99d4); receiver contracts and callback argument
+order use legal comptime state (fd913bd2). Pattern guards, alternative candidates,
+rebinding and tuple/range exports now use self updates or owned callbacks, with
+exact callback counts where applicable (3c82914a).
+
+Validation in /home/fin/luna:
+- python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt_methods
+  exited 0: all 152 passed (/tmp/luna-tools-eoeq91d4/result.json).
+- python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt
+  exposed exactly three obsolete diagnostic expectations: 589 passed, 3 failed
+  (/tmp/luna-tools-f9v1bjee/result.json). Rejection now occurs at pointer phase
+  validation before capture/escape validation; those assertions now check the
+  explicit comptime pointer diagnostic.
+- python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --test comptime_pointer_phase
+  exited 0: 592 CMTT and 5 phase boundary tests passed
+  (/tmp/luna-tools-xlpa2wsu/result.json).
+
+The three diagnostic changes remain with the uncommitted phase gate, rather than
+creating a commit that depends on an unstaged gate. Other source suites and
+pointer-bearing comptime parameter/result domains still require integration;
+these results do not establish completion of D12. No test process remains live.
+
+Staged input fixture alignment (4a05d9ac): eleven legacy pointer-based trace
+fixtures now use inherent value-reference methods. This retains clause snapshots,
+receiver-before-clause order, ordinary/spread argument order, inline selector
+short-circuiting, range boundary/guard order, and nominal parent/member packets.
+No compiler behavior or expected ordering was weakened.
+
+Validation in /home/fin/luna:
+- Five-group baseline via development/check.py test -p luna with
+  --test comptime_clause_inputs --test comptime_inline_loops
+  --test nominal_staging --test staged_aggregate_contracts
+  --test nominal_value_parameters --no-fail-fast exited 101
+  (/tmp/luna-tools-4xi0zenu/result.json). The 7 clause, 1 loop, and 3 nominal
+  failures all reported the pending comptime pointer phase rejection; nominal
+  staging (11) and staged aggregate contracts (31) passed.
+- Final python3 -B development/check.py --timeout 900 -- test -p luna
+  --test comptime_clause_inputs --test comptime_inline_loops
+  --test nominal_value_parameters exited 0: 46 + 11 + 307 passed
+  (/tmp/luna-tools-idwjwiq2/result.json).
+- Formatting exited 0 (/tmp/luna-tools-7tjrvmii/result.json); git diff --check
+  passed. No process remains live. Broader pointer phase integration is still
+  pending; these fixtures are an independent committed correction.
+
+Broader pointer-phase integration evidence (working directory /home/fin/luna):
+python3 -B development/check.py --timeout 900 -- test -p luna
+--test default_calls --test function_type_parameters
+--test function_type_dependencies --test execution --test library_protocols
+--test pure_callbacks --test instantiation --test normal_patterns --no-fail-fast
+exited 101 (/tmp/luna-tools-2vv6fsuz/result.json).
+Default calls (43), function type dependencies (39), library protocols (27),
+and pure callbacks (80) passed. The four other groups had 15 failures total.
+Three normal-pattern pointer fixtures now use value-reference counters
+(77839a30); full normal_patterns passed 42 tests
+(/tmp/luna-tools-tfp1hl_4/result.json).
+
+The computed type default test was using Interpreter::new rather than the
+phase-aware comptime entrypoint. d7e2dcc7 checks both for_comptime and
+for_comptime_tree, preserving nominal/tuple type results and exact producer
+call order. Its targeted test passed (/tmp/luna-tools-4nbrztzg/result.json).
+Initial reproduction: /tmp/luna-tools-dnhnqydj/result.json showed Make/First
+executed before Type failure; for_comptime passed
+(/tmp/luna-tools-co4p047w/result.json). No production behavior was weakened.
+
+Remaining observed failures from that baseline (not reclassified as pointer
+regressions; protected memory-summary edits also remain in the worktree):
+- interpreter_depth_budget_fires_on_a_two_mebibyte_host_stack_and_recovers
+- late_normal_form_input_staging_limits_depth_on_a_small_stack
+- memory_summaries_classify_proved_scalar_results_as_readonly
+- memory_summaries_use_local_scalar_identity_without_exporting_assumptions
+- ordinary_type_inputs_do_not_hide_selective_memory_writes
+- ordinary_type_memory_summaries_forward_across_different_input_positions
+- type_boolean_requirements_and_non_generic_function_references_execute
+- recursive_factory_can_store_and_use_recursive_results_before_returning
+- recursive_template_factory_executes_with_finite_helper_graph
+- finite_factory_graphs_are_limited_by_work_budget_not_a_fixed_node_count
+- instance_copy_budget_counts_expanded_parameter_occurrences_and_recovers
+Formatting and git diff --check passed. No process remains live. The pending
+pointer phase gate, generated-struct fixture, phase tests, and three CMTT
+negative diagnostic updates are still uncommitted; parameter/result storage
+domain validation remains incomplete.
+
+Comptime declaration storage domains (5e163f65): phase validation now rejects
+stored pointers in comptime parameters/results and staged ordinary-function
+parameters, including unused domains. The bounded inspector follows actual
+nominal fields, enum/newtype payloads, optional/error payloads, closure captures,
+and registered collection representation evidence. It does not inspect phantom
+type arguments, quoted ports, or runtime function signatures as stored values;
+Type values can still describe pointers. Opaque heads remain opaque. Symbolic
+representations defer; this phase does not claim complete specialization-time
+admission. The declaration check is independent of the still-uncommitted
+pointer-operation gate (only its 18-line hunk remains in phases.rs).
+
+Validation in /home/fin/luna:
+- python3 -B development/check.py --timeout 900 -- test -p luna
+  --test comptime_storage_domains --test comptime_pointer_phase --test cmtt
+  --test cmtt_methods --test library_protocols --no-fail-fast exited 0:
+  3 storage-domain, 5 operation-phase, 592 CMTT, 152 method and 27 public-library
+  tests passed (/tmp/luna-tools-o1iv3led/result.json).
+- The storage-domain test additionally rejects pointer-bearing registered list
+  domains; its targeted repeat passed (/tmp/luna-tools-80ehfkxo/result.json).
+- Formatting exited 0 (/tmp/luna-tools-gmaw080z/result.json) and git diff --check
+  passed. No test process remains live. Earlier unrelated baseline failures
+  remain pending; no broad completion claim is made from these focused checks.
+
+Completed invocation domains (a02511e6): reproduced a genuine gap with generic
+absent<T>() -> ?T instantiated as *bool or Wrapper<*bool>. The pre-fix VM returned
+Bool(true) after discarding the invalid absent result
+(/tmp/luna-tools-y64yysqe/result.json). Parameter binding now checks completed
+domains after earlier values are substituted; completed results are checked
+before body execution. The same NIR payload inspection accepts a nominal resolver
+backed by the live VM catalogs, rather than stale source-only definitions.
+Inspection is charged to invocation fuel. Type descriptions remain admissible.
+Both tree and linear tests reject invalid generic results and dependent optional
+inputs, then successfully invoke valid entries in the same VM.
+
+Validation in /home/fin/luna:
+- python3 -B development/check.py --timeout 900 -- test -p luna
+  --test comptime_storage_domains --test cmtt_methods --test library_protocols
+  --no-fail-fast exited 0: 5 + 152 + 27 passed
+  (/tmp/luna-tools-xme6a8wi/result.json).
+- python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor
+  --lib exited 0: 372 passed (/tmp/luna-tools-3p0_n89e/result.json).
+- Formatting exited 0 (/tmp/luna-tools-7gkih2a_/result.json), diff checks passed.
+Only the old 18-line pointer-operation gate remains unstaged in phases.rs;
+its fixture migration and previously recorded unrelated failures remain pending.
+No process remains live. These checks do not establish complete D12 coverage.
+
+Source pointer-operation boundary integrated (27551bd4). The earlier pending
+18-line gate, phase tests, generated-struct fixture, and CMTT negative diagnostic
+updates are now committed. Runtime pointer behavior remains tested; new comptime
+BitVec receiver tests observe exact low/high/RHS order through a state trace,
+retaining early returns, nested and zero-width updates. The Object tests now use
+value-reference state, and integer contracts reject stale facts after self writes.
+
+The broader ten-group check exposed six failures, all corrected in this stage:
+one arithmetic fixture, one integer-contract fixture, three Object pointer
+fixtures, and the Object package test's incomplete builtin root. That package
+test now uses the actual sysroot. It exposed a real CLI restriction: attributes
+need target layout but build target inputs were rejected for attribute output.
+6816ad21 allows target inputs for both attribute output modes, retaining the
+rejection for stages before semantic elaboration.
+
+Evidence in /home/fin/luna:
+- Ten-group baseline: development/check.py test -p luna with --test
+  arithmetic_contexts, integer_contracts, pure_bitvec, type_lists,
+  source_reflection, builder_invocations, library_meta_objects,
+  quote_functions, test_templates, source_tests and --no-fail-fast;
+  exit 101, /tmp/luna-tools-y6ri14c8/result.json. Builder (79), BitVec (29),
+  quote (106), reflection (17), source tests (13), templates (87), and type
+  lists (32) passed. Six failures described above were localized.
+- Arithmetic and integer follow-ups: /tmp/luna-tools-p4nqvi04/result.json
+  (11 passed), /tmp/luna-tools-hgkqlxd2/result.json (integer 18 passed).
+  The new arithmetic trace originally used a raw interpreter without associated
+  dispatch preparation; it now uses the normal invocation pipeline and observes
+  effects in source state rather than demanding unprepared trait execution.
+- Object group: /tmp/luna-tools-l1k7tb0e/result.json had 33 passing and the
+  target-less sysroot failure. The corrected sysroot/target CLI case passed
+  /tmp/luna-tools-bhvizzkd/result.json after the stage admission fix.
+- Final python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt
+  --test comptime_pointer_phase --test arithmetic_contexts --test integer_contracts
+  --no-fail-fast exited 0: 592 + 5 + 11 + 18 passed
+  (/tmp/luna-tools-vdcude44/result.json).
+- Generated-struct tests retain live internal ValueReference identity across
+  publication: 11 passed (/tmp/luna-tools-tkkq8tlo/result.json).
+- Formatting passed (/tmp/luna-tools-vv5wan9_/result.json), diff checks passed.
+
+No process remains live. The source operation boundary is integrated, but D12
+is not closed: direct host-value admission must still be audited for pointer
+values hidden in Object/closure graphs and legacy copy permissions. The earlier
+unrelated budget, memory-proof and factory baseline failures remain recorded.
