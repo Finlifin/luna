@@ -174,6 +174,15 @@ fn completed_value_arguments_keep_identity_in_symbolic_solutions() {
         Term::Integer(comptime_runtime::Integer::from_i128(123456789)),
         Term::String(Arc::from("a\n\"🦀")),
         Term::Symbol(Arc::from("payload")),
+        Term::TupleValue(vec![]),
+        Term::RecordValue(vec![]),
+        Term::TupleValue(vec![
+            Term::Bool(true),
+            Term::RecordValue(vec![(
+                "nested".into(),
+                Term::TupleValue(vec![Term::Symbol(Arc::from("item")), Term::Char('x')]),
+            )]),
+        ]),
     ];
     for value in values {
         let mut context = Context::default();
@@ -225,16 +234,27 @@ fn unsupported_value_domains_and_non_type_results_cannot_forge_a_model() {
     for value in [
         Term::Float64(0),
         Term::Value { store: 1, index: 0 },
+        Term::TupleValue(vec![Term::Float64(0)]),
+        Term::RecordValue(vec![("pending".into(), Term::Value { store: 1, index: 0 })]),
         Term::Rigid {
             declaration: id(8),
             sort: Sort::ComptimeValue,
         },
     ] {
-        assert!(matches!(
-            context.prove(F::equal(apply(value), boolean()), Budget::default()),
-            Outcome::Unknown { .. }
-        ));
+        let outcome = context.prove(F::equal(apply(value.clone()), boolean()), Budget::default());
+        assert!(
+            matches!(outcome, Outcome::Unknown { .. }),
+            "{value}: {outcome}"
+        );
     }
+    let duplicate = Term::RecordValue(vec![
+        ("duplicate".into(), Term::Bool(true)),
+        ("duplicate".into(), Term::Bool(false)),
+    ]);
+    assert!(matches!(
+        context.prove(F::equal(apply(duplicate), boolean()), Budget::default()),
+        Outcome::IllFormed(_)
+    ));
     let outcome = context.prove(
         F::equal(apply(Term::Bool(true)), boolean()),
         Budget::default(),
@@ -257,6 +277,46 @@ fn unsupported_value_domains_and_non_type_results_cannot_forge_a_model() {
             .verify_witness(&wrong_input, Budget::default())
             .is_err()
     );
+}
+
+#[test]
+fn aggregate_argument_models_preserve_structure_without_inverting_the_head() {
+    let mut context = Context::default();
+    context.admit_congruence(id(100));
+    let left = Term::RecordValue(vec![
+        (
+            "first".into(),
+            Term::TupleValue(vec![Term::Bool(true), Term::Unit]),
+        ),
+        ("second".into(), Term::Bool(false)),
+    ]);
+    let right = Term::RecordValue(vec![
+        ("second".into(), Term::Bool(false)),
+        (
+            "first".into(),
+            Term::TupleValue(vec![Term::Bool(true), Term::Unit]),
+        ),
+    ]);
+    // Ordered records are distinct completed packets. Their opaque Type
+    // results may nevertheless coincide; no inverse equation is justified.
+    context.assume(F::equal(head(left.clone()), head(right.clone())));
+    let outcome = context.prove(F::False, Budget::default());
+    let Outcome::NotEntailed(witness) = outcome else {
+        panic!("{outcome}")
+    };
+    context.verify_witness(&witness, Budget::default()).unwrap();
+    assert_eq!(witness.applications.len(), 2);
+    assert_eq!(
+        witness.applications[0].result,
+        witness.applications[1].result
+    );
+    let mut damaged = witness.clone();
+    damaged.applications[0].arguments[0] = Term::TupleValue(vec![Term::Bool(false)]);
+    assert!(context.verify_witness(&damaged, Budget::default()).is_err());
+    assert!(matches!(
+        context.prove(F::equal(head(left), boolean()), Budget::default()),
+        Outcome::NotEntailed(_)
+    ));
 }
 
 #[test]

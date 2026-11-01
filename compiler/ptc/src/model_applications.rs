@@ -31,16 +31,35 @@ pub(super) fn admitted(term: &Term, context: &Context) -> bool {
 /// floating comparison, user Eq/Hash and unresolved value stores need their
 /// own evidence and must not be guessed from Rust representation equality.
 pub(super) fn fixed_argument(term: &Term) -> bool {
-    matches!(
-        term,
-        Term::Unit
+    fn visit(term: &Term, depth: usize, remaining: &mut usize) -> bool {
+        if depth >= 256 || *remaining == 0 {
+            return false;
+        }
+        *remaining -= 1;
+        match term {
+            Term::Unit
             | Term::Bool(_)
             | Term::Char(_)
             | Term::Integer(_)
             | Term::String(_)
             | Term::Symbol(_)
-            | Term::BitVec(_)
-    )
+            | Term::BitVec(_) => true,
+            Term::TupleValue(values) => values
+                .iter()
+                .all(|value| visit(value, depth + 1, remaining)),
+            Term::RecordValue(fields) => {
+                let mut labels = BTreeSet::new();
+                fields.iter().all(|(label, value)| {
+                    labels.insert(label) && visit(value, depth + 1, remaining)
+                })
+            }
+            _ => false,
+        }
+    }
+    // Inputs and model copies are separately charged against the query budget.
+    // Bound this shape-only predicate too: it must not recursively inspect an
+    // unbounded host packet before those admission checks can reject it.
+    visit(term, 0, &mut 100_000)
 }
 
 pub(super) fn index(

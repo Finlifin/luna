@@ -568,6 +568,14 @@ fn qualified_and_opaque_type_models_commit_original_symbolic_identities() {
             sort: Sort::Type,
             arguments: vec![row],
         },
+        Term::NormalForm {
+            head,
+            sort: Sort::Type,
+            arguments: vec![Term::RecordValue(vec![(
+                "configuration".into(),
+                Term::TupleValue(vec![Term::Bool(true), Term::Char('x')]),
+            )])],
+        },
         Term::computation(
             vec![
                 nir::effects::Operation {
@@ -575,7 +583,7 @@ fn qualified_and_opaque_type_models_commit_original_symbolic_identities() {
                         package: 946,
                         local: 2
                     },
-                    arguments: vec![Term::Bool(true)],
+                    arguments: vec![Term::Bool(true), Term::TupleValue(vec![Term::Bool(false)])],
                 };
                 2
             ],
