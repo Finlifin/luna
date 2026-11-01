@@ -266,6 +266,7 @@ mod tests {
         // A later unrelated propagation must not delay or enter the learned cut.
         trail.assign(4, true, 1, Reason::Boolean(Arc::new(BTreeSet::from([0]))));
         for consumer in [
+            super::super::Consumer::Circuit,
             super::super::Consumer::Root,
             super::super::Consumer::Learned,
             super::super::Consumer::Theory,

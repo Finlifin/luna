@@ -305,13 +305,15 @@ impl Search<'_> {
                 }
             }
         }
-        let propagation = match self
-            .boolean
-            .as_ref()
-            .unwrap()
-            .propagate(assignment.values(), &mut self.steps)
-        {
-            Ok(result) => result,
+        let propagation = match self.boolean.as_mut().unwrap().propagate_changes(
+            assignment.values(),
+            assignment.changes(Consumer::Circuit),
+            &mut self.steps,
+        ) {
+            Ok(result) => {
+                assignment.acknowledge_changes(Consumer::Circuit);
+                result
+            }
             Err(()) => return Step::Return(SearchResult::Unknown(UnknownReason::BudgetExhausted)),
         };
         if propagation.truth == Some(false) {

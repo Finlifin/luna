@@ -1,6 +1,7 @@
 //! Query-local Boolean skeleton. Atom identities are borrowed from the theory
 //! catalog; evaluation and propagation never copy type terms.
 pub(crate) mod cnf;
+mod evaluation;
 
 use super::{Atom, Formula};
 use std::{collections::BTreeSet, sync::Arc};
@@ -23,6 +24,7 @@ pub(super) struct Circuit {
     nodes: Vec<Node>,
     clauses: Option<cnf::Cnf>,
     propagation: Option<cnf::Session>,
+    evaluation: Option<evaluation::State>,
 }
 enum Node {
     Constant(bool),
@@ -88,6 +90,7 @@ impl Circuit {
             nodes,
             clauses: None,
             propagation: None,
+            evaluation: None,
         })
     }
 
@@ -138,38 +141,71 @@ impl Circuit {
         Ok(result)
     }
 
-    /// Return the root truth and forced theory literals. No assignment is
-    /// retained across calls, so backtracking cannot leak branch-local facts.
+    #[cfg(test)]
     pub(super) fn propagate(
         &self,
         assignment: &[Option<bool>],
         fuel: &mut usize,
     ) -> Result<Propagation, ()> {
-        let mut values: Vec<Option<bool>> = Vec::new();
-        for node in &self.nodes {
-            charge(fuel)?;
-            let value = match node {
-                Node::Constant(b) => Some(*b),
-                Node::Atom(i) => assignment[*i],
-                Node::Not(i) => values[*i].map(|b| !b),
-                Node::And(children) | Node::Or(children) => {
-                    let absorbing = matches!(node, Node::Or(_));
-                    let mut result = Some(!absorbing);
-                    for i in children {
-                        charge(fuel)?;
-                        if values[*i] == Some(absorbing) {
-                            result = Some(absorbing);
-                            break;
-                        }
-                        if values[*i].is_none() {
-                            result = None;
-                        }
-                    }
-                    result
-                }
-            };
-            values.push(value);
+        let (values, _) = self.evaluate(assignment, fuel)?;
+        self.propagate_values(&values, fuel)
+    }
+    fn evaluate(
+        &self,
+        assignment: &[Option<bool>],
+        fuel: &mut usize,
+    ) -> Result<(Vec<Option<bool>>, usize), ()> {
+        let mut values = Vec::new();
+        let mut index_cost = self
+            .nodes
+            .len()
+            .saturating_mul(2)
+            .saturating_add(assignment.len());
+        for id in 0..self.nodes.len() {
+            values.push(self.node_value(id, &values, assignment, fuel)?);
+            index_cost = index_cost.saturating_add(match &self.nodes[id] {
+                Node::Not(_) => 1,
+                Node::And(inputs) | Node::Or(inputs) => inputs.len(),
+                _ => 0,
+            });
         }
+        Ok((values, index_cost))
+    }
+    fn node_value(
+        &self,
+        id: usize,
+        values: &[Option<bool>],
+        assignment: &[Option<bool>],
+        fuel: &mut usize,
+    ) -> Result<Option<bool>, ()> {
+        charge(fuel)?;
+        let node = &self.nodes[id];
+        Ok(match node {
+            Node::Constant(value) => Some(*value),
+            Node::Atom(index) => assignment[*index],
+            Node::Not(input) => values[*input].map(|value| !value),
+            Node::And(inputs) | Node::Or(inputs) => {
+                let absorbing = matches!(node, Node::Or(_));
+                let mut result = Some(!absorbing);
+                for &input in inputs {
+                    charge(fuel)?;
+                    if values[input] == Some(absorbing) {
+                        result = Some(absorbing);
+                        break;
+                    }
+                    if values[input].is_none() {
+                        result = None;
+                    }
+                }
+                result
+            }
+        })
+    }
+    fn propagate_values(
+        &self,
+        values: &[Option<bool>],
+        fuel: &mut usize,
+    ) -> Result<Propagation, ()> {
         let root = self.nodes.len() - 1;
         if values[root].is_some() {
             let mut support = None;

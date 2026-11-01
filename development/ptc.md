@@ -799,3 +799,36 @@ Validation from `/home/fin/luna`:
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`: four passed (`/tmp/luna-tools-l40lgp_v/result.json`).
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_type_factories_keep_identity_through_comptime_parameters`: passed (`/tmp/luna-tools-oocth4t_/result.json`).
 - Formatting check and `git diff --check` passed (`/tmp/luna-tools-794dzesz/result.json`).
+
+## Incremental Boolean circuit values
+
+The Boolean circuit is now a fourth independently acknowledged trail consumer.
+After reverse dependencies are installed, changed atoms schedule their source
+occurrences; topological node order recomputes affected parents only when a
+child's three-valued result changes. Assignments, removals, and backjumps use the
+same path. A new query epoch rebuilds from the complete assignment. Interrupted
+evaluation or explanation discards its session, so retry cannot retain partially
+updated node values. Proof replay still evaluates source formulas independently.
+
+Index construction is optional and amortized against observed direct-evaluation
+work. The circuit first evaluates directly; it installs reverse dependencies
+only after enough reuse and when the full reserved construction cost fits a
+bounded fraction of remaining fuel. Tiny circuits keep direct evaluation.
+Eager indexing initially regressed existing short-query budget tests; retaining
+those budgets and making initialization demand-driven restored them. No test
+expectations or language rules were relaxed.
+
+This eliminates repeated whole-circuit value evaluation for warmed, affected
+subgraphs. It does not yet cache child truth counts inside wide operators or
+make unit-reason extraction incremental, so changing a wide parent's value may
+still scan that parent's children. The earlier root-CNF and theory caches remain
+separate consumers; complete CDCL integration is still unfinished.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p ptc -p type_resolution`: 481 passed (`/tmp/luna-tools-c1ahz0qu/result.json`).
+- Every four-atom partial assignment is compared with full evaluation in both directions, including unit antecedents and conflict support. Another 128 budgets exercise interrupted updates, retry, and new epochs. Trail tests check independent circuit acknowledgement.
+- Warmed 16- and 4,096-subexpression circuits use equal update fuel (at most 16 units) when changed atom occurrences leave their containing tautology true; a quiescent settled circuit needs no evaluation fuel. This is bounded local work evidence, not an end-to-end timing claim.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`: four passed (`/tmp/luna-tools-j9qhz343/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_type_factories_keep_identity_through_comptime_parameters`: passed (`/tmp/luna-tools-byjfqnl3/result.json`).
+- Formatting check and `git diff --check` passed (`/tmp/luna-tools-nza7nmmp/result.json`).

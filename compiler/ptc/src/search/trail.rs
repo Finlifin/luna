@@ -14,6 +14,7 @@ pub(super) enum Reason {
 }
 #[derive(Clone, Copy)]
 pub(super) enum Consumer {
+    Circuit,
     Learned,
     Root,
     Theory,
@@ -33,7 +34,7 @@ pub(super) struct Trail<'a> {
     values: &'a mut [Option<bool>],
     levels: Vec<usize>,
     entries: Vec<Entry>,
-    pending: [Pending; 3],
+    pending: [Pending; 4],
 }
 impl<'a> Trail<'a> {
     pub(super) fn new(values: &'a mut [Option<bool>]) -> Self {
@@ -275,6 +276,7 @@ mod tests {
     fn consumers_acknowledge_independently_when_root_propagation_is_delayed() {
         let mut values = [None; 3];
         let mut trail = Trail::new(&mut values);
+        trail.acknowledge_changes(Consumer::Circuit);
         trail.acknowledge_changes(Consumer::Learned);
         trail.acknowledge_changes(Consumer::Theory);
         trail.assign(0, true, 0, Reason::Learned(Conflict::boolean(&[])));
@@ -291,7 +293,16 @@ mod tests {
             Some(&BTreeSet::from([0, 1, 2]))
         );
         trail.acknowledge_changes(Consumer::Theory);
+        assert_eq!(
+            trail.changes(Consumer::Circuit),
+            Some(&BTreeSet::from([0, 1, 2]))
+        );
+        trail.acknowledge_changes(Consumer::Circuit);
         trail.backjump(0);
+        assert_eq!(
+            trail.changes(Consumer::Circuit),
+            Some(&BTreeSet::from([1, 2]))
+        );
         assert_eq!(
             trail.changes(Consumer::Theory),
             Some(&BTreeSet::from([1, 2]))
