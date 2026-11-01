@@ -736,15 +736,20 @@ fn generator_pointer_range_snapshots_refresh_after_alias_writes() {
 }
 
 #[test]
-fn pattern_generator_live_aggregates_keep_comptime_callbacks_and_pointer_identity() {
+fn pattern_generator_aggregates_keep_callbacks_and_value_snapshots() {
     let source = "typealias Count=.Integer'builtin;
-        comptime fn bump(count:*Count)->bool {count.*+=1;count.* == 1}
-        comptime fn select(input:Tuple<*Count,comptime fn(*Count)->bool>)-><bool -| value:bool> {
-            let (count,action)=input;let wanted=action(count);'<value if value == wanted>
+        struct Counter {value:Count}
+        impl Counter {comptime fn bump(self)->bool {self.value+=1;self.value == 1}}
+        comptime fn bump(count:Counter)->bool {count.bump()}
+        comptime fn select(input:Tuple<Counter,comptime fn(Counter)->bool>)-><bool -| value:bool> {
+            let (count,action)=input;
+            let wanted=action(count) and count.value == 0;
+            '<value if value == wanted>
         }
         comptime fn emit()-><|-bool> {
-            var count:Count=0;const p=select(...do {((count.ref,bump),)});
-            let complete=count == 1;'(complete and (true match {~<p> => value,_ => false}))
+            let count=Counter {value:0};const p=select(...do {((count,bump),)});
+            let unchanged=count.value == 0;
+            '(unchanged and (true match {~<p> => value,_ => false}))
         }
         fn run()->bool {~<emit()>}";
     assert_eq!(
@@ -752,10 +757,10 @@ fn pattern_generator_live_aggregates_keep_comptime_callbacks_and_pointer_identit
         Value::Bool(true)
     );
     let invalid = source
-        .replace("comptime fn bump", "fn bump")
-        .replace("comptime fn(*Count)->bool", "fn(*Count)->bool");
+        .replace("comptime fn bump(count", "fn bump(count")
+        .replace("comptime fn(Counter)->bool", "fn(Counter)->bool");
     let failure = support::compile_with_tuple_protocols(&invalid, &Default::default()).unwrap_err();
-    assert!(!failure.contains("parsing failed"), "{failure}");
+    assert!(failure.contains("execution phase"), "{failure}");
 }
 
 #[test]
@@ -6010,10 +6015,15 @@ fn generator_named_comptime_callbacks_compute_data() {
 }
 
 #[test]
-fn generator_named_callbacks_can_update_invocation_local_storage() {
-    let source = "comptime fn mark(value:*bool)->bool {value.* = true;true}
-        comptime fn build(action:comptime fn(*bool)->bool)-><|-bool> {
-            var marked=false;let result=action(marked.ref);'(marked and result)
+fn generator_named_callbacks_mutate_private_argument_snapshots() {
+    let source = "struct State {marked:bool}
+        impl State {comptime fn mark(self)->bool {self.marked=true;self.marked}}
+        comptime fn mark(value:State)->bool {value.mark()}
+        comptime fn build(action:comptime fn(State)->bool)-><|-bool> {
+            let state=State {marked:false};
+            let result=action(state);
+            let unchanged=not state.marked;
+            '(unchanged and result)
         } fn run()->bool {~<build(mark)>}";
     assert_eq!(run(source, "run", vec![]), Value::Bool(true));
 }
