@@ -154,3 +154,71 @@ fn qualified_payloads_do_not_grant_opaque_inversion_or_unknown_value_identity() 
         TypeInputOutcome::Unknown(ptc::UnknownReason::BudgetExhausted)
     ));
 }
+
+#[test]
+fn opaque_qualified_observations_leave_explicit_type_inputs_ambiguous() {
+    for packet in [
+        (|value| optional(Some(value))) as fn(Term) -> Term,
+        |value| error(None, value),
+        |value| error(Some(Term::Primitive(P::Type)), value),
+    ] {
+        let mut context = Context::default();
+        context.admit_congruence(id(10));
+        let constraint = F::equal(
+            apply(packet(input(0))),
+            apply(packet(Term::Primitive(P::Bool))),
+        );
+        let outcome =
+            context.search_type_inputs(&[id(0)], constraint.clone(), &mut Budget::default());
+        let TypeInputOutcome::Ambiguous {
+            variable,
+            candidate,
+            alternative,
+        } = outcome
+        else {
+            panic!("an opaque result cannot determine its input: {outcome}");
+        };
+        assert_eq!(variable, id(0));
+        assert_ne!(candidate.types[&variable], alternative.types[&variable]);
+        let problem = context
+            .type_input_context(&[id(0)], constraint.clone(), &mut Budget::default())
+            .unwrap();
+        problem
+            .verify_witness(&candidate, Budget::default())
+            .unwrap();
+        problem
+            .verify_witness(&alternative, Budget::default())
+            .unwrap();
+        let explicit = F::And(vec![
+            constraint,
+            F::equal(input(0), Term::Primitive(P::Bool)),
+        ]);
+        assert!(matches!(
+            context.search_type_inputs(
+                &[id(0)],
+                explicit.clone(),
+                &mut Budget {
+                    steps: 0,
+                    ..Budget::default()
+                }
+            ),
+            TypeInputOutcome::Unknown(ptc::UnknownReason::BudgetExhausted)
+        ));
+        let TypeInputOutcome::Unique(solution) =
+            context.search_type_inputs(&[id(0)], explicit.clone(), &mut Budget::default())
+        else {
+            panic!("the explicit Type equality must resolve the ambiguity");
+        };
+        assert_eq!(solution.bindings[&id(0)].0, Term::Primitive(P::Bool));
+        let problem = context
+            .type_input_context(&[id(0)], explicit, &mut Budget::default())
+            .unwrap();
+        problem
+            .verify_witness(&solution.model, Budget::default())
+            .unwrap();
+        problem
+            .verify_proof(&solution.bindings[&id(0)].1, Budget::default())
+            .unwrap();
+        assert!(context.assumptions().is_empty());
+    }
+}
