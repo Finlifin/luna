@@ -662,6 +662,18 @@ impl<'a> Interpreter<'a> {
         depth: usize,
         preserve_identity: bool,
     ) -> Result<Value, Error> {
+        if let Value::List { ty, values } = value {
+            if preserve_identity {
+                // A checkpoint preserves nested identities. Validate the
+                // current graph before sharing its immutable payload; a
+                // later list mutation detaches from this snapshot.
+                self.check_borrowed_representation(value, source, depth)?;
+                return Ok(Value::List {
+                    ty: ty.clone(),
+                    values: values.clone(),
+                });
+            }
+        }
         self.check_representation_depth(source, depth)?;
         Ok(match value {
             Value::Code(code) => self.copy_code_value(code, source)?,

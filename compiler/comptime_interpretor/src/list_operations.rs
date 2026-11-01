@@ -234,16 +234,16 @@ impl Interpreter<'_> {
         other_length: usize,
         source: SourceRange,
     ) -> Result<Flow, Error> {
-        let count = length
+        length
             .checked_add(other_length)
             .filter(|count| *count <= 100_000)
             .ok_or_else(|| self.failure(ErrorKind::RepresentationSizeLimit, Some(source)))?;
-        self.integer_operation(Some(source), |budget| {
-            budget.consume(count.saturating_add(1))
-        })?;
         let value = match (value, other) {
             (Value::List { ty, mut values }, Value::List { values: right, .. }) => {
-                values.append_payload(right);
+                let moved = values.append_payload(right);
+                self.integer_operation(Some(source), |budget| {
+                    budget.consume(moved.saturating_add(1))
+                })?;
                 Value::List { ty, values }
             }
             _ => return Err(self.failure(ErrorKind::Type, Some(source))),
@@ -251,8 +251,8 @@ impl Interpreter<'_> {
         // Both inputs were admitted. A combined immutable description can
         // still exceed the shared structural work limit even below the element
         // limit; report that as a resource limit rather than a malformed type.
-        let work = value
-            .scoped_copy_work_with_evidence(
+        let (_, work) = value
+            .scoped_representation_work(
                 &self.abstract_type_parameters,
                 &self.abstract_value_parameters,
             )

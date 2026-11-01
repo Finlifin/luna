@@ -85,6 +85,15 @@ fn operation_body(name: &str, mut inputs: Vec<n::Expr>, source: n::SourceRange) 
     use n::{
         EnumBitQuery as B, EnumStructureQuery as Q, ObjectEditKind as E, ObjectQueryKind as O,
     };
+    if matches!(name, "list_length" | "list_concat") {
+        inputs.remove(0);
+        return if name == "list_length" {
+            K::ListLength(Box::new(inputs.remove(0)))
+        } else {
+            let right = inputs.pop().unwrap();
+            K::ListConcat(Box::new(inputs.pop().unwrap()), Box::new(right))
+        };
+    }
     if signatures::publishes_definition(name) {
         if name == "build_bits_enum_paths" {
             let encoding = inputs.split_off(6);

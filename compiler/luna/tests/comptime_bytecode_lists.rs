@@ -16,17 +16,17 @@ fn list_construction_concat_and_length_execute_without_losing_snapshots() {
         comptime fn values() -> List<bool> {
             var flag = false;
             let first: List<bool> = [do { flag = true; flag }, do { flag = false; flag }];
-            concat(first, [not flag])
+            concat(bool,first, [not flag])
         }
-        comptime fn types() -> List<Type> { concat([bool], [Integer]) }
+        comptime fn types() -> List<Type> { concat(Type,[bool], [Integer]) }
         comptime fn nested() -> List<List<bool>> { [[true], [false]] }
         comptime fn snapshots() -> List<bool> {
             var values: List<bool> = [false];
             let saved = values;
-            values = concat(values, [true]);
-            concat(saved, values)
+            values = concat(bool,values, [true]);
+            concat(bool,saved, values)
         }
-        comptime fn count(input: List<bool>) -> Integer { length(input) }
+        comptime fn count(input: List<bool>) -> Integer { length(bool,input) }
         comptime fn early() -> bool {
             let values: List<bool> = [do { return true; false }, do { while true {} false }];
             false
@@ -35,9 +35,14 @@ fn list_construction_concat_and_length_execute_without_losing_snapshots() {
     let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     for name in ["values", "types", "nested", "snapshots", "early"] {
         let before = vm.bytecode_invocations();
+        let calls_before = support::calls(&package, &vm).len();
         let id = support::id(&package, name);
         let result = vm.invoke(id, vec![]).unwrap();
-        assert_eq!(vm.bytecode_invocations() - before, 1, "{name}");
+        assert_eq!(
+            vm.bytecode_invocations() - before,
+            support::calls(&package, &vm).len() - calls_before,
+            "{name}"
+        );
         match (name, result) {
             ("values", Value::List { values, .. }) => assert_eq!(
                 values,
@@ -61,12 +66,16 @@ fn list_construction_concat_and_length_execute_without_losing_snapshots() {
     }
     let values = vm.invoke(support::id(&package, "values"), vec![]).unwrap();
     let before = vm.bytecode_invocations();
+    let calls_before = support::calls(&package, &vm).len();
     assert_eq!(
         vm.invoke(support::id(&package, "count"), vec![values])
             .unwrap(),
         Value::Integer(comptime_runtime::Integer::from_u128(3))
     );
-    assert_eq!(vm.bytecode_invocations() - before, 1);
+    assert_eq!(
+        vm.bytecode_invocations() - before,
+        support::calls(&package, &vm).len() - calls_before
+    );
 }
 
 #[test]
@@ -103,6 +112,7 @@ fn list_indices_preserve_bounds_snapshots_and_type_values() {
     ] {
         for index in [-1, 2, i128::MAX] {
             let before = vm.bytecode_invocations();
+            let calls_before = support::calls(&package, &vm).len();
             assert_eq!(
                 vm.invoke(
                     support::id(&package, name),
@@ -115,9 +125,13 @@ fn list_indices_preserve_bounds_snapshots_and_type_values() {
                 .kind,
                 ErrorKind::IndexOutOfBounds
             );
-            assert_eq!(vm.bytecode_invocations() - before, 1);
+            assert_eq!(
+                vm.bytecode_invocations() - before,
+                support::calls(&package, &vm).len() - calls_before
+            );
         }
         let before = vm.bytecode_invocations();
+        let calls_before = support::calls(&package, &vm).len();
         assert_eq!(
             vm.invoke(
                 support::id(&package, name),
@@ -129,15 +143,22 @@ fn list_indices_preserve_bounds_snapshots_and_type_values() {
             .unwrap(),
             expected
         );
-        assert_eq!(vm.bytecode_invocations() - before, 1);
+        assert_eq!(
+            vm.bytecode_invocations() - before,
+            support::calls(&package, &vm).len() - calls_before
+        );
     }
     for name in ["snapshot", "early"] {
         let before = vm.bytecode_invocations();
+        let calls_before = support::calls(&package, &vm).len();
         assert_eq!(
             vm.invoke(support::id(&package, name), vec![]).unwrap(),
             Value::Bool(true)
         );
-        assert_eq!(vm.bytecode_invocations() - before, 1);
+        assert_eq!(
+            vm.bytecode_invocations() - before,
+            support::calls(&package, &vm).len() - calls_before
+        );
     }
 }
 
@@ -151,18 +172,18 @@ fn repeated_append_keeps_copies_and_callback_snapshots() {
         comptime fn copies() -> List<bool> {
             var values: List<bool> = [true];
             let saved = values;
-            values = concat(values, values);
-            values = concat(values, [false]);
-            concat(saved, values)
+            values = concat(bool,values, values);
+            values = concat(bool,values, [false]);
+            concat(bool,saved, values)
         }
         comptime fn snapshot() -> List<bool> {
             var values: List<bool> = [true];
-            values = concat(values, do { values = [false]; [true] });
+            values = concat(bool,values, do { values = [false]; [true] });
             values
         }
         comptime fn types() -> List<Type> {
             var values: List<Type> = [bool];
-            values = concat(values, [Integer]);
+            values = concat(Type,values, [Integer]);
             values
         }",
     );
@@ -172,6 +193,7 @@ fn repeated_append_keeps_copies_and_callback_snapshots() {
         ("snapshot", vec![true, true]),
     ] {
         let before = vm.bytecode_invocations();
+        let calls_before = support::calls(&package, &vm).len();
         let Value::List { values, .. } = vm.invoke(support::id(&package, name), vec![]).unwrap()
         else {
             panic!("list")
@@ -180,7 +202,10 @@ fn repeated_append_keeps_copies_and_callback_snapshots() {
             values,
             expected.into_iter().map(Value::Bool).collect::<Vec<_>>()
         );
-        assert_eq!(vm.bytecode_invocations() - before, 1);
+        assert_eq!(
+            vm.bytecode_invocations() - before,
+            support::calls(&package, &vm).len() - calls_before
+        );
     }
     let Value::List { ty, values } = vm.invoke(support::id(&package, "types"), vec![]).unwrap()
     else {
@@ -245,7 +270,7 @@ fn scalar_append_loop_has_linear_vm_work_in_both_engines() {
         comptime fn build(count: Integer) -> List<bool> {
             var values: List<bool> = [];
             var index = 0;
-            while index < count { values = concat(values, [true]); index += 1; }
+            while index < count { values = concat(bool,values, [true]); index += 1; }
             values
         }",
     );

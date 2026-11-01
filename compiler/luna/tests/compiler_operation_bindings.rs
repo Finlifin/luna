@@ -25,8 +25,8 @@ fn compiler_operations_follow_imports_and_constant_aliases() {
         const count=size;
         comptime fn run()->bool {
             let a:List<bool> = [true];let b:List<bool> = [false,true];
-            let joined=operations.concat(a,b);
-            count(joined) == 3 and joined[0] and not joined[1] and joined[2]
+            let joined=operations.concat(bool,a,b);
+            count(bool,joined) == 3 and joined[0] and not joined[1] and joined[2]
         }"
     ).unwrap();
     assert_eq!(
@@ -41,7 +41,7 @@ fn compiler_operation_arguments_keep_source_order_and_single_evaluation() {
         "const concat=.list_concat'builtin;const length=.list_length'builtin;
         struct Trace {value:Integer}
         impl Trace {comptime fn input(self,digit:Integer)->List<bool> {self.value = self.value * 10 + digit;[true]}}
-        comptime fn run()->bool {let trace=Trace {value:0};let values=concat(trace.input(1),trace.input(2));trace.value == 12 and length(values) == 2}"
+        comptime fn run()->bool {let trace=Trace {value:0};let values=concat(bool,trace.input(1),trace.input(2));trace.value == 12 and length(bool,values) == 2}"
     ).unwrap();
     assert_eq!(
         luna::invocation::invoke(&package, "run", 100_000).unwrap(),
@@ -53,15 +53,11 @@ fn compiler_operation_arguments_keep_source_order_and_single_evaluation() {
 fn compiler_operation_bindings_retain_arity_domain_and_phase_errors() {
     for (body, diagnostic) in [
         (
-            "comptime fn bad() {let xs:List<bool> = [];length(xs,xs);}",
-            "positional list operands",
+            "comptime fn bad() {let xs:List<bool> = [];length(bool,xs,xs);}",
+            "argument",
         ),
-        ("comptime fn bad() {length(true);}", "bound meta.List"),
+        ("comptime fn bad() {length(bool,true);}", "type"),
         ("fn bad()->Integer {divide(4,2)}", "bound Splice protocol"),
-        (
-            "comptime fn bad() {let escaped=length;}",
-            "requires a direct call",
-        ),
     ] {
         let error=compile(&format!("const length=.list_length'builtin;const divide=.comptime_integer_div_trunc'builtin;{body}")).unwrap_err();
         assert!(error.contains(diagnostic), "{body}: {error}");
@@ -79,7 +75,7 @@ fn compiler_operation_binding_can_supply_type_observation_without_replaying_call
     let package=compile(
         "const concat=.list_concat'builtin;const length=.list_length'builtin;
         comptime fn Other()->Type {Integer}
-        comptime fn run()->bool {let a:List<Type> = [Other()];let b:List<Type> = [bool];let joined=concat(a,b);let T=joined[length(a)];let value:T=true;value}"
+        comptime fn run()->bool {let a:List<Type> = [Other()];let b:List<Type> = [bool];let joined=concat(Type,a,b);let T=joined[length(Type,a)];let value:T=true;value}"
     ).unwrap();
     let mut vm =
         comptime_interpretor::Interpreter::for_comptime(&package, Default::default()).unwrap();
@@ -165,7 +161,7 @@ fn typed_operation_bindings_reject_wrong_signatures_even_without_calls() {
     let error =
         compile("const generic: comptime fn(List<bool>) -> Integer = .list_length'builtin;")
             .unwrap_err();
-    assert!(error.contains("signature contract"), "{error}");
+    assert!(error.contains("signature mismatch"), "{error}");
 }
 
 #[test]
@@ -336,7 +332,7 @@ fn fixed_reflection_and_object_operations_are_callable_values() {
             let entries: Object = join({flag: true}, {tail: false});
             observe(Record, inspect) and Repr(Wrapper) == bool
                 and size(entries) == 2 and (lookup(entries, 0) matches .flag?)
-                and list_length(variants(Choice)) == 2
+                and list_length(Symbol,variants(Choice)) == 2
         }",
     );
 }
@@ -640,7 +636,7 @@ fn staged_runtime_methods_can_be_stored_as_comptime_list_data() {
         comptime fn run() -> bool {
             let methods = saved;
             let copied = methods;
-            length(copied) == 1
+            length(fn(comptime bool) -> bool, copied) == 1
         }",
     );
     let key = iir::InstanceKey {
@@ -715,6 +711,46 @@ fn dependent_source_callable_values_keep_invocation_binders() {
             let functions: List<comptime fn(comptime T: Type, value: T) -> T> = [select];
             functions[0](bool, true)
         }",
+    );
+}
+
+#[test]
+fn dependent_list_operations_are_ordinary_callable_values() {
+    run_staged_carriers(
+        "const length: comptime fn(comptime T: Type, List<T>) -> Integer = .list_length'builtin;
+        const concat: comptime fn(comptime T: Type, List<T>, List<T>) -> List<T> = .list_concat'builtin;
+        comptime fn apply(op: comptime fn(comptime T: Type, List<T>, List<T>) -> List<T>) -> List<bool> {
+            op(bool, [true], [false])
+        }
+        comptime fn compute() -> bool {
+            let joins: List<comptime fn(comptime T: Type, List<T>, List<T>) -> List<T>> = [concat];
+            let count = length;
+            let flags = apply(joins[0]);
+            let types = joins[0](Type, [bool], [Integer]);
+            count(bool, flags) == 2 and flags[0] and not flags[1]
+                and count(Type, types) == 2 and types[0] == bool and types[1] == Integer
+        }",
+    );
+}
+
+#[test]
+fn dependent_list_binding_signatures_use_the_bound_constructor() {
+    let package = support::compile_with_source_bindings(
+        "typealias Type = .Type'builtin;
+        typealias Integer = .Integer'builtin;
+        pub const List: pure comptime fn<T: Type> -> Type = .List'builtin;
+        const length: comptime fn(comptime T: Type, List<T>) -> Integer = .list_length'builtin;
+        comptime fn run() -> bool { length(bool, [true]) == 1 }",
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            meta_list: Some("input.List"),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
     );
 }
 

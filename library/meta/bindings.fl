@@ -3,8 +3,8 @@ use List;
 
 pub typealias Object = .Object'builtin;
 
-const compiler_list_length = .list_length'builtin;
-pub const compiler_list_concat = .list_concat'builtin;
+const compiler_list_length: comptime fn(comptime T: Type, List<T>) -> Integer = .list_length'builtin;
+pub const compiler_list_concat: comptime fn(comptime T: Type, List<T>, List<T>) -> List<T> = .list_concat'builtin;
 const compiler_comptime_integer_convert = .comptime_integer_convert'builtin;
 const compiler_comptime_integer_div_trunc: comptime fn(Integer, Integer) -> Integer = .comptime_integer_div_trunc'builtin;
 const compiler_comptime_integer_rem_trunc: comptime fn(Integer, Integer) -> Integer = .comptime_integer_rem_trunc'builtin;
@@ -51,11 +51,11 @@ const CompilerBuildBitsEnumPaths: comptime fn(Symbol, List<List<Symbol>>,
     at this boundary. Type parameters retain the List normal-form identity.
 -}
 pub pure comptime fn list_length(values: List<T>) -> Integer where T {
-    compiler_list_length(values)
+    compiler_list_length(T, values)
 }
 
 pub pure comptime fn list_concat(left: List<T>, right: List<T>) -> List<T> where T {
-    compiler_list_concat(left, right)
+    compiler_list_concat(T, left, right)
 }
 
 pub pure comptime fn to_usize(value: Integer) -> usize {

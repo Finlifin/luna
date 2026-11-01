@@ -236,10 +236,10 @@ fn prefix_observation_does_not_truncate_actual_list_values() {
 #[test]
 fn concatenated_list_evidence_preserves_exact_offsets_and_initializer_calls() {
     for body in [
-        "let a:meta.List<Type> = [Other(),bool]; let b:meta.List<Type> = [Byte]; let combined=list_concat(a,b); let T=combined[2]; let value:T=7; value == 7",
-        "let a:meta.List<Type> = [Byte]; let b:meta.List<Type> = [Other(),bool]; let combined=list_concat(a,b); let T=combined[2]; let value:T=true; value",
-        "let a:meta.List<Type> = [Other(),bool]; let count=list_length(a); let b:meta.List<Type> = [Byte]; let combined=list_concat(a,b); let T=combined[count]; let value:T=7; value == 7",
-        "let a:meta.List<Type> = if choose() {[Other(),bool]} else {[Byte,bool]}; let count=list_length(a); let b:meta.List<Type> = [Byte]; let combined=list_concat(a,b); let T=combined[count]; let value:T=7; value == 7",
+        "let a:meta.List<Type> = [Other(),bool]; let b:meta.List<Type> = [Byte]; let combined=list_concat(Type,a,b); let T=combined[2]; let value:T=7; value == 7",
+        "let a:meta.List<Type> = [Byte]; let b:meta.List<Type> = [Other(),bool]; let combined=list_concat(Type,a,b); let T=combined[2]; let value:T=true; value",
+        "let a:meta.List<Type> = [Other(),bool]; let count=list_length(Type,a); let b:meta.List<Type> = [Byte]; let combined=list_concat(Type,a,b); let T=combined[count]; let value:T=7; value == 7",
+        "let a:meta.List<Type> = if choose() {[Other(),bool]} else {[Byte,bool]}; let count=list_length(Type,a); let b:meta.List<Type> = [Byte]; let combined=list_concat(Type,a,b); let T=combined[count]; let value:T=7; value == 7",
     ] {
         let package=compile(&format!("comptime fn Other()->Type {{Byte}} comptime fn choose()->bool {{true}} comptime fn run()->bool {{{body}}}")).unwrap();
         let mut vm = Interpreter::for_comptime(&package, Default::default()).unwrap();
@@ -259,19 +259,53 @@ fn concatenated_list_evidence_preserves_exact_offsets_and_initializer_calls() {
 }
 
 #[test]
+fn immediate_callable_observation_keeps_unknown_arguments_executable() {
+    let package = compile(
+        "comptime fn Other() -> Type { Byte }
+        comptime fn run() -> bool {
+            let values = (|input: meta.List<Type>| input)([Other(), bool]);
+            let Selected = values[1];
+            let value: Selected = true;
+            value
+        }",
+    )
+    .unwrap();
+    for bytecode in [false, true] {
+        let mut vm = if bytecode {
+            Interpreter::for_comptime(&package, Default::default())
+        } else {
+            Interpreter::for_comptime_tree(&package, Default::default())
+        }
+        .unwrap();
+        assert_eq!(
+            vm.invoke(support::id(&package, "run"), vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        let other = support::id(&package, "Other");
+        assert_eq!(
+            vm.events()
+                .iter()
+                .filter(|event| matches!(event, Event::EnterFunction(id) if *id == other))
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
 fn concatenation_never_treats_a_joined_prefix_as_an_exact_length() {
     let prefix = "comptime fn choose()->bool {false}";
     for body in [
-        "let a:meta.List<Type> = if choose() {[bool]} else {[bool,Byte]}; let b:meta.List<Type> = [bool]; let combined=list_concat(a,b); let T=combined[1]; let value:T=true; value",
-        "let a:meta.List<Type> = if choose() {[bool]} else {[bool,Byte]}; let n=list_length(a); let types:meta.List<Type> = [Byte,bool,Byte]; let T=types[n]; let value:T=true; value",
-        "var a:meta.List<Type> = [bool]; let b:meta.List<Type> = [Byte]; let combined=list_concat(a,b); let T=combined[1]; let value:T=7; true",
+        "let a:meta.List<Type> = if choose() {[bool]} else {[bool,Byte]}; let b:meta.List<Type> = [bool]; let combined=list_concat(Type,a,b); let T=combined[1]; let value:T=true; value",
+        "let a:meta.List<Type> = if choose() {[bool]} else {[bool,Byte]}; let n=list_length(Type,a); let types:meta.List<Type> = [Byte,bool,Byte]; let T=types[n]; let value:T=true; value",
+        "var a:meta.List<Type> = [bool]; let b:meta.List<Type> = [Byte]; let combined=list_concat(Type,a,b); let T=combined[1]; let value:T=7; true",
     ] {
         assert!(
             compile(&format!("{prefix} comptime fn run()->bool {{{body}}}")).is_err(),
             "accepted {body}"
         );
     }
-    let package=compile(&format!("{prefix} comptime fn run()->bool {{let a:meta.List<Type> = if choose() {{[bool]}} else {{[bool,Byte]}}; let b:meta.List<Type> = [Byte];let combined=list_concat(a,b);let T=combined[0];let value:T=true;value}}")).unwrap();
+    let package=compile(&format!("{prefix} comptime fn run()->bool {{let a:meta.List<Type> = if choose() {{[bool]}} else {{[bool,Byte]}}; let b:meta.List<Type> = [Byte];let combined=list_concat(Type,a,b);let T=combined[0];let value:T=true;value}}")).unwrap();
     assert_eq!(
         luna::invocation::invoke(&package, "run", 100_000).unwrap(),
         Value::Bool(true)
@@ -280,7 +314,7 @@ fn concatenation_never_treats_a_joined_prefix_as_an_exact_length() {
 
 #[test]
 fn concatenation_evidence_keeps_failures_and_opaque_type_identity() {
-    let package=compile("comptime fn Fail()->Type {let types:meta.List<Type> = [];types[0]} comptime fn run()->bool {let a:meta.List<Type> = [bool];let b:meta.List<Type> = [Fail()];let combined=list_concat(a,b);let T=combined[0];let value:T=true;value}").unwrap();
+    let package=compile("comptime fn Fail()->Type {let types:meta.List<Type> = [];types[0]} comptime fn run()->bool {let a:meta.List<Type> = [bool];let b:meta.List<Type> = [Fail()];let combined=list_concat(Type,a,b);let T=combined[0];let value:T=true;value}").unwrap();
     let mut vm = Interpreter::for_comptime(&package, Default::default()).unwrap();
     assert_eq!(
         vm.invoke(support::id(&package, "run"), vec![])
@@ -288,9 +322,9 @@ fn concatenation_evidence_keeps_failures_and_opaque_type_identity() {
             .kind,
         comptime_interpretor::ErrorKind::IndexOutOfBounds
     );
-    let source = "pure comptime fn Identity<T>->Type {T} comptime fn run()->bool {let a:meta.List<Type> = [];let b:meta.List<Type> = [Identity<bool>];let combined=list_concat(a,b);let T=combined[0];let value:T=true;value}";
+    let source = "pure comptime fn Identity<T>->Type {T} comptime fn run()->bool {let a:meta.List<Type> = [];let b:meta.List<Type> = [Identity<bool>];let combined=list_concat(Type,a,b);let T=combined[0];let value:T=true;value}";
     assert!(compile(source).is_err());
-    let package=compile("comptime fn run()->bool {let a:meta.List<Type> = [];let b:meta.List<Type> = [bool];let combined=list_concat(a,b);let T=combined[0];let value:T=true;value}").unwrap();
+    let package=compile("comptime fn run()->bool {let a:meta.List<Type> = [];let b:meta.List<Type> = [bool];let combined=list_concat(Type,a,b);let T=combined[0];let value:T=true;value}").unwrap();
     assert_eq!(
         luna::invocation::invoke(&package, "run", 100_000).unwrap(),
         Value::Bool(true)
@@ -328,7 +362,7 @@ fn nested_concat_type_observation_is_sound_for_all_branch_choices() {
                                 let left:List<Type> = if first {{{a}}} else {{{b}}};
                                 let right:List<Type> = if second {{{c}}} else {{{d}}};
                                 let suffix:List<Type> = [bool];
-                                let joined=list_concat(list_concat(list_concat(prefix,left),right),suffix);
+                                let joined=list_concat(Type,list_concat(Type,list_concat(Type,prefix,left),right),suffix);
                                 let Selected=joined[{index}];let value:Selected=true;value
                             }}", a=spell(a),b=spell(b),c=spell(c),d=spell(d)
                         );

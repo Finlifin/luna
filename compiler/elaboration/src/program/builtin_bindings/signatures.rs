@@ -71,6 +71,37 @@ pub(super) fn callable(
             arguments: vec![ty],
         })
     };
+    if matches!(name, "list_length" | "list_concat") {
+        let element = Term::Bound {
+            depth: 0,
+            index: 0,
+            sort: Sort::Type,
+        };
+        let domain = list(element)?;
+        let mut parameters = vec![
+            Parameter {
+                sort: Sort::Type,
+                ty: p(P::Type),
+            },
+            Parameter {
+                sort: Sort::Runtime,
+                ty: domain.clone(),
+            },
+        ];
+        let result = if name == "list_concat" {
+            parameters.push(Parameter {
+                sort: Sort::Runtime,
+                ty: domain.clone(),
+            });
+            domain
+        } else {
+            p(P::Integer)
+        };
+        return Ok(Some(Term::ComptimeFunction(Box::new(Term::Function {
+            parameters,
+            result: Box::new(result),
+        }))));
+    }
     let (inputs, output) = match name {
         "comptime_integer_div_trunc" | "comptime_integer_rem_trunc" => {
             (vec![p(P::Integer), p(P::Integer)], p(P::Integer))

@@ -102,6 +102,17 @@ impl Interpreter<'_> {
             }
             Value::List { ty, values } => {
                 self.check_comptime_domain(ty, source)?;
+                if values
+                    .summary()
+                    .is_some_and(|summary| summary.uniform_scalar.is_some())
+                {
+                    // Uniform primitive leaves carry no mutable identities or
+                    // domains. Still check the child depth in this invocation.
+                    if let Some(first) = values.first() {
+                        self.check_comptime_graph_inner(first, source, depth + 1, seen)?;
+                    }
+                    return Ok(());
+                }
                 for value in values {
                     self.check_comptime_graph_inner(value, source, depth + 1, seen)?;
                 }

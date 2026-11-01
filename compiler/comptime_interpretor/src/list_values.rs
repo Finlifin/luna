@@ -174,6 +174,53 @@ mod tests {
         values
     }
     #[test]
+    fn warmed_checkpoints_share_payloads_but_recheck_depth_and_mutation() {
+        let package = crate::Package::default();
+        let source = crate::SourceRange { start: 1, end: 2 };
+        let mut costs = Vec::new();
+        for len in [32, 4096] {
+            // Representation checkpointing is independent of domain admission.
+            let value = Value::List {
+                ty: Term::Primitive(Primitive::Bool),
+                values: vec![Value::Bool(true); len].into(),
+            };
+            value.immutable_copy_work().unwrap();
+            let mut vm =
+                crate::Interpreter::for_comptime(&package, crate::Budget::default()).unwrap();
+            let before = vm.budget.steps;
+            let mut snapshot = vm.checkpoint_representation(&value, source).unwrap();
+            costs.push(before - vm.budget.steps);
+            assert!(std::ptr::eq(
+                payload(&value).first().unwrap(),
+                payload(&snapshot).first().unwrap()
+            ));
+            vm.budget.depth = 1;
+            assert_eq!(
+                vm.checkpoint_representation(&value, source)
+                    .unwrap_err()
+                    .kind,
+                crate::ErrorKind::DepthExhausted
+            );
+            vm.budget = crate::Budget::default();
+            let Value::List { values, .. } = &mut snapshot else {
+                unreachable!()
+            };
+            values[0] = Value::Pointer(
+                crate::Storage::new(Value::Bool(false))
+                    .pointer(Term::Primitive(Primitive::Bool), vec![]),
+            );
+            assert!(values.summary().is_none());
+            assert_eq!(
+                vm.checkpoint_representation(&snapshot, source)
+                    .unwrap_err()
+                    .kind,
+                crate::ErrorKind::PhaseMismatch
+            );
+            assert_eq!(vm.checkpoint_representation(&value, source).unwrap(), value);
+        }
+        assert_eq!(costs[0], costs[1]);
+    }
+    #[test]
     fn scalar_observations_compose_and_invalidate_without_type_verdicts() {
         let make = |values: Vec<Value>| {
             let mut value = test_type_list(vec![]);
