@@ -9699,3 +9699,31 @@ Validation from `/home/fin/luna`:
 - Workspace formatting passed (`/tmp/luna-tools-8xs47eyo/result.json`); `git diff --check` passed.
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test cmtt --test cmtt_phase_boundaries --test cmtt_type_inputs --test quote_functions`: 717 passed (`/tmp/luna-tools-o9d3p6o9/result.json`).
 - Real sysroot reflection/definition-builder acceptance passed (`/tmp/luna-tools-942i5w4s/result.json`): `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_reflection_objects_feed_checked_definition_builders`.
+
+### Share repeated typed constant payloads within compiled code
+
+Each invocation/contextual-input compilation now interns constant operands by
+exact declared type, operand kind and payload representation. Borrowed keys
+exist only during compilation; emitted instructions own shared immutable
+`Arc<Constant>` payloads. Separate instructions, registers and source locations
+remain intact. The VM still performs its normal literal/frozen-value admission
+and evaluation on every load; this is neither invocation memoization nor a
+cache of mutable values.
+
+Literal hashing uses the existing representation equality, including exact
+floating bit patterns. Signed zero, distinct NaN payloads, different declared
+integer types and literal versus frozen-value operands do not collapse. Opaque
+Type heads are not unfolded. Hashing and equality remain charged through the
+existing bounded preflight, including cache hits. Program retention accounting
+stays conservative rather than treating shared payload bytes as uncharged.
+
+This removes duplicate owned payloads within one compiled fragment. It does
+not yet provide a module-wide pool shared by independent functions, change the
+opcode format to constant indices, or claim an end-to-end timing improvement.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_compiler -p comptime_interpretor`: 620 passed (`/tmp/luna-tools-49vkjne4/result.json`). New checks verify actual shared allocation, separate source sites, source-lifetime independence, type/kind/float-bit separation and deterministic dumps.
+- Workspace formatting passed (`/tmp/luna-tools-0lp1h321/result.json`); `git diff --check` passed.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode --test comptime_iir_bytecode --test comptime_bytecode_types --test comptime_bytecode_lists --test comptime_staged_values`: 39 passed (`/tmp/luna-tools-5mhq7u4r/result.json`).
+- Real sysroot stateful List.fold acceptance passed (`/tmp/luna-tools-r_n8qi87/result.json`): `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_list_fold_retains_comptime_callback_state`.

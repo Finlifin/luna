@@ -154,7 +154,7 @@ impl fmt::Display for ExpansionSource {
         )
     }
 }
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Literal {
     PendingInteger {
         spelling: String,

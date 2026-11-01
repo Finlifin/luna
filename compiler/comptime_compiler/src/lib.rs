@@ -1270,6 +1270,7 @@ fn compile_root<'a>(
     };
     let initial_fuel = *fuel;
     let mut instructions = Vec::new();
+    let mut constants = constants::Pool::default();
     let mut locals = BTreeMap::new();
     let mut registers = 1;
     let mut labels = Vec::new();
@@ -2575,12 +2576,12 @@ fn compile_root<'a>(
                     }
                     K::Unit => emit(&mut work, Op::Unit(dst)),
                     K::Literal(_) | K::TypeValue(_) | K::ComptimeValue(_) | K::Function(_) => {
-                        let value = constants::Constant::copy(expr, fuel)?;
+                        let value = constants.get(expr, fuel)?;
                         emit(
                             &mut work,
                             Op::Constant {
                                 destination: dst,
-                                value: Arc::new(value),
+                                value,
                             },
                         );
                     }

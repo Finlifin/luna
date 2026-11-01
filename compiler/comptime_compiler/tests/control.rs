@@ -972,3 +972,91 @@ fn trait_method_descriptors_own_identity_and_charge_their_complete_payload() {
     assert_eq!(method.subject, Term::Primitive(Primitive::Bool));
     assert!(code.to_string().contains("(select-trait-method "));
 }
+
+#[test]
+fn repeated_constants_share_owned_payloads_without_merging_instructions() {
+    use nir::program::Literal;
+    let code = {
+        let literal = Expr {
+            source: SourceRange { start: 10, end: 11 },
+            ty: Term::Primitive(Primitive::Str),
+            kind: K::Literal(Literal::String("payload".repeat(512))),
+        };
+        let mut second = literal.clone();
+        second.source = SourceRange { start: 20, end: 21 };
+        compile(
+            &expr(K::Block {
+                statements: vec![literal, second],
+                result: None,
+            }),
+            &mut 100_000,
+        )
+        .unwrap()
+    };
+    let constants: Vec<_> = code
+        .instructions()
+        .iter()
+        .filter_map(|instruction| {
+            if let comptime_compiler::Op::Constant { value, .. } = &instruction.op {
+                Some((instruction.source, value))
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(constants.len(), 2);
+    assert_ne!(constants[0].0, constants[1].0);
+    assert!(std::sync::Arc::ptr_eq(constants[0].1, constants[1].1));
+    assert!(code.to_string().contains("payload"));
+}
+
+#[test]
+fn constant_pool_preserves_domains_kinds_and_float_bits() {
+    use nir::program::Literal as L;
+    let constant = |ty, kind| Expr {
+        ty: Term::Primitive(ty),
+        kind,
+        ..expr(K::Unit)
+    };
+    let entries = vec![
+        constant(Primitive::I8, K::Literal(L::SignedInteger(1))),
+        constant(Primitive::I16, K::Literal(L::SignedInteger(1))),
+        constant(Primitive::Bool, K::Literal(L::Bool(true))),
+        constant(Primitive::Bool, K::ComptimeValue(Term::Bool(true))),
+        constant(Primitive::F32, K::Literal(L::Float32(0))),
+        constant(Primitive::F32, K::Literal(L::Float32(0x80000000))),
+        constant(Primitive::F32, K::Literal(L::Float32(0x7fc00001))),
+        constant(Primitive::F32, K::Literal(L::Float32(0x7fc00002))),
+        constant(
+            Primitive::Type,
+            K::TypeValue(Term::Primitive(Primitive::Bool)),
+        ),
+    ];
+    let count = entries.len();
+    let mut repeated = entries.clone();
+    repeated.extend(entries);
+    let body = expr(K::Block {
+        statements: repeated,
+        result: None,
+    });
+    let code = compile(&body, &mut 100_000).unwrap();
+    let values: Vec<_> = code
+        .instructions()
+        .iter()
+        .filter_map(|instruction| match &instruction.op {
+            comptime_compiler::Op::Constant { value, .. } => Some(value),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(values.len(), 2 * count);
+    for i in 0..count {
+        assert!(std::sync::Arc::ptr_eq(values[i], values[i + count]));
+        for j in i + 1..count {
+            assert!(!std::sync::Arc::ptr_eq(values[i], values[j]));
+        }
+    }
+    assert_eq!(
+        code.to_string(),
+        compile(&body, &mut 100_000).unwrap().to_string()
+    );
+}
