@@ -70,35 +70,57 @@ pub(super) fn candidates(
     Ok(candidates)
 }
 
-pub(super) fn binding(
-    problem: &Context,
-    variable: DeclarationId,
-    candidates: &[Term],
-    budget: &mut Budget,
-) -> Result<Option<(Term, Proof)>, UnknownReason> {
-    for candidate in candidates {
-        if !within_input_limits(
-            Input::Term(candidate),
-            budget.max_depth.min(128),
-            &mut budget.steps,
-        ) {
-            return Err(UnknownReason::BudgetExhausted);
-        }
-        match problem.prove_metered(
-            Formula::equal(type_variable(variable), candidate.clone()),
-            budget,
-        ) {
-            Outcome::Entailed(proof) => return Ok(Some((candidate.clone(), proof))),
-            Outcome::Unknown {
-                reason: UnknownReason::BudgetExhausted,
-                ..
-            } => {
-                return Err(UnknownReason::BudgetExhausted);
-            }
-            _ => {}
+/// Rejections belong to one immutable problem, not a reusable global cache.
+/// New proved bindings only expose candidates; they never change this context.
+pub(super) struct Resolver<'a> {
+    problem: &'a Context,
+    rejected: HashMap<DeclarationId, std::collections::HashSet<Term>>,
+}
+impl<'a> Resolver<'a> {
+    pub(super) fn new(problem: &'a Context) -> Self {
+        Self {
+            problem,
+            rejected: HashMap::new(),
         }
     }
-    Ok(None)
+
+    pub(super) fn binding(
+        &mut self,
+        variable: DeclarationId,
+        candidates: &[Term],
+        budget: &mut Budget,
+    ) -> Result<Option<(Term, Proof)>, UnknownReason> {
+        let rejected = self.rejected.entry(variable).or_default();
+        for candidate in candidates {
+            // Charge traversal before hashing, comparing or copying the term.
+            if !within_input_limits(
+                Input::Term(candidate),
+                budget.max_depth.min(128),
+                &mut budget.steps,
+            ) {
+                return Err(UnknownReason::BudgetExhausted);
+            }
+            if rejected.contains(candidate) {
+                continue;
+            }
+            match self.problem.prove_metered(
+                Formula::equal(type_variable(variable), candidate.clone()),
+                budget,
+            ) {
+                Outcome::Entailed(proof) => return Ok(Some((candidate.clone(), proof))),
+                Outcome::NotEntailed(_) => {
+                    rejected.insert(candidate.clone());
+                }
+                Outcome::Unknown {
+                    reason: UnknownReason::BudgetExhausted,
+                    ..
+                } => return Err(UnknownReason::BudgetExhausted),
+                // Unknown is not a countermodel and cannot exclude a candidate.
+                _ => {}
+            }
+        }
+        Ok(None)
+    }
 }
 
 pub(super) fn same_ambient(
@@ -187,10 +209,131 @@ mod tests {
         let proposed =
             candidates(&problem, &[id(0), id(1)], &bindings, &mut Budget::default()).unwrap();
         assert!(proposed.contains(&head(variable(9))));
-        let (value, proof) = binding(&problem, id(0), &proposed, &mut Budget::default())
+        let (value, proof) = Resolver::new(&problem)
+            .binding(id(0), &proposed, &mut Budget::default())
             .unwrap()
             .unwrap();
         assert_eq!(value, head(variable(9)));
         problem.verify_proof(&proof, Budget::default()).unwrap();
+    }
+
+    #[test]
+    fn rejected_candidates_are_local_to_the_problem_and_input() {
+        let id = |local| DeclarationId { package: 71, local };
+        let boolean = Term::Primitive(nir::Primitive::Bool);
+        let pointer = Term::Pointer(Box::new(boolean.clone()));
+        let mut problem = Context::default();
+        problem.assume(Formula::equal(type_variable(id(0)), pointer.clone()));
+        problem.assume(Formula::equal(type_variable(id(1)), boolean.clone()));
+        let mut resolver = Resolver::new(&problem);
+        let wrong = [boolean.clone(), Term::Primitive(nir::Primitive::U8)];
+        let mut cold = Budget::default();
+        let initial = cold.steps;
+        assert!(
+            resolver
+                .binding(id(0), &wrong, &mut cold)
+                .unwrap()
+                .is_none()
+        );
+        let cold_work = initial - cold.steps;
+        let mut warm = Budget::default();
+        let initial = warm.steps;
+        assert!(
+            resolver
+                .binding(id(0), &wrong, &mut warm)
+                .unwrap()
+                .is_none()
+        );
+        let warm_work = initial - warm.steps;
+        assert!(warm_work < cold_work, "{warm_work} versus {cold_work}");
+        assert_eq!(resolver.rejected[&id(0)].len(), 2);
+
+        // A newly exposed candidate still receives an independent proof.
+        let candidates = [wrong[0].clone(), pointer.clone()];
+        let (value, proof) = resolver
+            .binding(id(0), &candidates, &mut Budget::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(value, pointer);
+        problem.verify_proof(&proof, Budget::default()).unwrap();
+        let (value, proof) = resolver
+            .binding(id(1), &wrong, &mut Budget::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(value, boolean);
+        problem.verify_proof(&proof, Budget::default()).unwrap();
+
+        let mut changed = Context::default();
+        changed.assume(Formula::equal(type_variable(id(0)), boolean.clone()));
+        let (_, proof) = Resolver::new(&changed)
+            .binding(id(0), &wrong, &mut Budget::default())
+            .unwrap()
+            .unwrap();
+        changed.verify_proof(&proof, Budget::default()).unwrap();
+    }
+
+    #[test]
+    fn interrupted_candidate_checks_are_retryable() {
+        let variable = DeclarationId {
+            package: 72,
+            local: 0,
+        };
+        let boolean = Term::Primitive(nir::Primitive::Bool);
+        let mut problem = Context::default();
+        problem.assume(Formula::equal(type_variable(variable), boolean.clone()));
+        let candidates = [boolean];
+        for steps in 0..32 {
+            let mut resolver = Resolver::new(&problem);
+            let result = resolver.binding(
+                variable,
+                &candidates,
+                &mut Budget {
+                    steps,
+                    ..Budget::default()
+                },
+            );
+            assert!(resolver.rejected[&variable].is_empty());
+            if let Ok(Some((_, proof))) = result {
+                problem.verify_proof(&proof, Budget::default()).unwrap();
+            }
+            let (_, proof) = resolver
+                .binding(variable, &candidates, &mut Budget::default())
+                .unwrap()
+                .unwrap();
+            problem.verify_proof(&proof, Budget::default()).unwrap();
+        }
+    }
+
+    #[test]
+    fn unavailable_trait_models_do_not_exclude_candidates() {
+        let variable = DeclarationId {
+            package: 73,
+            local: 0,
+        };
+        let mut problem = Context::default();
+        problem.assume(Formula::Trait(crate::TraitQuery {
+            interface: DeclarationId {
+                package: 73,
+                local: 1,
+            },
+            subject: type_variable(variable),
+            arguments: Vec::new(),
+        }));
+        let candidate = Term::Primitive(nir::Primitive::Bool);
+        assert!(matches!(
+            problem.prove_metered(
+                Formula::equal(type_variable(variable), candidate.clone()),
+                &mut Budget::default()
+            ),
+            Outcome::Unknown { .. }
+        ));
+        let mut resolver = Resolver::new(&problem);
+        assert!(
+            resolver
+                .binding(variable, &[candidate], &mut Budget::default())
+                .unwrap()
+                .is_none()
+        );
+        assert!(resolver.rejected[&variable].is_empty());
     }
 }

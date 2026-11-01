@@ -883,3 +883,27 @@ Validation from `/home/fin/luna`:
 
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`: seven passed (`/tmp/luna-tools-2hkg93a9/result.json`).
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: passed (`/tmp/luna-tools-8kf7rfmz/result.json`).
+
+## Reuse countermodel exclusions during dependent Type search
+
+Symbolic input resolution now keeps rejected candidates across dependency
+rounds. The resolver borrows one immutable private problem and keys exclusions
+by requested variable and candidate term. Only `NotEntailed`, which contains a
+validated countermodel, admits an exclusion. New solved inputs expose additional
+candidates without changing that problem, so earlier counterexamples stay valid.
+New candidates still require an entailment proof before any binding is exported.
+
+The cache is local to one search. Budget exhaustion, unavailable trait models
+and other unknown outcomes do not exclude candidates; no result is shared with
+another problem or variable. Candidate traversal is charged before hashing and
+copying, and the entire resolver is discarded when search returns. This removes
+repeated proof searches for rejected candidates, but candidate enumeration and
+term traversal still repeat across rounds; it is not a whole-search complexity
+or wall-clock speedup claim.
+
+Validation from `/home/fin/luna`:
+
+- PTC and type-resolution suites: 485 passed (`/tmp/luna-tools-_zb6kid4/result.json`). Tests cover reduced work on repeated rejected candidates, new candidates, variable/problem isolation, interrupted checks and unavailable trait models. Existing dependency-order and proof-replay tests remain passing.
+- Source Type-input acceptance: seven passed (`/tmp/luna-tools-ef65o0jd/result.json`).
+- Workspace formatting passed (`/tmp/luna-tools-0wgz6p71/result.json`); `git diff --check` passed.
+- Real sysroot type-factory identity acceptance passed (`/tmp/luna-tools-ga78p5nv/result.json`): `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_type_factories_keep_identity_through_comptime_parameters`.

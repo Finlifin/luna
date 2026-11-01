@@ -77,6 +77,7 @@ impl Context {
         // A solved input can expose a symbolic shape for another input. Keep
         // all unresolved inputs until this dependency closure stops growing;
         // request order must not decide whether an ambient solution is found.
+        let mut resolver = symbolic::Resolver::new(&problem);
         while !pending.is_empty() {
             let candidates = match symbolic::candidates(&problem, inputs, &bindings, budget) {
                 Ok(candidates) => candidates,
@@ -85,7 +86,7 @@ impl Context {
             let before = bindings.len();
             let mut unresolved = Vec::new();
             for (variable, alternative) in pending {
-                match symbolic::binding(&problem, variable, &candidates, budget) {
+                match resolver.binding(variable, &candidates, budget) {
                     Ok(Some(binding)) => {
                         bindings.insert(variable, binding);
                     }
