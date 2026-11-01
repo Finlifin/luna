@@ -236,3 +236,18 @@ pub(super) fn integer_representation(ty: &Term) -> bool {
         && **result == p(P::U128)
         && n::integer_representation_valid(&parameters[0].ty, result)
 }
+
+/// Checked Integer conversions are comptime-only. Their result domain is part
+/// of the callable signature, not inferred from the representation of a value.
+pub(super) fn integer_conversion(ty: &Term) -> bool {
+    let Term::ComptimeFunction(signature) = ty else {
+        return false;
+    };
+    let Term::Function { parameters, result } = signature.as_ref() else {
+        return false;
+    };
+    parameters.len() == 1
+        && parameters[0].sort == Sort::Runtime
+        && parameters[0].ty != p(P::Never)
+        && n::comptime_integer_conversion_valid(&parameters[0].ty, result)
+}

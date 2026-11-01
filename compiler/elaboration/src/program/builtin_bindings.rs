@@ -220,7 +220,10 @@ impl Checker<'_, '_> {
                     // Only the original declaration may establish a phase;
                     // an alias cannot turn an untyped token into a function.
                     if (signatures::text_query(name.as_str()).is_some()
-                        || name.as_str() == "integer_representation")
+                        || matches!(
+                            name.as_str(),
+                            "integer_representation" | "comptime_integer_convert"
+                        ))
                         && !annotations.iter().any(|(annotated, _)| *annotated == owner)
                     {
                         if let Some((_, annotation)) = annotations.first() {
@@ -246,12 +249,24 @@ impl Checker<'_, '_> {
                             let actual = self.type_expr(annotation);
                             self.active_signatures.remove(&annotated_owner);
                             let actual = actual?;
-                            if annotated_owner == owner && name.as_str() == "integer_representation"
+                            if annotated_owner == owner
+                                && matches!(
+                                    name.as_str(),
+                                    "integer_representation" | "comptime_integer_convert"
+                                )
                             {
-                                if !signatures::integer_representation(&actual) {
+                                let valid = if name.as_str() == "integer_representation" {
+                                    signatures::integer_representation(&actual)
+                                } else {
+                                    signatures::integer_conversion(&actual)
+                                };
+                                if !valid {
                                     return Err(error(
                                         annotation.span,
-                                        "compiler operation signature mismatch: integer representation requires fn(machine integer) -> u128 in the declared phase",
+                                        format!(
+                                            "compiler operation signature mismatch: invalid concrete domains or phase for {}",
+                                            name.as_str()
+                                        ),
                                     ));
                                 }
                                 expected = Some(actual.clone());

@@ -959,3 +959,64 @@ fn integer_representation_bindings_reject_wrong_domains_results_and_alias_phases
         );
     }
 }
+
+#[test]
+fn integer_conversion_callbacks_keep_checked_bounds_and_recover() {
+    use comptime_interpretor::{Budget, ErrorKind, Interpreter};
+    let package = compile(
+        "typealias i8 = .i8'builtin;
+        const narrow: comptime fn(Integer) -> i8 = .comptime_integer_convert'builtin;
+        const widen: comptime fn(i8) -> Integer = .comptime_integer_convert'builtin;
+        comptime fn run(value: Integer) -> Integer {
+            let converters: List<comptime fn(Integer) -> i8> = [narrow];
+            let convert = converters[0];
+            widen(convert(value))
+        }",
+    )
+    .unwrap();
+    for bytecode in [false, true] {
+        let mut vm = if bytecode {
+            Interpreter::for_comptime(&package, Budget::default())
+        } else {
+            Interpreter::for_comptime_tree(&package, Budget::default())
+        }
+        .unwrap();
+        let entry = support::id(&package, "run");
+        for n in [-129, 128] {
+            assert_eq!(
+                vm.invoke(
+                    entry,
+                    vec![Value::Integer(comptime_runtime::Integer::from_i128(n))]
+                )
+                .unwrap_err()
+                .kind,
+                ErrorKind::MachineOverflow
+            );
+        }
+        for n in [-128, 0, 127] {
+            let value = Value::Integer(comptime_runtime::Integer::from_i128(n));
+            assert_eq!(vm.invoke(entry, vec![value.clone()]).unwrap(), value);
+        }
+    }
+}
+
+#[test]
+fn integer_conversion_signatures_retain_phase_domain_and_alias_identity() {
+    for declarations in [
+        "const bad: fn(Integer) -> u8 = .comptime_integer_convert'builtin;",
+        "const bad: comptime fn(bool) -> u8 = .comptime_integer_convert'builtin;",
+        "const bad: comptime fn(Integer) -> bool = .comptime_integer_convert'builtin;",
+        "const bad: comptime fn(Integer, Integer) -> u8 = .comptime_integer_convert'builtin;",
+        "const original: comptime fn(Integer) -> u8 = .comptime_integer_convert'builtin;
+         const bad: comptime fn(Integer) -> i8 = original;",
+    ] {
+        let error = compile(&format!(
+            "typealias u8 = .u8'builtin; typealias i8 = .i8'builtin; {declarations}"
+        ))
+        .unwrap_err();
+        assert!(
+            error.contains("signature mismatch"),
+            "{declarations}: {error}"
+        );
+    }
+}

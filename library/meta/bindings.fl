@@ -5,7 +5,8 @@ pub typealias Object = .Object'builtin;
 
 const compiler_list_length: comptime fn(comptime T: Type, List<T>) -> Integer = .list_length'builtin;
 pub const compiler_list_concat: comptime fn(comptime T: Type, List<T>, List<T>) -> List<T> = .list_concat'builtin;
-const compiler_comptime_integer_convert = .comptime_integer_convert'builtin;
+const compiler_to_usize: comptime fn(Integer) -> usize = .comptime_integer_convert'builtin;
+const compiler_from_usize: comptime fn(usize) -> Integer = .comptime_integer_convert'builtin;
 const compiler_comptime_integer_div_trunc: comptime fn(Integer, Integer) -> Integer = .comptime_integer_div_trunc'builtin;
 const compiler_comptime_integer_rem_trunc: comptime fn(Integer, Integer) -> Integer = .comptime_integer_rem_trunc'builtin;
 pub const compiler_object_length: comptime fn(Object) -> Integer = .object_length'builtin;
@@ -59,11 +60,11 @@ pub pure comptime fn list_concat(left: List<T>, right: List<T>) -> List<T> where
 }
 
 pub pure comptime fn to_usize(value: Integer) -> usize {
-    compiler_comptime_integer_convert(usize, value)
+    compiler_to_usize(value)
 }
 
 pub pure comptime fn from_usize(value: usize) -> Integer {
-    compiler_comptime_integer_convert(Integer, value)
+    compiler_from_usize(value)
 }
 
 pub const div_trunc: comptime fn(Integer, Integer) -> Integer = compiler_comptime_integer_div_trunc;

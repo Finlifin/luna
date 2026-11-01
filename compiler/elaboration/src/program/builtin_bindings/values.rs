@@ -86,6 +86,9 @@ impl Checker<'_, '_> {
 }
 
 fn operation_body(name: &str, mut inputs: Vec<n::Expr>, source: n::SourceRange) -> K {
+    if name == "comptime_integer_convert" {
+        return K::ComptimeIntegerConvert(Box::new(inputs.remove(0)));
+    }
     if name == "integer_representation" {
         return K::IntegerRepresentation(Box::new(inputs.remove(0)));
     }

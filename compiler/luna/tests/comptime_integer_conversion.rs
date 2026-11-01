@@ -64,7 +64,7 @@ fn public_size_conversions_use_target_bounds_and_recover_after_overflow() {
                 .unwrap(),
                 Value::Integer(Integer::from_u128(value))
             );
-            assert_eq!(vm.bytecode_invocations() - before, 4);
+            assert_eq!(vm.bytecode_invocations() - before, 6);
         }
         assert!(package.to_string().contains("(comptime-integer-convert "));
     }
@@ -90,7 +90,7 @@ fn size_conversion_preserves_single_evaluation_and_early_return() {
         vm.invoke(support::id(&package, "run"), vec![]).unwrap(),
         Value::Bool(true)
     );
-    assert_eq!(vm.bytecode_invocations(), 3);
+    assert_eq!(vm.bytecode_invocations(), 5);
     let before = vm.bytecode_invocations();
     assert_eq!(
         vm.invoke(support::id(&package, "early"), vec![]).unwrap(),

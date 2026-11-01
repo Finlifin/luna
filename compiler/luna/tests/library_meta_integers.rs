@@ -165,7 +165,7 @@ fn integer_size_methods_obey_the_selected_target_and_preserve_all_bits() {
                 integer
             );
             // User entry, method and named compiler-operation wrapper for each call.
-            assert_eq!(vm.bytecode_invocations() - before, 6);
+            assert_eq!(vm.bytecode_invocations() - before, 8);
         }
     }
 }
