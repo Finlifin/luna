@@ -163,6 +163,16 @@ impl Checker<'_, '_> {
                 return self.generator_property_result_hint(value, callee, arguments, depth + 1);
             }
             H::Application(callee, arguments) => {
+                if let H::Projection(base, name) = callee.kind {
+                    if let Some(result) = self.generator_method_result_hint(
+                        base,
+                        name.name.as_str(),
+                        value.span,
+                        depth + 1,
+                    )? {
+                        return Ok(Some(result));
+                    }
+                }
                 if let H::NFApplication(head, arguments) = callee.kind {
                     return self.generator_explicit_signature_hint(
                         head,
@@ -242,6 +252,72 @@ impl Checker<'_, '_> {
         self.required_steps = fuel as u64;
         bounded.map_err(|e| error(value.span, e.to_string()))?;
         Ok(Some(ty.clone()))
+    }
+
+    // Read the selected inherent declaration's signature without preparing the
+    // receiver or arguments. Normal invocation still checks access, contracts,
+    // phases and method-local inputs at the original source position.
+    fn generator_method_result_hint(
+        &mut self,
+        base: &Expr<'_>,
+        name: &str,
+        span: Span,
+        depth: usize,
+    ) -> Result<Option<Term>, Error> {
+        if !self.interfaces_ready || depth >= 64 {
+            return Ok(None);
+        }
+        let Some(subject) = self.generator_expression_type_hint(base, depth)? else {
+            return Ok(None);
+        };
+        // A callable data field follows ordinary projection rules; a method
+        // with the same spelling must not supply its result instead.
+        if self
+            .generator_layout_field_type_hint(&subject, name, span)?
+            .is_some()
+        {
+            return Ok(None);
+        }
+        let Some((implementation, arguments)) =
+            self.select_inherent_method_implementation(&subject, name, span)?
+        else {
+            return Ok(None);
+        };
+        let Some(body) = self
+            .checked_implementations
+            .iter()
+            .find(|item| item.declaration == implementation)
+            .and_then(|item| item.methods.iter().find(|(member, _)| member == name))
+            .map(|(_, body)| *body)
+        else {
+            return Ok(None);
+        };
+        let Some(owner) = self.package.owners().find_map(|(owner, _)| {
+            matches_declaration(self.package, &self.package_identities, owner, body)
+                .then_some(owner)
+        }) else {
+            return Ok(None);
+        };
+        let Some(signature) = self.signatures.get(&owner) else {
+            return Ok(None);
+        };
+        let parameters = &self.type_parameters[&owner];
+        if arguments.len() > parameters.len() {
+            return Ok(None);
+        }
+        let Term::Function { result, .. } = signature.callable_signature() else {
+            return Ok(None);
+        };
+        if result.check_scope(&[]).is_err()
+            || parameters[arguments.len()..]
+                .iter()
+                .any(|parameter| result.mentions_rigid(*parameter))
+        {
+            return Ok(None);
+        }
+        let result =
+            self.instantiate_input_types(result, &parameters[..arguments.len()], &arguments, span)?;
+        self.copy_alias_type(&result, span).map(Some)
     }
 
     fn generator_match_type_hint(
