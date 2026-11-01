@@ -214,11 +214,30 @@ impl Protocol {
             *copy_failure.borrow_mut() = evidence.err();
             allowed
         };
+        // Ordinary Type inputs become concrete only inside the invocation.
+        // Resolve their method calls against this protocol's frozen source world.
+        let method_resolver = |callee: &nir::program::Expr, remaining: &mut u64| {
+            let mut fuel = usize::try_from(*remaining).unwrap_or(usize::MAX);
+            let before = fuel;
+            let result = elaboration::materialization::resolve_method_identity_in_context(
+                &self.package,
+                callee,
+                &self.context,
+                &[],
+                &mut fuel,
+            );
+            *remaining = remaining.saturating_sub((before - fuel) as u64);
+            result.map_err(|_| comptime_interpretor::Error {
+                kind: comptime_interpretor::ErrorKind::UnmaterializedDispatch,
+                source: Some(callee.source),
+            })
+        };
         let steps = u64::try_from(context.remaining()).unwrap_or(u64::MAX);
         let mut interpreter =
             Interpreter::for_comptime(&self.package, Budget { steps, depth: 128 })
                 .map_err(|e| Error::Protocol(e.to_string()))?
                 .with_budgeted_type_solver(&solver)
+                .with_method_resolver(&method_resolver)
                 .with_budgeted_pointer_copy_permission(&pointer_copy);
         let result = action(&mut interpreter);
         context.spend::<String>((steps - interpreter.remaining_steps()) as usize)?;
