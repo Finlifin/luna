@@ -155,9 +155,14 @@ pub(super) fn expand<'h>(source: &Package<'h>, arena: &'h HirArena) -> Result<Pa
                     if explicit.ty.flags != p.ty.flags {
                         return Err(error(explicit.span, "function template instance parameter markers must match the inherited interface"));
                     }
-                    let (T::Positional(annotation), T::Positional(_)) = (&explicit.ty.kind, &p.ty.kind) else {
-                        return Err(error(explicit.span, "explicit function template parameter protocol compatibility is not implemented"));
+                    let annotation = match (&explicit.ty.kind, &p.ty.kind) {
+                        (T::Positional(annotation), T::Positional(_))
+                        | (T::Varadic(_, annotation), T::Varadic(..)) => annotation,
+                        _ => return Err(error(explicit.span, "explicit function template parameter protocol compatibility is not implemented")),
                     };
+                    // The inherited collector remains authoritative. An instance
+                    // ascription checks its domain without replacing collection
+                    // behavior or evaluating a second collector declaration.
                     p.template_annotation = Some(annotation);
                 }
                 p.hir_id = input.binding;

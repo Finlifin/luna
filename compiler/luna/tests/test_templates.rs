@@ -2446,3 +2446,57 @@ fn explicit_template_annotations_keep_instance_lexical_lookup() {
         .is_err()
     );
 }
+
+#[test]
+fn explicit_template_variadics_preserve_collectors_and_fresh_instance_bindings() {
+    let source = "template fn pair(...values:Tuple<bool,bool>)->bool;
+        fn both use pair {
+            let (first,second)=values;first and second
+        }
+        quote fn either(...renamed:Tuple<bool,bool>) use pair {
+            let (first,second)=renamed;first or second
+        }
+        fn run()->bool {
+            both(true,true) and not both(true,false)
+                and either(false,true) and not either(false,false)
+        }";
+    let Artifact::Nir(package) = compile_with_tuple(source, Emit::Nir).unwrap() else {
+        panic!("expected NIR")
+    };
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+    for parameter in [
+        "items:Tuple<bool,bool>",
+        "...items:Tuple<bool>",
+        "...items:Tuple<bool,char>",
+    ] {
+        let source = format!(
+            "template fn pair(...values:Tuple<bool,bool>)->bool; quote fn wrong({parameter}) use pair {{true}}"
+        );
+        assert!(
+            compile_with_tuple(&source, Emit::Nir).is_err(),
+            "{parameter}"
+        );
+    }
+}
+
+#[test]
+fn explicit_template_property_collectors_keep_generic_domains() {
+    let source = "template fn configuration(...properties:T)->T where T;
+        quote fn first(...settings:T) use configuration {settings}
+        quote fn second(...other:T) use configuration {other}
+        fn run()->bool {
+            let yes = first {flag:true};
+            let no = second {flag:false};
+            yes.flag and not no.flag
+        }";
+    let Artifact::Nir(package) = compile(source, Emit::Nir).unwrap() else {
+        panic!("expected NIR")
+    };
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
