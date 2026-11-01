@@ -10676,3 +10676,20 @@ Evidence from `/home/fin/luna`:
 This is a fixture/coverage migration, not a new language feature or a claim that
 all comptime architecture and builtin package work is finished. Deep pattern
 execution and the other previously recorded execution failures remain open.
+
+
+### Linear pattern execution and independent depth limits
+
+Reconciled the two-mebibyte stack regression with the existing linear VM
+contract. Nested Or patterns execute successfully with per-node work charges
+and reuse compiled code; the reference tree matcher still reports its native
+recursion limit and recovers. Finite invocation depth remains enforced for
+linear calls. With unlimited invocation depth, infinite recursion instead
+exhausts its finite step allowance. This changes test coverage, not interpreter
+semantics, and does not resolve the other recorded execution failures.
+
+Evidence from `/home/fin/luna`: `python3 -B development/check.py --timeout 900
+-- test -p luna --test execution
+interpreter_depth_budget_fires_on_a_two_mebibyte_host_stack_and_recovers`
+passed (exit 0, `/tmp/luna-tools-zopafb3q/result.json`). Workspace formatting
+passed (exit 0, `/tmp/luna-tools-hj5nqvo1/result.json`).

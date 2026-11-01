@@ -14318,13 +14318,52 @@ fn interpreter_depth_budget_fires_on_a_two_mebibyte_host_stack_and_recovers() {
                     },
                 )
                 .unwrap();
-                for name in ["recurse", "pattern"] {
+                if depth != usize::MAX {
                     assert_eq!(
-                        engine.invoke(id(&package, name), vec![]).unwrap_err().kind,
+                        engine
+                            .invoke(id(&package, "recurse"), vec![])
+                            .unwrap_err()
+                            .kind,
                         ErrorKind::DepthExhausted
                     );
                     assert_eq!(
                         engine.invoke(id(&package, "good"), vec![]).unwrap(),
+                        Value::Bool(true)
+                    );
+                }
+                // Or patterns lower to linear control. Warm the code first so
+                // this measures execution work rather than compilation work.
+                assert_eq!(
+                    engine.invoke(id(&package, "pattern"), vec![]).unwrap(),
+                    Value::Bool(true)
+                );
+                let before = engine.remaining_steps();
+                let compiled = engine.bytecode_compilations();
+                let invocations = engine.bytecode_invocations();
+                assert_eq!(
+                    engine.invoke(id(&package, "pattern"), vec![]).unwrap(),
+                    Value::Bool(true)
+                );
+                assert!(before - engine.remaining_steps() >= 384);
+                assert_eq!(engine.bytecode_compilations(), compiled);
+                assert_eq!(engine.bytecode_invocations(), invocations + 1);
+                // The reference tree matcher still uses recursive host frames.
+                // Its safety limit must remain effective and recoverable.
+                let mut tree = Interpreter::for_comptime_tree(
+                    &package,
+                    Budget {
+                        steps: 100_000,
+                        depth,
+                    },
+                )
+                .unwrap();
+                for name in ["recurse", "pattern"] {
+                    assert_eq!(
+                        tree.invoke(id(&package, name), vec![]).unwrap_err().kind,
+                        ErrorKind::DepthExhausted
+                    );
+                    assert_eq!(
+                        tree.invoke(id(&package, "good"), vec![]).unwrap(),
                         Value::Bool(true)
                     );
                 }
@@ -14359,6 +14398,25 @@ fn interpreter_depth_budget_fires_on_a_two_mebibyte_host_stack_and_recovers() {
                     Value::Bool(true)
                 );
             }
+            // Heap call frames obey the requested invocation limit, not the
+            // native recursion guard. An unbounded recursive program still
+            // terminates when its finite work allowance runs out.
+            let mut unbounded = Interpreter::for_comptime(
+                &package,
+                Budget {
+                    steps: 20_000,
+                    depth: usize::MAX,
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                unbounded
+                    .invoke(id(&package, "recurse"), vec![])
+                    .unwrap_err()
+                    .kind,
+                ErrorKind::StepsExhausted
+            );
+            assert_eq!(unbounded.remaining_steps(), 0);
         })
         .unwrap()
         .join()
