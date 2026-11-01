@@ -180,17 +180,16 @@ impl Checker<'_, '_> {
                 return Err(error(site.span, "expected contextual data call"));
             };
             self.with_code_method_callee(callee, |this, callee, receiver| {
-                if receiver.is_some() {
-                    return Err(error(
-                        site.span,
-                        "contextual data receiver invocation requires value-reference dispatch not yet implemented",
-                    ));
-                }
+                let inputs = receiver
+                    .into_iter()
+                    .map(Arg::Positional)
+                    .chain(arguments.iter().cloned())
+                    .collect::<Vec<_>>();
                 let selected = Expr {
                     kind: if matches!(site.kind, H::ExtendedApplication(..)) {
-                        H::ExtendedApplication(callee, arguments)
+                        H::ExtendedApplication(callee, &inputs)
                     } else {
-                        H::Application(callee, arguments)
+                        H::Application(callee, &inputs)
                     },
                     ..site.clone()
                 };
@@ -214,21 +213,6 @@ impl Checker<'_, '_> {
             .data_consumer_call(site)
             .ok_or_else(|| error(site.span, "expected contextual data call"))?;
         self.ensure_data_consumer(owner, site.span)?;
-        let (ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) =
-            &self.package.item(owner).unwrap().kind
-        else {
-            unreachable!()
-        };
-        if sig
-            .params
-            .iter()
-            .any(|param| matches!(param.ty.kind, TyParamKind::Itself { .. }))
-        {
-            return Err(error(
-                site.span,
-                "contextual data receiver invocation requires value-reference dispatch not yet implemented",
-            ));
-        }
         let template = self.copy_data_consumer(owner, site.span)?;
         let (H::Application(callee, arguments) | H::ExtendedApplication(callee, arguments)) =
             site.kind

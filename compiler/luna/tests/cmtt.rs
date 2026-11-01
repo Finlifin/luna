@@ -10772,29 +10772,26 @@ fn contextual_data_methods_check_unused_bodies_and_declaration_contracts() {
 }
 
 #[test]
-fn contextual_data_methods_keep_receiver_and_ordinary_value_paths_closed() {
-    for (method, call) in [
-        (
-            "comptime fn inspect(code:<|-bool>)->bool {true}",
-            "const action=Reader.inspect;true",
-        ),
-        (
-            "comptime fn inspect(self,code:<|-bool>)->bool {true}",
-            "const r=Reader {};const result=r.inspect('(true));result",
-        ),
-        (
-            "comptime fn inspect(self,code:<|-bool>)->bool {true}",
-            "const result=Reader.inspect(Reader {},'(true));result",
-        ),
+fn contextual_data_methods_support_receivers_without_callable_erasure() {
+    for call in [
+        "const r=Reader {};const result=r.inspect('(true));result",
+        "const result=Reader.inspect(Reader {},'(true));result",
     ] {
-        let source =
-            format!("struct Reader {{}} impl Reader {{{method}}} fn run()->bool {{{call}}}");
-        let failure = support::compile_with_protocols(&source, &Default::default()).unwrap_err();
-        assert!(
-            failure.contains("contextual data") || failure.contains("code generator method"),
-            "{failure}"
+        let source = format!(
+            "struct Reader {{}} impl Reader {{
+            comptime fn inspect(self,code:<|-bool>)->bool {{true}}
+        }} fn run()->bool {{{call}}}"
         );
+        assert_eq!(run(&source, "run", vec![]), Value::Bool(true));
     }
+    let source = "struct Reader {} impl Reader {
+        comptime fn inspect(code:<|-bool>)->bool {true}
+    } fn run()->bool {const action=Reader.inspect;true}";
+    let failure = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+    assert!(
+        failure.contains("contextual data") || failure.contains("code generator method"),
+        "{failure}"
+    );
 }
 
 #[test]

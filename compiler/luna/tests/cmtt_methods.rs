@@ -2502,3 +2502,76 @@ fn selected_contextual_methods_export_exit_state_for_public_postconditions() {
         assert!(failure.contains("postcondition rejected"), "{failure}");
     }
 }
+
+#[test]
+fn contextual_consumer_receivers_write_back_through_inherent_and_trait_calls() {
+    for call in [
+        "host.read('(true),state)",
+        "host.as(Read).read('(true),state)",
+        "host.as(Read).forward('(true),state)",
+    ] {
+        let source = format!(
+            "struct State {{flag:bool}}
+            trait Read {{
+                comptime fn read(self,code:<|-bool>,state:State)->bool
+                where requires not state.flag, ensures state.flag;
+                comptime fn forward(self,code:<|-bool>,state:State)->bool {{
+                    self.as(Read).read(code,state)
+                }}
+            }}
+            struct Host {{changed:bool}}
+            impl Host {{comptime fn read(self,code:<|-bool>,state:State)->bool {{
+                self.changed=true;state.flag=true;true
+            }}}}
+            impl Read for Host {{comptime fn read(self,code:<|-bool>,state:State)->bool {{
+                self.changed=true;state.flag=true;true
+            }}}}
+            comptime fn outer()-><|-bool> {{
+                let host=Host {{changed:false}};let state=State {{flag:false}};
+                const result={call};let correct=result and host.changed and not state.flag;
+                '(correct)
+            }}
+            fn run()->bool {{~<outer()>}}"
+        );
+        assert_eq!(run(&source, "run", vec![]), Value::Bool(true), "{call}");
+        if call.contains("as(Read)") {
+            let invalid = source.replace("state.flag=true", "state.flag=false");
+            let failure =
+                support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+            assert!(failure.contains("postcondition rejected"), "{failure}");
+        }
+    }
+}
+
+#[test]
+fn contextual_consumer_receivers_evaluate_once_before_routed_inputs() {
+    for call in [
+        "factory.make().read('(true),.flag=factory.next())",
+        "factory.make().read(.flag=factory.next(),'(true))",
+        "Host.read(factory.make(),'(true),.flag=factory.next())",
+        "factory.make().read(...('(true),),.flag=factory.next())",
+    ] {
+        let source=format!("typealias Count=.Integer'builtin;
+            struct Host {{changed:bool}}
+            impl Host {{
+                comptime fn read(self,code:<|-bool>,.flag:bool=false)->bool {{
+                    let first=not self.changed;self.changed=true;first and flag
+                }}
+            }}
+            struct Factory {{trace:Count}}
+            impl Factory {{
+                comptime fn make(self)->Host {{self.trace=self.trace * 10 + 1;Host {{changed:false}}}}
+                comptime fn next(self)->bool {{let ordered=self.trace == 1;self.trace=self.trace * 10 + 2;ordered}}
+            }}
+            comptime fn outer()-><|-bool> {{
+                let factory=Factory {{trace:0}};const result={call};
+                let correct=result and factory.trace == 12;'(correct)
+            }}
+            fn run()->bool {{~<outer()>}}");
+        assert_eq!(
+            support::run_iir_with_tuple(&source, "run", vec![]),
+            Value::Bool(true),
+            "{call}"
+        );
+    }
+}

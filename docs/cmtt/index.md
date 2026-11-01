@@ -1641,6 +1641,30 @@ impl SizedBuilder for SmallBuilder {
 
 省略实现的前置条件时，trait 调用仍检查公开条件。显式条件的兼容性证明还包括谓词自身的定义性，例如除法的分母非零。证明只读取 comptime 数据，不把代码参数的 runtime 上下文当作可用程序事实，也不经过 PTC。当前检查复用有预算限制的程序验证器。任意精度整数的单边比较也能推导，例如 `n > 10` 可以证明 `n > 0`；取得同一值的有限上下界后，还会建立区间供后续多项式推导使用。单边事实绑定于程序值的版本，赋值后不能沿用旧事实，分支合并只能保留两侧共同成立的条件。尚未支持的谓词、无法建立所需边界或预算耗尽仍可能返回 Unknown，此时拒绝兼容性证明并保留原因，不能视为已满足契约。公开后置条件在选定实现返回后，按该次调用的退出参数状态检查；`'old` 仍引用公开调用入口的独立快照。表达式生成器、pattern 生成器和 contextual data consumer 共用这一分派边界。普通值参数在实现内的更新不写回调用者的对象，comptime `self` 值引用则保留自身的写回规则。代码结果绑定契约仍未实现。
 
+接收 quoted code、返回普通 comptime 数据的方法同样支持值引用 `self`。
+固有方法、显式 trait view 和 trait 默认方法转发复用相同的接收者准备规则：
+接收者先求值一次，再按源码顺序准备普通、具名或展开实参。
+显式类型调用也可供应接收者，例如 `Inspector.inspect(reader, '(true))`。
+它仍是 contextual 方法，不能擦除其代码参数接口而作为普通函数值保存。
+
+~~~flurry
+struct Inspector { seen: bool }
+impl Inspector {
+    comptime fn inspect(self, code: <|- bool>) -> bool {
+        self.seen = true;
+        true
+    }
+}
+
+comptime fn build_checked() -> <|- bool> {
+    let reader = Inspector { seen: false };
+    const accepted = reader.inspect('(true));
+    let updated = reader.seen;
+    '(accepted and updated)
+}
+~~~
+
+
 单边整数条件还可以随 comptime 局部副本、参数、返回值和元组解构传递。复制建立新值身份，后续写入原变量不会改变副本的既有条件；通过指针改写的局部值则不能沿用旧事实。缺少有限区间时，精确复制等式作为程序规格证据保留，不从等式虚构区间。`Integer` 仍是 comptime 值：比较也须在 comptime 完成，再把 bool 等可接入值交给 runtime。
 
 次数不超过三次的 comptime 整数表达式也保留精确来源，例如 `n + 1`、`n * n` 和 `x * y * z + x`。局部绑定、返回值及元组字段可以携带这些表达式关系；缺少有限上下界只会限制区间推导，不会自动抹去仍然有效的精确表达式。关系引用的是计算当时的输入版本：输入被改写后不能把旧结果解释为新输入的函数，需要引用入口值时使用 `n'old`。比较两边可以先消去相同的多项式项，例如 `n + 1 > n`、`n * n + 1 > n * n` 不要求给 n 提供有限区间。消项之前仍检查每个输入的版本；即使旧变量会在数学式中相消，也不能用过期证据证明当前程序。不可满足的条件（例如 `n < n`）会标记该假设路径不可达。这里仍不承诺任意无界多项式的不等式求解，表达式证据也不替代溢出、除零等检查。
