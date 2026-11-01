@@ -1013,7 +1013,7 @@ impl fmt::Display for ObjectQueryKind {
     }
 }
 
-/// Logical enum structure; declaration order never implies a discriminant.
+/// Enum structure and explicit encoding; order never synthesizes a discriminant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EnumStructureQuery {
     GroupPaths,
@@ -1021,6 +1021,7 @@ pub enum EnumStructureQuery {
     Shapes,
     FieldNames,
     FieldTypes,
+    SymbolValues,
 }
 impl fmt::Display for EnumStructureQuery {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1030,6 +1031,7 @@ impl fmt::Display for EnumStructureQuery {
             Self::Shapes => "shapes",
             Self::FieldNames => "field-names",
             Self::FieldTypes => "field-types",
+            Self::SymbolValues => "symbol-values",
         })
     }
 }

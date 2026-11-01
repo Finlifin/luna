@@ -134,3 +134,24 @@ typealias Event = EventType();
 真实 sysroot 示例：`development/examples/sysroot-object-enum-builder.fl`。
 运行 `python3 -B development/library_check.py --stage sysroot-object-enum-builder`
 可检查生成类型的构造、空 named payload 和带分组的 pattern matching。
+
+## 读回并重建 Symbol 编码
+
+`Type.enum_symbol_values() -> List<Symbol>` 返回显式声明的 Symbol 编码，
+顺序与 `enum_variant_paths()` 的叶变体顺序一致。分组不占据编码条目。
+同一操作也通过 `meta.enum_symbol_values(subject)` 导出。
+
+```flurry
+comptime fn Mirrored() -> Type {
+    let draft = meta.EnumBuilder.from_type(Message, .name = .Mirrored);
+    draft.BuildSymbol(Message.enum_symbol_values())
+}
+```
+
+这里生成新的 nominal 类型身份，并经普通 builder 发布检查保留原有 wire codes。
+`from_type` 负责结构，`BuildSymbol` 显式选择编码；普通 `Build` 的行为不变。
+普通枚举、固定 bit 编码枚举及非枚举 Type 没有 Symbol 编码，此查询会拒绝它们，
+不会从变体名、声明序号或不透明 Type 函数体猜测编码。
+
+真实 sysroot 示例在 `development/examples/sysroot-symbol-enum.fl`，涵盖分组路径、
+不同于变体名的编码、独立生成类型身份，以及重建后 runtime 模式匹配。

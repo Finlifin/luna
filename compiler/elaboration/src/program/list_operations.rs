@@ -279,6 +279,7 @@ impl Checker<'_, '_> {
             "enum_variant_shapes" => Q::Shapes,
             "enum_variant_field_names" => Q::FieldNames,
             "enum_variant_field_types" => Q::FieldTypes,
+            "enum_symbol_values" => Q::SymbolValues,
             _ => unreachable!(),
         };
         let head = self
@@ -299,7 +300,7 @@ impl Checker<'_, '_> {
         });
         let ty = if is_never(&subject.ty) {
             p(P::Never)
-        } else if query == Q::Shapes {
+        } else if matches!(query, Q::Shapes | Q::SymbolValues) {
             list(element)
         } else {
             list(list(element))

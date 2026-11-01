@@ -31,6 +31,7 @@ fn operation(name: &str) -> bool {
             | "enum_variant_shapes"
             | "enum_variant_field_names"
             | "enum_variant_field_types"
+            | "enum_symbol_values"
             | "build_struct"
             | "build_enum"
             | "build_enum_paths"

@@ -15,6 +15,7 @@ pub use bindings.enum_variant_paths;
 pub use bindings.enum_variant_shapes;
 pub use bindings.enum_variant_field_names;
 pub use bindings.enum_variant_field_types;
+pub use bindings.enum_symbol_values;
 
 {-
     Compose the checked parallel reflection lists into ordered field entries.
@@ -31,6 +32,14 @@ pure comptime fn field_object(names: List<Symbol>, types: List<Type>) -> Object 
 }
 
 impl Type {
+    {-
+        Read explicit Symbol codes in leaf-variant declaration order. Ordinary
+        and fixed-bit enums have no Symbol codes and reject this observation.
+    -}
+    pub pure comptime fn enum_symbol_values(self) -> List<Symbol> {
+        bindings.enum_symbol_values(self)
+    }
+
     pub pure comptime fn struct_fields(self) -> Object {
         field_object(self.struct_field_names(), self.struct_field_types())
     }

@@ -749,3 +749,49 @@ fn ordered_field_objects_keep_receiver_admission_and_recover_after_failure() {
         );
     }
 }
+
+#[test]
+fn explicit_symbol_codes_are_reflected_without_inventing_discriminants() {
+    let package = compile(
+        "use meta.builtin.{Symbol, Type};
+        enum Message {
+            .base_type Symbol,
+            .discrete_tag true,
+            ready = .wire_ready,
+            waiting = .wire_waiting,
+        }
+        enum Ordinary { ready, waiting }
+        pure comptime fn Identity<T> -> Type {T}
+        comptime fn run() -> bool {
+            let codes = Message.enum_symbol_values();
+            let again = meta.enum_symbol_values(Message);
+            codes.length() == 2 and codes[0] == .wire_ready
+                and codes[1] == .wire_waiting and again[0] == codes[0]
+        }
+        comptime fn bad() -> meta.List<Symbol> { Ordinary.enum_symbol_values() }
+        comptime fn hidden_type() -> meta.List<Symbol> { Identity<Message>.enum_symbol_values() }
+        comptime fn non_enum() -> meta.List<Symbol> { bool.enum_symbol_values() }",
+    )
+    .unwrap();
+    let mut vm = comptime_interpretor::Interpreter::for_comptime(
+        &package,
+        comptime_interpretor::Budget {
+            steps: 2_000_000,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for name in ["run", "bad", "hidden_type", "non_enum", "run"] {
+        let before = vm.bytecode_invocations();
+        let result = vm.invoke(support::id(&package, name), vec![]);
+        if name == "run" {
+            assert_eq!(result.unwrap(), Value::Bool(true));
+        } else {
+            assert_eq!(
+                result.unwrap_err().kind,
+                comptime_interpretor::ErrorKind::Type
+            );
+        }
+        assert!(vm.bytecode_invocations() > before);
+    }
+}

@@ -121,7 +121,11 @@ impl Interpreter<'_> {
                 let result_element = self.list_element(output);
                 let expected_element = match observation.kind {
                     O::EnumStructure(query)
-                        if query != nir::program::EnumStructureQuery::Shapes =>
+                        if !matches!(
+                            query,
+                            nir::program::EnumStructureQuery::Shapes
+                                | nir::program::EnumStructureQuery::SymbolValues
+                        ) =>
                     {
                         result_element.and_then(|ty| self.list_element(ty))
                     }

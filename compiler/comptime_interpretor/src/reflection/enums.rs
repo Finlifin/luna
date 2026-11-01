@@ -8,14 +8,15 @@ pub struct ReflectedVariant {
     pub fields: Vec<Term>,
 }
 
-/// Ordered structural information only. Groups do not occupy variant indices;
-/// no discriminant value, storage encoding or layout is inferred from order.
+/// Ordered structure and explicitly declared Symbol encoding. Groups do not
+/// occupy variant indices; no encoding or layout is inferred from order.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EnumReflection {
     pub subject: Term,
     pub is_intrinsic: bool,
     pub variants: Vec<ReflectedVariant>,
     pub groups: Vec<String>,
+    pub symbol_values: Option<Vec<String>>,
 }
 
 impl fmt::Display for ReflectedVariant {
@@ -57,13 +58,21 @@ impl fmt::Display for EnumReflection {
         for variant in &self.variants {
             write!(f, " {variant}")?;
         }
-        f.write_str("))")
+        f.write_str(")")?;
+        if let Some(values) = &self.symbol_values {
+            f.write_str(" (symbol-values")?;
+            for value in values {
+                write!(f, " {}", nir::QuotedDisplay(value))?;
+            }
+            f.write_str(")")?;
+        }
+        f.write_str(")")
     }
 }
 
 impl Interpreter<'_> {
-    /// Observe instantiated enum structure without selecting a value's variant
-    /// or requesting its encoding. The original subject identity is retained.
+    /// Observe instantiated structure and declared Symbol codes without selecting
+    /// a value's variant. The original subject identity is retained.
     pub fn reflect_enum(&mut self, ty: &Term) -> Result<EnumReflection, Error> {
         if !self.comptime_only {
             return Err(self.failure(ErrorKind::PhaseMismatch, None));
@@ -173,7 +182,20 @@ impl Interpreter<'_> {
                 fields,
             });
         }
+        let symbol_values = if let Some(encoding) = &definition.symbol_encoding {
+            let mut values = Vec::new();
+            for variant in encoding.variants() {
+                self.integer_operation(None, |budget| {
+                    budget.consume(variant.value.len().saturating_add(1))
+                })?;
+                values.push(variant.value.clone());
+            }
+            Some(values)
+        } else {
+            None
+        };
         Ok(EnumReflection {
+            symbol_values,
             subject: subject.clone(),
             is_intrinsic: definition.is_intrinsic,
             variants,
@@ -237,6 +259,15 @@ impl Interpreter<'_> {
                     })?;
                     values.push(symbols(path.split('.').map(str::to_owned).collect()));
                 }
+            }
+            Q::SymbolValues => {
+                values.extend(
+                    reflected
+                        .symbol_values
+                        .ok_or_else(fail)?
+                        .into_iter()
+                        .map(|value| Value::Symbol(value.into())),
+                );
             }
             Q::Shapes => {
                 for variant in reflected.variants {

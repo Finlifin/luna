@@ -37,3 +37,25 @@ comptime fn inspect() -> bool {
 test generated_symbol_enum_reflection {
     inline if inspect() { assumes true; } else { assumes false; };
 }
+
+{- Rebuild a fresh nominal identity with the explicitly reflected wire codes. -}
+comptime fn Mirrored() -> Type {
+    let draft = meta.EnumBuilder.from_type(Message, .name = .Mirrored);
+    draft.BuildSymbol(Message.enum_symbol_values())
+}
+
+typealias Mirror = Mirrored();
+
+comptime fn inspect_mirror() -> bool {
+    let original = Message.enum_symbol_values();
+    let copied = Mirror.enum_symbol_values();
+    original.length() == copied.length()
+        and copied[0] == .wire_ready and copied[1] == .wire_waiting
+        and copied[2] == .wire_closed and Message != Mirror
+}
+
+test reflected_symbol_encoding_rebuild {
+    let ready = Mirror.net.ready;
+    let matched = ready match { .net.ready => true, _ => false };
+    inline if inspect_mirror() { assumes matched; } else { assumes false; };
+}

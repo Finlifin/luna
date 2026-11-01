@@ -9785,3 +9785,27 @@ Validation from `/home/fin/luna`:
 - Workspace formatting passed (`/tmp/luna-tools-2kvjqhp_/result.json`); `git diff --check` passed.
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test comptime_bytecode --test comptime_iir_bytecode --test comptime_bytecode_types --test comptime_bytecode_lists --test comptime_staged_values`: 39 passed (`/tmp/luna-tools-umgdw89r/result.json`).
 - Real sysroot Type-factory identity acceptance passed (`/tmp/luna-tools-8j4hm329/result.json`): `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_type_factories_keep_identity_through_comptime_parameters`.
+
+### Explicit Symbol enum encoding reflection
+
+`Type.enum_symbol_values()` and `meta.enum_symbol_values(subject)` expose the
+explicit Symbol codes as an ordinary `meta.List<Symbol>` in leaf declaration
+order. The centralized compiler binding lowers to an enum observation whose
+output domain is checked before evaluation. Source and bytecode observation
+share the implementation; reflected metadata and S-expression dumps retain the
+explicit values without deriving them from variant names, order or opaque heads.
+String-copy work consumes the invocation budget.
+
+This completes a public reconstruction path: `EnumBuilder.from_type(subject)`
+provides the structural draft and `BuildSymbol(subject.enum_symbol_values())`
+publishes a fresh identity carrying the same wire codes. Ordinary enums,
+non-enum Types and opaque Type heads reject the query. Fixed-bit encodings do
+not supply Symbol codes either. The change does not add generic-definition,
+function, trait or impl builders, or bit-encoding reflection.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test source_reflection explicit_symbol_codes`: passed (`/tmp/luna-tools-fe24s98e/result.json`), covering both public spellings, exact codes, negative inputs, bytecode use and same-VM recovery. The first fixture attempt used the reserved word `opaque` as a function name and failed parsing (`/tmp/luna-tools-4j41vlmy/result.json`); the fixture name was corrected without changing language rules.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`: 371 passed (`/tmp/luna-tools-5onec5zy/result.json`).
+- `python3 -B development/library_check.py --stage sysroot-symbol-enum --timeout 900`: three native tests passed (`/tmp/luna-library-ov0u7c4b/summary.json`), including grouped-code reconstruction, distinct generated identity and runtime matching.
+- Workspace formatting passed (`/tmp/luna-tools-pgrfakrb/result.json`); `git diff --check` passed.

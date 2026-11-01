@@ -25,6 +25,7 @@ const compiler_enum_variant_paths = .enum_variant_paths'builtin;
 const compiler_enum_variant_shapes = .enum_variant_shapes'builtin;
 const compiler_enum_variant_field_names = .enum_variant_field_names'builtin;
 const compiler_enum_variant_field_types = .enum_variant_field_types'builtin;
+const compiler_enum_symbol_values = .enum_symbol_values'builtin;
 const CompilerBuildStruct = .build_struct'builtin;
 const CompilerBuildEnumPaths = .build_enum_paths'builtin;
 const CompilerBuildSymbolEnumPaths = .build_symbol_enum_paths'builtin;
@@ -150,4 +151,9 @@ pub comptime fn BuildBitsEnum(name: Symbol, groups: List<List<Symbol>>,
     offsets: List<List<Integer>>) -> Type {
     CompilerBuildBitsEnumPaths(name, groups, paths, shapes, names, types,
         width, base_type, masks, values, offsets)
+}
+
+
+pub pure comptime fn enum_symbol_values(subject: Type) -> List<Symbol> {
+    compiler_enum_symbol_values(subject)
 }
