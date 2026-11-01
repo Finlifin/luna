@@ -585,6 +585,16 @@ fn validate_conversion_with_tuple(
     if errors.is_empty() {
         return Err(Error::InvalidType);
     }
+    // A proved whole-Type equality can expose labels hidden in a generic
+    // success tail. Positional inspection of that unresolved tail cannot
+    // establish the same fact. This admits transport, not concrete tag routing;
+    // the completed result types still determine the executable embedding.
+    if conversion == Conversion::Embed
+        && matches!(input, Term::ErrorResult { .. })
+        && (input == output || equal(input, output))
+    {
+        return Ok(());
+    }
     let mut member = |label: &Term, fuel: &mut usize| -> Result<bool, Error> {
         for candidate in errors {
             charge(label, fuel)?;

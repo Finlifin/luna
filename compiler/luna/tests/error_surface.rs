@@ -2584,3 +2584,36 @@ fn error_success_adapts_plain_values_to_optional_payloads_without_losing_layers(
         assert!(compile(source, Emit::Nir).is_err(), "{source}");
     }
 }
+
+#[test]
+fn generic_error_tail_aliases_allow_explicit_flattening_contracts() {
+    let source = "
+        enum First { bad }
+        enum Second { bad }
+        fn flatten(value:!First R) -> ![First,Second] bool
+        where R, requires R == (!Second bool)
+        {
+            value
+        }
+        fn run() -> bool {
+            typealias Residual = !Second bool;
+            let value: !First Residual = true;
+            flatten<Residual>(value) match {
+                result! => result,
+                error First.bad => false,
+                error Second.bad => true,
+            }
+        }
+    ";
+    for (input, expected) in [
+        ("true", true),
+        ("error First.bad", false),
+        ("error Second.bad", true),
+    ] {
+        let source = source.replace("= true;", &format!("= {input};"));
+        assert_eq!(
+            support::run_iir(&source, "run", vec![]),
+            comptime_interpretor::Value::Bool(expected)
+        );
+    }
+}

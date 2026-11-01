@@ -1499,3 +1499,43 @@ fn completed_identity_pattern_matches_subject_without_acquiring_another_owner() 
         assert!(matches!(pattern, Pattern::Then { .. }));
     }
 }
+
+#[test]
+fn whole_type_evidence_admits_generic_error_transport_without_choosing_tags() {
+    use nir::error_results::{Conversion as C, validate_conversion};
+    let first = label(31, true);
+    let second = label(32, false);
+    let tail = Term::Rigid {
+        declaration: DeclarationId {
+            package: 1,
+            local: 33,
+        },
+        sort: Sort::Type,
+    };
+    let input = Term::error_result(vec![first.clone()], tail);
+    let output = Term::error_result(vec![first, second], Term::Primitive(P::Bool));
+    assert_eq!(
+        validate_conversion(C::Embed, &input, &output, &mut 1000, &mut |a, b| a == b),
+        Err(Error::IncompatibleSuccess)
+    );
+    let evidence = |a: &Term, b: &Term| a == b || (a == &input && b == &output);
+    validate_conversion(C::Embed, &input, &output, &mut 1000, &mut { evidence }).unwrap();
+    assert!(validate_conversion(C::Embed, &input, &output, &mut 0, &mut { evidence }).is_err());
+    // Whole result equality never turns an already tagged value into success.
+    assert_eq!(
+        validate_conversion(C::Success, &input, &output, &mut 1000, &mut { evidence }),
+        Err(Error::InvalidType)
+    );
+    // Executable transport still requires an actual completed source layout.
+    assert!(
+        nir::error_results::transport_plan_with_layouts(
+            &input,
+            &output,
+            false,
+            &mut 1000,
+            &mut { evidence },
+            &|_| None
+        )
+        .is_err()
+    );
+}

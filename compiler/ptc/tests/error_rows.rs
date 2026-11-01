@@ -257,3 +257,119 @@ fn explicit_error_label_cannot_disappear_into_a_closed_destination() {
         Outcome::Entailed(_)
     ));
 }
+
+#[test]
+fn error_tail_aliases_flatten_under_branch_evidence() {
+    let tail = variable(200);
+    let a = Term::Primitive(Primitive::Bool);
+    let b = Term::Primitive(Primitive::Char);
+    let left = Term::error_result(vec![a.clone()], tail.clone());
+    let right = row(vec![a, b.clone()]);
+    let mut context = Context::default();
+    assert!(!matches!(
+        context.prove(
+            Formula::equal(left.clone(), right.clone()),
+            Budget::default()
+        ),
+        Outcome::Entailed(_)
+    ));
+    context.assume(Formula::equal(tail, row(vec![b])));
+    proved(&context, left.clone(), right);
+    disproved(&context, left, row(vec![Term::Primitive(Primitive::Bool)]));
+}
+
+#[test]
+fn cyclic_error_tail_aliases_do_not_prove_closedness() {
+    let tail = variable(201);
+    let a = Term::Primitive(Primitive::Bool);
+    let b = Term::Primitive(Primitive::Char);
+    let mut context = Context::default();
+    context.assume(Formula::equal(
+        tail.clone(),
+        Term::error_result(vec![a.clone()], tail.clone()),
+    ));
+    // Idempotent labels can occur in the tail already. This equation neither
+    // closes the tail nor establishes the absence of a different label.
+    for goal in [
+        Formula::equal(tail.clone(), row(vec![a.clone()])),
+        Formula::equal(tail.clone(), row(vec![a, b])).negate(),
+    ] {
+        assert!(!matches!(
+            context.prove(goal, Budget::default()),
+            Outcome::Entailed(_)
+        ));
+    }
+}
+
+#[test]
+fn nested_scoped_tail_aliases_preserve_proof_scope_and_budget_recovery() {
+    let outer = Term::Bound {
+        depth: 1,
+        index: 0,
+        sort: Sort::Type,
+    };
+    let inner = Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: Sort::Type,
+    };
+    let a = Term::Primitive(Primitive::Bool);
+    let b = Term::Primitive(Primitive::Char);
+    let left = Term::error_result(vec![a.clone()], outer.clone());
+    let right = row(vec![a.clone(), b.clone()]);
+    let facts = [
+        Formula::equal(outer, Term::error_result(vec![a], inner.clone())),
+        Formula::equal(inner, row(vec![b])),
+    ];
+    for reverse in [false, true] {
+        let empty = Context::with_scope(vec![vec![Sort::Type], vec![Sort::Type]]);
+        let mut context = empty.fork();
+        for index in if reverse { [1, 0] } else { [0, 1] } {
+            context.assume(facts[index].clone());
+        }
+        let goal = Formula::equal(left.clone(), right.clone());
+        for steps in [0, 1, 10, 100] {
+            let _ = context.prove(
+                goal.clone(),
+                Budget {
+                    steps,
+                    ..Budget::default()
+                },
+            );
+        }
+        let Outcome::Entailed(proof) = context.prove(goal.clone(), Budget::default()) else {
+            panic!("alias chain must flatten");
+        };
+        context.verify_proof(&proof, Budget::default()).unwrap();
+        assert_eq!(
+            empty.verify_proof(&proof, Budget::default()),
+            Err(ProofError::Invalid)
+        );
+        assert!(!matches!(
+            empty.prove(goal, Budget::default()),
+            Outcome::Entailed(_)
+        ));
+    }
+}
+
+#[test]
+fn disjunctive_tail_evidence_is_rechecked_in_each_search_branch() {
+    let tail = variable(202);
+    let a = Term::Primitive(Primitive::Bool);
+    let b = Term::Primitive(Primitive::Char);
+    let c = Term::Primitive(Primitive::U8);
+    let mut context = Context::default();
+    context.assume(Formula::Or(vec![
+        Formula::equal(tail.clone(), row(vec![b.clone()])),
+        Formula::equal(tail.clone(), row(vec![c.clone()])),
+    ]));
+    let left = Term::error_result(vec![a.clone()], tail);
+    let goal = Formula::Or(vec![
+        Formula::equal(left.clone(), row(vec![a.clone(), b])),
+        Formula::equal(left, row(vec![a, c])),
+    ]);
+    let Outcome::Entailed(proof) = context.prove(goal, Budget::default()) else {
+        panic!("each alternative carries its own row evidence");
+    };
+    context.verify_proof(&proof, Budget::default()).unwrap();
+}

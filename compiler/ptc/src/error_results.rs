@@ -92,6 +92,8 @@ impl Search<'_> {
         };
         Ok(left == right)
     }
+    /// Follow only branch-proved aliases. A cyclic tail remains open: error
+    /// labels are idempotent, so such an equation is not itself contradictory.
     fn error_result_view(
         &mut self,
         start: usize,
@@ -100,6 +102,7 @@ impl Search<'_> {
         let terms = self.terms;
         let mut labels = BTreeSet::new();
         let mut current = start;
+        let mut seen = BTreeSet::new();
         for _ in 0..self.max_depth.min(128) {
             self.tick().map_err(|()| UnknownReason::BudgetExhausted)?;
             let Term::ErrorResult { errors, result } = &terms.nodes[current] else {
@@ -109,7 +112,45 @@ impl Search<'_> {
                 self.tick().map_err(|()| UnknownReason::BudgetExhausted)?;
                 labels.insert(classes.root(terms.ids[error]));
             }
-            current = terms.ids[result.as_ref()];
+            let result = terms.ids[result.as_ref()];
+            let root = classes.root(result);
+            if !seen.insert(root) {
+                return Ok(None);
+            }
+            let mut next = None;
+            let mut cyclic = false;
+            for index in std::iter::once(result).chain(0..terms.nodes.len()) {
+                self.tick().map_err(|()| UnknownReason::BudgetExhausted)?;
+                if classes.root(index) != root {
+                    continue;
+                }
+                // An ordinary representative closes the residual even when a
+                // contradictory branch also equates it with an error wrapper.
+                // Following that wrapper would hide the contradiction in a
+                // spurious cycle instead of checking its explicit labels.
+                let term = &terms.nodes[index];
+                if constructor(term).is_some()
+                    || matches!(term, Term::Record(_))
+                    || self.context.is_tuple_type(term)
+                    || self.context.is_list_type(term)
+                {
+                    return Ok(Some((labels, root)));
+                }
+                let Term::ErrorResult { errors, result } = &terms.nodes[index] else {
+                    continue;
+                };
+                let target = classes.root(terms.ids[result.as_ref()]);
+                if seen.contains(&target) {
+                    cyclic |= !errors.is_empty();
+                    continue;
+                }
+                next.get_or_insert(index);
+            }
+            match next {
+                Some(index) => current = index,
+                None if cyclic => return Ok(None),
+                None => return Ok(Some((labels, root))),
+            }
         }
         Err(UnknownReason::BudgetExhausted)
     }
