@@ -96,6 +96,58 @@ impl Checker<'_, '_> {
         Ok(())
     }
 
+    /// The public declaration and its selected implementation are two views
+    /// of one call. Export exit parameter state for public postconditions,
+    /// without writing ordinary by-value inputs back into the caller's frame.
+    pub(in crate::program::cmtt) fn selected_generator_frame<R>(
+        &mut self,
+        target: OwnerId,
+        bindings: &[(n::LocalId, n::LocalId)],
+        span: Span,
+        run: impl FnOnce(&mut Self) -> Result<R, Error>,
+    ) -> Result<R, Error> {
+        let (result, outputs) = self.generator_frame(target, |this| {
+            let result = run(this)?;
+            let mut outputs = Vec::new();
+            for &(public, selected) in bindings {
+                this.required_steps = this
+                    .required_steps
+                    .checked_sub(1)
+                    .ok_or_else(|| error(span, "selected method exit frame budget exhausted"))?;
+                let Some(value) = this.generator_data.get(&selected) else {
+                    continue;
+                };
+                if let Some(value) = value {
+                    constants::charge_copy(value, &mut this.required_steps, span)?;
+                }
+                let mut value = value.clone();
+                if let Some(value) = &mut value {
+                    if matches!(value.kind, K::Local(id) if id == selected) {
+                        value.kind = K::Local(public);
+                    }
+                }
+                let mut cell = this.generator_cells.get(&selected).cloned();
+                if let Some((snapshot, _)) = &mut cell {
+                    constants::charge_copy(snapshot, &mut this.required_steps, span)?;
+                    if matches!(snapshot.kind, K::Local(id) if id == selected) {
+                        snapshot.kind = K::Local(public);
+                    }
+                }
+                outputs.push((public, value, cell));
+            }
+            Ok((result, outputs))
+        })?;
+        for (binding, value, cell) in outputs {
+            self.generator_data.insert(binding, value);
+            if let Some(cell) = cell {
+                self.generator_cells.insert(binding, cell);
+            } else {
+                self.generator_cells.remove(&binding);
+            }
+        }
+        Ok(result)
+    }
+
     pub(super) fn run_selected_code_method(
         &mut self,
         owner: OwnerId,
@@ -109,7 +161,13 @@ impl Checker<'_, '_> {
         let template = self.copy_code_generator(target, span)?;
         let (definition, arguments) =
             self.prepare_selected_contextual_method(target, public, &template, span)?;
-        self.generator_frame(target, |this| {
+        let bindings: Vec<_> = public
+            .inputs
+            .iter()
+            .zip(&definition.inputs)
+            .map(|((public, _), (selected, _))| (*public, *selected))
+            .collect();
+        self.selected_generator_frame(target, &bindings, span, |this| {
             this.run_code_generator(&definition, arguments)
         })
         .map(Some)

@@ -428,8 +428,15 @@ impl Checker<'_, '_> {
             let (selected, arguments) =
                 self.prepare_selected_contextual_method(target, definition, &template, sig.span)?;
             self.require(&selected.output, &definition.output, sig.span)?;
-            let result =
-                self.generator_frame(target, |this| this.run_data_consumer(&selected, arguments))?;
+            let bindings: Vec<_> = definition
+                .inputs
+                .iter()
+                .zip(&selected.inputs)
+                .map(|((public, _), (selected, _))| (*public, *selected))
+                .collect();
+            let result = self.selected_generator_frame(target, &bindings, sig.span, |this| {
+                this.run_data_consumer(&selected, arguments)
+            })?;
             Control::DataReturn(result)
         } else {
             let Some(body) = body else {

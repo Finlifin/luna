@@ -1282,7 +1282,13 @@ impl Checker<'_, '_> {
                 };
             arguments.push(argument);
         }
-        self.generator_frame(target, |this| {
+        let bindings: Vec<_> = public
+            .inputs
+            .iter()
+            .zip(&definition.inputs)
+            .map(|((public, _), (selected, _))| (*public, *selected))
+            .collect();
+        self.selected_generator_frame(target, &bindings, span, |this| {
             this.install_generator_capture_values(&definition.captures, span)?;
             this.alias_substitution.extend(
                 definition

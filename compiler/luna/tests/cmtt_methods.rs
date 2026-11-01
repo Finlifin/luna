@@ -152,11 +152,12 @@ fn trait_pattern_methods_keep_live_receivers_and_single_evaluation() {
                 self.state=enabled;'<value>
             }
         }
-        comptime fn next(state:*bool)->bool {let before=state.*;state.* = not before;before}
+        struct Tick {state:bool}
+        impl Tick {comptime fn next(self)->bool {let before=self.state;self.state=not before;before}}
         comptime fn emit()-><|-bool> {
-            var flag=Flag {state:false};var tick=true;
-            const p:<bool -| value:bool> = flag.as(Rule).pattern(next(tick.ref));
-            let changed=flag.state;let once=not tick;'(changed and once and (true match {~<p> => value,_ => false}))
+            var flag=Flag {state:false};let tick=Tick {state:true};
+            const p:<bool -| value:bool> = flag.as(Rule).pattern(tick.next());
+            let changed=flag.state;let once=not tick.state;'(changed and once and (true match {~<p> => value,_ => false}))
         }
         fn run()->bool {~<emit()>}";
     assert_eq!(run(source, "run", vec![]), Value::Bool(true));
@@ -536,18 +537,23 @@ fn static_code_methods_infer_and_accept_method_type_arguments() {
 #[test]
 fn static_code_methods_reuse_default_and_argument_evaluation_order() {
     let source="typealias Count=.u8'builtin;
-        comptime fn mark(count:*Count)->bool where requires count.* == 0 {count.*+=1;true}
+        struct Counter {value:Count}
+        impl Counter {
+            comptime fn mark(self)->bool
+            where requires self.value == 0
+            {self.value+=1;true}
+        }
         struct Builder {
             pub comptime fn build(first:bool,.second:bool=true)-><|-bool> where requires first {'(first and second)}
         }
         comptime fn outer()-><|-bool> {
-            var count:Count=0;
-            let code=Builder.build(mark(count.ref));
-            if count == 1 {code} else {'(false)}
+            let count=Counter {value:0};
+            let code=Builder.build(count.mark());
+            if count.value == 1 {code} else {'(false)}
         }
         fn run()->bool {~<outer()>}";
     assert_eq!(run(source, "run", vec![]), Value::Bool(true));
-    let invalid = source.replace("Builder.build(mark(count.ref))", "Builder.build(false)");
+    let invalid = source.replace("Builder.build(count.mark())", "Builder.build(false)");
     let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
     assert!(failure.contains("precondition"), "{failure}");
 }
@@ -816,13 +822,14 @@ fn trait_code_method_defaults_forward_through_abstract_self() {
 #[test]
 fn trait_code_methods_preserve_single_input_evaluation() {
     let source = "typealias Count=.Integer'builtin;
-        comptime fn next(count:*Count)->bool {count.*+=1;true}
+        struct Counter {value:Count}
+        impl Counter {comptime fn next(self)->bool {self.value+=1;true}}
         trait Builder {comptime fn build(flag:bool)-><|-bool>;}
         struct Flag {} impl Builder for Flag {comptime fn build(input:bool)-><|-bool> {'(input)}}
         comptime fn outer()-><|-bool> {
-            var count:Count=0;
-            let code=Flag.as(Builder).build(next(count.ref));
-            if count == 1 {code} else {'(false)}
+            let count=Counter {value:0};
+            let code=Flag.as(Builder).build(count.next());
+            if count.value == 1 {code} else {'(false)}
         }
         fn run()->bool {~<outer()>}";
     assert_eq!(run(source, "run", vec![]), Value::Bool(true));
@@ -952,13 +959,16 @@ fn generic_code_method_value_receivers_preserve_parent_types() {
 fn code_method_value_receivers_evaluate_once_before_arguments() {
     let source="typealias Count=.Integer'builtin;
         struct Builder {flag:bool}
-        comptime fn make(count:*Count)->Builder {count.* = count.* * 10 + 1;Builder{flag:true}}
-        comptime fn next(count:*Count)->bool {let ordered=count.* == 1;count.* = count.* * 10 + 2;ordered}
+        struct Counter {value:Count}
+        impl Counter {
+            comptime fn make(self)->Builder {self.value=self.value * 10 + 1;Builder {flag:true}}
+            comptime fn next(self)->bool {let ordered=self.value == 1;self.value=self.value * 10 + 2;ordered}
+        }
         impl Builder {comptime fn build(self,flag:bool)-><|-bool> {let result=self.flag and flag;'(result)}}
         comptime fn outer()-><|-bool> {
-            var count:Count=0;
-            let code=make(count.ref).build(next(count.ref));
-            if count == 12 {code} else {'(false)}
+            let count=Counter {value:0};
+            let code=count.make().build(count.next());
+            if count.value == 12 {code} else {'(false)}
         }
         fn run()->bool {~<outer()>}";
     assert_eq!(run(source, "run", vec![]), Value::Bool(true));
@@ -1487,24 +1497,26 @@ fn trait_default_reference_code_methods_forward_the_same_owner() {
 }
 
 #[test]
-fn reference_code_dispatch_checks_public_pointer_contracts_after_writeback() {
-    let source = "trait Build {
-            comptime fn build(self,state:*bool)-><|-bool> where requires not state.*, ensures state.*;
+fn code_dispatch_checks_public_value_contracts_after_local_updates() {
+    let source = "struct State {flag:bool}
+        trait Build {
+            comptime fn build(self,state:State)-><|-bool>
+            where requires not state.flag, ensures state.flag;
         }
         struct Builder {}
         impl Build for Builder {
-            comptime fn build(self,output:*bool)-><|-bool> {output.* = true;'(true)}
+            comptime fn build(self,output:State)-><|-bool> {output.flag=true;'(true)}
         }
         comptime fn outer()-><|-bool> {
-            var builder=Builder {};var flag=false;
-            let code=builder.as(Build).build(flag.ref);
-            if flag {code} else {'(false)}
+            let builder=Builder {};let state=State {flag:false};
+            let code=builder.as(Build).build(state);
+            if not state.flag {code} else {'(false)}
         }
         fn run()->bool {~<outer()>}";
     assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
     for (from, to, diagnostic) in [
-        ("var flag=false", "var flag=true", "precondition"),
-        ("output.* = true", "output.* = false", "postcondition"),
+        ("State {flag:false}", "State {flag:true}", "precondition"),
+        ("output.flag=true", "output.flag=false", "postcondition"),
     ] {
         let rejected = source.replace(from, to);
         let error = support::compile_with_protocols(&rejected, &Default::default()).unwrap_err();
@@ -1790,30 +1802,31 @@ fn generator_entry_values_are_isolated_across_nested_calls() {
 }
 
 #[test]
-fn trait_default_forwarding_keeps_live_aggregates_and_public_entry_contracts() {
-    let source = "struct State {flag:bool,target:*bool}
+fn trait_default_forwarding_preserves_value_and_entry_snapshots() {
+    let source = "struct State {flag:bool}
         trait Build {
             comptime fn build(self,state:State)-><|-bool>
-                where ensures not state'old.flag and state'old.target.*;
+                where ensures not state'old.flag and state.flag;
             comptime fn again(self,state:State)-><|-bool>
-                where ensures not state'old.flag and state'old.target.* {
+                where ensures not state'old.flag and not state.flag
+            {
                 self.as(Build).build(state)
             }
         }
         struct Builder {}
         impl Build for Builder {
             comptime fn build(self,input:State)-><|-bool> {
-                input.target.* = true;'(true)
+                input.flag=true;'(true)
             }
         }
         comptime fn outer()-><|-bool> {
-            var builder=Builder {};var flag=false;
-            let code=builder.as(Build).again(State {flag:false,target:flag.ref});
-            if flag {code} else {'(false)}
+            let builder=Builder {};let state=State {flag:false};
+            let code=builder.as(Build).again(state);
+            if not state.flag {code} else {'(false)}
         }
         fn run()->bool {~<outer()>}";
     assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
-    let invalid = source.replace("input.target.* = true", "input.target.* = false");
+    let invalid = source.replace("input.flag=true", "input.flag=false");
     let error = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
     assert!(error.contains("postcondition rejected"), "{error}");
 }
@@ -2059,14 +2072,17 @@ fn generic_code_method_contracts_preserve_associated_instances() {
 
 #[test]
 fn discarded_trait_pattern_calls_keep_selection_and_mutation() {
-    let source="trait Builder {comptime fn touch(count:*.u8'builtin)-><bool -| value:bool>;}
-        struct Host {} impl Builder for Host {
-            comptime fn touch(input:*.u8'builtin)-><bool -| value:bool> {assumes input.* < 255;input.* += 1;'<value>}
+    let source = "typealias Byte=.u8'builtin;
+        trait Builder {comptime fn touch(self)-><bool -| value:bool>;}
+        struct Host {count:Byte} impl Builder for Host {
+            comptime fn touch(self)-><bool -| value:bool> {
+                assumes self.count < 255;self.count+=1;'<value>
+            }
         }
         comptime fn emit()-><|-bool> {
-            var count:.u8'builtin=0;
-            Host.as(Builder).touch(count.ref);
-            let correct=count==1;'(correct)
+            let host=Host {count:0};
+            host.as(Builder).touch();
+            let correct=host.count==1;'(correct)
         }
         fn run()->bool {~<emit()>}";
     assert_eq!(run(source, "run", vec![]), Value::Bool(true));
@@ -2442,5 +2458,47 @@ fn comptime_code_receiver_spreads_preserve_places_and_packet_evaluation() {
             Value::Bool(true),
             "{source}"
         );
+    }
+}
+
+#[test]
+fn selected_contextual_methods_export_exit_state_for_public_postconditions() {
+    for (parameters, result, body, call, tail) in [
+        (
+            "state:State",
+            "<bool -| value:bool>",
+            "'<value>",
+            "const p=Host.as(Build).build(state);",
+            "'(unchanged and (true match {~<p> => value,_=>false}))",
+        ),
+        (
+            "code:<|-bool>,state:State",
+            "bool",
+            "true",
+            "const result=Host.as(Build).build('(true),state);",
+            "'(unchanged and result)",
+        ),
+    ] {
+        let source = format!(
+            "struct State {{flag:bool}}
+            trait Build {{
+                comptime fn build({parameters})->{result}
+                where requires not state.flag, ensures not state'old.flag and state.flag;
+            }}
+            struct Host {{}}
+            impl Build for Host {{
+                comptime fn build({parameters})->{result} {{state.flag=true;{body}}}
+            }}
+            comptime fn outer()-><|-bool> {{
+                let state=State {{flag:false}};
+                {call}let unchanged=not state.flag;
+                {tail}
+            }}
+            fn run()->bool {{~<outer()>}}"
+        );
+        assert_eq!(run(&source, "run", vec![]), Value::Bool(true));
+        let invalid = source.replace("state.flag=true", "state.flag=false");
+        let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+        assert!(failure.contains("postcondition rejected"), "{failure}");
     }
 }
