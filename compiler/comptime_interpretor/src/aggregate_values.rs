@@ -40,6 +40,7 @@ impl Interpreter<'_> {
         values: Vec<Value>,
         source: SourceRange,
     ) -> Result<Value, Error> {
+        self.check_comptime_domain(ty, source)?;
         let selected = if self.associated_values.is_empty() {
             None
         } else {

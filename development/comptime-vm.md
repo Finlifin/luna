@@ -10919,3 +10919,35 @@ Validation from `/home/fin/luna`: `python3 -B development/check.py --timeout
 (`/tmp/luna-tools-b_ps4s86/result.json`), as did `git diff --check`.
 This is VM construction coverage, not new source elaboration support for
 phase-dependent local type annotations.
+
+
+### Generic local enum storage checks include inactive variants
+
+A source-level reproducer constructed and discarded `Packet<*bool>.empty`
+inside a generic comptime function, even though another variant stored T.
+Neither an escaping value nor a pointer payload was needed to bypass the stage
+restriction (`/tmp/luna-tools-sg5z3dnt/result.json`, exit 101).
+
+The shared variant constructor now validates the full instantiated storage
+domain against the live nominal catalog, including every variant. This occurs
+at aggregate assembly, after field evaluation, consistently with existing
+aggregate shape checks. Both execution engines reject the invalid domain and
+recover for a subsequent legal invocation. Phantom type parameters describing
+pointers and runtime construction remain legal. Source tests additionally cover
+both inactive error-result branches fixed in the preceding commit.
+
+Validation from `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor
+  -p luna --test comptime_storage_domains`: 7 source tests passed, exit 0
+  (`/tmp/luna-tools-tjeb68d9/result.json`). This command selects the named test
+  target; it does not run the interpreter unit suite.
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor`:
+  passed, exit 0 (`/tmp/luna-tools-u0er39kd/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test
+  sysroot_preludes shipped_reflection_objects_feed_checked_definition_builders`:
+  passed, exit 0 (`/tmp/luna-tools-zl6r0huz/result.json`).
+- Workspace formatting passed (`/tmp/luna-tools-d_d1w2d5/result.json`);
+  `git diff --check` passed.
+
+This closes variant construction admission; it does not claim complete generic
+elaboration/invocation suspension or a general post-specialization phase pass.

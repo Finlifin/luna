@@ -153,3 +153,63 @@ fn dependent_input_domains_reject_absent_pointer_payloads_and_recover() {
         );
     }
 }
+
+#[test]
+fn generic_local_error_domains_check_inactive_branches_and_recover() {
+    let package = support::compile(
+        "comptime fn success()->bool where E {let value: !E bool = true; true}
+        comptime fn failure()->bool where T {let value: !bool T = error false; true}
+        comptime fn bad_success()->bool {success<*bool>()}
+        comptime fn bad_failure()->bool {failure<*bool>()}
+        comptime fn good()->bool {success<bool>() and failure<bool>()}",
+    );
+    for tree in [false, true] {
+        let mut vm = if tree {
+            comptime_interpretor::Interpreter::for_comptime_tree(&package, Default::default())
+        } else {
+            comptime_interpretor::Interpreter::for_comptime(&package, Default::default())
+        }
+        .unwrap();
+        for name in ["bad_success", "bad_failure"] {
+            let error = vm.invoke(support::id(&package, name), vec![]).unwrap_err();
+            assert_eq!(error.kind, comptime_interpretor::ErrorKind::PhaseMismatch);
+            assert_eq!(
+                vm.invoke(support::id(&package, "good"), vec![]).unwrap(),
+                Value::Bool(true)
+            );
+        }
+    }
+}
+
+#[test]
+fn generic_local_enum_domains_check_inactive_variants_and_recover() {
+    let package = support::compile(
+        "enum Packet where T {empty, some(T)}
+        enum Phantom where T {empty, some(bool)}
+        comptime fn discard()->bool where T {let value=Packet<T>.empty; true}
+        comptime fn bad()->bool {discard<*bool>()}
+        comptime fn good()->bool {let phantom=Phantom<*bool>.empty; discard<bool>()}
+        fn runtime()->bool {let value=Packet<*bool>.empty; true}",
+    );
+    let mut runtime = comptime_interpretor::Interpreter::new(&package, Default::default()).unwrap();
+    assert_eq!(
+        runtime
+            .invoke(support::id(&package, "runtime"), vec![])
+            .unwrap(),
+        Value::Bool(true)
+    );
+    for tree in [false, true] {
+        let mut vm = if tree {
+            comptime_interpretor::Interpreter::for_comptime_tree(&package, Default::default())
+        } else {
+            comptime_interpretor::Interpreter::for_comptime(&package, Default::default())
+        }
+        .unwrap();
+        let error = vm.invoke(support::id(&package, "bad"), vec![]).unwrap_err();
+        assert_eq!(error.kind, comptime_interpretor::ErrorKind::PhaseMismatch);
+        assert_eq!(
+            vm.invoke(support::id(&package, "good"), vec![]).unwrap(),
+            Value::Bool(true)
+        );
+    }
+}
