@@ -495,8 +495,8 @@ fn shipped_text_hash_runs_its_loop_in_bytecode() {
     assert_eq!(result, Value::UnsignedInteger(0x0ac21707b7181e01));
     assert_eq!(
         vm.bytecode_invocations(),
-        5,
-        "wrapper, hash body, length and both byte calls must compile"
+        7,
+        "wrapper, hash body, length, both byte reads and both mix calls must compile"
     );
 }
 
@@ -523,7 +523,7 @@ fn shipped_text_hash_body_uses_bytecode_for_all_bytes() {
             vm.invoke(method, vec![Value::String(text.into())]).unwrap(),
             Value::UnsignedInteger(expected)
         );
-        assert_eq!(vm.bytecode_invocations() - before, 2 + text.len());
+        assert_eq!(vm.bytecode_invocations() - before, 2 + 2 * text.len());
     }
 }
 
@@ -569,4 +569,120 @@ fn same_named_methods_select_the_execution_phase_without_source_prefixes() {
         .unwrap();
         assert!(failure.contains("comptime trait membership"), "{failure}");
     }
+}
+
+#[test]
+fn arbitrary_precision_integer_hashes_use_canonical_target_independent_bytes() {
+    use comptime_interpretor::{Budget, Interpreter};
+    use comptime_runtime::Integer;
+    let package = support::compile(&source(
+        "comptime fn digest(value:Integer)->u64 {value.hash()}
+         comptime fn same(left:Integer,right:Integer)->bool {left.eq(right) and not left.ne(right)}",
+    ));
+    assert!(package.target.is_none());
+    let mut vm = Interpreter::for_comptime(
+        &package,
+        Budget {
+            steps: 5_000_000,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for (literal, expected) in [
+        ("0", 590684067820433389u128),
+        ("1", 590682968308805178),
+        ("-1", 589728592215707255),
+        ("255", 590474061099445088),
+        ("-255", 589911111145990281),
+        ("256", 15658190276026904068),
+        ("-256", 15034027211670106815),
+        (
+            "1606938044258990275541962092341162602522202993782792835301376",
+            8424690812682328228,
+        ),
+        (
+            "-1606938044258990275541962092341162602522202993782792835301376",
+            18410723617023889215,
+        ),
+        (
+            "1606938044258990275541962092341162602522202993782792835301377",
+            6053771721358495617,
+        ),
+    ] {
+        let mut value =
+            Integer::parse_literal(literal.trim_start_matches('-'), &mut Default::default())
+                .unwrap();
+        if literal.starts_with('-') {
+            value = value.negated();
+        }
+        let value = Value::Integer(value);
+        assert_eq!(
+            vm.invoke(support::id(&package, "digest"), vec![value.clone()])
+                .unwrap(),
+            Value::UnsignedInteger(expected),
+            "{literal}"
+        );
+        assert_eq!(
+            vm.invoke(support::id(&package, "same"), vec![value.clone(), value])
+                .unwrap(),
+            Value::Bool(true),
+            "{literal}"
+        );
+    }
+}
+
+#[test]
+fn integer_key_protocol_recovers_from_budget_exhaustion_without_target_data() {
+    use comptime_executor::{Context, KeyProtocol};
+    use comptime_runtime::Integer;
+    let package = support::compile(&source(""));
+    let mut items = intrinsic::LangItems::new();
+    let bindings = [
+        (intrinsic::LangItem::Eq, "ComptimeEq"),
+        (intrinsic::LangItem::Hash, "ComptimeHash"),
+    ]
+    .map(|(item, name)| {
+        (
+            item,
+            package
+                .traits
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap()
+                .declaration,
+        )
+    });
+    items.bind_source_traits(&package, &bindings).unwrap();
+    let mut protocol = luna::comptime_keys::Protocol::prepare(
+        &package,
+        &items,
+        &nir::Term::Primitive(nir::Primitive::Integer),
+        Default::default(),
+    )
+    .unwrap();
+    let magnitude = Integer::parse_literal(
+        "1606938044258990275541962092341162602522202993782792835301376",
+        &mut Default::default(),
+    )
+    .unwrap();
+    let negative = Value::Integer(magnitude.negated());
+    let positive = Value::Integer(magnitude);
+    assert!(protocol.hash(&positive, &mut Context::new(1)).is_err());
+    let mut context = Context::new(5_000_000);
+    // The key protocol hashes the language digest again to select a bucket.
+    // Exact public digest vectors are checked separately above.
+    let first = protocol.hash(&positive, &mut context).unwrap();
+    assert!(
+        protocol
+            .equivalent(&positive, &positive, &mut context)
+            .unwrap()
+    );
+    assert!(
+        !protocol
+            .equivalent(&positive, &negative, &mut context)
+            .unwrap()
+    );
+    let other = protocol.hash(&negative, &mut context).unwrap();
+    assert_eq!(protocol.hash(&negative, &mut context).unwrap(), other);
+    assert_eq!(protocol.hash(&positive, &mut context).unwrap(), first);
 }

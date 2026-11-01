@@ -263,3 +263,29 @@ find 返回第一次精确匹配的位置，未找到返回 null；空 needle �
   真实 sysroot 编译及 native 测试通过；`/tmp/luna-library-rvnsqkdf/summary.json`。
 - `cargo fmt --all` 经 `development/command.py` 执行通过，
   `/tmp/luna-tools-swax6so5/result.json`；`git diff --check` 通过。
+
+## Integer 的编译期相等与 hash
+
+`Integer` 实现默认 meta prelude 中的 `ComptimeEq` 和 `ComptimeHash`。
+`value.eq(other)`、`value.ne(other)` 比较完整的任意精度数值；`value.hash()`
+返回 u64。接口只用于 comptime，不为 Integer 引入 runtime 表示。
+
+```flurry
+comptime fn same_key() -> bool {
+    let first: Integer = 1606938044258990275541962092341162602522202993782792835301376;
+    let second = first + 1 - 1;
+    first.eq(second) and first.hash() == second.hash()
+}
+```
+
+hash 使用 FNV-1a：先输入符号字节（非负为 0，负为 1），再输入绝对值的
+小端字节，不保留高位零；数值零仍有一个零幅值字节。因此相等数值不受
+字面量进制、宿主机器或目标位宽影响，缺少 target 配置也可以计算。
+编码覆盖完整幅值，不经 usize 或固定宽度整数截断。
+
+它复用 str／Symbol 的字节混合步骤；原有文本和 Symbol hash 数值不变。
+碰撞仍须通过相等比较判定，hash 不是类型等价证据或密码学摘要。循环、
+任意精度除法和转换都消耗普通 invocation 预算；预算失败继续传播。
+
+真实 sysroot 验收：
+`python3 -B development/library_check.py --stage sysroot-hash`。

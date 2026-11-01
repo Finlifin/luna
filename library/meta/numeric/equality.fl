@@ -1,4 +1,4 @@
-use builtin.{bool, char, str, Symbol, u8, u16, u32, u64, u128,
+use builtin.{Integer, bool, char, str, Symbol, u8, u16, u32, u64, u128,
     i8, i16, i32, i64, i128, usize, isize};
 
 {-
@@ -72,5 +72,9 @@ comptime impl ComptimeEq for isize {
 }
 
 comptime impl ComptimeEq for str {
+    comptime fn eq(self, other: Self) -> bool { self == other }
+}
+
+comptime impl ComptimeEq for Integer {
     comptime fn eq(self, other: Self) -> bool { self == other }
 }

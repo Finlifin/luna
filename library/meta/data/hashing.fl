@@ -1,9 +1,10 @@
-use builtin.{bool, char, str, Symbol, u8, u16, u32, u64, u128,
+use builtin.{Integer, bool, char, str, Symbol, u8, u16, u32, u64, u128,
     i8, i16, i32, i64, i128, usize, isize};
 use text_impl.bindings.{byte_length as hash_str_byte_length, byte as hash_str_byte,
     symbol_byte_length as hash_symbol_byte_length, symbol_byte as hash_symbol_byte};
 use numeric.bindings.{usize_representation as hash_usize_representation,
-    isize_representation as hash_isize_representation};
+    isize_representation as hash_isize_representation,
+    integer_byte, integer_div_trunc, integer_rem_trunc};
 
 {-
     The same representation/content hashes as builtin.Hash, with independent
@@ -103,13 +104,7 @@ comptime impl ComptimeHash for str {
                 value? => value,
                 null => return state,
             };
-            let bits = state'bitvec;
-            let widened = byte'bitvec.as(u64);
-            let input = widened'bitvec;
-            let mixed = ((bits and not input) or (not bits and input)).as(u128);
-            assumes mixed <= 18446744073709551615;
-            let product = mixed * 1099511628211;
-            state = product'bitvec[0..64].as(u64);
+            state = mix_byte(state, byte);
             index = index + 1;
         }
         state
@@ -127,13 +122,7 @@ comptime impl ComptimeHash for Symbol {
                 value? => value,
                 null => return state,
             };
-            let bits = state'bitvec;
-            let widened = byte'bitvec.as(u64);
-            let input = widened'bitvec;
-            let mixed = ((bits and not input) or (not bits and input)).as(u128);
-            assumes mixed <= 18446744073709551615;
-            let product = mixed * 1099511628211;
-            state = product'bitvec[0..64].as(u64);
+            state = mix_byte(state, byte);
             index = index + 1;
         }
         state
@@ -157,5 +146,37 @@ comptime impl ComptimeHash for isize {
         let low = bits[0..64];
         let high = bits[64..128];
         ((low and not high) or (not low and high)).as(u64)
+    }
+}
+
+{-
+    FNV-1a byte mixing with explicit modulo-2^64 reduction. Shared by text,
+    Symbol and Integer encodings; collisions still require equality checking.
+-}
+pure comptime fn mix_byte(state: u64, byte: u8) -> u64 {
+    let bits = state'bitvec;
+    let widened = byte'bitvec.as(u64);
+    let input = widened'bitvec;
+    let mixed = ((bits and not input) or (not bits and input)).as(u128);
+    assumes mixed <= 18446744073709551615;
+    let product = mixed * 1099511628211;
+    product'bitvec[0..64].as(u64)
+}
+
+comptime impl ComptimeHash for Integer {
+    {-
+        Canonical sign byte (zero or one), then unsigned magnitude bytes in
+        little-endian order. Zero has one zero magnitude byte; no high zero
+        bytes or target-width conversions participate in the encoding.
+    -}
+    comptime fn hash(self) -> u64 {
+        let negative = self < 0;
+        var magnitude = if negative { -self } else { self };
+        var state = mix_byte(14695981039346656037, if negative { 1 } else { 0 });
+        while magnitude >= 256 {
+            state = mix_byte(state, integer_byte(integer_rem_trunc(magnitude, 256)));
+            magnitude = integer_div_trunc(magnitude, 256);
+        }
+        mix_byte(state, integer_byte(magnitude))
     }
 }

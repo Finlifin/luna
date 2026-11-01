@@ -54,3 +54,19 @@ test symbol_runtime_and_comptime_phases {
         assumes false;
     };
 }
+
+comptime fn exact_integer_keys() -> bool {
+    let zero: Integer = 0;
+    let huge: Integer = 1606938044258990275541962092341162602522202993782792835301376;
+    let same: Integer = 0x100000000000000000000000000000000000000000000000000;
+    zero.hash() == 590684067820433389
+        and huge.hash() == 8424690812682328228
+        and (-huge).hash() == 18410723617023889215
+        and (huge + 1).hash() == 6053771721358495617
+        and huge.eq(same) and huge.ne(-huge)
+        and huge.hash() == same.hash()
+}
+
+test arbitrary_precision_comptime_keys {
+    inline if exact_integer_keys() {assumes true;} else {assumes false;}
+}
