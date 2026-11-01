@@ -72,12 +72,13 @@ fn object_construction_preserves_duplicates_and_nested_values() {
 
 #[test]
 fn object_queries_and_edits_stay_in_bytecode_and_preserve_snapshots() {
-    // Bootstrap bindings are explicit here so the invocation counter verifies
-    // this body, without library wrapper invocations obscuring the route.
+    // Every entered function, including generated operation bodies, must use
+    // bytecode. Ordinary callable bindings add invocations of their own.
     let package = support::compile(
         "typealias Object = .Object'builtin;
         typealias Symbol = .Symbol'builtin;
         typealias Type = .Type'builtin;
+        typealias char = .char'builtin;
         const length = .object_length'builtin;
         const key = .object_key'builtin;
         const EntryType = .object_entry_type'builtin;
@@ -95,13 +96,13 @@ fn object_queries_and_edits_stay_in_bytecode_and_preserve_snapshots() {
             var original = {flag: true, flag: false};
             let saved = original;
             let snapshot = get(bool, original, do {
-                original = replace(original, 1, true);
+                original = replace(bool, original, 1, true);
                 let name: Symbol = .flag;
                 name
             });
             let absent: ?Symbol = null;
-            let appended = append(original, absent, 'x');
-            let replaced = replace(appended, 0, 'z');
+            let appended = append(char, original, absent, 'x');
+            let replaced = replace(char, appended, 0, 'z');
             let removed = remove(replaced, 1);
             let joined = concat(removed, saved);
             length(joined) == 4
@@ -117,16 +118,24 @@ fn object_queries_and_edits_stay_in_bytecode_and_preserve_snapshots() {
     );
     let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     let before = vm.bytecode_invocations();
+    let calls_before = support::calls(&package, &vm).len();
     assert_eq!(
         vm.invoke(support::id(&package, "run"), vec![]).unwrap(),
         Value::Bool(true)
     );
-    assert_eq!(vm.bytecode_invocations() - before, 1);
+    assert_eq!(
+        vm.bytecode_invocations() - before,
+        support::calls(&package, &vm).len() - calls_before
+    );
     let before = vm.bytecode_invocations();
+    let calls_before = support::calls(&package, &vm).len();
     assert_eq!(
         vm.invoke(support::id(&package, "Reflected"), vec![])
             .unwrap(),
         Value::Type(nir::Term::Primitive(nir::Primitive::Bool))
     );
-    assert_eq!(vm.bytecode_invocations() - before, 1);
+    assert_eq!(
+        vm.bytecode_invocations() - before,
+        support::calls(&package, &vm).len() - calls_before
+    );
 }

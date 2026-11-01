@@ -115,8 +115,11 @@ fn operation_body(name: &str, mut inputs: Vec<n::Expr>, source: n::SourceRange) 
     }
     if name.starts_with("object_") {
         // The explicit Type input is already bound by ordinary invocation.
-        // Its identity lives in the result domain, not the Object query packet.
-        if matches!(name, "object_value" | "object_get") {
+        // Its identity lives in the dependent domains, not the operation packet.
+        if matches!(
+            name,
+            "object_value" | "object_get" | "object_append" | "object_replace"
+        ) {
             inputs.remove(0);
         }
         let subject = Box::new(n::Expr {
@@ -148,6 +151,14 @@ fn operation_body(name: &str, mut inputs: Vec<n::Expr>, source: n::SourceRange) 
             "object_concat" => K::ObjectEdit {
                 subject,
                 operation: E::Concat,
+            },
+            "object_append" => K::ObjectEdit {
+                subject,
+                operation: E::Append,
+            },
+            "object_replace" => K::ObjectEdit {
+                subject,
+                operation: E::Replace,
             },
             "object_remove" => K::ObjectEdit {
                 subject,

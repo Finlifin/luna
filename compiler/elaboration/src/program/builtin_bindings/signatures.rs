@@ -6,6 +6,37 @@ pub(super) fn callable(
     name: &str,
     list_head: Option<DeclarationId>,
 ) -> Result<Option<Term>, &'static str> {
+    if matches!(name, "object_append" | "object_replace") {
+        return Ok(Some(Term::ComptimeFunction(Box::new(Term::Function {
+            parameters: vec![
+                Parameter {
+                    sort: Sort::Type,
+                    ty: p(P::Type),
+                },
+                Parameter {
+                    sort: Sort::Runtime,
+                    ty: p(P::Object),
+                },
+                Parameter {
+                    sort: Sort::Runtime,
+                    ty: if name == "object_append" {
+                        Term::Optional(Box::new(p(P::Symbol)))
+                    } else {
+                        p(P::Integer)
+                    },
+                },
+                Parameter {
+                    sort: Sort::Runtime,
+                    ty: Term::Bound {
+                        depth: 0,
+                        index: 0,
+                        sort: Sort::Type,
+                    },
+                },
+            ],
+            result: Box::new(p(P::Object)),
+        }))));
+    }
     if matches!(name, "object_value" | "object_get") {
         return Ok(Some(Term::ComptimeFunction(Box::new(Term::Function {
             parameters: vec![

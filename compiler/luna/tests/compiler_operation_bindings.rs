@@ -719,6 +719,53 @@ fn dependent_source_callable_values_keep_invocation_binders() {
 }
 
 #[test]
+fn dependent_object_edit_values_preserve_payload_domains_and_snapshots() {
+    run_staged_carriers(
+        "typealias Object = .Object'builtin;
+        typealias Symbol = .Symbol'builtin;
+        typealias char = .char'builtin;
+        const append: comptime fn(comptime T: Type, Object, ?Symbol, T) -> Object = .object_append'builtin;
+        const replace: comptime fn(comptime T: Type, Object, Integer, T) -> Object = .object_replace'builtin;
+        const get = .object_get'builtin;
+        const at = .object_value'builtin;
+        comptime fn apply(op: comptime fn(comptime T: Type, Object, ?Symbol, T) -> Object, object: Object) -> Object {
+            op(bool, object, .flag, false)
+        }
+        comptime fn compute() -> bool {
+            let edits: List<comptime fn(comptime T: Type, Object, ?Symbol, T) -> Object> = [append];
+            let update = replace;
+            let original: Object = {flag: true};
+            let added = apply(edits[0], original);
+            let text = edits[0](char, added, null, 'x');
+            let changed = update(Integer, text, 0, 7);
+            let empty: ?bool = null;
+            let nested = edits[0](?bool, changed, .empty, empty);
+            (get(bool, original, .flag) matches true?)
+                and (get(bool, added, .flag) matches false?)
+                and (at(bool, text, 0) matches true?)
+                and (at(Integer, changed, 0) matches 7?)
+                and (at(char, changed, 2) matches 'x'?)
+                and (get(?bool, nested, .empty) match {v? => v matches null, null => false})
+        }",
+    );
+}
+
+#[test]
+fn dependent_object_edit_payloads_are_checked_by_the_callable_signature() {
+    for source in [
+        "const append: comptime fn(comptime T: Type, Object, ?Symbol, bool) -> Object = .object_append'builtin;",
+        "const replace = .object_replace'builtin; comptime fn bad() -> Object { replace(bool, {}, 0, 'x') }",
+    ] {
+        assert!(
+            compile(&format!(
+                "typealias Object = .Object'builtin; typealias Symbol = .Symbol'builtin; {source}"
+            ))
+            .is_err()
+        );
+    }
+}
+
+#[test]
 fn open_comptime_invocation_inputs_do_not_become_iir_instances() {
     let package = compile("comptime fn select(comptime T: Type, value: T) -> T { value }").unwrap();
     let key = iir::InstanceKey {

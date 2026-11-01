@@ -19,13 +19,23 @@ comptime fn lookup(comptime T: Type, object: Object, key: Symbol) -> ?T {
     object.get<T>(key)
 }
 
+comptime fn append_entry(comptime T: Type, object: Object, value: T) -> Object {
+    object.append<T>(value)
+}
+
 comptime fn callbacks() -> bool {
     let queries: meta.List<comptime fn(comptime T: Type, Object, Symbol) -> ?T> = [lookup];
+    let edits: meta.List<comptime fn(comptime T: Type, Object, T) -> Object> = [append_entry];
     let object: Object = {flag: true, count: 7};
+    let numbers = edits[0](Integer, object, 9);
+    let chars = edits[0](char, numbers, 'x');
     (queries[0](bool, object, .flag) matches true?)
         and (queries[0](Integer, object, .count) matches 7?)
         and (queries[0](bool, object, .count) matches null)
         and (queries[0](bool, object, .missing) matches null)
+        and (numbers.value<Integer>(2) matches 9?)
+        and (chars.value<char>(3) matches 'x'?)
+        and object.length() == 2 and numbers.length() == 3
 }
 
 

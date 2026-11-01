@@ -14,8 +14,8 @@ pub const CompilerObjectEntryType: comptime fn(Object, Integer) -> Type = .objec
 pub const compiler_object_value: comptime fn(comptime T: Type, Object, Integer) -> ?T = .object_value'builtin;
 pub const compiler_object_get: comptime fn(comptime T: Type, Object, Symbol) -> ?T = .object_get'builtin;
 const compiler_object_concat: comptime fn(Object, Object) -> Object = .object_concat'builtin;
-const compiler_object_append = .object_append'builtin;
-const compiler_object_replace = .object_replace'builtin;
+const compiler_object_append: comptime fn(comptime T: Type, Object, ?Symbol, T) -> Object = .object_append'builtin;
+const compiler_object_replace: comptime fn(comptime T: Type, Object, Integer, T) -> Object = .object_replace'builtin;
 const compiler_object_remove: comptime fn(Object, Integer) -> Object = .object_remove'builtin;
 pub const compiler_object_slice: comptime fn(Object, Integer, Integer) -> Object = .object_slice'builtin;
 const compiler_struct_field_types: comptime fn(Type) -> List<Type> = .struct_field_types'builtin;
@@ -95,11 +95,11 @@ pub pure comptime fn object_concat(left: Object, right: Object) -> Object {
 }
 
 pub pure comptime fn object_append(object: Object, value: T, .key: ?Symbol = null) -> Object where T {
-    compiler_object_append(object, key, value)
+    compiler_object_append(T, object, key, value)
 }
 
 pub pure comptime fn object_replace(object: Object, index: Integer, value: T) -> Object where T {
-    compiler_object_replace(object, index, value)
+    compiler_object_replace(T, object, index, value)
 }
 
 pub pure comptime fn object_remove(object: Object, index: Integer) -> Object {
