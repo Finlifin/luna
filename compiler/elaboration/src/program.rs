@@ -1299,10 +1299,13 @@ fn elaborate_candidate<'a, 'h>(
         let previous_code = checker.in_code_body;
         let previous_holes = std::mem::take(&mut checker.quote_holes);
         checker.in_code_body = sig.modifiers.is_quote;
-        let value = checker.computation_body(body.value, Some(result));
+        let value = checker.function_body(owner, body.value, result);
         checker.in_code_body = previous_code;
         checker.quote_holes = previous_holes;
         let value = value?;
+        if sig.modifiers.is_function_template {
+            continue;
+        }
         output.functions.push(n::Function {
             phase: if sig.modifiers.is_normal_form_head {
                 n::FunctionPhase::NormalForm

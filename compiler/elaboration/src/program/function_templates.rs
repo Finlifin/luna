@@ -1,4 +1,4 @@
-//! Instantiate signature bindings before ordinary function elaboration.
+//! Instantiate signatures and shared-body bindings before function elaboration.
 //! Declaration identities are retained; no source text or type heads are expanded.
 use super::{Error, error};
 use hir::clause::ClauseConstraintKind as C;
@@ -49,15 +49,76 @@ pub(super) use member_clone::{ClonedMember, clone_member_with_inputs};
 
 pub(super) fn expand<'h>(source: &Package<'h>, arena: &'h HirArena) -> Result<Package<'h>, Error> {
     let mut package = source.clone();
-    // Body templates need CMTT port connections, not signature-only expansion.
-    for (_, info) in source.owners() {
-        if let ItemKind::Fn(sig, _) = &info.node.expect_item().kind {
-            if sig.modifiers.is_function_template {
+    // Check shared declarations under abstract code evidence; instances get
+    // their own concrete code input and fresh setup bindings below.
+    for (owner, info) in source.owners() {
+        let item = info.node.expect_item();
+        if let ItemKind::Fn(formal, body) = &item.kind {
+            if !formal.modifiers.is_function_template
+                || source.function_template_bodies.contains_key(&owner)
+            {
+                continue;
+            }
+            let inputs = formal
+                .params
+                .iter()
+                .filter(|p| p.ty.is_quote() && p.ty.is_lambda())
+                .collect::<Vec<_>>();
+            if inputs.len() != 1 {
                 return Err(error(
-                    sig.span,
-                    "function template expansion with a shared CMTT body is not implemented",
+                    formal.span,
+                    "function template expansion with zero or multiple body inputs is not yet implemented",
                 ));
             }
+            let parameter = inputs[0];
+            let T::Positional(ty) = parameter.ty.kind else {
+                return Err(error(
+                    parameter.span,
+                    "shared template requires a contextual expression interface",
+                ));
+            };
+            if !matches!(ty.kind, E::ContextualExprType(..)) {
+                return Err(error(
+                    ty.span,
+                    "shared template requires a contextual expression interface",
+                ));
+            }
+            package.function_template_bodies.insert(
+                owner,
+                hir::item::FunctionTemplateBody {
+                    interface: hir::item::FunctionTemplateInterface {
+                        parameter: parameter.hir_id,
+                        ty,
+                    },
+                    ports: vec![],
+                    supplied: None,
+                },
+            );
+            let mut sig = formal.clone();
+            sig.params = arena.alloc_fn_param_slice(
+                formal
+                    .params
+                    .iter()
+                    .filter(|p| p.hir_id != parameter.hir_id)
+                    .cloned()
+                    .enumerate()
+                    .map(|(index, mut param)| {
+                        param.index = index as u32;
+                        param
+                    }),
+            );
+            let mut setup = package
+                .body(*body)
+                .ok_or_else(|| error(item.span, "missing template body"))?
+                .clone();
+            setup.params =
+                arena.alloc_param_slice(sig.params.iter().map(hir::body::BodyParam::from_fn_param));
+            package.insert_body(*body, setup);
+            let mut expanded = item.clone();
+            expanded.kind = ItemKind::Fn(sig, *body);
+            let mut info = info.clone();
+            info.node = hir::owner::OwnerNode::Item(arena.alloc_item(expanded));
+            package.insert_owner(owner, info);
         }
     }
     for (owner, info) in source.owners() {
@@ -70,7 +131,8 @@ pub(super) fn expand<'h>(source: &Package<'h>, arena: &'h HirArena) -> Result<Pa
             clause_bindings,
             modifiers,
             body,
-            ..
+            body_interface,
+            body_ports,
         } = &item.kind
         else {
             continue;
@@ -78,9 +140,17 @@ pub(super) fn expand<'h>(source: &Package<'h>, arena: &'h HirArena) -> Result<Pa
         let formal = signature
             .as_ref()
             .ok_or_else(|| error(item.span, "unlinked function template signature"))?;
-        if formal.params.len() != parameters.len()
-            || formal
-                .params
+        let ordinary = formal
+            .params
+            .iter()
+            .filter(|p| {
+                body_interface
+                    .as_ref()
+                    .is_none_or(|body| p.hir_id != body.parameter)
+            })
+            .collect::<Vec<_>>();
+        if ordinary.len() != parameters.len()
+            || ordinary
                 .iter()
                 .zip(parameters)
                 .any(|(p, input)| input.formal != Some(p.hir_id))
@@ -116,7 +186,7 @@ pub(super) fn expand<'h>(source: &Package<'h>, arena: &'h HirArena) -> Result<Pa
             namespace,
             bindings: parameters
                 .iter()
-                .zip(formal.params)
+                .zip(ordinary.iter())
                 .map(|(input, formal)| (formal.hir_id, input.binding))
                 .collect(),
             budget: 100_000,
@@ -144,8 +214,7 @@ pub(super) fn expand<'h>(source: &Package<'h>, arena: &'h HirArena) -> Result<Pa
         }
         let mut sig = formal.clone();
         sig.clause_params = rebind.clauses(formal.clause_params)?;
-        let params = formal
-            .params
+        let params = ordinary
             .iter()
             .zip(parameters)
             .enumerate()
@@ -168,6 +237,7 @@ pub(super) fn expand<'h>(source: &Package<'h>, arena: &'h HirArena) -> Result<Pa
                 }
                 p.hir_id = input.binding;
                 p.name = input.name;
+                p.index = index as u32;
                 Ok(p)
             })
             .collect::<Result<Vec<_>, Error>>()?;
@@ -195,6 +265,47 @@ pub(super) fn expand<'h>(source: &Package<'h>, arena: &'h HirArena) -> Result<Pa
         sig.modifiers.is_pure |= formal.modifiers.is_pure;
         // Interface reuse cannot erase the declaration's unsafe call boundary.
         sig.modifiers.is_unsafe |= formal.modifiers.is_unsafe;
+        let expanded_body = if let Some(interface) = body_interface {
+            let E::ResolvedDef { def_id, .. } = template.kind else {
+                return Err(error(
+                    template.span,
+                    "shared template requires a declaration",
+                ));
+            };
+            let target = source
+                .definition_owner(def_id)
+                .and_then(|owner| source.item(owner))
+                .ok_or_else(|| error(template.span, "missing shared template declaration"))?;
+            let ItemKind::Fn(_, setup) = target.kind else {
+                return Err(error(
+                    template.span,
+                    "shared template requires a setup body",
+                ));
+            };
+            let interface = hir::item::FunctionTemplateInterface {
+                parameter: rebind.id(interface.parameter),
+                ty: rebind.expr(interface.ty, 0)?,
+            };
+            let ports = body_ports
+                .iter()
+                .map(|port| {
+                    let mut port = port.clone();
+                    port.formal = port.formal.map(|id| rebind.id(id));
+                    port
+                })
+                .collect();
+            package.function_template_bodies.insert(
+                owner,
+                hir::item::FunctionTemplateBody {
+                    interface,
+                    ports,
+                    supplied: Some(*body),
+                },
+            );
+            rebind.body(setup, item.span, 0)?
+        } else {
+            *body
+        };
         for (id, body) in rebind.bodies.drain(..) {
             package.insert_body(id, body);
         }
@@ -216,14 +327,14 @@ pub(super) fn expand<'h>(source: &Package<'h>, arena: &'h HirArena) -> Result<Pa
             }
         }
         let mut body_value = package
-            .body(*body)
+            .body(expanded_body)
             .ok_or_else(|| error(item.span, "function template body missing"))?
             .clone();
         body_value.params =
             arena.alloc_param_slice(sig.params.iter().map(hir::body::BodyParam::from_fn_param));
-        package.insert_body(*body, body_value);
+        package.insert_body(expanded_body, body_value);
         let mut expanded = item.clone();
-        expanded.kind = ItemKind::Fn(sig, *body);
+        expanded.kind = ItemKind::Fn(sig, expanded_body);
         let mut info = info.clone();
         info.node = hir::owner::OwnerNode::Item(arena.alloc_item(expanded));
         package.insert_owner(owner, info);

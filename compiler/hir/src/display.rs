@@ -255,6 +255,25 @@ impl Display for Package<'_> {
                 Definition(*definition)
             )?;
         }
+        f.write_str(") (function-template-bodies")?;
+        let mut templates = self.function_template_bodies.iter().collect::<Vec<_>>();
+        templates.sort_unstable_by_key(|(owner, _)| owner.def_id.raw());
+        for (owner, body) in templates {
+            write!(
+                f,
+                " (template-body (owner {}) (interface {}) (ports",
+                Owner(*owner),
+                body.interface
+            )?;
+            for port in &body.ports {
+                write!(f, " {port}")?;
+            }
+            f.write_str(") (supplied")?;
+            if let Some(supplied) = body.supplied {
+                write!(f, " {supplied}")?;
+            }
+            f.write_str("))")?;
+        }
         f.write_str(") (definition-attributes")?;
         for attribute in &self.definition_attributes {
             write!(f, " {attribute}")?;

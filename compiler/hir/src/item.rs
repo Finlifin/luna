@@ -112,6 +112,16 @@ pub struct FunctionTemplateInterface<'hir> {
     pub ty: &'hir Expr<'hir>,
 }
 
+/// A definition-bound code input removed from an instantiated runtime signature.
+/// The supplied body is checked against `interface` before insertion into setup.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FunctionTemplateBody<'hir> {
+    pub interface: FunctionTemplateInterface<'hir>,
+    pub ports: Vec<FunctionTemplateInput>,
+    /// None while checking the abstract shared declaration.
+    pub supplied: Option<BodyId>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TestTemplateInterface<'hir> {
     pub parameter: HirId,

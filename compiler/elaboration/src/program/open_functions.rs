@@ -1957,6 +1957,12 @@ impl Checker<'_, '_> {
                 "deferred interface and effect signatures are not yet implemented",
             ));
         };
+        if self.package.function_template_bodies.contains_key(&owner) {
+            return Err(error(
+                span,
+                "shared function templates with deferred signatures or staged body work are not yet implemented",
+            ));
+        }
         if sig.modifiers.is_normal_form_head
             || self.self_containers.contains_key(&owner)
             || self.self_types.contains_key(&owner)

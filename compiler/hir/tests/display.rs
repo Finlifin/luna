@@ -254,7 +254,7 @@ fn empty_and_invalid_packages_are_single_complete_expressions() {
     let mut package = Package::new();
     assert_eq!(
         package.to_string(),
-        "(hir-package\n  (root (owner-id 4294967295))\n  (next-definition 0)\n  (owners)\n  (bodies) (definitions) (member-projections) (deferred-member-projections) (member-access) (trait-sources) (source-origins) (lexical-parents) (staged-parameter-definitions) (definition-attributes) (pending-semantics))"
+        "(hir-package\n  (root (owner-id 4294967295))\n  (next-definition 0)\n  (owners)\n  (bodies) (definitions) (member-projections) (deferred-member-projections) (member-access) (trait-sources) (source-origins) (lexical-parents) (staged-parameter-definitions) (function-template-bodies) (definition-attributes) (pending-semantics))"
     );
     let item = Item {
         owner_id: owner(0),
@@ -1744,4 +1744,54 @@ fn constant_object_entry_dump_preserves_input_and_index() {
     assert_eq!(parsed(&entry).tag(), "constant-object-entry");
     assert!(dump.contains("(index 2)"), "{dump}");
     assert!(dump.contains("(object"), "{dump}");
+}
+
+#[test]
+fn shared_template_body_dump_keeps_interfaces_ports_and_stable_owner_order() {
+    let ty = expr(ExprKind::TyVoid, 200);
+    let interface = hir::item::FunctionTemplateInterface {
+        parameter: id(201),
+        ty: &ty,
+    };
+    let bodies = [
+        (
+            owner(9),
+            hir::item::FunctionTemplateBody {
+                interface: interface.clone(),
+                ports: vec![hir::item::FunctionTemplateInput {
+                    name: name("port \" ) ("),
+                    binding: id(202),
+                    formal: Some(id(203)),
+                }],
+                supplied: Some(BodyId::new(id(204))),
+            },
+        ),
+        (
+            owner(3),
+            hir::item::FunctionTemplateBody {
+                interface,
+                ports: vec![],
+                supplied: None,
+            },
+        ),
+    ];
+    let mut package = Package::new();
+    package
+        .function_template_bodies
+        .extend(bodies.iter().cloned());
+    let first = package.to_string();
+    Sexp::parse(&first);
+    assert!(
+        first.find("(template-body (owner (owner-id 3))").unwrap()
+            < first.find("(template-body (owner (owner-id 9))").unwrap()
+    );
+    assert!(first.contains("(function-template-body-interface "));
+    assert!(first.contains("(supplied)"));
+    assert!(first.contains("(supplied (body-id "));
+    assert!(first.contains("(function-template-input "));
+    package.function_template_bodies.clear();
+    package
+        .function_template_bodies
+        .extend(bodies.into_iter().rev());
+    assert_eq!(first, package.to_string());
 }

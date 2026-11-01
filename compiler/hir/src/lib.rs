@@ -105,6 +105,7 @@ pub struct Package<'hir> {
     next_definition_index: u32,
     /// Lexical definition containing a block-local declaration.
     pub lexical_parents: FxHashMap<OwnerId, OwnerId>,
+    pub function_template_bodies: FxHashMap<OwnerId, item::FunctionTemplateBody<'hir>>,
     pub staged_parameter_definitions: FxHashMap<HirId, symbol::DefId>,
 }
 
@@ -126,6 +127,7 @@ impl<'hir> Package<'hir> {
             clause_definitions: FxHashMap::default(),
             next_definition_index: 0,
             lexical_parents: FxHashMap::default(),
+            function_template_bodies: FxHashMap::default(),
             staged_parameter_definitions: FxHashMap::default(),
         }
     }

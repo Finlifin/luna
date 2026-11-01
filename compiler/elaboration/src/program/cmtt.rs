@@ -2,6 +2,7 @@
 //! publishes no runtime reads, moves or effects. Connection produces ordinary
 //! NIR, which goes through the existing resource/effect verification pipeline.
 use super::*;
+mod function_templates;
 mod functions;
 mod generators;
 pub(super) mod patterns;

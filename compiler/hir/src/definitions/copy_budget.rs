@@ -72,6 +72,7 @@ pub(super) fn charge_package(package: &Package<'_>, fuel: &mut usize) -> Result<
         next_definition_index: _,
         lexical_parents,
         staged_parameter_definitions,
+        function_template_bodies,
     } = package;
     charge(fuel, 1)?;
     charge(fuel, owners.len())?;
@@ -86,6 +87,9 @@ pub(super) fn charge_package(package: &Package<'_>, fuel: &mut usize) -> Result<
         charge(fuel, text.len())?;
     }
     attributes(definition_attributes, fuel)?;
+    for body in function_template_bodies.values() {
+        charge(fuel, body.ports.len())?;
+    }
     for count in [
         member_projections.capacity(),
         source_origins.capacity(),
@@ -97,6 +101,7 @@ pub(super) fn charge_package(package: &Package<'_>, fuel: &mut usize) -> Result<
         clause_definitions.capacity(),
         lexical_parents.capacity(),
         staged_parameter_definitions.capacity(),
+        function_template_bodies.capacity(),
     ] {
         charge(fuel, count)?;
     }

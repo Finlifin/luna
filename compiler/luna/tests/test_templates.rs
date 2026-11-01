@@ -2529,10 +2529,14 @@ fn shared_function_templates_link_only_their_granted_body_ports() {
             "private binding escaped: {private}"
         );
     }
-    let failure = compile(&source, Emit::Nir)
-        .err()
-        .expect("shared body expansion remains pending");
-    assert!(failure.contains("shared CMTT body"), "{failure}");
+    let source = format!("{source} fn run()->bool {{first(true) and second(false)}}");
+    let Artifact::Nir(package) = compile(&source, Emit::Nir).unwrap() else {
+        panic!("expected NIR")
+    };
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
 }
 
 #[test]
@@ -2652,4 +2656,193 @@ fn shared_template_explicit_ports_override_implicit_connections() {
             .expect("invalid explicit connection");
         assert!(failure.contains(message), "{splice}: {failure}");
     }
+}
+
+#[test]
+fn shared_template_instances_keep_function_category_and_early_returns() {
+    for category in ["", "inline ", "quote "] {
+        let source = format!(
+            "template fn choose(value:bool,quote lambda body:<current:bool |- bool>)->bool {{
+                let current=value; let selected=~<body>; not selected
+            }}
+            {category}fn early use choose {{return current;}}
+            {category}fn normal use choose {{current}}
+            fn run()->bool {{early(true) and normal(false) and not early(false)}}"
+        );
+        let Artifact::Nir(package) =
+            compile(&source, Emit::Nir).unwrap_or_else(|e| panic!("{category}: {e}"))
+        else {
+            panic!("expected NIR")
+        };
+        assert!(!package.functions.iter().any(|f| f.name == "choose"));
+        assert_eq!(
+            luna::execution::interpret(&package, "run", 100_000).unwrap(),
+            comptime_interpretor::Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn shared_template_parameter_position_and_explicit_port_mapping_are_preserved() {
+    let source = "template fn choose(quote lambda body:<current:bool |- bool>,value:bool)->bool {
+            let other=not value; ~[current=other]<body>
+        }
+        fn first use choose {current}
+        quote fn second(input:bool) use choose {not current}
+        fn run()->bool {first(false) and second(true)}";
+    let Artifact::Nir(package) = compile(source, Emit::Nir).unwrap() else {
+        panic!("expected NIR")
+    };
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn shared_template_checks_unused_setup_and_instance_result_types() {
+    for source in [
+        "template fn invalid(value:bool,quote lambda body:<current:bool |- bool>)->bool {let current=value;let wrong:*bool=value;~<body>}",
+        "template fn invalid(value:*bool,quote lambda body:<current:bool |- bool>)->bool {let current=value;~<body>}",
+        "template fn valid(value:bool,quote lambda body:<current:bool |- bool>)->bool {let current=value;~<body>}fn invalid use valid {current.ref}",
+    ] {
+        let failure = compile(source, Emit::Nir)
+            .err()
+            .expect("template type error");
+        assert!(!failure.contains("not implemented"), "{failure}");
+    }
+}
+
+#[test]
+fn shared_template_call_evaluates_runtime_input_once() {
+    let source = "template fn twice(value:bool,quote lambda body:<current:bool |- bool>)->bool {let current=value;~<body>}
+        fn duplicated use twice {current and current}
+        fn flip(cell:*bool)->bool {let previous=cell.*;cell.* = not previous;previous}
+        fn run()->bool {var cell=true;let answer=duplicated(flip(cell.ref));answer and not cell}";
+    let Artifact::Nir(package) = compile(source, Emit::Nir).unwrap() else {
+        panic!("expected NIR")
+    };
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn shared_template_inherits_default_inputs_and_postconditions() {
+    let source = "template fn choose(value:bool,quote lambda body:<current:bool |- bool>,.flag:bool=value)->result:bool
+        where ensures result == flag
+        {let current=flag;~<body>}
+        fn selected use choose {current}
+        fn run()->bool {selected(true) and selected(false,.flag=true) and not selected(false)}";
+    let Artifact::Nir(package) = compile(source, Emit::Nir).unwrap() else {
+        panic!("expected NIR")
+    };
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+    let failure = compile(
+        &source.replace("use choose {current}", "use choose {not current}"),
+        Emit::Nir,
+    )
+    .err()
+    .expect("inherited postcondition");
+    assert!(!failure.contains("not implemented"), "{failure}");
+}
+
+#[test]
+fn shared_template_return_keeps_setup_cleanup() {
+    let source = "trait Duplicate {} trait Retire {fn drop(*self);}
+        struct Ticket {ready:bool}
+        impl Retire for Ticket {fn drop(*self) {assumes self.ready.*;}}
+        template fn fixture(quote lambda body:<ticket:*Ticket |- bool>)->bool {
+            var value=Ticket {ready:false};let ticket=value.ref;let answer=~<body>;
+            assumes false;answer
+        }
+        fn ready use fixture {ticket.ready.* = true;return true;}
+        fn unready use fixture {return true;}
+        test succeeds {let result=ready();assumes result;}
+        test fails {let result=unready();assumes result;}";
+    let Artifact::Nir(package) = compile(source, Emit::Nir).unwrap() else {
+        panic!("expected NIR")
+    };
+    let protocols = elaboration::program::Protocols {
+        copy: Some(
+            package
+                .traits
+                .iter()
+                .find(|t| t.name == "Duplicate")
+                .unwrap()
+                .declaration,
+        ),
+        drop: Some(
+            package
+                .traits
+                .iter()
+                .find(|t| t.name == "Retire")
+                .unwrap()
+                .declaration,
+        ),
+        ..Default::default()
+    };
+    for inline in [false, true] {
+        let report =
+            luna::testing::run_report(&package, 0, 100_000, inline, Some(&protocols)).unwrap();
+        assert!(report.results[0].failure.is_none(), "{report}");
+        assert!(report.results[1].failure.is_some(), "{report}");
+    }
+}
+
+#[test]
+fn shared_template_clause_types_are_rebound_in_body_interfaces() {
+    let source = "typealias Type=.Type'builtin;
+        template fn select(value:T,quote lambda body:<current:T |- T>)->T where T {
+            let current=value;~<body>
+        }
+        fn first use select {current}
+        fn second use select {current}
+        fn run()->bool {first<bool>(true) and not second<bool>(false)}";
+    let Artifact::Nir(package) = compile(source, Emit::Nir).unwrap() else {
+        panic!("expected NIR")
+    };
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn shared_template_body_keeps_return_boundaries() {
+    let source =
+        "template fn nested(quote lambda body:<|-bool>)->bool {let invoke=|| ~<body>;invoke()}
+        fn bad use nested {return true;}";
+    let failure = compile(source, Emit::Nir)
+        .err()
+        .expect("return cannot move into a closure");
+    assert!(
+        failure.contains("return cannot cross a closure or quote boundary"),
+        "{failure}"
+    );
+    let source = "template fn nested(quote lambda body:<|-bool>)->bool {~<body>}
+        fn bad use nested {const code='(do {return true;});true}";
+    let failure = compile(source, Emit::Nir)
+        .err()
+        .expect("ordinary quotes have no outer return target");
+    assert!(failure.contains("return outside a function"), "{failure}");
+}
+
+#[test]
+fn shared_template_declaration_types_and_instance_names_keep_separate_scopes() {
+    let Artifact::Nir(package) = compile_with_modules(
+        "typealias Flag=*bool;use provider.with_current;fn instance use with_current {not current} fn run()->bool {instance(false)}",
+        &[("provider.fl", "typealias Flag=bool;pub template fn with_current(value:Flag,quote lambda body:<current:Flag |- Flag>)->Flag {let current=value;~<body>}")],
+        Emit::Nir,
+    ).unwrap() else {panic!("expected NIR")};
+    let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
+    let mut vm = comptime_interpretor::Interpreter::from_iir(&graph, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
 }
