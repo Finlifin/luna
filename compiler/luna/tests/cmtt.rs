@@ -6926,40 +6926,23 @@ fn static_normal_tuple_evidence_uses_completed_type_lists() {
 }
 
 #[test]
-fn generator_temporary_pointer_writes_preserve_state_and_quote_snapshots() {
-    let source = "trait Duplicate {} trait Retire {fn drop(*self);}
-        struct State {flag:bool,count:.u8'builtin} impl Duplicate for State {}
+fn generator_value_writes_preserve_state_and_quote_snapshots_without_copy() {
+    let source = "struct State {flag:bool,count:.u8'builtin}
         pure comptime fn build()-><|-bool> {
-            let state=State {flag:false,count:0};
+            var state=State {flag:false,count:0};
             const original='(not state.flag and state.count == 0);
-            state.ref.* = State {flag:true,count:1};
-            state.ref.*.count += 2;
-            state.flag.ref.* = false;
+            state = State {flag:true,count:1};
+            state.count += 2;
+            state.flag = false;
             '(~<original> and not state.flag and state.count == 3)
         } fn run()->bool {~<build()>}";
-    let compile = |source: &str| {
-        support::compile_with_source_bindings(
-            source,
-            &Default::default(),
-            luna::protocols::type_constructors::Selectors {
-                copy: Some("Duplicate"),
-                drop: Some("Retire"),
-                ..Default::default()
-            },
-        )
-    };
-    let package = compile(source).unwrap();
-    assert_eq!(
-        luna::execution::interpret(&package, "run", 100_000).unwrap(),
-        Value::Bool(true)
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let invalid = source.replace("var state=", "let state=");
+    let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+    assert!(
+        failure.contains("cannot assign an immutable generator binding"),
+        "{failure}"
     );
-    for rejected in [
-        source.replace("impl Duplicate for State {}", ""),
-        format!("{source} impl Retire for State {{fn drop(*self) {{}}}}"),
-    ] {
-        let failure = compile(&rejected).unwrap_err();
-        assert!(failure.contains("pointer Copy evidence"), "{failure}");
-    }
 }
 
 #[test]
@@ -7014,11 +6997,11 @@ fn generator_temporary_pointer_writes_reject_stage_leaks_and_wrong_pointees() {
 }
 
 #[test]
-fn generator_temporary_pointer_bit_writes_preserve_siblings_and_check_bounds() {
+fn generator_field_bit_writes_preserve_siblings_and_check_bounds() {
     let prefix = "struct State {bits:.u8'builtin,other:bool}
         pure comptime fn build(index:.u8'builtin)-><|-bool> {
             let state=State {bits:0,other:false};
-            state.ref.*.bits'bitvec[index]=do {state.other=true;1};
+            state.bits'bitvec[index]=do {state.other=true;1};
             '(state.bits == 2 and state.other)
         }";
     let failure = support::compile_with_protocols(
@@ -7451,17 +7434,18 @@ fn generator_collections_supply_context_to_earlier_callbacks() {
 #[test]
 fn generator_collection_evidence_keeps_producer_order_and_packet_evaluation_once() {
     let prefix = "typealias Count=.Integer'builtin;
-        comptime fn next(count:*Count)->bool {let first=count.* == 1;count.* += 1;first}
-        comptime fn packet(count:*Count)->Tuple<bool,bool> {(next(count),next(count))}
+        struct Counter {value:Count}
+        impl Counter { comptime fn next(self)->bool {let first=self.value == 1;self.value += 1;first} }
+        impl Counter { comptime fn packet(self)->Tuple<bool,bool> {(self.next(),self.next())} }
         comptime fn build(action:comptime fn(T)->bool,...items:T)-><|-bool> where T {
             let result=action(items);'(result)
         }";
-    for inputs in ["next(count.ref),next(count.ref)", "...packet(count.ref)"] {
+    for inputs in ["count.next(),count.next()", "...count.packet()"] {
         let source=format!("{prefix}
             comptime fn outer()-><|-bool> {{
-                var count:Count=0;
-                let code=build(do {{count+=1;|value| {{let (first,second)=value;first and not second}}}},{inputs});
-                if count == 3 {{code}} else {{'(false)}}
+                let count=Counter {{value:0}};
+                let code=build(do {{count.value+=1;|value| {{let (first,second)=value;first and not second}}}},{inputs});
+                if count.value == 3 {{code}} else {{'(false)}}
             }} fn run()->bool {{~<outer()>}}");
         assert_eq!(
             support::run_iir_with_tuple(&source, "run", vec![]),
@@ -7670,14 +7654,15 @@ fn generator_collected_callbacks_use_partial_function_contexts() {
 #[test]
 fn generator_partial_callbacks_keep_owned_state_and_source_order() {
     let source = "typealias Count=.Integer'builtin;
-        comptime fn next(count:*Count)->bool {let first=count.* == 1;count.* += 1;first}
+        struct Counter {value:Count}
+        impl Counter { comptime fn next(self)->bool {let first=self.value == 1;self.value += 1;first} }
         comptime fn transform(action:comptime fn(T)->U,value:T)-><|-U> where T,U {
             let result=action(value);'(result)
         }
         comptime fn outer()-><|-bool> {
-            var count:Count=0;
-            let code=transform(do {count+=1;|value| if value {'a'} else {'b'}},next(count.ref));
-            if count == 2 {'(~<code> == 'a')} else {'(false)}
+            let count=Counter {value:0};
+            let code=transform(do {count.value+=1;|value| if value {'a'} else {'b'}},count.next());
+            if count.value == 2 {'(~<code> == 'a')} else {'(false)}
         }
         fn run()->bool {~<outer()>}";
     assert_eq!(run(source, "run", vec![]), Value::Bool(true));
@@ -7892,11 +7877,12 @@ fn generator_named_literal_packets_keep_order_and_tuple_identity() {
 #[test]
 fn generator_named_computed_packets_keep_their_single_invocation_boundary() {
     let prefix="typealias Count=.Integer'builtin;
-        comptime fn packet(count:*Count)->Tuple<bool,bool> {count.*+=1;(true,true)}
+        struct Counter {value:Count}
+        impl Counter { comptime fn packet(self)->Tuple<bool,bool> {self.value+=1;(true,true)} }
         comptime fn build(...items:Tuple<bool,bool>)-><|-bool> {let (first,second)=items;'(first and second)}";
-    for input in ["packet(count.ref)", "do {count+=1;(true,true)}"] {
+    for input in ["count.packet()", "do {count.value+=1;(true,true)}"] {
         let source=format!("{prefix}
-            comptime fn outer()-><|-bool> {{var count:Count=0;let code=build(.items={input});if count == 1 {{code}} else {{'(false)}}}}
+            comptime fn outer()-><|-bool> {{let count=Counter {{value:0}};let code=build(.items={input});if count.value == 1 {{code}} else {{'(false)}}}}
             fn run()->bool {{~<outer()>}}");
         assert_eq!(
             support::run_iir_with_tuple(&source, "run", vec![]),
@@ -8209,12 +8195,13 @@ fn generator_field_type_evidence_instantiates_generic_and_anonymous_records() {
 fn generator_field_type_evidence_keeps_packet_and_callback_source_order() {
     let source="typealias Count=.Integer'builtin;
         struct Config {packet:Tuple<bool>}
-        comptime fn config(count:*Count)->Config {let flag=count.* == 1;count.*+=1;Config {packet:(flag,)}}
+        struct Counter {value:Count}
+        impl Counter { comptime fn config(self)->Config {let flag=self.value == 1;self.value+=1;Config {packet:(flag,)}} }
         comptime fn build(action:comptime fn(T)->T,value:T)-><|-T> where T {let result=action(value);'(result)}
         comptime fn outer()-><|-bool> {
-            var count:Count=0;
-            let code=build(do {count+=1;|value| value},...config(count.ref).packet);
-            if count == 2 {code} else {'(false)}
+            let count=Counter {value:0};
+            let code=build(do {count.value+=1;|value| value},...count.config().packet);
+            if count.value == 2 {code} else {'(false)}
         }
         fn run()->bool {~<outer()>}";
     assert_eq!(
@@ -8354,12 +8341,13 @@ fn generator_block_binding_evidence_handles_annotations_and_shadowing() {
 #[test]
 fn generator_block_binding_evidence_keeps_destructuring_producer_order() {
     let source="typealias Count=.Integer'builtin;
-        comptime fn packet(count:*Count)->Tuple<bool,.char'builtin> {let ready=count.* == 1;count.*+=1;(ready,'a')}
+        struct Counter {value:Count}
+        impl Counter { comptime fn packet(self)->Tuple<bool,.char'builtin> {let ready=self.value == 1;self.value+=1;(ready,'a')} }
         comptime fn build(action:comptime fn(T)->T,value:T)-><|-T> where T {let result=action(value);'(result)}
         comptime fn outer()-><|-bool> {
-            var count:Count=0;
-            let code=build(do {count+=1;|value| value},do {let (ready,letter)=packet(count.ref);ready});
-            if count == 2 {code} else {'(false)}
+            let count=Counter {value:0};
+            let code=build(do {count.value+=1;|value| value},do {let (ready,letter)=count.packet();ready});
+            if count.value == 2 {code} else {'(false)}
         }
         fn run()->bool {~<outer()>}";
     assert_eq!(
@@ -8420,12 +8408,13 @@ fn generator_record_binding_evidence_keeps_nested_producer_order() {
     let source="typealias Count=.Integer'builtin;
         struct Config {action:comptime fn(.u8'builtin)->.u8'builtin}
         comptime fn narrow(value:.u8'builtin)->.u8'builtin {value}
-        comptime fn bundle(count:*Count)->Tuple<Config,bool> {count.* = count.* * 10 + 2;(Config {action:narrow},true)}
+        struct Counter {value:Count}
+        impl Counter { comptime fn bundle(self)->Tuple<Config,bool> {self.value = self.value * 10 + 2;(Config {action:narrow},true)} }
         comptime fn build(code:<|-T>,action:comptime fn(T)->T)-><|-T> where T {code}
         comptime fn outer()-><|-.u8'builtin> {
-            var count:Count=0;
-            let code=build(do {count+=1;'(200)},do {let ({action},_)=bundle(count.ref);action});
-            if count == 12 {code} else {'(0)}
+            let count=Counter {value:0};
+            let code=build(do {count.value+=1;'(200)},do {let ({action},_)=count.bundle();action});
+            if count.value == 12 {code} else {'(0)}
         }
         fn run()->.u8'builtin {~<outer()>}";
     assert_eq!(
@@ -8486,15 +8475,16 @@ fn generator_match_binding_evidence_keeps_subject_and_guard_order() {
     let source="typealias Count=.Integer'builtin;
         comptime fn narrow()->.u8'builtin {200}
         comptime fn wrong()->.u8'builtin {0}
-        comptime fn pair(count:*Count)->Tuple<comptime fn()->.u8'builtin,bool> {count.*+=1;(narrow,true)}
+        struct Counter {value:Count}
+        impl Counter { comptime fn pair(self)->Tuple<comptime fn()->.u8'builtin,bool> {self.value+=1;(narrow,true)} }
         comptime fn build(transform:comptime fn(T)->bool,action:comptime fn()->T)-><|-bool> where T {let value=action();let result=transform(value);'(result)}
         comptime fn outer()-><|-bool> {
-            var count:Count=0;
-            let code=build(do {count+=1;|value| value == 200},pair(count.ref) match {
-                (action,true) if count == 2=>action,
+            let count=Counter {value:0};
+            let code=build(do {count.value+=1;|value| value == 200},count.pair() match {
+                (action,true) if count.value == 2=>action,
                 (action,_)=>wrong,
             });
-            if count == 2 {code} else {'(false)}
+            if count.value == 2 {code} else {'(false)}
         }
         fn run()->bool {~<outer()>}";
     assert_eq!(
@@ -8567,15 +8557,16 @@ fn generator_enum_binding_evidence_keeps_invocation_and_guard_order() {
         enum Choice {item(comptime fn()->.u8'builtin)}
         comptime fn narrow()->.u8'builtin {200}
         comptime fn wrong()->.u8'builtin {0}
-        comptime fn choice(count:*Count)->Choice {count.*+=1;Choice.item(narrow)}
+        struct Counter {value:Count}
+        impl Counter { comptime fn choice(self)->Choice {self.value+=1;Choice.item(narrow)} }
         comptime fn build(transform:comptime fn(T)->bool,action:comptime fn()->T)-><|-bool> where T {let value=action();let result=transform(value);'(result)}
         comptime fn outer()-><|-bool> {
-            var count:Count=0;
-            let code=build(do {count+=1;|value| value == 200},choice(count.ref) match {
-                .item(action) if count == 2=>action,
+            let count=Counter {value:0};
+            let code=build(do {count.value+=1;|value| value == 200},count.choice() match {
+                .item(action) if count.value == 2=>action,
                 .item(_)=>wrong,
             });
-            if count == 2 {code} else {'(false)}
+            if count.value == 2 {code} else {'(false)}
         }
         fn run()->bool {~<outer()>}";
     assert_eq!(run(source, "run", vec![]), Value::Bool(true));

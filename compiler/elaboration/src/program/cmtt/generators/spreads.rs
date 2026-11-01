@@ -103,7 +103,12 @@ impl Checker<'_, '_> {
                     let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
                     let width = self.spread_width(packet, &mut fuel, 0);
                     self.required_steps = fuel as u64;
-                    width?
+                    match width? {
+                        Some(width) => Some(width),
+                        None => self
+                            .generator_packet_type_hint(packet, 0)?
+                            .map(|fields| fields.len()),
+                    }
                 }
                 Arg::Positional(_) => Some(1),
                 _ => Some(0),
