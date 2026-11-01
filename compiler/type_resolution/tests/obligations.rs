@@ -329,3 +329,41 @@ fn bounded_obligation_preparation_pauses_without_poisoning_inference() {
         assert_eq!(engine.attempts(id), Some(2));
     }
 }
+
+#[test]
+fn nested_native_frames_survive_matching_waiters_and_candidate_commit() {
+    let context =
+        type_resolution::ptc::Context::with_scope(vec![vec![Sort::Type], vec![Sort::Type]]);
+    let mut parent = Engine::with_context(context);
+    let input = parent.fresh(Sort::Type);
+    let outer = Term::Bound {
+        depth: 1,
+        index: 0,
+        sort: Sort::Type,
+    };
+    let inner = Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: Sort::Type,
+    };
+    let expected = Term::Tuple(vec![outer, inner]);
+    let waiting = parent.require(R::Equal(T::Meta(input), T::Stable(expected.clone())));
+    parent.advance_metered(100, &mut Budget::default());
+    assert!(matches!(parent.state(waiting), Some(State::Waiting(_))));
+    let (mut candidate, _) = parent
+        .match_many(
+            &[(T::Meta(input), T::Stable(expected.clone()))],
+            Budget::default(),
+        )
+        .unwrap();
+    assert_eq!(parent.inspect(&T::Meta(input)).unwrap(), T::Meta(input));
+    assert!(
+        candidate
+            .to_string()
+            .contains("(frames (frame type) (frame type))")
+    );
+    candidate.advance_metered(100, &mut Budget::default());
+    assert!(candidate.state(waiting).unwrap().is_proven());
+    parent.commit(candidate).unwrap();
+    assert_eq!(parent.freeze(&T::Meta(input)).unwrap(), expected);
+}

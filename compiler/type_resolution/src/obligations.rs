@@ -23,13 +23,12 @@ fn scoped_equality(
     a: Term,
     b: Term,
     scope: &[(Sort, Option<Term>)],
-    native_scope: bool,
+    native_scope: Option<&[Vec<Sort>]>,
 ) -> Result<Formula, InferenceError> {
-    if native_scope {
-        let frames = scope_frames(scope);
-        a.check_scope(&frames)
+    if let Some(frames) = native_scope {
+        a.check_scope(frames)
             .map_err(InferenceError::InvalidSubstitution)?;
-        b.check_scope(&frames)
+        b.check_scope(frames)
             .map_err(InferenceError::InvalidSubstitution)?;
         return Ok(Formula::equal(a, b));
     }
@@ -100,7 +99,7 @@ impl Requirement {
         &self,
         inference: &InferenceContext,
         scope: &[(Sort, Option<Term>)],
-        native_scope: bool,
+        native_scope: Option<&[Vec<Sort>]>,
     ) -> Result<Formula, InferenceError> {
         Ok(match self {
             Self::Stable(formula) => formula.clone(),
@@ -164,7 +163,7 @@ impl Requirement {
         &self,
         inference: &InferenceContext,
         scope: &[(Sort, Option<Term>)],
-        native_scope: bool,
+        native_scope: Option<&[Vec<Sort>]>,
         budget: &mut Budget,
         depth: usize,
     ) -> Result<Formula, InferenceError> {
@@ -270,6 +269,7 @@ pub struct Engine {
     inference: InferenceContext,
     context: ptc::Context,
     scope: Arc<Vec<(Sort, Option<Term>)>>,
+    frames: Arc<Vec<Vec<Sort>>>,
     obligations: Arc<BTreeMap<ObligationId, Arc<Obligation>>>,
     ready: Arc<BTreeSet<ObligationId>>,
     watchers: Arc<BTreeMap<MetaId, Arc<BTreeSet<ObligationId>>>>,
@@ -283,6 +283,7 @@ impl Default for Engine {
             inference: InferenceContext::default(),
             context: ptc::Context::default(),
             scope: Arc::default(),
+            frames: Arc::default(),
             obligations: Arc::default(),
             ready: Arc::default(),
             watchers: Arc::default(),
@@ -331,7 +332,13 @@ impl Engine {
         self.context.is_nominal_constructor(head)
     }
     pub(crate) fn with_call_scope(context: ptc::Context, scope: Vec<nir::Parameter>) -> Self {
+        let frames = if scope.is_empty() {
+            vec![]
+        } else {
+            vec![scope.iter().map(|parameter| parameter.sort).collect()]
+        };
         Self {
+            frames: Arc::new(frames),
             context,
             scope: scope
                 .into_iter()
@@ -367,7 +374,7 @@ impl Engine {
         let context = if context.scope() == frames.as_slice() {
             context
         } else if context.scope().is_empty() {
-            let mut scoped = context.theory_in_scope(frames);
+            let mut scoped = context.theory_in_scope(frames.clone());
             let mut budget = Budget::default();
             for assumption in context.assumptions() {
                 context
@@ -382,25 +389,25 @@ impl Engine {
         Ok(Self {
             context,
             scope: Arc::new(scope),
+            frames: Arc::new(frames),
             ..Self::default()
         })
     }
 
     pub(crate) fn check_context_type(&self, ty: &Term) -> Result<(), Error> {
-        ty.check_scope(&scope_frames(&self.scope))
+        ty.check_scope(&self.frames)
             .map_err(|error| Error::Inference(InferenceError::InvalidSubstitution(error)))
     }
     pub(crate) fn assume_type_equality(&mut self, a: Term, b: Term) -> Result<(), Error> {
-        self.assume(scoped_equality(
-            a,
-            b,
-            &self.scope,
-            self.context.scope() == scope_frames(&self.scope).as_slice(),
-        )?);
+        self.assume(scoped_equality(a, b, &self.scope, self.native_scope())?);
         Ok(())
+    }
+    fn native_scope(&self) -> Option<&[Vec<Sort>]> {
+        (self.context.scope() == self.frames.as_slice()).then_some(self.frames.as_slice())
     }
     pub fn with_context(context: ptc::Context) -> Self {
         Self {
+            frames: Arc::new(context.scope().to_vec()),
             context,
             ..Self::default()
         }
@@ -429,7 +436,7 @@ impl Engine {
                     left,
                     right,
                     &candidate.context,
-                    &scope_frames(&candidate.scope),
+                    &candidate.frames,
                     budget,
                 )?;
             }
@@ -547,7 +554,7 @@ impl Engine {
         let requirement = match obligation.requirement.freeze_metered(
             &self.inference,
             &self.scope,
-            self.context.scope() == scope_frames(&self.scope).as_slice(),
+            self.native_scope(),
             &mut Budget {
                 steps: 4096,
                 max_depth: 64,
@@ -597,7 +604,8 @@ impl Engine {
                 Ok(_) => match obligation.requirement.freeze(
                     &self.inference,
                     &self.scope,
-                    self.context.scope() == scope_frames(&self.scope).as_slice(),
+                    (self.context.scope() == self.frames.as_slice())
+                        .then_some(self.frames.as_slice()),
                 ) {
                     Ok(formula) => State::Solved(self.context.prove(formula, budget)),
                     Err(error) => State::InvalidInference(error.to_string()),
@@ -646,7 +654,8 @@ impl Engine {
                 Ok(_) => match obligation.requirement.freeze_metered(
                     &self.inference,
                     &self.scope,
-                    self.context.scope() == scope_frames(&self.scope).as_slice(),
+                    (self.context.scope() == self.frames.as_slice())
+                        .then_some(self.frames.as_slice()),
                     budget,
                     0,
                 ) {
@@ -695,6 +704,7 @@ impl Engine {
             inference: self.inference.trial(),
             context: self.context.fork(),
             scope: self.scope.clone(),
+            frames: self.frames.clone(),
             obligations: self.obligations.clone(),
             ready: self.ready.clone(),
             watchers: self.watchers.clone(),
@@ -786,6 +796,17 @@ impl fmt::Display for Requirement {
 impl fmt::Display for Engine {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(obligations")?;
+        if !self.frames.is_empty() {
+            f.write_str(" (frames")?;
+            for frame in self.frames.iter() {
+                f.write_str(" (frame")?;
+                for sort in frame {
+                    write!(f, " {sort}")?;
+                }
+                f.write_str(")")?;
+            }
+            f.write_str(")")?;
+        }
         if !self.scope.is_empty() {
             f.write_str(" (scope")?;
             for (sort, domain) in self.scope.iter() {

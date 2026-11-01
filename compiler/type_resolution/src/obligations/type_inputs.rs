@@ -68,13 +68,8 @@ impl Engine {
                 budget.max_depth,
             )?;
         }
-        let formula = problem.freeze_metered(
-            &encoded,
-            &self.scope,
-            self.context.scope() == scope_frames(&self.scope).as_slice(),
-            budget,
-            0,
-        )?;
+        let formula =
+            problem.freeze_metered(&encoded, &self.scope, self.native_scope(), budget, 0)?;
         let outcome = self
             .context
             .search_type_inputs(&identities, formula, budget);

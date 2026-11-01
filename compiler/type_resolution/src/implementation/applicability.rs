@@ -844,33 +844,7 @@ impl ImplementationHead {
         let parameters = self
             .parameter_binders()
             .map_err(|e| TypeAssessment::Invalid(e.to_string()))?;
-        let mut root = match context.scope() {
-            [] => Engine::with_context(context.fork()),
-            [frame] => {
-                let caller_scope = frame
-                    .iter()
-                    .map(|sort| {
-                        (
-                            *sort,
-                            (*sort == Sort::Type).then_some(Term::Primitive(nir::Primitive::Type)),
-                        )
-                    })
-                    .collect();
-                Engine::with_sparse_call_scope(context.fork(), caller_scope)
-                    .map_err(|error| TypeAssessment::Invalid(format!("caller scope: {error:?}")))?
-            }
-            _ if std::iter::once(subject)
-                .chain(interface_arguments)
-                .all(|term| term.check_scope(&[]).is_ok()) =>
-            {
-                Engine::with_context(context.fork())
-            }
-            _ => {
-                return Err(TypeAssessment::Pending(
-                    "nested caller frames require scoped head inference".into(),
-                ));
-            }
-        };
+        let mut root = Engine::with_context(context.fork());
         let types: Vec<_> = parameters
             .iter()
             .map(|parameter| I::Meta(root.fresh(parameter.sort)))

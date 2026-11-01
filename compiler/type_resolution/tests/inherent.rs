@@ -472,3 +472,59 @@ fn inherent_matching_and_replay_preserve_caller_type_scope() {
             .is_err()
     );
 }
+
+#[test]
+fn inherent_candidates_preserve_distinct_nested_binders_and_empty_frames() {
+    let pair = |left, right| Term::Nominal {
+        declaration: id(10),
+        arguments: vec![left, right],
+    };
+    let mut index = InherentIndex::default();
+    index
+        .insert(
+            head(20, pair(var(1), var(2)), vec![id(1), id(2)], &["get"]),
+            Budget::default(),
+        )
+        .unwrap();
+    for inner in [vec![Sort::Type], vec![]] {
+        let context = context().theory_in_scope(vec![vec![Sort::Type], inner.clone()]);
+        let outer = Term::Bound {
+            depth: 1,
+            index: 0,
+            sort: Sort::Type,
+        };
+        let second = if inner.is_empty() {
+            Term::Primitive(P::Bool)
+        } else {
+            Term::Bound {
+                depth: 0,
+                index: 0,
+                sort: Sort::Type,
+            }
+        };
+        let subject = pair(outer.clone(), second.clone());
+        let result = index
+            .resolve_types("get", &subject, &context, Budget::default())
+            .unwrap();
+        assert_eq!(
+            result.selection,
+            Selection::Selected(id(20)),
+            "{:?}",
+            result.assessments
+        );
+        let TypeAssessment::Applicable(evidence) = &result.assessments[&id(20)] else {
+            panic!()
+        };
+        assert_eq!(evidence.type_arguments, vec![outer, second]);
+        index
+            .verify_evidence("get", evidence, &subject, &context, Budget::default())
+            .unwrap();
+        let mut corrupted = evidence.clone();
+        corrupted.type_arguments.swap(0, 1);
+        assert!(
+            index
+                .verify_evidence("get", &corrupted, &subject, &context, Budget::default())
+                .is_err()
+        );
+    }
+}

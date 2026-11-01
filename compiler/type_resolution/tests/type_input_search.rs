@@ -511,3 +511,46 @@ fn fixed_environment_ambiguity_does_not_assign_inference_inputs() {
         Term::Primitive(P::Bool)
     );
 }
+
+#[test]
+#[ignore = "PTC witnesses do not yet represent lexical binder assignments"]
+fn nested_scope_type_models_preserve_binding_depth_through_commit() {
+    let context = Context::with_scope(vec![vec![Sort::Type], vec![Sort::Type]]);
+    let mut parent = Engine::with_context(context);
+    let input = parent.fresh(Sort::Type);
+    let outer = Term::Bound {
+        depth: 1,
+        index: 0,
+        sort: Sort::Type,
+    };
+    let inner = Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: Sort::Type,
+    };
+    let expected = Term::Tuple(vec![outer, inner]);
+    let problem = R::Equal(I::Meta(input), I::Stable(expected.clone()));
+    let (mut candidate, obligation) = match parent
+        .search_type_inputs(&[input], &problem, &mut Budget::default())
+        .unwrap()
+    {
+        Search::Proposed {
+            candidate,
+            obligation,
+            ..
+        } => (candidate, obligation),
+        Search::Unresolved(outcome) => {
+            panic!("explicit equality determines the scoped Type input: {outcome:?}")
+        }
+    };
+    assert_eq!(parent.inspect(&I::Meta(input)).unwrap(), I::Meta(input));
+    assert!(
+        candidate
+            .to_string()
+            .contains("(frames (frame type) (frame type))")
+    );
+    candidate.advance_metered(100, &mut Budget::default());
+    assert!(candidate.state(obligation).unwrap().is_proven());
+    parent.commit(candidate).unwrap();
+    assert_eq!(parent.freeze(&I::Meta(input)).unwrap(), expected);
+}
