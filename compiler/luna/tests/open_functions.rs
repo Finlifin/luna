@@ -601,17 +601,11 @@ fn suspended_type_blocks_invoke_staged_local_closures() {
         "let callback=|| flag",
         "var local=false;let ptr=local.ref;let callback=|| do {ptr.* = flag;ptr.*}",
     );
-    let package = compile(&pointer);
-    for (entry, expected) in [
-        ("flag", Value::Bool(true)),
-        ("byte", Value::UnsignedInteger(9)),
-    ] {
-        assert_eq!(
-            luna::execution::interpret(&package, entry, 100_000).unwrap(),
-            expected
-        );
-        luna::instantiation::instantiate(&package, entry, 100_000).unwrap();
-    }
+    let failure = compile_with_protocols(&pointer, &Default::default()).unwrap_err();
+    assert!(
+        failure.contains("pointer operations cannot execute at comptime"),
+        "{failure}"
+    );
 }
 
 #[test]
@@ -6765,16 +6759,20 @@ fn readonly_selector_can_construct_fresh_mutable_local_closures() {
         comptime fn keep(select:Selector,value:defer select())->defer select() {value}
         const RESULT=keep(make(),true);typealias Result=RESULT'type;
         fn run()->Result {true}";
-    for body in [
+    let package = compile(source);
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    let pointer = source.replace(
         "flag=not flag;flag",
         "let pointer=flag.ref;pointer.* = not pointer.*;flag",
-    ] {
-        let package = compile(&source.replace("flag=not flag;flag", body));
-        assert_eq!(
-            luna::execution::interpret(&package, "run", 100_000).unwrap(),
-            Value::Bool(true)
-        );
-    }
+    );
+    let failure = compile_with_protocols(&pointer, &Default::default()).unwrap_err();
+    assert!(
+        failure.contains("pointer operations cannot execute at comptime"),
+        "{failure}"
+    );
 }
 
 #[test]
@@ -6914,35 +6912,41 @@ fn live_packet_selectors_share_annotation_and_final_body_mutations() {
 }
 
 #[test]
-fn live_selector_can_update_primitive_capture_through_local_pointer() {
-    let package = compile(
-        "typealias Type=.Type'builtin;
+fn live_selector_updates_captured_values_without_pointer_or_copy_protocols() {
+    let source = "typealias Type=.Type'builtin;
+        typealias Byte=.u8'builtin;
         typealias Selector=%{flag:bool} comptime fn()->Type;
         comptime fn make()->Selector {var flag=false;|| {
-            let pointer=flag.ref;pointer.* = not pointer.*;
-            if flag {bool} else {.u8'builtin}
+            flag=not flag;
+            if flag {bool} else {Byte}
         }}
         comptime fn consume(select:Selector,value:defer select())->defer select() {7}
         const RESULT=consume(make(),true);typealias Result=RESULT'type;
-        fn run()->Result {7}",
-    );
+        fn run()->Result {7}";
+    let package = compile(source);
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),
         Value::UnsignedInteger(7)
     );
-    let failure = compile_with_protocols(
+    luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
+    for pointer in [
+        source.replace(
+            "flag=not flag;",
+            "let pointer=flag.ref;pointer.* = not pointer.*;",
+        ),
         "typealias Type=.Type'builtin;
         typealias Selector=%{selected:Type} comptime fn()->Type;
         comptime fn make()->Selector {var selected=bool;|| {let pointer=selected.ref;pointer.*}}
         comptime fn consume(select:Selector,value:defer select())->bool {true}
-        const BAD=consume(make(),true);",
-        &Default::default(),
-    )
-    .unwrap_err();
-    assert!(
-        failure.contains("requires bound Copy and Drop protocols"),
-        "{failure}"
-    );
+        const BAD=consume(make(),true);"
+            .into(),
+    ] {
+        let failure = compile_with_protocols(&pointer, &Default::default()).unwrap_err();
+        assert!(
+            failure.contains("pointer operations cannot execute at comptime"),
+            "{failure}"
+        );
+    }
 }
 
 #[test]
