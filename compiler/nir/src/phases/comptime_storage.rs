@@ -9,7 +9,17 @@ pub(super) fn validate(
     package: &Package,
     frames: &[Vec<Sort>],
 ) -> Result<(), &'static str> {
-    match contains_pointer(ty, package, frames, &mut HashSet::new(), &mut 100_000, 0) {
+    validate_resolved(ty, package, frames, None, &mut 100_000)
+}
+
+pub(super) fn validate_resolved(
+    ty: &Term,
+    package: &Package,
+    frames: &[Vec<Sort>],
+    resolve: super::NominalStorageResolver<'_>,
+    fuel: &mut usize,
+) -> Result<(), &'static str> {
+    match contains_pointer(ty, package, frames, &mut HashSet::new(), fuel, 0, resolve) {
         Ok(false) => Ok(()),
         Ok(true) => Err("runtime pointer values cannot inhabit comptime storage"),
         Err(()) => Err("comptime storage inspection limit or invalid payload layout"),
@@ -23,8 +33,13 @@ fn contains_pointer(
     seen: &mut HashSet<Term>,
     fuel: &mut usize,
     depth: usize,
+    resolve: super::NominalStorageResolver<'_>,
 ) -> Result<bool, ()> {
-    crate::type_computations::charge_term(ty, fuel).map_err(|_| ())?;
+    crate::type_computations::charge_term(ty, fuel).map_err(|error| {
+        if matches!(error, crate::type_computations::Error::Budget) {
+            *fuel = 0;
+        }
+    })?;
     if depth > 128 {
         return Err(());
     }
@@ -51,7 +66,11 @@ fn contains_pointer(
             if let Some(fields) = crate::normal_forms::tuple_fields(Some(package), ty) {
                 fields.to_vec()
             } else if let Some(element) =
-                crate::normal_forms::list_element_budgeted(package, ty, fuel).map_err(|_| ())?
+                crate::normal_forms::list_element_budgeted(package, ty, fuel).map_err(|error| {
+                    if matches!(error, crate::NominalAdmissionError::Budget) {
+                        *fuel = 0;
+                    }
+                })?
             {
                 vec![element]
             } else {
@@ -63,7 +82,9 @@ fn contains_pointer(
             declaration,
             arguments,
         } => {
-            if let Some(definition) = package
+            if let Some(resolve) = resolve {
+                resolve(ty, fuel).ok_or(())?
+            } else if let Some(definition) = package
                 .structs
                 .iter()
                 .find(|d| d.declaration == *declaration)
@@ -103,7 +124,7 @@ fn contains_pointer(
         _ => vec![],
     };
     for child in children {
-        if contains_pointer(&child, package, frames, seen, fuel, depth + 1)? {
+        if contains_pointer(&child, package, frames, seen, fuel, depth + 1, resolve)? {
             return Ok(true);
         }
     }

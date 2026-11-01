@@ -797,6 +797,7 @@ impl<'a> Interpreter<'a> {
         result_type
             .check_scope(&[])
             .map_err(|_| self.failure(ErrorKind::Type, None))?;
+        self.check_comptime_domain(&result_type, body.source)?;
         if let Term::Computation { effects, .. } = &result_type {
             self.check_effect_environment(effects, None)?;
         } else {

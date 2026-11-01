@@ -75,3 +75,81 @@ fn collected_domains_inspect_elements_but_not_type_value_contents() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn completed_generic_result_domains_cannot_hide_pointer_storage() {
+    for expression in ["absent<*bool>()", "absent<Wrapper<*bool>>()"] {
+        let source = format!(
+            "struct Wrapper where T {{value:T}}
+            comptime fn absent()->?T where T {{null}}
+            comptime fn run()->bool {{let value={expression};true}}"
+        );
+        let package = support::compile(&source);
+        for tree in [false, true] {
+            let mut vm = if tree {
+                comptime_interpretor::Interpreter::for_comptime_tree(&package, Default::default())
+            } else {
+                comptime_interpretor::Interpreter::for_comptime(&package, Default::default())
+            }
+            .unwrap();
+            let error = vm.invoke(support::id(&package, "run"), vec![]).unwrap_err();
+            assert_eq!(
+                error.kind,
+                comptime_interpretor::ErrorKind::PhaseMismatch,
+                "{expression}: {error:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn dependent_input_domains_reject_absent_pointer_payloads_and_recover() {
+    let package = support::compile(
+        "typealias Type=.Type'builtin;
+        comptime fn accept(comptime T:Type,value:T)->bool {true}
+        comptime fn good()->bool {true}",
+    );
+    for tree in [false, true] {
+        let mut vm = if tree {
+            comptime_interpretor::Interpreter::for_comptime_tree(&package, Default::default())
+        } else {
+            comptime_interpretor::Interpreter::for_comptime(&package, Default::default())
+        }
+        .unwrap();
+        let domain = nir::Term::Optional(Box::new(nir::Term::Pointer(Box::new(
+            nir::Term::Primitive(nir::Primitive::Bool),
+        ))));
+        let error = vm
+            .invoke(
+                support::id(&package, "accept"),
+                vec![
+                    Value::Type(domain.clone()),
+                    Value::Optional {
+                        ty: domain,
+                        value: None,
+                    },
+                ],
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, comptime_interpretor::ErrorKind::PhaseMismatch);
+        assert_eq!(
+            vm.invoke(support::id(&package, "good"), vec![]).unwrap(),
+            Value::Bool(true)
+        );
+        let domain = nir::Term::Optional(Box::new(nir::Term::Primitive(nir::Primitive::Bool)));
+        assert_eq!(
+            vm.invoke(
+                support::id(&package, "accept"),
+                vec![
+                    Value::Type(domain.clone()),
+                    Value::Optional {
+                        ty: domain,
+                        value: None
+                    }
+                ]
+            )
+            .unwrap(),
+            Value::Bool(true)
+        );
+    }
+}

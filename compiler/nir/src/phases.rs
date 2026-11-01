@@ -1749,6 +1749,19 @@ pub fn validate_runtime_storage_with_nominals(
     validate_runtime_storage_inner(ty, package, frames, Some(resolve), fuel)
 }
 
+/// Check a completed comptime payload domain against the caller's current
+/// nominal catalog, including definitions published during invocation. Type
+/// descriptions and runtime code signatures are not stored pointer payloads.
+pub fn validate_comptime_storage_with_nominals(
+    ty: &Term,
+    package: &Package,
+    frames: &[Vec<Sort>],
+    resolve: &dyn Fn(&Term, &mut usize) -> Option<Vec<Term>>,
+    fuel: &mut usize,
+) -> Result<(), &'static str> {
+    comptime_storage::validate_resolved(ty, package, frames, Some(resolve), fuel)
+}
+
 type NominalStorageResolver<'a> = Option<&'a dyn Fn(&Term, &mut usize) -> Option<Vec<Term>>>;
 fn validate_runtime_storage_inner(
     ty: &Term,

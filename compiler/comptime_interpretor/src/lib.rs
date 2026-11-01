@@ -20,6 +20,7 @@ pub use code_values::CodeValue;
 mod bit_operations;
 mod bit_representation;
 mod bit_writeback;
+mod comptime_domains;
 mod default_code;
 mod dynamic_instances;
 mod environment;
@@ -2450,6 +2451,7 @@ impl<'a> Interpreter<'a> {
                 expected
                     .check_scope(&[])
                     .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
+                self.check_comptime_domain(&expected, source)?;
                 if !self.has_type(representation, &expected) {
                     return Err(self.failure(ErrorKind::Type, Some(source)));
                 }
@@ -2491,6 +2493,7 @@ impl<'a> Interpreter<'a> {
             expected
                 .check_scope(&[])
                 .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
+            self.check_comptime_domain(&expected, source)?;
             if !self.has_type(&representation, &expected) {
                 return Err(self.failure(ErrorKind::Type, Some(source)));
             }
