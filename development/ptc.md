@@ -613,3 +613,32 @@ Validation from `/home/fin/luna`:
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`: four passed (`/tmp/luna-tools-swnci1ir/result.json`).
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_type_factories_keep_identity_through_comptime_parameters`: passed (`/tmp/luna-tools-uiqtfwv4/result.json`).
 - Formatting check and `git diff --check` passed (`/tmp/luna-tools-y4lc6x0b/result.json`).
+
+## Active first-UIP analysis over live assignments
+
+Search now analyzes a returned conflict before unwinding continuations. It walks
+the chronological assignment trail backwards, skips literals outside the
+conflict support, and resolves current-level Boolean/root/learned reasons until
+at most one current-level literal remains. The resulting proof enters the
+existing clause-admission and asserting-backjump path. This identifies the UIP
+while assignments, theory state, and propagation notification cursors remain
+unchanged; chronological unwind remains the fallback when analysis or retention
+cannot finish within its budget.
+
+Analysis uses a bounded fraction of query fuel. Every intermediate resolution
+is already a valid proof, so interruption returns that proof rather than a
+partial dependency claim. Boolean reasons use captured antecedents. Root and
+learned reasons copy bounded owned proof structure while sharing older lemma
+DAGs; preflight limits copying depth before recursive clone. A unified proof
+arena would remove this remaining copy. Full CDCL completion is still not
+claimed: root auxiliary reasoning and decision continuations remain separate,
+and Boolean/theory evaluation is not entirely event-driven.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p ptc -p type_resolution`: 468 passed (`/tmp/luna-tools-wkqbuuop/result.json`).
+- A mixed-reason implication graph checks all 512 analysis budgets, independently replays every intermediate proof from only its recorded support, verifies the completed UIP is the propagated dominator, and rejects the opposite UIP premise. Trail contents and all three consumers' pending notifications remain unchanged.
+- The existing end-to-end first-UIP search test now asserts that active analysis actually resolved live trail reasons before the learned asserting clause is reused on the opposite decision branch.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`: four passed (`/tmp/luna-tools-3obuzhk1/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_type_factories_keep_identity_through_comptime_parameters`: passed (`/tmp/luna-tools-i6pp0b27/result.json`).
+- Formatting check and `git diff --check` passed (`/tmp/luna-tools-bf6d111b/result.json`).

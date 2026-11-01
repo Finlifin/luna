@@ -93,6 +93,10 @@ impl<'a> Trail<'a> {
         self.levels[index] = 0;
         entry.reason
     }
+    pub(super) fn entry(&self, position: usize) -> (usize, bool, usize, &Reason) {
+        let entry = &self.entries[position];
+        (entry.index, entry.value, entry.level, &entry.reason)
+    }
     pub(super) fn last_literal(&self) -> Option<(usize, bool)> {
         self.entries.last().map(|entry| (entry.index, entry.value))
     }

@@ -2,6 +2,7 @@
 //! branch restoration and backjumping no longer depend on the Rust call stack.
 use super::{Conflict, Search, SearchResult, UnknownReason, boolean, learning};
 use std::fmt;
+mod analysis;
 mod trail;
 use trail::{Consumer, Reason, Trail};
 
@@ -90,6 +91,7 @@ impl Search<'_> {
                 }
                 Step::Return(result) => result,
             };
+            result = self.analyze_conflict(result, &assignment, decision_level);
             let mut learned_at = None;
             loop {
                 let (next, jump) = self.learn_first_uip(
@@ -549,6 +551,7 @@ mod tests {
         };
         let mut assignment = vec![None; 3];
         BACKJUMPS.with(|n| n.set(0));
+        analysis::RESOLUTIONS.with(|n| n.set(0));
         assert!(matches!(
             search.solve(&mut assignment, 0),
             SearchResult::Model(_)
@@ -557,6 +560,10 @@ mod tests {
         assert!(
             BACKJUMPS.with(|n| n.get()) > 0,
             "UIP learning did not restart propagation"
+        );
+        assert!(
+            analysis::RESOLUTIONS.with(|n| n.get()) > 0,
+            "production search skipped trail conflict analysis"
         );
         // The decision's opposite branch must still benefit from x=false.
         assignment[0] = Some(true);
