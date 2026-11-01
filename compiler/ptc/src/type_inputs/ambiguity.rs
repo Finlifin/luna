@@ -28,6 +28,16 @@ pub(super) fn alternative(
             pinned.assume(Formula::equal(type_variable(id), value.clone()));
         }
     }
+    for (binder, value) in &model.bound_types {
+        if !within_input_limits(
+            Input::Term(value),
+            budget.max_depth.min(128),
+            &mut budget.steps,
+        ) {
+            return Err(UnknownReason::BudgetExhausted);
+        }
+        pinned.assume(Formula::equal(binder.term(), value.clone()));
+    }
     for (&id, &value) in &model.integers {
         budget.steps = budget
             .steps

@@ -23,7 +23,7 @@ pub(super) fn candidates(
             .map_err(|_| UnknownReason::UnvalidatedModel)?;
         // Only proved bindings may eliminate requested variables from a
         // candidate. Unresolved cycles stay out of the exported Type values.
-        if references.is_empty()
+        if (references.is_empty() && term.check_scope(&[]).is_ok())
             || references
                 .keys()
                 .any(|id| requested.contains(id) && !bindings.contains_key(id))
@@ -131,7 +131,7 @@ pub(super) fn same_ambient(
 ) -> Result<bool, UnknownReason> {
     let requested = requested(inputs, budget)?;
     for model in [first, second] {
-        for value in model.types.values() {
+        for value in model.types.values().chain(model.bound_types.values()) {
             if !within_input_limits(
                 Input::Term(value),
                 budget.max_depth.min(128),
@@ -160,7 +160,8 @@ pub(super) fn same_ambient(
             .checked_sub(model.integers.len())
             .ok_or(UnknownReason::BudgetExhausted)?;
     }
-    Ok(first.applications == second.applications
+    Ok(first.bound_types == second.bound_types
+        && first.applications == second.applications
         && first.integers == second.integers
         && first
             .types

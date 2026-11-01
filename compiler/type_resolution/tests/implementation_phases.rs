@@ -185,11 +185,15 @@ fn requirement_binders_are_alpha_bound_without_capturing_free_identities() {
         .insert_phase(make(200, 1, 2), Runtime, Budget::default())
         .unwrap();
     let revision = separate.revision();
-    assert!(matches!(
-        separate.insert_phase(make(201, 2, 1), Comptime, Budget::default()),
-        Err(Error::UndeterminedPhaseRelationship(_))
-    ));
-    assert_eq!(separate.revision(), revision);
+    // A scoped countermodel distinguishes the free declarations from the
+    // alpha-bound parameter. The two contributions must not be merged.
+    assert_eq!(
+        separate
+            .insert_phase(make(201, 2, 1), Comptime, Budget::default())
+            .unwrap(),
+        id(201)
+    );
+    assert!(separate.revision() > revision);
 }
 
 #[test]
@@ -506,7 +510,13 @@ fn unvalidated_countermodels_preserve_the_previous_relationship_world() {
         let mut index = Index::default();
         let weak = head(200, Some(1));
         let mut strong = head(201, Some(2));
-        strong.requirements = vec![Q::Equal(var(2), boolean())];
+        // Trait truth needs implementation-world evidence; a bare PTC model
+        // still cannot distinguish these applicability conditions.
+        strong.requirements = vec![Q::Trait(nir::program::TraitRequirement {
+            interface: id(101),
+            subject: var(2),
+            interface_arguments: vec![],
+        })];
         let (first, second) = if reverse {
             (strong, weak)
         } else {
@@ -516,14 +526,53 @@ fn unvalidated_countermodels_preserve_the_previous_relationship_world() {
             .insert_phase(first, Runtime, Budget::default())
             .unwrap();
         let previous = resolve(&index);
+        let previous_phase = index.select_phase(&previous, Comptime);
         assert!(matches!(
             index.insert_phase(second, Comptime, Budget::default()),
             Err(Error::UndeterminedPhaseRelationship(_))
         ));
         assert!(index.type_resolution_is_current(&previous));
-        assert!(matches!(
-            index.select_phase(&previous, Comptime),
-            PhaseSelection::Missing { .. }
-        ));
+        assert_eq!(index.select_phase(&previous, Comptime), previous_phase);
+    }
+}
+
+#[test]
+fn scoped_countermodels_preserve_same_precision_phase_conflicts() {
+    use nir::program::TypePredicate as Q;
+    for reverse in [false, true] {
+        let mut index = Index::default();
+        let weak = head(200, Some(1));
+        let mut strong = head(201, Some(2));
+        strong.requirements = vec![Q::Equal(var(2), boolean())];
+        let (first, second) = if reverse {
+            (strong, weak)
+        } else {
+            (weak, strong)
+        };
+        let second_id = second.declaration;
+        index
+            .insert_phase(first, Runtime, Budget::default())
+            .unwrap();
+        let previous = resolve(&index);
+        assert_eq!(
+            index
+                .insert_phase(second, Comptime, Budget::default())
+                .unwrap(),
+            second_id
+        );
+        assert!(!index.type_resolution_is_current(&previous));
+        let selected = resolve(&index);
+        // Logical refinement changes applicability, not structural precision.
+        // Both relationships apply to bool, so neither phase can hide conflict.
+        assert_eq!(
+            selected.selection,
+            Selection::Conflict(vec![id(200), id(201)])
+        );
+        for phase in [Runtime, Comptime] {
+            assert_eq!(
+                index.select_phase(&selected, phase),
+                PhaseSelection::Unselected(selected.selection.clone())
+            );
+        }
     }
 }

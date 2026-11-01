@@ -513,7 +513,6 @@ fn fixed_environment_ambiguity_does_not_assign_inference_inputs() {
 }
 
 #[test]
-#[ignore = "PTC witnesses do not yet represent lexical binder assignments"]
 fn nested_scope_type_models_preserve_binding_depth_through_commit() {
     let context = Context::with_scope(vec![vec![Sort::Type], vec![Sort::Type]]);
     let mut parent = Engine::with_context(context);

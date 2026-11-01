@@ -169,6 +169,32 @@ pub enum ProofTree {
         positive: Arc<ProofTree>,
     },
 }
+/// A Type input in the surrounding lexical scope, indexed from its innermost
+/// frame. This is model evidence, never a declaration identity or a new axiom.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TypeBinder {
+    pub depth: u32,
+    pub index: usize,
+}
+impl TypeBinder {
+    fn term(self) -> Term {
+        Term::Bound {
+            depth: self.depth,
+            index: self.index,
+            sort: Sort::Type,
+        }
+    }
+}
+impl fmt::Display for TypeBinder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(type-binder (depth {}) (index {}))",
+            self.depth, self.index
+        )
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Witness {
     pub applications: Vec<TypeApplication>,
@@ -177,6 +203,7 @@ pub struct Witness {
     pub nominal_constructors: BTreeSet<DeclarationId>,
     pub congruence_heads: BTreeSet<DeclarationId>,
     pub types: BTreeMap<DeclarationId, Term>,
+    pub bound_types: BTreeMap<TypeBinder, Term>,
     pub integers: BTreeMap<DeclarationId, i128>,
     pub assumptions: Vec<Formula>,
     pub goal: Formula,
@@ -339,7 +366,14 @@ impl Context {
                 return Err(ProofError::BudgetExhausted);
             }
         }
-        for ty in witness.types.values() {
+        for binder in witness.bound_types.keys() {
+            *fuel = fuel.checked_sub(1).ok_or(ProofError::BudgetExhausted)?;
+            binder
+                .term()
+                .check_scope(&self.scope)
+                .map_err(|_| ProofError::Invalid)?;
+        }
+        for ty in witness.types.values().chain(witness.bound_types.values()) {
             if !within_input_limits(Input::Term(ty), limit, fuel) {
                 return Err(ProofError::BudgetExhausted);
             }
@@ -376,6 +410,7 @@ impl Context {
                 model_atom(
                     atom,
                     &witness.types,
+                    &witness.bound_types,
                     &applications,
                     &evaluation_fuel,
                     &witness.integers,
@@ -394,6 +429,7 @@ impl Context {
                 evaluate_model(
                     formula,
                     &witness.types,
+                    &witness.bound_types,
                     &applications,
                     &evaluation_fuel,
                     &witness.integers,
@@ -648,6 +684,7 @@ impl Context {
                 nominal_constructors: (*self.nominal_constructors).clone(),
                 congruence_heads: (*self.congruence_heads).clone(),
                 types: model.types,
+                bound_types: model.bound_types,
                 integers: model.integers,
                 assumptions: (*self.assumptions).clone(),
                 goal,
@@ -1300,6 +1337,7 @@ struct Search<'a> {
 struct Model {
     applications: Vec<TypeApplication>,
     types: BTreeMap<DeclarationId, Term>,
+    bound_types: BTreeMap<TypeBinder, Term>,
     integers: BTreeMap<DeclarationId, i128>,
 }
 struct TheoryEvidence {
@@ -1662,11 +1700,15 @@ impl Search<'_> {
         // Reify actual closed types, not arbitrary EUF domain elements. Missing
         // value-store, runtime or opaque-call interpretations keep Unknown.
         let mut types = BTreeMap::new();
+        let mut bound_types = BTreeMap::new();
         let mut representatives = HashMap::new();
         for (id, term) in self.terms.nodes.iter().enumerate() {
             if !matches!(
                 term,
                 Term::Rigid {
+                    sort: Sort::Type,
+                    ..
+                } | Term::Bound {
                     sort: Sort::Type,
                     ..
                 }
@@ -1689,11 +1731,16 @@ impl Search<'_> {
             }
         }
         for term in &self.terms.nodes {
-            if let Term::Rigid {
-                declaration,
-                sort: Sort::Type,
-            } = term
-            {
+            if matches!(
+                term,
+                Term::Rigid {
+                    sort: Sort::Type,
+                    ..
+                } | Term::Bound {
+                    sort: Sort::Type,
+                    ..
+                }
+            ) {
                 let id = self.terms.ids[term];
                 let value = reify(
                     id,
@@ -1705,7 +1752,21 @@ impl Search<'_> {
                     &self.context.nominal_constructors,
                     &mut self.steps,
                 )?;
-                types.insert(*declaration, value);
+                match term {
+                    Term::Rigid { declaration, .. } => {
+                        types.insert(*declaration, value);
+                    }
+                    Term::Bound { depth, index, .. } => {
+                        bound_types.insert(
+                            TypeBinder {
+                                depth: *depth,
+                                index: *index,
+                            },
+                            value,
+                        );
+                    }
+                    _ => unreachable!(),
+                }
             }
         }
         let mut applications = Vec::new();
@@ -1781,6 +1842,7 @@ impl Search<'_> {
             let value = model_atom(
                 atom,
                 &types,
+                &bound_types,
                 &application_index,
                 &evaluation_fuel,
                 &theory.integers,
@@ -1800,6 +1862,7 @@ impl Search<'_> {
             .then_some(Model {
                 applications,
                 types,
+                bound_types,
                 integers: theory.integers.clone(),
             })
     }
@@ -1826,6 +1889,7 @@ fn evaluate_kind_with_heads(
 fn evaluate_model(
     formula: &Formula,
     types: &BTreeMap<DeclarationId, Term>,
+    bound_types: &BTreeMap<TypeBinder, Term>,
     applications: &model_applications::Applications,
     fuel: &std::cell::Cell<usize>,
     integers: &BTreeMap<DeclarationId, i128>,
@@ -1836,6 +1900,7 @@ fn evaluate_model(
         model_atom(
             atom,
             types,
+            bound_types,
             applications,
             fuel,
             integers,
@@ -1847,6 +1912,7 @@ fn evaluate_model(
 fn model_atom(
     atom: &Atom,
     types: &BTreeMap<DeclarationId, Term>,
+    bound_types: &BTreeMap<TypeBinder, Term>,
     applications: &model_applications::Applications,
     fuel: &std::cell::Cell<usize>,
     integers: &BTreeMap<DeclarationId, i128>,
@@ -1868,15 +1934,15 @@ fn model_atom(
             } else {
                 evaluate_kind_with_heads(
                     query.kind,
-                    &substitute_types(&query.ty, types, applications, fuel, nominal)?,
+                    &substitute_types(&query.ty, types, bound_types, applications, fuel, nominal)?,
                     nominal,
                     tuple_heads,
                 )
             }
         }
         Atom::TypeEqual(atom) => {
-            let a = substitute_types(&atom.0, types, applications, fuel, nominal)?;
-            let b = substitute_types(&atom.1, types, applications, fuel, nominal)?;
+            let a = substitute_types(&atom.0, types, bound_types, applications, fuel, nominal)?;
+            let b = substitute_types(&atom.1, types, bound_types, applications, fuel, nominal)?;
             if !closed_type(&a, nominal) || !closed_type(&b, nominal) {
                 return None;
             }
@@ -2024,6 +2090,7 @@ fn rebuild(
 fn substitute_types(
     term: &Term,
     types: &BTreeMap<DeclarationId, Term>,
+    bound_types: &BTreeMap<TypeBinder, Term>,
     applications: &model_applications::Applications,
     fuel: &std::cell::Cell<usize>,
     nominal: &BTreeSet<DeclarationId>,
@@ -2043,6 +2110,20 @@ fn substitute_types(
     {
         return model_applications::copy(types.get(declaration)?, fuel);
     }
+    if let Term::Bound {
+        depth,
+        index,
+        sort: Sort::Type,
+    } = term
+    {
+        return model_applications::copy(
+            bound_types.get(&TypeBinder {
+                depth: *depth,
+                index: *index,
+            })?,
+            fuel,
+        );
+    }
     if let Term::NormalForm {
         head,
         sort: Sort::Type,
@@ -2051,13 +2132,13 @@ fn substitute_types(
     {
         let arguments = arguments
             .iter()
-            .map(|arg| substitute_types(arg, types, applications, fuel, nominal))
+            .map(|arg| substitute_types(arg, types, bound_types, applications, fuel, nominal))
             .collect::<Option<Vec<_>>>()?;
         // Child substitution charged each ground argument before hashing it.
         return model_applications::copy(applications.get(&(*head, arguments))?, fuel);
     }
     let value = rebuild(term, nominal, &mut |child| {
-        substitute_types(child, types, applications, fuel, nominal)
+        substitute_types(child, types, bound_types, applications, fuel, nominal)
     })?;
     model_applications::charge(&value, fuel)?;
     Some(value)
@@ -2162,6 +2243,9 @@ impl fmt::Display for Outcome {
                 f.write_str(") (bindings")?;
                 for (id, ty) in &witness.types {
                     write!(f, " (type {id} {ty})")?;
+                }
+                for (binder, ty) in &witness.bound_types {
+                    write!(f, " (type {binder} {ty})")?;
                 }
                 for (id, value) in &witness.integers {
                     write!(f, " (integer {id} {value})")?;
