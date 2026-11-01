@@ -8,6 +8,8 @@
 
 | 方法 | 返回值 |
 | --- | --- |
+| `struct_fields()` | 声明顺序的具名 Type 条目 `Object` |
+| `enum_variant_fields()` | 每个 variant 的字段描述 `List<Object>` |
 | `struct_field_names()` | 声明顺序的 `List<Symbol>` |
 | `struct_field_types()` | 对应的 `List<Type>` |
 | `enum_group_paths()` | 分组路径的 `List<List<Symbol>>` |
@@ -40,3 +42,42 @@ struct 与 enum 操作分别检查接收者的结构种类。路径由 Symbol �
 `meta.struct_field_names(subject)` 等既有自由函数继续由此模块导出，复用同一
 集中绑定和编译器检查。builder 的 `from_type` 使用 Type 方法，不再承载反射
 接口的定义。构造完成的新 Type 可使用同样的方法观察。
+
+
+## 有序字段描述
+
+`subject.struct_fields()` 将字段名与对应 Type 组成一个有序 `Object`。
+`subject.enum_variant_fields()` 按 `enum_variant_paths()` 的顺序返回描述列表：
+unit 分支为空 Object，tuple 分支使用无名条目，named 分支保留字段名。
+空的 tuple/named 分支也会产生空 Object，分支形状仍须从
+`enum_variant_shapes()` 取得，不能仅靠字段描述区分。
+
+```flurry
+struct Source { item: u32, ready: bool }
+
+comptime fn Selected() -> Type {
+    let fields = Source.struct_fields();
+    let selected = fields.filter(|entry| entry.key(0) matches .item?);
+    let draft = meta.StructBuilder.from_object(
+        selected.concat({active: bool}), .name = .Selected) match {
+        value? => value,
+        null => return bool,
+    };
+    draft.Build()
+}
+```
+
+条目值是原始 Type 值，不是类型名字符串；泛型替换后的类型和不透明
+normal-form 头保持原身份。接收者只求值一次。返回描述是普通 comptime 值，
+后续编辑不会改变源声明或已保存的描述。它们不复制默认代码、属性、可见性、
+存储编码或方法，也不授予访问源字段的权限；新定义仍经过 builder 的发布检查。
+
+这两个接口使用已有反射和 Object/List 操作在库中组合实现，没有新增编译器
+特判。描述构造仍受 invocation 预算约束，不承诺零拷贝。真实 sysroot 的反射、
+筛选和生成定义用例见 `development/examples/sysroot-reflected-field-objects.fl`。
+
+
+验证（工作目录 `/home/fin/luna`）：
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_reflection_objects_feed_checked_definition_builders`：通过，`/tmp/luna-tools-4vvs3v5u/result.json`。覆盖真实 sysroot、泛型与 opaque 字段、枚举字段形状、描述快照及生成结构体的使用。
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test source_reflection ordered_field_objects`：通过，`/tmp/luna-tools-5y48gdzf/result.json`。错误接收者返回 Type 错误，失败后合法 invocation 可继续执行。

@@ -711,3 +711,41 @@ fn structure_observations_and_subject_calls_execute_as_bytecode() {
         }
     }
 }
+
+#[test]
+fn ordered_field_objects_keep_receiver_admission_and_recover_after_failure() {
+    let package = compile(
+        "use meta.builtin.Type;
+        struct Row { field: bool }
+        pure comptime fn Identity<T> -> Type { T }
+        comptime fn bad_struct() -> meta.Object { bool.struct_fields() }
+        comptime fn bad_enum() -> meta.List<meta.Object> { Row.enum_variant_fields() }
+        comptime fn bad_opaque() -> meta.Object { Identity<Row>.struct_fields() }
+        comptime fn good() -> bool {
+            let fields = Row.struct_fields();
+            fields.length() == 1 and (fields.key(0) matches .field?)
+                and (fields.value<Type>(0) match { value? => value == bool, null => false, })
+        }",
+    )
+    .unwrap();
+    let mut vm = comptime_interpretor::Interpreter::for_comptime(
+        &package,
+        comptime_interpretor::Budget {
+            steps: 1_000_000,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for name in ["bad_struct", "bad_enum", "bad_opaque"] {
+        let failure = vm.invoke(support::id(&package, name), vec![]).unwrap_err();
+        assert_eq!(
+            failure.kind,
+            comptime_interpretor::ErrorKind::Type,
+            "{name}: {failure}"
+        );
+        assert_eq!(
+            vm.invoke(support::id(&package, "good"), vec![]).unwrap(),
+            Value::Bool(true)
+        );
+    }
+}

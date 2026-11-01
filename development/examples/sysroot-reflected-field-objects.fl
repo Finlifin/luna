@@ -1,0 +1,51 @@
+{-
+    Ordered reflection Objects can be transformed and published through builders.
+    No Type is reconstructed from source text, and opaque heads remain intact.
+-}
+pure comptime fn Identity<T> -> Type { T }
+struct Row where T { item: T, ready: bool }
+struct Empty {}
+enum Event where T {
+    idle,
+    pair(T, bool),
+    named { item: T, ready: bool },
+}
+
+comptime fn GeneratedRow() -> Type {
+    let reflected = Row<u32>.struct_fields();
+    let selected = reflected.filter(|entry| entry.key(0) matches .item?);
+    let builder = meta.StructBuilder.from_object(
+        selected.concat({active: bool}), .name = .GeneratedRow) match {
+        value? => value,
+        null => return bool,
+    };
+    builder.Build()
+}
+typealias Generated = GeneratedRow();
+
+comptime fn checked_reflection() -> bool {
+    var selections: Integer = 0;
+    let fields = do { selections += 1; Row<Identity<bool>> }.struct_fields();
+    let variants = Event<Identity<bool>>.enum_variant_fields();
+    let shape = Event<Identity<bool>>.enum_variant_shapes();
+    let row_copy = fields;
+    let edited = fields.replace(1, u8);
+    selections == 1 and fields.length() == 2
+        and (fields.key(0) matches .item?) and (fields.key(1) matches .ready?)
+        and (fields.value<Type>(0) match { value? => value == Identity<bool>, null => false, })
+        and (row_copy.value<Type>(1) match { value? => value == bool, null => false, })
+        and (edited.value<Type>(1) match { value? => value == u8, null => false, })
+        and Empty.struct_fields().length() == 0
+        and variants.length() == 3 and variants[0].length() == 0
+        and variants[1].length() == 2 and (variants[1].key(0) matches null)
+        and (variants[1].value<Type>(0) match { value? => value == Identity<bool>, null => false, })
+        and (variants[2].key(0) matches .item?)
+        and (variants[2].key(1) matches .ready?)
+        and shape[0] == .unit and shape[1] == .tuple and shape[2] == .named
+}
+const checked = checked_reflection();
+
+fn run() -> bool {
+    let generated = Generated {item: 37, active: true};
+    inline if checked { generated.item == 37 and generated.active } else { false }
+}

@@ -1,6 +1,7 @@
 use bindings;
 use builtin.{Symbol, Type};
 use List;
+use bindings.Object;
 
 {-
     Observe declaration order through the checked Type value. Reflection grants
@@ -15,7 +16,41 @@ pub use bindings.enum_variant_shapes;
 pub use bindings.enum_variant_field_names;
 pub use bindings.enum_variant_field_types;
 
+{-
+    Compose the checked parallel reflection lists into ordered field entries.
+    Tuple payloads have no names; named payloads retain their original keys.
+    Object stores each field's Type value, without erasing it to Any.
+-}
+pure comptime fn field_object(names: List<Symbol>, types: List<Type>) -> Object {
+    var fields: Object = {};
+    let count = types.length();
+    inline for index in 0..count {
+        fields = fields.append(types[index], .key = names.get(index));
+    }
+    fields
+}
+
 impl Type {
+    pub pure comptime fn struct_fields(self) -> Object {
+        field_object(self.struct_field_names(), self.struct_field_types())
+    }
+
+    {-
+        One Object per variant, in the same order as enum_variant_paths().
+        Unit cases yield an empty Object; tuple fields are positional entries.
+        These descriptions carry fields only, not default code or attributes.
+    -}
+    pub pure comptime fn enum_variant_fields(self) -> List<Object> {
+        let names = self.enum_variant_field_names();
+        let types = self.enum_variant_field_types();
+        var variants: List<Object> = [];
+        let count = types.length();
+        inline for index in 0..count {
+            variants = variants.concat([field_object(names[index], types[index])]);
+        }
+        variants
+    }
+
     pub pure comptime fn struct_field_names(self) -> List<Symbol> {
         bindings.struct_field_names(self)
     }
