@@ -87,7 +87,13 @@ impl Checker<'_, '_> {
                 return Err(error(span, "generator live data nesting limit exceeded"));
             }
             match value {
-                Value::Pointer(_) | Value::ComptimeReference(_) => live = true,
+                Value::Pointer(_) => {
+                    return Err(error(
+                        span,
+                        "runtime pointer values cannot inhabit generator data",
+                    ));
+                }
+                Value::ComptimeReference(_) => live = true,
                 Value::Tuple(fields)
                 | Value::Record { fields, .. }
                 | Value::Variant { fields, .. } => {
@@ -171,50 +177,6 @@ impl Checker<'_, '_> {
             self.generator_cells.insert(id, (snapshot, cell));
         }
         Ok(())
-    }
-
-    fn generator_pointer_snapshot_checks(
-        &mut self,
-        id: n::LocalId,
-        ty: &Term,
-        cell: &GeneratorCell,
-        statements: &mut Vec<n::Expr>,
-        span: Span,
-    ) -> Result<(), Error> {
-        let Term::Pointer(pointee) = ty else {
-            return Ok(());
-        };
-        let comptime_interpretor::Value::Pointer(pointer) = self.read_generator_cell(cell, span)?
-        else {
-            return Ok(());
-        };
-        let package = n::Package::default();
-        let mut vm = comptime_interpretor::Interpreter::for_comptime(
-            &package,
-            comptime_interpretor::Budget {
-                steps: self.required_steps,
-                depth: 128,
-            },
-        )
-        .map_err(|e| error(span, format!("generator pointer observation failed: {e}")))?;
-        let value = vm.observe_pointer_scalar(&pointer);
-        self.required_steps = vm.remaining_steps();
-        let Some(value) =
-            value.map_err(|e| error(span, format!("generator pointer observation failed: {e}")))?
-        else {
-            return Ok(());
-        };
-        let snapshot = self.materialize_generator_data(value, (**pointee).clone(), span)?;
-        let place = n::Expr {
-            source: source(span),
-            ty: (**pointee).clone(),
-            kind: K::ReadPointer(Box::new(n::Expr {
-                source: source(span),
-                ty: ty.clone(),
-                kind: K::Local(id),
-            })),
-        };
-        self.generator_snapshot_checks(place, &snapshot, statements, span, 0)
     }
 
     fn generator_snapshot_checks(
@@ -618,13 +580,6 @@ impl Checker<'_, '_> {
                     }
                 };
                 live.push((id, ty.clone(), cell.value()));
-                self.generator_pointer_snapshot_checks(
-                    id,
-                    &ty,
-                    &cell,
-                    &mut statements,
-                    value.span,
-                )?;
                 cells.insert(id, cell);
                 self.generator_snapshot_checks(
                     n::Expr {

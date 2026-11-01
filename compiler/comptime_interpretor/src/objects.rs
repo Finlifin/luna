@@ -39,6 +39,9 @@ impl Interpreter<'_> {
                 .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
             self.integer_operation(None, |budget| budget.consume(work.saturating_add(1)))?;
             self.admit_type(&typed.ty, 0)?;
+            let source = SourceRange { start: 0, end: 0 };
+            self.check_comptime_domain(&typed.ty, source)?;
+            self.check_comptime_graph(&typed.value, source, 0)?;
             self.admit_embedded_type_descriptions(&typed.value, 0)?;
             if !self.has_type(&typed.value, &typed.ty) {
                 return Err(self.failure(ErrorKind::Type, None));

@@ -3075,6 +3075,9 @@ impl<'a> Interpreter<'a> {
         }
     }
     fn eval_pointer(&mut self, expr: &Expr, environment: &mut Environment) -> Result<Flow, Error> {
+        if self.comptime_only {
+            return Err(self.failure(ErrorKind::PhaseMismatch, Some(expr.source)));
+        }
         if nir::program::pointer_operation_error_in(expr, self.target).is_some() {
             return Err(self.failure(ErrorKind::Type, Some(expr.source)));
         }
@@ -3161,22 +3164,8 @@ impl<'a> Interpreter<'a> {
                 let Value::Pointer(pointer) = value!(self.eval(pointer, environment)) else {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                 };
-                let immutable_list = self.comptime_only && self.list_element(&expr.ty).is_some();
-                let immutable_object =
-                    self.comptime_only && expr.ty == Term::Primitive(Primitive::Object);
-                if pointer.pointee != expr.ty
-                    || (!immutable_list
-                        && !immutable_object
-                        && !self.permits_pointer_copy(&expr.ty))
-                {
+                if pointer.pointee != expr.ty || !self.permits_pointer_copy(&expr.ty) {
                     return Err(self.failure(ErrorKind::Unsupported, Some(expr.source)));
-                }
-                if immutable_object || immutable_list {
-                    pointer
-                        .inspect(|value| {
-                            self.validate_immutable_storage(value, &expr.ty, expr.source)
-                        })
-                        .map_err(|kind| self.failure(kind, Some(expr.source)))??;
                 }
                 let value = pointer
                     .inspect(|value| self.copy_representation(value, expr.source, 0))
@@ -3191,26 +3180,10 @@ impl<'a> Interpreter<'a> {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                 };
                 let value = value!(self.eval(value, environment));
-                let immutable_list =
-                    self.comptime_only && self.list_element(&pointer.pointee).is_some();
-                let immutable_object =
-                    self.comptime_only && pointer.pointee == Term::Primitive(Primitive::Object);
-                if !immutable_list
-                    && !immutable_object
-                    && !self.permits_pointer_copy(&pointer.pointee)
-                {
+                if !self.permits_pointer_copy(&pointer.pointee) {
                     return Err(self.failure(ErrorKind::Unsupported, Some(expr.source)));
                 }
-                if immutable_object || immutable_list {
-                    // Representation admission alone does not authorize copying
-                    // or discarding nominal resources inside a data container.
-                    self.validate_immutable_storage(&value, &pointer.pointee, expr.source)?;
-                    pointer
-                        .inspect(|old| {
-                            self.validate_immutable_storage(old, &pointer.pointee, expr.source)
-                        })
-                        .map_err(|kind| self.failure(kind, Some(expr.source)))??;
-                } else if !self.has_type(&value, &pointer.pointee) {
+                if !self.has_type(&value, &pointer.pointee) {
                     return Err(self.failure(ErrorKind::Type, Some(expr.source)));
                 }
                 pointer

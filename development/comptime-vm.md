@@ -10489,3 +10489,39 @@ This is not completion of D12 or the broader audit. Generator storage observatio
 still construct declaration metadata snapshots; persistent borrowed worlds and
 other execution architecture work remain separate. Earlier unrelated budget,
 memory-proof and factory baseline failures have not been reclassified as fixed.
+
+
+Remove residual comptime pointer execution and observation
+---------------------------------------------------------
+
+The pointer evaluator now rejects comptime operations before evaluating operands
+or converting a local into pointer-backed storage. The old special Object/list
+pointer transfers and their runtime-copy permission traversal have been removed;
+ordinary value-reference replacements retain their separate representation checks.
+Generator data no longer classifies pointers as legal live state or emits scalar
+pointer snapshots as preconditions. Owned cells and value references continue to
+provide the actual generator state path.
+
+Host-side named Object queries previously admitted pointer payloads and could
+return a borrowed pointer entry even though source pointer expressions were
+forbidden. Queries now validate every entry's comptime storage domain and actual
+payload graph, including entries hidden by duplicate keys. Tests reject direct,
+nested and absent-optional pointer payload domains, then recover on a Type-valued
+pointer description while retaining the borrowed entry identity. Runtime scalar
+pointer observation remains available only in the runtime VM.
+
+Validation from `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor
+  --lib`: 376 passed, exit 0 (`/tmp/luna-tools-j37x0zp0/result.json`). The new
+  address test checks rejection before local mutation, a subsequent successful
+  comptime read, and successful runtime address/read behavior for the same IR.
+- `development/check.py --timeout 900 -- test -p luna --test cmtt
+  --test library_meta_objects --test comptime_pointer_phase
+  --test arithmetic_contexts --no-fail-fast`: exit 0, 592 + 34 + 5 + 11 passed
+  (`/tmp/luna-tools-k7exrqqf/result.json`). Includes real sysroot Object use,
+  quoted runtime pointers, and runtime pointer/BitVec arithmetic behavior.
+- Workspace formatting passed (`/tmp/luna-tools-_d6wovy4/result.json`), and
+  `git diff --check` passed. No validation process remains live.
+
+These removals close obsolete pointer execution paths, not the remaining audit
+items or the entire D12 builtin-package scope.

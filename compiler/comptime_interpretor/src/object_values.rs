@@ -499,34 +499,66 @@ fn property_lookup_keeps_opaque_type_identity_and_type_payloads() {
 }
 
 #[test]
-fn property_lookup_does_not_copy_or_extend_pointer_storage_lifetime() {
+fn property_lookup_rejects_pointer_domains_even_when_hidden_and_recovers() {
     let package = Package::default();
     let storage = Storage::new(Value::Bool(true));
     let pointee = Term::Primitive(Primitive::Bool);
-    let pointer = storage.pointer(pointee.clone(), vec![]);
-    let ty = Term::Pointer(Box::new(pointee));
-    let data = Object::from_entries(vec![ObjectEntry::Property {
-        key: "pointer".into(),
-        value: ObjectValue {
-            ty: ty.clone(),
-            value: Value::Pointer(pointer),
+    let ty = Term::Pointer(Box::new(pointee.clone()));
+    let pointer = ObjectValue {
+        ty: ty.clone(),
+        value: Value::Pointer(storage.pointer(pointee, vec![])),
+    };
+    let absent_ty = Term::Optional(Box::new(ty.clone()));
+    let invalid = [
+        pointer.clone(),
+        ObjectValue {
+            ty: absent_ty.clone(),
+            value: Value::Optional {
+                ty: absent_ty,
+                value: None,
+            },
         },
-    }]);
+        ObjectValue {
+            ty: Term::Primitive(Primitive::Object),
+            value: Value::Object(Object::from_entries(vec![ObjectEntry::Value(pointer)])),
+        },
+    ];
+    let valid = ObjectEntry::Property {
+        key: "selected".into(),
+        value: ObjectValue {
+            ty: Term::Primitive(Primitive::Type),
+            value: Value::Type(ty),
+        },
+    };
     let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
-    let ObjectProperty::Found(value) = vm.lookup_object_property(&data, "pointer", &ty).unwrap()
-    else {
-        panic!()
-    };
-    assert!(std::ptr::eq(value, data.entries()[0].value()));
-    let Value::Pointer(pointer) = &value.value else {
-        panic!()
-    };
-    assert_eq!(
-        vm.observe_pointer_scalar(pointer).unwrap(),
-        Some(Value::Bool(true))
-    );
-    drop(storage);
-    assert_eq!(vm.observe_pointer_scalar(pointer).unwrap(), None);
+    for payload in invalid {
+        // A duplicate key must not hide the earlier invalid payload; neither
+        // must a query for a different or absent key bypass admission.
+        let data = Object::from_entries(vec![
+            ObjectEntry::Property {
+                key: "selected".into(),
+                value: payload,
+            },
+            valid.clone(),
+        ]);
+        for key in ["selected", "absent"] {
+            assert_eq!(
+                vm.lookup_object_property(&data, key, &Term::Primitive(Primitive::Type))
+                    .unwrap_err()
+                    .kind,
+                ErrorKind::PhaseMismatch
+            );
+        }
+        let data = Object::from_entries(vec![valid.clone()]);
+        let ObjectProperty::Found(value) = vm
+            .lookup_object_property(&data, "selected", &Term::Primitive(Primitive::Type))
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert!(std::ptr::eq(value, data.entries()[0].value()));
+        assert_eq!(storage.read().unwrap(), Value::Bool(true));
+    }
 }
 
 #[test]

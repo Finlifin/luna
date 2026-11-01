@@ -702,6 +702,9 @@ impl super::Interpreter<'_> {
         &mut self,
         pointer: &PointerValue,
     ) -> Result<Option<Value>, super::Error> {
+        if self.comptime_only {
+            return Err(self.failure(ErrorKind::PhaseMismatch, None));
+        }
         let work = pointer
             .copy_metadata_work()
             .and_then(|n| n.checked_mul(2))
@@ -835,11 +838,58 @@ mod record_storage_tests {
     }
 
     #[test]
+    fn comptime_cannot_create_pointers_from_host_locals() {
+        use nir::program::{Expr, ExprKind, LocalId, SourceRange};
+        let package = nir::program::Package::default();
+        let id = LocalId { owner: 0, index: 0 };
+        let source = SourceRange { start: 2, end: 8 };
+        let expression = Expr {
+            source,
+            ty: Term::Pointer(Box::new(boolean())),
+            kind: ExprKind::AddressOf(Box::new(Expr {
+                source,
+                ty: boolean(),
+                kind: ExprKind::Local(id),
+            })),
+        };
+        let mut env = super::super::Environment::new();
+        env.insert(id, Value::Bool(true));
+        let mut vm = super::super::Interpreter::for_comptime(&package, Default::default()).unwrap();
+        let error = vm.eval(&expression, &mut env).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::PhaseMismatch);
+        assert_eq!(error.source, Some(source));
+        assert_eq!(env[&id], Value::Bool(true));
+        // A rejected address operation must not turn the ordinary local into
+        // an owned pointer cell; normal comptime reads can still continue.
+        let ExprKind::AddressOf(local) = &expression.kind else {
+            unreachable!()
+        };
+        assert!(matches!(
+            vm.eval(local, &mut env).unwrap(),
+            super::super::Flow::Value(Value::Bool(true))
+        ));
+        let mut runtime = super::super::Interpreter::new(&package, Default::default()).unwrap();
+        let super::super::Flow::Value(Value::Pointer(pointer)) =
+            runtime.eval(&expression, &mut env).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(pointer.read().unwrap(), Value::Bool(true));
+    }
+
+    #[test]
     fn pointer_scalar_observations_are_fresh_bounded_and_non_owning() {
         let package = nir::program::Package::default();
-        let mut vm = super::super::Interpreter::for_comptime(&package, Default::default()).unwrap();
+        let mut vm = super::super::Interpreter::new(&package, Default::default()).unwrap();
         let owner = Storage::new(Value::Bool(false));
         let pointer = owner.pointer(boolean(), vec![]);
+        let mut comptime =
+            super::super::Interpreter::for_comptime(&package, Default::default()).unwrap();
+        assert_eq!(
+            comptime.observe_pointer_scalar(&pointer).unwrap_err().kind,
+            ErrorKind::PhaseMismatch
+        );
+        assert_eq!(owner.read().unwrap(), Value::Bool(false));
         assert_eq!(
             vm.observe_pointer_scalar(&pointer).unwrap(),
             Some(Value::Bool(false))
