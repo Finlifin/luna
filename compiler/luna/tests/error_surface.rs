@@ -2481,7 +2481,6 @@ fn error_result_storage_cannot_hide_comptime_only_payloads() {
     for source in [
         "typealias MetaType=.Type'builtin; enum Fault {bad} fn invalid(value:!Fault MetaType) {}",
         "enum Fault {bad(.Type'builtin)} fn invalid(value:!Fault bool) {}",
-        "typealias Integer=.Integer'builtin; enum Fault {bad} fn invalid(value:*!Fault Integer) {}",
     ] {
         let error = compile(source, Emit::Nir)
             .err()
@@ -2493,6 +2492,27 @@ fn error_result_storage_cannot_hide_comptime_only_payloads() {
         )
         .unwrap();
     }
+    let pointer =
+        "typealias Integer=.Integer'builtin; enum Fault {bad} fn invalid(value:*!Fault Integer) {}";
+    let error = compile(pointer, Emit::Nir)
+        .err()
+        .expect("runtime comptime-only payload");
+    assert!(error.contains("comptime-only"), "{error}");
+    let error = compile(
+        &pointer.replace("fn invalid", "comptime fn invalid"),
+        Emit::Nir,
+    )
+    .err()
+    .expect("comptime pointer storage");
+    assert!(
+        error.contains("runtime pointer values cannot inhabit comptime storage"),
+        "{error}"
+    );
+    compile(
+        "enum Fault {bad} fn valid(value:*!Fault bool) {}",
+        Emit::Nir,
+    )
+    .unwrap();
     compile("enum Fault {bad} fn valid(value:!Fault bool) {}", Emit::Nir).unwrap();
 }
 
