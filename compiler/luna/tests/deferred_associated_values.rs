@@ -133,3 +133,24 @@ fn required_associated_values_use_the_selected_member_domain() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn required_inputs_observe_associated_domains_after_prior_type_arguments() {
+    for phase in ["", "comptime "] {
+        let source = format!(
+            "typealias Type=.Type'builtin;
+            trait Source {{ assoc Item:Type; }}
+            impl Source for bool {{ assoc Item:Type=bool; }}
+            comptime fn echo(comptime T:Type, {phase}value:T.as(Source).Item)->T.as(Source).Item
+            where requires T :- Source
+            {{ value }}
+            const saved=echo(bool, true);
+            comptime fn run()->bool {{ saved }}"
+        );
+        let package = support::compile_with_protocols(&source, &Default::default()).unwrap();
+        assert_eq!(
+            luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+            Value::Bool(true)
+        );
+    }
+}

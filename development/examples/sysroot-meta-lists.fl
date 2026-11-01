@@ -460,5 +460,11 @@ where requires T :- FlagValues
 const saved_flag_values = flag_values(bool);
 
 comptime fn associated_flags() -> bool {
-    saved_flag_values.length() == 2 and saved_flag_values[0] and not saved_flag_values[1]
+    flag_inputs(bool, saved_flag_values).length() == 2 and saved_flag_values[0] and not saved_flag_values[1]
+}
+
+comptime fn flag_inputs(comptime T: Type, values: meta.List<T.as(FlagValues).Item>) -> meta.List<T.as(FlagValues).Item>
+where requires T :- FlagValues
+{
+    values
 }

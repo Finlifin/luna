@@ -2487,6 +2487,29 @@ impl<'a> Interpreter<'a> {
         for (index, ((binding, argument), parameter)) in
             parameters.iter().zip(arguments).zip(types).enumerate()
         {
+            // Type observation may invoke associated programs. Finish it
+            // before borrowing the argument's value-reference storage.
+            self.charge_copy_work(Some(source), |fuel| {
+                nir::copy_budget::charge_type_substitution(&parameter.ty, &[], &[], fuel)
+            })?;
+            let expected = match builder.as_mut() {
+                Some(builder) => std::borrow::Cow::Borrowed(
+                    builder
+                        .next_type()
+                        .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?,
+                ),
+                None => std::borrow::Cow::Owned(
+                    parameter
+                        .ty
+                        .substitute_partial(&[])
+                        .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?,
+                ),
+            };
+            expected
+                .check_scope(&[])
+                .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
+            let expected = self.selected_type_view(&expected, Some(source))?;
+            self.check_comptime_domain(&expected, source)?;
             if self.comptime_only
                 && parameter.sort == nir::Sort::Runtime
                 && !matches!(argument, Value::Storage(_))
@@ -2507,23 +2530,6 @@ impl<'a> Interpreter<'a> {
                     .as_ref()
                     .map_or(&argument, |contents| contents.value());
                 self.check_borrowed_representation(representation, source, 0)?;
-                let expected = match builder.as_mut() {
-                    Some(builder) => std::borrow::Cow::Borrowed(
-                        builder
-                            .next_type()
-                            .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?,
-                    ),
-                    None => std::borrow::Cow::Owned(
-                        parameter
-                            .ty
-                            .substitute_partial(&[])
-                            .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?,
-                    ),
-                };
-                expected
-                    .check_scope(&[])
-                    .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
-                self.check_comptime_domain(&expected, source)?;
                 if !self.has_type(representation, &expected) {
                     return Err(self.failure(ErrorKind::Type, Some(source)));
                 }
@@ -2549,23 +2555,6 @@ impl<'a> Interpreter<'a> {
                 }
                 value => std::borrow::Cow::Owned(self.checkpoint_representation(value, source)?),
             };
-            let expected = match builder.as_mut() {
-                Some(builder) => std::borrow::Cow::Borrowed(
-                    builder
-                        .next_type()
-                        .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?,
-                ),
-                None => std::borrow::Cow::Owned(
-                    parameter
-                        .ty
-                        .substitute_partial(&[])
-                        .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?,
-                ),
-            };
-            expected
-                .check_scope(&[])
-                .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
-            self.check_comptime_domain(&expected, source)?;
             if !self.has_type(&representation, &expected) {
                 return Err(self.failure(ErrorKind::Type, Some(source)));
             }
@@ -2574,7 +2563,7 @@ impl<'a> Interpreter<'a> {
             }
             let input = if parameter.sort == nir::Sort::Type
                 || (parameter.sort == nir::Sort::ComptimeValue
-                    && *expected == Term::Primitive(Primitive::Type))
+                    && expected == Term::Primitive(Primitive::Type))
             {
                 let ty = match representation.as_ref() {
                     Value::Type(ty) => ty.clone(),

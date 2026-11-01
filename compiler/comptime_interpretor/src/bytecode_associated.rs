@@ -383,3 +383,101 @@ fn associated_result_domains_survive_query_local_type_observations() {
         assert!(vm.active_associated_initializers.is_empty());
     }
 }
+
+#[test]
+fn associated_input_domains_admit_values_and_reject_mismatches() {
+    let package = Package::default();
+    let reference = ValueReference::owned(Value::Bool(true));
+    let resolver = |_: &Expr, fuel: &mut u64| {
+        *fuel -= 1;
+        // Resolving a domain must not hold the actual argument's storage lock.
+        assert!(matches!(
+            reference.borrow(fuel).unwrap().value(),
+            Value::Bool(true)
+        ));
+        Ok(AssociatedSelection {
+            initializer: nir::associated_initializers::AssociatedInitializer::new(
+                Expr {
+                    source: SOURCE,
+                    ty: Term::Primitive(Primitive::Type),
+                    kind: K::TypeValue(Term::Primitive(Primitive::Bool)),
+                },
+                &mut 1000,
+            )
+            .unwrap(),
+            requires_invocation: true,
+        })
+    };
+    for sort in [nir::Sort::Runtime, nir::Sort::ComptimeValue] {
+        let signature = Term::ComptimeFunction(Box::new(Term::Function {
+            parameters: vec![
+                nir::Parameter {
+                    sort: nir::Sort::Type,
+                    ty: Term::Primitive(Primitive::Type),
+                },
+                nir::Parameter {
+                    sort,
+                    ty: Term::AssociatedType {
+                        origin: Box::new(nir::AssociatedTypeOrigin {
+                            interface: id(1),
+                            member: id(3),
+                        }),
+                        arguments: vec![],
+                        subject: Box::new(Term::Bound {
+                            depth: 0,
+                            index: 0,
+                            sort: nir::Sort::Type,
+                        }),
+                    },
+                },
+            ],
+            result: Box::new(Term::Primitive(Primitive::Bool)),
+        }));
+        let parameters = [
+            LocalId { owner: 7, index: 0 },
+            LocalId { owner: 7, index: 1 },
+        ];
+        let mut vm = Interpreter::for_comptime(&package, Budget::default())
+            .unwrap()
+            .with_associated_resolver(&resolver);
+        let mut environment = Environment::default();
+        vm.bind_invocation_inputs(
+            &parameters,
+            vec![
+                Value::Type(Term::Primitive(Primitive::Bool)),
+                Value::ComptimeReference(reference.clone()),
+            ],
+            &signature,
+            &mut environment,
+            SOURCE,
+        )
+        .unwrap();
+        assert_eq!(
+            environment[&parameters[1]],
+            Value::ComptimeReference(reference.clone())
+        );
+        for (value, valid) in [
+            (Value::Bool(true), true),
+            (Value::Char('x'), false),
+            (Value::Bool(false), true),
+        ] {
+            let mut environment = Environment::default();
+            let result = vm.bind_invocation_inputs(
+                &parameters,
+                vec![Value::Type(Term::Primitive(Primitive::Bool)), value],
+                &signature,
+                &mut environment,
+                SOURCE,
+            );
+            if valid {
+                result.unwrap();
+                assert!(environment.contains_key(&parameters[1]));
+            } else {
+                assert_eq!(result.unwrap_err().kind, ErrorKind::Type);
+                assert!(!environment.contains_key(&parameters[1]));
+            }
+            assert!(!vm.associated_values.contains_key(&key(3)));
+            assert!(vm.active_associated_initializers.is_empty());
+        }
+    }
+}

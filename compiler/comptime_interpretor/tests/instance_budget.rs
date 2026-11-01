@@ -176,7 +176,29 @@ fn cached_instances_preflight_program_contract_copies_on_each_call() {
                 .unwrap(),
             Value::Bool(true)
         );
-        vm.charge_preparation((vm.remaining_steps() - 2000) as usize)
+        // Measure admission and input checking without program predicates.
+        // A fixed allowance can expire earlier as those checks evolve, hiding
+        // whether the cached invocation still preflights its contract copies.
+        let mut baseline_package = package.clone();
+        baseline_package.functions[0].preconditions.clear();
+        baseline_package.functions[0].postconditions.clear();
+        let mut baseline = Interpreter::for_comptime(
+            &baseline_package,
+            Budget {
+                steps: 100_000,
+                depth: 128,
+            },
+        )
+        .unwrap();
+        baseline
+            .invoke_instantiated(id(1), vec![input.clone()], vec![value.clone()])
+            .unwrap();
+        let before = baseline.remaining_steps();
+        baseline
+            .invoke_instantiated(id(1), vec![input.clone()], vec![value.clone()])
+            .unwrap();
+        let admission = before - baseline.remaining_steps();
+        vm.charge_preparation((vm.remaining_steps() - admission - 100) as usize)
             .unwrap();
         let error = vm
             .invoke_instantiated(id(1), vec![input], vec![value])

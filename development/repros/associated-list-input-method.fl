@@ -1,0 +1,15 @@
+{- Known gap: inherent method selection on a collection whose element domain
+   depends on an ordinary Type input reports an invalid caller binder.
+   Reproduce with luna check and the repository sysroot. -}
+trait Source {
+    assoc Item: Type;
+}
+impl Source for bool {
+    assoc Item: Type = bool;
+}
+comptime fn count(comptime T: Type, values: meta.List<T.as(Source).Item>) -> usize
+where requires T :- Source
+{
+    values.length()
+}
+const count_result = count(bool, [true, false]);
