@@ -19,6 +19,84 @@ enum Node {
     },
 }
 
+#[derive(Clone)]
+struct Cursor<'a> {
+    pending: Vec<&'a Node>,
+    leaf: std::slice::Iter<'a, Value>,
+}
+impl<'a> Cursor<'a> {
+    fn new(root: &'a Node) -> Self {
+        match root {
+            Node::Leaf(values) => Self {
+                pending: Vec::new(),
+                leaf: values.iter(),
+            },
+            Node::Branch { .. } => Self {
+                pending: vec![root],
+                leaf: [].iter(),
+            },
+        }
+    }
+    fn next(&mut self, reverse: bool) -> Option<&'a Value> {
+        loop {
+            if let Some(value) = if reverse {
+                self.leaf.next_back()
+            } else {
+                self.leaf.next()
+            } {
+                return Some(value);
+            }
+            match self.pending.pop()? {
+                Node::Leaf(values) => self.leaf = values.iter(),
+                Node::Branch { left, right, .. } => {
+                    let (first, second) = if reverse {
+                        (right, left)
+                    } else {
+                        (left, right)
+                    };
+                    self.pending.push(second);
+                    self.pending.push(first);
+                }
+            }
+        }
+    }
+}
+
+/// Borrowed traversal uses two bounded tree cursors and never copies elements.
+/// A shared remaining count stops opposite cursors before they cross.
+#[derive(Clone)]
+pub struct ListIter<'a> {
+    front: Cursor<'a>,
+    back: Cursor<'a>,
+    remaining: usize,
+}
+impl<'a> Iterator for ListIter<'a> {
+    type Item = &'a Value;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        let value = self.front.next(false)?;
+        self.remaining -= 1;
+        Some(value)
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+}
+impl DoubleEndedIterator for ListIter<'_> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        let value = self.back.next(true)?;
+        self.remaining -= 1;
+        Some(value)
+    }
+}
+impl ExactSizeIterator for ListIter<'_> {}
+impl std::iter::FusedIterator for ListIter<'_> {}
+
 impl Node {
     fn len(&self) -> usize {
         match self {
@@ -137,6 +215,13 @@ impl From<Vec<Value>> for Storage {
     }
 }
 impl Storage {
+    pub fn iter(&self) -> ListIter<'_> {
+        ListIter {
+            front: Cursor::new(&self.root),
+            back: Cursor::new(&self.root),
+            remaining: self.len(),
+        }
+    }
     pub fn len(&self) -> usize {
         self.root.len()
     }
@@ -363,5 +448,73 @@ mod tests {
         assert!(list.element(4096).is_none());
         assert!(list.element(usize::MAX).is_none());
         assert!(list.flat.get().is_none());
+    }
+
+    #[test]
+    fn borrowed_iteration_preserves_order_and_mixed_end_exhaustion() {
+        for len in [0, 1, 2, 19, 1024] {
+            let expected: Vec<_> = (0..len).map(Value::UnsignedInteger).collect();
+            for chunked in [false, true] {
+                let mut list = Storage::from(if chunked { vec![] } else { expected.clone() });
+                if chunked {
+                    for chunk in expected.chunks(3) {
+                        let snapshot = list.clone();
+                        list.append(Storage::from(chunk.to_vec()));
+                        assert!(snapshot.len() < list.len());
+                    }
+                }
+                assert!(list.iter().eq(expected.iter()));
+                assert!(list.iter().rev().eq(expected.iter().rev()));
+                for seed in [1usize, 19, 271] {
+                    let mut seed = seed;
+                    let mut iter = list.iter();
+                    let mut reference = expected.iter();
+                    while reference.len() > 0 {
+                        assert_eq!(iter.size_hint(), reference.size_hint());
+                        assert!(iter.clone().eq(reference.clone()));
+                        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                        let (actual, expected) = if seed & 4 == 0 {
+                            (iter.next(), reference.next())
+                        } else {
+                            (iter.next_back(), reference.next_back())
+                        };
+                        assert_eq!(actual, expected);
+                        assert!(iter.front.pending.len() <= list.root.height());
+                        assert!(iter.back.pending.len() <= list.root.height());
+                    }
+                    assert_eq!(iter.len(), 0);
+                    for _ in 0..3 {
+                        assert_eq!(iter.next(), None);
+                        assert_eq!(iter.next_back(), None);
+                    }
+                }
+                assert!(list.flat.get().is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn list_observation_equality_and_debug_do_not_materialize_payloads() {
+        use super::super::ListValues;
+        let mut values = ListValues::default();
+        for i in 0..256 {
+            let snapshot = values.clone();
+            values.append_payload(vec![Value::UnsignedInteger(i)].into());
+            assert_eq!(snapshot.len(), i as usize);
+        }
+        let expected: Vec<_> = (0..256).map(Value::UnsignedInteger).collect();
+        assert_eq!(values, expected);
+        assert_eq!(format!("{values:?}"), format!("{expected:?}"));
+        let value = Value::List {
+            ty: crate::Term::Primitive(crate::Primitive::Bool),
+            values,
+        };
+        // Structural inspection does not establish the intentionally mismatched
+        // element domain, but still visits every machine-integer payload.
+        assert!(value.immutable_copy_work().is_some());
+        let Value::List { values, .. } = value else {
+            unreachable!()
+        };
+        assert!(values.values.flat.get().is_none());
     }
 }

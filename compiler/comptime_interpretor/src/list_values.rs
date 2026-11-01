@@ -6,6 +6,7 @@ use std::{
     ops::{Deref, DerefMut},
     sync::OnceLock,
 };
+pub use storage::ListIter;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Summary {
@@ -84,6 +85,9 @@ impl ListValues {
     pub fn first(&self) -> Option<&Value> {
         self.values.first()
     }
+    pub fn iter(&self) -> ListIter<'_> {
+        self.values.iter()
+    }
     /// Read one immutable element without materializing a contiguous payload.
     /// The work count includes each visited tree node, including the leaf.
     pub(crate) fn element(&self, index: usize) -> Option<(&Value, usize)> {
@@ -139,9 +143,9 @@ impl IntoIterator for ListValues {
 }
 impl<'a> IntoIterator for &'a ListValues {
     type Item = &'a Value;
-    type IntoIter = std::slice::Iter<'a, Value>;
+    type IntoIter = ListIter<'a>;
     fn into_iter(self) -> Self::IntoIter {
-        self.values.flat().iter()
+        self.iter()
     }
 }
 impl<'a> IntoIterator for &'a mut ListValues {
@@ -153,17 +157,17 @@ impl<'a> IntoIterator for &'a mut ListValues {
 }
 impl PartialEq for ListValues {
     fn eq(&self, other: &Self) -> bool {
-        self.values.flat() == other.values.flat()
+        self.len() == other.len() && self.iter().eq(other.iter())
     }
 }
 impl PartialEq<Vec<Value>> for ListValues {
     fn eq(&self, other: &Vec<Value>) -> bool {
-        self.values.flat() == other
+        self.len() == other.len() && self.iter().eq(other.iter())
     }
 }
 impl fmt::Debug for ListValues {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.values.flat().fmt(f)
+        f.debug_list().entries(self.iter()).finish()
     }
 }
 

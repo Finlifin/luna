@@ -858,7 +858,7 @@ mod declaration_index;
 mod layout_catalog;
 mod list_values;
 mod source_state;
-pub use list_values::ListValues;
+pub use list_values::{ListIter, ListValues};
 mod method_catalog;
 pub use code_session::CodeSession;
 
