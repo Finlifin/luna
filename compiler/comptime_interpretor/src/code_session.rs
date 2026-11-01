@@ -141,7 +141,7 @@ impl<'program> Interpreter<'program> {
                 initializers: vm.associated_initializers.positions.clone(),
                 method_contracts: vm.method_contracts.entries.clone(),
                 normal_forms: vm.normal_forms.positions.clone(),
-                newtypes: vm.newtypes.positions.clone(),
+                newtypes: vm.newtypes.source.positions.clone(),
                 aliases: vm.alias_contracts.positions.clone(),
                 structs: Arc::new(
                     package
@@ -402,7 +402,7 @@ mod tests {
         let identities = first.runtime_function_identities.positions.clone();
         let effects = first.effect_declarations.positions.clone();
         let heads = first.normal_forms.positions.clone();
-        let newtypes = first.newtypes.positions.clone();
+        let newtypes = first.newtypes.source.positions.clone();
         let aliases = first.alias_contracts.positions.clone();
         let domains = first.declaration_parameter_domains.clone();
         let sorts = first.declaration_parameter_sorts.clone();
@@ -428,7 +428,7 @@ mod tests {
                 .unwrap(),
             &source.normal_forms[0]
         ));
-        assert!(Arc::ptr_eq(&newtypes, &next.newtypes.positions));
+        assert!(Arc::ptr_eq(&newtypes, &next.newtypes.source.positions));
         assert!(Arc::ptr_eq(&aliases, &next.alias_contracts.positions));
         assert!(std::ptr::eq(
             next.newtypes.get(&source.newtypes[0].declaration).unwrap(),

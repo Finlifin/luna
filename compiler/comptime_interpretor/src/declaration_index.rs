@@ -60,7 +60,66 @@ pub(super) type RuntimeIdentities<'a> = Declarations<'a, nir::program::RuntimeFu
 
 pub(super) type Effects<'a> = Declarations<'a, nir::effects::Declaration>;
 
-pub(super) type Newtypes<'a> = Declarations<'a, nir::newtypes::Newtype>;
+/// Source indexes stay shared across invocations; published additions are local.
+pub(super) struct Newtypes<'a> {
+    pub(super) source: Declarations<'a, nir::newtypes::Newtype>,
+    local: BTreeMap<DeclarationId, generated_newtypes::NewtypeDefinition<'a>>,
+}
+impl<'a> Newtypes<'a> {
+    pub(super) fn new(
+        declarations: &'a [nir::newtypes::Newtype],
+        positions: Option<Arc<BTreeMap<DeclarationId, usize>>>,
+        identity: impl Fn(&nir::newtypes::Newtype) -> DeclarationId,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            source: Declarations::new(declarations, positions, identity)?,
+            local: BTreeMap::new(),
+        })
+    }
+    pub(super) fn get(&self, id: &DeclarationId) -> Option<&nir::newtypes::Newtype> {
+        self.local
+            .get(id)
+            .map(|definition| &**definition)
+            .or_else(|| self.source.get(id))
+    }
+    pub(super) fn handle(
+        &self,
+        id: &DeclarationId,
+    ) -> Option<generated_newtypes::NewtypeDefinition<'a>> {
+        self.local.get(id).cloned().or_else(|| {
+            self.source
+                .get(id)
+                .map(generated_newtypes::NewtypeDefinition::Borrowed)
+        })
+    }
+    pub(super) fn values(&self) -> impl Iterator<Item = &nir::newtypes::Newtype> + Clone {
+        self.source
+            .values()
+            .chain(self.local.values().map(|definition| &**definition))
+    }
+    pub(super) fn contains_key(&self, id: &DeclarationId) -> bool {
+        self.source.contains_key(id) || self.local.contains_key(id)
+    }
+    pub(super) fn insert(
+        &mut self,
+        id: DeclarationId,
+        definition: generated_newtypes::NewtypeDefinition<'a>,
+    ) {
+        debug_assert!(!self.contains_key(&id));
+        self.local.insert(id, definition);
+    }
+    pub(super) fn remove(&mut self, id: &DeclarationId) {
+        self.local.remove(id);
+    }
+}
+impl Default for Newtypes<'_> {
+    fn default() -> Self {
+        Self {
+            source: Declarations::default(),
+            local: BTreeMap::new(),
+        }
+    }
+}
 pub(super) type Aliases<'a> = Declarations<'a, nir::type_aliases::Contract>;
 
 pub(super) type NormalForms<'a> = Declarations<'a, nir::normal_forms::Head>;

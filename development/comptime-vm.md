@@ -10977,3 +10977,41 @@ Validation from `/home/fin/luna`:
   exit 0 (`/tmp/luna-tools-bqmsod5w/result.json`).
 - Workspace formatting passed (`/tmp/luna-tools-1j8xuvt0/result.json`);
   `git diff --check` passed.
+
+
+### Concrete newtype publication admission
+
+The newtype table now combines the existing shared source-position index with
+invocation-local borrowed/shared descriptors. Owning handles let pending nominal
+input plans and type-pattern observations retain a published definition without
+borrowing the mutable VM or copying its representation. Newtype conversion
+looks up both source and generated descriptors through the same path.
+
+Host installation checks identity collisions across declaration kinds, closed
+representation Types, and formation requirements in the combined batch world.
+Tentative entries roll back on admission failure, exhausted fuel, callback
+rejection or unwind. Shared batches retain their own lifetime, and rollback
+releases ownership. DefinitionAdmissionSession now accepts newtype receipts,
+sharing the existing revision and prepaid commit protocol with struct/enum
+receipts; stale/foreign receipts cannot invoke publication callbacks.
+
+Tests execute wrap/unwrap via both carriers, validate forward references and
+unknown descriptions, sweep every insufficient installation fuel budget, retry
+after exhaustion, and exercise cross-kind collisions, receipt invalidation,
+failed commits and ownership release. Existing source-index sharing remains
+covered by the interpreter session tests.
+
+Validation from `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor`:
+  passed, exit 0 (`/tmp/luna-tools-oj35gdbl/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test newtypes`:
+  212 passed, exit 0 (`/tmp/luna-tools-s9m28i9p/result.json`).
+- Formatting check passed (`/tmp/luna-tools-zlkgfeyp/result.json`);
+  `git diff --check` passed.
+
+This is the host admission prerequisite, not a source NewtypeBuilder delivery.
+Next wiring must add the checked declaration publisher, source request lowering,
+VM request dispatch, library bindings and a real-sysroot test. Generic/captured
+newtype descriptions remain unsupported at this boundary. As for struct/enum
+installation, ordinary declaration and layout-cycle checking belongs to the
+publisher; this VM entry is not a replacement for that service.

@@ -56,12 +56,14 @@ mod trait_methods;
 mod value_reference;
 pub use objects::ObjectProperty;
 pub use value_reference::ValueReference;
+mod generated_newtypes;
+pub use generated_newtypes::NewtypePublicationError;
 mod generated_enums;
 pub use generated_enums::EnumPublicationError;
 mod generated_structs;
 pub use generated_structs::{
-    DefinitionAdmissionSession, PreparedEnumAdmission, PreparedStructAdmission,
-    StructAdmissionSession, StructPublicationError,
+    DefinitionAdmissionSession, PreparedEnumAdmission, PreparedNewtypeAdmission,
+    PreparedStructAdmission, StructAdmissionSession, StructPublicationError,
 };
 mod definition_diagnostics;
 pub use definition_diagnostics::DefinitionBuildError;

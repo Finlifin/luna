@@ -19,6 +19,13 @@ pub struct PreparedEnumAdmission {
     revision: u64,
 }
 
+/// A newtype admission receipt shares the session revision with struct receipts.
+pub struct PreparedNewtypeAdmission {
+    definitions: Arc<[nir::newtypes::Newtype]>,
+    identity: Arc<()>,
+    revision: u64,
+}
+
 /// Completed admission with prepaid installation work. Dropping it publishes
 /// nothing. Private fields prevent replacing the descriptions after checking.
 pub struct PreparedStructAdmission {
@@ -116,7 +123,7 @@ impl<'world> DefinitionAdmissionSession<'world> {
         })
     }
 
-    /// A commit of either definition kind invalidates all competing receipts.
+    /// A commit of any definition kind invalidates all competing receipts.
     /// Insertion has already been paid for; failed callbacks preserve revision.
     pub fn commit_enums_with<T, E>(
         &mut self,
@@ -136,6 +143,59 @@ impl<'world> DefinitionAdmissionSession<'world> {
         let result = self
             .vm
             .commit_admitted_enums_with(prepared.definitions, commit)?;
+        self.revision = next.unwrap();
+        Ok(result)
+    }
+
+    /// Prepare a newtype batch without exposing tentative entries to later calls.
+    pub fn prepare_newtypes(
+        &mut self,
+        definitions: Arc<[nir::newtypes::Newtype]>,
+        budget: &mut Budget,
+    ) -> Result<PreparedNewtypeAdmission, Error> {
+        let reserved = std::mem::take(&mut budget.steps);
+        self.vm.budget = Budget {
+            steps: reserved,
+            depth: budget.depth,
+        };
+        let allowance = Allowance {
+            vm: &mut self.vm,
+            budget,
+            reserved,
+        };
+        allowance
+            .vm
+            .charge_preparation(definitions.len().saturating_mul(2))?;
+        drop(allowance.vm.prepare_generated_newtypes(
+            crate::generated_newtypes::NewtypeBatch::Shared(Arc::clone(&definitions)),
+        )?);
+        Ok(PreparedNewtypeAdmission {
+            definitions,
+            identity: Arc::clone(&self.identity),
+            revision: self.revision,
+        })
+    }
+
+    /// A commit of any definition kind invalidates all competing receipts.
+    /// Insertion has already been paid for; failed callbacks preserve revision.
+    pub fn commit_newtypes_with<T, E>(
+        &mut self,
+        prepared: PreparedNewtypeAdmission,
+        commit: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, crate::NewtypePublicationError<E>> {
+        let next = self.revision.checked_add(1);
+        if !Arc::ptr_eq(&self.identity, &prepared.identity)
+            || self.revision != prepared.revision
+            || next.is_none()
+        {
+            return Err(crate::NewtypePublicationError::Admission(Error {
+                kind: ErrorKind::InvalidCallPlan,
+                source: None,
+            }));
+        }
+        let result = self
+            .vm
+            .commit_admitted_newtypes_with(prepared.definitions, commit)?;
         self.revision = next.unwrap();
         Ok(result)
     }
@@ -208,6 +268,20 @@ impl fmt::Display for PreparedEnumAdmission {
         write!(
             f,
             "(prepared-enum-admission (revision {}) (definitions",
+            self.revision
+        )?;
+        for definition in self.definitions.iter() {
+            write!(f, " {}", definition.declaration)?;
+        }
+        f.write_str("))")
+    }
+}
+
+impl fmt::Display for PreparedNewtypeAdmission {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(prepared-newtype-admission (revision {}) (definitions",
             self.revision
         )?;
         for definition in self.definitions.iter() {

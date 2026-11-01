@@ -2,8 +2,8 @@
 use super::*;
 mod admission_session;
 pub use admission_session::{
-    DefinitionAdmissionSession, PreparedEnumAdmission, PreparedStructAdmission,
-    StructAdmissionSession,
+    DefinitionAdmissionSession, PreparedEnumAdmission, PreparedNewtypeAdmission,
+    PreparedStructAdmission, StructAdmissionSession,
 };
 
 /// Distinguish VM admission from the publisher's final commit failure.

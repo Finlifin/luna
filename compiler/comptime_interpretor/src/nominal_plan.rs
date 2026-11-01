@@ -21,7 +21,7 @@ enum Contract<'a> {
     Alias(&'a nir::type_aliases::Contract),
     Struct(generated_structs::StructDefinition<'a>),
     Enum(generated_enums::EnumDefinition<'a>),
-    Newtype(&'a nir::newtypes::Newtype),
+    Newtype(generated_newtypes::NewtypeDefinition<'a>),
 }
 macro_rules! contract_data {
     ($value:expr, $def:ident, $body:expr) => {
@@ -130,7 +130,7 @@ impl<'a, 'e> Frame<'a, 'e> {
             Contract::Struct(def.clone())
         } else if let Some(def) = vm.enums.get(declaration) {
             Contract::Enum(def.clone())
-        } else if let Some(def) = vm.newtypes.get(declaration) {
+        } else if let Some(def) = vm.newtypes.handle(declaration) {
             Contract::Newtype(def)
         } else {
             return Err(vm.failure(ErrorKind::Type, Some(expr.source)));

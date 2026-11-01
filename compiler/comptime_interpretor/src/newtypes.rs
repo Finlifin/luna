@@ -167,7 +167,7 @@ mod tests {
                 vm.local_value(&env, TRACE, Some(SOURCE)).unwrap(),
                 Value::Bool(true)
             );
-            let position = Arc::make_mut(&mut vm.newtypes.positions)
+            let position = Arc::make_mut(&mut vm.newtypes.source.positions)
                 .remove(&package.newtypes[0].declaration)
                 .unwrap();
             env.insert(TRACE, Value::Bool(false));
@@ -181,7 +181,7 @@ mod tests {
                 vm.local_value(&env, TRACE, Some(SOURCE)).unwrap(),
                 Value::Bool(false)
             );
-            Arc::make_mut(&mut vm.newtypes.positions)
+            Arc::make_mut(&mut vm.newtypes.source.positions)
                 .insert(package.newtypes[0].declaration, position);
             for (input, output, value, observed) in [
                 (

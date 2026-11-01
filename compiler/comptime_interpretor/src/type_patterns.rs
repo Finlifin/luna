@@ -219,11 +219,12 @@ impl<'a> Interpreter<'a> {
                 self.tick(None)?;
                 let struct_definition = self.structs.get(&declaration).cloned();
                 let enum_definition = self.enums.get(&declaration).cloned();
+                let newtype_definition = self.newtypes.handle(&declaration);
                 let domains = if let Some(def) = struct_definition.as_ref() {
                     def.parameter_types.as_slice()
                 } else if let Some(def) = enum_definition.as_ref() {
                     def.parameter_types.as_slice()
-                } else if let Some(def) = self.newtypes.get(&declaration) {
+                } else if let Some(def) = newtype_definition.as_ref() {
                     def.parameter_types.as_slice()
                 } else {
                     return Err(self.failure(ErrorKind::Type, None));

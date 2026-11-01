@@ -329,3 +329,126 @@ fn enum_admission_budget_failure_is_retryable_and_commit_is_prepaid() {
     assert_eq!(fuel.steps, 0);
     assert!(session.prepare(batch(2, nominal(1)), &mut budget()).is_ok());
 }
+
+fn newtype_batch(local: u32, representation: Term) -> Arc<[nir::newtypes::Newtype]> {
+    vec![nir::newtypes::Newtype {
+        declaration: id(local),
+        name: "GeneratedNewtype".into(),
+        type_parameters: vec![],
+        parameter_types: vec![],
+        capture_count: 0,
+        requirements: vec![],
+        capabilities: vec![],
+        representation,
+    }]
+    .into()
+}
+
+#[test]
+fn newtype_receipts_share_revision_visibility_and_identity_with_other_kinds() {
+    use comptime_interpretor::NewtypePublicationError;
+    let world = Package::default();
+    let mut fuel = budget();
+    let mut session = StructAdmissionSession::new(&world, &mut fuel).unwrap();
+    let structure = session.prepare(batch(1, boolean()), &mut fuel).unwrap();
+    let stale = session
+        .prepare_newtypes(newtype_batch(2, boolean()), &mut fuel)
+        .unwrap();
+    assert!(
+        stale
+            .to_string()
+            .starts_with("(prepared-newtype-admission ")
+    );
+    session.commit_with(structure, || Ok::<_, ()>(())).unwrap();
+    let called = Cell::new(false);
+    assert!(
+        matches!(session.commit_newtypes_with(stale, || {called.set(true); Ok::<_, ()>(())}),
+        Err(NewtypePublicationError::Admission(error)) if error.kind == ErrorKind::InvalidCallPlan)
+    );
+    assert!(!called.get());
+    assert!(
+        session
+            .prepare_newtypes(newtype_batch(1, boolean()), &mut fuel)
+            .is_err()
+    );
+    let current = session
+        .prepare_newtypes(newtype_batch(2, nominal(1)), &mut fuel)
+        .unwrap();
+    let competing = session
+        .prepare_enums(enum_batch(3, boolean()), &mut fuel)
+        .unwrap();
+    session
+        .commit_newtypes_with(current, || Ok::<_, ()>(()))
+        .unwrap();
+    assert!(
+        session
+            .commit_enums_with(competing, || Ok::<_, ()>(()))
+            .is_err()
+    );
+    assert!(session.prepare(batch(2, boolean()), &mut fuel).is_err());
+    assert!(
+        session
+            .prepare_enums(enum_batch(2, boolean()), &mut fuel)
+            .is_err()
+    );
+    let consumer = session
+        .prepare_enums(enum_batch(3, nominal(2)), &mut fuel)
+        .unwrap();
+    session
+        .commit_enums_with(consumer, || Ok::<_, ()>(()))
+        .unwrap();
+    let next = session
+        .prepare_newtypes(newtype_batch(4, nominal(3)), &mut fuel)
+        .unwrap();
+    session
+        .commit_newtypes_with(next, || Ok::<_, ()>(()))
+        .unwrap();
+}
+
+#[test]
+fn newtype_receipt_failures_preserve_revision_and_release_ownership() {
+    use comptime_interpretor::NewtypePublicationError;
+    let world = Package::default();
+    let mut fuel = budget();
+    let mut session = StructAdmissionSession::new(&world, &mut fuel).unwrap();
+    let survivor = session.prepare(batch(1, boolean()), &mut fuel).unwrap();
+    for mode in 0..3 {
+        let definitions = newtype_batch(2, boolean());
+        let weak = Arc::downgrade(&definitions);
+        let receipt = session.prepare_newtypes(definitions, &mut fuel).unwrap();
+        match mode {
+            0 => drop(receipt),
+            1 => assert!(matches!(
+                session.commit_newtypes_with(receipt, || Err::<(), _>("reject")),
+                Err(NewtypePublicationError::Commit("reject"))
+            )),
+            _ => assert!(
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _ = session
+                        .commit_newtypes_with(receipt, || -> Result<(), ()> { panic!("abort") });
+                }))
+                .is_err()
+            ),
+        }
+        assert!(weak.upgrade().is_none());
+        assert!(session.prepare(batch(3, nominal(2)), &mut fuel).is_err());
+    }
+    session.commit_with(survivor, || Ok::<_, ()>(())).unwrap();
+    let foreign = session
+        .prepare_newtypes(newtype_batch(2, nominal(1)), &mut fuel)
+        .unwrap();
+    let mut other = StructAdmissionSession::new(&world, &mut fuel).unwrap();
+    assert!(
+        matches!(other.commit_newtypes_with(foreign, || Ok::<_, ()>(())),
+        Err(NewtypePublicationError::Admission(error)) if error.kind == ErrorKind::InvalidCallPlan)
+    );
+    let owned = newtype_batch(2, nominal(1));
+    let weak = Arc::downgrade(&owned);
+    let receipt = session.prepare_newtypes(owned, &mut fuel).unwrap();
+    session
+        .commit_newtypes_with(receipt, || Ok::<_, ()>(()))
+        .unwrap();
+    assert!(weak.upgrade().is_some());
+    drop(session);
+    assert!(weak.upgrade().is_none());
+}
