@@ -767,3 +767,35 @@ Validation from `/home/fin/luna`:
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`: four passed (`/tmp/luna-tools-jg4p5pnc/result.json`).
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_type_factories_keep_identity_through_comptime_parameters`: passed (`/tmp/luna-tools-4n7tngy2/result.json`).
 - Formatting check and `git diff --check` passed (`/tmp/luna-tools-27fq34h2/result.json`).
+
+## Source-path certificates for integer units
+
+Shortest-path propagation now retains predecessor edges and reconstructs the
+actual signed source constraints establishing a bound. The proof records that
+ordered path, its conclusion, and polarity using shared immutable payloads.
+Conflict support includes only the path literals and the opposite conclusion,
+not every assigned predicate. This replaces the previous whole-graph
+opposite-literal trial during propagation.
+
+The independent verifier checks exact source-literal membership and polarity,
+requires the opposite conclusion, checks connected endpoints, and sums path
+weights with checked arithmetic. The resulting bound must imply the conclusion.
+It never consults retained distances, predecessor arrays, model values, or a
+cached validation decision. Empty paths prove only valid same-vertex bounds.
+Path corruption, absent premises, or excessive conclusions are rejected.
+
+A finite path can fit the arithmetic capacity even when Bellman-Ford on the
+added opposite edge would overflow before recognizing a negative cycle. Such
+propagation certificates now verify directly. This does not widen mathematical
+integer representation or fix all consistency-query capacity limits: path
+summation can still report ArithmeticRange, and the baseline negative-cycle
+solver is unchanged. Difference graphs also still rebuild per scan.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p ptc -p type_resolution`: 478 passed (`/tmp/luna-tools-wvl_jxrl/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p ptc integer::proof::tests`: two passed after strengthening irrelevant-premise coverage (`/tmp/luna-tools-f4tmsu3q/result.json`). Positive/negative certificates reject missing premises, wrong polarity, disconnected/reordered paths, stronger conclusions, and short budgets; unused source constraints do not enter support.
+- Direct replay covers the former opposite-cycle overflow boundary, valid empty reflexive paths, and genuine checked-sum overflow. Existing valuation comparisons and production search proof replay remain active.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`: four passed (`/tmp/luna-tools-l40lgp_v/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_type_factories_keep_identity_through_comptime_parameters`: passed (`/tmp/luna-tools-oocth4t_/result.json`).
+- Formatting check and `git diff --check` passed (`/tmp/luna-tools-794dzesz/result.json`).

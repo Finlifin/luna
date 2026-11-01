@@ -1,7 +1,9 @@
 //! Mathematical integer difference logic. i128 is an implementation capacity,
 //! never a source overflow rule: any exhausted arithmetic capacity is Unknown.
 use super::UnknownReason;
+mod proof;
 use nir::DeclarationId;
+pub use proof::IntegerBoundProof;
 use std::{collections::BTreeMap, fmt};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -49,7 +51,13 @@ fn tick(steps: &mut usize) -> Result<(), UnknownReason> {
 struct Graph {
     variables: BTreeMap<DeclarationId, usize>,
     edges: Vec<(usize, usize, i128)>,
+    sources: Vec<usize>,
 }
+struct Paths {
+    distances: Vec<Option<i128>>,
+    predecessors: Vec<Option<usize>>,
+}
+
 impl IntLe {
     fn directed(&self, value: bool) -> Result<(&IntegerTerm, &IntegerTerm, i128), UnknownReason> {
         // not (x+a <= y+b) means y-x <= a-b-1 over mathematical integers.
@@ -90,31 +98,34 @@ impl Graph {
         }
         let index = |term: &IntegerTerm| term.variable.map_or(0, |id| variables[&id]);
         let mut edges = Vec::new();
-        for (atom, value) in literals {
+        let mut sources = Vec::new();
+        for (source, (atom, value)) in literals.into_iter().enumerate() {
             let Some(value) = value else { continue };
             let (from, to, bound) = atom.directed(value)?;
             edges.push((index(from), index(to), bound));
+            sources.push(source);
         }
 
-        Ok(Self { variables, edges })
+        Ok(Self {
+            variables,
+            edges,
+            sources,
+        })
     }
     fn index(&self, term: &IntegerTerm) -> usize {
         term.variable.map_or(0, |id| self.variables[&id])
     }
-    fn shortest(
-        &self,
-        source: usize,
-        steps: &mut usize,
-    ) -> Result<Vec<Option<i128>>, UnknownReason> {
+    fn shortest(&self, source: usize, steps: &mut usize) -> Result<Paths, UnknownReason> {
         let count = self.variables.len() + 1;
         *steps = steps
-            .checked_sub(count)
+            .checked_sub(count.saturating_mul(2))
             .ok_or(UnknownReason::BudgetExhausted)?;
         let mut distances: Vec<Option<i128>> = vec![None; count];
+        let mut predecessors = vec![None; count];
         distances[source] = Some(0);
         for _ in 1..count {
             let mut changed = false;
-            for &(from, to, bound) in &self.edges {
+            for (edge, &(from, to, bound)) in self.edges.iter().enumerate() {
                 tick(steps)?;
                 let Some(distance) = distances[from] else {
                     continue;
@@ -124,6 +135,7 @@ impl Graph {
                     .ok_or(UnknownReason::ArithmeticRange)?;
                 if distances[to].is_none_or(|previous| candidate < previous) {
                     distances[to] = Some(candidate);
+                    predecessors[to] = Some(edge);
                     changed = true;
                 }
             }
@@ -131,7 +143,10 @@ impl Graph {
                 break;
             }
         }
-        Ok(distances)
+        Ok(Paths {
+            distances,
+            predecessors,
+        })
     }
 }
 impl fmt::Display for Graph {
@@ -150,10 +165,19 @@ impl fmt::Display for Graph {
 
 /// Propagate only source-path bounds from a consistent assignment. Distances
 /// from the model's super-source are deliberately not used as consequences.
+#[cfg(test)]
 pub(super) fn propagate(
     literals: &[(usize, &IntLe, Option<bool>)],
     steps: &mut usize,
 ) -> Result<Option<(usize, bool)>, UnknownReason> {
+    propagate_explained(literals, steps)
+        .map(|unit| unit.map(|(index, proof, _)| (index, proof.value)))
+}
+
+pub(super) fn propagate_explained(
+    literals: &[(usize, &IntLe, Option<bool>)],
+    steps: &mut usize,
+) -> Result<Option<(usize, IntegerBoundProof, std::collections::BTreeSet<usize>)>, UnknownReason> {
     let graph = Graph::new(
         literals.iter().map(|(_, atom, value)| (*atom, *value)),
         steps,
@@ -170,16 +194,41 @@ pub(super) fn propagate(
             if !paths.contains_key(&from) {
                 paths.insert(from, graph.shortest(from, steps)?);
             }
-            if paths[&from][to].is_some_and(|distance| distance <= bound) {
-                // Ensure this explanation also fits the current independent
-                // checker's arithmetic capacity. Overflow is not a source fact.
-                let opposite = solve(
-                    literals.iter().map(|(i, atom, assigned)| {
-                        (*atom, if *i == index { Some(!truth) } else { *assigned })
-                    }),
-                    steps,
-                )?;
-                return Ok(opposite.is_none().then_some((index, truth)));
+            if paths[&from].distances[to].is_some_and(|distance| distance <= bound) {
+                let mut cursor = to;
+                let mut path = Vec::new();
+                let mut support = std::collections::BTreeSet::from([index]);
+                while cursor != from {
+                    tick(steps)?;
+                    // Defensive cycle guard; consistent shortest paths need
+                    // at most one visit per vertex.
+                    if path.len() >= graph.variables.len() + 1 {
+                        return Ok(None);
+                    }
+                    let Some(edge) = paths[&from].predecessors[cursor] else {
+                        return Ok(None);
+                    };
+                    let (source_index, literal, value) = literals[graph.sources[edge]];
+                    let Some(value) = value else {
+                        return Ok(None);
+                    };
+                    path.push((literal.clone(), value));
+                    support.insert(source_index);
+                    cursor = graph.edges[edge].0;
+                }
+                *steps = steps
+                    .checked_sub(path.len())
+                    .ok_or(UnknownReason::BudgetExhausted)?;
+                path.reverse();
+                let proof = IntegerBoundProof {
+                    path: path.into(),
+                    conclusion: std::sync::Arc::new(atom.clone()),
+                    value: truth,
+                };
+                if proof.check_bound(steps)? {
+                    return Ok(Some((index, proof, support)));
+                }
+                return Ok(None);
             }
         }
     }
@@ -193,7 +242,9 @@ pub(super) fn solve<'a>(
     literals: impl Iterator<Item = (&'a IntLe, Option<bool>)>,
     steps: &mut usize,
 ) -> Result<Option<BTreeMap<DeclarationId, i128>>, UnknownReason> {
-    let Graph { variables, edges } = Graph::new(literals, steps)?;
+    let Graph {
+        variables, edges, ..
+    } = Graph::new(literals, steps)?;
     let mut distance = vec![0i128; variables.len() + 1];
     for round in 0..distance.len() {
         let mut changed = false;
@@ -395,11 +446,11 @@ mod tests {
             .unwrap()
             .is_some()
         );
-        // The path itself fits i128, but replay of the opposite literal runs
-        // out of arithmetic capacity before discovering its negative cycle.
+        // Direct path replay proves the bound even though adding the opposite
+        // edge to Bellman-Ford would overflow before detecting the cycle.
         assert_eq!(
             propagate(&[(0, &premise, Some(true)), (1, &implied, None)], &mut 1000),
-            Err(UnknownReason::ArithmeticRange)
+            Ok(Some((1, true)))
         );
         let atom = IntLe {
             left: variable(0, 0),

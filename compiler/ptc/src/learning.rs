@@ -117,6 +117,13 @@ impl Search<'_> {
                     pending.push((positive, depth + 1));
                 }
                 ProofTree::Lemma { proof, .. } => pending.push((proof, depth + 1)),
+                ProofTree::IntegerBound(proof) => {
+                    if work < proof.path.len() {
+                        admitted = false;
+                        break;
+                    }
+                    work -= proof.path.len();
+                }
                 ProofTree::ClauseConflict(trace) => {
                     if work < trace.len() {
                         admitted = false;

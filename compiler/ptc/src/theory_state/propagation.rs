@@ -146,8 +146,16 @@ impl Search<'_> {
             }
         }
         if pending_integer {
-            let (index, value) = crate::integer::propagate(&integers, fuel).ok()??;
-            return self.explain_unit(assignment, index, value, fuel);
+            let (index, proof, support) =
+                crate::integer::propagate_explained(&integers, fuel).ok()??;
+            return Some(Unit {
+                index,
+                value: proof.value,
+                reason: Conflict {
+                    tree: ProofTree::IntegerBound(proof),
+                    support,
+                },
+            });
         }
         None
     }

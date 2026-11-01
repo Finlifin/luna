@@ -24,7 +24,7 @@ pub use traits::TraitQuery;
 mod classification;
 pub use classification::{KindQuery, TypeKind};
 mod integer;
-pub use integer::{IntLe, IntegerTerm};
+pub use integer::{IntLe, IntegerBoundProof, IntegerTerm};
 
 use nir::{DeclarationId, Primitive, Sort, Term};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -153,6 +153,7 @@ pub struct Proof {
 #[derive(Clone, Debug)]
 pub enum ProofTree {
     BooleanConflict,
+    IntegerBound(IntegerBoundProof),
     /// Unit root clauses followed by a falsified clause, independently replayed.
     ClauseConflict(Arc<[usize]>),
     /// An inconsistent subset of literals present on the current branch.
@@ -1324,6 +1325,7 @@ impl Search<'_> {
                     Err(ProofError::Invalid)
                 }
             }
+            ProofTree::IntegerBound(proof) => proof.verify(self.atoms, assignment, &mut self.steps),
             ProofTree::ClauseConflict(trace) => {
                 let circuit = boolean::Circuit::compile(self.formula, self.atoms, &mut self.steps)
                     .map_err(|()| ProofError::BudgetExhausted)?;
@@ -2103,6 +2105,7 @@ impl fmt::Display for ProofTree {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::BooleanConflict => f.write_str("(boolean-conflict)"),
+            Self::IntegerBound(proof) => proof.fmt(f),
             Self::ClauseConflict(trace) => {
                 f.write_str("(clause-conflict")?;
                 for clause in trace.iter() {
