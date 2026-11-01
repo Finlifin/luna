@@ -213,10 +213,11 @@ fn pattern_lambda_inputs_route_spreads_and_reject_invalid_protocols() {
 
 #[test]
 fn pattern_expression_inputs_evaluate_code_producers_once() {
-    let source = "comptime fn make(flag:*bool)-><x:bool|-bool> {flag.* = not flag.*;'(x)}
+    let source = "struct State {flag:bool}
+        impl State {comptime fn make(self)-><x:bool|-bool> {self.flag = not self.flag;'(x)}}
         comptime fn guarded(guard_code:<x:bool|-bool>)-><bool -| value:bool> {'<value if ~[x=value]<guard_code>>}
         comptime fn emit()-><|-bool> {
-            var flag=false;const p=guarded(make(flag.ref));let once=flag;
+            let state=State {flag:false};const p=guarded(state.make());let once=state.flag;
             '(once and (true match {~<p> => value,_ => false}))
         }
         fn run()->bool {~<emit()>}";
@@ -6318,18 +6319,19 @@ fn generator_callback_context_flows_through_data_control_branches() {
 #[test]
 fn generator_branch_packet_evidence_does_not_execute_selectors_or_unselected_arms() {
     let source = "typealias Byte=.u8'builtin;
-        comptime fn packet(count:*Byte)->Tuple<bool> where requires count.* == 2 {
-            count.* += 1;(false,)
-        }
+        struct Counter {value:Byte}
+        impl Counter { comptime fn packet(self)->Tuple<bool> where requires self.value == 2 {
+            self.value += 1;(false,)
+        } }
         comptime fn never()->Tuple<bool> {while true {} (true,)}
         comptime fn build(action:comptime fn(T)->T,value:T)-><|-T> where T {
             let result=action(value);'(result)
         }
         comptime fn outer()-><|-bool> {
-            var count:Byte=0;
-            let code=build(do {count+=1;|value| not value},
-                ...if do {count+=1;true} {packet(count.ref)} else {never()});
-            if count == 3 {code} else {'(false)}
+            let count=Counter {value:0};
+            let code=build(do {count.value+=1;|value| not value},
+                ...if do {count.value+=1;true} {count.packet()} else {never()});
+            if count.value == 3 {code} else {'(false)}
         } fn run()->bool {~<outer()>}";
     assert_eq!(
         support::run_iir_with_tuple(source, "run", vec![]),
@@ -6466,17 +6468,20 @@ fn generator_callbacks_infer_nested_generic_producer_results() {
 #[test]
 fn inferred_generic_producer_results_keep_evaluation_order() {
     let source = "typealias Byte=.u8'builtin;
-        comptime fn input(value:T,count:*Byte)->T where T, requires count.* == 1 {
-            count.* += 1;value
+        struct Counter {value:Byte}
+        impl Counter {
+            comptime fn input(self,value:T)->T where T, requires self.value == 1 {
+                self.value += 1;value
+            }
         }
         comptime fn build(action:comptime fn(T)->T,value:T)-><|-T> where T {
             let result=action(value);'(result)
         }
         comptime fn outer()-><|-bool> {
-            var count:Byte=0;
+            let count=Counter {value:0};
             let flag=false;
-            let code=build(do {count+=1;|value| not value},input(flag,count.ref));
-            if count == 2 {code} else {'(false)}
+            let code=build(do {count.value+=1;|value| not value},count.input(flag));
+            if count.value == 2 {code} else {'(false)}
         } fn run()->bool {~<outer()>}";
     assert_eq!(run(source, "run", vec![]), Value::Bool(true));
 }
@@ -6728,17 +6733,18 @@ fn generic_collection_inference_combines_computed_spread_packets() {
 #[test]
 fn computed_packet_type_evidence_keeps_nested_producer_evaluation_order() {
     let source = "typealias Count=.Integer'builtin;
-        comptime fn packet(count:*Count)->Tuple<bool> {
-            let first=count.* == 1;count.* += 1;(first,)
-        }
+        struct Counter {value:Count}
+        impl Counter { comptime fn packet(self)->Tuple<bool> {
+            let first=self.value == 1;self.value += 1;(first,)
+        } }
         comptime fn identity(value:T)->T where T {value}
         comptime fn build(action:comptime fn(T)->T,value:T)-><|-T> where T {
             let result=action(value);'(result)
         }
         comptime fn outer()-><|-bool> {
-            var count:Count=0;
-            let code=build(do {count+=1;|value| value},identity(...packet(count.ref)));
-            if count == 2 {code} else {'(false)}
+            let count=Counter {value:0};
+            let code=build(do {count.value+=1;|value| value},identity(...count.packet()));
+            if count.value == 2 {code} else {'(false)}
         } fn run()->bool {~<outer()>}";
     assert_eq!(
         support::run_iir_with_tuple(source, "run", vec![]),
@@ -9554,13 +9560,13 @@ fn pattern_output_context_survives_nested_control_producers() {
 #[test]
 fn discarded_pattern_producers_preserve_construction_effects() {
     for (statements, count) in [
-        ("touch(count.ref);", 1),
-        ("while count < 2 {touch(count.ref);}", 2),
+        ("count.touch();", 1),
+        ("while count.value < 2 {count.touch();}", 2),
         (
-            "if true {touch(count.ref);} else {touch(count.ref);touch(count.ref);}",
+            "if true {count.touch();} else {count.touch();count.touch();}",
             1,
         ),
-        ("const p=touch(count.ref);p;p;", 1),
+        ("const p=count.touch();p;p;", 1),
     ] {
         for (result, tail, run_body) in [
             ("<|-bool>", "'(correct)", "~<emit()>"),
@@ -9570,8 +9576,9 @@ fn discarded_pattern_producers_preserve_construction_effects() {
                 "true match {~<emit()> => value,_=>false}",
             ),
         ] {
-            let source=format!("comptime fn touch(count:*.u8'builtin)-><bool -| value:bool> {{assumes count.* < 255;count.* += 1;'<value>}}
-                comptime fn emit()->{result} {{var count:.u8'builtin=0;{statements}let correct=count=={count};{tail}}}
+            let source=format!("typealias Byte=.u8'builtin;struct Counter {{value:Byte}}
+                impl Counter {{comptime fn touch(self)-><bool -| value:bool> {{assumes self.value < 255;self.value += 1;'<value>}}}}
+                comptime fn emit()->{result} {{let count=Counter {{value:0}};{statements}let correct=count.value=={count};{tail}}}
                 fn run()->bool {{{run_body}}}");
             assert_eq!(
                 run(&source, "run", vec![]),
@@ -10981,4 +10988,21 @@ fn generator_method_result_evidence_substitutes_implementation_inputs() {
     let invalid = source.replace("comptime fn get", "fn get");
     let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
     assert!(failure.contains("execution phase"), "{failure}");
+}
+
+#[test]
+fn generator_method_result_evidence_keeps_impl_and_method_inputs_distinct() {
+    let source = "struct Source where T {value:T}
+        impl Source<T> where T {
+            comptime fn choose(self,value:U)->U where U {value}
+        }
+        comptime fn build(action:comptime fn(U)->bool,value:U)-><|-bool> where U {
+            let result=action(value);'(result)
+        }
+        comptime fn emit()-><|-bool> {
+            let source=Source<bool> {value:true};
+            build(|value| value == 'x',source.choose('x'))
+        }
+        fn run()->bool {~<emit()>}";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
 }

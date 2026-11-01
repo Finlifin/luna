@@ -167,7 +167,8 @@ impl Checker<'_, '_> {
                     if let Some(result) = self.generator_method_result_hint(
                         base,
                         name.name.as_str(),
-                        value.span,
+                        arguments,
+                        value,
                         depth + 1,
                     )? {
                         return Ok(Some(result));
@@ -240,6 +241,7 @@ impl Checker<'_, '_> {
                         arguments,
                         value,
                         depth + 1,
+                        &[],
                     );
                 }
                 Some(result.as_ref())
@@ -261,9 +263,11 @@ impl Checker<'_, '_> {
         &mut self,
         base: &Expr<'_>,
         name: &str,
-        span: Span,
+        inputs: &[Arg<'_>],
+        site: &Expr<'_>,
         depth: usize,
     ) -> Result<Option<Term>, Error> {
+        let span = site.span;
         if !self.interfaces_ready || depth >= 64 {
             return Ok(None);
         }
@@ -308,12 +312,23 @@ impl Checker<'_, '_> {
         let Term::Function { result, .. } = signature.callable_signature() else {
             return Ok(None);
         };
-        if result.check_scope(&[]).is_err()
-            || parameters[arguments.len()..]
-                .iter()
-                .any(|parameter| result.mentions_rigid(*parameter))
-        {
+        if result.check_scope(&[]).is_err() {
             return Ok(None);
+        }
+        if parameters[arguments.len()..]
+            .iter()
+            .any(|parameter| result.mentions_rigid(*parameter))
+        {
+            let mut supplied = Vec::with_capacity(inputs.len() + 1);
+            supplied.push(Arg::Positional(base));
+            supplied.extend(inputs.iter().cloned());
+            return self.generator_inferred_result_hint(
+                owner,
+                &supplied,
+                site,
+                depth + 1,
+                &arguments,
+            );
         }
         let result =
             self.instantiate_input_types(result, &parameters[..arguments.len()], &arguments, span)?;
@@ -756,6 +771,7 @@ impl Checker<'_, '_> {
         arguments: &[Arg<'_>],
         site: &Expr<'_>,
         depth: usize,
+        established: &[Term],
     ) -> Result<Option<Term>, Error> {
         let Some(ItemKind::Fn(declaration, _)) = self.package.item(owner).map(|item| &item.kind)
         else {
@@ -830,13 +846,14 @@ impl Checker<'_, '_> {
         bounded.map_err(|e| error(site.span, e.to_string()))?;
         let signature = signature.callable_signature().clone();
         let all_parameters = self.type_parameters[&owner].clone();
-        if declaration.clause_params.len() != all_parameters.len() {
+        if declaration.clause_params.len() + established.len() != all_parameters.len() {
             return Ok(None);
         }
         let binders = self.input_binders(&all_parameters);
         let mut parameters = Vec::new();
-        let mut assigned = Vec::new();
-        for (index, clause) in declaration.clause_params.iter().enumerate() {
+        let mut assigned = established.to_vec();
+        for (local_index, clause) in declaration.clause_params.iter().enumerate() {
+            let index = established.len() + local_index;
             let ty = match clause.kind {
                 hir::clause::ClauseParamKind::Optional(_, _, default) => {
                     let bindings = Some((all_parameters.as_slice(), assigned.as_slice()));
