@@ -537,7 +537,7 @@ fn list_code_retains_declared_domains_and_checks_concat_before_right_input() {
         .iter()
         .filter_map(|instruction| match instruction.op {
             Op::PrepareListOperation(_) => Some("prepare-concat"),
-            Op::PrepareList(_) => Some("prepare-list"),
+            Op::PrepareList { .. } => Some("prepare-list"),
             Op::List { .. } => Some("list"),
             Op::CheckListOperand { .. } => Some("check"),
             Op::ListConcat { .. } => Some("concat"),

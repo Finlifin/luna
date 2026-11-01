@@ -6,17 +6,24 @@ impl Interpreter<'_> {
         ty: &Term,
         fields: impl ExactSizeIterator<Item = &'b Term> + Clone,
         source: SourceRange,
-    ) -> Result<Option<Term>, Error> {
+    ) -> Result<(Term, Option<Term>), Error> {
         if fields.len() > 100_000 {
             return Err(self.failure(ErrorKind::RepresentationSizeLimit, Some(source)));
         }
+        self.integer_operation(Some(source), |budget| {
+            budget.consume(fields.len().saturating_add(1))
+        })?;
+        let ty = self.selected_type_view(ty, Some(source))?;
+        let fields = fields
+            .map(|field| self.selected_type_view(field, Some(source)))
+            .collect::<Result<Vec<_>, _>>()?;
         let diverging = fields
-            .clone()
+            .iter()
             .any(|field| *field == Term::Primitive(Primitive::Never));
-        let element_type = self.list_element(ty).cloned();
-        if (diverging && *ty != Term::Primitive(Primitive::Never))
+        let element_type = self.list_element(&ty).cloned();
+        if (diverging && ty != Term::Primitive(Primitive::Never))
             || (!diverging && element_type.is_none())
-            || fields.clone().any(|field| {
+            || fields.iter().any(|field| {
                 *field != Term::Primitive(Primitive::Never)
                     && !diverging
                     && Some(field) != element_type.as_ref()
@@ -24,10 +31,7 @@ impl Interpreter<'_> {
         {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         }
-        self.integer_operation(Some(source), |budget| {
-            budget.consume(fields.len().saturating_add(1))
-        })?;
-        Ok(element_type)
+        Ok((ty, element_type))
     }
 
     pub(super) fn complete_list_construction(
@@ -75,7 +79,7 @@ impl Interpreter<'_> {
         let K::TypeList(fields) = &expr.kind else {
             unreachable!()
         };
-        let element = self.prepare_list_construction(
+        let (ty, element) = self.prepare_list_construction(
             &expr.ty,
             fields.iter().map(|field| &field.ty),
             expr.source,
@@ -100,7 +104,7 @@ impl Interpreter<'_> {
                 },
             );
         }
-        self.complete_list_construction(&expr.ty, values, expr.source)
+        self.complete_list_construction(&ty, values, expr.source)
             .map(Flow::Value)
     }
 }

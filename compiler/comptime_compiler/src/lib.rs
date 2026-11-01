@@ -241,7 +241,10 @@ pub enum Op {
         list_source: SourceRange,
         index: leaf_inputs::Selector,
     },
-    PrepareList(Arc<lists::Construction>),
+    PrepareList {
+        destination: Register,
+        list: Arc<lists::Construction>,
+    },
     List {
         destination: Register,
         list: Arc<lists::Construction>,
@@ -754,7 +757,9 @@ impl fmt::Display for Program {
                     "(local-list-index %{destination} {contract} (list %{list} (source {} {})) (index {index}))",
                     list_source.start, list_source.end
                 )?,
-                Op::PrepareList(list) => write!(f, "(prepare-list {list})")?,
+                Op::PrepareList { destination, list } => {
+                    write!(f, "(prepare-list %{destination} {list})")?
+                }
                 Op::List {
                     destination,
                     list,
@@ -2272,7 +2277,13 @@ fn compile_root<'a>(
                             }
                             work.push(Work::Expression(field, slot));
                         }
-                        emit(&mut work, Op::PrepareList(list));
+                        emit(
+                            &mut work,
+                            Op::PrepareList {
+                                destination: dst,
+                                list,
+                            },
+                        );
                     }
                     K::ListLength(left) | K::ListConcat(left, _) => {
                         let right = if let K::ListConcat(_, right) = &expr.kind {

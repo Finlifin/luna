@@ -1116,3 +1116,102 @@ fn scalar_summaries_recheck_head_contracts_and_reject_mixed_or_narrow_payloads()
     vm.validate_immutable_input(&value, &list(Primitive::Bool))
         .unwrap();
 }
+
+#[test]
+fn associated_list_domains_are_prepared_before_elements_and_retained_at_completion() {
+    let package = package();
+    let projection = Term::AssociatedType {
+        origin: Box::new(nir::AssociatedTypeOrigin {
+            interface: id(80),
+            member: id(81),
+        }),
+        arguments: vec![],
+        subject: Box::new(Term::Primitive(Primitive::Bool)),
+    };
+    let contextual = Term::NormalForm {
+        head: id(2),
+        sort: nir::Sort::Type,
+        arguments: vec![projection.clone()],
+    };
+    let resolver = |_: &Expr, fuel: &mut u64| {
+        *fuel -= 1;
+        Ok(AssociatedSelection {
+            initializer: nir::associated_initializers::AssociatedInitializer::new(
+                expr(
+                    Term::Primitive(Primitive::Type),
+                    K::TypeValue(Term::Primitive(Primitive::Bool)),
+                ),
+                &mut 1000,
+            )
+            .unwrap(),
+            requires_invocation: true,
+        })
+    };
+    let input = LocalId {
+        owner: 82,
+        index: 0,
+    };
+    let trace = LocalId {
+        owner: 81,
+        index: 0,
+    };
+    let invalid = expr(
+        contextual.clone(),
+        K::TypeList(vec![expr(
+            Term::Primitive(Primitive::Char),
+            K::Block {
+                statements: vec![expr(
+                    Term::Primitive(Primitive::Void),
+                    K::Assign {
+                        place: Place {
+                            root: trace,
+                            fields: vec![],
+                        },
+                        value: Box::new(expr(
+                            Term::Primitive(Primitive::Bool),
+                            K::Literal(Literal::Bool(true)),
+                        )),
+                    },
+                )],
+                result: Some(Box::new(expr(
+                    Term::Primitive(Primitive::Char),
+                    K::Literal(Literal::Char('x')),
+                ))),
+            },
+        )]),
+    );
+    for compiled in [false, true] {
+        let mut vm = Interpreter::for_comptime(&package, Budget::default())
+            .unwrap()
+            .with_associated_resolver(&resolver);
+        let mut environment =
+            Environment::from([(trace, Value::Bool(false)), (input, Value::Bool(true))]);
+        assert_eq!(
+            run(&mut vm, &invalid, &mut environment, compiled)
+                .unwrap_err()
+                .kind,
+            ErrorKind::Type
+        );
+        assert_eq!(environment[&trace], Value::Bool(false));
+        for fields in [
+            vec![],
+            vec![expr(
+                Term::Primitive(Primitive::Bool),
+                K::Literal(Literal::Bool(true)),
+            )],
+            vec![expr(projection.clone(), K::Local(input))],
+        ] {
+            let count = fields.len();
+            let body = expr(contextual.clone(), K::TypeList(fields));
+            let Flow::Value(Value::List { ty, values }) =
+                run(&mut vm, &body, &mut environment, compiled).unwrap()
+            else {
+                panic!()
+            };
+            assert_eq!(ty, list(Primitive::Bool));
+            assert_eq!(values.len(), count);
+            assert!(values.iter().all(|value| *value == Value::Bool(true)));
+        }
+        assert!(vm.active_associated_initializers.is_empty());
+    }
+}

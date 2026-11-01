@@ -14,6 +14,7 @@ pub(super) struct Frame {
     waiting: Option<Waiting>,
     calls: BTreeMap<usize, PendingCall>,
     newtype_conversions: BTreeMap<usize, nir::newtypes::Conversion>,
+    list_types: BTreeMap<usize, Term>,
     instance_origins: BTreeMap<usize, Option<(DeclarationId, usize)>>,
     instance_methods: BTreeMap<usize, comptime_compiler::methods::Method>,
     closures: BTreeMap<usize, PendingClosure>,
@@ -1055,6 +1056,7 @@ impl<'a> Interpreter<'a> {
             waiting: None,
             calls: BTreeMap::new(),
             newtype_conversions: BTreeMap::new(),
+            list_types: BTreeMap::new(),
             instance_origins: BTreeMap::new(),
             instance_methods: BTreeMap::new(),
             normal_types: BTreeMap::new(),
@@ -1576,20 +1578,23 @@ impl<'a> Interpreter<'a> {
                     };
                     frame.slots[*destination] = Some(value);
                 }
-                Op::PrepareList(list) => {
-                    self.prepare_list_construction(&list.ty, list.inputs.iter(), source)?;
+                Op::PrepareList { destination, list } => {
+                    let (ty, _) =
+                        self.prepare_list_construction(&list.ty, list.inputs.iter(), source)?;
+                    frame.list_types.insert(*destination, ty);
                 }
                 Op::List {
                     destination,
-                    list,
+                    list: _,
                     values,
                 } => {
+                    let ty = frame.list_types.remove(destination).ok_or_else(missing)?;
                     let values = values
                         .iter()
                         .map(|slot| frame.slots[*slot].take().ok_or_else(missing))
                         .collect::<Result<_, _>>()?;
                     frame.slots[*destination] =
-                        Some(self.complete_list_construction(&list.ty, values, source)?);
+                        Some(self.complete_list_construction(&ty, values, source)?);
                 }
                 Op::PrepareListOperation(operation) => self.prepare_list_operation(
                     &operation.ty,
