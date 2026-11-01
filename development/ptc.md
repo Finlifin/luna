@@ -734,3 +734,36 @@ Validation from `/home/fin/luna`:
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`: four passed (`/tmp/luna-tools-rrqas4q0/result.json`).
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_type_factories_keep_identity_through_comptime_parameters`: passed (`/tmp/luna-tools-0rmpdwz8/result.json`).
 - Formatting check and `git diff --check` passed (`/tmp/luna-tools-w1j693_g/result.json`).
+
+## Explained integer difference-bound propagation
+
+The existing mathematical-integer theory now shares one difference-graph
+construction between consistency/model checking and propagation. Positive and
+negative literals use the same checked offset conversion; negation adjusts the
+bound by one in the integer domain. The graph has a stable S-expression dump.
+
+Propagation computes shortest paths from each queried source as needed, reusing
+those paths within the scan. Unreachable vertices remain unknown. It does not
+reuse the model's all-zero super-source distances as logical bounds. A path
+proving the queried bound, or its integer negation, proposes a theory unit.
+Before publication, the opposite literal is checked with the independent
+consistency path to ensure the certificate is replayable within the current
+arithmetic capacity. Overflow or budget exhaustion declines optional propagation
+without publishing a partial reason or inventing a machine-overflow rule.
+
+Integer units use the existing source-premise proof builder, trail, and conflict
+analysis. This concerns integer predicates in PTC's type propositions, not
+program-state or memory specifications. The implementation still covers the
+existing difference fragment, not general linear/nonlinear arithmetic or modular
+constraints. Graphs are rebuilt per scan; explanation support is conservative,
+and the extra certificate-capacity check is not an incremental path proof.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p ptc -p type_resolution`: 476 passed (`/tmp/luna-tools-6vvoles4/result.json`).
+- Partial-assignment propagation is compared against direct integer valuations for all 81 assignments of a four-bound system, covering positive and negative consequences. Tests retry every insufficient propagation budget, check constant bounds and unconstrained variables, and verify graph dumps.
+- `python3 -B development/check.py --timeout 900 -- test -p ptc integer::tests`: two passed after adding the certificate-capacity boundary (`/tmp/luna-tools-b38dhyhe/result.json`). A path may fit i128 while opposite-literal replay exceeds capacity; that case publishes no unit.
+- Production search requires actual positive/negative integer propagation and independently replays the resulting contradiction proofs with entry assignments restored.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`: four passed (`/tmp/luna-tools-jg4p5pnc/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_type_factories_keep_identity_through_comptime_parameters`: passed (`/tmp/luna-tools-4n7tngy2/result.json`).
+- Formatting check and `git diff --check` passed (`/tmp/luna-tools-27fq34h2/result.json`).

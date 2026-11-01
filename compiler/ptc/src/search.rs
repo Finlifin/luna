@@ -671,6 +671,69 @@ mod tests {
     }
 
     #[test]
+    fn search_uses_positive_and_negative_integer_path_reasons() {
+        let variable = |local, offset| {
+            crate::IntegerTerm::variable(
+                DeclarationId {
+                    package: 105,
+                    local,
+                },
+                offset,
+            )
+        };
+        let le = |left, right| Formula::IntLe(crate::IntLe { left, right });
+        for truth in [true, false] {
+            let target = if truth {
+                le(variable(0, 1), variable(2, 0))
+            } else {
+                le(variable(2, 0), variable(0, 0))
+            };
+            let denied = if truth { target.negate() } else { target };
+            let other = Formula::equal(
+                Term::Rigid {
+                    declaration: DeclarationId {
+                        package: 105,
+                        local: 3,
+                    },
+                    sort: Sort::Type,
+                },
+                Term::Primitive(Primitive::Bool),
+            );
+            let formula = Formula::And(vec![
+                le(variable(0, 1), variable(1, 0)),
+                le(variable(1, 0), variable(2, 0)),
+                Formula::Or(vec![denied.clone(), other.clone()]),
+                Formula::Or(vec![denied, other.negate()]),
+            ]);
+            let context = Context::default();
+            let mut atoms = Vec::new();
+            let mut terms = Terms::default();
+            collect(&formula, &mut atoms, &mut terms, 0, 128, &[]).unwrap();
+            let mut search = Search {
+                boolean: None,
+                theory_state: None,
+                learned: learning::Clauses::default(),
+                context: &context,
+                formula: &formula,
+                atoms: &atoms,
+                terms: &terms,
+                steps: 100000,
+                max_depth: 128,
+            };
+            let mut assignment = vec![None; atoms.len()];
+            THEORY_UNITS.with(|n| n.set(0));
+            let SearchResult::Unsat(proof) = search.solve(&mut assignment, 0) else {
+                panic!("integer consequence was not proved")
+            };
+            assert!(THEORY_UNITS.with(|n| n.get()) > 0);
+            assert!(proof.support.is_empty());
+            search.steps = 100000;
+            search.check_tree(&proof.tree, &mut assignment, 0).unwrap();
+            assert!(assignment.iter().all(Option::is_none));
+        }
+    }
+
+    #[test]
     fn first_uip_retains_the_propagated_dominator_before_the_decision() {
         let atom = |local| {
             Formula::equal(
