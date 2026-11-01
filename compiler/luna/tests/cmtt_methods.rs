@@ -1752,51 +1752,62 @@ fn generator_live_collections_and_spreads_cannot_export_pointers() {
 
 #[test]
 fn generator_postconditions_keep_entry_values_after_parameter_updates() {
-    let source = "comptime fn build(flag:bool)-><|-bool>
-        where ensures flag and not flag'old {
-        let pointer=flag.ref;pointer.* = true;'(flag)
-    }
-    fn run()->bool {~<build(false)>}";
+    let source = "struct State {flag:bool}
+        comptime fn build(state:State)-><|-bool>
+        where ensures state.flag and not state'old.flag
+        {
+            state.flag=true;let result=state.flag;'(result)
+        }
+        fn run()->bool {~<build(State {flag:false})>}";
     assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    let invalid = source.replace("state.flag=true", "state.flag=false");
+    let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+    assert!(failure.contains("postcondition rejected"), "{failure}");
 }
 
 #[test]
-fn generator_entry_aggregates_copy_fields_but_not_pointer_targets() {
-    let source = "struct State {flag:bool,target:*bool}
+fn generator_entry_aggregates_preserve_nested_value_snapshots() {
+    let source = "struct Flag {value:bool}
+        struct State {flag:bool,nested:Flag}
         comptime fn build(state:State)-><|-bool>
-            where ensures state.flag and not state'old.flag and state'old.target.* {
-            let pointer=state.ref;
-            pointer.*.flag = true;
-            state.target.* = true;
-            '(true)
+        where ensures state.flag and state.nested.value
+            and not state'old.flag and not state'old.nested.value
+        {
+            state.flag=true;state.nested.value=true;'(true)
         }
         comptime fn outer()-><|-bool> {
-            var target=false;
-            build(State {flag:false,target:target.ref})
+            let state=State {flag:false,nested:Flag {value:false}};
+            let code=build(state);let unchanged=not state.flag and not state.nested.value;
+            '(unchanged and ~<code>)
         }
         fn run()->bool {~<outer()>}";
     assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
-    let invalid = source.replace("not state'old.flag", "state'old.flag");
-    let error = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
-    assert!(error.contains("postcondition rejected"), "{error}");
+    for old in ["not state'old.flag", "not state'old.nested.value"] {
+        let invalid = source.replace(old, &old[4..]);
+        let error = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+        assert!(error.contains("postcondition rejected"), "{error}");
+    }
 }
 
 #[test]
 fn generator_entry_values_are_isolated_across_nested_calls() {
-    let source = "comptime fn build(flag:bool)-><|-bool>
-        where ensures not flag'old and flag {
-        let pointer=flag.ref;pointer.* = true;
-        '(true)
-    }
-    comptime fn outer(flag:bool)-><|-bool>
-        where ensures flag'old and not flag {
-        let nested=build(false);
-        let pointer=flag.ref;pointer.* = false;
-        nested
-    }
-    fn run()->bool {~<outer(true)>}";
+    let source = "struct State {flag:bool}
+        comptime fn build(state:State)-><|-bool>
+        where ensures not state'old.flag and state.flag
+        {
+            state.flag=true;'(true)
+        }
+        comptime fn outer(state:State)-><|-bool>
+        where ensures state'old.flag and not state.flag
+        {
+            let nested=build(State {flag:false});state.flag=false;nested
+        }
+        fn run()->bool {~<outer(State {flag:true})>}";
     assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
-    let invalid = source.replace("not flag'old and flag", "flag'old and flag");
+    let invalid = source.replace(
+        "not state'old.flag and state.flag",
+        "state'old.flag and state.flag",
+    );
     let error = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
     assert!(error.contains("postcondition rejected"), "{error}");
 }
@@ -1990,16 +2001,17 @@ fn generator_enum_updates_switch_between_live_and_frozen_payloads() {
 }
 
 #[test]
-fn generator_aggregate_replacement_keeps_old_pointer_values_and_owner_addresses() {
+fn quoted_runtime_aggregate_replacement_preserves_pointer_targets() {
     let source = "struct Link {pointer:*bool}
         comptime fn build()-><|-bool> {
-            var first=false;var second=false;
-            var link=Link {pointer:first.ref};
-            let old=link.pointer;let address=link.ref;
-            link=Link {pointer:second.ref};
-            old.* = true;
-            address.*.pointer.* = true;
-            let result=first and second;'(result)
+            '(do {
+                var first=false;var second=false;
+                var link=Link {pointer:first.ref};
+                let old=link.pointer;let address=link.ref;
+                link=Link {pointer:second.ref};
+                old.* = true;address.*.pointer.* = true;
+                first and second
+            })
         }
         fn run()->bool {~<build()>}";
     assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
