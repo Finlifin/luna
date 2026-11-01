@@ -1678,3 +1678,59 @@ fn metadata_selector_in_generic_body_preserves_input_bindings() {
         comptime_interpretor::Value::Bool(true)
     );
 }
+
+#[test]
+fn concrete_comptime_metadata_keeps_dynamic_selection_and_recovers() {
+    use comptime_interpretor::{Budget, Interpreter, Value};
+    let fixture = SourceFixture::new(
+        r#"
+        use builtin.str;
+        comptime fn read(alias:str)->build.PackageMetadata {build.package_metadata(alias)}
+        "#,
+        "",
+    );
+    let luna::frontend::Artifact::Nir(package) = fixture
+        .compile_configured(&metadata_protocols(), None)
+        .unwrap()
+    else {
+        panic!()
+    };
+    let declaration = package
+        .functions
+        .iter()
+        .find(|function| function.name == "read")
+        .unwrap()
+        .declaration;
+    let root = iir::InstanceKey {
+        declaration,
+        arguments: vec![].into(),
+    };
+    let graph = elaboration::materialization::instantiate(
+        &package,
+        std::slice::from_ref(&root),
+        Default::default(),
+        elaboration::ptc::Budget {
+            steps: 1_000_000,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut source = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let mut compiled = Interpreter::from_iir_for_comptime(&graph, Budget::default()).unwrap();
+    let mut tree = Interpreter::from_iir_for_comptime_tree(&graph, Budget::default()).unwrap();
+    for alias in ["dependency", "missing", "dependency"] {
+        let input = vec![Value::String(alias.into())];
+        let expected = source.invoke(declaration, input.clone());
+        for actual in [
+            compiled.invoke_instance(&root, input.clone()),
+            tree.invoke_instance(&root, input),
+        ] {
+            match (&expected, actual) {
+                (Ok(expected), Ok(actual)) => assert_eq!(*expected, actual),
+                (Err(expected), Err(actual)) => assert_eq!(expected.kind, actual.kind),
+                (expected, actual) => panic!("{alias}: {expected:?} / {actual:?}"),
+            }
+        }
+    }
+    assert!(compiled.bytecode_invocations() > 0);
+}

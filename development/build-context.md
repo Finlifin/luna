@@ -287,3 +287,40 @@ Validation in `/home/fin/luna`:
   (`/tmp/luna-tools-tg5z9kwf/result.json`, exit 0).
 - Workspace formatting check passed (`/tmp/luna-tools-6me9faas/result.json`);
   `git diff --check` passed.
+
+
+## Concrete comptime metadata snapshots
+
+A public `build.package_metadata(alias)` function with an invocation-time alias
+could execute in the source VM but failed IIR materialization unconditionally
+(`IIR requires package metadata materialization`, red regression
+`/tmp/luna-tools-vr0bn7z2/result.json`, exit 101). The snapshot itself was already
+immutable and origin-bound; only the selector depended on invocation inputs.
+
+Materialization now retains those snapshots for comptime instances and collects
+all referenced nominal/callable/type dependencies. IIR validation requires a str
+selector, distinct nonempty aliases and completed, linked retained values. It
+still rejects metadata queries in runtime functions. The selected payload alone
+is admitted against the result domain at invocation; unavailable or differently
+typed unselected entries do not cause eager domain failures. No source package,
+live host query or global configuration fallback is introduced into the VM.
+
+The public-interface regression compares source, concrete tree and concrete
+bytecode results across successful reads, missing aliases and recovery. VM tests
+also exercise unavailable providers, invalid selected payloads and exactly-once
+selector effects in concrete sessions. Artifact tests reject dangling or open
+references, malformed selectors/aliases and runtime residual queries, and sweep
+insufficient validation budgets. The leftover duplicate unary metadata arm in
+the iterative NIR rewriter was removed after the previous selector fix.
+
+Validation from `/home/fin/luna`:
+- `python3 -B development/check.py --timeout 900 -- test -p iir`: passed,
+  exit 0 (`/tmp/luna-tools-5qg9romn/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor
+  metadata`: passed, exit 0 (`/tmp/luna-tools-xjrct2of/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test
+  build_context --test comptime_iir_bytecode`: 45 passed, exit 0
+  (`/tmp/luna-tools-m8q4t5m3/result.json`), including real sysroot O0/O3 and
+  resident metadata invalidation/recovery.
+- Workspace formatting passed (`/tmp/luna-tools-ivz22zum/result.json`);
+  `git diff --check` passed.

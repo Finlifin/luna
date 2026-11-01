@@ -3420,12 +3420,15 @@ impl Builder<'_> {
             K::BuildMetadata {
                 selector, entries, ..
             } => {
-                if self.instances.is_some() {
-                    return Err("IIR requires package metadata materialization".into());
-                }
                 self.expr(selector, depth + 1)?;
                 for (_, _, value) in entries {
                     if let Some(value) = value {
+                        // Retain completed immutable snapshots for comptime
+                        // invocation. Runtime residual queries are rejected by
+                        // the concrete artifact's phase validation.
+                        if self.instances.is_some() {
+                            iir::completed_type(value, &self.runtime_bindings, &mut self.fuel)?;
+                        }
                         self.queue.push_back(Task::Type(value.clone()));
                     }
                 }

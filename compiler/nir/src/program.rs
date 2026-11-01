@@ -4023,9 +4023,6 @@ impl Expr {
                 | ExprKind::StructFieldTypes(value)
                 | ExprKind::BuildStruct(value)
                 | ExprKind::BuildNewtype(value)
-                | ExprKind::BuildMetadata {
-                    selector: value, ..
-                }
                 | ExprKind::BuildEnum(value)
                 | ExprKind::EnumStructure { subject: value, .. }
                 | ExprKind::ObjectQuery { subject: value, .. }

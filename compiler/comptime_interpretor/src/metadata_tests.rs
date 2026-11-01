@@ -59,8 +59,13 @@ fn execute(
 #[test]
 fn metadata_reads_only_the_selected_input_and_recovers_without_replaying_effects() {
     let package = Package::default();
-    for compiled in [false, true] {
-        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let graph = iir::Package::default();
+    for (concrete, compiled) in [(false, false), (false, true), (true, false), (true, true)] {
+        let mut vm = if concrete {
+            Interpreter::from_iir_for_comptime(&graph, Budget::default()).unwrap()
+        } else {
+            Interpreter::for_comptime(&package, Budget::default()).unwrap()
+        };
         for alias in ["yes", "missing", "unknown", "invalid", "no", "yes"] {
             let mut env = Environment::from([
                 (ALIAS, Value::String(alias.into())),

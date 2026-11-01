@@ -439,8 +439,13 @@ impl Package {
                         })
                     }
 
-                    K::ComptimeValue(_) | K::BuildMetadata { .. } => {
+                    K::ComptimeValue(_) => {
                         return Err("IIR requires captured comptime value materialization".into());
+                    }
+                    K::BuildMetadata { .. }
+                        if instance.function.phase != nir::program::FunctionPhase::Comptime =>
+                    {
+                        return Err("IIR runtime body retains package metadata query".into());
                     }
                     K::AssociatedValue { .. } => {
                         return Err("IIR requires associated value selection".into());
@@ -527,6 +532,28 @@ impl Package {
     ) -> Result<(), String> {
         use nir::program::ExprKind as K;
         self.validate_type(&links, &expr.ty, fuel)?;
+        if let K::BuildMetadata {
+            selector, entries, ..
+        } = &expr.kind
+        {
+            if selector.ty != Term::Primitive(nir::Primitive::Str) {
+                return Err("IIR package metadata requires a str selector".into());
+            }
+            let mut aliases = std::collections::BTreeSet::new();
+            for (alias, _, value) in entries {
+                *fuel = fuel
+                    .checked_sub(alias.len().saturating_add(1))
+                    .ok_or("IIR metadata alias budget exhausted")?;
+                if alias.is_empty() || !aliases.insert(alias) {
+                    return Err("IIR package metadata has empty or duplicate aliases".into());
+                }
+                if let Some(value) = value {
+                    // Only the selected payload is admitted against the output
+                    // domain at invocation; all retained references must link.
+                    self.validate_type(links, value, fuel)?;
+                }
+            }
+        }
         if let K::SymbolName(operand) | K::EnumName(operand) = &expr.kind {
             let never = Term::Primitive(nir::Primitive::Never);
             let expected = if operand.ty == never {
