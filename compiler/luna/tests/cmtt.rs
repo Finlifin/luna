@@ -6964,27 +6964,34 @@ fn generator_value_writes_preserve_state_and_quote_snapshots_without_copy() {
 }
 
 #[test]
-fn generator_temporary_pointer_selection_runs_once_before_rhs() {
-    let source = "struct State {count:.u8'builtin,other:bool}
+fn quoted_runtime_pointer_selection_runs_once_before_rhs() {
+    let source = "typealias Byte=.u8'builtin;
+        struct State {count:Byte,other:bool}
         pure comptime fn build()-><|-bool> {
-            let state=State {count:1,other:false};
-            var calls:.u8'builtin=0;
-            (do {calls+=1;state.count.ref}).* += do {
-                state.other=true;calls+=2;calls
-            };
-            '(state.count == 4 and state.other and calls == 3)
+            '(do {
+                let state=State {count:1,other:false};
+                var calls:Byte=0;
+                (do {calls+=1;state.count.ref}).* += do {
+                    state.other=true;calls+=2;calls
+                };
+                state.count == 4 and state.other and calls == 3
+            })
         } fn run()->bool {~<build()>}";
     assert_eq!(run(source, "run", vec![]), Value::Bool(true));
 }
 
 #[test]
-fn generator_temporary_pointer_selection_can_choose_between_owned_roots() {
+fn quoted_runtime_pointer_selection_can_choose_between_owned_roots() {
     let source = "struct State {flag:bool}
-        pure comptime fn build(select:bool)-><|-bool> {
-            let first=State {flag:false};let second=State {flag:false};
-            (if select {first.flag.ref} else {second.flag.ref}).* = true;
-            '(first.flag == select and second.flag != select)
-        } fn run()->bool {~<build(true)> and ~<build(false)>}";
+        pure comptime fn build()-><select:bool|-bool> {
+            '(do {
+                let first=State {flag:false};let second=State {flag:false};
+                (if select {first.flag.ref} else {second.flag.ref}).* = true;
+                first.flag == select and second.flag != select
+            })
+        }
+        fn choose(select:bool)->bool {~[select=select]<build()>}
+        fn run()->bool {choose(true) and choose(false)}";
     assert_eq!(run(source, "run", vec![]), Value::Bool(true));
 }
 
