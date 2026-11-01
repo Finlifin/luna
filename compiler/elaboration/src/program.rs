@@ -7740,16 +7740,47 @@ impl Checker<'_, '_> {
         if availability.map_err(|e| error(index.span, e))? {
             return Ok((checked, None));
         }
-        let (value, _) = self.required_normal_input(index, checked.clone(), Vec::new())?;
-        let value = match value {
-            comptime_interpretor::Value::Integer(value) => value,
-            comptime_interpretor::Value::UnsignedInteger(value) => {
-                comptime_runtime::Integer::from_u128(value)
+        // A checked scalar literal is already a value, with no callable,
+        // capture, cleanup or user literal protocol left to execute. Decode it
+        // under the shared budget instead of constructing a complete VM world
+        // for every static slice endpoint. All other expressions retain the
+        // ordinary invocation path, including calls that happen to be constant.
+        let immediate = if matches!(
+            checked.kind,
+            K::Literal(
+                n::Literal::Integer(_)
+                    | n::Literal::SignedInteger(_)
+                    | n::Literal::UnsignedInteger(_)
+            )
+        ) {
+            let mut budget = comptime_runtime::Budget {
+                steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
+                max_limbs: 4096,
+            };
+            let before = budget.steps;
+            let value = self.known_normal_input(&checked, 0, &mut budget);
+            self.required_steps -= (before - budget.steps) as u64;
+            match value {
+                Some(Term::Integer(value)) => Some(value),
+                _ => None,
             }
-            comptime_interpretor::Value::SignedInteger(value) => {
-                comptime_runtime::Integer::from_i128(value)
+        } else {
+            None
+        };
+        let value = if let Some(value) = immediate {
+            value
+        } else {
+            let (value, _) = self.required_normal_input(index, checked.clone(), Vec::new())?;
+            match value {
+                comptime_interpretor::Value::Integer(value) => value,
+                comptime_interpretor::Value::UnsignedInteger(value) => {
+                    comptime_runtime::Integer::from_u128(value)
+                }
+                comptime_interpretor::Value::SignedInteger(value) => {
+                    comptime_runtime::Integer::from_i128(value)
+                }
+                _ => return Err(error(index.span, "BitVec index must produce an integer")),
             }
-            _ => return Err(error(index.span, "BitVec index must produce an integer")),
         };
         if value.is_negative() {
             return Err(error(index.span, "BitVec index must be nonnegative"));

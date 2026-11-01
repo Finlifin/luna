@@ -158,6 +158,7 @@ impl Checker<'_, '_> {
                     }
                 }
                 let mut sources = Vec::new();
+                let mut queried_fixed_interfaces = BTreeSet::new();
                 let mut pending = false;
                 for id in candidates.declarations() {
                     budget.steps = budget
@@ -188,29 +189,47 @@ impl Checker<'_, '_> {
                     {
                         continue;
                     }
-                    let mut allowance = Budget {
-                        steps: budget.steps.min(10_000),
-                        ..budget
-                    };
-                    let reserved = allowance.steps;
-                    let inferred = head.infer_interface_from_subject_metered(
-                        subject,
-                        &self.context,
-                        &mut allowance,
-                        self.implementation_index.parameter_domains(),
-                        Some(self.implementation_index.nominal_layouts()),
-                    );
-                    budget.steps -= reserved - allowance.steps;
-                    let source = match inferred {
-                        Ok(source) => source,
-                        Err(
-                            crate::implementation::TypeAssessment::Excluded(_)
-                            | crate::implementation::TypeAssessment::ValueIndexMismatch { .. }
-                            | crate::implementation::TypeAssessment::ForbiddenSubject(_),
-                        ) => continue,
-                        Err(_) => {
-                            pending = true;
+                    let source = if contract.type_parameters.is_empty()
+                        && head.interface_arguments.is_empty()
+                    {
+                        // There are no interface inputs to infer. Discover the
+                        // trait once, then let complete implementation selection
+                        // assess every head and requirement for this receiver.
+                        // A pending impl cannot be discarded by this shortcut.
+                        if !queried_fixed_interfaces.insert(interface) {
                             continue;
+                        }
+                        n::InterfaceInstance {
+                            declaration: interface,
+                            arguments: vec![],
+                        }
+                    } else {
+                        let mut allowance = Budget {
+                            steps: budget.steps.min(10_000),
+                            ..budget
+                        };
+                        let reserved = allowance.steps;
+                        let inferred = head.infer_interface_from_subject_metered(
+                            subject,
+                            &self.context,
+                            &mut allowance,
+                            self.implementation_index.parameter_domains(),
+                            Some(self.implementation_index.nominal_layouts()),
+                        );
+                        budget.steps -= reserved - allowance.steps;
+                        match inferred {
+                            Ok(source) => source,
+                            Err(
+                                crate::implementation::TypeAssessment::Excluded(_)
+                                | crate::implementation::TypeAssessment::ValueIndexMismatch {
+                                    ..
+                                }
+                                | crate::implementation::TypeAssessment::ForbiddenSubject(_),
+                            ) => continue,
+                            Err(_) => {
+                                pending = true;
+                                continue;
+                            }
                         }
                     };
                     let inherited = self.inherited_member_sources_metered(

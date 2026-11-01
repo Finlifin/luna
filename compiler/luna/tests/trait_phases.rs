@@ -1369,6 +1369,40 @@ fn concrete_source_search_retains_budget_for_multiple_small_candidates() {
 }
 
 #[test]
+fn parameterless_source_discovery_preserves_impl_precision_and_requirements() {
+    let prefix = "struct Subject where T {value:T}
+        pure comptime trait Read {comptime fn read(self)->bool;}
+        comptime impl Read for Subject<T> where T {
+            comptime fn read(self)->bool {false}
+        }
+        comptime impl Read for Subject<bool> {
+            comptime fn read(self)->bool {true}
+        }";
+    let package = support::compile(&format!(
+        "{prefix} comptime fn run()->bool {{Subject<bool>{{value:true}}.read()}}"
+    ));
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+
+    let failure = compile(
+        "typealias char = .char'builtin;
+        struct Subject where T {value:T}
+        pure comptime trait Read {comptime fn read(self)->bool;}
+        comptime impl Read for Subject<T> where T, requires T == bool {
+            comptime fn read(self)->bool {true}
+        }
+        comptime fn bad()->bool {Subject<char>{value:'x'}.read()}",
+        Emit::Nir,
+    )
+    .err()
+    .expect("discovery must not grant an unmet implementation requirement");
+    assert!(failure.contains("unknown struct field read"), "{failure}");
+    assert!(!failure.contains("budget exhausted"), "{failure}");
+}
+
+#[test]
 fn generic_comptime_child_checks_selected_parent_phase_at_concrete_use() {
     for parent_phase in ["", "comptime "] {
         let source = format!(

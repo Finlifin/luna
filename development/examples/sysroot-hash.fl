@@ -97,3 +97,24 @@ comptime fn list_protocol_equality() -> bool {
 test list_element_equality_protocol {
     inline if list_protocol_equality() {assumes true;} else {assumes false;}
 }
+
+comptime impl ComptimeHash for FoldedKey {
+    comptime fn hash(self) -> u64 {
+        self.value.rem_euclid(10).hash()
+    }
+}
+
+comptime fn list_protocol_hashing() -> bool {
+    let left: List<FoldedKey> = [FoldedKey {value: 12}, FoldedKey {value: 23}];
+    let right: List<FoldedKey> = [FoldedKey {value: 22}, FoldedKey {value: 13}];
+    let empty: List<FoldedKey> = [];
+    let nested_left: List<List<FoldedKey>> = [empty, left];
+    let nested_right: List<List<FoldedKey>> = [empty, right];
+    left.eq(right) and left.hash() == right.hash()
+        and nested_left.eq(nested_right) and nested_left.hash() == nested_right.hash()
+        and empty.hash() == 12638227882485885803
+}
+
+test list_element_hash_protocol {
+    inline if list_protocol_hashing() {assumes true;} else {assumes false;}
+}

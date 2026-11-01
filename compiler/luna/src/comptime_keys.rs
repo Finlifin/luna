@@ -121,8 +121,12 @@ impl Protocol {
             declaration: m.method.body,
             arguments: m.method.arguments.clone().into(),
         });
-        let dispatch =
-            elaboration::materialization::dispatch_instances_for_roots(package, &roots, budget)?;
+        // Key methods execute in the comptime VM. Transitive helpers may have
+        // ordinary Type inputs (for example a generic container operation);
+        // retain those checked telescopes for binding at the actual call.
+        let dispatch = elaboration::materialization::dispatch_instances_for_invocation(
+            package, &roots, budget,
+        )?;
         let mut package = package.clone();
         package.dispatch_instances = dispatch;
         Ok(Self {

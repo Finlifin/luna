@@ -1,0 +1,31 @@
+use builtin.{Integer, u8, u64};
+use List;
+use hashing.{ComptimeHash, mix_byte};
+
+{-
+    Hash a fixed snapshot in index order. Each element contributes its protocol
+    digest exactly once, encoded as eight little-endian bytes. The list prefix
+    and fixed-width encoding do not depend on target size or element storage.
+    Hash collisions still require the element-based ComptimeEq implementation.
+-}
+comptime impl ComptimeHash for List<T> where T:- ComptimeHash {
+    comptime fn hash(self) -> u64 {
+        let input = self;
+        let count = input.length();
+        var state = mix_byte(14695981039346656037, 76);
+        var index: Integer = 0;
+        while index < count {
+            let digest = input[index].as(ComptimeHash).hash();
+            state = mix_byte(state, digest'bitvec[0..8].as(u8));
+            state = mix_byte(state, digest'bitvec[8..16].as(u8));
+            state = mix_byte(state, digest'bitvec[16..24].as(u8));
+            state = mix_byte(state, digest'bitvec[24..32].as(u8));
+            state = mix_byte(state, digest'bitvec[32..40].as(u8));
+            state = mix_byte(state, digest'bitvec[40..48].as(u8));
+            state = mix_byte(state, digest'bitvec[48..56].as(u8));
+            state = mix_byte(state, digest'bitvec[56..64].as(u8));
+            index = index + 1;
+        }
+        state
+    }
+}
