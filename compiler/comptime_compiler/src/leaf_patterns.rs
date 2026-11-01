@@ -25,7 +25,7 @@ impl Leaf {
         let mut budget = *fuel as u64;
         let charged = nir::copy_budget::charge_pattern_rewrite(pattern, &mut budget);
         *fuel = budget as usize;
-        charged.map_err(|_| Error::Budget(source))?;
+        charged.map_err(|error| crate::copy_error(error, source))?;
         Ok(match pattern {
             Pattern::Wild => Self::Wild,
             Pattern::Unit => Self::Unit,

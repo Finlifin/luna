@@ -740,6 +740,9 @@ impl<'a> Interpreter<'a> {
             Err(comptime_compiler::Error::Budget(source)) => {
                 Err(self.failure(ErrorKind::StepsExhausted, Some(source)))
             }
+            Err(comptime_compiler::Error::Depth(source)) => {
+                Err(self.failure(ErrorKind::DepthExhausted, Some(source)))
+            }
             Err(comptime_compiler::Error::InvalidControl(source)) => {
                 Err(self.failure(ErrorKind::InvalidControlFlow, Some(source)))
             }

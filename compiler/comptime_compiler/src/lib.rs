@@ -529,6 +529,7 @@ impl Program {
 pub enum Error {
     Unsupported(SourceRange),
     Budget(SourceRange),
+    Depth(SourceRange),
     InvalidControl(SourceRange),
     /// Definition-checking evidence reached executable pattern lowering.
     UnresolvedTypeEvidence(SourceRange),
@@ -3107,7 +3108,7 @@ fn compile_root<'a>(
 fn copy_error(error: nir::copy_budget::CopyBudgetExhausted, source: SourceRange) -> Error {
     match error {
         nir::copy_budget::CopyBudgetExhausted::Steps => Error::Budget(source),
-        nir::copy_budget::CopyBudgetExhausted::Depth => Error::Budget(source),
+        nir::copy_budget::CopyBudgetExhausted::Depth => Error::Depth(source),
     }
 }
 fn copy_term(ty: &Term, fuel: &mut usize, source: SourceRange) -> Result<Term, Error> {

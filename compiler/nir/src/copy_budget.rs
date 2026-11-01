@@ -86,8 +86,13 @@ fn charge_node_substitution(
         .checked_sub(parameters.len())
         .ok_or(CopyBudgetExhausted::Steps)?;
     for argument in arguments {
-        crate::type_computations::charge_term(argument, fuel)
-            .map_err(|_| CopyBudgetExhausted::Steps)?;
+        crate::type_computations::visit_expanded_term_for_copy(
+            argument,
+            fuel,
+            128,
+            &std::collections::BTreeMap::new(),
+            &mut |_| {},
+        )?;
     }
     let replacements = parameters
         .iter()
@@ -179,7 +184,7 @@ fn charge_node_observed(
             let mut fuel = usize::try_from(*steps).unwrap_or(usize::MAX);
             let before = fuel;
             let empty = std::collections::BTreeMap::new();
-            let result = crate::type_computations::visit_expanded_term(
+            let result = crate::type_computations::visit_expanded_term_for_copy(
                 ty,
                 &mut fuel,
                 (MAX_COPY_DEPTH - depth).min(128),
@@ -187,7 +192,7 @@ fn charge_node_observed(
                 observe,
             );
             *steps -= (before - fuel) as u64;
-            result.map_err(|_| CopyBudgetExhausted::Steps)?;
+            result?;
             continue;
         }
         *steps -= 1;

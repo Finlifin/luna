@@ -105,10 +105,7 @@ fn deeply_nested_constant_types_fail_before_recursive_copying() {
         ty: Term::Primitive(Primitive::Type),
         kind: K::TypeValue(ty),
     };
-    assert!(matches!(
-        compile(&body, &mut 100_000),
-        Err(Error::Budget(_))
-    ));
+    assert!(matches!(compile(&body, &mut 100_000), Err(Error::Depth(_))));
 }
 
 #[test]

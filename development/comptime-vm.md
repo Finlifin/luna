@@ -10595,3 +10595,45 @@ Validation from `/home/fin/luna`: `python3 -B development/check.py --timeout 900
 (`/tmp/luna-tools-0dklk0na/result.json`); diff checks passed. No process remains
 live. The earlier phantom baseline is resolved as a test-contract issue; the
 separate execution depth, memory-proof and diagnostic failures remain open.
+
+
+Preserve depth exhaustion through bytecode preparation
+-----------------------------------------------------
+
+Copy preflight already distinguished expression depth from step exhaustion, but
+nested Type traversal collapsed both into Steps, and bytecode compilation mapped
+copy Depth back to Budget. The internal expanded-term visitor now preserves the
+copy-limit reason; its existing residual-invocation wrapper keeps the aggregate
+Budget API. Bytecode has a distinct Depth error, mapped to VM DepthExhausted.
+Contextual input shape depth exhaustion is no longer treated as Unsupported,
+which previously authorized a fallback probe despite an exhausted structural
+limit. Constant-copy and contextual-shape tests check the exact limit class;
+small step allowances still produce Budget/StepsExhausted, and the same compiler
+session remains usable after rejection.
+
+Evidence in `/home/fin/luna`:
+- Source repro before correction: `development/check.py --timeout 900 -- test
+  -p luna --test execution small_stack -- --nocapture`, exit 101
+  (`/tmp/luna-tools-50o92p9q/result.json`), expected DepthExhausted but observed
+  StepsExhausted for late normal-form input staging.
+- Compiler control/unit + interpreter unit checks: 7 + 27 + 376 passed, exit 0
+  (`/tmp/luna-tools-lmo94xef/result.json`).
+- NIR copy-budget + type-computation checks: 16 + 15 passed, exit 0
+  (`/tmp/luna-tools-32lb8e91/result.json`). Strengthened exact copy-limit checks
+  passed again (`/tmp/luna-tools-01gzx2c3/result.json`, 16 tests).
+- `development/check.py --timeout 900 -- test -p luna --test execution
+  late_normal_form_input_staging_limits_depth_on_a_small_stack`: passed, exit 0
+  (`/tmp/luna-tools-g8o09gbb/result.json`). Checks the two-mebibyte thread and a
+  successful subsequent invocation on the same VM.
+- Workspace formatting passed (`/tmp/luna-tools-2iofr7n9/result.json`); diff
+  checks passed. No process remains live.
+
+The initial broader interpreter run (`/tmp/luna-tools-8i0vmlka/result.json`)
+also exposed eight older integration fixtures using prohibited comptime pointers:
+`abstract_values::prepared_owned_roots_preserve_borrow_identity_across_invocations`
+and seven `type_list_inputs` cases (repeated lengths, replacement effects,
+atomic writes, runtime Copy isolation, invalid element/identity, append snapshots,
+and representation-limit recovery). They fail with PhaseMismatch from the
+previously installed phase boundaries, not from the new Depth classification;
+their value-reference/runtime migration remains pending. The separate deep
+pattern-control test still needs its tree/linear execution contract audited.

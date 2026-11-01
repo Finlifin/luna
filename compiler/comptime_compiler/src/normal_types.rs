@@ -313,7 +313,7 @@ pub(super) fn compile_input<'a>(
             }
             Task::Enter(argument, depth) => {
                 if depth >= 128 {
-                    return Err(Error::Unsupported(argument.source()));
+                    return Err(Error::Depth(argument.source()));
                 }
                 if staged {
                     code.push(Work::Emit(
@@ -555,7 +555,7 @@ mod tests {
                 &mut BTreeMap::new(),
                 false
             ),
-            Err(Error::Unsupported(_))
+            Err(Error::Depth(_))
         ));
         let wide = A::List {
             source: SOURCE,

@@ -550,11 +550,25 @@ pub(crate) fn visit_expanded_term(
     replacements: &BTreeMap<DeclarationId, &Term>,
     visit: &mut impl FnMut(&Term),
 ) -> Result<(), Error> {
+    visit_expanded_term_for_copy(root, fuel, max_depth, replacements, visit)
+        .map_err(|_| Error::Budget)
+}
+
+/// Preserve the exhausted limit for copy preflight and VM diagnostics. The
+/// residual-invocation API above retains its existing aggregate budget error.
+pub(crate) fn visit_expanded_term_for_copy(
+    root: &Term,
+    fuel: &mut usize,
+    max_depth: usize,
+    replacements: &BTreeMap<DeclarationId, &Term>,
+    visit: &mut impl FnMut(&Term),
+) -> Result<(), crate::copy_budget::CopyBudgetExhausted> {
+    use crate::copy_budget::CopyBudgetExhausted as Limit;
     let mut work = vec![(root, 0usize, true)];
     while let Some((term, depth, substitute)) = work.pop() {
-        *fuel = fuel.checked_sub(1).ok_or(Error::Budget)?;
+        *fuel = fuel.checked_sub(1).ok_or(Limit::Steps)?;
         if depth >= max_depth.min(128) {
-            return Err(Error::Budget);
+            return Err(Limit::Depth);
         }
         if substitute {
             if let Term::Rigid { declaration, .. } = term {
@@ -577,22 +591,22 @@ pub(crate) fn visit_expanded_term(
             Term::BitVec(value) => value.words().len(),
             Term::Record(fields) | Term::RecordValue(fields) => {
                 if fields.len() > *fuel {
-                    return Err(Error::Budget);
+                    return Err(Limit::Steps);
                 }
                 fields
                     .iter()
                     .try_fold(0usize, |size, (name, _)| {
                         size.checked_add(name.len()).filter(|size| *size <= *fuel)
                     })
-                    .ok_or(Error::Budget)?
+                    .ok_or(Limit::Steps)?
             }
             Term::Computation { effects, .. } => effects.len(),
             _ => 0,
         };
-        *fuel = fuel.checked_sub(payload).ok_or(Error::Budget)?;
+        *fuel = fuel.checked_sub(payload).ok_or(Limit::Steps)?;
         let mut push = |term| {
             if work.len() >= *fuel {
-                return Err(Error::Budget);
+                return Err(Limit::Steps);
             }
             work.push((term, depth + 1, substitute));
             Ok(())

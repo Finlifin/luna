@@ -370,7 +370,14 @@ fn expression_scope_allowance_does_not_raise_type_term_depth() {
     }
     let mut value = small();
     value.ty = ty;
-    assert!(charge_expression(&value, &mut 100_000).is_err());
+    assert_eq!(
+        charge_expression(&value, &mut 100_000),
+        Err(CopyBudgetExhausted::Depth)
+    );
+    assert_eq!(
+        charge_expression(&value, &mut 1),
+        Err(CopyBudgetExhausted::Steps)
+    );
     charge_expression(&small(), &mut 32).unwrap();
 }
 
