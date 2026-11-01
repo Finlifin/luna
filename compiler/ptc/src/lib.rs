@@ -2048,6 +2048,10 @@ fn rebuild(
 ) -> Option<Term> {
     match term {
         Term::Primitive(p) => Some(Term::Primitive(*p)),
+        Term::ErrorResult { errors, result } => Some(Term::error_result(
+            errors.iter().map(&mut *child).collect::<Option<Vec<_>>>()?,
+            child(result)?,
+        )),
         Term::Optional(t) => Some(Term::Optional(Box::new(child(t)?))),
         Term::Pointer(t) => Some(Term::Pointer(Box::new(child(t)?))),
         Term::ComptimeFunction(t) => Some(Term::ComptimeFunction(Box::new(child(t)?))),
@@ -2144,6 +2148,32 @@ fn substitute_types(
     Some(value)
 }
 fn closed_type(term: &Term, nominal: &BTreeSet<DeclarationId>) -> bool {
+    if let Term::ErrorResult { errors, result } = term {
+        // Model equality uses completed canonical values. Reject forged raw
+        // assignments rather than interpreting label order or duplicate tags
+        // as distinct Type identities. Source terms are normalized by rebuild.
+        if errors.is_empty()
+            || matches!(result.as_ref(), Term::ErrorResult { .. })
+            || !closed_type(result, nominal)
+        {
+            return false;
+        }
+        // Match the constructor's stable ordering without cloning the entire
+        // row or allocating another sorted collection during witness replay.
+        let mut seen = std::collections::HashSet::new();
+        let mut previous = None;
+        for label in errors {
+            if !closed_type(label, nominal) || !seen.insert(label) {
+                return false;
+            }
+            let key = label.to_string();
+            if previous.as_ref().is_some_and(|previous| previous > &key) {
+                return false;
+            }
+            previous = Some(key);
+        }
+        return true;
+    }
     if matches!(term, Term::Nominal { declaration, arguments } if !arguments.is_empty() && !nominal.contains(declaration))
     {
         return false;

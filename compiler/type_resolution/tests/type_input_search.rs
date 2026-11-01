@@ -553,3 +553,41 @@ fn nested_scope_type_models_preserve_binding_depth_through_commit() {
     parent.commit(candidate).unwrap();
     assert_eq!(parent.freeze(&I::Meta(input)).unwrap(), expected);
 }
+
+#[test]
+fn error_and_opaque_type_models_commit_original_symbolic_identities() {
+    let head = DeclarationId {
+        package: 946,
+        local: 1,
+    };
+    let row = Term::error_result(vec![Term::Primitive(P::Char)], Term::Primitive(P::Bool));
+    for expected in [
+        row.clone(),
+        Term::NormalForm {
+            head,
+            sort: Sort::Type,
+            arguments: vec![row],
+        },
+    ] {
+        let mut context = Context::default();
+        context.admit_congruence(head);
+        let mut parent = Engine::with_context(context);
+        let input = parent.fresh(Sort::Type);
+        let problem = R::Equal(I::Meta(input), I::Stable(expected.clone()));
+        let Search::Proposed {
+            mut candidate,
+            obligation,
+            ..
+        } = parent
+            .search_type_inputs(&[input], &problem, &mut Budget::default())
+            .unwrap()
+        else {
+            panic!("explicit equality determines the Type input");
+        };
+        assert_eq!(parent.inspect(&I::Meta(input)).unwrap(), I::Meta(input));
+        candidate.advance_metered(100, &mut Budget::default());
+        assert!(candidate.state(obligation).unwrap().is_proven());
+        parent.commit(candidate).unwrap();
+        assert_eq!(parent.freeze(&I::Meta(input)).unwrap(), expected);
+    }
+}

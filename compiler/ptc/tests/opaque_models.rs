@@ -334,3 +334,32 @@ fn large_completed_payloads_are_metered_before_model_indexing() {
         Err(ptc::ProofError::BudgetExhausted)
     ));
 }
+
+#[test]
+fn closed_opaque_applications_remain_symbolic_type_solutions() {
+    let mut context = Context::default();
+    context.admit_congruence(id(100));
+    for arguments in [vec![], vec![Term::Primitive(Primitive::Bool)]] {
+        let expected = Term::NormalForm {
+            head: id(100),
+            sort: Sort::Type,
+            arguments,
+        };
+        let constraint = F::equal(var(0), expected.clone());
+        let outcome =
+            context.search_type_inputs(&[id(0)], constraint.clone(), &mut Budget::default());
+        let TypeInputOutcome::Unique(solution) = outcome else {
+            panic!("{outcome}")
+        };
+        assert_eq!(solution.bindings[&id(0)].0, expected);
+        let problem = context
+            .type_input_context(&[id(0)], constraint, &mut Budget::default())
+            .unwrap();
+        problem
+            .verify_proof(&solution.bindings[&id(0)].1, Budget::default())
+            .unwrap();
+        problem
+            .verify_witness(&solution.model, Budget::default())
+            .unwrap();
+    }
+}
