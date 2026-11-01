@@ -6,7 +6,7 @@ use comptime_interpretor::Value;
 
 fn source(body: &str) -> String {
     format!(
-        "mod primitives {{ {} }} use primitives.*;\nmod bindings {{ {} }}\nmod comparison {{ {} }}\nmod resources {{ {} }}\nmod conversion {{ {} }}\nmod traits {{ {} }}\nmod builtin {{pub use primitives.*;pub mod compiler {{pub use bindings.*;}}}}\nmod comptime_comparison {{ {} }}\nmod text_impl {{ mod bindings {{ {} }} }}\nmod comptime_hashing {{ {} }}\npub use comptime_comparison.ComptimeEq;pub use comptime_hashing.ComptimeHash;pub use traits.*;\n{body}",
+        "mod primitives {{ {} }} use primitives.*;\nmod bindings {{ {} }}\nmod comparison {{ {} }}\nmod resources {{ {} }}\nmod conversion {{ {} }}\nmod traits {{ {} }}\nmod builtin {{pub use primitives.*;pub mod compiler {{pub use bindings.*;}}}}\nmod comptime_comparison {{ {} }}\nmod text_impl {{ mod bindings {{ {} }} }}\nmod numeric {{ mod bindings {{ {} }} }}\nmod comptime_hashing {{ {} }}\npub use comptime_comparison.ComptimeEq;pub use comptime_hashing.ComptimeHash;pub use traits.*;\n{body}",
         include_str!("../../../library/builtin/primitives.fl"),
         include_str!("../../../library/builtin/bindings.fl"),
         support::with_attrs(include_str!(
@@ -17,6 +17,7 @@ fn source(body: &str) -> String {
         support::with_attrs(include_str!("../../../library/builtin/protocols/traits.fl")),
         include_str!("../../../library/meta/numeric/equality.fl"),
         include_str!("../../../library/meta/text_impl/bindings.fl"),
+        include_str!("../../../library/meta/numeric/bindings.fl"),
         include_str!("../../../library/meta/data/hashing.fl"),
     )
 }

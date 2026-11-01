@@ -8,7 +8,7 @@ concat!(
     "\nmod bindings {\n", include_str!("../../../../library/builtin/bindings.fl"), "\n} pub mod compiler {pub use bindings.*;} }\n",
     "mod bindings {\n", include_str!("../../../../library/meta/bindings.fl"), "\n}\n",
     "mod text_impl {mod bindings {\n", include_str!("../../../../library/meta/text_impl/bindings.fl"), "\n}}\n",
-    "mod numeric {mod equality {\n", include_str!("../../../../library/meta/numeric/equality.fl"), "\n}}\n",
+    "mod numeric {mod bindings {\n", include_str!("../../../../library/meta/numeric/bindings.fl"), "\n} mod equality {\n", include_str!("../../../../library/meta/numeric/equality.fl"), "\n}}\n",
     "mod data {\n",
     "mod hashing {\n", include_str!("../../../../library/meta/data/hashing.fl"), "\n}\n",
     "mod patterns {\n", include_str!("../../../../library/meta/data/patterns.fl"), "\n}\n",

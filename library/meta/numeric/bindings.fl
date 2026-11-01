@@ -1,0 +1,5 @@
+use builtin.{usize, isize, u128};
+
+-- Bind target-sized representation observations to the comptime phase.
+pub const usize_representation: comptime fn(usize) -> u128 = .integer_representation'builtin;
+pub const isize_representation: comptime fn(isize) -> u128 = .integer_representation'builtin;

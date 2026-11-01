@@ -219,7 +219,8 @@ impl Checker<'_, '_> {
                     // Legacy phase-neutral bindings retain direct lowering.
                     // Only the original declaration may establish a phase;
                     // an alias cannot turn an untyped token into a function.
-                    if signatures::text_query(name.as_str()).is_some()
+                    if (signatures::text_query(name.as_str()).is_some()
+                        || name.as_str() == "integer_representation")
                         && !annotations.iter().any(|(annotated, _)| *annotated == owner)
                     {
                         if let Some((_, annotation)) = annotations.first() {
@@ -234,7 +235,7 @@ impl Checker<'_, '_> {
                         signatures::callable(name.as_str(), self.protocols.meta_list)
                             .map_err(|message| error(span, message))?;
                     if !annotations.is_empty() {
-                        let mut expected = signature.clone().ok_or_else(|| error(span, "typed compiler operation requires a supported callable signature contract"))?;
+                        let mut expected = signature.clone();
                         for (annotated_owner, annotation) in annotations.into_iter().rev() {
                             if !self.active_signatures.insert(annotated_owner) {
                                 return Err(error(
@@ -245,17 +246,31 @@ impl Checker<'_, '_> {
                             let actual = self.type_expr(annotation);
                             self.active_signatures.remove(&annotated_owner);
                             let actual = actual?;
+                            if annotated_owner == owner && name.as_str() == "integer_representation"
+                            {
+                                if !signatures::integer_representation(&actual) {
+                                    return Err(error(
+                                        annotation.span,
+                                        "compiler operation signature mismatch: integer representation requires fn(machine integer) -> u128 in the declared phase",
+                                    ));
+                                }
+                                expected = Some(actual.clone());
+                                signature = Some(actual.clone());
+                            }
                             // Phase-neutral primitive operations may establish
                             // either phase at their original typed binding.
                             // Aliases retain that binding's phase and identity.
                             if annotated_owner == owner
                                 && signatures::text_query(name.as_str()).is_some()
-                                && actual == Term::ComptimeFunction(Box::new(expected.clone()))
+                                && expected.as_ref().is_some_and(|expected| {
+                                    actual == Term::ComptimeFunction(Box::new(expected.clone()))
+                                })
                             {
-                                expected = actual.clone();
-                                signature = Some(expected.clone());
+                                expected = Some(actual.clone());
+                                signature = Some(actual.clone());
                             }
-                            if actual != expected {
+                            let expected = expected.as_ref().ok_or_else(|| error(span, "typed compiler operation requires a supported callable signature contract"))?;
+                            if &actual != expected {
                                 return Err(error(
                                     annotation.span,
                                     format!(

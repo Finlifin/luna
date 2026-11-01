@@ -220,3 +220,19 @@ pub(super) fn publishes_definition(name: &str) -> bool {
             | "build_bits_enum_paths"
     )
 }
+
+/// Concrete operation bindings select a machine domain without granting a
+/// coercion, a host-sized interpretation, or a new generic language rule.
+pub(super) fn integer_representation(ty: &Term) -> bool {
+    let signature = match ty {
+        Term::ComptimeFunction(signature) => signature.as_ref(),
+        ty => ty,
+    };
+    let Term::Function { parameters, result } = signature else {
+        return false;
+    };
+    parameters.len() == 1
+        && parameters[0].sort == Sort::Runtime
+        && **result == p(P::U128)
+        && n::integer_representation_valid(&parameters[0].ty, result)
+}

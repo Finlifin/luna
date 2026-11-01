@@ -2,7 +2,8 @@ use builtin.{bool, char, str, Symbol, u8, u16, u32, u64, u128,
     i8, i16, i32, i64, i128, usize, isize};
 use text_impl.bindings.{byte_length as hash_str_byte_length, byte as hash_str_byte,
     symbol_byte_length as hash_symbol_byte_length, symbol_byte as hash_symbol_byte};
-use builtin.compiler.{integer_representation as hash_integer_representation};
+use numeric.bindings.{usize_representation as hash_usize_representation,
+    isize_representation as hash_isize_representation};
 
 {-
     The same representation/content hashes as builtin.Hash, with independent
@@ -141,7 +142,7 @@ comptime impl ComptimeHash for Symbol {
 
 comptime impl ComptimeHash for usize {
     comptime fn hash(self) -> u64 {
-        let widened = hash_integer_representation(self);
+        let widened = hash_usize_representation(self);
         let bits = widened'bitvec;
         let low = bits[0..64];
         let high = bits[64..128];
@@ -151,7 +152,7 @@ comptime impl ComptimeHash for usize {
 
 comptime impl ComptimeHash for isize {
     comptime fn hash(self) -> u64 {
-        let widened = hash_integer_representation(self);
+        let widened = hash_isize_representation(self);
         let bits = widened'bitvec;
         let low = bits[0..64];
         let high = bits[64..128];

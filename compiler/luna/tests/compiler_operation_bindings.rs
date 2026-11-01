@@ -922,3 +922,40 @@ fn a_text_operation_alias_cannot_establish_the_original_phase() {
         "{error}"
     );
 }
+
+#[test]
+fn integer_representation_values_keep_machine_width_through_callbacks() {
+    run_staged_carriers(
+        "typealias i8 = .i8'builtin; typealias u128 = .u128'builtin;
+        const bits: comptime fn(i8) -> u128 = .integer_representation'builtin;
+        comptime fn observe(f: comptime fn(i8) -> u128, value: i8) -> u128 { f(value) }
+        comptime fn compute() -> bool {
+            let operations: List<comptime fn(i8) -> u128> = [bits];
+            observe(operations[0], -1) == 255 and observe(bits, -128) == 128
+        }",
+    );
+}
+
+#[test]
+fn integer_representation_bindings_reject_wrong_domains_results_and_alias_phases() {
+    for declarations in [
+        "const wrong: comptime fn(bool) -> u128 = .integer_representation'builtin;",
+        "const wrong: comptime fn(Integer) -> u128 = .integer_representation'builtin;",
+        "const wrong: comptime fn(i8) -> i8 = .integer_representation'builtin;",
+        "const wrong: comptime fn(i8, i8) -> u128 = .integer_representation'builtin;",
+        "const original: comptime fn(i8) -> u128 = .integer_representation'builtin;
+         const alias: fn(i8) -> u128 = original;",
+        "const original: fn(i8) -> u128 = .integer_representation'builtin;
+         const alias: fn(u8) -> u128 = original;",
+    ] {
+        let error = compile(&format!(
+            "typealias i8 = .i8'builtin; typealias u8 = .u8'builtin;
+             typealias u128 = .u128'builtin; {declarations}"
+        ))
+        .unwrap_err();
+        assert!(
+            error.contains("signature mismatch"),
+            "{declarations}: {error}"
+        );
+    }
+}

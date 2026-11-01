@@ -86,6 +86,9 @@ impl Checker<'_, '_> {
 }
 
 fn operation_body(name: &str, mut inputs: Vec<n::Expr>, source: n::SourceRange) -> K {
+    if name == "integer_representation" {
+        return K::IntegerRepresentation(Box::new(inputs.remove(0)));
+    }
     if let Some(query) = signatures::text_query(name) {
         return K::TextQuery {
             query,

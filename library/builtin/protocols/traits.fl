@@ -1,6 +1,7 @@
 use bindings.{str_byte_length as hash_str_byte_length, str_byte as hash_str_byte,
     symbol_byte_length as hash_symbol_byte_length, symbol_byte as hash_symbol_byte,
-    integer_representation as hash_integer_representation};
+    usize_representation as hash_usize_representation,
+    isize_representation as hash_isize_representation};
 
 -- ==========================================================================
 -- builtin/traits – fundamental traits
@@ -158,7 +159,7 @@ impl Hash for Symbol {
 -}
 impl Hash for usize {
     fn hash(self) -> u64 {
-        let widened = hash_integer_representation(self);
+        let widened = hash_usize_representation(self);
         let bits = widened'bitvec;
         let low = bits[0..64];
         let high = bits[64..128];
@@ -168,7 +169,7 @@ impl Hash for usize {
 
 impl Hash for isize {
     fn hash(self) -> u64 {
-        let widened = hash_integer_representation(self);
+        let widened = hash_isize_representation(self);
         let bits = widened'bitvec;
         let low = bits[0..64];
         let high = bits[64..128];
