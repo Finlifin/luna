@@ -238,6 +238,6 @@ fn enabled() -> bool {
 
 已发布的 builder 类型支持 runtime 与 comptime 的直接表示转换；泛型转换端点中的
 关联 Type 在 invocation 中观察并保留，包装与拆包不展开名义身份。当前 cast 目标
-仍不能直接引用 comptime 函数里的局部 Type 值（例如 `let Generated = draft.Build();
-value.as(Generated)`），该路径的动态类型 elaboration 尚未接通；上述示例先通过
-顶层 `typealias` 发布类型。
+可以引用已静态观察到的局部 Type 值，但不能引用尚需 invocation 产生的局部类型
+（例如 `let Generated = draft.Build(); value.as(Generated)`）；该路径的动态类型
+elaboration 尚未接通。上述示例先通过顶层 `typealias` 发布类型。

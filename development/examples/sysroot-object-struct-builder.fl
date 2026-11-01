@@ -84,7 +84,13 @@ where requires T :- FieldType
 }
 comptime fn associated_holder() -> bool {
     let held = hold(bool, true);
-    let packet = Packet {ready: held.item, count: 23};
+    let packet = Packet {ready: read_holder(bool, held), count: 23};
     packet.ready and packet.count == 23
 }
 const associated_aggregate = associated_holder();
+
+comptime fn read_holder(comptime T: Type, holder: Holder<T.as(FieldType).Item>) -> T.as(FieldType).Item
+where requires T :- FieldType
+{
+    holder.item
+}

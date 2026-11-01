@@ -52,6 +52,10 @@ impl Interpreter<'_> {
         base_source: SourceRange,
         source: SourceRange,
     ) -> Result<Value, Error> {
+        // Type observation may invoke user code. Finish it before borrowing
+        // addressable storage or a comptime value-reference receiver.
+        let ty = self.selected_type_view(ty, Some(source))?;
+        self.check_comptime_domain(&ty, source)?;
         let guard = if let Value::Storage(storage) = local {
             Some(
                 storage
@@ -92,7 +96,7 @@ impl Interpreter<'_> {
         }
         .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
         let value = self.checkpoint_representation(selected, base_source)?;
-        if name.is_some() && !self.has_type(&value, ty) {
+        if !self.has_type(&value, &ty) {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         }
         Ok(value)

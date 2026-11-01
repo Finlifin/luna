@@ -224,3 +224,113 @@ fn computed_record_receivers_keep_the_general_control_flow_path() {
         Flow::Return(Value::Bool(false))
     ));
 }
+
+#[test]
+fn associated_field_domains_are_observed_before_borrowing_and_checked_for_all_records() {
+    let package = Package::default();
+    let boolean = Term::Primitive(Primitive::Bool);
+    let declaration = DeclarationId {
+        package: 12,
+        local: 1,
+    };
+    let projection = Term::AssociatedType {
+        origin: Box::new(nir::AssociatedTypeOrigin {
+            interface: DeclarationId {
+                package: 12,
+                local: 2,
+            },
+            member: DeclarationId {
+                package: 12,
+                local: 3,
+            },
+        }),
+        arguments: vec![],
+        subject: Box::new(boolean.clone()),
+    };
+    for nominal in [false, true] {
+        let storage = Storage::new(if nominal {
+            Value::Record {
+                declaration,
+                arguments: vec![],
+                fields: vec![Value::Bool(true)],
+            }
+        } else {
+            Value::AnonymousRecord(vec![("selected".into(), Value::Bool(true))])
+        });
+        let resolver = |_: &Expr, fuel: &mut u64| {
+            *fuel -= 1;
+            // Selection itself must not run under the receiver's storage lock.
+            let _guard = storage
+                .0
+                .try_lock()
+                .expect("Type observation borrowed its receiver");
+            Ok(AssociatedSelection {
+                initializer: nir::associated_initializers::AssociatedInitializer::new(
+                    Expr {
+                        source: source(),
+                        ty: Term::Primitive(Primitive::Type),
+                        kind: K::TypeValue(boolean.clone()),
+                    },
+                    &mut 1000,
+                )
+                .unwrap(),
+                requires_invocation: true,
+            })
+        };
+        for computed in [false, true] {
+            for compiled in [false, true] {
+                let mut receiver = base();
+                if computed {
+                    receiver.kind = K::Block {
+                        statements: vec![],
+                        result: Some(Box::new(base())),
+                    };
+                }
+                let mut body = Expr {
+                    source: source(),
+                    ty: projection.clone(),
+                    kind: if nominal {
+                        K::Field {
+                            value: Box::new(receiver),
+                            declaration,
+                            index: 0,
+                        }
+                    } else {
+                        K::AnonymousField {
+                            value: Box::new(receiver),
+                            name: "selected".into(),
+                            index: 0,
+                        }
+                    },
+                };
+                let mut vm = Interpreter::for_comptime(&package, Budget::default())
+                    .unwrap()
+                    .with_associated_resolver(&resolver);
+                let mut env = environment(Value::Storage(storage.clone()));
+                let run = |vm: &mut Interpreter<'_>, body: &Expr, env: &mut Environment| {
+                    if compiled {
+                        let code = Arc::new(comptime_compiler::compile(body, &mut 10000).unwrap());
+                        vm.execute_code(&code, env)
+                    } else {
+                        vm.eval(body, env)
+                    }
+                };
+                assert!(matches!(
+                    run(&mut vm, &body, &mut env).unwrap(),
+                    Flow::Value(Value::Bool(true))
+                ));
+                body.ty = Term::Primitive(Primitive::Char);
+                assert_eq!(
+                    run(&mut vm, &body, &mut env).unwrap_err().kind,
+                    ErrorKind::Type
+                );
+                body.ty = projection.clone();
+                assert!(matches!(
+                    run(&mut vm, &body, &mut env).unwrap(),
+                    Flow::Value(Value::Bool(true))
+                ));
+                assert!(vm.active_associated_initializers.is_empty());
+            }
+        }
+    }
+}

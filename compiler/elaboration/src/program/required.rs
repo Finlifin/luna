@@ -150,6 +150,53 @@ impl Checker<'_, '_> {
         let saved_checking = std::mem::replace(&mut self.checking_contract, true);
         let saved_pending = self.pending_type_uses.replace(Vec::new());
         let saved_capabilities = self.capabilities.get(&owner).cloned();
+        let saved_type_inputs = self.type_input_bindings.clone();
+        let saved_value_inputs = self.value_input_bindings.clone();
+        // A required invocation can request this contract after a nested
+        // signature check restored its caller's input environment. Rebuild
+        // declaration inputs from checked domains, never from that caller.
+        let domains = self
+            .open_functions
+            .get(&owner)
+            .map(|definition| definition.input_domains())
+            .or_else(|| {
+                self.signatures
+                    .get(&owner)
+                    .or_else(|| self.interface_signatures.get(&owner))
+                    .and_then(|signature| match signature.callable_signature() {
+                        Term::Function { parameters, .. } => Some(
+                            parameters
+                                .iter()
+                                .map(|p| (p.sort, Some(p.ty.clone())))
+                                .collect(),
+                        ),
+                        _ => None,
+                    })
+            })
+            .or_else(|| self.signature_domains.get(&owner).cloned());
+        if let Some(domains) = domains {
+            if let ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) | ItemKind::Effect(sig, _) =
+                &self.package.item(owner).unwrap().kind
+            {
+                for (index, (parameter, (sort, domain))) in
+                    sig.params.iter().zip(domains).enumerate()
+                {
+                    let binding = local(parameter.hir_id);
+                    let symbol = Term::Bound {
+                        depth: 0,
+                        index,
+                        sort,
+                    };
+                    if sort == Sort::Type {
+                        self.type_input_bindings.insert(binding, symbol);
+                    } else if sort == Sort::ComptimeValue {
+                        if let Some(domain) = domain {
+                            self.value_input_bindings.insert(binding, (symbol, domain));
+                        }
+                    }
+                }
+            }
+        }
         self.context = self.binder_context(owner);
         let result = (|| {
             let clauses = match &self.package.item(owner).unwrap().kind {
@@ -244,6 +291,8 @@ impl Checker<'_, '_> {
             Ok(requirements)
         })();
         let uses = std::mem::replace(&mut self.pending_type_uses, saved_pending).unwrap();
+        self.type_input_bindings = saved_type_inputs;
+        self.value_input_bindings = saved_value_inputs;
         self.signature_owner = saved_owner;
         self.context = saved_context;
         self.checking_contract = saved_checking;

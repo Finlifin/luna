@@ -4290,57 +4290,32 @@ impl<'a> Interpreter<'a> {
         if let Some(value) = self.eval_local_field(expr, environment) {
             return value;
         }
-        let result = match &expr.kind {
-            K::AnonymousField { value, name, index } => {
-                let representation = value!(self.eval(value, environment));
-                if !matches!(
-                    value.kind,
-                    K::Field { .. } | K::AnonymousField { .. } | K::Local(_)
-                ) {
-                    self.retain_residual(value.source, &representation)?;
-                }
-                let Value::AnonymousRecord(fields) = representation else {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                };
-                let (actual, value) = fields
-                    .get(*index)
-                    .ok_or_else(|| self.failure(ErrorKind::Type, Some(expr.source)))?;
-                if actual != name || !self.has_type(value, &expr.ty) {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                }
-                value.clone()
-            }
+        let (base, nominal, name, index) = match &expr.kind {
+            K::AnonymousField { value, name, index } => (value, None, Some(name.as_str()), *index),
             K::Field {
                 value,
                 declaration,
                 index,
-            } => {
-                let representation = value!(self.eval(value, environment));
-                if !matches!(
-                    value.kind,
-                    K::Field { .. } | K::AnonymousField { .. } | K::Local(_)
-                ) {
-                    self.retain_residual(value.source, &representation)?;
-                }
-                let Value::Record {
-                    declaration: actual,
-                    fields,
-                    ..
-                } = representation
-                else {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                };
-                if actual != *declaration {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                }
-                fields
-                    .get(*index)
-                    .cloned()
-                    .ok_or_else(|| self.failure(ErrorKind::Type, Some(expr.source)))?
-            }
+            } => (value, Some(*declaration), None, *index),
             _ => unreachable!("expression dispatcher selected an incompatible evaluator"),
         };
-        Ok(Flow::Value(result))
+        let representation = value!(self.eval(base, environment));
+        if !matches!(
+            base.kind,
+            K::Field { .. } | K::AnonymousField { .. } | K::Local(_)
+        ) {
+            self.retain_residual(base.source, &representation)?;
+        }
+        self.read_record_field(
+            &representation,
+            nominal,
+            name,
+            index,
+            &expr.ty,
+            base.source,
+            expr.source,
+        )
+        .map(Flow::Value)
     }
 
     #[inline(never)]
