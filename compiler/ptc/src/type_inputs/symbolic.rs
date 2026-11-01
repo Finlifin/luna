@@ -163,8 +163,24 @@ pub(super) fn same_ambient(
             .checked_sub(model.integers.len())
             .ok_or(UnknownReason::BudgetExhausted)?;
     }
+    // These are finite observations of an opaque function, not exhaustive
+    // function definitions. Disjoint keys can share one common interpretation;
+    // overlapping keys must agree. Requiring identical tables made a changed
+    // requested input look like a changed ambient function automatically.
+    let mut applications = HashMap::new();
+    for entry in first.applications.iter().chain(&second.applications) {
+        budget.steps = budget
+            .steps
+            .checked_sub(1)
+            .ok_or(UnknownReason::BudgetExhausted)?;
+        let key = (entry.head, entry.arguments.as_slice());
+        if let Some(previous) = applications.insert(key, &entry.result) {
+            if previous != &entry.result {
+                return Ok(false);
+            }
+        }
+    }
     Ok(first.bound_types == second.bound_types
-        && first.applications == second.applications
         && first.integers == second.integers
         && first
             .types
@@ -190,6 +206,46 @@ fn requested(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finite_function_observations_share_a_world_only_when_keys_agree() {
+        let head = DeclarationId {
+            package: 712,
+            local: 1,
+        };
+        let mut context = Context::default();
+        context.admit_congruence(head);
+        let Outcome::NotEntailed(mut first) = context.prove(Formula::False, Budget::default())
+        else {
+            panic!()
+        };
+        let entry = |input, output| TypeApplication {
+            head,
+            arguments: vec![Term::TupleValue(vec![Term::Primitive(input)])],
+            result: Term::Primitive(output),
+        };
+        first.applications = vec![entry(Primitive::Bool, Primitive::U8)];
+        let mut second = first.clone();
+        second.applications = vec![entry(Primitive::Char, Primitive::U16)];
+        assert!(same_ambient(&first, &second, &[], &mut Budget::default()).unwrap());
+        second.applications.push(first.applications[0].clone());
+        assert!(same_ambient(&first, &second, &[], &mut Budget::default()).unwrap());
+        context.verify_witness(&second, Budget::default()).unwrap();
+        second.applications[1].result = Term::Primitive(Primitive::U32);
+        assert!(!same_ambient(&first, &second, &[], &mut Budget::default()).unwrap());
+        assert!(matches!(
+            same_ambient(
+                &first,
+                &second,
+                &[],
+                &mut Budget {
+                    steps: 0,
+                    ..Budget::default()
+                }
+            ),
+            Err(UnknownReason::BudgetExhausted)
+        ));
+    }
 
     #[test]
     fn composed_candidates_keep_opaque_heads_and_require_original_proofs() {

@@ -100,7 +100,8 @@ impl Context {
                 break;
             }
         }
-        if let Some((variable, alternative)) = pending.into_iter().next() {
+        let unresolved = !pending.is_empty();
+        for (variable, alternative) in pending {
             // Different ambient worlds do not establish ambiguity relative
             // to one fixed surrounding interface.
             match symbolic::same_ambient(&model, &alternative, inputs, budget) {
@@ -112,19 +113,26 @@ impl Context {
                     };
                 }
                 Ok(false) => {
-                    return match ambiguity::alternative(&problem, &model, variable, inputs, budget)
-                    {
-                        Ok(Some(alternative)) => TypeInputOutcome::Ambiguous {
-                            variable,
-                            candidate: model,
-                            alternative,
-                        },
-                        Ok(None) => TypeInputOutcome::Unknown(UnknownReason::UnvalidatedModel),
-                        Err(reason) => TypeInputOutcome::Unknown(reason),
-                    };
+                    match ambiguity::alternative(&problem, &model, variable, inputs, budget) {
+                        Ok(Some(alternative)) => {
+                            return TypeInputOutcome::Ambiguous {
+                                variable,
+                                candidate: model,
+                                alternative,
+                            };
+                        }
+                        // One input's finite interpretation may be insufficient
+                        // while a later input has two validated assignments.
+                        // Never turn this incomplete search into uniqueness.
+                        Ok(None) | Err(UnknownReason::UnvalidatedModel) => {}
+                        Err(reason) => return TypeInputOutcome::Unknown(reason),
+                    }
                 }
                 Err(reason) => return TypeInputOutcome::Unknown(reason),
             }
+        }
+        if unresolved {
+            return TypeInputOutcome::Unknown(UnknownReason::UnvalidatedModel);
         }
         TypeInputOutcome::Unique(TypeInputSolution { model, bindings })
     }

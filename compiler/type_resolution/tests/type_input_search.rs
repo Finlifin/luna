@@ -362,6 +362,49 @@ fn dependent_symbolic_proposals_commit_without_temporary_search_identities() {
 }
 
 #[test]
+fn structural_value_type_inputs_preserve_ambient_identity_on_commit() {
+    let head = DeclarationId {
+        package: 947,
+        local: 1,
+    };
+    let mut context = Context::default();
+    context.admit_congruence(head);
+    let mut parent = Engine::with_context(context);
+    let input = parent.fresh(Sort::Type);
+    let ambient = Term::Rigid {
+        declaration: DeclarationId {
+            package: 947,
+            local: 2,
+        },
+        sort: Sort::Type,
+    };
+    let expected = Term::NormalForm {
+        head,
+        sort: Sort::Type,
+        arguments: vec![Term::RecordValue(vec![(
+            "type_and_flag".into(),
+            Term::TupleValue(vec![ambient, Term::Bool(true)]),
+        )])],
+    };
+    let problem = R::Equal(I::Meta(input), I::Stable(expected.clone()));
+    let Search::Proposed {
+        mut candidate,
+        obligation,
+        ..
+    } = parent
+        .search_type_inputs(&[input], &problem, &mut Budget::default())
+        .unwrap()
+    else {
+        panic!("the explicit equation fixes the input relative to its environment")
+    };
+    assert_eq!(parent.inspect(&I::Meta(input)).unwrap(), I::Meta(input));
+    candidate.advance(100, Budget::default());
+    assert!(candidate.state(obligation).unwrap().is_proven());
+    parent.commit(candidate).unwrap();
+    assert_eq!(parent.freeze(&I::Meta(input)).unwrap(), expected);
+}
+
+#[test]
 fn model_search_late_budget_failures_preserve_assignments_and_waiters() {
     let mut parent = Engine::default();
     let outer = parent.fresh(Sort::Type);

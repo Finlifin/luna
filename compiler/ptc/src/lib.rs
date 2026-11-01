@@ -2021,7 +2021,9 @@ fn reify(
             // Nullary operations still allocate and participate in ordering.
             *fuel = fuel.checked_sub(effects.len())?;
         }
-        if model_applications::fixed_argument(term) {
+        if model_applications::fixed_argument(term)
+            || matches!(term, Term::TupleValue(_) | Term::RecordValue(_))
+        {
             nir::type_computations::charge_term(term, fuel).ok()?;
         }
         rebuild(term, nominal, &mut |child| {
@@ -2070,6 +2072,15 @@ fn rebuild(
     match term {
         Term::Primitive(p) => Some(Term::Primitive(*p)),
         term if model_applications::fixed_argument(term) => Some(term.clone()),
+        Term::TupleValue(values) => Some(Term::TupleValue(
+            values.iter().map(&mut *child).collect::<Option<_>>()?,
+        )),
+        Term::RecordValue(fields) => Some(Term::RecordValue(
+            fields
+                .iter()
+                .map(|(label, value)| Some((label.clone(), child(value)?)))
+                .collect::<Option<_>>()?,
+        )),
         Term::Computation { effects, result } => {
             model_effects::rebuild(effects, result, nominal, child)
         }

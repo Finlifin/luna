@@ -5,7 +5,7 @@ use super::*;
 use nir::effects::Operation;
 
 fn argument(value: &Term, nominal: &BTreeSet<DeclarationId>) -> bool {
-    closed_type(value, nominal) || model_applications::fixed_argument(value)
+    model_applications::closed_argument(value, nominal)
 }
 
 pub(super) fn rebuild(

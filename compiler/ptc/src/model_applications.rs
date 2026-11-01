@@ -24,18 +24,36 @@ pub(super) fn admitted(term: &Term, context: &Context) -> bool {
     matches!(term, Term::NormalForm { head, sort: Sort::Type, arguments }
         if context.congruence_heads.contains(head)
             && !context.tuple_heads.contains(head)
-            && arguments.iter().all(|arg| arg.sort() == Sort::Type || fixed_argument(arg)))
+            && arguments.iter().all(|arg| argument_with_types(arg, &|_| true)))
 }
 
 /// Completed intrinsic value identities only. This is not program equality:
 /// floating comparison, user Eq/Hash and unresolved value stores need their
 /// own evidence and must not be guessed from Rust representation equality.
 pub(super) fn fixed_argument(term: &Term) -> bool {
-    fn visit(term: &Term, depth: usize, remaining: &mut usize) -> bool {
+    argument_with_types(term, &|_| false)
+}
+
+/// A ground model packet may contain interpreted Type leaves. Pending source
+/// Types are accepted only by application discovery, never witness replay.
+pub(super) fn closed_argument(term: &Term, nominal: &BTreeSet<DeclarationId>) -> bool {
+    argument_with_types(term, &|ty| closed_type(ty, nominal))
+}
+
+fn argument_with_types(term: &Term, type_leaf: &impl Fn(&Term) -> bool) -> bool {
+    fn visit(
+        term: &Term,
+        depth: usize,
+        remaining: &mut usize,
+        type_leaf: &impl Fn(&Term) -> bool,
+    ) -> bool {
         if depth >= 256 || *remaining == 0 {
             return false;
         }
         *remaining -= 1;
+        if term.sort() == Sort::Type {
+            return type_leaf(term);
+        }
         match term {
             Term::Unit
             | Term::Bool(_)
@@ -46,11 +64,11 @@ pub(super) fn fixed_argument(term: &Term) -> bool {
             | Term::BitVec(_) => true,
             Term::TupleValue(values) => values
                 .iter()
-                .all(|value| visit(value, depth + 1, remaining)),
+                .all(|value| visit(value, depth + 1, remaining, type_leaf)),
             Term::RecordValue(fields) => {
                 let mut labels = BTreeSet::new();
                 fields.iter().all(|(label, value)| {
-                    labels.insert(label) && visit(value, depth + 1, remaining)
+                    labels.insert(label) && visit(value, depth + 1, remaining, type_leaf)
                 })
             }
             _ => false,
@@ -59,7 +77,7 @@ pub(super) fn fixed_argument(term: &Term) -> bool {
     // Inputs and model copies are separately charged against the query budget.
     // Bound this shape-only predicate too: it must not recursively inspect an
     // unbounded host packet before those admission checks can reject it.
-    visit(term, 0, &mut 100_000)
+    visit(term, 0, &mut 100_000, type_leaf)
 }
 
 pub(super) fn index(
@@ -86,7 +104,7 @@ pub(super) fn index(
                 return Err(ProofError::BudgetExhausted);
             }
             if !(closed_type(value, &context.nominal_constructors)
-                || (is_argument && fixed_argument(value)))
+                || (is_argument && closed_argument(value, &context.nominal_constructors)))
                 || value.check_scope(&[]).is_err()
             {
                 return Err(ProofError::Invalid);

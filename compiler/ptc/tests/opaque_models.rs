@@ -49,6 +49,82 @@ fn opaque_models_supply_checked_symbolic_type_input_solutions() {
 }
 
 #[test]
+fn aggregate_type_leaves_are_interpreted_without_freezing_ambient_inputs() {
+    let mut context = Context::default();
+    context.admit_congruence(id(100));
+    let packet = |ty| {
+        Term::RecordValue(vec![(
+            "configuration".into(),
+            Term::TupleValue(vec![Term::Bool(true), ty]),
+        )])
+    };
+    let inputs = [id(0), id(1)];
+    let constraint = F::And(vec![
+        F::equal(var(0), head(packet(var(1)))),
+        F::equal(var(1), var(9)),
+    ]);
+    let outcome = context.search_type_inputs(&inputs, constraint.clone(), &mut Budget::default());
+    let TypeInputOutcome::Unique(solution) = outcome else {
+        panic!("{outcome}")
+    };
+    assert_eq!(solution.bindings[&id(0)].0, head(packet(var(9))));
+    assert_eq!(solution.bindings[&id(1)].0, var(9));
+    let problem = context
+        .type_input_context(&inputs, constraint, &mut Budget::default())
+        .unwrap();
+    problem
+        .verify_witness(&solution.model, Budget::default())
+        .unwrap();
+    for (_, proof) in solution.bindings.values() {
+        problem.verify_proof(proof, Budget::default()).unwrap();
+    }
+    let mut corrupt = solution.model.clone();
+    corrupt.applications[0].arguments[0] = packet(var(9));
+    assert!(problem.verify_witness(&corrupt, Budget::default()).is_err());
+    assert!(context.assumptions().is_empty());
+}
+
+#[test]
+fn aggregate_type_arguments_preserve_ambiguity_and_budget_recovery() {
+    let mut context = Context::default();
+    context.admit_congruence(id(100));
+    let constraint = F::equal(var(0), head(Term::TupleValue(vec![var(1)])));
+    for steps in [0, 1, 20] {
+        assert!(matches!(
+            context.search_type_inputs(
+                &[id(0), id(1)],
+                constraint.clone(),
+                &mut Budget {
+                    steps,
+                    ..Budget::default()
+                }
+            ),
+            TypeInputOutcome::Unknown(ptc::UnknownReason::BudgetExhausted)
+        ));
+    }
+    let outcome =
+        context.search_type_inputs(&[id(0), id(1)], constraint.clone(), &mut Budget::default());
+    let TypeInputOutcome::Ambiguous {
+        candidate,
+        alternative,
+        ..
+    } = outcome
+    else {
+        panic!("{outcome}")
+    };
+    let problem = context
+        .type_input_context(&[id(0), id(1)], constraint, &mut Budget::default())
+        .unwrap();
+    problem
+        .verify_witness(&candidate, Budget::default())
+        .unwrap();
+    problem
+        .verify_witness(&alternative, Budget::default())
+        .unwrap();
+    assert!(context.assumptions().is_empty());
+}
+
+#[test]
 fn opaque_model_tables_are_checked_and_do_not_grant_injectivity() {
     let mut context = Context::default();
     context.admit_congruence(id(100));
