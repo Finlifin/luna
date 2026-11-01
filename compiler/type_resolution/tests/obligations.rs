@@ -367,3 +367,27 @@ fn nested_native_frames_survive_matching_waiters_and_candidate_commit() {
     parent.commit(candidate).unwrap();
     assert_eq!(parent.freeze(&T::Meta(input)).unwrap(), expected);
 }
+
+#[test]
+fn scoped_row_proofs_use_candidate_facts_without_leaking_them() {
+    let bound = |depth| Term::Bound {
+        depth,
+        index: 0,
+        sort: Sort::Type,
+    };
+    let context =
+        type_resolution::ptc::Context::with_scope(vec![vec![Sort::Type], vec![Sort::Type]]);
+    let mut parent = Engine::with_context(context);
+    let left = Term::error_result(vec![bound(0), bound(1)], Term::Primitive(P::Bool));
+    let right = Term::error_result(vec![bound(0)], Term::Primitive(P::Bool));
+    let obligation = parent.require(R::Equal(T::Stable(left), T::Stable(right)));
+    run(&mut parent);
+    assert!(!parent.state(obligation).unwrap().is_proven());
+    let mut candidate = parent.trial();
+    candidate.assume(F::equal(bound(0), bound(1)));
+    run(&mut candidate);
+    assert!(candidate.state(obligation).unwrap().is_proven());
+    assert!(!parent.state(obligation).unwrap().is_proven());
+    parent.commit(candidate).unwrap();
+    assert!(parent.state(obligation).unwrap().is_proven());
+}

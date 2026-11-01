@@ -152,9 +152,6 @@ impl<'a> Search<'a> {
         start: usize,
         classes: &Classes,
     ) -> Result<Option<(Vec<&'a Operation>, usize)>, UnknownReason> {
-        if has_bound(&self.terms.nodes[start]) {
-            return Ok(None);
-        }
         let terms = self.terms;
         let mut current = start;
         let mut operations = Vec::new();
@@ -186,9 +183,6 @@ impl<'a> Search<'a> {
                 let Term::Computation { effects, result } = &terms.nodes[index] else {
                     continue;
                 };
-                if has_bound(&terms.nodes[index]) {
-                    continue;
-                }
                 let target = classes.root(terms.ids[result.as_ref()]);
                 if seen.contains(&target) {
                     cyclic |= !effects.is_empty();

@@ -97,9 +97,6 @@ impl Search<'_> {
         start: usize,
         classes: &Classes,
     ) -> Result<Option<(BTreeSet<usize>, usize)>, UnknownReason> {
-        if has_bound(&self.terms.nodes[start]) {
-            return Ok(None);
-        }
         let terms = self.terms;
         let mut labels = BTreeSet::new();
         let mut current = start;

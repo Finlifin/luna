@@ -908,11 +908,13 @@ impl Terms {
 }
 fn subterms(term: &Term) -> Vec<&Term> {
     match term {
-        Term::ErrorResult { errors, result } if !has_bound(term) => errors
+        // Rows do not introduce binders: labels and residuals inhabit the
+        // surrounding scope. Callable-local binders remain opaque below.
+        Term::ErrorResult { errors, result } => errors
             .iter()
             .chain(std::iter::once(result.as_ref()))
             .collect(),
-        Term::Computation { effects, result } if !has_bound(term) => effects
+        Term::Computation { effects, result } => effects
             .iter()
             .flat_map(|operation| operation.arguments.iter())
             .chain(std::iter::once(result.as_ref()))
@@ -1264,9 +1266,7 @@ fn same_congruent_head(a: &Term, b: &Term, context: &Context) -> bool {
     {
         // Only lift equality through an identical occurrence layout. This does
         // not assert injectivity, disjointness or unproved row commutations.
-        return !has_bound(a)
-            && !has_bound(b)
-            && left.len() == right.len()
+        return left.len() == right.len()
             && left.iter().zip(right).all(|(a, b)| {
                 a.declaration == b.declaration && a.arguments.len() == b.arguments.len()
             });
