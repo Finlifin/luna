@@ -173,6 +173,22 @@ impl Checker<'_, '_> {
             .map(|(name, _)| name))
     }
 
+    pub(super) fn direct_compiler_operation(
+        &mut self,
+        owner: OwnerId,
+        span: Span,
+    ) -> Result<Option<hir::Symbol>, Error> {
+        let Some(name) = self.compiler_operation_binding(owner, span)? else {
+            return Ok(None);
+        };
+        // Fixed contracts are ordinary callable values. Keep the temporary
+        // direct lowering only for operations awaiting callable contracts.
+        Ok(signatures::fixed(name.as_str(), self.protocols.meta_list)
+            .map_err(|message| error(span, message))?
+            .is_none()
+            .then_some(name))
+    }
+
     fn resolve_compiler_operation(
         &mut self,
         mut owner: OwnerId,

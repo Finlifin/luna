@@ -1031,8 +1031,8 @@ fn elaborate_candidate<'a, 'h>(
                     .compiler_operation_binding(owner, item.span)?
                     .is_some()
                 {
-                    // Calls use the binding's declaration identity; there is no
-                    // runtime function value to materialize for this operation.
+                    // Validate binding annotations now. Fixed callable bodies
+                    // are materialized on demand by ordinary value lookup.
                 } else if checker.is_build_context(owner) {
                     checker.validate_build_context(owner, item.span)?;
                 } else {
@@ -8473,7 +8473,7 @@ impl Checker<'_, '_> {
         if let H::Application(callee, arguments) = &expr.kind
             && let H::ResolvedDef { def_id, .. } = &callee.kind
             && let Some(owner) = self.package.definition_owner(*def_id)
-            && let Some(name) = self.compiler_operation_binding(owner, callee.span)?
+            && let Some(name) = self.direct_compiler_operation(owner, callee.span)?
         {
             let bound = Expr {
                 hir_id: callee.hir_id,

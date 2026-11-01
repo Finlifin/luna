@@ -57,10 +57,7 @@ fn compiler_operation_bindings_retain_arity_domain_and_phase_errors() {
             "positional list operands",
         ),
         ("comptime fn bad() {length(true);}", "bound meta.List"),
-        (
-            "fn bad()->Integer {divide(4,2)}",
-            "requires comptime invocation",
-        ),
+        ("fn bad()->Integer {divide(4,2)}", "bound Splice protocol"),
         (
             "comptime fn bad() {let escaped=length;}",
             "requires a direct call",
@@ -179,7 +176,7 @@ fn typed_operation_bindings_preserve_phase_checks() {
     ).is_err());
     for (body, diagnostic) in [(
         "fn bad() -> Integer { divide(8, 2) }",
-        "requires comptime invocation",
+        "bound Splice protocol",
     )] {
         let source = format!(
             "const divide: comptime fn(Integer, Integer) -> Integer = .comptime_integer_div_trunc'builtin; {body}"
@@ -367,4 +364,91 @@ fn operation_callback_failure_does_not_poison_later_invocation() {
             assert_eq!(invoke(vec![number(9), number(2)]).unwrap(), number(4));
         }
     }
+}
+
+#[test]
+fn named_fixed_operations_use_ordinary_call_nodes_and_source_order() {
+    use nir::program::ExprKind as K;
+    let package = run_all_carriers(
+        "const divide = .comptime_integer_div_trunc'builtin;
+        struct Trace { value: Integer }
+        impl Trace {
+            comptime fn input(self, digit: Integer) -> Integer {
+                self.value = self.value * 10 + digit;
+                digit
+            }
+        }
+        comptime fn run() -> bool {
+            let trace = Trace { value: 0 };
+            let quotient = divide(trace.input(8), trace.input(2));
+            quotient == 4 and trace.value == 82
+        }",
+    );
+    let operation = package
+        .functions
+        .iter()
+        .find(|function| function.name == "<compiler-operation.comptime_integer_div_trunc>")
+        .unwrap()
+        .declaration;
+    let run = package
+        .functions
+        .iter()
+        .find(|function| function.name == "run")
+        .unwrap();
+    let mut calls = 0;
+    nir::visit::expressions(run, &mut 10_000, |expression, _| {
+        assert!(!matches!(
+            expression.kind,
+            K::IntegerBinary {
+                op: nir::program::IntegerOp::DivideTrunc,
+                ..
+            }
+        ));
+        if let K::Call { callee, .. } = &expression.kind {
+            if matches!(callee.kind, K::Function(id) if id == operation) {
+                calls += 1;
+            }
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(calls, 1);
+}
+
+#[test]
+fn named_operation_calls_splice_only_the_comptime_result() {
+    let source = "
+        typealias Type = .Type'builtin;
+        typealias Integer = .Integer'builtin;
+        trait Splice {
+            assoc RuntimeTarget: Type;
+            fn splice(comptime data: Self) -> RuntimeTarget;
+        }
+        impl Splice for bool {
+            assoc RuntimeTarget: Type = bool;
+            fn splice(comptime data: bool) -> bool { data }
+        }
+        comptime fn equals_four(value: Integer) -> bool { value == 4 }
+        impl Splice for Integer {
+            assoc RuntimeTarget: Type = bool;
+            fn splice(comptime data: Integer) -> bool {
+                equals_four(data)
+            }
+        }
+        const divide = .comptime_integer_div_trunc'builtin;
+        fn run() -> bool { divide(9, 2) }
+    ";
+    let package =
+        support::compile_with_bindings(source, &Default::default(), Some("Splice")).unwrap();
+    let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
+    let mut vm = comptime_interpretor::Interpreter::from_iir(&graph, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    let invalid = source.replace(
+        "fn run() -> bool { divide(9, 2) }",
+        "fn run(input: Integer) -> bool { divide(input, 2) }",
+    );
+    assert!(support::compile_with_bindings(&invalid, &Default::default(), Some("Splice")).is_err());
 }
