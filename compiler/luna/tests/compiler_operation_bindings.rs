@@ -607,3 +607,52 @@ fn runtime_function_instances_remain_data_in_comptime_lists() {
             .is_err()
     );
 }
+
+#[test]
+fn staged_runtime_methods_can_be_stored_as_comptime_list_data() {
+    let package = run_all_carriers(
+        "trait Selector { fn select(comptime value: bool) -> bool; }
+        impl Selector for bool { fn select(comptime value: bool) -> bool { true } }
+        const length = .list_length'builtin;
+        comptime fn run() -> bool {
+            let methods: List<fn(comptime bool) -> bool> = [bool.select];
+            let copied = methods;
+            length(copied) == 1
+        }",
+    );
+    let key = iir::InstanceKey {
+        declaration: support::id(&package, "run"),
+        arguments: vec![].into(),
+    };
+    let mut graph = elaboration::materialization::instantiate(
+        &package,
+        &[key.clone()],
+        Default::default(),
+        elaboration::ptc::Budget::default(),
+    )
+    .unwrap();
+    let method = graph
+        .interfaces
+        .iter_mut()
+        .flat_map(|interface| &mut interface.methods)
+        .find(|method| method.name == "select")
+        .unwrap();
+    method
+        .requirements
+        .push(nir::program::TypePredicate::Bool(false));
+    for bytecode in [false, true] {
+        let mut vm = if bytecode {
+            comptime_interpretor::Interpreter::from_iir_for_comptime(&graph, Default::default())
+        } else {
+            comptime_interpretor::Interpreter::from_iir_for_comptime_tree(
+                &graph,
+                Default::default(),
+            )
+        }
+        .unwrap();
+        assert_eq!(
+            vm.invoke_instance(&key, vec![]).unwrap_err().kind,
+            comptime_interpretor::ErrorKind::TypeContractRejected
+        );
+    }
+}

@@ -430,6 +430,25 @@ impl Value {
                         (total <= 100_000).then_some(total)
                     })?
                 }
+                Value::RuntimeTraitMethod(method) => {
+                    let mut total = 0usize;
+                    for term in std::iter::once(&method.subject)
+                        .chain(method.interface.arguments.iter())
+                        .chain(method.method_arguments.iter())
+                    {
+                        total = total.checked_add(scoped_term_value_work_with_evidence(
+                            term,
+                            &BTreeMap::new(),
+                            parameters,
+                            value_parameters,
+                            |_, _, _| None,
+                        )?)?;
+                        if total > 100_000 {
+                            return None;
+                        }
+                    }
+                    total
+                }
                 Value::AnonymousRecord(fields) => {
                     if fields.len() > 100_000 {
                         return None;
@@ -487,8 +506,7 @@ impl Value {
                 Value::Code(_)
                 | Value::Pointer(_)
                 | Value::Storage(_)
-                | Value::ComptimeReference(_)
-                | Value::RuntimeTraitMethod(_) => return None,
+                | Value::ComptimeReference(_) => return None,
                 _ => 0,
             };
             *work = work.checked_add(extra)?;

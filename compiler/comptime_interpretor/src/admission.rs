@@ -152,6 +152,18 @@ impl Interpreter<'_> {
         }
         self.tick(None)?;
         match value {
+            Value::RuntimeTraitMethod(method) => {
+                self.admit_runtime_method_identity(method)?;
+                self.admit_type(&method.subject, depth + 1)?;
+                for argument in method
+                    .interface
+                    .arguments
+                    .iter()
+                    .chain(&method.method_arguments)
+                {
+                    self.admit_type(argument, depth + 1)?;
+                }
+            }
             Value::Function(declaration) => {
                 self.admit_callable_identity(*declaration, &[], SourceRange { start: 0, end: 0 })?;
             }

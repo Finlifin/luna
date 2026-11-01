@@ -1740,3 +1740,41 @@ fn immutable_template_handles_use_the_current_iir_target_table() {
     assert!(vm.invoke_instance(&key, vec![]).is_err());
     vm.validate_immutable_input(&value, &ty).unwrap();
 }
+
+#[test]
+fn immutable_method_handles_recheck_interface_formation_without_execution() {
+    let world = trait_package();
+    let mut producer = Interpreter::for_comptime(&world, Budget::default()).unwrap();
+    let method = producer.invoke(id(1), vec![]).unwrap();
+    let value = Value::Tuple(vec![method.clone()]);
+    let ty = Term::Tuple(vec![signature(Term::Primitive(Primitive::Bool))]);
+    assert!(value.immutable_copy_work().is_some());
+    let mut receiver = Interpreter::for_comptime(&world, Budget::default()).unwrap();
+    receiver.validate_immutable_input(&value, &ty).unwrap();
+    assert!(receiver.events().is_empty());
+    let mut rejected = world.clone();
+    rejected.traits[0].methods[0].requirements = vec![nir::program::TypePredicate::Bool(false)];
+    let mut rejected = Interpreter::for_comptime(&rejected, Budget::default()).unwrap();
+    assert_eq!(
+        rejected
+            .validate_immutable_input(&value, &ty)
+            .unwrap_err()
+            .kind,
+        ErrorKind::TypeContractRejected
+    );
+    assert!(rejected.events().is_empty());
+    let empty = Package::default();
+    let mut missing = Interpreter::for_comptime(&empty, Budget::default()).unwrap();
+    assert!(missing.validate_immutable_input(&value, &ty).is_err());
+    receiver.validate_immutable_input(&value, &ty).unwrap();
+    receiver
+        .charge_preparation(receiver.remaining_steps() as usize)
+        .unwrap();
+    assert_eq!(
+        receiver
+            .validate_immutable_input(&value, &ty)
+            .unwrap_err()
+            .kind,
+        ErrorKind::StepsExhausted
+    );
+}

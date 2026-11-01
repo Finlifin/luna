@@ -12,6 +12,79 @@ pub(super) enum Selection {
     },
 }
 impl Interpreter<'_> {
+    pub(super) fn admit_runtime_method_identity(
+        &mut self,
+        identity: &TraitMethodIdentity,
+    ) -> Result<(), Error> {
+        let source = SourceRange { start: 0, end: 0 };
+        if self.graph.is_some() {
+            // The immutable graph owns the selected interface/body evidence.
+            // No source method lookup or execution is needed for transport.
+            let contract = self
+                .iir_method(
+                    identity.interface.declaration,
+                    &identity.interface.arguments,
+                    &identity.subject,
+                    identity.member,
+                    &identity.method_arguments,
+                )?
+                .ok_or_else(|| self.failure(ErrorKind::UnmaterializedDispatch, Some(source)))?;
+            for requirement in &contract.requirements {
+                self.check_type_contract(requirement, source)?;
+            }
+            if !self.capabilities_hold_parameters(&contract.capabilities, &[], &[]) {
+                return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
+            }
+            return Ok(());
+        }
+        let (parameters, contract) = self
+            .method_contracts
+            .get(&(identity.interface.declaration, identity.member))
+            .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(source)))?;
+        self.budget.steps = self
+            .budget
+            .steps
+            .checked_sub(parameters.len() as u64 + 1)
+            .ok_or_else(|| self.failure(ErrorKind::StepsExhausted, Some(source)))?;
+        let parameters = parameters.clone();
+        self.charge_copy_work(Some(source), |fuel| {
+            for argument in std::iter::once(&identity.subject)
+                .chain(identity.interface.arguments.iter())
+                .chain(&identity.method_arguments)
+            {
+                nir::copy_budget::charge_type_substitution(argument, &[], &[], fuel)?;
+            }
+            Ok(())
+        })?;
+        let arguments: Vec<_> = std::iter::once(identity.subject.clone())
+            .chain(identity.interface.arguments.iter().cloned())
+            .chain(identity.method_arguments.iter().cloned())
+            .collect();
+        let signature = contract
+            .signature
+            .ordinary()
+            .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
+        self.charge_copy_work(Some(source), |fuel| {
+            nir::copy_budget::charge_type_substitution(signature, &parameters, &arguments, fuel)
+        })?;
+        let output = signature
+            .instantiate_parameters(&parameters, &arguments)
+            .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
+        self.select_trait_method(
+            View {
+                interface: identity.interface.declaration,
+                interface_arguments: &identity.interface.arguments,
+                subject: &identity.subject,
+                member: identity.member,
+                method_arguments: &identity.method_arguments,
+                output: &output,
+                source,
+            },
+            false,
+        )?;
+        Ok(())
+    }
+
     pub(super) fn select_trait_method(
         &mut self,
         method: View<'_>,

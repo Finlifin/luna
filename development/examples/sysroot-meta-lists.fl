@@ -180,7 +180,7 @@ test comptime_list_collectors {
     } else {
         assumes false;
     };
-    inline if SelectedCarrier == CallbackCarrier<retain<bool>> {
+    inline if SelectedCarrier == CallbackCarrier<retain<bool>> and staged_methods_stored() {
         assumes true;
     } else {
         assumes false;
@@ -375,3 +375,17 @@ comptime fn selected() -> fn(bool) -> bool {
 
 pure comptime fn CallbackCarrier<function: fn(bool) -> bool> -> Type { bool }
 typealias SelectedCarrier = CallbackCarrier<selected()>;
+
+trait StagedSelector {
+    fn select(comptime value: bool) -> bool;
+}
+
+impl StagedSelector for bool {
+    fn select(comptime value: bool) -> bool { true }
+}
+
+comptime fn staged_methods_stored() -> bool {
+    let methods: meta.List<fn(comptime bool) -> bool> = [bool.select];
+    let saved = methods;
+    saved.length() == 1 and (saved.first() matches _?)
+}
