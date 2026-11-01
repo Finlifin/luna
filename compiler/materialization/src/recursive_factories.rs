@@ -454,7 +454,7 @@ impl Builder<'_> {
                 }
             }
             function.declaration = identities[index];
-            function.name = format!("{}::template-target", function.name);
+            function.name = format!("{}.template-target", function.name);
             function.inline = false;
             generated.push(function);
         }

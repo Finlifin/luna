@@ -10525,3 +10525,15 @@ Validation from `/home/fin/luna`:
 
 These removals close obsolete pointer execution paths, not the remaining audit
 items or the entire D12 builtin-package scope.
+
+
+Recursive factory baseline clarification: the three previously recorded
+`function_type_parameters` failures were reproduced (52 passed, 3 failed,
+`/tmp/luna-tools-jf2_smkk/result.json`). Generated helper names still used
+`::template-target` instead of the project-wide `.template-target` spelling.
+Correcting the materializer, without changing tests, restores all 55 cases
+(`/tmp/luna-tools-aq3plg71/result.json`, exit 0). Assertions verify the 70-node
+finite graph, low-budget rejection/retry, deterministic dumps, returned callable
+behavior, and recursive helper entry counts. This is a generated-name correction,
+not a new recursive factory algorithm. The separate instance-copy budget failure
+remains unresolved.
