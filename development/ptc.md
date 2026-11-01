@@ -486,3 +486,37 @@ Validation from `/home/fin/luna`:
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`: four passed (`/tmp/luna-tools-4qvx1qjm/result.json`).
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_type_factories_keep_identity_through_comptime_parameters`: passed (`/tmp/luna-tools-ubls547g/result.json`).
 - Formatting check and `git diff --check` passed (`/tmp/luna-tools-fpf3ybci/result.json`).
+
+## Independent root-CNF notification consumption
+
+Root CNF propagation now consumes trail changes as well. Root and learned
+propagation have separate pending sets and acknowledgement states because they
+can run at different points in search. Before a consumer's first call, a complete
+snapshot is required and individual notifications need not be stored. Once
+initialized, assignments and backjumps notify both active consumers; neither can
+clear the other's pending work.
+
+Root synchronization examines notified atoms to find the earliest invalid
+auxiliary-trail premise. Undoing that suffix can also remove caller atoms whose
+values did not change. Those atoms are explicitly added to the readmission set,
+so the new local trail still reflects the complete caller state without scanning
+every atom. Independent certificates continue to replay from the original CNF.
+A failed root update discards its partial session; retry initializes from the
+full current assignment even if the caller resends only its pending changes.
+New search epochs discard previous proposals and auxiliary state.
+
+The previous full-snapshot root synchronization entrypoint is retained only for
+tests. A quiescent 4,096-atom root session needs no synchronization fuel; adding
+one unwatched assignment uses three local work units (copy/change/readmission),
+independent of the atom count. This does not eliminate the separate Boolean
+circuit evaluation in search, and theory still consumes assignment snapshots.
+Root auxiliaries and proof-resolution continuations also remain separate from
+the final shared reason arena. Complete CDCL integration remains unfinished.
+
+Validation from `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p ptc -p type_resolution`: 464 passed (`/tmp/luna-tools-ror26qqr/result.json`).
+- Exhaustive three-atom partial assignments now exercise the production notification entrypoint in both directions, with independent source-model checks and proof replay. Added tests cover 96 interrupted-update budgets, new epochs, delayed consumers, unchanged premises removed by local rollback, and bounded sparse-update work.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference`: four passed (`/tmp/luna-tools-3zlh09t3/result.json`).
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test sysroot_preludes shipped_type_factories_keep_identity_through_comptime_parameters`: passed (`/tmp/luna-tools-2xcubrze/result.json`).
+- Formatting check and `git diff --check` passed (`/tmp/luna-tools-knh612vj/result.json`).

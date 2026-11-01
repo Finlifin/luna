@@ -1,7 +1,7 @@
 //! Reversible propagation trail within one immutable root clause set.
 //! Retraction preserves the valid prefix; proof replay never consults it.
 use super::{Cnf, Literal, Propagation, Status, Watches, charge};
-use std::fmt;
+use std::{collections::BTreeSet, fmt};
 
 pub(crate) struct Session {
     values: Vec<Option<bool>>,
@@ -51,13 +51,21 @@ impl Session {
         })
     }
 
-    fn synchronize(&mut self, assignment: &[Option<bool>], fuel: &mut usize) -> Result<(), ()> {
+    fn synchronize_changes(
+        &mut self,
+        assignment: &[Option<bool>],
+        changed: &BTreeSet<usize>,
+        fuel: &mut usize,
+    ) -> Result<(), ()> {
         if assignment.len() != self.atoms {
             return Err(());
         }
+        *fuel = fuel.checked_sub(changed.len()).ok_or(())?;
+        let mut readmit = changed.clone();
         let mut cut = self.trail.len();
-        for (index, value) in assignment.iter().enumerate() {
+        for &index in changed {
             charge(fuel)?;
+            let value = assignment.get(index).ok_or(())?;
             if self.values[index].is_some() && self.values[index] != *value {
                 cut = cut.min(self.atom_positions[index].ok_or(())?);
             }
@@ -77,6 +85,7 @@ impl Session {
                     self.watches.schedule(reason);
                 } else {
                     self.atom_positions[variable] = None;
+                    readmit.insert(variable);
                 }
                 self.watches.assigned(variable, fuel)?;
             }
@@ -87,9 +96,10 @@ impl Session {
                 self.watches.schedule(clause);
             }
         }
-        for (variable, value) in assignment.iter().enumerate() {
+        for variable in readmit {
             charge(fuel)?;
-            if let Some(positive) = value.filter(|_| self.values[variable].is_none()) {
+            if let Some(positive) = assignment[variable].filter(|_| self.values[variable].is_none())
+            {
                 self.atom_positions[variable] = Some(self.trail.len());
                 self.trail.push(Entry {
                     literal: Literal { variable, positive },
@@ -109,13 +119,30 @@ impl Session {
         Ok(trace)
     }
 
+    #[cfg(test)]
     pub(crate) fn propagate(
         &mut self,
         cnf: &Cnf,
         assignment: &[Option<bool>],
         fuel: &mut usize,
     ) -> Result<Propagation, ()> {
-        self.synchronize(assignment, fuel)?;
+        *fuel = fuel.checked_sub(assignment.len()).ok_or(())?;
+        let changed = assignment
+            .iter()
+            .enumerate()
+            .filter_map(|(index, value)| (self.values[index] != *value).then_some(index))
+            .collect();
+        self.propagate_changes(cnf, assignment, &changed, fuel)
+    }
+
+    pub(crate) fn propagate_changes(
+        &mut self,
+        cnf: &Cnf,
+        assignment: &[Option<bool>],
+        changed: &BTreeSet<usize>,
+        fuel: &mut usize,
+    ) -> Result<Propagation, ()> {
+        self.synchronize_changes(assignment, changed, fuel)?;
         if let Some(clause) = self.conflict {
             return Ok(Propagation::Conflict(self.certificate(clause, fuel)?));
         }
@@ -304,5 +331,58 @@ mod tests {
                 .to_string()
                 .contains("(auxiliary 3 true (reason 0))")
         );
+        // Atom 2 remains a caller premise when undoing the earlier atom 1
+        // removes its local entry. It is absent from the notification set.
+        let changed = BTreeSet::from([1]);
+        let Propagation::Conflict(trace) = session
+            .propagate_changes(&cnf, &conflict, &changed, &mut 100_000)
+            .unwrap()
+        else {
+            panic!("unchanged caller premise was lost during rollback");
+        };
+        cnf.replay(&trace, &conflict, &mut 100_000).unwrap();
+        session
+            .propagate_changes(
+                &cnf,
+                &[Some(true), Some(false), Some(false)],
+                &changed,
+                &mut 100_000,
+            )
+            .unwrap();
+        assert_eq!(session.values[2], Some(false));
+    }
+
+    #[test]
+    fn unchanged_root_session_does_not_scan_the_atom_universe() {
+        let cnf = Cnf {
+            atoms: 4096,
+            clauses: vec![vec![
+                Literal {
+                    variable: 0,
+                    positive: true,
+                },
+                Literal {
+                    variable: 1,
+                    positive: true,
+                },
+            ]],
+            definitions: vec![],
+        };
+        let mut assignment = vec![None; 4096];
+        assignment[0] = Some(true);
+        let mut session = Session::new(&cnf, &assignment, &mut 100_000).unwrap();
+        assert!(matches!(
+            session.propagate_changes(&cnf, &assignment, &BTreeSet::new(), &mut 100_000),
+            Ok(Propagation::None)
+        ));
+        assert!(matches!(
+            session.propagate_changes(&cnf, &assignment, &BTreeSet::new(), &mut 0),
+            Ok(Propagation::None)
+        ));
+        assignment[4095] = Some(false);
+        assert!(matches!(
+            session.propagate_changes(&cnf, &assignment, &BTreeSet::from([4095]), &mut 3),
+            Ok(Propagation::None)
+        ));
     }
 }

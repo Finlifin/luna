@@ -90,6 +90,7 @@ impl Circuit {
         Ok(self.clauses.as_ref().unwrap())
     }
 
+    #[cfg(test)]
     pub(crate) fn propagate_clauses(
         &mut self,
         assignment: &[Option<bool>],
@@ -104,6 +105,27 @@ impl Circuit {
             _ => cnf::Session::new(cnf, assignment, fuel)?,
         };
         let result = state.propagate(cnf, assignment, fuel)?;
+        self.propagation = Some(state);
+        Ok(result)
+    }
+
+    pub(crate) fn propagate_clause_changes(
+        &mut self,
+        assignment: &[Option<bool>],
+        changed: Option<&std::collections::BTreeSet<usize>>,
+        fuel: &mut usize,
+    ) -> Result<cnf::Propagation, ()> {
+        self.clauses(assignment.len(), fuel)?;
+        let cnf = self.clauses.as_ref().unwrap();
+        // A new epoch invalidates a previous search's assignment history.
+        // Failed updates drop the session; the next call rebuilds from the
+        // complete current snapshot, regardless of its pending event set.
+        let mut state = match (self.propagation.take(), changed) {
+            (Some(state), Some(_)) => state,
+            _ => cnf::Session::new(cnf, assignment, fuel)?,
+        };
+        let empty = std::collections::BTreeSet::new();
+        let result = state.propagate_changes(cnf, assignment, changed.unwrap_or(&empty), fuel)?;
         self.propagation = Some(state);
         Ok(result)
     }

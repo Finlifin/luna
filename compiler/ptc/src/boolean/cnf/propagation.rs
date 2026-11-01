@@ -252,6 +252,67 @@ mod tests {
         );
     }
 
+    #[test]
+    fn interrupted_root_notifications_rebuild_and_new_epochs_drop_old_proposals() {
+        let atoms: Vec<_> = (0..2)
+            .map(|local| {
+                Atom::TypeEqual(Equality(
+                    Term::Rigid {
+                        declaration: nir::DeclarationId { package: 96, local },
+                        sort: nir::Sort::Type,
+                    },
+                    Term::Primitive(Primitive::Bool),
+                ))
+            })
+            .collect();
+        let formula = Formula::Or(
+            atoms
+                .iter()
+                .map(|atom| {
+                    let Atom::TypeEqual(equality) = atom else {
+                        unreachable!()
+                    };
+                    Formula::Equal(equality.clone())
+                })
+                .collect(),
+        );
+        for fuel in 0..96 {
+            let mut circuit = Circuit::compile(&formula, &atoms, &mut 10000).unwrap();
+            let first = [Some(true), None];
+            assert!(matches!(
+                circuit.propagate_clause_changes(&first, None, &mut 10000),
+                Ok(Propagation::None)
+            ));
+            let next = [Some(false), None];
+            let changed = std::collections::BTreeSet::from([0]);
+            if circuit
+                .propagate_clause_changes(&next, Some(&changed), &mut { fuel })
+                .is_err()
+            {
+                assert!(circuit.propagation.is_none());
+            }
+            let Propagation::Unit {
+                index: 1,
+                value: true,
+                trace,
+            } = circuit
+                .propagate_clause_changes(&next, Some(&changed), &mut 10000)
+                .unwrap()
+            else {
+                panic!("notification retry must force the other alternative");
+            };
+            circuit
+                .clauses(2, &mut 10000)
+                .unwrap()
+                .replay(&trace, &[Some(false), Some(false)], &mut 10000)
+                .unwrap();
+            assert!(matches!(
+                circuit.propagate_clause_changes(&first, None, &mut 10000),
+                Ok(Propagation::None)
+            ));
+        }
+    }
+
     fn check_explanation(cnf: &Cnf, trace: &[usize], assignment: &[Option<bool>]) {
         let (trace, support) = cnf.explain(trace, assignment, &mut 10000).unwrap();
         let reduced: Vec<_> = assignment
@@ -355,13 +416,23 @@ mod tests {
         for formula in formulas {
             let mut circuit = Circuit::compile(&formula, &atoms, &mut 10000).unwrap();
             let cnf = Cnf::compile(&circuit, atoms.len(), &mut 10000).unwrap();
-            for code in 0..27 {
+            let mut previous = [None; 3];
+            for code in (0..27).chain((0..27).rev()) {
                 let assignment = [
                     [None, Some(false), Some(true)][code % 3],
                     [None, Some(false), Some(true)][(code / 3) % 3],
                     [None, Some(false), Some(true)][code / 9],
                 ];
-                let result = circuit.propagate_clauses(&assignment, &mut 10000).unwrap();
+                let changed = assignment
+                    .iter()
+                    .zip(previous)
+                    .enumerate()
+                    .filter_map(|(index, (a, b))| (*a != b).then_some(index))
+                    .collect();
+                let result = circuit
+                    .propagate_clause_changes(&assignment, Some(&changed), &mut 10000)
+                    .unwrap();
+                previous = assignment;
                 let completion_is_model = |mask: usize| {
                     let full = [mask & 1 != 0, mask & 2 != 0, mask & 4 != 0];
                     assignment

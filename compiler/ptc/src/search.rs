@@ -3,7 +3,7 @@
 use super::{Conflict, Search, SearchResult, UnknownReason, boolean, learning};
 use std::fmt;
 mod trail;
-use trail::{Origin, Trail};
+use trail::{Consumer, Origin, Trail};
 
 #[cfg(test)]
 thread_local! { static BACKJUMPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
@@ -342,9 +342,10 @@ impl Search<'_> {
             return Step::Return(SearchResult::Unsat(conflict));
         }
         let forced = propagation.literals;
-        let learned = self.propagate_learned_changes(assignment.values(), assignment.changes());
+        let learned = self
+            .propagate_learned_changes(assignment.values(), assignment.changes(Consumer::Learned));
         if learned.is_ok() {
-            assignment.acknowledge_changes();
+            assignment.acknowledge_changes(Consumer::Learned);
         }
         match learned {
             Err(reason) => return Step::Return(SearchResult::Unknown(reason)),
@@ -369,11 +370,14 @@ impl Search<'_> {
             Ok(learning::Propagation::None) => {}
         }
         if forced.is_empty() && propagation.truth.is_none() {
-            let result = self
-                .boolean
-                .as_mut()
-                .unwrap()
-                .propagate_clauses(assignment.values(), &mut self.steps);
+            let result = self.boolean.as_mut().unwrap().propagate_clause_changes(
+                assignment.values(),
+                assignment.changes(Consumer::Root),
+                &mut self.steps,
+            );
+            if result.is_ok() {
+                assignment.acknowledge_changes(Consumer::Root);
+            }
             use boolean::cnf::Propagation;
             match result {
                 Err(()) => {

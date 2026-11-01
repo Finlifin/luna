@@ -9,6 +9,16 @@ pub(super) enum Origin {
     RootClause,
     Learned,
 }
+#[derive(Clone, Copy)]
+pub(super) enum Consumer {
+    Learned,
+    Root,
+}
+#[derive(Default)]
+struct Pending {
+    atoms: BTreeSet<usize>,
+    synchronized: bool,
+}
 struct Entry {
     index: usize,
     value: bool,
@@ -19,8 +29,7 @@ pub(super) struct Trail<'a> {
     values: &'a mut [Option<bool>],
     levels: Vec<usize>,
     entries: Vec<Entry>,
-    changes: BTreeSet<usize>,
-    synchronized: bool,
+    pending: [Pending; 2],
 }
 impl<'a> Trail<'a> {
     pub(super) fn new(values: &'a mut [Option<bool>]) -> Self {
@@ -28,17 +37,26 @@ impl<'a> Trail<'a> {
             levels: vec![0; values.len()],
             values,
             entries: Vec::new(),
-            changes: BTreeSet::new(),
-            synchronized: false,
+            pending: std::array::from_fn(|_| Pending::default()),
         }
     }
-    // None starts a new consumer epoch; otherwise only these atoms changed.
-    pub(super) fn changes(&self) -> Option<&BTreeSet<usize>> {
-        self.synchronized.then_some(&self.changes)
+    // Consumers run at different times and acknowledge their own event set.
+    pub(super) fn changes(&self, consumer: Consumer) -> Option<&BTreeSet<usize>> {
+        let pending = &self.pending[consumer as usize];
+        pending.synchronized.then_some(&pending.atoms)
     }
-    pub(super) fn acknowledge_changes(&mut self) {
-        self.changes.clear();
-        self.synchronized = true;
+    pub(super) fn acknowledge_changes(&mut self, consumer: Consumer) {
+        let pending = &mut self.pending[consumer as usize];
+        pending.atoms.clear();
+        pending.synchronized = true;
+    }
+    fn notify(&mut self, index: usize) {
+        for pending in &mut self.pending {
+            // The first call receives a complete snapshot, so it needs no IDs.
+            if pending.synchronized {
+                pending.atoms.insert(index);
+            }
+        }
     }
     pub(super) fn values(&self) -> &[Option<bool>] {
         self.values
@@ -55,7 +73,7 @@ impl<'a> Trail<'a> {
             "search assignment overwrites a live premise"
         );
         self.values[index] = Some(value);
-        self.changes.insert(index);
+        self.notify(index);
         self.levels[index] = level;
         self.entries.push(Entry {
             index,
@@ -68,7 +86,7 @@ impl<'a> Trail<'a> {
         let entry = self.entries.pop().expect("missing search assignment");
         assert_eq!(entry.index, index, "search unwind must follow the trail");
         self.values[index] = None;
-        self.changes.insert(index);
+        self.notify(index);
         self.levels[index] = 0;
     }
     pub(super) fn backjump(&mut self, target: usize) {
@@ -147,20 +165,23 @@ mod tests {
             trail.assign(2, true, 1, Origin::Decision);
             trail.assign(3, false, 1, Origin::Learned);
             let before = trail.to_string();
-            assert!(trail.changes().is_none());
-            trail.acknowledge_changes();
+            assert!(trail.changes(Consumer::Learned).is_none());
+            trail.acknowledge_changes(Consumer::Learned);
             let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 trail.probe(2, false, |_| panic!("interrupted proof probe"));
             }));
             assert!(panic.is_err());
             assert_eq!(trail.to_string(), before);
-            assert!(trail.changes().unwrap().is_empty());
+            assert!(trail.changes(Consumer::Learned).unwrap().is_empty());
             assert_eq!(
                 trail.values(),
                 &[Some(true), Some(false), Some(true), Some(false)]
             );
             trail.backjump(0);
-            assert_eq!(trail.changes(), Some(&BTreeSet::from([2, 3])));
+            assert_eq!(
+                trail.changes(Consumer::Learned),
+                Some(&BTreeSet::from([2, 3]))
+            );
             assert_eq!(trail.values(), &[Some(true), Some(false), None, None]);
             assert_eq!(trail.levels(), &[0, 0, 0, 0]);
             assert_eq!(
@@ -177,5 +198,27 @@ mod tests {
         }));
         assert!(panic.is_err());
         assert_eq!(values, [Some(true), None, None, None]);
+    }
+
+    #[test]
+    fn consumers_acknowledge_independently_when_root_propagation_is_delayed() {
+        let mut values = [None; 3];
+        let mut trail = Trail::new(&mut values);
+        trail.acknowledge_changes(Consumer::Learned);
+        trail.assign(0, true, 0, Origin::Learned);
+        assert!(trail.changes(Consumer::Root).is_none());
+        trail.acknowledge_changes(Consumer::Root);
+        trail.assign(1, false, 1, Origin::Decision);
+        trail.acknowledge_changes(Consumer::Learned);
+        trail.assign(2, true, 1, Origin::Boolean);
+        assert_eq!(trail.changes(Consumer::Learned), Some(&BTreeSet::from([2])));
+        assert_eq!(trail.changes(Consumer::Root), Some(&BTreeSet::from([1, 2])));
+        trail.acknowledge_changes(Consumer::Root);
+        trail.backjump(0);
+        assert_eq!(
+            trail.changes(Consumer::Learned),
+            Some(&BTreeSet::from([1, 2]))
+        );
+        assert_eq!(trail.changes(Consumer::Root), Some(&BTreeSet::from([1, 2])));
     }
 }
