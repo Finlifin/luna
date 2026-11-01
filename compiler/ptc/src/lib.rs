@@ -896,6 +896,18 @@ impl Terms {
         if let Some(id) = self.ids.get(term) {
             return *id;
         }
+        // Empty closure qualification is an alias for the callable itself.
+        // Keep the original lookup key, but give it the same theory node.
+        if let Term::Closure {
+            environment,
+            signature,
+        } = term
+            && environment.is_empty()
+        {
+            let id = self.insert(signature);
+            self.ids.insert(term.clone(), id);
+            return id;
+        }
         let children = subterms(term)
             .into_iter()
             .map(|child| self.insert(child))
@@ -963,10 +975,12 @@ fn subterms(term: &Term) -> Vec<&Term> {
         Term::ContextualClosure { context, signature } if !has_bound(term) => {
             vec![context, signature]
         }
+        // Captured domains use the surrounding scope. The signature remains
+        // its own term, so Function still guards its locally bound telescope.
         Term::Closure {
             environment,
             signature,
-        } if !has_bound(term) => environment
+        } => environment
             .iter()
             .chain(std::iter::once(signature.as_ref()))
             .collect(),
@@ -1168,9 +1182,7 @@ fn constructor(term: &Term) -> Option<Head> {
         Term::Function { parameters, .. } if !has_bound(term) => {
             Some(Head::Function(parameters.iter().map(|p| p.sort).collect()))
         }
-        Term::Closure { environment, .. } if !has_bound(term) => {
-            Some(Head::Closure(environment.len()))
-        }
+        Term::Closure { environment, .. } => Some(Head::Closure(environment.len())),
         Term::Nominal {
             declaration,
             arguments,
@@ -2090,10 +2102,11 @@ fn rebuild(
         Term::Closure {
             environment,
             signature,
-        } if !has_bound(term) => Some(Term::Closure {
-            environment: environment.iter().map(&mut *child).collect::<Option<_>>()?,
-            signature: Box::new(child(signature)?),
-        }),
+        } => Term::contextual_closure(
+            Term::ClosureContextValue(environment.iter().map(&mut *child).collect::<Option<_>>()?),
+            child(signature)?,
+        )
+        .ok(),
         Term::Nominal {
             declaration,
             arguments,
@@ -2168,6 +2181,11 @@ fn substitute_types(
     Some(value)
 }
 fn closed_type(term: &Term, nominal: &BTreeSet<DeclarationId>) -> bool {
+    if matches!(term, Term::Closure { environment, .. } if environment.is_empty()) {
+        // Model values use the callable directly; a raw empty wrapper is not
+        // a distinct closed Type and cannot be supplied as witness evidence.
+        return false;
+    }
     if let Term::Computation { effects, result } = term {
         return model_effects::canonical(effects, result, nominal);
     }

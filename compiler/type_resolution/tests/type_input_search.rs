@@ -604,3 +604,45 @@ fn qualified_and_opaque_type_models_commit_original_symbolic_identities() {
         assert_eq!(parent.freeze(&I::Meta(input)).unwrap(), expected);
     }
 }
+
+#[test]
+fn scoped_closure_environment_models_require_proof_before_commit() {
+    let context = Context::with_scope(vec![vec![Sort::Type], vec![Sort::Type]]);
+    let mut parent = Engine::with_context(context);
+    let input = parent.fresh(Sort::Type);
+    let expected = Term::Closure {
+        environment: vec![
+            Term::Bound {
+                depth: 1,
+                index: 0,
+                sort: Sort::Type,
+            },
+            Term::Optional(Box::new(Term::Bound {
+                depth: 0,
+                index: 0,
+                sort: Sort::Type,
+            })),
+        ],
+        signature: Box::new(Term::Function {
+            parameters: vec![],
+            result: Box::new(Term::Primitive(P::Bool)),
+        }),
+    };
+    let problem = R::Equal(I::Meta(input), I::Stable(expected.clone()));
+    let Search::Proposed {
+        mut candidate,
+        obligation,
+        ..
+    } = parent
+        .search_type_inputs(&[input], &problem, &mut Budget::default())
+        .unwrap()
+    else {
+        panic!("the explicit scoped closure equation should produce a candidate")
+    };
+    assert_eq!(parent.inspect(&I::Meta(input)).unwrap(), I::Meta(input));
+    assert!(candidate.freeze(&I::Meta(input)).is_err());
+    candidate.advance_metered(100, &mut Budget::default());
+    assert!(candidate.state(obligation).unwrap().is_proven());
+    parent.commit(candidate).unwrap();
+    assert_eq!(parent.freeze(&I::Meta(input)).unwrap(), expected);
+}
