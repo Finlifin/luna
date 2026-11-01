@@ -311,43 +311,16 @@ fn repository_package_exports_object_for_user_attribute_constructors() {
         ^marker() fn example() {}",
     )
     .unwrap();
-    let library =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/meta/lib.fl");
+    let library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_luna"))
-        .args(["--packages-v1", "--package", "1", "101", "app"])
         .arg(&input)
-        .args(["--builtin-impl-package", "2"])
-        .args(["--package", "2", "202", "meta"])
+        .arg("--sysroot")
         .arg(&library)
-        .args(["--package", "3", "303", "builtin"])
-        .arg(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../library/builtin/primitives.fl"),
-        )
-        .args(["--dependency", "2", "builtin", "3"])
-        .args(["--package", "4", "404", "attrs"])
-        .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/attrs/lib.fl"))
-        .args(["--dependency", "2", "attrs", "4"])
-        .args(["--dependency", "4", "builtin", "3"])
-        .args(nir::intrinsics::Operation::ALL.iter().flat_map(|op| {
-            [
-                "--comptime-intrinsic".to_owned(),
-                format!(
-                    "{}=meta.numeric.scalar_math.target.Scalar.{}",
-                    op.name(),
-                    op.name()
-                ),
-            ]
-        }))
         .args([
-            "--dependency",
-            "1",
-            "meta",
-            "2",
-            "--primary",
-            "1",
-            "--meta-list-type",
-            "meta.List",
+            "--build-target",
+            "x86_64",
+            "linux",
+            "64",
             "--emit",
             "attributes",
         ])

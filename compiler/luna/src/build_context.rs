@@ -479,8 +479,13 @@ impl TargetOptions {
         {
             return Ok(());
         }
-        if emit != crate::cli::Emit::Nir {
-            return Err("build target inputs require NIR elaboration or execution".into());
+        if !matches!(
+            emit,
+            crate::cli::Emit::Nir
+                | crate::cli::Emit::Attributes
+                | crate::cli::Emit::MergedAttributes
+        ) {
+            return Err("build target inputs require semantic elaboration or execution".into());
         }
         self.primary.complete()?;
         for selected in self.packages.values() {
