@@ -99,6 +99,14 @@ pub struct FunctionTemplateClause {
     pub binding: crate::common::DefId,
 }
 
+/// Definition-time application retained after signature/body identity rebinding.
+/// Its inputs are evaluated by elaboration, never substituted as source syntax.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FunctionTemplateApplication<'hir> {
+    pub template: &'hir Expr<'hir>,
+    pub clauses: Vec<FunctionTemplateClause>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionTemplateInput {
     pub name: Ident,

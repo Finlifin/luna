@@ -136,6 +136,12 @@ impl Checker<'_, '_> {
                     "normal-form default references itself or a later parameter",
                 ));
             }
+            if let Some(value) = self.definition_input(declaration, expr.span)? {
+                if let Some(expected) = expected {
+                    self.require_expression(&value.ty, expected, expr.span)?;
+                }
+                return Ok(Some(value));
+            }
             if let Some((binding, ty)) = self.normal_default_bindings.get(&declaration).cloned() {
                 if let Some(Some(value)) = self.generator_data.get(&binding) {
                     constants::charge_copy(value, &mut self.required_steps, expr.span)?;

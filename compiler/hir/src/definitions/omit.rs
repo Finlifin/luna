@@ -96,6 +96,9 @@ pub fn omit_generation_sources<'h>(
     package
         .function_template_bodies
         .retain(|owner, _| !omitted.contains(owner));
+    package
+        .function_template_applications
+        .retain(|owner, _| !omitted.contains(owner));
     package.definition_attributes.retain(|attribute| {
         let owner = match attribute.target {
             AttributeTarget::Definition(owner) => owner,

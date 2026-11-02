@@ -10,7 +10,7 @@ import tempfile
 from process_tools import ROOT, run, save_summary
 from host_examples import EXAMPLES, MATH_OPERATIONS
 
-STAGES = ('declarations', 'attributes', 'merged-attributes', 'meta-values', 'inline-iteration', 'manifest', 'native-resources', 'native-comparison',
+STAGES = ('declarations', 'attributes', 'merged-attributes', 'meta-values', 'inline-iteration', 'manifest', 'native-resources', 'native-comparison', 'sysroot-template-inputs',
           'native-math', 'sysroot-meta-math', 'sysroot-meta-object', 'sysroot-qualified-methods', 'native-option', 'native-result', 'native-tuple', 'native-conversion', 'hash-protocols', 'sysroot-hash', 'sysroot-qualified-equality', 'sysroot-meta', 'sysroot-comptime-ordering', 'sysroot-builders', 'sysroot-object-struct-builder', 'sysroot-enum-builder', 'sysroot-object-enum-builder', 'sysroot-newtype-builder', 'sysroot-symbol-enum', 'sysroot-fixed-enum', 'sysroot-build-mode', 'sysroot-build-target', 'build-context', 'sysroot', 'sysroot-iteration', 'sysroot-fallible-iteration', 'sysroot-resources', 'sysroot-patterns', 'sysroot-meta-patterns')
 
 
@@ -155,6 +155,9 @@ def main():
                      '--output', str(sysroot_executable)]),
     ]
     stages[-1:-1] = [
+        ('sysroot-template-inputs', ['run', '-p', 'luna', '--', 'test',
+                                    str(ROOT / 'development/examples/sysroot-template-inputs.fl'),
+                                    '--sysroot', str(ROOT / 'library')]),
         ('sysroot-meta-object', ['run', '-p', 'luna', '--', 'comptime',
                                 str(ROOT / 'development/examples/sysroot-meta-object-methods.fl'),
                                 '--sysroot', str(ROOT / 'library'),
@@ -175,7 +178,7 @@ def main():
         ]))
     if args.stage:
         stages = [(label, command) for label, command in stages if label in args.stage]
-    native_counts = {'native-resources': 4, 'native-comparison': 6, 'native-math': 13,
+    native_counts = {'native-resources': 4, 'native-comparison': 6, 'native-math': 13, 'sysroot-template-inputs': 3,
                      'sysroot-qualified-methods': 1, 'native-option': 1, 'native-result': 1, 'native-tuple': 4, 'native-conversion': 3, 'sysroot-iteration': 30, 'sysroot-fallible-iteration': 13, 'sysroot-resources': 3, 'sysroot-patterns': 3, 'sysroot-meta-patterns': 3, 'sysroot-qualified-equality': 4, 'sysroot-hash': 9, 'sysroot-meta': 3, 'sysroot-comptime-ordering': 1, 'sysroot-builders': 6, 'sysroot-object-struct-builder': 1, 'sysroot-enum-builder': 3, 'sysroot-object-enum-builder': 1, 'sysroot-newtype-builder': 1, 'sysroot-symbol-enum': 3, 'sysroot-fixed-enum': 3, 'sysroot-build-mode': 1, 'sysroot-build-target': 2}
     outcomes = []
     for label, command in stages:

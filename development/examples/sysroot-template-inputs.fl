@@ -1,0 +1,67 @@
+{- Template clauses are fixed when a definition is formed; runtime calls use
+   the resulting interface and the ordinary public library protocols. -}
+template fn optional_map(value: ?T, action: fn(T) -> T) -> ?T
+where T;
+
+fn map_flag use optional_map<bool> {
+    value.as(OptionalOps<T>).map(action)
+}
+
+fn negate(value: bool) -> bool { not value }
+
+template fn result_map(value: !E T, action: fn(T) -> T) -> !E T
+where T, E;
+
+fn map_result use result_map<bool, u8> {
+    value.as(ErrorResultOps<T, E>).map(action)
+}
+
+test {
+    let present = map_flag(false, negate);
+    let missing = map_flag(null, negate);
+    assumes present match { value? => value, null => false };
+    assumes missing.as(OptionalOps<bool>).is_none();
+    let success: !u8 bool = false;
+    let failure: !u8 bool = error 7;
+    let mapped = map_result(success, negate);
+    let unchanged = map_result(failure, negate);
+    assumes mapped match { value! => value, error _ => false };
+    assumes unchanged match { _! => false, error code => code == 7 };
+}
+
+comptime fn Schema() -> Type {
+    let draft = meta.StructBuilder.from_object({ready: bool}) match {
+        value? => value,
+        null => return bool,
+    };
+    draft.Build()
+}
+
+template fn construct() -> U
+where T, .U: Type = T, requires T == U;
+
+fn packet use construct<Schema()> {
+    T {ready: true}
+}
+
+test {
+    let first = packet();
+    let second = packet();
+    assumes first.ready and second.ready;
+}
+
+template fn contextual(value: T, quote lambda body: <current: T |- T>) -> T
+where T
+{
+    let current = value;
+    ~<body>
+}
+
+quote fn inverted use contextual<bool> { not current }
+fn retained use contextual<bool> { current }
+
+test {
+    let first = inverted(false);
+    let second = retained(true);
+    assumes first and second;
+}

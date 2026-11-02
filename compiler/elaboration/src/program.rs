@@ -528,6 +528,8 @@ fn elaborate_with_attributes(
         alias_substitution: BTreeMap::new(),
         alias_value_bindings: BTreeMap::new(),
         normal_default_bindings: BTreeMap::new(),
+        definition_inputs: BTreeMap::new(),
+        prepared_template_applications: BTreeSet::new(),
         forbidden_default_inputs: BTreeSet::new(),
         next_temporary_binding: 0,
         alias_expression_budget: 16_384,
@@ -1727,6 +1729,8 @@ struct Checker<'a, 'h> {
     alias_substitution: BTreeMap<DeclarationId, std::sync::Arc<Term>>,
     alias_value_bindings: BTreeMap<DeclarationId, n::LocalId>,
     normal_default_bindings: BTreeMap<DeclarationId, (n::LocalId, Term)>,
+    definition_inputs: BTreeMap<DeclarationId, n::Expr>,
+    prepared_template_applications: BTreeSet<OwnerId>,
     forbidden_default_inputs: BTreeSet<DeclarationId>,
     next_temporary_binding: u32,
     alias_expression_budget: usize,
@@ -1925,6 +1929,7 @@ impl Checker<'_, '_> {
                     self.lexical_input_domains.insert(input, domain);
                 }
             }
+            self.prepare_template_application(owner)?;
             let parent = self
                 .effect_parents
                 .get(&owner)
@@ -3640,6 +3645,11 @@ impl Checker<'_, '_> {
                 self.normal_default_bindings
                     .get(&declaration)
                     .map(|(_, ty)| ty.clone())
+                    .or_else(|| {
+                        self.definition_inputs
+                            .get(&declaration)
+                            .map(|value| value.ty.clone())
+                    })
                     .or_else(|| self.trait_input_domain(declaration))
                     .or_else(|| {
                         self.normal_parameters
@@ -4325,6 +4335,12 @@ impl Checker<'_, '_> {
                     package: semantic_package(&self.package_identities, id.pkg),
                     local: id.index,
                 };
+                if let Some(value) = self.definition_input(declaration, expr.span)? {
+                    let K::TypeValue(ty) = value.kind else {
+                        return Err(error(expr.span, "definition value input cannot be used as a Type"));
+                    };
+                    return Ok(ty);
+                }
                 if let Some(domain) = self.trait_input_domain(declaration) {
                     let domain = self.substituted_trait_domain(&domain, expr.span)?;
                     if domain != p(P::Type) {

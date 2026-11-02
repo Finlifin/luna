@@ -114,6 +114,42 @@ fn check_invert() -> bool {
 
 不要把“使用模板定义一个函数”与“调用这个函数”混为一步。前者决定具体定义及其代码，后者才按该实例的普通或 quote 调用规则供应 runtime 输入。
 
+### 定义时供应子句输入
+
+`use template<...>` 在形成实例定义时绑定模板的子句输入。实参沿普通子句规则
+求值、按名称或位置归属，缺省输入在模板的定义环境中取得；后面的默认值可以
+使用前面已经取得的输入。这些值同时进入实例的参数类型、返回类型、契约和正文。
+
+~~~flurry
+template fn identity(value: T) -> T
+where T;
+
+fn keep_flag use identity<bool> { value }
+fn keep_any use identity { value }
+
+template fn configured(value: bool) -> bool
+where .inverted: bool = false;
+
+fn invert use configured<.inverted = true> { value != inverted }
+fn retain use configured<> { value != inverted }
+
+test {
+    assumes keep_flag(true);
+    assumes keep_any<bool>(true);
+    assumes invert(false) and retain(true);
+}
+~~~
+
+`keep_flag` 的 Type 输入已经固定，调用时不再接收 `<bool>`；不带应用的
+`keep_any` 仍继承模板的泛型接口。显式空应用 `configured<>` 使用子句默认值，
+并把取得的值固定到该实例。普通值输入遵循自己的域，不限于 Type。
+
+形成实例时即检查模板的形成要求，未使用的实例也不能绕过它们。实参中的
+comptime 调用在外围环境中检查，不能预先假设尚未形成的实例契约。
+normal-form 输入保留原来的头与身份，不因绑定到模板参数就展开函数体。
+共享正文的模板遵循同样规则：固定子句输入先参与 contextual 接口形成，
+每个实例再取得自己的正文端口与局部绑定。
+
 ### 基于 CMTT 的正文复用
 
 高级 template fn 通过 quote lambda 参数接收正文。代码接口与规则聚合见 [CMTT 模板接入](../cmtt/quote-functions-and-templates.md)。quote 保留代码，lambda 标记正文入口；模板可以先建立接口授予的 runtime 绑定，再通过 splice 接入用户正文。

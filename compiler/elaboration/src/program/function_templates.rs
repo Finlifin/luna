@@ -43,6 +43,7 @@ impl super::Checker<'_, '_> {
         self.require(inherited, &explicit, annotation.span)
     }
 }
+mod applications;
 mod generation_attributes;
 mod generation_inputs;
 pub(super) use generation_inputs::{
@@ -179,12 +180,7 @@ pub(super) fn expand<'h>(source: &Package<'h>, arena: &'h HirArena) -> Result<Pa
                 "invalid explicit function template parameter correspondence",
             ));
         }
-        if matches!(template.kind, E::NFApplication(..)) {
-            return Err(error(
-                item.span,
-                "function template clause substitution is not implemented",
-            ));
-        }
+        let applied = matches!(template.kind, E::NFApplication(..));
         // A separate identity namespace avoids collisions with the already-lowered body.
         let namespace = package.alloc_owner_id();
         let mut rebind = Rebind {
@@ -220,7 +216,18 @@ pub(super) fn expand<'h>(source: &Package<'h>, arena: &'h HirArena) -> Result<Pa
             ));
         }
         let mut sig = formal.clone();
-        sig.clause_params = rebind.clauses(formal.clause_params)?;
+        sig.clause_params = if applied {
+            package.function_template_applications.insert(
+                owner,
+                hir::item::FunctionTemplateApplication {
+                    template,
+                    clauses: clause_bindings.clone(),
+                },
+            );
+            &[]
+        } else {
+            rebind.clauses(formal.clause_params)?
+        };
         let params = ordinary
             .iter()
             .zip(parameters)
@@ -273,7 +280,12 @@ pub(super) fn expand<'h>(source: &Package<'h>, arena: &'h HirArena) -> Result<Pa
         // Interface reuse cannot erase the declaration's unsafe call boundary.
         sig.modifiers.is_unsafe |= formal.modifiers.is_unsafe;
         let expanded_body = if let Some(interface) = body_interface {
-            let E::ResolvedDef { def_id, .. } = template.kind else {
+            let head = if let E::NFApplication(head, _) = template.kind {
+                head
+            } else {
+                template
+            };
+            let E::ResolvedDef { def_id, .. } = head.kind else {
                 return Err(error(
                     template.span,
                     "shared template requires a declaration",

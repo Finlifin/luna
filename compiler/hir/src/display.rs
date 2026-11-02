@@ -274,6 +274,20 @@ impl Display for Package<'_> {
             }
             f.write_str("))")?;
         }
+        f.write_str(") (function-template-applications")?;
+        let mut applications = self
+            .function_template_applications
+            .iter()
+            .collect::<Vec<_>>();
+        applications.sort_unstable_by_key(|(owner, _)| owner.def_id.raw());
+        for (owner, application) in applications {
+            write!(
+                f,
+                " (application (owner {}) {})",
+                Owner(*owner),
+                application
+            )?;
+        }
         f.write_str(") (definition-attributes")?;
         for attribute in &self.definition_attributes {
             write!(f, " {attribute}")?;
@@ -1101,7 +1115,21 @@ impl Display for TestTemplateInterface<'_> {
 
 impl Display for crate::item::FunctionTemplateClause {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        form!(f, "function-template-clause", "formal" => self.formal, "binding" => self.binding)
+        form!(f, "function-template-clause", "formal" => Definition(self.formal), "binding" => Definition(self.binding))
+    }
+}
+
+impl Display for crate::item::FunctionTemplateApplication<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(function-template-application (template {}) (clauses",
+            self.template
+        )?;
+        for clause in &self.clauses {
+            write!(f, " {clause}")?;
+        }
+        f.write_str("))")
     }
 }
 

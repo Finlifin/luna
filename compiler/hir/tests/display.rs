@@ -254,7 +254,7 @@ fn empty_and_invalid_packages_are_single_complete_expressions() {
     let mut package = Package::new();
     assert_eq!(
         package.to_string(),
-        "(hir-package\n  (root (owner-id 4294967295))\n  (next-definition 0)\n  (owners)\n  (bodies) (definitions) (member-projections) (deferred-member-projections) (member-access) (trait-sources) (source-origins) (lexical-parents) (staged-parameter-definitions) (function-template-bodies) (definition-attributes) (pending-semantics))"
+        "(hir-package\n  (root (owner-id 4294967295))\n  (next-definition 0)\n  (owners)\n  (bodies) (definitions) (member-projections) (deferred-member-projections) (member-access) (trait-sources) (source-origins) (lexical-parents) (staged-parameter-definitions) (function-template-bodies) (function-template-applications) (definition-attributes) (pending-semantics))"
     );
     let item = Item {
         owner_id: owner(0),
@@ -1793,5 +1793,51 @@ fn shared_template_body_dump_keeps_interfaces_ports_and_stable_owner_order() {
     package
         .function_template_bodies
         .extend(bodies.into_iter().rev());
+    assert_eq!(first, package.to_string());
+}
+
+#[test]
+fn applied_template_dump_retains_inputs_and_clause_correspondence() {
+    let head = expr(
+        ExprKind::ResolvedDef {
+            name: Symbol::intern("template \" ) ("),
+            has_clause_param: true,
+            def_id: DefId::new(2, 8),
+        },
+        220,
+    );
+    let input = expr(ExprKind::TyType, 221);
+    let arguments = [Arg::Named(name("T"), &input)];
+    let application = expr(ExprKind::NFApplication(&head, &arguments), 222);
+    let value = hir::item::FunctionTemplateApplication {
+        template: &application,
+        clauses: vec![hir::item::FunctionTemplateClause {
+            formal: DefId::new(2, 9),
+            binding: DefId::new(2, 19),
+        }],
+    };
+    let mut package = Package::new();
+    package
+        .function_template_applications
+        .insert(owner(9), value.clone());
+    package
+        .function_template_applications
+        .insert(owner(3), value.clone());
+    let first = package.to_string();
+    Sexp::parse(&first);
+    assert!(first.contains("(function-template-application (template"));
+    assert!(first.contains("(formal (def-id (package 2) (index 9)))"));
+    assert!(first.contains("(binding (def-id (package 2) (index 19)))"));
+    assert!(
+        first.find("(application (owner (owner-id 3))").unwrap()
+            < first.find("(application (owner (owner-id 9))").unwrap()
+    );
+    package.function_template_applications.clear();
+    package
+        .function_template_applications
+        .insert(owner(3), value.clone());
+    package
+        .function_template_applications
+        .insert(owner(9), value);
     assert_eq!(first, package.to_string());
 }

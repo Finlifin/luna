@@ -560,6 +560,13 @@ impl Checker<'_, '_> {
                 package: semantic_package(&self.package_identities, id.pkg),
                 local: id.index,
             };
+            if let Some(input) = self.definition_input(declaration, value.span)? {
+                self.require_expression(&input.ty, ty, value.span)?;
+                return match input.kind {
+                    K::TypeValue(term) | K::ComptimeValue(term) => Ok(term),
+                    _ => Err(error(value.span, "definition input is not a frozen value")),
+                };
+            }
             if self.forbidden_default_inputs.contains(&declaration) {
                 return Err(error(
                     value.span,
