@@ -5,7 +5,6 @@
 //! ```text
 //!   ┌──────────────────────────────────────┐
 //!   │  Db                                  │
-//!   │  ├ storage      – salsa Database     │
 //!   │  ├ ty_ctxt      – type arena         │
 //!   │  ├ providers    – fn-ptr dispatch    │
 //!   │  ├ query_engine – stack + hooks      │
@@ -108,10 +107,10 @@ impl QueryCaches {
 
 // ── LunaDatabase trait ────────────────────────────────────────────────────────
 
-/// Extension of [`salsa::Database`] with Luna compiler query methods.
-pub trait LunaDatabase: salsa::Database {
+/// Luna compiler queries over session-bound input dependencies.
+pub trait LunaDatabase<'session> {
     /// Downcast to the concrete [`Db`].
-    fn as_db(&self) -> &Db;
+    fn as_db(&self) -> &Db<'session>;
 
     // ── ADT lookups (TyCtxt side tables, not demand queries) ──────────────
 
@@ -146,12 +145,26 @@ pub trait LunaDatabase: salsa::Database {
 /// The Luna compiler database.
 ///
 /// Created once per compilation by `CompilerInstance::new()`.
+/// Input replacement is synchronized by the query engine, but that does not
+/// make the arenas or diagnostic sinks thread-safe. Auto traits retain those
+/// restrictions instead of imposing a manual `Send`/`Sync` promise.
+///
+/// ```compile_fail
+/// fn transfer(db: middle::Db<'static>) {
+///     std::thread::spawn(move || drop(db));
+/// }
+/// ```
+///
+/// Session dependencies cannot be retained by a longer-lived database.
+///
+/// ```compile_fail
+/// fn remember<'session>(db: &middle::Db<'static>,
+///     input: std::sync::Arc<middle::HirQueryInput<'session>>) {
+///     db.set_hir_input(input);
+/// }
+/// ```
 #[derive(Clone)]
-#[salsa::db]
-pub struct Db {
-    /// Salsa storage — host for [`salsa::Database`].
-    storage: salsa::Storage<Db>,
-
+pub struct Db<'session> {
     /// Type-interning arena (wrapped in `Arc` for cheap `Clone`).
     pub ty_ctxt: Arc<TyCtxt>,
 
@@ -162,32 +175,23 @@ pub struct Db {
     pub query_engine: Arc<QueryEngine>,
 
     /// Inputs for the `hir_package` query (set before calling the query).
-    hir_input: Arc<std::sync::Mutex<Option<Arc<HirQueryInput>>>>,
+    hir_input: Arc<std::sync::Mutex<Option<Arc<HirQueryInput<'session>>>>>,
 
     /// Per-query memo tables.
     pub caches: QueryCaches,
 }
 
-#[salsa::db]
-impl salsa::Database for Db {}
-
-// SAFETY: Luna is single-threaded.  `TyCtxt` and `HirArena` use `RefCell`
-// internally, but we never access a `Db` from multiple threads concurrently.
-// Salsa 0.22 requires `Db: Sync` via `HasStorage`; this impl satisfies it.
-unsafe impl Sync for Db {}
-
-impl LunaDatabase for Db {
+impl<'session> LunaDatabase<'session> for Db<'session> {
     #[inline]
-    fn as_db(&self) -> &Db {
+    fn as_db(&self) -> &Db<'session> {
         self
     }
 }
 
-impl Db {
+impl<'session> Db<'session> {
     /// Construct an empty compiler database with default (panicking) providers.
     pub fn new() -> Self {
         Db {
-            storage: salsa::Storage::default(),
             ty_ctxt: Arc::new(TyCtxt::new()),
             providers: Providers::default(),
             query_engine: Arc::new(QueryEngine::new()),
@@ -200,7 +204,7 @@ impl Db {
     ///
     /// Replacing input invalidates HIR and its observed query consumers.
     /// Input cannot be replaced from inside an active query provider.
-    pub fn set_hir_input(&self, input: Arc<HirQueryInput>) {
+    pub fn set_hir_input(&self, input: Arc<HirQueryInput<'session>>) {
         self.query_engine
             .update_input(&self.caches.hir_package, &(), || {
                 *self.hir_input.lock().unwrap_or_else(|e| e.into_inner()) = Some(input);
@@ -209,7 +213,7 @@ impl Db {
     }
 
     /// Retrieve the current query input, if any.
-    pub fn hir_input(&self) -> Option<Arc<HirQueryInput>> {
+    pub fn hir_input(&self) -> Option<Arc<HirQueryInput<'session>>> {
         self.hir_input
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -229,10 +233,8 @@ impl Db {
     }
 }
 
-impl Default for Db {
+impl Default for Db<'_> {
     fn default() -> Self {
         Self::new()
     }
 }
-
-impl query::LunaDbBase for Db {}

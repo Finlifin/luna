@@ -432,15 +432,13 @@ fn compile_bound_for_target_with_invocation(
         .get_ast(file_id)
         .ok_or_else(|| "parsed input is unavailable for lowering".to_string())?
         .clone();
-    // These pointers remain valid until the synchronous HIR query completes.
     let mut hir_input = middle::HirQueryInput::new(
         Arc::new(ast),
         file_id,
         Arc::new(module_tree),
         file_scope,
-        &sess.source_map as *const rustc_span::SourceMap,
-        &instance.diag_ctx as *const diagnostic::DiagnosticContext<'_>
-            as *const diagnostic::DiagnosticContext<'static>,
+        &sess.source_map,
+        Arc::clone(&instance.diag_ctx),
     );
     for (id, _) in instance.vfs.files() {
         if id == file_id {

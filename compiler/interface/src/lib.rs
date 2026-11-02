@@ -23,13 +23,13 @@
 //!       │
 //!       ▼
 //!   CompilerInstance<'sess>   (db, hir_arena, vfs, diag_ctx, …)
-//!       │  db: middle::Db     ← salsa database + TyCtxt arena
+//!       │  db: middle::Db     ← query engine + TyCtxt arena
 //!       │
 //!       ▼
-//!   Compiler<'c>              (thin Copy handle, Deref → CompilerInstance)
+//!   Compiler<'c, 'sess>       (thin Copy handle, Deref → CompilerInstance)
 //! ```
 //!
-//! The [`middle::Db`] owns both the salsa storage (query memoisation,
+//! The [`middle::Db`] owns both the query engine (memoisation,
 //! change tracking) and the [`middle::TyCtxt`] arena (type interning).
 //! All previously separate [`QueryEngine`] / [`Queries`] / [`TyCtxt`]
 //! fields are now unified in `db`.
@@ -68,7 +68,7 @@ use vfs::Vfs;
 /// # Central store: `db`
 ///
 /// [`middle::Db`] unifies:
-/// - the salsa query engine (memoisation, cycle detection, dep-graph)
+/// - the query engine (memoisation, cycle detection, dep-graph)
 /// - the [`TyCtxt`](middle::TyCtxt) type-interning arena
 ///
 /// Both are accessed through `self.db` or `self.db.ty_ctxt`.
@@ -82,17 +82,17 @@ pub struct CompilerInstance<'sess> {
     /// The long-lived compiler session.
     pub sess: &'sess Session,
     /// Diagnostic context (errors, warnings, suggestions).
-    pub diag_ctx: DiagnosticContext<'sess>,
+    pub diag_ctx: Arc<DiagnosticContext<'sess>>,
     /// Virtual file system for the **user** package.
     pub vfs: Vfs,
     /// VFS instances for sysroot packages (index 0 = builtin, 1 = std).
     pub sysroot_vfs: Vec<Vfs>,
-    /// The central salsa database.
+    /// The central query database.
     ///
     /// Provides:
-    /// - memoised query results via salsa (call `self.db.adt_def(id)`, …)
+    /// - memoised query results (call `self.db.hir_package(())`, …)
     /// - the type-interning arena (`self.db.ty_ctxt`)
-    pub db: Db,
+    pub db: Db<'sess>,
     /// HIR arena – backing memory for all `&'hir` HIR nodes.
     ///
     /// Owned here so the `'hir` lifetime equals the borrow lifetime `'c`
@@ -110,7 +110,7 @@ impl<'sess> CompilerInstance<'sess> {
         let sysroot_vfs = Self::load_sysroot(sess);
 
         CompilerInstance {
-            diag_ctx: DiagnosticContext::new(&sess.source_map),
+            diag_ctx: Arc::new(DiagnosticContext::new(&sess.source_map)),
             vfs: Vfs::new(&sess.config.name, sess.config.root.clone()),
             sysroot_vfs,
             db,
@@ -154,13 +154,13 @@ impl<'sess> CompilerInstance<'sess> {
     /// Enter a read-only scope via a [`Compiler`] handle.
     pub fn enter<F, R>(&self, f: F) -> R
     where
-        F: FnOnce(Compiler<'_>) -> R,
+        F: FnOnce(Compiler<'_, 'sess>) -> R,
     {
         f(Compiler { instance: self })
     }
 
     /// Obtain a [`Compiler`] handle without the closure indirection.
-    pub fn compiler(&self) -> Compiler<'_> {
+    pub fn compiler(&self) -> Compiler<'_, 'sess> {
         Compiler { instance: self }
     }
 
@@ -174,7 +174,7 @@ impl<'sess> CompilerInstance<'sess> {
     /// Must be called after name resolution and before `Compiler::hir_package()`.
     /// Also ensure providers are registered via
     /// `ast_lowering::set_providers(&mut instance.db.providers)`.
-    pub fn set_hir_input(&self, input: Arc<middle::HirQueryInput>) {
+    pub fn set_hir_input(&self, input: Arc<middle::HirQueryInput<'sess>>) {
         self.db.set_hir_input(input);
     }
 }
@@ -191,18 +191,18 @@ impl<'sess> CompilerInstance<'sess> {
 /// obtain `&'c T` (= `&'hir T`) HIR references.
 ///
 /// ```ignore
-/// fn some_pass(cx: Compiler<'_>) {
-///     let adt = cx.adt_def(id);        // salsa query
+/// fn some_pass(cx: Compiler<'_, '_>) {
+///     let adt = cx.adt_def(id);        // TyCtxt side-table lookup
 ///     let ty  = cx.db.ty_ctxt.def_ty(def_id);  // TyCtxt arena lookup
 ///     let e   = cx.hir_arena.alloc_expr(…);    // HIR allocation
 /// }
 /// ```
 #[derive(Clone, Copy)]
-pub struct Compiler<'c> {
-    instance: &'c CompilerInstance<'c>,
+pub struct Compiler<'c, 'sess> {
+    instance: &'c CompilerInstance<'sess>,
 }
 
-impl<'c> Compiler<'c> {
+impl<'c, 'sess> Compiler<'c, 'sess> {
     // ── Query methods ─────────────────────────────────────────────────────
 
     /// Look up an ADT definition by id (TyCtxt side table).
@@ -228,8 +228,8 @@ impl<'c> Compiler<'c> {
     }
 }
 
-impl<'c> Deref for Compiler<'c> {
-    type Target = CompilerInstance<'c>;
+impl<'c, 'sess> Deref for Compiler<'c, 'sess> {
+    type Target = CompilerInstance<'sess>;
 
     #[inline]
     fn deref(&self) -> &Self::Target {

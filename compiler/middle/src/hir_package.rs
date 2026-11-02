@@ -1,63 +1,50 @@
-//! HIR package ownership wrapper.
-//!
-//! [`HirPackageBox`] co-locates a [`HirArena`] and the [`Package`] allocated
-//! from it, erasing the `'hir` lifetime so the value can be stored in the
-//! database and shared behind `Arc`.
-//!
-//! # Lifetime safety
-//!
-//! `HirPackageBox` transmutes `Package<'hir>` to `Package<'static>` and stores
-//! both the arena and the package in the same allocation.  Accessing the
-//! package via [`HirPackageBox::package`] rebinds the lifetime to the borrow
-//! of the `HirPackageBox`, ensuring the arena is always live.
-
+//! An owned HIR package whose arena is constructed in a generative scope.
+//! The package can only borrow that arena or static data. Its references are
+//! exposed with the owner's borrow lifetime, never the erased storage lifetime.
 use hir::{HirArena, Package};
 
-// ── HirPackageBox ─────────────────────────────────────────────────────────────
-
-/// An owned HIR package with its backing arena.
-///
-/// `Package<'hir>` borrows from `HirArena`.  By moving both into this struct
-/// together we can safely erase `'hir` to `'static`: the `package()` accessor
-/// rebinds it to the borrow lifetime of `self`.
 pub struct HirPackageBox {
-    /// The arena that owns all `&'hir` allocations in `package`.
-    arena: HirArena,
-    /// The HIR package.  Lifetime erased to `'static`; use `package()`.
-    ///
-    /// # Invariant
-    /// All `&'hir` pointers inside this value point into `arena` above.
+    // Drop the package before its allocation owner.
     package: Package<'static>,
+    arena: Box<HirArena>,
 }
 
 impl HirPackageBox {
-    /// Move an `arena`-allocated `Package` into an owned box.
+    /// Build a package inside its allocation owner's scope.
     ///
-    /// After this call the arena is co-located with the package; callers
-    /// must not access `package` after `arena` has been dropped.
-    /// This invariant is upheld automatically because both live in `Self`.
-    pub fn new(arena: HirArena, package: Package<'_>) -> Self {
-        // SAFETY: `package` borrows from `arena`.  Both are moved into `Self`
-        // together, so the transmuted `Package<'static>` is only accessible via
-        // `package()` which re-constrains the lifetime to `'a ≤ lifetime-of-self`.
+    /// The higher-ranked callback prevents a package borrowing an unrelated
+    /// arena from being smuggled into the owned result.
+    ///
+    /// ```compile_fail
+    /// fn detach<'hir>(foreign: hir::Package<'hir>) -> middle::HirPackageBox {
+    ///     middle::HirPackageBox::new(|_| foreign)
+    /// }
+    /// ```
+    ///
+    /// Shared allocation requires a thread-safe arena; moving an unaliased
+    /// owner is governed separately by its natural auto traits.
+    ///
+    /// ```compile_fail
+    /// fn share(package: std::sync::Arc<middle::HirPackageBox>) {
+    ///     std::thread::spawn(move || drop(package));
+    /// }
+    /// ```
+    pub fn new(build: impl for<'hir> FnOnce(&'hir HirArena) -> Package<'hir>) -> Self {
+        let arena = Box::new(HirArena::new());
+        let package = build(&arena);
+        // SAFETY: the callback must work for any arena borrow lifetime. The
+        // returned package can therefore borrow only this arena or static data.
+        // The boxed arena stays at its address and outlives the package. The
+        // accessor shortens all exposed references to the owner's borrow.
         let package = unsafe { std::mem::transmute::<Package<'_>, Package<'static>>(package) };
-        HirPackageBox { arena, package }
+        Self { package, arena }
     }
 
-    /// Borrow the HIR package with a safe lifetime `'a` tied to `self`.
-    pub fn package<'a>(&'a self) -> &'a Package<'a> {
-        // SAFETY: rebind lifetime from 'static (internal repr) to 'a (borrow of self).
-        unsafe { std::mem::transmute::<&Package<'static>, &'a Package<'a>>(&self.package) }
+    pub fn package(&self) -> &Package<'_> {
+        &self.package
     }
 
-    /// Borrow the HIR arena.
     pub fn arena(&self) -> &HirArena {
         &self.arena
     }
 }
-
-// SAFETY: `HirArena` uses `Cell`/`RefCell` internally (single-threaded).
-// Luna is single-threaded; we never access `HirPackageBox` from multiple
-// threads concurrently.  The unsafe impls satisfy salsa's `Db: Sync` bound.
-unsafe impl Sync for HirPackageBox {}
-unsafe impl Send for HirPackageBox {}

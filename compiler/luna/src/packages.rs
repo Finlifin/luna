@@ -820,9 +820,8 @@ fn compile_with_expansion(
         file_id,
         Arc::new(resolved.tree),
         scope,
-        &session.source_map as *const rustc_span::SourceMap,
-        &instance.diag_ctx as *const diagnostic::DiagnosticContext<'_>
-            as *const diagnostic::DiagnosticContext<'static>,
+        &session.source_map,
+        Arc::clone(&instance.diag_ctx),
     );
     for (id, vfs) in &inputs {
         for (local_file, _) in vfs.files() {

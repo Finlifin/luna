@@ -10,7 +10,7 @@ members = [
     "compiler/resolve",
     "compiler/hir",
     "compiler/ast_lowering",
-    # Query / type / interface layer (salsa-based):
+    # Query / type / interface layer:
     "compiler/query",
     "compiler/middle",
     "compiler/interface",
@@ -40,5 +40,4 @@ once_cell = "1.21.3"
 rustc_data_structures = "0.1.2"
 thin-vec = "0.2"
 rustc-arena-modified = "0.1.1"
-salsa = "0.22"
 symbol = { path = "compiler/symbol" }

@@ -1,8 +1,7 @@
 //! Luna query system — generic infrastructure layer.
 //!
 //! This crate is the **infrastructure** tier of Luna's query system,
-//! analogous to `rustc_query_system`.  It re-exports
-//! [salsa](https://crates.io/crates/salsa) and provides keyed memoisation,
+//! analogous to `rustc_query_system`. It provides keyed memoisation,
 //! cycle detection, and panic-safe evaluation for rustc-style provider
 //! tables owned by `middle::Db`.
 //!
@@ -53,18 +52,6 @@ use std::hash::Hash;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::{Condvar, Mutex};
-
-/// Re-export salsa so downstream crates can write `query::salsa::…`
-/// or use salsa proc-macro attributes via `use query::salsa`.
-pub use salsa;
-
-/// Marker super-trait for all Luna query databases.
-///
-/// Every concrete database struct (currently only `middle::Db`) must
-/// implement this trait in addition to [`salsa::Database`].  It acts as
-/// a single extension point for Luna-wide database invariants that are
-/// too generic for `middle` but too domain-specific for plain salsa.
-pub trait LunaDbBase: salsa::Database + Send {}
 
 /// Shared query-engine state owned by `middle::Db`.
 ///

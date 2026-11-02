@@ -87,3 +87,82 @@ Validation in `/home/fin/luna`:
 The database test uses a controlled HIR provider to test the input boundary;
 it is not an end-to-end source-edit incremental compilation test. No full
 language suite, race detector or performance benchmark was run for this stage.
+
+## Session ownership and HIR publication
+
+The D02/D10 query work still has only the package HIR query in production. Before
+adding more cached compiler results, the input and result ownership boundary now
+stops claiming lifetimes or thread safety that its fields do not provide.
+
+`Db<'session>` retains `HirQueryInput<'session>` with a borrowed source map and
+an owned `Arc<DiagnosticContext<'session>>`. Both source drivers pass these
+dependencies directly. They no longer cast a diagnostic context to a raw
+`DiagnosticContext<'static>` pointer, and lowering uses safe accessors. A clone
+of the database shares the same invalidated input and cache; it cannot extend
+the source map's lifetime. `Compiler` distinguishes its short borrow from the
+session lifetime instead of relying on covariance through mutable query state.
+
+`HirPackageBox::new` now accepts a higher-ranked arena-building callback. The
+callback must return a package for any borrow lifetime of the owner's arena;
+it cannot return a package borrowed from an unrelated, shorter-lived arena.
+The arena is boxed and dropped after the package. Lifetime erasure remains
+encapsulated inside this constructor, and the accessor narrows references
+without a second transmute. The lowering provider no longer erases lifetimes.
+Owned results can outlive the database and inputs, while borrowed HIR views
+remain tied to their result owner.
+
+Removed manual `Send`/`Sync` implementations from Db, HirQueryInput,
+HirPackageBox and TyCtxt. Their natural field bounds determine which transfers
+are valid: moving an unaliased HIR owner is distinct from sharing its mutable
+arena through Arc. The query engine remains synchronized for data that actually
+supports shared use; compiler arenas do not inherit that permission.
+
+The unused Salsa storage/marker layer imposed the unsafe database bounds but
+did not perform any production query. It is removed, including its dependency
+closure. Existing dependency versions are unchanged; the lockfile removes 16
+unused packages. Memoization, invalidation and cycle handling remain in the
+existing query engine.
+
+This does not add persistent queries, diagnostic replay, source-edit reuse or a
+parallel compiler scheduler. Other arena/interner lifetime-erasure internals
+are not certified by these changes. Language semantics and library interfaces
+are unchanged.
+
+Verification in `/home/fin/luna`:
+
+- `python3 -B development/check.py --timeout 900 -- test -p middle -p query
+  -p interface -p ast_lowering` exited 0
+  (`/tmp/luna-tools-_l_w5o7n/result.json`): 21 unit/integration tests and five
+  compile-fail doctests passed; five pre-existing doctests remain ignored.
+  Checks cover foreign-arena rejection, input/session lifetime escape, actual
+  thread bounds, results retained after input/database destruction, and the
+  existing shared-engine invalidation and recovery behavior.
+- Linux dependency metadata with `--offline --locked --filter-platform
+  x86_64-unknown-linux-gnu` exited 0 (`/tmp/luna-tools-matgv_87/result.json`).
+  The unfiltered metadata attempt requested an uncached Redox dependency
+  (`/tmp/luna-tools-t96m936n/result.json`, exit 101); no dependency was downloaded
+  and no surviving package version was upgraded.
+- Serial driver regression command: `python3 -B development/check.py --timeout
+  900 -- test -p luna --test modules --test packages --test frontend_cli --test
+  sysroot_preludes --no-fail-fast -- --test-threads=1`
+  (`/tmp/luna-tools-tc4yom99/result.json`, exit 101). All 56 module tests, 50
+  package tests and 15 sysroot tests pass; frontend_cli has 229 passes and 23
+  failures. The real sysroot tests cover public staged methods, text, hashing,
+  object reflection, definition builders, qualified values and iteration.
+  An earlier parallel run is recorded separately in
+  `/tmp/luna-tools-th2m9zem/result.json`; it is not the serial result.
+- Five frontend_cli failures are diagnostic/old-assertion failures. Repeating
+  those exact tests on unmodified HEAD `40b7740b` reproduces all five
+  (`/tmp/luna-tools-vhyab7rl/result.json`, exit 101). The other 18 serial
+  failures hit that fixture's 15-second subprocess deadline. No expectation or
+  deadline was changed to make the suite pass.
+- All 18 timeout cases reproduce serially on the same unmodified HEAD
+  (`/tmp/luna-tools-48t__pdp/result.json`, exit 101). The union of the two
+  baseline failure sets exactly matches the current 23 failing tests. The
+  baseline comparison temporarily restored only this change's files and then
+  restored their current contents; unrelated worktree edits were preserved.
+  This is a baseline comparison, not a claim that the full driver suite passes.
+- Final `cargo fmt --all -- --check` through the command wrapper exited 0
+  (`/tmp/luna-tools-07rapooj/result.json`), as did the middle/query doctests after
+  updating API comments (`/tmp/luna-tools-i5dwuwgr/result.json`).
+  `git diff --check` passed.

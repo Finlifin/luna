@@ -2,7 +2,7 @@
 //!
 //! Luna uses a rustc-style **provider table** plus the generic
 //! [`crate::try_get_with`] / [`crate::force_get_with`] helpers in this crate.
-//! Salsa is only the `Database` host; memoisation and cycles are handled here.
+//! `middle::Db` owns session-bound inputs; memoisation and cycles are handled here.
 //!
 //! ## Checklist
 //!

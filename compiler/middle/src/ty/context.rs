@@ -38,15 +38,22 @@ pub struct CommonTypes<'tcx> {
 /// retrieving semantic types.
 ///
 /// Analogous to rustc's `TyCtxt<'tcx>`. Owned by `CompilerInstance` and
-/// shared across all type-checking passes via the `Compiler<'c>` handle.
+/// shared across all type-checking passes via the `Compiler<'c, 'sess>` handle.
 ///
 /// # Lifetimes
 ///
 /// The `'tcx` lifetime of the types it creates is the borrow lifetime of
 /// `&'tcx self`. Since `CompilerInstance` owns the `TyCtxt` and
-/// `Compiler<'c>` borrows `CompilerInstance`, `'c` = `'tcx`.
+/// `Compiler<'c, 'sess>` borrows `CompilerInstance`, `'c` = `'tcx`.
 ///
 /// # Usage
+///
+/// This mutable arena is not a cross-thread query result.
+///
+/// ```compile_fail
+/// fn shared<T: Send + Sync>() {}
+/// shared::<middle::TyCtxt>();
+/// ```
 ///
 /// ```ignore
 /// fn check_expr(tcx: &TyCtxt, expr: &Expr<'_>) -> Ty<'_> {
@@ -311,11 +318,3 @@ impl Default for TyCtxt {
         Self::new()
     }
 }
-
-// SAFETY: The Luna compiler is single-threaded.  `TyCtxt` uses `RefCell`
-// and `TypedArena` (both `!Sync`/`!Send`) internally for arena allocation
-// and mutable caches.  We promise never to share a `TyCtxt` across threads
-// concurrently.  These impls are required because `Arc<TyCtxt>` must be
-// `Send + Sync` for salsa 0.22's `HasStorage` bound.
-unsafe impl Sync for TyCtxt {}
-unsafe impl Send for TyCtxt {}

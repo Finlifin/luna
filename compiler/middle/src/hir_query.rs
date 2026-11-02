@@ -1,15 +1,6 @@
-//! Query inputs for the `hir_package` query.
-//!
-//! [`HirQueryInput`] bundles all data that `ast_lowering::lower_to_hir` needs.
-//! Owned data (AST, module tree) are held via `Arc`; data that carries a
-//! lifetime (`SourceMap`, `DiagnosticContext`) is stored as a raw pointer and
-//! accessed through `unsafe` accessors.
-//!
-//! # Lifetime safety
-//!
-//! The caller (the compiler driver in `luna/src/main.rs`) must guarantee that
-//! both pointer targets remain live for as long as the `HirQueryInput` is
-//! accessible — in practice for the entire compilation.
+//! Session-bound inputs for HIR lowering. ASTs and resolution data are owned;
+//! the source map is borrowed for the database lifetime and diagnostics retain
+//! shared ownership. Query reuse cannot outlive either dependency.
 
 use std::sync::Arc;
 
@@ -19,7 +10,7 @@ use resolve::{ModuleTree, ScopeId};
 use rustc_span::SourceMap;
 
 /// All inputs required to lower one file's AST to HIR.
-pub struct HirQueryInput {
+pub struct HirQueryInput<'session> {
     /// Parsed AST of the source file.
     pub ast: Arc<Ast>,
     pub additional_files: Vec<(vfs::FileId, Arc<Ast>, ScopeId)>,
@@ -29,40 +20,27 @@ pub struct HirQueryInput {
     pub file_scope: ScopeId,
     /// File ID of the source file being lowered.
     pub file_id: vfs::FileId,
-    /// Raw pointer to the session's `SourceMap`.
-    source_map_ptr: *const SourceMap,
-    /// Raw pointer to the compiler's `DiagnosticContext` (lifetime erased).
-    diag_ctx_ptr: *const DiagnosticContext<'static>,
+    source_map: &'session SourceMap,
+    diagnostics: Arc<DiagnosticContext<'session>>,
 }
 
-// SAFETY: Luna is single-threaded.  The raw pointers are only dereferenced on
-// the main thread inside `ast_lowering::lower_to_hir`.
-unsafe impl Send for HirQueryInput {}
-unsafe impl Sync for HirQueryInput {}
-
-impl HirQueryInput {
-    /// Construct a new query input.
-    ///
-    /// # Safety
-    ///
-    /// `source_map_ptr` and `diag_ctx_ptr` must remain valid for the entire
-    /// duration that this `HirQueryInput` is live.
+impl<'session> HirQueryInput<'session> {
     pub fn new(
         ast: Arc<Ast>,
         file_id: vfs::FileId,
         module_tree: Arc<ModuleTree>,
         file_scope: ScopeId,
-        source_map_ptr: *const SourceMap,
-        diag_ctx_ptr: *const DiagnosticContext<'static>,
+        source_map: &'session SourceMap,
+        diagnostics: Arc<DiagnosticContext<'session>>,
     ) -> Self {
-        HirQueryInput {
+        Self {
             ast,
             additional_files: Vec::new(),
             file_id,
             module_tree,
             file_scope,
-            source_map_ptr,
-            diag_ctx_ptr,
+            source_map,
+            diagnostics,
         }
     }
 
@@ -85,22 +63,11 @@ impl HirQueryInput {
         self.file_scope
     }
 
-    /// Obtain a reference to the source map.
-    ///
-    /// # Safety
-    ///
-    /// The pointer passed to [`new`](Self::new) must still be valid.
-    pub unsafe fn source_map(&self) -> &SourceMap {
-        &*self.source_map_ptr
+    pub fn source_map(&self) -> &SourceMap {
+        self.source_map
     }
 
-    /// Obtain a reference to the diagnostic context.
-    ///
-    /// # Safety
-    ///
-    /// The pointer passed to [`new`](Self::new) must still be valid and the
-    /// lifetime `'a` must be no longer than the pointee's actual lifetime.
-    pub unsafe fn diag_ctx<'a>(&self) -> &'a DiagnosticContext<'a> {
-        &*(self.diag_ctx_ptr as *const DiagnosticContext<'a>)
+    pub fn diag_ctx(&self) -> &DiagnosticContext<'session> {
+        &self.diagnostics
     }
 }
