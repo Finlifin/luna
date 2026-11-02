@@ -56,8 +56,10 @@ first-UIP 子句；传播得到的汇合点不会等到归约为原决策文字�
 保留直接扫描。错误结果与效应行暂保留全对扫描，其标签关系还依赖显式不等式，不能
 仅凭子项代表元不变跳过检查。trait、kind 与整数一致性仍重新检查，尚非完整增量 theory solver。
 
-当前尚未实现 Type 解提取及其生产调用接线；也未完成统一子句 trail、
-其余 theory 增量状态和跨查询 activation guard。现有查询局部学习不代表完整 CDCL 已交付。
+Type 解提取及其生产调用现已有后文记录的有界实现；统一子句 trail、
+其余 theory 增量状态和跨查询 activation guard 仍未完成。现有查询局部学习不代表完整
+CDCL 已交付。结构 unification 与模型搜索共同服务于获准求解的输入，求解能力的增强
+不扩大语言允许隐式推导的位置；没有选择依据的多个模型不能成为默认类型选择。
 
 结构匹配现可使用区域内已成立的命题恢复符号类型的结构视图：直接分解没有提出输入时，
 从已知公式中收集候选形状，并由 PTC 证明实际类型与该形状相等后才交给结构匹配。
@@ -1057,3 +1059,49 @@ Verification from `/home/fin/luna`:
   production change.
 - Workspace format checking passed (`/tmp/luna-tools-7i0bm9vt/result.json`, exit
   0); `git diff --check` passed.
+
+## Frozen payloads with opaque Type domains
+
+Type application models now accept frozen payloads whose declared domain is an
+opaque Type application. This follows the ordinary value representation, without
+recognizing List names or adding a Type-list argument category. Real sysroot
+`meta.List` values containing scalars, Types, and nested lists can participate in
+Type input search. Exported solutions retain their source NF heads and lexical
+or ambient Type inputs; a Type-producing function's body is not unfolded.
+
+Closed model validation is separate from source NIR formation. An interpreted
+payload domain is a Type element, not permission to construct or inspect source
+values at that Type. Source formulas still receive normal scope and formation
+checks. Model validation preserves callable wrapper shapes, parameter sorts,
+collector bounds, error-label membership, closed binders, and head authority.
+Fields and variant tags remain part of payload identity. Model witnesses do not
+grant source layout authority or program-level Eq/Hash behavior.
+
+Type search still exports only symbolic solutions with entailment evidence.
+The inference engine stages those solutions in an isolated candidate and checks
+the original obligations before commit. Stronger model support does not enable
+arbitrary model assignments as defaults or widen implicit inference positions.
+
+Verification from `/home/fin/luna`:
+
+- The new opaque-domain regressions initially returned
+  `Unknown(UnvalidatedModel)` (`/tmp/luna-tools-ygezvr4j/result.json`, exit 101).
+- `python3 -B development/check.py --timeout 900 -- test -p ptc -p
+  type_resolution` passed all 582 tests
+  (`/tmp/luna-tools-5pc5lid4/result.json`, exit 0).
+- Final targeted checks used `python3 -B development/check.py --timeout 900 --
+  test -p ptc -p luna --test opaque_payload_models --test
+  scoped_comptime_callables --test type_model_inference --no-fail-fast`:
+  32 tests passed (`/tmp/luna-tools-sm9cpiib/result.json`, exit 0). They cover
+  forged witnesses, lexical inputs, non-injectivity, budget recovery, candidate
+  commits, and real public List methods. The sysroot fixture initially appended
+  through an immutable `let` receiver and correctly failed with
+  `InvalidValueReference` (`/tmp/luna-tools-15dz8vqa/result.json`, exit 101);
+  changing that fixture to `var` required no relaxation of compiler checks.
+- Workspace format checking passed (`/tmp/luna-tools-eclie7en/result.json`,
+  exit 0); `git diff --check` passed.
+
+This is a bounded model-domain extension. Floating payloads, unresolved value
+stores, closure snapshots, ListConcat, Tuple-role model applications, and complete
+implementation-world trait models remain unsupported. Complete CDCL is still
+unfinished.

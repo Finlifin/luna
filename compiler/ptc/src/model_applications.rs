@@ -74,11 +74,13 @@ fn argument_with_types(term: &Term, type_leaf: &impl Fn(&Term) -> bool) -> bool 
                         .terms()
                         .all(|value| visit(value, depth + 1, remaining, type_leaf))
             }
-            // Formation is checked before PTC admission. A nominal payload
-            // retains its declared Type and variant; an opaque NF domain does
-            // not acquire collection/layout authority from this carrier alone.
+            // Formation is checked before PTC admission. The payload domain
+            // can be an opaque Type application, not just nominal syntax. Its
+            // model interpretation is a Type element, not a source layout:
+            // retaining this tag does not authorize construction or inspection
+            // of a value at that model Type. Fields and variants stay distinct.
             Term::NominalValue { ty, fields, .. } => {
-                matches!(ty.as_ref(), Term::Nominal { .. })
+                ty.sort() == Sort::Type
                     && visit(ty, depth + 1, remaining, type_leaf)
                     && fields
                         .iter()
@@ -92,7 +94,8 @@ fn argument_with_types(term: &Term, type_leaf: &impl Fn(&Term) -> bool) -> bool 
                         .is_none_or(|value| visit(value, depth + 1, remaining, type_leaf))
             }
             Term::ErrorValue { ty, label, value } => {
-                matches!(ty.as_ref(), Term::ErrorResult { .. })
+                matches!(ty.as_ref(), Term::ErrorResult { errors, .. }
+                    if label.as_ref().is_none_or(|label| errors.contains(label)))
                     && visit(ty, depth + 1, remaining, type_leaf)
                     && label
                         .as_ref()
@@ -142,7 +145,6 @@ pub(super) fn index(
             }
             if !(closed_type(value, &context.nominal_constructors)
                 || (is_argument && closed_argument(value, &context.nominal_constructors)))
-                || value.check_scope(&[]).is_err()
             {
                 return Err(ProofError::Invalid);
             }

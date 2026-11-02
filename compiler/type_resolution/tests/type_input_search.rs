@@ -968,3 +968,51 @@ fn callable_normal_form_inputs_survive_model_search_and_transaction_commit() {
         assert_eq!(parent.freeze(&I::Meta(input)).unwrap(), expected);
     }
 }
+
+#[test]
+fn opaque_payload_domains_commit_source_identities_after_original_obligations() {
+    let id = |local| DeclarationId {
+        package: 948,
+        local,
+    };
+    let ambient = Term::Rigid {
+        declaration: id(9),
+        sort: Sort::Type,
+    };
+    let expected = Term::NormalForm {
+        head: id(1),
+        sort: Sort::Type,
+        arguments: vec![Term::NominalValue {
+            ty: Box::new(Term::NormalForm {
+                head: id(2),
+                sort: Sort::Type,
+                arguments: vec![ambient.clone()],
+            }),
+            variant: None,
+            fields: vec![ambient],
+        }],
+    };
+    let mut context = Context::default();
+    context.admit_congruence(id(1));
+    context.admit_congruence(id(2));
+    let mut parent = Engine::with_context(context);
+    let input = parent.fresh(Sort::Type);
+    let requirement = R::Equal(I::Meta(input), I::Stable(expected.clone()));
+    let Search::Proposed {
+        mut candidate,
+        obligation,
+        evidence,
+    } = parent
+        .search_type_inputs(&[input], &requirement, &mut Budget::default())
+        .unwrap()
+    else {
+        panic!("opaque payload Type is determined")
+    };
+    assert_eq!(evidence.bindings.values().next().unwrap().0, expected);
+    assert_eq!(parent.inspect(&I::Meta(input)).unwrap(), I::Meta(input));
+    assert!(candidate.freeze(&I::Meta(input)).is_err());
+    candidate.advance_metered(100, &mut Budget::default());
+    assert!(candidate.state(obligation).unwrap().is_proven());
+    parent.commit(candidate).unwrap();
+    assert_eq!(parent.freeze(&I::Meta(input)).unwrap(), expected);
+}
