@@ -75,3 +75,56 @@ test comparison_phase_selection {
     assumes not equal_errors;
     inline if staged_equal() {assumes true;} else {assumes false;}
 }
+
+struct HashKey {called: *bool, retired: *bool}
+impl Hash for HashKey {
+    fn hash(self) -> u64 {
+        assumes not self.called.*;
+        self.called.* = true;
+        7
+    }
+}
+impl Drop for HashKey {
+    fn drop(*self) {
+        assumes not self.retired.*.*;
+        self.retired.*.* = true;
+    }
+}
+
+comptime fn optional_digest(present: bool) -> u64 {
+    let value: ?u64 = if present {7} else {null};
+    value.hash()
+}
+comptime fn error_digest(failure: bool) -> u64 {
+    let value: !u64 u64 = if failure {error 7} else {7};
+    value.hash()
+}
+
+fn optional_hash_trial(present: bool) -> bool {
+    var called = false;
+    var retired = false;
+    let value: ?HashKey = if present {HashKey {called: called.ref, retired: retired.ref}} else {null};
+    let digest = value.hash();
+    const some_digest = optional_digest(true);
+    const none_digest = optional_digest(false);
+    let expected = if present {some_digest} else {none_digest};
+    digest == expected and called == present and retired == present
+}
+fn error_hash_trial(failure: bool) -> bool {
+    var called = false;
+    var retired = false;
+    let value: !HashKey HashKey = if failure {error HashKey {called: called.ref, retired: retired.ref}} else {HashKey {called: called.ref, retired: retired.ref}};
+    let digest = value.hash();
+    const failed_digest = error_digest(true);
+    const ok_digest = error_digest(false);
+    let expected = if failure {failed_digest} else {ok_digest};
+    digest == expected and called and retired
+}
+
+test qualified_hash_cleanup {
+    let absent = optional_hash_trial(false);
+    let present = optional_hash_trial(true);
+    let success = error_hash_trial(false);
+    let failure = error_hash_trial(true);
+    assumes absent and present and success and failure;
+}

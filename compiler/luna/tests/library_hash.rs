@@ -705,3 +705,47 @@ fn runtime_qualified_equality_requires_payload_evidence() {
         );
     }
 }
+
+#[test]
+fn runtime_qualified_hashes_encode_branches_and_require_payload_protocols() {
+    let declarations = format!(
+        "mod qualified_hashing {{ {} }}",
+        include_str!("../../../library/builtin/types/hashing.fl")
+    );
+    let package = support::compile(&source(&format!(
+        "{declarations}
+        fn absent()->u64 {{let value:?u64=null; value.as(Hash).hash()}}
+        fn present()->u64 {{let value:?u64=7; value.as(Hash).hash()}}
+        fn success()->u64 {{let value:!u64 u64=7; value.as(Hash).hash()}}
+        fn failure()->u64 {{let value:!u64 u64=error 7; value.as(Hash).hash()}}"
+    )));
+    for (name, tag, payload) in [
+        ("absent", 0u8, None),
+        ("present", 1, Some(7u64)),
+        ("success", 0, Some(7)),
+        ("failure", 1, Some(7)),
+    ] {
+        let expected = std::iter::once(tag)
+            .chain(payload.into_iter().flat_map(u64::to_le_bytes))
+            .fold(14695981039346656037u64, |state, byte| {
+                (state ^ u64::from(byte)).wrapping_mul(1099511628211)
+            });
+        assert_eq!(
+            luna::execution::interpret(&package, name, 1_000_000).unwrap(),
+            Value::UnsignedInteger(expected.into())
+        );
+    }
+    for domain in ["?Key", "!Key bool", "!bool Key"] {
+        let input = source(&format!(
+            "{declarations} struct Key {{value:bool}}
+            fn invalid(value:{domain})->u64 {{value.as(Hash).hash()}}"
+        ));
+        let failure = support::compile_with_protocols(&input, &Default::default())
+            .err()
+            .expect("missing runtime payload Hash must reject the call");
+        assert!(
+            failure.contains("trait") || failure.contains("method"),
+            "{failure}"
+        );
+    }
+}

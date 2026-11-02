@@ -1,0 +1,41 @@
+use primitives.{u8, u64, u128};
+use traits.Hash;
+
+{- Qualified values use the same branch and payload encoding as meta. -}
+impl Hash for ?T where T:- Hash {
+    fn hash(self) -> u64 = self match {
+        value? => mix_digest(mix_byte(14695981039346656037, 1), value.as(Hash).hash()),
+        null => mix_byte(14695981039346656037, 0),
+    };
+}
+
+impl Hash for !E T where T:- Hash, E:- Hash {
+    fn hash(self) -> u64 = self match {
+        value! => mix_digest(mix_byte(14695981039346656037, 0), value.as(Hash).hash()),
+        error failure => mix_digest(mix_byte(14695981039346656037, 1), failure.as(Hash).hash()),
+    };
+}
+
+{- FNV-1a mixing explicitly retains the low 64 product bits. -}
+fn mix_byte(state: u64, byte: u8) -> u64 {
+    let bits = state'bitvec;
+    let widened = byte'bitvec.as(u64);
+    let input = widened'bitvec;
+    let mixed = ((bits and not input) or (not bits and input)).as(u128);
+    assumes mixed <= 18446744073709551615;
+    let product = mixed * 1099511628211;
+    product'bitvec[0..64].as(u64)
+}
+
+fn mix_digest(state: u64, digest: u64) -> u64 {
+    var mixed = state;
+    mixed = mix_byte(mixed, digest'bitvec[0..8].as(u8));
+    mixed = mix_byte(mixed, digest'bitvec[8..16].as(u8));
+    mixed = mix_byte(mixed, digest'bitvec[16..24].as(u8));
+    mixed = mix_byte(mixed, digest'bitvec[24..32].as(u8));
+    mixed = mix_byte(mixed, digest'bitvec[32..40].as(u8));
+    mixed = mix_byte(mixed, digest'bitvec[40..48].as(u8));
+    mixed = mix_byte(mixed, digest'bitvec[48..56].as(u8));
+    mixed = mix_byte(mixed, digest'bitvec[56..64].as(u8));
+    mixed
+}

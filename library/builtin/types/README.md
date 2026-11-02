@@ -9,4 +9,13 @@ Tuple 的 normal-form 构造入口，以及原生 ?T、!E T 的接口。option.f
 
 comptime 上下文由独立的 `meta.ComptimeEq` 实现提供同名方法。真实 sysroot
 验收 `development/examples/sysroot-qualified-equality.fl` 覆盖非 Copy 载荷的
-Drop、所有分支组合以及两阶段选择。runtime Hash 和多错误标签行尚未提供。
+Drop、所有分支组合以及两阶段选择。多错误标签行尚未提供。
+
+`hashing.fl` 为相同的限定类型提供 runtime `Hash`，要求所有载荷类型实现
+Hash。每个存在的载荷只调用一次协议方法，并按普通所有权规则清理；空可选值
+不调用载荷方法。编码与 meta 对应实现一致：可选值先输入不存在／存在的
+0／1 字节，错误结果先输入成功／错误的 0／1 字节，再混合载荷的完整小端
+u64 摘要。混合函数共享于两类限定类型；乘法显式保留低 64 位，不依赖溢出。
+
+native 验收使用非 Copy 载荷记录调用和清理，并与 comptime 求得的摘要比较。
+Hash 不要求 Eq，但摘要碰撞不能替代值相等；调用方仍须使用适用的 Eq 协议。
