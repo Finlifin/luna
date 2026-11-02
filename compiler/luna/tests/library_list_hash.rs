@@ -161,6 +161,42 @@ fn prepare_protocol(
 }
 
 #[test]
+fn key_world_construction_failures_retain_the_callers_budget_reservation() {
+    use comptime_executor::{Context, KeyProtocol};
+    let package = compile("").unwrap();
+    let mut protocol = prepare_protocol(&package, &nir::Term::Primitive(nir::Primitive::Bool));
+    // The shipped declarations already exceed these allowances, before any
+    // input admission or user method executes.
+    assert!(package.functions.len() > 8);
+    for steps in [1, 8] {
+        let mut context = Context::new(steps);
+        assert!(protocol.admit(Value::Bool(true), &mut context).is_err());
+        assert_eq!(
+            context.remaining(),
+            0,
+            "failed world setup must not be free"
+        );
+        assert!(protocol.admit(Value::Bool(true), &mut context).is_err());
+        assert_eq!(context.remaining(), 0);
+    }
+    let mut recovered = Context::new(1_000_000);
+    let snapshot = protocol.admit(Value::Bool(true), &mut recovered).unwrap();
+    assert!(recovered.remaining() < 1_000_000);
+    let expected = protocol.hash(&snapshot, &mut recovered).unwrap();
+    assert_eq!(
+        protocol
+            .hash(&snapshot, &mut Context::new(1_000_000))
+            .unwrap(),
+        expected
+    );
+    assert!(
+        protocol
+            .equivalent(&snapshot, &snapshot, &mut recovered)
+            .unwrap()
+    );
+}
+
+#[test]
 fn key_methods_can_call_user_helpers_with_ordinary_type_inputs() {
     use comptime_executor::{Context, KeyProtocol};
     let package = compile(

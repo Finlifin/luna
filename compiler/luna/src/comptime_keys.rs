@@ -238,13 +238,21 @@ impl Protocol {
             )
         };
         let steps = u64::try_from(context.remaining()).unwrap_or(u64::MAX);
-        let mut interpreter =
-            Interpreter::for_comptime(&self.package, Budget { steps, depth: 128 })
-                .map_err(|e| Error::Protocol(e.to_string()))?
+        let mut allowance = Budget { steps, depth: 128 };
+        let prepared = Interpreter::for_comptime_in_budget(&self.package, &[], &mut allowance);
+        let mut interpreter = match prepared {
+            Ok(interpreter) => interpreter
                 .with_budgeted_type_solver(&solver)
                 .with_method_resolver(&method_resolver)
                 .with_associated_resolver(&associated_resolver)
-                .with_budgeted_pointer_copy_permission(&pointer_copy);
+                .with_budgeted_pointer_copy_permission(&pointer_copy),
+            Err(error) => {
+                // Failed world construction retains its reservation, just as
+                // ordinary invocation does; retries cannot obtain free work.
+                context.spend::<String>((steps - allowance.steps) as usize)?;
+                return Err(Error::Protocol(error.to_string()));
+            }
+        };
         let result = action(&mut interpreter);
         context.spend::<String>((steps - interpreter.remaining_steps()) as usize)?;
         result.map_err(|e| {
