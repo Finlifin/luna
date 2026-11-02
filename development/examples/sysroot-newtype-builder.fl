@@ -7,6 +7,7 @@ comptime fn Flag() -> Type {
 typealias Enabled = Flag();
 typealias Visible = Flag();
 newtype Wrapper<T> = T;
+newtype Checked<T:-Representation> = T;
 
 comptime fn ReflectedFlag() -> Type {
     let draft = meta.NewtypeBuilder.from_type(Wrapper<bool>, .name = .ReflectedFlag);
@@ -18,7 +19,8 @@ typealias Reflected = ReflectedFlag();
 fn run() -> bool {
     let enabled = true.as(Enabled);
     let visible = false.as(Visible);
-    enabled.as(bool) and not visible.as(bool) and true.as(Reflected).as(bool)
+    enabled.as(bool) and not visible.as(bool)
+        and true.as(Reflected).as(bool) and true.as(Checked<bool>).as(bool)
 }
 
 test {

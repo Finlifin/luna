@@ -610,3 +610,38 @@ Validation from `/home/fin/luna`:
 - `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor`: 589 passed (`/tmp/luna-tools-3ajwlqfe/result.json`).
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test execution memoized_`: 13 passed (`/tmp/luna-tools-2t7ka1u6/result.json`).
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: passed (`/tmp/luna-tools-13ko725_/result.json`); `git diff --check` passed.
+
+## Retained trait evidence during IIR execution
+
+Concrete nominal admission rechecks formation obligations before conversion or
+construction. Previously an IIR VM without a host solver returned Unknown even
+when materialization had retained the exact selected trait dispatch. The source
+case `newtype Guarded<T:-Marker, tag:bool> = T` failed during execution despite a
+retained `Marker for bool` implementation.
+
+The VM now consults the immutable graph's implementation index when no host type
+solver is installed. Evidence is keyed by interface identity, all interface
+arguments and subject; a source declaration catalog does not grant this authority.
+A missing key stays Unknown, including under negation. Boolean combinations use
+three-valued reasoning, and lookup/copy work consumes the invocation allowance.
+Explicit host solvers retain authority. This is evidence consumption, not a new
+trait search engine, closed-world negation rule or runtime program verifier.
+
+Tests exercise exact keys, wrong subjects/interfaces/arguments, conjunction and
+disjunction, missing evidence, exhaustion/recovery and explicit solver authority.
+The existing source newtype formation regression exercises the real producer and
+execution path; the sysroot newtype-builder example also has a constrained wrapper.
+
+Verification from `/home/fin/luna`:
+
+- `development/check.py --timeout 900 -- test -p comptime_interpretor retained_contracts`: exit 0 (`/tmp/luna-tools-nph7dkct/result.json`).
+- `development/check.py --timeout 900 -- test -p luna --test nominal_value_parameters --test scoped_comptime_callables`: exit 0 (`/tmp/luna-tools-w3yq4qqj/result.json`).
+- Broader `newtypes` coverage had 211 passes and one failure in
+  `constant_type_factories_keep_callable_phase_and_selected_identity`, whose
+  runtime-constant case expects a Splice diagnostic. Restoring the old
+  `None => ContractOutcome::Unknown` solver branch reproduced the same failure
+  (`/tmp/luna-tools-a2qxn2zr/result.json`); the new branch was then restored.
+  This separate existing phase/diagnostic discrepancy remains unresolved.
+- Formatting check exited 0 (`/tmp/luna-tools-3az2lqhq/result.json`).
+- Real sysroot `sysroot-newtype-builder` passed with the constrained wrapper
+  (`/tmp/luna-library-y5m9v1hd/summary.json`).

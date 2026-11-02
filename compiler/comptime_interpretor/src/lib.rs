@@ -42,6 +42,7 @@ mod memory;
 mod nominal_inputs;
 mod nominal_plan;
 mod normal_inputs;
+mod retained_contracts;
 use normal_inputs::InputKey;
 mod normal_plan;
 mod normal_terms;
@@ -2048,7 +2049,7 @@ impl<'a> Interpreter<'a> {
                 self.budget.steps = self.budget.steps.min(remaining);
                 result
             }
-            None => ContractOutcome::Unknown,
+            None => self.retained_type_contract(predicate, 0),
         }
     }
 
