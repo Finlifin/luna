@@ -914,3 +914,57 @@ fn projected_symbolic_dependencies_do_not_assign_unrequested_metavariables() {
     parent.commit(candidate).unwrap();
     assert_eq!(parent.freeze(&I::Meta(output)).unwrap(), expected);
 }
+
+#[test]
+fn callable_normal_form_inputs_survive_model_search_and_transaction_commit() {
+    let id = |local| DeclarationId {
+        package: 947,
+        local,
+    };
+    let ambient = Term::Rigid {
+        declaration: id(9),
+        sort: Sort::Type,
+    };
+    let function = Term::FunctionValue {
+        declaration: id(2),
+        arguments: vec![ambient.clone(), Term::Bool(true)],
+    };
+    let method = Term::MethodValue(Box::new(nir::TraitMethodIdentity {
+        interface: nir::program::InterfaceInstance {
+            declaration: id(3),
+            arguments: vec![ambient.clone()],
+        },
+        subject: ambient.clone(),
+        member: id(4),
+        method_arguments: vec![function.clone()],
+    }));
+    for callable in [function, method] {
+        let expected = Term::NormalForm {
+            head: id(1),
+            sort: Sort::Type,
+            arguments: vec![Term::TupleValue(vec![callable, ambient.clone()])],
+        };
+        let mut context = Context::default();
+        context.admit_congruence(id(1));
+        let mut parent = Engine::with_context(context);
+        let input = parent.fresh(Sort::Type);
+        let problem = R::Equal(I::Meta(input), I::Stable(expected.clone()));
+        let Search::Proposed {
+            mut candidate,
+            obligation,
+            evidence,
+        } = parent
+            .search_type_inputs(&[input], &problem, &mut Budget::default())
+            .unwrap()
+        else {
+            panic!("callable-bearing Type is determined");
+        };
+        assert_eq!(evidence.bindings.values().next().unwrap().0, expected);
+        assert_eq!(parent.inspect(&I::Meta(input)).unwrap(), I::Meta(input));
+        assert!(candidate.freeze(&I::Meta(input)).is_err());
+        candidate.advance_metered(100, &mut Budget::default());
+        assert!(candidate.state(obligation).unwrap().is_proven());
+        parent.commit(candidate).unwrap();
+        assert_eq!(parent.freeze(&I::Meta(input)).unwrap(), expected);
+    }
+}

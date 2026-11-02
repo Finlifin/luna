@@ -1020,3 +1020,40 @@ passed (`/tmp/luna-tools-1ruyduer/result.json`, exit 0).
 Search remains budgeted and incomplete. Internally examining unexported inputs
 can consume additional proof budget; this change does not supply dependency
 slicing or completeness for every theory model.
+
+## Frozen callable values in Type application models
+
+Finite application models now preserve `FunctionValue` and `MethodValue` inputs.
+Named values retain their declaration and ordered instance arguments. Method
+values retain the interface declaration, subject, member, and separate interface
+and method argument groups. Type leaves are interpreted in the current model;
+exported symbolic solutions keep the original ambient or lexical Type bindings.
+This is forward identity congruence, not function-body equivalence, dispatch
+selection, executable permission, or inverse equations for an opaque Type head.
+Formation and callable-domain admission remain with the producing/receiving IR
+world. PTC still accepts only Type propositions, not standalone value equality.
+
+The input-budget walk now descends into callable arguments and closure-snapshot
+payloads before recursive hashing/scope validation. Closure snapshots themselves
+are not admitted to application models by this change. Floating inputs, unresolved
+value stores, and implementation-world trait models remain unavailable.
+
+Verification from `/home/fin/luna`:
+
+- Before implementation, the symbolic callable-input regression returned
+  `Unknown(UnvalidatedModel)` (`/tmp/luna-tools-l3tsjxr4/result.json`, exit 101).
+- `python3 -B development/check.py --timeout 900 -- test -p ptc -p type_resolution`
+  passed (`/tmp/luna-tools-cbj13_rm/result.json`, exit 0). Cases cover proof and
+  witness replay, forged callable identities, method argument-group separation,
+  lexical inputs, non-injectivity, budget exhaustion/recovery, and committing the
+  original symbolic Type through an isolated inference candidate.
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test
+  scoped_comptime_callables` passed (`/tmp/luna-tools-x_3elws2/result.json`, exit
+  0). Existing source fixtures now also replay models and symbolic solutions
+  using the actual frozen function/method inputs produced by elaboration. They
+  ensure a Carrier head is not unfolded to its bool-returning body. An initial
+  helper used u32 for the u64 package identity and failed to compile
+  (`/tmp/luna-tools-i5j6sfxj/result.json`); correcting that test type required no
+  production change.
+- Workspace format checking passed (`/tmp/luna-tools-7i0bm9vt/result.json`, exit
+  0); `git diff --check` passed.

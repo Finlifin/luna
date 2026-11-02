@@ -839,6 +839,12 @@ fn within_input_limits(input: Input<'_>, limit: usize, fuel: &mut usize) -> bool
                 Term::Tuple(items)
                 | Term::ClosureContextValue(items)
                 | Term::TupleValue(items)
+                | Term::FunctionValue {
+                    arguments: items, ..
+                }
+                | Term::ClosureSnapshot {
+                    arguments: items, ..
+                }
                 | Term::Nominal {
                     arguments: items, ..
                 }
@@ -851,6 +857,15 @@ fn within_input_limits(input: Input<'_>, limit: usize, fuel: &mut usize) -> bool
                     for item in items {
                         pending.push((Input::Term(item), depth + 1));
                     }
+                }
+                Term::MethodValue(method) => {
+                    let count = 1usize
+                        .saturating_add(method.interface.arguments.len())
+                        .saturating_add(method.method_arguments.len());
+                    if count > room {
+                        return false;
+                    }
+                    pending.extend(method.terms().map(|term| (Input::Term(term), depth + 1)));
                 }
                 Term::Function { parameters, result } => {
                     if parameters.len().saturating_add(1) > room {
@@ -924,6 +939,8 @@ impl Terms {
 }
 fn subterms(term: &Term) -> Vec<&Term> {
     match term {
+        Term::MethodValue(method) => method.terms().collect(),
+        Term::FunctionValue { arguments, .. } => arguments.iter().collect(),
         // Rows do not introduce binders: labels and residuals inhabit the
         // surrounding scope. Callable-local binders remain opaque below.
         Term::ErrorResult { errors, result } => errors
@@ -992,6 +1009,10 @@ fn subterms(term: &Term) -> Vec<&Term> {
 }
 fn has_bound(term: &Term) -> bool {
     match term {
+        Term::MethodValue(method) => method.terms().any(has_bound),
+        Term::FunctionValue { arguments, .. } | Term::ClosureSnapshot { arguments, .. } => {
+            arguments.iter().any(has_bound)
+        }
         Term::ErrorResult { errors, result } => errors.iter().any(has_bound) || has_bound(result),
         Term::Computation { effects, result } => {
             has_bound(result)
@@ -1271,6 +1292,27 @@ impl Context {
 }
 
 fn same_congruent_head(a: &Term, b: &Term, context: &Context) -> bool {
+    // Forward identity congruence preserves declaration and parameter groups.
+    // No callable-body equality, inverse equation or dispatch follows from it.
+    if let (
+        Term::FunctionValue {
+            declaration: a,
+            arguments: aa,
+        },
+        Term::FunctionValue {
+            declaration: b,
+            arguments: ba,
+        },
+    ) = (a, b)
+    {
+        return a == b && aa.len() == ba.len();
+    }
+    if let (Term::MethodValue(a), Term::MethodValue(b)) = (a, b) {
+        return a.interface.declaration == b.interface.declaration
+            && a.member == b.member
+            && a.interface.arguments.len() == b.interface.arguments.len()
+            && a.method_arguments.len() == b.method_arguments.len();
+    }
     if let (Term::OptionalValue { value: a, .. }, Term::OptionalValue { value: b, .. }) = (a, b) {
         return a.is_some() == b.is_some();
     }
@@ -1852,6 +1894,8 @@ fn reify(
                     | Term::NominalValue { .. }
                     | Term::OptionalValue { .. }
                     | Term::ErrorValue { .. }
+                    | Term::FunctionValue { .. }
+                    | Term::MethodValue(_)
             )
         {
             nir::type_computations::charge_term(term, fuel).ok()?;
@@ -1902,6 +1946,31 @@ fn rebuild(
     match term {
         Term::Primitive(p) => Some(Term::Primitive(*p)),
         term if model_applications::fixed_argument(term) => Some(term.clone()),
+        Term::FunctionValue {
+            declaration,
+            arguments,
+        } => Some(Term::FunctionValue {
+            declaration: *declaration,
+            arguments: arguments.iter().map(&mut *child).collect::<Option<_>>()?,
+        }),
+        Term::MethodValue(method) => Some(Term::MethodValue(Box::new(nir::TraitMethodIdentity {
+            interface: nir::program::InterfaceInstance {
+                declaration: method.interface.declaration,
+                arguments: method
+                    .interface
+                    .arguments
+                    .iter()
+                    .map(&mut *child)
+                    .collect::<Option<_>>()?,
+            },
+            subject: child(&method.subject)?,
+            member: method.member,
+            method_arguments: method
+                .method_arguments
+                .iter()
+                .map(&mut *child)
+                .collect::<Option<_>>()?,
+        }))),
         Term::NominalValue {
             ty,
             variant,

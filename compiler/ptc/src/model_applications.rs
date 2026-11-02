@@ -62,6 +62,18 @@ fn argument_with_types(term: &Term, type_leaf: &impl Fn(&Term) -> bool) -> bool 
             | Term::String(_)
             | Term::Symbol(_)
             | Term::BitVec(_) => true,
+            // These are already frozen declaration identities, not executable
+            // bodies or a claim about extensional/program equality. Formation,
+            // invocation and method dispatch stay with the receiving world.
+            Term::FunctionValue { arguments, .. } => arguments
+                .iter()
+                .all(|value| visit(value, depth + 1, remaining, type_leaf)),
+            Term::MethodValue(method) => {
+                method.subject.sort() == Sort::Type
+                    && method
+                        .terms()
+                        .all(|value| visit(value, depth + 1, remaining, type_leaf))
+            }
             // Formation is checked before PTC admission. A nominal payload
             // retains its declared Type and variant; an opaque NF domain does
             // not acquire collection/layout authority from this carrier alone.

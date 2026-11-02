@@ -4,6 +4,48 @@
 mod support;
 use comptime_interpretor::Value;
 
+fn assert_frozen_callable_type_model(ty: &nir::Term) {
+    use elaboration::ptc::{Budget, Context, Formula, Outcome, TypeInputOutcome};
+    let nir::Term::NormalForm { head, .. } = ty else {
+        panic!("expected an opaque Type carrying a callable value");
+    };
+    let mut context = Context::default();
+    context.admit_congruence(*head);
+    let outcome = context.prove(
+        Formula::equal(ty.clone(), nir::Term::Primitive(nir::Primitive::Bool)),
+        Budget::default(),
+    );
+    let Outcome::NotEntailed(witness) = outcome else {
+        panic!("a factory body returning bool must not unfold: {outcome}");
+    };
+    context.verify_witness(&witness, Budget::default()).unwrap();
+    let input = nir::DeclarationId {
+        package: u64::MAX,
+        local: 1,
+    };
+    let constraint = Formula::equal(
+        nir::Term::Rigid {
+            declaration: input,
+            sort: nir::Sort::Type,
+        },
+        ty.clone(),
+    );
+    let outcome = context.search_type_inputs(&[input], constraint.clone(), &mut Budget::default());
+    let TypeInputOutcome::Unique(solution) = outcome else {
+        panic!("{outcome}")
+    };
+    assert_eq!(&solution.bindings[&input].0, ty);
+    let problem = context
+        .type_input_context(&[input], constraint, &mut Budget::default())
+        .unwrap();
+    problem
+        .verify_proof(&solution.bindings[&input].1, Budget::default())
+        .unwrap();
+    problem
+        .verify_witness(&solution.model, Budget::default())
+        .unwrap();
+}
+
 #[test]
 fn returned_runtime_function_identities_supply_scoped_defaults() {
     let source = "typealias Type=.Type'builtin;
@@ -68,6 +110,8 @@ fn runtime_function_values_preserve_scoped_normal_form_arguments() {
         parameter("other", 0)
     );
     assert_ne!(parameter("concrete", 0), parameter("other", 0));
+    assert_frozen_callable_type_model(&parameter("concrete", 0));
+    assert_frozen_callable_type_model(&parameter("other", 0));
 }
 
 #[test]
@@ -361,6 +405,7 @@ fn normal_form_method_inputs_keep_their_interface_origin() {
     assert_ne!(parameter("consume_first"), parameter("consume_second"));
     for name in ["consume_first", "consume_second"] {
         let ty = parameter(name);
+        assert_frozen_callable_type_model(&ty);
         let nir::Term::NormalForm { arguments, .. } = ty else {
             panic!("NF head was lost")
         };
