@@ -14,16 +14,17 @@ fn compile_text(source: &str) -> nir::program::Package {
 }
 
 #[test]
-fn static_function_alias_callees_select_code_without_runtime_data_conversion() {
-    let package = compile_text(&source(
-        "fn identity(value: bool) -> bool { value }
+fn runtime_function_alias_constants_require_cross_stage_conversion() {
+    let error = support::compile_with_protocols(
+        &source(
+            "fn identity(value: bool) -> bool { value }
         const alias = identity;
         fn run() -> bool { alias(true) }",
-    ));
-    assert_eq!(
-        luna::execution::interpret(&package, "run", 100_000).unwrap(),
-        Value::Bool(true)
-    );
+        ),
+        &support::meta_fixture_protocols(),
+    )
+    .unwrap_err();
+    assert!(error.contains("Splice"), "{error}");
 }
 
 #[test]
@@ -241,8 +242,19 @@ fn explicit_runtime_text_trait_does_not_bypass_comptime_phase_checks() {
 
 #[test]
 fn runtime_symbol_operation_bindings_keep_alias_identity_and_argument_order() {
-    let package = compile_text(&source(
-        "const length = bindings.symbol_byte_length;
+    let package = support::compile_with_bindings(&source(
+        "trait Splice { assoc RuntimeTarget: Type; fn splice(comptime data: Self) -> RuntimeTarget; }
+        typealias Length = fn(Symbol) -> u64;
+        typealias Byte = fn(Symbol, u64) -> ?u8;
+        impl Splice for Length {
+            assoc RuntimeTarget: Type = Length;
+            fn splice(comptime data: Length) -> Length { data }
+        }
+        impl Splice for Byte {
+            assoc RuntimeTarget: Type = Byte;
+            fn splice(comptime data: Byte) -> Byte { data }
+        }
+        const length = bindings.symbol_byte_length;
         const byte = bindings.symbol_byte;
         fn run() -> bool {
             var trace: u64 = 0;
@@ -257,7 +269,7 @@ fn runtime_symbol_operation_bindings_keep_alias_identity_and_argument_order() {
             byte(do {return true; .hello}, 0);
             false
         }",
-    ));
+    ), &support::meta_fixture_protocols(), Some("Splice")).unwrap();
     for name in ["run", "early"] {
         assert_eq!(
             luna::execution::interpret(&package, name, 100_000).unwrap(),

@@ -5,7 +5,40 @@
 -}
 pub const str_byte_length = .str_byte_length'builtin;
 pub const str_byte = .str_byte'builtin;
-pub const symbol_byte_length: fn(Symbol) -> u64 = .symbol_byte_length'builtin;
-pub const symbol_byte: fn(Symbol, u64) -> ?u8 = .symbol_byte'builtin;
-pub const usize_representation: fn(usize) -> u128 = .integer_representation'builtin;
-pub const isize_representation: fn(isize) -> u128 = .integer_representation'builtin;
+const symbol_byte_length_operation: fn(Symbol) -> u64 = .symbol_byte_length'builtin;
+const symbol_byte_operation: fn(Symbol, u64) -> ?u8 = .symbol_byte'builtin;
+const usize_representation_operation: fn(usize) -> u128 = .integer_representation'builtin;
+const isize_representation_operation: fn(isize) -> u128 = .integer_representation'builtin;
+
+{-
+    Select compiler operation identities as explicit comptime inputs. The public
+    wrappers receive runtime data; no callable constant is implicitly delivered
+    across stages at their call sites.
+-}
+fn invoke_one(comptime operation: fn(T) -> U, value: T) -> U
+where T, U
+{
+    operation(value)
+}
+
+fn invoke_two(comptime operation: fn(T, U) -> V, first: T, second: U) -> V
+where T, U, V
+{
+    operation(first, second)
+}
+
+pub fn symbol_byte_length(value: Symbol) -> u64 {
+    invoke_one(symbol_byte_length_operation, value)
+}
+
+pub fn symbol_byte(value: Symbol, index: u64) -> ?u8 {
+    invoke_two(symbol_byte_operation, value, index)
+}
+
+pub fn usize_representation(value: usize) -> u128 {
+    invoke_one(usize_representation_operation, value)
+}
+
+pub fn isize_representation(value: isize) -> u128 {
+    invoke_one(isize_representation_operation, value)
+}

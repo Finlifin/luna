@@ -645,3 +645,49 @@ Verification from `/home/fin/luna`:
 - Formatting check exited 0 (`/tmp/luna-tools-3az2lqhq/result.json`).
 - Real sysroot `sysroot-newtype-builder` passed with the constrained wrapper
   (`/tmp/luna-library-y5m9v1hd/summary.json`).
+
+## Runtime callable constants preserve Splice
+
+The previously noted Splice discrepancy came from a callee shortcut introduced
+while exposing operation bindings as callable values. After constant folding,
+`K::Function` / `K::FunctionInstance` results bypassed the ordinary cross-stage
+conversion. This was observable: a user Splice implementation returning another
+function was skipped, and the source function ran instead.
+
+The shortcut now applies only to comptime callable consumption, where the callee
+runs during comptime and its eventual result follows normal delivery. A runtime
+callable stored in an ordinary constant follows Splice even when its declaration
+identity is known. This follows `docs/comptime/quoting-and-splicing.md` and
+`docs/functions/calls-and-returns.md`; constant folding does not authorize removal
+of a user conversion. The earlier unresolved diagnostic discrepancy is fixed.
+
+The regression first returned true from the original function instead of false
+from the converted target (`/tmp/luna-tools-jq77vmri/result.json`). It now checks
+parenthesized and braced calls, an alias chain, exact `run, splice, input, replacement`
+execution order, and execution of the completed IIR artifact. The text-operation
+alias fixture supplies explicit Splice implementations and retains argument order
+and operation identity checks; ordinary aliases without a protocol reject.
+
+Verification from `/home/fin/luna`:
+
+- Compiler-operation bindings: 33 passed (`/tmp/luna-tools-vb311kr6/result.json`, before the corrected IIR execution fixture).
+- Extended calls and newtypes: 38 and 212 passed (`/tmp/luna-tools-94rbsqrv/result.json`). That run then exposed the two old text tests asserting the removed exemption.
+- Corrected text contract tests: 9 passed (`/tmp/luna-tools-lgs4bhjg/result.json`).
+
+The real sysroot Hash stage exposed the same shortcut dependency in typed runtime
+operation bindings. Their centralized raw identities are now private comptime
+inputs to ordinary generic `invoke_one` / `invoke_two` helpers; public runtime
+wrappers deliver runtime arguments normally. No declaration-name exception or
+implicit function-constant conversion is introduced. Text aliases in the tests
+still use explicit Splice, while compiler-internal selection uses explicit staged
+parameters. The untyped legacy str operation bindings retain their existing
+separate migration boundary.
+
+The sysroot Hash stage failed before this library wiring
+(`/tmp/luna-library-we4ff9t5/summary.json`) and passed after it
+(`/tmp/luna-library-jija14p1/summary.json`).
+
+Final combined check after the library and argument-order updates:
+`development/check.py --timeout 900 -- test -p luna --test extended_calls --test
+text_bytes --test compiler_operation_bindings --test library_hash --test newtypes`
+exited 0 (310 tests, `/tmp/luna-tools-56bn476h/result.json`).

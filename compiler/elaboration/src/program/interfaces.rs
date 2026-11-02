@@ -2947,17 +2947,10 @@ impl Checker<'_, '_> {
                         } else {
                             self.constant_value(owner, callee.span)?
                         };
-                        if (self.protocols.splice.is_some() && value.ty.is_comptime_callable())
-                            || (!value.ty.is_comptime_callable()
-                                && matches!(
-                                    value.kind,
-                                    K::Function(_) | K::FunctionInstance { .. }
-                                ))
-                        {
-                            // A completed declaration identity used as the
-                            // callee selects code, rather than transporting a
-                            // function value into runtime storage. This also
-                            // applies to ordinary source function aliases.
+                        if self.protocols.splice.is_some() && value.ty.is_comptime_callable() {
+                            // This callee is invoked during comptime; only its
+                            // eventual result crosses into runtime. A runtime
+                            // callable constant still goes through Splice.
                             return Ok(value);
                         }
                     }

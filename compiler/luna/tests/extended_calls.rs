@@ -856,3 +856,39 @@ fn divergence_does_not_invent_callable_signatures_or_skip_invalid_tail_checks() 
         );
     }
 }
+
+#[test]
+fn runtime_callable_constants_observe_splice_before_selecting_the_target() {
+    let prefix = "typealias Type = .Type'builtin;
+        typealias Callback = fn(bool) -> bool;
+        trait Splice { assoc RuntimeTarget: Type; fn splice(comptime data: Self) -> RuntimeTarget; }
+        fn original(value: bool) -> bool { true }
+        fn replacement(value: bool) -> bool { value }
+        fn input() -> bool { false }
+        impl Splice for Callback {
+            assoc RuntimeTarget: Type = Callback;
+            fn splice(comptime data: Callback) -> Callback { replacement }
+        }
+        const Stored = original;
+        const Alias: Callback = Stored;";
+    for expression in ["Stored(input())", "Alias(input())", "Alias {input()}"] {
+        let source = format!("{prefix} fn run() -> bool {{ {expression} }}");
+        let package =
+            execution_support::compile_with_bindings(&source, &Default::default(), Some("Splice"))
+                .unwrap_or_else(|error| panic!("{expression}: {error}"));
+        let graph = luna::instantiation::instantiate(&package, "run", 100000).unwrap();
+        let mut vm = Interpreter::from_iir(&graph, Budget::default()).unwrap();
+        assert_eq!(
+            vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            calls(&package, &vm),
+            ["run", "splice", "input", "replacement"]
+        );
+        assert_eq!(
+            luna::execution::interpret(&package, "run", 100000).unwrap(),
+            Value::Bool(false)
+        );
+    }
+}
