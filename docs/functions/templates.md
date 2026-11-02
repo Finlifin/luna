@@ -35,6 +35,38 @@ case_param -> case pattern
 
 模板实例继承的是接口中的参数、结果和约束。参数名在实例正文中指向本次接口绑定；函数名则属于实例自身。两份实例可以共享接口却具有不同主体、不同效果和不同的实现代码。
 
+签名模板也可以保留显式 `defer` 注解。模板声明检查类型计算、默认值与契约，
+实例调用先取得 comptime 输入，再形成对应的参数和结果类型。模板自身没有
+可执行入口，不能直接调用。
+
+~~~flurry
+comptime fn Select(flag: bool) -> Type {
+    if flag { bool } else { u8 }
+}
+
+template fn choose(
+    comptime flag: bool,
+    .value: defer Select(flag) = true,
+) -> defer Select(flag);
+
+fn first use choose { value }
+quote fn second use choose { value }
+
+fn run() -> bool {
+    first(true) and second(false, .value = 9) == 9
+}
+~~~
+
+`first(true)` 使用 bool 默认值；`second(false, .value = 9)` 显式提供 u8。
+`first(false)` 则拒绝：其 bool 默认值不满足本次形成的 u8 域。显式输入不会
+使声明端跳过默认表达式的合法性检查。未使用的模板也不能隐藏非法类型注解
+或契约。
+
+显式实例参数注解若与继承注解都形如 `defer T`，并且引用本实例同一个先前
+comptime 输入，则两者共享同一个待取得的 Type 身份。参数改名不改变这一点；
+两个不同输入不能仅因为某次调用恰好提供相同类型，就被当作定义端相等。
+其它延迟计算之间的显式注解兼容证明，以及带共享主体的延迟接口，仍未接通。
+
 默认回调也属于复用的接口。例如，下面的默认值构造一个回调；调用实例时，实例正文才调用它。两个 `apply` 各自建立 tactic lambda 边界，因此内层 `_0` 指内层接收的 `false`，不与外层 `_0` 共用参数。
 
 ~~~flurry

@@ -591,12 +591,20 @@ fn compile_with_constructors(
     meta_list: Option<&str>,
     tuple: Option<&str>,
 ) -> Result<Artifact, String> {
-    let directory = std::env::temp_dir().join(format!(
-        "test-template-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::create_dir(&directory).unwrap();
+    let directory = loop {
+        let directory = std::env::temp_dir().join(format!(
+            "test-template-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        match std::fs::create_dir(&directory) {
+            Ok(()) => break directory,
+            // Sandboxed processes may reuse a PID while an interrupted run's
+            // fixture still exists. Acquire a fresh directory without deleting it.
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("cannot create template fixture: {error}"),
+        }
+    };
     let path = directory.join("main.fl");
     primitive_bindings::write_fixture(&path, source).unwrap();
     for (name, contents) in modules {
@@ -3014,4 +3022,103 @@ fn unused_pure_shared_templates_check_setup_without_becoming_runtime_functions()
             .expect("unused pure template must validate setup effects");
         assert!(failure.contains("P4 evidence"), "{failure}");
     }
+}
+
+#[test]
+fn explicit_template_annotations_preserve_deferred_input_identity() {
+    let source = "typealias Type=.Type'builtin;
+        comptime fn Domain(flag:bool)->Type {Type}
+        template fn identity(comptime flag:bool,comptime T:defer Domain(flag),value:defer T)->defer T;
+        quote fn first(comptime enabled:bool,comptime U:_,other:defer U) use identity {other}
+        quote fn second(comptime enabled:bool,comptime U:_,other:defer U) use identity {other}
+        fn run()->bool {first(true,bool,true) and not second(false,bool,false)}";
+    let Artifact::Nir(package) = compile(source, Emit::Nir).unwrap() else {
+        panic!("expected NIR")
+    };
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn deferred_signature_templates_check_instances_defaults_and_unused_interfaces() {
+    let prelude = "typealias Type=.Type'builtin;typealias u8=.u8'builtin;
+        comptime fn Select(flag:bool)->Type {if flag {bool} else {u8}}";
+    let template = "template fn choose(comptime flag:bool,.value:defer Select(flag)=true)->defer Select(flag);";
+    for modifier in ["", "inline ", "quote "] {
+        let source = format!(
+            "{prelude} {template}
+            {modifier}fn first use choose {{value}}
+            {modifier}fn second use choose {{value}}
+            fn run()->bool {{first(true) and second(false,.value=9) == 9}}"
+        );
+        let Artifact::Nir(package) = compile(&source, Emit::Nir).unwrap() else {
+            panic!("NIR")
+        };
+        assert!(
+            !package
+                .functions
+                .iter()
+                .any(|function| function.name == "choose")
+        );
+        assert_eq!(
+            luna::execution::interpret(&package, "run", 100_000).unwrap(),
+            comptime_interpretor::Value::Bool(true)
+        );
+        luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
+    }
+    for body in [
+        "fn first use choose {value} fn wrong()->u8 {first(false)}",
+        "fn first use choose {value} fn wrong()->u8 {first(false,.value=true)}",
+        "fn first use choose {true} fn wrong()->u8 {first(false,.value=9)}",
+        "fn wrong()->bool {choose(true)}",
+    ] {
+        assert!(
+            compile(&format!("{prelude} {template} {body}"), Emit::Nir).is_err(),
+            "{body}"
+        );
+    }
+    for template in [
+        "template fn unused(comptime flag:bool,value:defer not flag);",
+        "template fn unused(comptime flag:bool,.value:defer Select(flag)=missing);",
+        "template fn unused(comptime flag:bool,value:defer Select(flag)) where requires 'x';",
+    ] {
+        assert!(
+            compile(&format!("{prelude} {template}"), Emit::Nir).is_err(),
+            "{template}"
+        );
+    }
+}
+
+#[test]
+fn deferred_template_ascriptions_do_not_equate_distinct_type_inputs() {
+    let source = "typealias Type=.Type'builtin;
+        comptime fn Domain(flag:bool)->Type {if flag {Type} else {bool}}
+        template fn identity(comptime flag:bool,comptime T:defer Domain(flag),comptime U:defer Domain(flag),value:defer T)->defer T;";
+    let error = compile(&format!("{source}
+        quote fn bad(comptime enabled:bool,comptime A:_,comptime B:_,other:defer B) use identity {{other}}"), Emit::Nir).err().expect("distinct Type inputs are not equal by default");
+    assert!(
+        error.contains("deferred function template parameter compatibility"),
+        "{error}"
+    );
+    let instance = "quote fn good(comptime enabled:bool,comptime A:_,comptime B:_,other:defer A) use identity {other}";
+    assert!(
+        compile(
+            &format!("{source} {instance} fn bad()->bool {{good(false,true,false,true)}}"),
+            Emit::Nir
+        )
+        .is_err()
+    );
+    let Artifact::Nir(package) = compile(
+        &format!("{source} {instance} fn run()->bool {{good(true,bool,bool,true)}}"),
+        Emit::Nir,
+    )
+    .unwrap() else {
+        panic!("NIR")
+    };
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
 }

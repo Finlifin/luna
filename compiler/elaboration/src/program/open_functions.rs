@@ -1951,11 +1951,15 @@ impl Checker<'_, '_> {
         result: Annotation,
         span: Span,
     ) -> Result<(), Error> {
-        let Some(ItemKind::Fn(sig, _)) = self.package.item(owner).map(|item| &item.kind) else {
-            return Err(error(
-                span,
-                "deferred interface and effect signatures are not yet implemented",
-            ));
+        let sig = match self.package.item(owner).map(|item| &item.kind) {
+            Some(ItemKind::Fn(sig, _)) => sig,
+            Some(ItemKind::FnDeclaration(sig)) if sig.modifiers.is_function_template => sig,
+            _ => {
+                return Err(error(
+                    span,
+                    "deferred interface and effect signatures are not yet implemented",
+                ));
+            }
         };
         if self.package.function_template_bodies.contains_key(&owner)
             && (parameters
@@ -2117,8 +2121,10 @@ impl Checker<'_, '_> {
         }
         let checked = self.in_open_function(owner, |this| {
             let item = this.package.item(owner).unwrap();
-            let ItemKind::Fn(sig, body) = &item.kind else {
-                unreachable!()
+            let (sig, body) = match &item.kind {
+                ItemKind::Fn(sig, body) => (sig, Some(*body)),
+                ItemKind::FnDeclaration(sig) if sig.modifiers.is_function_template => (sig, None),
+                _ => unreachable!(),
             };
             let metadata = n::Package {
                 target: this.target,
@@ -2284,9 +2290,15 @@ impl Checker<'_, '_> {
             let (postconditions, entry_snapshots) = this
                 .program_postconditions_with_result(owner, result_evidence)
                 .map_err(open_contract_error)?;
+            let Some(body) = body else {
+                // A signature template has no executable body. Its annotation,
+                // default and contract checks above still apply; each instance
+                // independently checks its supplied body in the inherited domain.
+                return Ok((default_types, default_dependencies));
+            };
             let body = this
                 .package
-                .body(*body)
+                .body(body)
                 .ok_or_else(|| error(item.span, "missing open function body"))?;
             let declared_result = definition.result.description();
             let result = match &declared_result {
@@ -2420,7 +2432,9 @@ impl Checker<'_, '_> {
             checked.map_err(|message| error(span, message))?;
         }
         let owner = self.signature_owner.unwrap();
-        let ItemKind::Fn(sig, _) = &self.package.item(owner).unwrap().kind else {
+        let (ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) =
+            &self.package.item(owner).unwrap().kind
+        else {
             unreachable!()
         };
         let mut staged_locals = Vec::new();
@@ -2468,7 +2482,9 @@ impl Checker<'_, '_> {
             }
         }
         let definition = &self.open_functions[&owner];
-        let ItemKind::Fn(sig, _) = &self.package.item(owner).unwrap().kind else {
+        let (ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) =
+            &self.package.item(owner).unwrap().kind
+        else {
             unreachable!()
         };
         let mut parameters = Vec::new();

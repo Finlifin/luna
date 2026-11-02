@@ -19,10 +19,17 @@ impl super::Checker<'_, '_> {
             return Ok(());
         }
         let explicit = self.signature_annotation(annotation)?;
-        let (
-            super::open_functions::Annotation::Known(inherited),
-            super::open_functions::Annotation::Known(explicit),
-        ) = (inherited, explicit)
+        use super::open_functions::Annotation;
+        // Both annotations are interpreted in this instance's ordered input
+        // telescope. Referring to the same earlier Type value is an identity
+        // proof, even when that value's domain still awaits invocation.
+        if let (Annotation::InputType { slot: inherited }, Annotation::InputType { slot: explicit }) =
+            (inherited, &explicit)
+            && inherited == explicit
+        {
+            return Ok(());
+        }
+        let (Annotation::Known(inherited), Annotation::Known(explicit)) = (inherited, explicit)
         else {
             return Err(error(
                 annotation.span,
