@@ -68,6 +68,7 @@ pub(in crate::program) fn execution_draft<'h>(
         captures: HashMap::new(),
         capture_uses: BTreeSet::new(),
         self_type: Some(subject),
+        locals: Default::default(),
         member_owner: Some(strategy),
     };
     let result = (|| {
@@ -235,6 +236,7 @@ pub(in crate::program) fn input_group<'h>(
         captures: HashMap::new(),
         capture_uses: BTreeSet::new(),
         self_type: None,
+        locals: Default::default(),
         member_owner: Some(OwnerId::INVALID),
     };
     let head = arena.alloc_expr(Expr {
@@ -336,6 +338,7 @@ pub(in crate::program) fn value_draft<'h>(
         captures: captures.clone(),
         capture_uses: BTreeSet::new(),
         self_type: None,
+        locals: Default::default(),
         member_owner: Some(OwnerId::INVALID),
     };
     let result = (|| {

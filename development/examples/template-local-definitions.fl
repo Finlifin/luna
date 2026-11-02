@@ -1,0 +1,16 @@
+template fn choose(value: ?u8, .action: fn(?u8) -> u8 = do {
+    fn select(input: ?u8) -> u8 { input.unwrap_or(9) }
+    select
+}) -> u8;
+
+fn first use choose { action(value) }
+quote fn second use choose { action(value) }
+
+fn run() -> bool {
+    first(null) == 9 and second(7) == 7 and first(2) == 2
+}
+
+test {
+    let checked = run();
+    assumes checked;
+}

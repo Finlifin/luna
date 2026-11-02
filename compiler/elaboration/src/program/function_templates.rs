@@ -51,6 +51,7 @@ pub(super) use generation_inputs::{
 };
 mod member_clone;
 pub(super) use generation_attributes::relocate as relocate_generation_attributes;
+mod local_definitions;
 mod patterns;
 mod resolution;
 pub(super) use member_clone::{ClonedMember, clone_member_with_inputs};
@@ -202,7 +203,9 @@ pub(super) fn expand<'h>(source: &Package<'h>, arena: &'h HirArena) -> Result<Pa
             captures: HashMap::new(),
             capture_uses: BTreeSet::new(),
             self_type: None,
+            locals: Default::default(),
         };
+        rebind.prepare_local_definitions(&mut package, template, owner)?;
         if clause_bindings.len() != formal.clause_params.len()
             || formal.clause_params.iter().any(|parameter| {
                 parameter
@@ -328,6 +331,7 @@ pub(super) fn expand<'h>(source: &Package<'h>, arena: &'h HirArena) -> Result<Pa
         for (id, body) in rebind.bodies.drain(..) {
             package.insert_body(id, body);
         }
+        rebind.publish_local_definitions(&mut package);
         for (id, evidence) in rebind.resolution()? {
             if let Some(plan) = evidence.trait_sources {
                 package.trait_sources.insert(id, plan);
@@ -382,6 +386,7 @@ struct Rebind<'s, 'h> {
     captures: HashMap<HirId, InputCapture>,
     capture_uses: BTreeSet<hir::common::DefId>,
     self_type: Option<&'h Expr<'h>>,
+    locals: local_definitions::Locals<'h>,
 }
 impl<'h> Rebind<'_, 'h> {
     fn charge(&mut self, span: rustc_span::Span, depth: usize) -> Result<(), Error> {
@@ -554,6 +559,7 @@ impl<'h> Rebind<'_, 'h> {
             }
         }
         let kind = match &expr.kind {
+            E::Item(owner) => E::Item(self.local_definition(*owner, depth)?),
             // These are completed Type values, not source binders. Preserve
             // semantic identities and let ordinary destination admission check
             // closure, formation contracts and declaration availability again.
@@ -937,6 +943,7 @@ pub(super) fn implementation_draft<'h>(
         captures: captures.clone(),
         capture_uses: BTreeSet::new(),
         self_type: None,
+        locals: Default::default(),
     };
     let result = (|| {
         let clause_params = rebind.clauses(request.clause_params)?;

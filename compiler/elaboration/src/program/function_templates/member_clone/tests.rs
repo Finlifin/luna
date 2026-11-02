@@ -255,6 +255,7 @@ fn remaps_generated_definition_references_without_rewriting_external_ones() {
         captures: HashMap::new(),
         capture_uses: BTreeSet::new(),
         self_type: None,
+        locals: Default::default(),
         member_owner: Some(owner),
     };
     for (input, expected) in [(old, new), (external, external)] {

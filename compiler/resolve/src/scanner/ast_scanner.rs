@@ -535,6 +535,17 @@ impl<'a> AstScanner<'a> {
             self.ast.get_node_kind(item),
             Some(NodeKind::Function | NodeKind::DeriverDef)
         ) {
+            // Defaults and annotations contain ordinary lexical blocks too.
+            // Register their local definitions before HIR resolves the signature;
+            // each block remains a separate scope, not part of the function body.
+            for &parameter in self
+                .ast
+                .get_multi_child_slice(self.ast.get_children(item)[1])
+                .unwrap_or(&[])
+            {
+                self.scan_runtime_blocks(scope_id, parameter)?;
+            }
+            self.scan_runtime_blocks(scope_id, self.ast.get_children(item)[2])?;
             self.scan_runtime_blocks(scope_id, self.ast.get_children(item)[4])?;
         }
         Ok(())
@@ -598,6 +609,7 @@ impl<'a> AstScanner<'a> {
             T::SingleWithMultiChildren => (1, Some(1)),
             T::DoubleWithMultiChildren => (2, Some(2)),
             T::TripleWithMultiChildren => (3, Some(3)),
+            T::FnTypeChildren => (0, Some(1)),
             // Declaration bodies have their own scanner; raw FnType flags are
             // not AST indices. Neither may be traversed as runtime syntax.
             _ => return Ok(()),
@@ -743,7 +755,12 @@ impl<'a> AstScanner<'a> {
                 self.def_names.push((clause_def, name));
             }
         }
-
+        // Clause defaults and requirements have the same block-local declaration
+        // rules as ordinary parameter defaults. All clause identities above are
+        // registered before scanning their nested scopes.
+        for &clause in clauses {
+            self.scan_runtime_blocks(scope_id, clause)?;
+        }
         Ok(())
     }
 

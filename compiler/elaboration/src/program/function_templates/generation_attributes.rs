@@ -34,6 +34,7 @@ pub(in crate::program) fn relocate<'h>(
         captures: captures.clone(),
         capture_uses: BTreeSet::new(),
         self_type: None,
+        locals: Default::default(),
     };
     let result = (|| {
         for (member, _) in members {
