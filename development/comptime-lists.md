@@ -700,3 +700,47 @@ Validation from `/home/fin/luna`:
 - After extracting shared test helpers, `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib`: 369 tests passed (`/tmp/luna-tools-a1sglspn/result.json`).
 - `python3 -B development/check.py --timeout 900 -- test -p luna --test builder_invocations contextual_data_consumer_publishes_structs_through_the_complete_sysroot`: passed (`/tmp/luna-tools-yg130o9y/result.json`).
 - `python3 -B development/command.py --timeout 120 -- cargo fmt --all`: passed (`/tmp/luna-tools-ll674zef/result.json`); `git diff --check` passed.
+
+## Consume persistent lists without eager flattening
+
+Owned `ListValues` traversal now keeps a deque of unconsumed tree fragments.
+Unique leaves move their values; shared leaves clone only the element actually
+requested. Forward and reverse traversal share one frontier and remaining count,
+so mixed-end consumption cannot duplicate or skip elements. Collecting a unique
+branched list into a Vec also moves enclosed allocations instead of recursively
+cloning them. Borrowed iteration and mutable contiguous access are unchanged.
+
+This removes the intermediate full element array from consumers such as enum
+builder path parsing. A shared 4,096-element list previously cloned all 4,096
+values when its iterator was created; the regression observes the underlying
+shared text reference count to show that creation now clones none, and consuming
+two elements clones only those two. Tests also check move identity of nested
+owned allocations, early drop, snapshot mutation isolation, cached flat views,
+forward/reverse order and mixed-end exhaustion. The frontier stays bounded by
+the balanced tree height rather than payload length.
+
+This is a storage/consumption optimization, not a new Flurry iteration protocol
+or permission to copy runtime resources. Type admission and invocation budgeting
+remain in the existing consumers. Prior full validation can still cost linear
+work; dropping an already materialized flat cache can also take linear time.
+Explicit contiguous views and mutable payload access still materialize values.
+No whole-invocation complexity or wall-clock speedup is claimed.
+
+Verification from `/home/fin/luna`:
+
+- The new shared-consumption regression failed before implementation with text
+  reference counts 8,193 versus 4,097 (`/tmp/luna-tools-vvege7wx/result.json`,
+  exit 101).
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor`
+  passed (`/tmp/luna-tools-qigge_ac/result.json`, exit 0), including existing
+  bytecode/tree invocation, representation rejection and append rollback tests.
+- `python3 -B development/library_check.py --timeout 900 --stage
+  sysroot-enum-builder` passed (`/tmp/luna-library-_d26nux4/summary.json`). The
+  real sysroot fixture feeds concatenated, shared nested lists into EnumBuilder,
+  checks its generated variant order and original snapshots, and uses the enum
+  in a native test. The first draft put method calls directly inside `assumes`,
+  which the current contract elaborator rejects
+  (`/tmp/luna-library-j3_tn_ca/summary.json`); the final fixture evaluates those
+  queries into bool locals before asserting the same conditions.
+- Workspace formatting and diff checks passed
+  (`/tmp/luna-tools-2bhgah9w/result.json`, exit 0).

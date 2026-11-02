@@ -2,6 +2,8 @@
 //! mutable slice access explicitly materializes a detached snapshot.
 use super::Value;
 use std::sync::{Arc, OnceLock};
+mod owned;
+pub use owned::ListIntoIter;
 
 #[derive(Clone)]
 pub(super) struct Storage {
@@ -320,17 +322,16 @@ impl Storage {
         }
         match Arc::try_unwrap(self.root) {
             Ok(Node::Leaf(values)) => Arc::unwrap_or_clone(values),
-            Ok(node) => {
-                let mut values = Vec::with_capacity(node.len());
-                node.collect(&mut values);
-                values
-            }
-            Err(node) => {
-                let mut values = Vec::with_capacity(node.len());
-                node.collect(&mut values);
-                values
-            }
+            Ok(node) => ListIntoIter::new(Arc::new(node)).collect(),
+            Err(node) => ListIntoIter::new(node).collect(),
         }
+    }
+    pub fn into_iter(self) -> ListIntoIter {
+        // A borrowed flat view is only a cache. Release it so it cannot keep
+        // otherwise unique element allocations shared during consumption.
+        let Self { root, flat } = self;
+        drop(flat);
+        ListIntoIter::new(root)
     }
 }
 

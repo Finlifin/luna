@@ -6,7 +6,7 @@ use std::{
     ops::{Deref, DerefMut},
     sync::OnceLock,
 };
-pub use storage::ListIter;
+pub use storage::{ListIntoIter, ListIter};
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Summary {
@@ -136,9 +136,9 @@ impl DerefMut for ListValues {
 }
 impl IntoIterator for ListValues {
     type Item = Value;
-    type IntoIter = std::vec::IntoIter<Value>;
+    type IntoIter = ListIntoIter;
     fn into_iter(self) -> Self::IntoIter {
-        self.values.into_vec().into_iter()
+        self.values.into_iter()
     }
 }
 impl<'a> IntoIterator for &'a ListValues {
@@ -567,5 +567,31 @@ mod rollback_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod owned_iteration_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn shared_owned_iteration_copies_only_consumed_elements() {
+        let text: Arc<str> = "shared element".into();
+        let values: ListValues = vec![Value::String(text.clone()); 4096].into();
+        let baseline = Arc::strong_count(&text);
+        let snapshot = values.clone();
+        let mut iter = values.into_iter();
+        assert_eq!(Arc::strong_count(&text), baseline);
+        let front = iter.next().unwrap();
+        assert_eq!(Arc::strong_count(&text), baseline + 1);
+        let back = iter.next_back().unwrap();
+        assert_eq!(Arc::strong_count(&text), baseline + 2);
+        assert_eq!(iter.len(), 4094);
+        drop(iter);
+        assert_eq!(Arc::strong_count(&text), baseline + 2);
+        drop((front, back));
+        assert_eq!(Arc::strong_count(&text), baseline);
+        assert_eq!(snapshot.len(), 4096);
     }
 }

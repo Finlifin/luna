@@ -141,6 +141,32 @@ comptime fn ComposedEnum() -> Type {
 
 typealias Composed = ComposedEnum();
 
+{- Builder inputs can share concatenated list snapshots, including nested paths. -}
+comptime fn ConcatenatedEnum() -> Type {
+    let prefix: List<List<Symbol>> = [[.head]];
+    let paths = prefix.concat([[.middle]]);
+    let complete = paths.concat([[.tail]]);
+    let shapes: List<Symbol> = [.unit];
+    let names: List<List<Symbol>> = [[]];
+    let types: List<List<Type>> = [[]];
+    let builder = meta.EnumBuilder.new(.name = .Concatenated);
+    let added = builder.add_variants(complete,
+        shapes.concat(shapes).concat(shapes),
+        names.concat(names).concat(names),
+        types.concat(types).concat(types));
+    assumes added;
+    let generated = builder.Build();
+    let lengths_preserved = prefix.length() == 1 and paths.length() == 2 and complete.length() == 3;
+    assumes lengths_preserved;
+    let paths_preserved = prefix[0][0] == .head and paths[1][0] == .middle;
+    assumes paths_preserved;
+    let tail_preserved = generated.enum_variant_paths()[2][0] == .tail;
+    assumes tail_preserved;
+    generated
+}
+
+typealias Concatenated = ConcatenatedEnum();
+
 fn read_composed(value: Composed) -> bool {
     value match {
         .net.data(byte) => byte == 7,
@@ -150,6 +176,8 @@ fn read_composed(value: Composed) -> bool {
 }
 
 test batch_enum_composition {
+    let shared_tail = Concatenated.tail matches .tail;
+    assumes shared_tail;
     let tuple_case = read_composed(Composed.net.data(7));
     assumes tuple_case;
     let named_case = read_composed(Composed.io.record {ready: true});
