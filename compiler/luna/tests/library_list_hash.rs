@@ -543,3 +543,64 @@ fn key_invocation_clones_shared_payloads_without_charging_their_expanded_size() 
         "a constant key method must not pay for payload cloning that does not occur"
     );
 }
+
+#[test]
+fn key_protocol_input_cloning_shares_text_without_granting_content_equality() {
+    use comptime_executor::{Context, KeyProtocol};
+    let package = compile(
+        "use meta.builtin.str;
+        struct Key {value:str}
+        comptime impl ComptimeEq for Key {comptime fn eq(self,other:Self)->bool {self.value.eq(other.value)}}
+        comptime impl ComptimeHash for Key {comptime fn hash(self)->u64 {0}}
+        comptime fn make()->Key {Key {value:\"\"}}",
+    ).unwrap();
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let empty = vm.invoke(support::id(&package, "make"), vec![]).unwrap();
+    let nir::Term::Function { result, .. } = &package
+        .functions
+        .iter()
+        .find(|f| f.declaration == support::id(&package, "make"))
+        .unwrap()
+        .signature
+    else {
+        panic!("function")
+    };
+    let mut protocol = prepare_protocol(&package, result);
+    let mut costs = Vec::new();
+    for len in [32, 4096] {
+        let mut key = empty.clone();
+        let Value::Record { fields, .. } = &mut key else {
+            panic!("record")
+        };
+        fields[0] = Value::String("a".repeat(len).into());
+        let left = protocol
+            .admit(key.clone(), &mut Context::new(1_000_000))
+            .unwrap();
+        let mut allowance = Context::new(1_000_000);
+        let hash = protocol.hash(&left, &mut allowance).unwrap();
+        costs.push(1_000_000 - allowance.remaining());
+        let Value::Record { fields, .. } = &mut key else {
+            panic!("record")
+        };
+        fields[0] = Value::String(format!("{}b", "a".repeat(len - 1)).into());
+        let right = protocol.admit(key, &mut Context::new(1_000_000)).unwrap();
+        assert_eq!(
+            hash,
+            protocol.hash(&right, &mut Context::new(1_000_000)).unwrap()
+        );
+        assert!(
+            !protocol
+                .equivalent(&left, &right, &mut Context::new(1_000_000))
+                .unwrap()
+        );
+        assert!(
+            protocol
+                .equivalent(&left, &left, &mut Context::new(1_000_000))
+                .unwrap()
+        );
+    }
+    assert_eq!(
+        costs[0], costs[1],
+        "constant hashing does not copy shared text bytes"
+    );
+}

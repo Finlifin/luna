@@ -3,7 +3,7 @@ use super::Value;
 
 impl Value {
     /// Bound inspection and `Value::clone` work without discounting expanded
-    /// representation limits. Persistent list payloads are shared, while their
+    /// representation limits. Text and persistent list payloads are shared;
     /// type metadata and enclosing owned aggregates are still cloned. This is
     /// not admission into a type, resource duplication permission or Eq evidence.
     pub fn immutable_clone_work(&self) -> Option<usize> {
@@ -20,6 +20,7 @@ impl Value {
                 Some(())
             };
             match value {
+                Value::String(text) | Value::Symbol(text) => return Some(text.len()),
                 Value::List { values, .. } => return Some(values.summary()?.work),
                 Value::Tuple(values)
                 | Value::Record { fields: values, .. }
@@ -60,6 +61,34 @@ impl Value {
 mod tests {
     use super::*;
     use crate::{Primitive, Storage, Term};
+
+    #[test]
+    fn text_clones_share_bytes_but_keep_expanded_size_limits() {
+        let mut costs = Vec::new();
+        for len in [32, 4096] {
+            let text: std::sync::Arc<str> = "x".repeat(len).into();
+            let value = Value::Tuple(vec![Value::String(text.clone()), Value::Symbol(text)]);
+            costs.push(value.immutable_clone_work().unwrap());
+            assert!(value.immutable_copy_work().unwrap() >= len * 2);
+            let copy = value.clone();
+            let (Value::Tuple(original), Value::Tuple(copied)) = (&value, &copy) else {
+                unreachable!()
+            };
+            let (Value::String(original), Value::String(copied)) = (&original[0], &copied[0])
+            else {
+                unreachable!()
+            };
+            assert!(std::sync::Arc::ptr_eq(original, copied));
+        }
+        assert_eq!(costs[0], costs[1]);
+        let oversized = Value::String("x".repeat(100_000).into());
+        assert!(oversized.immutable_clone_work().is_none());
+        assert!(
+            Value::String("small".into())
+                .immutable_clone_work()
+                .is_some()
+        );
+    }
 
     fn list(len: usize) -> Value {
         Value::List {

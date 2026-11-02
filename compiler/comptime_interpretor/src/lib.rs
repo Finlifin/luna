@@ -494,7 +494,14 @@ impl Value {
                 _ => 0,
             };
             *work = work.checked_add(extra)?;
-            *inspected = inspected.checked_add(1)?.checked_add(extra)?;
+            // Shared immutable text exposes its byte length in constant time;
+            // inspection does not read its bytes. Expanded-size limits below
+            // still include every byte, as do full-content comparison budgets.
+            let inspection = match value {
+                Value::String(_) | Value::Symbol(_) => 0,
+                _ => extra,
+            };
+            *inspected = inspected.checked_add(1)?.checked_add(inspection)?;
             let children = match value {
                 Value::List { values: fields, .. } => fields.len(),
                 Value::Record { fields, .. }

@@ -36,6 +36,10 @@ comptime fn same_lists() -> bool {
 相等与哈希函数实际遍历的内容照常计费，缓存的结构依赖比较也不因此降为
 常数成本。首次检查和写入后重新建立摘要仍需查看载荷。
 
+`str` 和 `Symbol` 的不可变文本也共享字节存储，输入克隆按共享引用计费；
+文本长度仍计入完整表示大小限制。此优化不提供文本相等证据，不改变库的
+`ComptimeEq`／`ComptimeHash`：内容比较和摘要计算仍按实际工作消耗预算。
+
 ## 可选值与错误限定值
 
 `ComptimeOptionalOps` 与 `ComptimeErrorResultOps` 已采用 `pure comptime trait`，
