@@ -1,4 +1,4 @@
-use builtin.{Order, Integer, bool, char, str, u8, u16, u32, u64, u128,
+use builtin.{Order, Integer, bool, char, str, Symbol, u8, u16, u32, u64, u128,
     i8, i16, i32, i64, i128, usize, isize};
 use equality.ComptimeEq;
 use text_impl.bindings;
@@ -119,30 +119,47 @@ comptime impl ComptimeOrd for bool {
     }
 }
 
-{- UTF-8 byte order is lexicographic, with a proper prefix ordered first. -}
-comptime impl ComptimeOrd for str {
-    comptime fn cmp(self, other: Self) -> Order {
-        let left_length = bindings.byte_length(self);
-        let right_length = bindings.byte_length(other);
-        let count = if left_length < right_length { left_length } else { right_length };
-        var index: u64 = 0;
-        while index < count {
-            let left = bindings.byte(self, index);
-            let right = bindings.byte(other, index);
-            left match {
-                a? => right match {
-                    b? => {
-                        if a < b { return .less; };
-                        if a > b { return .greater; };
-                    },
-                    null => { assumes false; },
+{-
+    Text and symbols share lexicographic UTF-8 byte order. The callbacks retain
+    their ordinary comptime identities; no host string ordering is substituted.
+-}
+comptime fn compare_bytes(left: T, right: T,
+    length: comptime fn(T) -> u64,
+    byte: comptime fn(T, u64) -> ?u8) -> Order
+where T
+{
+    let left_length = length(left);
+    let right_length = length(right);
+    let count = if left_length < right_length { left_length } else { right_length };
+    var index: u64 = 0;
+    while index < count {
+        let left_byte = byte(left, index);
+        let right_byte = byte(right, index);
+        left_byte match {
+            a? => right_byte match {
+                b? => {
+                    if a < b { return .less; };
+                    if a > b { return .greater; };
                 },
                 null => { assumes false; },
-            };
-            index = index + 1;
+            },
+            null => { assumes false; },
         };
-        if left_length < right_length { .less }
-        else if left_length == right_length { .equal }
-        else { .greater }
+        index = index + 1;
+    };
+    if left_length < right_length { .less }
+    else if left_length == right_length { .equal }
+    else { .greater }
+}
+
+comptime impl ComptimeOrd for str {
+    comptime fn cmp(self, other: Self) -> Order {
+        compare_bytes(self, other, bindings.byte_length, bindings.byte)
+    }
+}
+
+comptime impl ComptimeOrd for Symbol {
+    comptime fn cmp(self, other: Self) -> Order {
+        compare_bytes(self, other, bindings.symbol_byte_length, bindings.symbol_byte)
     }
 }

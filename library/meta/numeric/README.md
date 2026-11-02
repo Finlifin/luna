@@ -9,11 +9,11 @@ scalar_math.fl 是与 builtin.math 对应的 comptime 标量函数，通过 VM i
 但保留独立协议及实现身份；comptime 方法查找优先采用编译期协议。
 `cmp` 提供三向比较，`lt`、`le`、`gt`、`ge` 是依赖 `cmp` 的默认方法。
 
-当前覆盖固定宽度整数、usize／isize、任意精度 Integer、bool、char 和 str。
-bool 按 false < true 排序；char 按 Unicode scalar 排序；str 按 UTF-8 字节
+当前覆盖固定宽度整数、usize／isize、任意精度 Integer、bool、char、str 和 Symbol。
+bool 按 false < true 排序；char 按 Unicode scalar 排序；str 与 Symbol 按 UTF-8 字节
 做字典序比较，公共前缀相同时短者在前，不做 locale 或 Unicode normalization。
 浮点没有默认全序实现，不能把 NaN 的普通比较当成全序。List<T> 在元素实现
-ComptimeOrd 时按字典序组合；Symbol 及其他复合容器的全序尚未提供，
+ComptimeOrd 时按字典序组合；其他复合容器的全序尚未提供，
 用户定义类型可显式实现协议。
 
 ```flurry
@@ -25,3 +25,7 @@ comptime fn ordered_names() -> List<str> {
 
 真实 sysroot 验收：`development/library_check.py --stage sysroot-comptime-ordering`。
 比较方法使用普通 comptime 调用与预算，不将比较结果作为类型相等证据。
+
+str 与 Symbol 的比较共用普通 comptime 字节比较函数，通过显式函数值参数
+传入各自的长度和字节操作。Symbol 按内容排序，不依赖宿主 intern ID，
+也不把排序结果用于 PTC 类型相等。空符号名、前缀及非 ASCII 内容遵循同一规则。

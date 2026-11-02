@@ -204,3 +204,43 @@ fn list_ordering_requires_element_ordering_even_for_empty_lists() {
     .unwrap_err();
     assert!(!failure.contains("parsing failed"), "{failure}");
 }
+
+#[test]
+fn symbols_order_by_content_and_compose_with_list_sorting() {
+    let package = compile(
+        "comptime fn less(left:Symbol, right:Symbol)->bool { left.lt(right) }
+        comptime fn equal(left:Symbol, right:Symbol)->bool {
+            (left.cmp(right) matches .equal) and left.eq(right)
+        }
+        comptime fn sorted()->bool {
+            let tags:List<Symbol> = [.beta, .alpha, .alphabet, .alpha];
+            tags.sort_by(|left,right| left.lt(right)).eq([.alpha, .alpha, .alphabet, .beta])
+                and tags[0].eq(.beta)
+        }",
+    )
+    .unwrap();
+    for mut vm in [
+        Interpreter::for_comptime(&package, Budget::default()).unwrap(),
+        Interpreter::for_comptime_tree(&package, Budget::default()).unwrap(),
+    ] {
+        for left in ["", "a", "ab", "z", "e\u{301}", "é", "🦀"] {
+            for right in ["", "a", "ab", "z", "e\u{301}", "é", "🦀"] {
+                let values = || vec![Value::Symbol(left.into()), Value::Symbol(right.into())];
+                assert_eq!(
+                    vm.invoke(support::id(&package, "less"), values()).unwrap(),
+                    Value::Bool(left.as_bytes() < right.as_bytes()),
+                    "{left:?}, {right:?}"
+                );
+                assert_eq!(
+                    vm.invoke(support::id(&package, "equal"), values()).unwrap(),
+                    Value::Bool(left == right),
+                    "{left:?}, {right:?}"
+                );
+            }
+        }
+        assert_eq!(
+            vm.invoke(support::id(&package, "sorted"), vec![]).unwrap(),
+            Value::Bool(true)
+        );
+    }
+}
