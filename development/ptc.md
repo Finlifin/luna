@@ -963,3 +963,36 @@ Validation from `/home/fin/luna`: `python3 -B development/check.py --timeout 900
 (`/tmp/luna-tools-i2wc47bq/result.json`, exit 0). Workspace formatting passed
 (`/tmp/luna-tools-3wntrqcz/result.json`, exit 0). This verifies the engine API
 boundary, not completeness of CDCL theories or source-language inference.
+
+## Determined projections of ambiguous Type models
+
+`Context::search_type_input_projection` separates the full set of searched Type
+inputs from the outputs whose uniqueness is requested. The full constraint and
+all input markers remain in the private search context. Only selected bindings
+with replayable entailment proofs are exported; the satisfying witness can still
+contain arbitrary values for other inputs, and those values are not inference.
+
+For example, `T == bool and U == U` has many models, but its T projection is
+uniquely bool. Conversely, projecting T from `T == U` with both T and U searched
+is still ambiguous: U must not silently become an ambient constant. Existing
+`search_type_inputs` retains its all-requested-inputs contract.
+
+The obligation engine exposes the same projection boundary. Its candidate keeps
+unselected metavariables unresolved and retains the complete original problem as
+an obligation. A caller cannot commit until those original obligations settle.
+Ordinary matching first attempts the joint search; after a validated ambiguity,
+a bounded part of the remaining search allowance attempts individual Type outputs.
+Only proved values enter the inference trial. Conditional matching equations do
+not become regional assumptions, and function requires are not used to invent
+arguments. If the original relation is not entailed, the candidate cannot commit.
+
+This is a bounded completeness improvement, not arbitrary defaulting, a complete
+CDCL(T) implementation, or an expansion of PTC into program-state verification.
+Mixed non-Type metavariable search and runtime region obligations are unchanged.
+
+Verification from `/home/fin/luna`:
+`python3 -B development/check.py --timeout 900 -- test -p ptc -p type_resolution`
+exited 0 (`/tmp/luna-tools-9drcq6bk/result.json`). New cases cover proof/witness
+replay, invalid output selections, ambiguity of unselected inputs, budget failure
+and recovery, explicit completion of remaining inputs, and matching candidates
+whose original conditional equation must still reject publication.

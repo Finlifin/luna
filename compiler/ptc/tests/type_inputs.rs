@@ -519,3 +519,90 @@ fn witness_replay_consumes_shared_fuel_on_success_and_rejection() {
         .verify_witness_metered(&witness, &mut budget)
         .unwrap();
 }
+
+#[test]
+fn projected_inputs_can_be_unique_while_the_full_model_is_ambiguous() {
+    let context = Context::default();
+    let constraint = F::And(vec![F::equal(var(0), boolean()), F::equal(var(1), var(1))]);
+    assert!(matches!(
+        context.search_type_inputs(&[id(0), id(1)], constraint.clone(), &mut Budget::default()),
+        O::Ambiguous { .. }
+    ));
+    let O::Unique(solution) = context.search_type_input_projection(
+        &[id(0), id(1)],
+        &[id(0)],
+        constraint.clone(),
+        &mut Budget::default(),
+    ) else {
+        panic!("unique projection");
+    };
+    assert_eq!(solution.bindings.len(), 1);
+    assert_eq!(solution.bindings[&id(0)].0, boolean());
+    let problem = context
+        .type_input_context(&[id(0), id(1)], constraint.clone(), &mut Budget::default())
+        .unwrap();
+    problem
+        .verify_witness(&solution.model, Budget::default())
+        .unwrap();
+    problem
+        .verify_proof(&solution.bindings[&id(0)].1, Budget::default())
+        .unwrap();
+    assert!(matches!(
+        context.search_type_input_projection(
+            &[id(0), id(1)],
+            &[id(1)],
+            constraint.clone(),
+            &mut Budget::default()
+        ),
+        O::Ambiguous { .. }
+    ));
+    for outputs in [vec![id(9)], vec![id(0), id(0)]] {
+        assert!(matches!(
+            context.search_type_input_projection(
+                &[id(0), id(1)],
+                &outputs,
+                constraint.clone(),
+                &mut Budget::default()
+            ),
+            O::IllFormed(_)
+        ));
+    }
+    assert!(context.assumptions().is_empty());
+}
+
+#[test]
+fn projection_does_not_turn_another_searched_input_into_an_ambient_constant() {
+    let context = Context::default();
+    let constraint = F::equal(var(0), var(1));
+    assert!(matches!(
+        context.search_type_input_projection(
+            &[id(0), id(1)],
+            &[id(0)],
+            constraint.clone(),
+            &mut Budget::default()
+        ),
+        O::Ambiguous { .. }
+    ));
+    let mut exhausted = Budget {
+        steps: 0,
+        ..Budget::default()
+    };
+    assert!(matches!(
+        context.search_type_input_projection(
+            &[id(0), id(1)],
+            &[id(0)],
+            constraint.clone(),
+            &mut exhausted
+        ),
+        O::Unknown(UnknownReason::BudgetExhausted)
+    ));
+    assert!(matches!(
+        context.search_type_input_projection(
+            &[id(0), id(1)],
+            &[id(0)],
+            constraint,
+            &mut Budget::default()
+        ),
+        O::Ambiguous { .. }
+    ));
+}

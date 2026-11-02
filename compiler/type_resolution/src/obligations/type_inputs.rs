@@ -21,6 +21,30 @@ impl Engine {
         problem: &Requirement,
         budget: &mut Budget,
     ) -> Result<TypeInputSearch, Error> {
+        self.search_type_input_projection(inputs, inputs, problem, budget)
+    }
+
+    /// Search the full equation problem but export only individually determined
+    /// requested outputs. Other input variables stay unresolved in the trial.
+    pub fn search_type_input_projection(
+        &self,
+        inputs: &[MetaId],
+        outputs: &[MetaId],
+        problem: &Requirement,
+        budget: &mut Budget,
+    ) -> Result<TypeInputSearch, Error> {
+        budget.steps = budget
+            .steps
+            .checked_sub(inputs.len())
+            .ok_or(InferenceError::Budget)?;
+        let available: BTreeSet<_> = inputs.iter().copied().collect();
+        let mut selected = BTreeSet::new();
+        for &output in outputs {
+            charge(budget)?;
+            if !available.contains(&output) || !selected.insert(output) {
+                return Err(Error::InvalidContext);
+            }
+        }
         let mut seen = BTreeSet::new();
         for &input in inputs {
             charge(budget)?;
@@ -70,15 +94,22 @@ impl Engine {
         }
         let formula =
             problem.freeze_metered(&encoded, &self.scope, self.native_scope(), budget, 0)?;
-        let outcome = self
-            .context
-            .search_type_inputs(&identities, formula, budget);
+        let projected: Vec<_> = inputs
+            .iter()
+            .zip(&identities)
+            .filter_map(|(input, identity)| selected.contains(input).then_some(*identity))
+            .collect();
+        let outcome =
+            self.context
+                .search_type_input_projection(&identities, &projected, formula, budget);
         let ptc::TypeInputOutcome::Unique(evidence) = outcome else {
             return Ok(TypeInputSearch::Unresolved(outcome));
         };
         let mut candidate = self.trial();
         for (&input, identity) in inputs.iter().zip(&identities) {
-            let value = &evidence.bindings[identity].0;
+            let Some((value, _)) = evidence.bindings.get(identity) else {
+                continue;
+            };
             nir::type_computations::charge_term_with_depth(
                 value,
                 &mut budget.steps,
@@ -282,17 +313,55 @@ impl Engine {
                 }
             }
             let inputs: Vec<_> = inputs.into_iter().collect();
-            let TypeInputSearch::Proposed { candidate, .. } =
-                self.search_type_inputs(&inputs, &problem, &mut local)?
-            else {
-                return Ok(());
+            // Leave room to recover individually determined inputs if the
+            // joint model is ambiguous. Never resolve ambiguity by choosing the
+            // first witness's arbitrary assignment.
+            let mut joint = Budget {
+                steps: local.steps / 2,
+                ..local
             };
+            let joint_before = joint.steps;
+            let searched = self.search_type_inputs(&inputs, &problem, &mut joint);
+            local.steps -= joint_before - joint.steps;
+            let mut solutions = Vec::new();
+            match searched? {
+                TypeInputSearch::Proposed { candidate, .. } => {
+                    for &input in &inputs {
+                        let value = candidate
+                            .inspect_type_metered(&InferenceTerm::Meta(input), &mut local)?;
+                        solutions.push((input, value));
+                    }
+                }
+                TypeInputSearch::Unresolved(ptc::TypeInputOutcome::Ambiguous { .. }) => {
+                    for (index, &input) in inputs.iter().enumerate() {
+                        let mut query = Budget {
+                            steps: local.steps / (inputs.len() - index + 1),
+                            ..local
+                        };
+                        let query_before = query.steps;
+                        let searched = self.search_type_input_projection(
+                            &inputs,
+                            &[input],
+                            &problem,
+                            &mut query,
+                        );
+                        local.steps -= query_before - query.steps;
+                        if let TypeInputSearch::Proposed { candidate, .. } = searched? {
+                            let value = candidate
+                                .inspect_type_metered(&InferenceTerm::Meta(input), &mut local)?;
+                            solutions.push((input, value));
+                        }
+                    }
+                }
+                _ => return Ok(()),
+            }
+            if solutions.is_empty() {
+                return Ok(());
+            }
             // Preserve this trial's parent/revision. The search's nested trial
             // cannot be returned directly to our caller as its own child.
             let mut proposed = self.inference.trial();
-            for input in inputs {
-                let value =
-                    candidate.inspect_type_metered(&InferenceTerm::Meta(input), &mut local)?;
+            for (input, value) in solutions {
                 proposed.assign_with_limits(
                     input,
                     InferenceTerm::Stable(value),

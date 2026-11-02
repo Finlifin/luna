@@ -747,3 +747,108 @@ fn classified_model_alternatives_leave_inference_inputs_unassigned() {
         Term::Primitive(P::U8)
     );
 }
+
+#[test]
+fn projected_search_keeps_unselected_inputs_pending_until_explicitly_bound() {
+    let mut parent = Engine::default();
+    let known = parent.fresh(Sort::Type);
+    let open = parent.fresh(Sort::Type);
+    let problem = R::And(vec![
+        determined(I::Meta(known)),
+        R::Equal(I::Meta(open), I::Meta(open)),
+    ]);
+    let Search::Proposed {
+        mut candidate,
+        obligation,
+        evidence,
+    } = parent
+        .search_type_input_projection(&[known, open], &[known], &problem, &mut Budget::default())
+        .unwrap()
+    else {
+        panic!("determined projection");
+    };
+    assert_eq!(evidence.bindings.len(), 1);
+    assert_eq!(candidate.inspect(&I::Meta(known)).unwrap(), stable(P::Bool));
+    assert_eq!(candidate.inspect(&I::Meta(open)).unwrap(), I::Meta(open));
+    candidate.advance(100, Budget::default());
+    assert!(!candidate.state(obligation).unwrap().is_proven());
+    assert_eq!(parent.inspect(&I::Meta(known)).unwrap(), I::Meta(known));
+    candidate.assign(open, stable(P::Char)).unwrap();
+    candidate.advance(100, Budget::default());
+    assert!(candidate.state(obligation).unwrap().is_proven());
+    parent.commit(candidate).unwrap();
+    assert_eq!(
+        parent.freeze(&I::Meta(known)).unwrap(),
+        Term::Primitive(P::Bool)
+    );
+    assert_eq!(
+        parent.freeze(&I::Meta(open)).unwrap(),
+        Term::Primitive(P::Char)
+    );
+}
+
+#[test]
+fn matching_recovers_determined_types_without_defaulting_other_inputs() {
+    let alias = Term::Rigid {
+        declaration: DeclarationId {
+            package: 10,
+            local: 17,
+        },
+        sort: Sort::Type,
+    };
+    let mut context = Context::default();
+    context.assume(F::Or(vec![
+        F::equal(
+            alias.clone(),
+            Term::Optional(Box::new(Term::Primitive(P::Bool))),
+        ),
+        F::equal(
+            alias.clone(),
+            Term::Pointer(Box::new(Term::Primitive(P::U8))),
+        ),
+    ]));
+    let pattern = |input| I::Instantiate {
+        template: Term::Optional(Box::new(Term::Bound {
+            depth: 0,
+            index: 0,
+            sort: Sort::Type,
+        })),
+        arguments: vec![I::Meta(input)],
+    };
+    let mut direct = type_resolution::InferenceContext::default();
+    let direct_input = direct.fresh(Sort::Type);
+    type_resolution::matching::propose(
+        &mut direct,
+        &pattern(direct_input),
+        &I::Stable(alias.clone()),
+        &context,
+        &[],
+        Budget::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        direct.resolve(&I::Meta(direct_input)).unwrap(),
+        I::Meta(direct_input)
+    );
+    let mut parent = Engine::with_context(context);
+    let known = parent.fresh(Sort::Type);
+    let open = parent.fresh(Sort::Type);
+    let (mut candidate, obligations) = parent
+        .match_many(
+            &[
+                (pattern(known), I::Stable(alias)),
+                (I::Meta(open), I::Meta(open)),
+            ],
+            Budget::default(),
+        )
+        .unwrap();
+    assert_eq!(candidate.inspect(&I::Meta(known)).unwrap(), stable(P::Bool));
+    assert_eq!(candidate.inspect(&I::Meta(open)).unwrap(), I::Meta(open));
+    candidate.assign(open, stable(P::Char)).unwrap();
+    candidate.advance(100, Budget::default());
+    // Solving the input under the match equations does not prove that the
+    // original conditional alias always has the demanded optional shape.
+    assert!(!candidate.state(obligations[0]).unwrap().is_proven());
+    assert!(parent.commit(candidate).is_err());
+    assert_eq!(parent.inspect(&I::Meta(known)).unwrap(), I::Meta(known));
+}

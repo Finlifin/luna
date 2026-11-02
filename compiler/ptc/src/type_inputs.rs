@@ -7,6 +7,8 @@ mod symbolic;
 
 #[derive(Clone, Debug)]
 pub struct TypeInputSolution {
+    /// A satisfying whole model. Only `bindings` are proved determined; other
+    /// witness assignments must never become inferred source inputs.
     pub model: Witness,
     pub bindings: BTreeMap<DeclarationId, (Term, Proof)>,
 }
@@ -37,6 +39,36 @@ impl Context {
         constraint: Formula,
         budget: &mut Budget,
     ) -> TypeInputOutcome {
+        self.search_type_input_projection(inputs, inputs, constraint, budget)
+    }
+
+    /// Determine only the selected outputs while solving over every requested
+    /// input. Other searched inputs are existential choices, never ambient
+    /// constants or exported assignments. A unique projection need not imply a
+    /// unique whole model.
+    pub fn search_type_input_projection(
+        &self,
+        inputs: &[DeclarationId],
+        outputs: &[DeclarationId],
+        constraint: Formula,
+        budget: &mut Budget,
+    ) -> TypeInputOutcome {
+        let Some(remaining) = budget.steps.checked_sub(inputs.len()) else {
+            budget.steps = 0;
+            return TypeInputOutcome::Unknown(UnknownReason::BudgetExhausted);
+        };
+        budget.steps = remaining;
+        let mut selected = BTreeSet::new();
+        let available: BTreeSet<_> = inputs.iter().copied().collect();
+        for &output in outputs {
+            let Some(remaining) = budget.steps.checked_sub(1) else {
+                return TypeInputOutcome::Unknown(UnknownReason::BudgetExhausted);
+            };
+            budget.steps = remaining;
+            if !available.contains(&output) || !selected.insert(output) {
+                return TypeInputOutcome::IllFormed("invalid Type output projection".into());
+            }
+        }
         let problem = match self.type_input_context(inputs, constraint, budget) {
             Ok(problem) => problem,
             Err(ValidationError::BudgetExhausted) => {
@@ -54,7 +86,7 @@ impl Context {
         };
         let mut bindings = BTreeMap::new();
         let mut pending = Vec::new();
-        for &variable in inputs {
+        for &variable in outputs {
             let Some(value) = model.types.get(&variable) else {
                 return TypeInputOutcome::Unknown(UnknownReason::UnvalidatedModel);
             };
