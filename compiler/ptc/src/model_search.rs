@@ -2,6 +2,8 @@
 //! search state, never equality evidence or a complete enumeration of Type.
 use super::*;
 mod combinations;
+mod fresh;
+pub(super) use fresh::candidate as fresh_candidate;
 
 #[cfg(test)]
 thread_local! {
@@ -329,6 +331,67 @@ impl Search<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn independent_type_inputs_do_not_require_deep_model_types() {
+        let input = |local| Term::Rigid {
+            declaration: DeclarationId {
+                package: 986,
+                local,
+            },
+            sort: Sort::Type,
+        };
+        let mut context = Context::default();
+        context.assume(
+            Formula::equal(
+                Term::Tuple((0..24).map(input).collect()),
+                Term::Tuple(vec![Term::Primitive(Primitive::Bool); 24]),
+            )
+            .negate(),
+        );
+        let budget = Budget {
+            steps: 1_000_000,
+            max_depth: 8,
+        };
+        let result = context.prove(Formula::False, budget);
+        let Outcome::NotEntailed(witness) = result else {
+            panic!("shallow independent inputs have a shallow model: {result:?}");
+        };
+        context.verify_witness(&witness, budget).unwrap();
+    }
+
+    #[test]
+    fn fresh_model_types_avoid_explicit_shallow_shapes() {
+        let variable = DeclarationId {
+            package: 986,
+            local: 0,
+        };
+        let input = Term::Rigid {
+            declaration: variable,
+            sort: Sort::Type,
+        };
+        let excluded: Vec<_> = [
+            vec![],
+            vec![Primitive::U8],
+            vec![Primitive::Bool, Primitive::U8],
+        ]
+        .into_iter()
+        .map(|fields| {
+            Term::Pointer(Box::new(Term::Tuple(
+                fields.into_iter().map(Term::Primitive).collect(),
+            )))
+        })
+        .collect();
+        let mut context = Context::default();
+        for ty in &excluded {
+            context.assume(Formula::equal(input.clone(), ty.clone()).negate());
+        }
+        let Outcome::NotEntailed(witness) = context.prove(Formula::False, Budget::default()) else {
+            panic!("explicit shapes must be skipped when choosing a fresh model type");
+        };
+        assert!(!excluded.contains(&witness.types[&variable]));
+        context.verify_witness(&witness, Budget::default()).unwrap();
+    }
 
     #[test]
     fn existing_model_candidates_do_not_allocate_fresh_structures() {

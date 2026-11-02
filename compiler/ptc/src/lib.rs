@@ -1868,12 +1868,11 @@ fn reify(
         })
     } else {
         if !free.contains_key(&root) {
-            let mut candidate = Term::Primitive(Primitive::Bool);
+            let mut candidate_index = 0;
             loop {
-                candidate = Term::Pointer(Box::new(candidate));
+                let candidate = model_search::fresh_candidate(candidate_index, fuel)?;
                 // A fresh model element must not accidentally equal an explicit
                 // type appearing in a disequality (or another free class).
-                nir::type_computations::charge_term(&candidate, fuel).ok()?;
                 let mut used = terms.ids.contains_key(&candidate);
                 for value in free.values() {
                     nir::type_computations::charge_term(value, fuel).ok()?;
@@ -1883,6 +1882,7 @@ fn reify(
                     free.insert(root, candidate);
                     break;
                 }
+                candidate_index = candidate_index.checked_add(1)?;
             }
         }
         let value = &free[&root];
