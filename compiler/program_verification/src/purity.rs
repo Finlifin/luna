@@ -4418,7 +4418,17 @@ impl<'a> Analysis<'a> {
         // A proven check has no rejection behavior, but its predicate still
         // executes. Analyze a private, proof-replayed view; never grant the
         // checked condition as an unconditional fact or mutate source NIR.
-        let function = if !self.finite {
+        let mut has_checks = false;
+        if !self.finite
+            && iir::visit::expressions(&function, &mut self.fuel, |expr, _| {
+                has_checks |= matches!(expr.kind, K::CheckPredicate(_));
+                Ok(())
+            })
+            .is_err()
+        {
+            return false;
+        }
+        let function = if !self.finite && has_checks {
             let mut limits = crate::Limits::default();
             if nir::copy_budget::charge_function_substitution(&function, &[], &[], &mut self.fuel)
                 .is_err()

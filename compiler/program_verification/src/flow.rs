@@ -5461,10 +5461,31 @@ impl Walker<'_> {
             | K::IntegerRepresentation(value)
             | K::ComptimeIntegerConvert(value)
             | K::SymbolName(value)
-            | K::EnumName(value)
-            | K::BitConvert(value) => {
+            | K::EnumName(value) => {
                 self.child(value, state, depth)?;
                 result = self.unknown_value(&expr.ty)?;
+            }
+            K::BitConvert(value) => {
+                self.child(value, state, depth)?;
+                result = self.unknown_value(&expr.ty)?;
+                // Unsigned reconstruction zero-extends the source bits. Its
+                // upper bound follows from their width, not the wider target
+                // domain. Do not transfer this rule to signed reinterpretation
+                // or to nominal types with independent representation duties.
+                if let (Term::Primitive(nir::Primitive::BitVec(width)), Term::Primitive(target)) =
+                    (&value.ty, &expr.ty)
+                {
+                    if self
+                        .integer_layout(*target)
+                        .is_some_and(|(signed, bits)| !signed && *width <= bits as usize)
+                    {
+                        result.range = Some(if *width == 0 {
+                            Interval::new(Integer::zero(), Integer::zero(), self.limits)?
+                        } else {
+                            Interval::machine(*width as u16, false, self.limits)?
+                        });
+                    }
+                }
             }
             K::FloatBinary { left, right, .. }
             | K::BitEqual(left, right)

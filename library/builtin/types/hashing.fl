@@ -17,7 +17,7 @@ impl Hash for !E T where T:- Hash, E:- Hash {
 }
 
 {- FNV-1a mixing explicitly retains the low 64 product bits. -}
-fn mix_byte(state: u64, byte: u8) -> u64 {
+pure fn mix_byte(state: u64, byte: u8) -> u64 {
     let bits = state'bitvec;
     let widened = byte'bitvec.as(u64);
     let input = widened'bitvec;
@@ -27,7 +27,7 @@ fn mix_byte(state: u64, byte: u8) -> u64 {
     product'bitvec[0..64].as(u64)
 }
 
-fn mix_digest(state: u64, digest: u64) -> u64 {
+pure fn mix_digest(state: u64, digest: u64) -> u64 {
     var mixed = state;
     mixed = mix_byte(mixed, digest'bitvec[0..8].as(u8));
     mixed = mix_byte(mixed, digest'bitvec[8..16].as(u8));

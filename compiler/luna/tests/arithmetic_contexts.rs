@@ -384,3 +384,34 @@ fn comptime_bit_compound_assignment_preserves_value_receiver_updates() {
         );
     }
 }
+
+#[test]
+fn unsigned_bit_reconstruction_retains_source_width_bounds() {
+    let source = format!(
+        "mod builtin {{ {} }} use builtin.{{u8,u16,u128,i8}};
+        pure fn widened(value:u8)->u16 {{value'bitvec.as(u16) + 1}}
+        pure fn sliced(value:u128)->u16 {{value'bitvec[0..8].as(u16) + 1}}
+        pure fn empty(value:u8)->u8 {{value'bitvec[0..0].as(u8) + 1}}
+        fn observed(flag:*bool)->u8 {{flag.* = true; 255}}
+        fn run()->bool {{
+            var flag=false;
+            let value=observed(flag.ref)'bitvec.as(u16) + 1;
+            flag and value==256 and widened(255)==256 and sliced(65535)==256 and empty(255)==1
+        }}",
+        include_str!("../../../library/builtin/primitives.fl")
+    );
+    let package = support::compile(&source);
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    for expression in ["value'bitvec.as(u8) + 1", "value'bitvec.as(i8) + 1"] {
+        let input = format!(
+            "mod builtin {{ {} }} use builtin.{{u8,i8}};
+            fn bad(value:u8) {{let overflow={expression};}}",
+            include_str!("../../../library/builtin/primitives.fl")
+        );
+        let failure = support::compile_with_protocols(&input, &Default::default()).unwrap_err();
+        assert!(failure.contains("range is not proven"), "{failure}");
+    }
+}
