@@ -13,6 +13,7 @@ mod places;
 mod properties;
 pub(in crate::program::cmtt) mod spreads;
 pub(in crate::program::cmtt) mod statements;
+mod storage;
 mod type_inputs;
 use statements::Control;
 
@@ -322,7 +323,7 @@ impl Checker<'_, '_> {
                     if !self.generator_data_domain(&ty, &visible_parameters) {
                         return Err(error(
                             parameter.span,
-                            "code generator data parameter requires a supported immutable value domain",
+                            "code generator data parameter requires a supported immutable value domain without runtime pointer storage",
                         ));
                     }
                     Input::Data(ty)
@@ -2329,7 +2330,7 @@ impl Checker<'_, '_> {
     }
 
     pub(in crate::program::cmtt) fn generator_data_domain(
-        &self,
+        &mut self,
         ty: &Term,
         parameters: &[DeclarationId],
     ) -> bool {
@@ -2389,7 +2390,13 @@ impl Checker<'_, '_> {
                 return false;
             }
         }
-        true
+        let mut fuel = usize::try_from(self.required_steps)
+            .unwrap_or(usize::MAX)
+            .min(100_000);
+        let before = fuel;
+        let valid = self.generator_comptime_storage(ty, &mut fuel);
+        self.required_steps -= (before - fuel) as u64;
+        valid
     }
 
     pub(super) fn validate_generator_data(

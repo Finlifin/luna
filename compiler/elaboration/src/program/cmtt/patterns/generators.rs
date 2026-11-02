@@ -497,7 +497,7 @@ impl Checker<'_, '_> {
                 if !this.generator_data_domain(&ty, &visible_parameters) {
                     return Err(error(
                         parameter.span,
-                        "pattern generator data domain is not supported",
+                        "pattern generator data domain is not supported; runtime pointer storage is not permitted",
                     ));
                 }
                 if parameter.ty.is_comptime() && ty == p(P::Type) {

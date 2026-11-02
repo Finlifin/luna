@@ -2955,7 +2955,7 @@ fn generator_data_rejects_runtime_inputs_and_wrong_identities() {
         ),
         (
             "pure comptime fn build(pointer:*bool)->< |- bool> {'(true)} fn run(pointer:*bool)->bool {~<build(pointer)>}",
-            "runtime parameter",
+            "runtime pointer storage",
         ),
         (
             "struct Description {ty:.Type'builtin} pure comptime fn build(description:Description)->< |- Description> {'(description)}",
@@ -8086,7 +8086,7 @@ fn generator_readonly_nominal_captures_reject_pointer_fields_and_field_addresses
             comptime fn build(reader:Reader)-><|-bool> {let value=reader();'(value)}
             comptime fn outer()-><|-bool> {let flag=true;build(make(Data {pointer:flag.ref}))}
             fn run()->bool {~<outer()>}",
-            "pointer operations cannot execute at comptime",
+            "runtime pointer storage",
         ),
         (
             "struct Data {flag:bool}
@@ -11142,4 +11142,35 @@ fn generator_callback_packets_preserve_shared_state_and_runtime_identities() {
     );
     let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
     assert!(failure.contains("execution phase"), "{failure}");
+}
+
+#[test]
+fn unused_code_generators_reject_runtime_pointer_payload_domains() {
+    for domain in [
+        "*bool",
+        "?*bool",
+        "!*bool bool",
+        "Link",
+        "Address",
+        "Choice",
+        "Box<*bool>",
+    ] {
+        let source = format!(
+            "struct Link {{pointer:*bool}} newtype Address=*bool; enum Choice {{pointer(*bool)}} struct Box where T {{value:T}} comptime fn build(value:{domain})-><|-bool> {{'(true)}}"
+        );
+        let failure = support::compile_with_protocols(&source, &Default::default())
+            .expect_err("unused code generator cannot accept stored runtime pointers");
+        assert!(!failure.contains("parsing failed"), "{failure}");
+    }
+}
+
+#[test]
+fn generator_storage_checks_preserve_pointer_descriptions_and_runtime_ports() {
+    for source in [
+        "typealias Type=.Type'builtin; comptime fn describe(comptime T:Type)-><|-bool> {'(true)} fn run()->bool {~<describe(*bool)>}",
+        "comptime fn load()-><pointer:*bool|-bool> {'(pointer.*)}",
+        "struct Phantom where T {flag:bool} comptime fn describe(value:Phantom<*bool>)-><|-bool> {'(true)}",
+    ] {
+        support::compile_with_protocols(source, &Default::default()).unwrap();
+    }
 }
