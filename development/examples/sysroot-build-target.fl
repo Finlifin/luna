@@ -8,6 +8,19 @@ const enabled = target.features.get(.vector);
 const disabled = target.features.get(.disabled);
 const absent = target.features.get(.unknown);
 
+comptime fn read_feature(
+    query: comptime fn(build.TargetFeatures, Symbol) -> ?bool,
+    features: build.TargetFeatures,
+    name: Symbol,
+) -> ?bool {
+    query(features, name)
+}
+
+const selected_query = build.TargetFeatures.get;
+const queried_enabled = read_feature(selected_query, target.features, .vector);
+const queried_disabled = read_feature(selected_query, target.features, .disabled);
+const queried_absent = read_feature(selected_query, target.features, .unknown);
+
 test selected_target {
     inline if (target.arch matches .configured_arch)
         and (target.os matches .configured_os)
@@ -18,7 +31,8 @@ test selected_target {
 
 test selected_features {
     inline if (enabled matches true?) and (disabled matches false?)
-        and (absent matches null) {
+        and (absent matches null) and (queried_enabled matches true?)
+        and (queried_disabled matches false?) and (queried_absent matches null) {
         assumes true;
     } else { assumes false; };
 }

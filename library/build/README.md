@@ -52,6 +52,9 @@ Rust 驱动仍可构造 `luna::build_context::Snapshot`，调用
 feature 的 typed lookup 使用编译期 Object 的按名查询入口，一次扫描已经取得的
 输入快照，避免在库循环中为每个索引重复传送整个 Object。驱动快照仍检查唯一
 feature 名称；这个查询优化不改变包归属、缓存键或缺失配置的诊断。
+内部 `object_get` 绑定显式声明 `comptime fn(comptime T: Type, Object, Symbol) -> ?T`，
+由普通依赖函数契约检查返回域。公开 `TargetFeatures.get` 可以保存为函数值并
+传给 comptime 回调；开启、关闭和缺失三个结果仍分别保留。
 
 ```flurry
 const target = build.target;

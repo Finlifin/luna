@@ -1,4 +1,4 @@
-use builtin.{Symbol, str};
+use builtin.{Symbol, Type, str};
 use info.target.Target;
 use info.package.PackageMetadata;
 
@@ -8,7 +8,7 @@ use info.package.PackageMetadata;
     definition's contextual package ownership.
 -}
 pub typealias Object = .Object'builtin;
-pub const object_get = .object_get'builtin;
+pub const object_get: comptime fn(comptime T: Type, Object, Symbol) -> ?T = .object_get'builtin;
 pub const mode: Symbol = .build_mode'builtin;
 pub const target: Target = .build_target'builtin;
 pub const package_metadata: comptime fn(str) -> PackageMetadata =

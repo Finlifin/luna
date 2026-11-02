@@ -26,3 +26,8 @@ Symbol 的底层字节观察仍由编译器操作提供，尚未在此协议中�
 runtime 文本接口。预期成功、目前被拒绝的用例保留在
 [原生文本方法复现](../../../development/repros/native-text-method-provenance.fl)。
 comptime 方法已通过真实 sysroot 验收。
+
+`builtin.bindings` 的两个 str 操作仍使用未注解的直接调用入口。将其改为
+`fn(str) -> u64` 与 `fn(str, u64) -> ?u8` 会形成普通函数边界，并在上述
+来源分析处被拒绝；即使操作主体可证明为 P4，外层调用也尚未取得内存证据。
+后续必须先接通 str 的存储来源，不能以标记 pure 或默认 Copy 绕过该检查。
