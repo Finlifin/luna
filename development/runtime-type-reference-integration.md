@@ -106,3 +106,27 @@ checks valid Type/value inputs plus exhaustion/retry. IIR and materialization te
 pass (`/tmp/luna-tools-v0vmlohp/result.json`). This checks arity and unconditional
 Type-parameter sorts only. It does not discharge dependent value domains,
 requirements, acquisition paths or lifetime obligations, and does not close D06.
+
+## Closed NF value-domain validation
+
+IIR now reuses the NIR argument checker for closed NF applications, including
+substitution of earlier inputs into later parameter domains. It rejects a bool
+parameter supplied with an integer, an out-of-range integer for u8, and a callable
+whose retained signature differs from its receiving domain. Nominal payloads use
+retained concrete layouts; callable and method signatures use invocation-local
+borrowed indexes. Neither lookup unfolds an NF head. Target-dependent scalar
+checks use the package target, and traversal, key hashing and layout copying
+consume the shared validation budget.
+
+Applications containing external binders, rigid inputs or runtime dependencies
+still rely on producer-side domain evidence; unconditional arity/Type-sort checks
+remain active for them. This does not prove head requirements or implement the
+missing runtime environment transport. In particular, it does not close D06.
+
+Verification in `/home/fin/luna`: `development/check.py --timeout 900 -- test -p iir
+-p materialization` exited 0 (`/tmp/luna-tools-8v1iq10v/result.json`). The regression
+first failed on the previous implementation because the malformed dependent input
+was accepted (`/tmp/luna-tools-77ce3n_f/result.json`).
+The real sysroot meta stage also passed
+(`/tmp/luna-library-znkc59jx/summary.json`); formatting check exited 0
+(`/tmp/luna-tools-f795ti_y/result.json`).

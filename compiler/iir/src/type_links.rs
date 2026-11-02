@@ -1,6 +1,14 @@
 //! Invocation-local borrowed indexes for completed type references.
 use crate::{NominalDefinition, Package, Term};
 use nir::DeclarationId;
+mod applications;
+type MethodKey<'a> = (
+    DeclarationId,
+    &'a [Term],
+    &'a Term,
+    DeclarationId,
+    &'a [Term],
+);
 use std::collections::{HashMap, HashSet};
 
 pub(super) struct TypeLinks<'a> {
@@ -11,7 +19,9 @@ pub(super) struct TypeLinks<'a> {
         DeclarationId,
         &'a [Term],
     )>,
-    callables: HashSet<(DeclarationId, &'a [Term])>,
+    callables: HashMap<(DeclarationId, &'a [Term]), &'a Term>,
+    signatures: HashMap<MethodKey<'a>, &'a Term>,
+    target: Option<nir::target::TargetData>,
     nominals: HashMap<&'a Term, &'a NominalDefinition>,
     heads: HashMap<DeclarationId, &'a nir::normal_forms::Head>,
 }
@@ -30,7 +40,9 @@ impl<'a> TypeLinks<'a> {
     pub(super) fn new(package: &'a Package, fuel: &mut usize) -> Result<Self, String> {
         let mut result = Self {
             methods: HashSet::new(),
-            callables: HashSet::new(),
+            callables: HashMap::new(),
+            signatures: HashMap::new(),
+            target: package.target,
             nominals: HashMap::new(),
             heads: HashMap::new(),
         };
@@ -39,9 +51,10 @@ impl<'a> TypeLinks<'a> {
             for argument in identity.key.arguments.iter() {
                 charge(argument, fuel)?;
             }
-            result
-                .callables
-                .insert((identity.key.declaration, &identity.key.arguments));
+            result.callables.insert(
+                (identity.key.declaration, &identity.key.arguments),
+                identity.closed_signature()?,
+            );
         }
         for dispatch in &package.dispatch {
             tick(fuel)?;
@@ -61,6 +74,31 @@ impl<'a> TypeLinks<'a> {
                     method.member,
                     &method.method_arguments,
                 ));
+            }
+        }
+        for contract in &package.interfaces {
+            tick(fuel)?;
+            charge(&contract.subject, fuel)?;
+            for argument in &contract.interface.arguments {
+                charge(argument, fuel)?;
+            }
+            for method in &contract.methods {
+                tick(fuel)?;
+                for argument in &method.type_arguments {
+                    charge(argument, fuel)?;
+                }
+                if let Ok(signature) = method.signature.ordinary() {
+                    result.signatures.insert(
+                        (
+                            contract.interface.declaration,
+                            &contract.interface.arguments,
+                            &contract.subject,
+                            method.declaration,
+                            &method.type_arguments,
+                        ),
+                        signature,
+                    );
+                }
             }
         }
         for nominal in &package.nominals {
@@ -150,7 +188,7 @@ impl<'a> TypeLinks<'a> {
                     }
                     if !self
                         .callables
-                        .contains(&(*declaration, arguments.as_slice()))
+                        .contains_key(&(*declaration, arguments.as_slice()))
                     {
                         return Err("IIR frozen callable has no signature evidence".into());
                     }
@@ -168,6 +206,7 @@ impl<'a> TypeLinks<'a> {
                         .heads
                         .get(head)
                         .ok_or("IIR normal-form reference is dangling")?;
+                    self.validate_application(definition, arguments, fuel)?;
                     if arguments.len() != definition.parameters.len() {
                         return Err(format!(
                             "IIR normal-form head expects {} inputs, found {}",

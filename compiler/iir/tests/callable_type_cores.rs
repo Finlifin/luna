@@ -215,3 +215,143 @@ fn retained_signatures_validate_normal_form_input_shapes() {
         }
     }
 }
+
+#[test]
+fn retained_normal_forms_check_dependent_value_domains() {
+    use nir::normal_forms::{Head, Kind, Parameter, Role};
+    let type_input = key(11).declaration;
+    let head = Head {
+        declaration: key(10).declaration,
+        collector: None,
+        role: Role::Opaque,
+        requirements: vec![],
+        parameters: vec![
+            Parameter {
+                declaration: type_input,
+                binding: nir::program::LocalId {
+                    owner: 10,
+                    index: 0,
+                },
+                kind: Kind::Type,
+                ty: Term::Primitive(Primitive::Type),
+            },
+            Parameter {
+                declaration: key(12).declaration,
+                binding: nir::program::LocalId {
+                    owner: 10,
+                    index: 1,
+                },
+                kind: Kind::Value,
+                ty: Term::Rigid {
+                    declaration: type_input,
+                    sort: nir::Sort::Type,
+                },
+            },
+        ],
+    };
+    for (domain, value, valid) in [
+        (Primitive::Bool, Term::Bool(true), true),
+        (
+            Primitive::U8,
+            Term::Integer(comptime_runtime::Integer::from_u128(255)),
+            true,
+        ),
+        (
+            Primitive::Bool,
+            Term::Integer(comptime_runtime::Integer::from_u128(1)),
+            false,
+        ),
+        (
+            Primitive::U8,
+            Term::Integer(comptime_runtime::Integer::from_u128(256)),
+            false,
+        ),
+    ] {
+        let result = Term::NormalForm {
+            head: head.declaration,
+            sort: nir::Sort::Type,
+            arguments: vec![Term::Primitive(domain), value],
+        };
+        let identity = CallableIdentity::intern(
+            key(1),
+            signature(result),
+            &mut TypeInterner::default(),
+            &mut 10_000,
+        )
+        .unwrap();
+        let graph = iir::Package {
+            normal_forms: vec![head.clone()],
+            callable_identities: vec![identity],
+            ..Default::default()
+        };
+        let checked = graph.validate(&mut 100_000);
+        if valid {
+            checked.unwrap();
+        } else {
+            assert!(
+                checked
+                    .expect_err("dependent value domain was not checked")
+                    .contains("normal-form")
+            );
+        }
+    }
+}
+
+#[test]
+fn normal_form_callable_inputs_use_retained_signatures() {
+    use nir::normal_forms::{Head, Kind, Parameter, Role};
+    let expected = signature(Term::Primitive(Primitive::Bool));
+    let head = Head {
+        declaration: key(10).declaration,
+        collector: None,
+        role: Role::Opaque,
+        requirements: vec![],
+        parameters: vec![Parameter {
+            declaration: key(11).declaration,
+            binding: nir::program::LocalId {
+                owner: 10,
+                index: 0,
+            },
+            kind: Kind::Value,
+            ty: expected.clone(),
+        }],
+    };
+    for (actual, valid) in [(Primitive::Bool, true), (Primitive::U8, false)] {
+        let mut pool = TypeInterner::default();
+        let value = Term::FunctionValue {
+            declaration: key(2).declaration,
+            arguments: vec![],
+        };
+        let result = Term::NormalForm {
+            head: head.declaration,
+            sort: nir::Sort::Type,
+            arguments: vec![value],
+        };
+        let graph = iir::Package {
+            normal_forms: vec![head.clone()],
+            callable_identities: vec![
+                CallableIdentity::intern(key(1), signature(result), &mut pool, &mut 10000).unwrap(),
+                CallableIdentity::intern(
+                    key(2),
+                    signature(Term::Primitive(actual)),
+                    &mut pool,
+                    &mut 10000,
+                )
+                .unwrap(),
+            ],
+            ..Default::default()
+        };
+        if valid {
+            graph.validate(&mut 100000).unwrap();
+            assert!(graph.validate(&mut 0).is_err());
+            graph.validate(&mut 100000).unwrap();
+        } else {
+            assert!(
+                graph
+                    .validate(&mut 100000)
+                    .unwrap_err()
+                    .contains("normal-form")
+            );
+        }
+    }
+}
