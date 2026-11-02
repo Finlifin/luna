@@ -1,0 +1,29 @@
+use builtin.{Integer, Order};
+use List;
+use numeric.ordering.ComptimeOrd;
+
+{-
+    Lexicographic ordering follows each element's protocol. Compare a fixed
+    pair of snapshots in index order and stop at the first unequal pair.
+    Only an equal common prefix permits comparing lengths. Comparator effects
+    and failures follow ordinary comptime invocation rules.
+-}
+comptime impl ComptimeOrd for List<T> where T:- ComptimeOrd {
+    comptime fn cmp(self, other: Self) -> Order {
+        let left = self;
+        let right = other;
+        let left_count = left.length();
+        let right_count = right.length();
+        let count = if left_count < right_count { left_count } else { right_count };
+        var index: Integer = 0;
+        while index < count {
+            let order = left[index].as(ComptimeOrd).cmp(right[index]);
+            order match {
+                .equal => {},
+                _ => { return order; },
+            };
+            index = index + 1;
+        };
+        left_count.cmp(right_count)
+    }
+}

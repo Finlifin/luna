@@ -12,8 +12,9 @@ scalar_math.fl 是与 builtin.math 对应的 comptime 标量函数，通过 VM i
 当前覆盖固定宽度整数、usize／isize、任意精度 Integer、bool、char 和 str。
 bool 按 false < true 排序；char 按 Unicode scalar 排序；str 按 UTF-8 字节
 做字典序比较，公共前缀相同时短者在前，不做 locale 或 Unicode normalization。
-浮点没有默认全序实现，不能把 NaN 的普通比较当成全序。Symbol 及复合容器的
-全序尚未提供，用户定义类型可显式实现协议。
+浮点没有默认全序实现，不能把 NaN 的普通比较当成全序。List<T> 在元素实现
+ComptimeOrd 时按字典序组合；Symbol 及其他复合容器的全序尚未提供，
+用户定义类型可显式实现协议。
 
 ```flurry
 comptime fn ordered_names() -> List<str> {

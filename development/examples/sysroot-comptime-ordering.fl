@@ -9,7 +9,11 @@ comptime fn ordered_text() -> bool {
     let character: char = 'é';
     let words: List<str> = ["é", "a", "", "ab", "a"];
     let sorted = words.sort_by(|left, right| left.lt(right));
+    let groups: List<List<u8>> = [[2], [], [1, 2], [1]];
+    let ordered_groups = groups.sort_by(|left, right| left.lt(right));
     sorted.eq(["", "a", "a", "ab", "é"])
+        and ordered_groups.eq([[], [1], [1, 2], [2]])
+        and groups[0].eq([2])
         and ("ab".cmp("ac") matches .less)
         and ("same".cmp("same") matches .equal)
         and ("ab".cmp("a") matches .greater)

@@ -104,3 +104,103 @@ fn custom_ordering_composes_through_generic_parent_bounds() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn lists_compare_common_prefixes_before_lengths_and_compose_recursively() {
+    let package = compile(
+        r#"
+        comptime fn check()->bool {
+            let empty:List<u8> = [];
+            let short:List<u8> = [1];
+            let long:List<u8> = [1,2];
+            let larger:List<u8> = [2];
+            let nested:List<List<u8>> = [[],[1],[1,2]];
+            (empty.cmp(empty) matches .equal) and empty.lt(short)
+                and short.lt(long) and long.gt(short) and long.lt(larger)
+                and larger.gt(long) and long.eq([1,2]) and long.le([1,2])
+                and nested.lt([[],[1],[2]]) and nested.ge([[],[1],[1,2]])
+        }
+    "#,
+    )
+    .unwrap();
+    for mut vm in [
+        Interpreter::for_comptime(&package, Budget::default()).unwrap(),
+        Interpreter::for_comptime_tree(&package, Budget::default()).unwrap(),
+    ] {
+        assert_eq!(
+            vm.invoke(support::id(&package, "check"), vec![]).unwrap(),
+            Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn list_ordering_uses_element_protocols_short_circuits_and_keeps_snapshots() {
+    let package = compile(
+        r#"
+        struct Key {rank:u8, ignored:bool}
+        comptime impl ComptimeEq for Key {
+            comptime fn eq(self,other:Self)->bool {self.rank == other.rank}
+        }
+        comptime impl ComptimeOrd for Key {
+            comptime fn cmp(self,other:Self)->Order {
+                assumes self.rank != 99;
+                let rank=self.rank;
+                let other_rank=other.rank;
+                self.rank=0;
+                other.rank=0;
+                rank.cmp(other_rank)
+            }
+        }
+        comptime fn check()->bool {
+            let left:List<Key> = [Key {rank:2,ignored:false}, Key {rank:99,ignored:false}];
+            let right:List<Key> = [Key {rank:1,ignored:true}, Key {rank:99,ignored:true}];
+            let equal_left:List<Key> = [Key {rank:1,ignored:false}];
+            let equal_right:List<Key> = [Key {rank:1,ignored:true}];
+            (left.cmp(right) matches .greater)
+                and left[0].rank == 2 and right[0].rank == 1
+                and (equal_left.cmp(equal_right) matches .equal)
+        }
+        comptime fn fail()->Order {
+            let left:List<Key> = [Key {rank:99,ignored:false}];
+            left.cmp(left)
+        }
+        comptime fn empty()->bool {
+            let left:List<Key> = [];
+            let right:List<Key> = [Key {rank:99,ignored:false}];
+            left.lt(right)
+        }
+    "#,
+    )
+    .unwrap();
+    for mut vm in [
+        Interpreter::for_comptime(&package, Budget::default()).unwrap(),
+        Interpreter::for_comptime_tree(&package, Budget::default()).unwrap(),
+    ] {
+        assert!(vm.invoke(support::id(&package, "fail"), vec![]).is_err());
+        for name in ["check", "empty"] {
+            assert_eq!(
+                vm.invoke(support::id(&package, name), vec![]).unwrap(),
+                Value::Bool(true)
+            );
+        }
+    }
+}
+
+#[test]
+fn list_ordering_requires_element_ordering_even_for_empty_lists() {
+    let failure = compile(
+        r#"
+        struct Unordered {}
+        comptime impl ComptimeEq for Unordered {
+            comptime fn eq(self,other:Self)->bool {true}
+        }
+        comptime fn invalid()->Order {
+            let values:List<Unordered> = [];
+            values.cmp(values)
+        }
+    "#,
+    )
+    .unwrap_err();
+    assert!(!failure.contains("parsing failed"), "{failure}");
+}
