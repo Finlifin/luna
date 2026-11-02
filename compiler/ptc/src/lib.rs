@@ -99,6 +99,8 @@ pub struct Context {
 #[derive(Clone, Copy, Debug)]
 pub struct Budget {
     pub steps: usize,
+    /// Bound syntax/proof nesting and active search decisions. Propagated
+    /// literals consume steps without introducing another decision level.
     pub max_depth: usize,
 }
 impl Default for Budget {

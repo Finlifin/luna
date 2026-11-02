@@ -1,4 +1,4 @@
-//! Explicit decision continuations. Logical depth remains metered, while
+//! Explicit decision continuations. Decision depth remains metered, while
 //! branch restoration and backjumping no longer depend on the Rust call stack.
 use super::{Conflict, Search, SearchResult, UnknownReason, boolean, learning};
 use std::fmt;
@@ -107,7 +107,7 @@ impl Search<'_> {
                 result = next;
                 if let Some(target) = jump {
                     backjump(&mut frames, &mut assignment, &mut decision_level, target);
-                    depth = entry_depth + assignment.len();
+                    depth = entry_depth + decision_level;
                     continue 'search;
                 }
                 let Some(frame) = frames.pop() else {
@@ -135,7 +135,7 @@ impl Search<'_> {
                             result = next;
                             if let Some(target) = jump {
                                 backjump(&mut frames, &mut assignment, &mut decision_level, target);
-                                depth = entry_depth + assignment.len();
+                                depth = entry_depth + decision_level;
                                 continue 'search;
                             }
                             let reason = assignment.undo(index);
@@ -341,7 +341,7 @@ impl Search<'_> {
             }) => {
                 let start = assignment.len();
                 assignment.assign(index, value, decision_level, Reason::Learned(reason));
-                return Step::Descend(Frame::Propagated { start }, depth + 1);
+                return Step::Descend(Frame::Propagated { start }, depth);
             }
             Ok(learning::Propagation::None) => {}
         }
@@ -372,7 +372,7 @@ impl Search<'_> {
                         .probe(index, !value, |values| self.clause_conflict(trace, values));
                     let start = assignment.len();
                     assignment.assign(index, value, decision_level, Reason::RootClause(reason));
-                    return Step::Descend(Frame::Propagated { start }, depth + 1);
+                    return Step::Descend(Frame::Propagated { start }, depth);
                 }
                 Ok(Propagation::None) => {}
             }
@@ -394,8 +394,9 @@ impl Search<'_> {
                 }
                 assignment.assign(index, value, decision_level, Reason::Boolean(support));
             }
-            let child_depth = depth + assignment.len() - start;
-            return Step::Descend(Frame::Propagated { start }, child_depth);
+            // Forced assignments stay at the current decision level. Their
+            // traversal and evidence consume steps, not decision depth.
+            return Step::Descend(Frame::Propagated { start }, depth);
         }
         let next_unassigned = assignment.values().iter().position(Option::is_none);
         let theory = self.theory_cached_changes(
@@ -427,7 +428,7 @@ impl Search<'_> {
                     decision_level,
                     Reason::Theory(unit.reason),
                 );
-                return Step::Descend(Frame::Propagated { start }, depth + 1);
+                return Step::Descend(Frame::Propagated { start }, depth);
             }
         }
         if let Some(index) = next_unassigned {
@@ -460,6 +461,51 @@ mod tests {
     use super::*;
     use crate::{Context, Formula, Terms, collect};
     use nir::{DeclarationId, Primitive, Sort, Term};
+
+    #[test]
+    fn decision_depth_exhaustion_restores_state_and_allows_retry() {
+        let atom = |local| {
+            Formula::equal(
+                Term::Rigid {
+                    declaration: DeclarationId {
+                        package: 988,
+                        local,
+                    },
+                    sort: Sort::Type,
+                },
+                Term::Primitive(Primitive::Bool),
+            )
+        };
+        let formula = Formula::Or(vec![atom(0), atom(1)]);
+        let context = Context::default();
+        let mut atoms = Vec::new();
+        let mut terms = Terms::default();
+        collect(&formula, &mut atoms, &mut terms, 0, 128, &[]).unwrap();
+        let mut search = Search {
+            boolean: None,
+            theory_state: None,
+            learned: learning::Clauses::default(),
+            context: &context,
+            formula: &formula,
+            atoms: &atoms,
+            terms: &terms,
+            steps: 100_000,
+            max_depth: 1,
+        };
+        let mut assignment = vec![None; atoms.len()];
+        assert!(matches!(
+            search.solve(&mut assignment, 0),
+            SearchResult::Unknown(UnknownReason::BudgetExhausted)
+        ));
+        assert!(assignment.iter().all(Option::is_none));
+        search.max_depth = 2;
+        search.steps = 100_000;
+        assert!(matches!(
+            search.solve(&mut assignment, 0),
+            SearchResult::Model(_)
+        ));
+        assert!(assignment.iter().all(Option::is_none));
+    }
 
     #[test]
     fn every_search_exit_restores_the_entry_assignment() {
@@ -769,7 +815,7 @@ mod tests {
             atoms: &atoms,
             terms: &terms,
             steps: 100_000,
-            max_depth: 128,
+            max_depth: 2,
         };
         let mut assignment = vec![None; 3];
         BACKJUMPS.with(|n| n.set(0));
@@ -787,6 +833,8 @@ mod tests {
             analysis::RESOLUTIONS.with(|n| n.get()) > 0,
             "production search skipped trail conflict analysis"
         );
+        // Search decision depth is separate from proof-tree nesting.
+        search.max_depth = 128;
         // The decision's opposite branch must still benefit from x=false.
         assignment[0] = Some(true);
         let learning::Propagation::Unit {

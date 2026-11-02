@@ -333,6 +333,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn wide_root_propagation_does_not_consume_decision_depth() {
+        let input = |local| Term::Rigid {
+            declaration: DeclarationId {
+                package: 987,
+                local,
+            },
+            sort: Sort::Type,
+        };
+        let mut context = Context::default();
+        for right in 1..24 {
+            for left in 0..right {
+                context.assume(Formula::equal(input(left), input(right)).negate());
+            }
+        }
+        let budget = Budget {
+            steps: 1_000_000,
+            max_depth: 8,
+        };
+        let outcome = context.prove(Formula::False, budget);
+        let Outcome::NotEntailed(witness) = outcome else {
+            panic!("root propagation does not introduce decisions: {outcome:?}");
+        };
+        context.verify_witness(&witness, budget).unwrap();
+        assert!(matches!(
+            context.prove(
+                Formula::False,
+                Budget {
+                    steps: 10,
+                    ..budget
+                }
+            ),
+            Outcome::Unknown {
+                reason: UnknownReason::BudgetExhausted,
+                ..
+            }
+        ));
+        assert!(matches!(
+            context.prove(Formula::False, budget),
+            Outcome::NotEntailed(_)
+        ));
+    }
+
+    #[test]
     fn independent_type_inputs_do_not_require_deep_model_types() {
         let input = |local| Term::Rigid {
             declaration: DeclarationId {
