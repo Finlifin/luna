@@ -4,11 +4,11 @@
 // resolves the same names through the builtin package dependency.
 concat!(
     "mod attrs {\n", include!("attrs_source.rs"), "\n}\n",
-    "mod builtin {\n", include_str!("../../../../library/builtin/primitives.fl"),
-    "\nmod bindings {\n", include_str!("../../../../library/builtin/bindings.fl"), "\n} pub mod compiler {pub use bindings.*;} }\n",
+    "mod primitives {\n", include_str!("../../../../library/builtin/primitives.fl"),
+    "\n} mod comparison {\n", include_str!("../../../../library/builtin/numeric/comparison.fl"), "\n} mod builtin {pub use primitives.*; pub use comparison.Order;\nmod bindings {\n", include_str!("../../../../library/builtin/bindings.fl"), "\n} pub mod compiler {pub use bindings.*;} }\n",
     "mod bindings {\n", include_str!("../../../../library/meta/bindings.fl"), "\n}\n",
     "mod text_impl {mod bindings {\n", include_str!("../../../../library/meta/text_impl/bindings.fl"), "\n}}\n",
-    "mod numeric {mod bindings {\n", include_str!("../../../../library/meta/numeric/bindings.fl"), "\n} mod equality {\n", include_str!("../../../../library/meta/numeric/equality.fl"), "\n}}\n",
+    "mod numeric {mod bindings {\n", include_str!("../../../../library/meta/numeric/bindings.fl"), "\n} mod ordering {\n", include_str!("../../../../library/meta/numeric/ordering.fl"), "\n} mod equality {\n", include_str!("../../../../library/meta/numeric/equality.fl"), "\n}}\n",
     "mod data {\n",
     "mod hashing {\n", include_str!("../../../../library/meta/data/hashing.fl"), "\n}\n",
     "mod patterns {\n", include_str!("../../../../library/meta/data/patterns.fl"), "\n}\n",
@@ -29,4 +29,4 @@ concat!(
     "mod newtypes {\n", include_str!("../../../../library/meta/definitions/newtypes.fl"), "\n}\n",
     "}\n",
     include_str!("../../../../library/meta/lib.fl"),
-).replace("use numeric.{scalar_math, equality};\n", "use numeric.equality;\n").replace("pub mod math {\n    pub use scalar_math.*;\n}\n\n", "")
+).replace("use numeric.{scalar_math, equality, ordering};\n", "use numeric.{equality, ordering};\n").replace("pub mod math {\n    pub use scalar_math.*;\n}\n\n", "")

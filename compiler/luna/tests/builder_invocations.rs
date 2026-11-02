@@ -35,7 +35,10 @@ impl Fixture {
         std::fs::write(
             self.0.join("builtin/lib.fl"),
             concat!(
+                "mod primitives {\n",
                 include_str!("../../../library/builtin/primitives.fl"),
+                "\n} pub use primitives.*;\n",
+                include_str!("../../../library/builtin/numeric/comparison.fl"),
                 "\npub mod compiler {\n",
                 include_str!("../../../library/builtin/bindings.fl"),
                 "\n}\n",

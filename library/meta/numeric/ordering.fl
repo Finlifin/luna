@@ -1,0 +1,148 @@
+use builtin.{Order, Integer, bool, char, str, u8, u16, u32, u64, u128,
+    i8, i16, i32, i64, i128, usize, isize};
+use equality.ComptimeEq;
+use text_impl.bindings;
+
+{-
+    Total ordering has a separate comptime protocol. It shares Order with the
+    runtime interface, while method discovery prefers this trait at comptime.
+    Floating-point values are excluded because ordinary NaN comparison is not
+    a total order.
+-}
+pub pure comptime trait ComptimeOrd :- ComptimeEq {
+    comptime fn cmp(self, other: Self) -> Order;
+    comptime fn lt(self, other: Self) -> bool = self.cmp(other) match {
+        .less => true,
+        _ => false,
+    };
+    comptime fn le(self, other: Self) -> bool = self.cmp(other) match {
+        .greater => false,
+        _ => true,
+    };
+    comptime fn gt(self, other: Self) -> bool = self.cmp(other) match {
+        .greater => true,
+        _ => false,
+    };
+    comptime fn ge(self, other: Self) -> bool = self.cmp(other) match {
+        .less => false,
+        _ => true,
+    };
+}
+
+comptime impl ComptimeOrd for u8 {
+    comptime fn cmp(self, other: Self) -> Order {
+        if self < other { .less } else if self == other { .equal } else { .greater }
+    }
+}
+
+comptime impl ComptimeOrd for u16 {
+    comptime fn cmp(self, other: Self) -> Order {
+        if self < other { .less } else if self == other { .equal } else { .greater }
+    }
+}
+
+comptime impl ComptimeOrd for u32 {
+    comptime fn cmp(self, other: Self) -> Order {
+        if self < other { .less } else if self == other { .equal } else { .greater }
+    }
+}
+
+comptime impl ComptimeOrd for u64 {
+    comptime fn cmp(self, other: Self) -> Order {
+        if self < other { .less } else if self == other { .equal } else { .greater }
+    }
+}
+
+comptime impl ComptimeOrd for u128 {
+    comptime fn cmp(self, other: Self) -> Order {
+        if self < other { .less } else if self == other { .equal } else { .greater }
+    }
+}
+
+comptime impl ComptimeOrd for i8 {
+    comptime fn cmp(self, other: Self) -> Order {
+        if self < other { .less } else if self == other { .equal } else { .greater }
+    }
+}
+
+comptime impl ComptimeOrd for i16 {
+    comptime fn cmp(self, other: Self) -> Order {
+        if self < other { .less } else if self == other { .equal } else { .greater }
+    }
+}
+
+comptime impl ComptimeOrd for i32 {
+    comptime fn cmp(self, other: Self) -> Order {
+        if self < other { .less } else if self == other { .equal } else { .greater }
+    }
+}
+
+comptime impl ComptimeOrd for i64 {
+    comptime fn cmp(self, other: Self) -> Order {
+        if self < other { .less } else if self == other { .equal } else { .greater }
+    }
+}
+
+comptime impl ComptimeOrd for i128 {
+    comptime fn cmp(self, other: Self) -> Order {
+        if self < other { .less } else if self == other { .equal } else { .greater }
+    }
+}
+
+comptime impl ComptimeOrd for usize {
+    comptime fn cmp(self, other: Self) -> Order {
+        if self < other { .less } else if self == other { .equal } else { .greater }
+    }
+}
+
+comptime impl ComptimeOrd for isize {
+    comptime fn cmp(self, other: Self) -> Order {
+        if self < other { .less } else if self == other { .equal } else { .greater }
+    }
+}
+
+comptime impl ComptimeOrd for Integer {
+    comptime fn cmp(self, other: Self) -> Order {
+        if self < other { .less } else if self == other { .equal } else { .greater }
+    }
+}
+
+comptime impl ComptimeOrd for char {
+    comptime fn cmp(self, other: Self) -> Order {
+        if self < other { .less } else if self == other { .equal } else { .greater }
+    }
+}
+
+comptime impl ComptimeOrd for bool {
+    comptime fn cmp(self, other: Self) -> Order {
+        if self == other { .equal } else if self { .greater } else { .less }
+    }
+}
+
+{- UTF-8 byte order is lexicographic, with a proper prefix ordered first. -}
+comptime impl ComptimeOrd for str {
+    comptime fn cmp(self, other: Self) -> Order {
+        let left_length = bindings.byte_length(self);
+        let right_length = bindings.byte_length(other);
+        let count = if left_length < right_length { left_length } else { right_length };
+        var index: u64 = 0;
+        while index < count {
+            let left = bindings.byte(self, index);
+            let right = bindings.byte(other, index);
+            left match {
+                a? => right match {
+                    b? => {
+                        if a < b { return .less; };
+                        if a > b { return .greater; };
+                    },
+                    null => { assumes false; },
+                },
+                null => { assumes false; },
+            };
+            index = index + 1;
+        };
+        if left_length < right_length { .less }
+        else if left_length == right_length { .equal }
+        else { .greater }
+    }
+}

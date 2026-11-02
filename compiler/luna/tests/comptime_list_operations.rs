@@ -456,7 +456,10 @@ fn ordinary_package_uses_public_list_operations_without_builtin_access() {
     std::fs::write(
         &builtin,
         concat!(
+            "mod primitives {\n",
             include_str!("../../../library/builtin/primitives.fl"),
+            "\n} pub use primitives.*;\n",
+            include_str!("../../../library/builtin/numeric/comparison.fl"),
             "\npub mod compiler {\n",
             include_str!("../../../library/builtin/bindings.fl"),
             "\n}\n",
@@ -1252,7 +1255,8 @@ fn list_ranges_reject_incompatible_inputs_and_propagate_invocation_limits() {
 fn list_transform_collectors_preserve_order_snapshots_and_optional_layers() {
     let source = include_str!("../../../development/examples/sysroot-meta-lists.fl");
     let package = compile(&format!(
-        "typealias Integer = .Integer'builtin;
+        "use meta.builtin.u8;
+        typealias Integer = .Integer'builtin;
         typealias void = .void'builtin;
         typealias Type = .Type'builtin;
         typealias u32 = .u32'builtin;

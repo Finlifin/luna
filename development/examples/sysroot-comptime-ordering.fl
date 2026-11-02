@@ -1,0 +1,31 @@
+{- Ordinary comptime ordering shares Order without selecting runtime methods. -}
+comptime fn ordered_text() -> bool {
+    let small: u8 = 7;
+    let larger: u8 = 9;
+    let negative: i64 = -3;
+    let positive: i64 = 1;
+    let pointer_width: usize = 2;
+    let signed_pointer_width: isize = -1;
+    let character: char = 'é';
+    let words: List<str> = ["é", "a", "", "ab", "a"];
+    let sorted = words.sort_by(|left, right| left.lt(right));
+    sorted.eq(["", "a", "a", "ab", "é"])
+        and ("ab".cmp("ac") matches .less)
+        and ("same".cmp("same") matches .equal)
+        and ("ab".cmp("a") matches .greater)
+        and "a".le("a") and "b".gt("a") and "b".ge("b")
+        and false.lt(true) and true.gt(false)
+        and (small.cmp(larger) matches .less)
+        and negative.lt(positive)
+        and pointer_width.gt(1) and signed_pointer_width.lt(0)
+        and character.gt('a')
+        and (10000000000000000000000000000000000000000).gt(1)
+}
+const checked_ordering = ordered_text();
+
+test comptime_ordering {
+    inline if checked_ordering {} else { assumes false; };
+    let runtime_value: u8 = 1;
+    let runtime_less = runtime_value.lt(2);
+    assumes runtime_less;
+}
