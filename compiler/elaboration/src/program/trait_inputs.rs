@@ -107,6 +107,11 @@ impl Checker<'_, '_> {
         domain: &Term,
         span: Span,
     ) -> Result<Term, Error> {
+        // An empty environment still goes through domain validation and
+        // associated-type observation. It needs no declaration-table scan.
+        if self.alias_substitution.is_empty() {
+            return self.instantiate_trait_domain(domain, &[], &[], span);
+        }
         let mut binders = Vec::new();
         let mut values = Vec::new();
         // Members can inherit the same declaration parameter. A substitution
@@ -117,14 +122,28 @@ impl Checker<'_, '_> {
                 declaration: declaration(self.package, &self.package_identities, *owner),
                 sort: Sort::Type,
             };
-            for binder in std::iter::once(self_binder).chain(self.declaration_binders(*owner)) {
-                if !seen.insert(binder.declaration) || !domain.mentions_rigid(binder.declaration) {
+            // Select identities before obtaining their sorts. Constructing the
+            // complete binder list here repeatedly searched the global domain
+            // table for every unrelated parameter at every type reference.
+            for id in std::iter::once(self_binder.declaration)
+                .chain(self.type_parameters[owner].iter().copied())
+            {
+                if !seen.insert(id) {
                     continue;
                 }
-                if let Some(value) = self.alias_substitution.get(&binder.declaration) {
-                    binders.push(binder);
-                    values.push(value.clone());
+                let Some(value) = self.alias_substitution.get(&id) else {
+                    continue;
+                };
+                if !domain.mentions_rigid(id) {
+                    continue;
                 }
+                let binder = if id == self_binder.declaration {
+                    self_binder
+                } else {
+                    self.input_binders(&[id])[0]
+                };
+                binders.push(binder);
+                values.push(value.clone());
             }
         }
         let values = values
