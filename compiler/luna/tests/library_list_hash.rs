@@ -439,3 +439,71 @@ fn error_protocols_require_both_payloads_to_supply_the_requested_interface() {
         }
     }
 }
+
+#[test]
+fn key_invocation_clones_shared_payloads_without_charging_their_expanded_size() {
+    use comptime_executor::{Context, KeyProtocol};
+    let package = compile(
+        "struct Key {values:List<bool>}
+        comptime impl ComptimeEq for Key {comptime fn eq(self,other:Self)->bool {true}}
+        comptime impl ComptimeHash for Key {comptime fn hash(self)->u64 {0}}
+        comptime fn make()->Key {Key {values:[]}}",
+    )
+    .unwrap();
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let empty = vm.invoke(support::id(&package, "make"), vec![]).unwrap();
+    let nir::Term::Function { result, .. } = &package
+        .functions
+        .iter()
+        .find(|f| f.declaration == support::id(&package, "make"))
+        .unwrap()
+        .signature
+    else {
+        panic!("signature")
+    };
+    let mut protocol = prepare_protocol(&package, result);
+    let mut costs = Vec::new();
+    for len in [32, 4096] {
+        let mut key = empty.clone();
+        let Value::Record { fields, .. } = &mut key else {
+            panic!("record")
+        };
+        let Value::List { values, .. } = &mut fields[0] else {
+            panic!("list")
+        };
+        *values = vec![Value::Bool(true); len].into();
+        // Admission checks actual element domains and warms only immutable data.
+        let snapshot = protocol.admit(key, &mut Context::new(1_000_000)).unwrap();
+        assert!(protocol.hash(&snapshot, &mut Context::new(1)).is_err());
+        let mut context = Context::new(1_000_000);
+        protocol.hash(&snapshot, &mut context).unwrap();
+        costs.push(1_000_000 - context.remaining());
+        assert!(
+            protocol
+                .equivalent(&snapshot, &snapshot, &mut context)
+                .unwrap()
+        );
+        let mut invalid = snapshot.value().clone();
+        let Value::Record { fields, .. } = &mut invalid else {
+            panic!("record")
+        };
+        let Value::List { values, .. } = &mut fields[0] else {
+            panic!("list")
+        };
+        values[0] = Value::Char('x');
+        assert!(
+            protocol
+                .admit(invalid, &mut Context::new(1_000_000))
+                .is_err()
+        );
+        assert!(
+            protocol
+                .hash(&snapshot, &mut Context::new(1_000_000))
+                .is_ok()
+        );
+    }
+    assert_eq!(
+        costs[0], costs[1],
+        "a constant key method must not pay for payload cloning that does not occur"
+    );
+}

@@ -13,6 +13,7 @@ mod bytecode;
 mod cleanup;
 mod closure_identity;
 mod code_values;
+mod immutable_cloning;
 mod literal_values;
 pub use closure_identity::ClosureIdentity;
 mod scoped_restore;
@@ -330,9 +331,10 @@ impl Value {
         )
     }
 
-    /// Bound copying of immutable data supplied by the host before cloning it.
-    /// This checks representation only; nominal formation and argument types
-    /// still belong to the invocation checker. It does not freeze storage.
+    /// Bound the expanded immutable representation, independently of sharing.
+    /// Full-content comparisons retain this allowance; host clones can use
+    /// `immutable_clone_work` to account for persistent payloads. Neither check
+    /// establishes nominal formation, argument membership or frozen storage.
     pub fn immutable_copy_work(&self) -> Option<usize> {
         self.scoped_copy_work(&BTreeSet::new())
     }
@@ -350,7 +352,7 @@ impl Value {
 
     /// Separate expanded representation size from inspection work. Sharing a
     /// list payload does not discount its semantic size or depth limits. Copy
-    /// callers currently use this size as a conservative work allowance; cached
+    /// and comparison callers can retain the expanded allowance; cached
     /// summaries only reduce the inspection component returned here.
     fn scoped_representation_work(
         &self,

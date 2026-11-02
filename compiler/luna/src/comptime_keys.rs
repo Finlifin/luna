@@ -147,7 +147,7 @@ impl Protocol {
         inputs: &[&Value],
         context: &mut Context,
     ) -> Result<Value, Error<String>> {
-        // Reject host references/callables and account for copying before
+        // Reject mutable host identities and account for cloning before
         // cloning inputs into the fresh invocation. This is not value freezing.
         for value in inputs {
             input_work(value, context)?;
@@ -322,7 +322,7 @@ impl std::fmt::Display for Protocol {
 }
 fn input_work(value: &Value, context: &mut Context) -> Result<(), Error<String>> {
     let work = value
-        .immutable_copy_work()
+        .immutable_clone_work()
         .ok_or_else(|| Error::Protocol("key input is not bounded immutable data".into()))?;
     context.spend::<String>(work)
 }

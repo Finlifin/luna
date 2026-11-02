@@ -555,7 +555,7 @@ fn execute(
             for input in inputs {
                 let work = input
                     .value()
-                    .immutable_copy_work()
+                    .immutable_clone_work()
                     .ok_or("unbounded invocation input")?;
                 context.spend::<String>(work).map_err(|e| e.to_string())?;
             }
