@@ -1,6 +1,7 @@
 //! Construct and replay concrete Type models. Candidate choices are private
 //! search state, never equality evidence or a complete enumeration of Type.
 use super::*;
+mod combinations;
 
 #[cfg(test)]
 thread_local! {
@@ -99,50 +100,34 @@ impl Search<'_> {
             domains.push((root, candidates));
             expandable.push(needs_shapes);
         }
-        let mut positions = vec![0; domains.len()];
+        let mut sizes: Vec<_> = domains
+            .iter()
+            .map(|(_, candidates)| candidates.len())
+            .collect();
         let mut previous_sizes = vec![0; domains.len()];
+        let mut positions = combinations::first(&sizes, &previous_sizes)?;
         let mut next_width = 0;
         loop {
-            // Cover candidate-index scans, carry propagation and resets even
-            // when an old combination is skipped without constructing a model.
+            // Meter the index traversal as well as actual model construction.
             self.steps = self
                 .steps
-                .checked_sub(domains.len().saturating_mul(4).saturating_add(1))?;
-            // After extending the domains, replay only combinations containing
-            // a new candidate. Earlier failed choices remain failed in this
-            // immutable theory world; they grant no learned logical fact.
-            let fresh = domains.is_empty()
-                || positions
-                    .iter()
-                    .zip(&previous_sizes)
-                    .any(|(position, previous)| position >= previous);
+                .checked_sub(domains.len().saturating_mul(8).saturating_add(1))?;
             let mut free = HashMap::new();
-            for ((root, candidates), &position) in domains.iter().zip(&positions).filter(|_| fresh)
-            {
+            for ((root, candidates), &position) in domains.iter().zip(&positions) {
                 let candidate = &candidates[position];
                 nir::type_computations::charge_term(candidate, &mut self.steps).ok()?;
                 free.insert(*root, candidate.clone());
             }
-            if fresh {
-                if let Some(model) = self.witness_with_choices(theory, &representatives, free) {
-                    return Some(model);
-                }
+            if let Some(model) = self.witness_with_choices(theory, &representatives, free) {
+                return Some(model);
             }
-            if let Some(next) = (0..positions.len())
-                .rev()
-                .find(|&index| positions[index] + 1 < domains[index].1.len())
-            {
-                positions[next] += 1;
-                positions[next + 1..].fill(0);
+            if combinations::advance(&mut positions, &sizes, &previous_sizes) {
                 continue;
             }
             if !expandable.iter().any(|expand| *expand) {
                 return None;
             }
-            previous_sizes = domains
-                .iter()
-                .map(|(_, candidates)| candidates.len())
-                .collect();
+            previous_sizes.clone_from(&sizes);
             loop {
                 // This bound is search coverage, never a finite-domain axiom.
                 if next_width > self.terms.nodes.len() {
@@ -186,7 +171,11 @@ impl Search<'_> {
                     break;
                 }
             }
-            positions.fill(0);
+            sizes = domains
+                .iter()
+                .map(|(_, candidates)| candidates.len())
+                .collect();
+            positions = combinations::first(&sizes, &previous_sizes)?;
         }
     }
 
