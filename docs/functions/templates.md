@@ -138,6 +138,25 @@ template test 通过唯一一个锚定子句参数绑定测试正文。唯一性
 
 模板提供初始化和合法上下文，测试正文在该上下文下检查；实例退出沿实际控制路径清理。一个普通测试不需要为了获得相同的资源清理而先变成模板。
 
+测试模板的 `meta.List<T>` 变参按元素域 T 接收普通 comptime 值，
+不专门限制为 Type 列表。展开列表保留元素顺序；完整列表可直接具名传入：
+
+~~~flurry
+template test samples
+where body: <|- void>, ...values: meta.List<u8>,
+    .valid: bool = values.length() == 2 and values[0] == 7 and values[1] == 9,
+    requires valid
+{
+    ~<body>;
+}
+
+test collected use samples<7, ...[9]> {}
+test supplied use samples<.values = [7, 9]> {}
+~~~
+
+默认子句在收集完成后读取列表。空收集得到相应域的空列表；嵌套列表仍是
+普通元素。域不匹配或同时提供完整列表和待收集元素时拒绝，不静默转换或合并。
+
 ### 分散定义的衔接
 
 template 的 open code 能力还可以组织多入口规则集合，通过 quote fn 与函数级模式表达 quoted arm。模式、成功绑定及主体需要一起交付，不能把同名局部变量当作已有绑定关系。该机制适合编译器 pass 的大量规则等场景；完整分工见[函数级模式与分散定义](pattern-functions.md)。

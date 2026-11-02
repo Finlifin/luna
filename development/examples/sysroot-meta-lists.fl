@@ -503,3 +503,18 @@ where requires T :- FlagValues
     result.append(value);
     result
 }
+
+{- Test-template collectors use the same ordinary List<T> values as functions. -}
+template test byte_samples
+where body: <|- void>, ...values: meta.List<u8>,
+    .valid: bool = values.length() == 3 and values[0] == 7
+        and values[1] == 9 and values[2] == 11,
+    requires valid
+{
+    ~<body>;
+}
+
+comptime fn sample_tail() -> meta.List<u8> { [9, 11] }
+
+test collected_byte_samples use byte_samples<7, ...sample_tail()> {}
+test named_byte_samples use byte_samples<.values = [7, 9, 11]> {}

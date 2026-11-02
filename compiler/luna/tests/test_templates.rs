@@ -3122,3 +3122,54 @@ fn deferred_template_ascriptions_do_not_equate_distinct_type_inputs() {
         comptime_interpretor::Value::Bool(true)
     );
 }
+
+#[test]
+fn test_templates_collect_ordinary_list_values_without_type_only_rules() {
+    let prelude = format!(
+        "mod meta {{ {} }} use meta.List; use meta.builtin.{{void,Type,u8}};",
+        include!("support/meta_source.rs")
+    );
+    let declarations = "
+        comptime fn bytes()->List<u8> {[7,9]}
+        template test values where body:<|-void>, .T:Type=u8, ...values:List<T> {
+            ~<body>;
+        }
+        template test checked where body:<|-void>, ...values:List<u8>,
+            .valid:bool=values[0]==7 and values[1]==9, requires valid { ~<body>; }
+        template test nested where body:<|-void>, ...values:List<List<bool>>,
+            .valid:bool=values[0][0] and not values[1][0], requires valid { ~<body>; }
+    ";
+    let source = format!(
+        "{prelude}{declarations}
+        test positional use checked<7,9> {{}}
+        test spread use checked<...bytes()> {{}}
+        test named use checked<.values=bytes()> {{}}
+        test mixed use checked<7,...[9]> {{}}
+        test dependent use values<true,false,.T=bool> {{}}
+        test empty use values {{}}
+        test nested_values use nested<[true],[false]> {{}}"
+    );
+    let compile = |source: &str| {
+        execution_support::compile_with_source_bindings(
+            source,
+            &execution_support::meta_fixture_protocols(),
+            luna::protocols::type_constructors::Selectors {
+                meta_list: Some("input.meta.List"),
+                ..Default::default()
+            },
+        )
+    };
+    let package = compile(&source).unwrap();
+    let report = luna::testing::run_report(&package, 0, 100_000, false, None).unwrap();
+    assert_eq!(report.results.len(), 7);
+    assert!(report.is_success(), "{report}");
+    for args in [
+        "true,false",
+        "256,9",
+        "...[true,false]",
+        "7,.values=bytes()",
+    ] {
+        let source = format!("{prelude}{declarations} test rejected use checked<{args}> {{}}");
+        assert!(compile(&source).is_err(), "accepted {args}");
+    }
+}

@@ -384,12 +384,12 @@ impl Checker<'_, '_> {
                         local: definition.index,
                     };
                     let domain = self.type_expr(annotation)?;
-                    if !self.is_type_list_type(&domain)
+                    if self.list_element_type(&domain).is_none()
                         && !matches!(self.structural_type(&domain, clause.span)?, Term::Tuple(_))
                     {
                         return Err(error(
                             clause.span,
-                            "test template variadic collection requires a tuple layout or the bound meta.List<Type>",
+                            "test template variadic collection requires a tuple layout or a bound meta.List domain",
                         ));
                     }
                     let binding = local(clause.hir_id);
@@ -509,66 +509,36 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<(comptime_interpretor::Value, Term), Error> {
         use comptime_interpretor::Value;
-        if self.is_type_list_type(domain) {
+        if let Some(element) = self.list_element_type(domain).cloned() {
             let mut elements = Vec::new();
             for (input, expand) in inputs {
                 self.required_steps = self.required_steps.checked_sub(1).ok_or_else(|| {
-                    error(
-                        input.span,
-                        "test template type-list collection budget exhausted",
-                    )
+                    error(input.span, "test template list collection budget exhausted")
                 })?;
                 if *expand {
-                    let (value, ty) = self.required_typed_expression(input, Some(domain))?;
-                    if !self.is_type_list_type(&ty) {
-                        return Err(error(
-                            input.span,
-                            "type-list spread requires the bound meta.List<Type>",
-                        ));
-                    }
-                    let items = match value {
-                        Value::List { ty, values } if ty == *domain => values
-                            .into_iter()
-                            .map(|value| match value {
-                                Value::Type(ty) => Ok(ty),
-                                _ => Err(error(
-                                    input.span,
-                                    "type-list collection requires Type values",
-                                )),
-                            })
-                            .collect::<Result<Vec<_>, _>>()?,
-                        _ => {
-                            return Err(error(
-                                input.span,
-                                "type-list spread did not produce Type list data",
-                            ));
-                        }
+                    let (value, actual) = self.required_typed_expression(input, Some(domain))?;
+                    self.require_expression(&actual, domain, input.span)?;
+                    let Value::List { ty, values } = value else {
+                        return Err(error(input.span, "list spread did not produce list data"));
                     };
+                    self.require_expression(&ty, domain, input.span)?;
                     self.required_steps = self
                         .required_steps
-                        .checked_sub(items.len() as u64)
+                        .checked_sub(values.len() as u64)
                         .ok_or_else(|| {
-                            error(
-                                input.span,
-                                "test template type-list spread budget exhausted",
-                            )
+                            error(input.span, "test template list spread budget exhausted")
                         })?;
-                    elements.extend(items);
+                    elements.extend(values);
                 } else {
-                    let (value, _) = self.required_typed_expression(input, Some(&p(P::Type)))?;
-                    let Value::Type(ty) = value else {
-                        return Err(error(
-                            input.span,
-                            "type-list collection requires Type values",
-                        ));
-                    };
-                    elements.push(ty);
+                    let (value, actual) = self.required_typed_expression(input, Some(&element))?;
+                    self.require_expression(&actual, &element, input.span)?;
+                    elements.push(value);
                 }
             }
             return Ok((
                 Value::List {
                     ty: domain.clone(),
-                    values: elements.into_iter().map(Value::Type).collect(),
+                    values: elements.into(),
                 },
                 domain.clone(),
             ));
