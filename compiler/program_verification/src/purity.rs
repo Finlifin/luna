@@ -715,10 +715,14 @@ pub fn validate_defaults<'a>(
     Ok(())
 }
 
+type ResourceWorld = std::sync::Arc<(crate::ptc::Context, crate::implementation::Index)>;
+
 struct Analysis<'a> {
     package: &'a n::Package,
     method_callees: crate::memory::MethodCallees,
     protocols: Protocols,
+    // Only immutable declarations are shared; each query supplies its own assumptions.
+    resource_world: Option<ResourceWorld>,
     functions: HashMap<DeclarationId, &'a n::Function>,
     tuple_heads: HashMap<DeclarationId, &'a nir::normal_forms::Head>,
     parameter_sorts: Option<BTreeMap<DeclarationId, Sort>>,
@@ -766,6 +770,7 @@ impl<'a> Analysis<'a> {
             package,
             method_callees: Default::default(),
             protocols: Protocols::default(),
+            resource_world: None,
             functions: package
                 .functions
                 .iter()
@@ -907,9 +912,11 @@ impl<'a> Analysis<'a> {
         valid && self.transfer_cleanup_is_pure(&function, &BTreeMap::new())
     }
 
-    fn resource_world_parts(
-        &mut self,
-    ) -> Option<(crate::ptc::Context, crate::implementation::Index)> {
+    fn resource_world_parts(&mut self) -> Option<ResourceWorld> {
+        self.fuel = self.fuel.checked_sub(1)?;
+        if let Some(world) = &self.resource_world {
+            return Some(world.clone());
+        }
         let context = crate::ptc::Context::from_package(self.package).ok()?;
         let mut index = crate::implementation::Index::for_builtin_packages(
             self.package.target,
@@ -954,7 +961,9 @@ impl<'a> Analysis<'a> {
                 return None;
             }
         }
-        Some((context, index))
+        let world = std::sync::Arc::new((context, index));
+        self.resource_world = Some(world.clone());
+        Some(world)
     }
 
     fn default_inputs_are_copy<'t>(&mut self, types: impl Iterator<Item = &'t Term>) -> bool {
@@ -965,12 +974,13 @@ impl<'a> Analysis<'a> {
         let (Some(copy), Some(drop)) = (self.protocols.copy, self.protocols.drop) else {
             return false;
         };
-        let Some((context, index)) = self.resource_world_parts() else {
+        let Some(world_parts) = self.resource_world_parts() else {
             return false;
         };
+        let (context, index) = world_parts.as_ref();
         let world = crate::capabilities::World {
-            index: &index,
-            context: &context,
+            index,
+            context,
             traits: &self.package.traits,
             implementations: &self.package.implementations,
             assumptions: &[],
@@ -2673,17 +2683,19 @@ impl<'a> Analysis<'a> {
             self.fuel = self.fuel.saturating_sub(report.entry_steps_used);
             return self.cleanup_report_is_pure(&report, &copy_types, None, 0);
         }
-        let mut fuel = self.fuel;
-        let Some((context, index)) = self.resource_world_parts() else {
+        let Some(world_parts) = self.resource_world_parts() else {
             return false;
         };
+        let (context, index) = world_parts.as_ref();
+        // World construction is already charged; do not restore its old allowance.
+        let mut fuel = self.fuel;
         let budget = crate::ptc::Budget {
             steps: fuel,
             ..Default::default()
         };
         let world = crate::capabilities::World {
-            index: &index,
-            context: &context,
+            index,
+            context,
             traits: &self.package.traits,
             implementations: &self.package.implementations,
             assumptions: &function.capabilities,
@@ -4594,5 +4606,100 @@ mod private_address_loop_tests {
             assert_eq!(analysis.private_addresses[&p], vec![place(a), place(b)]);
         }
         assert!(succeeded);
+    }
+}
+
+#[cfg(test)]
+mod resource_world_tests {
+    use super::*;
+
+    fn package() -> n::Package {
+        let mut package = n::Package::default();
+        for local in 0..16 {
+            package.functions.push(n::Function {
+                phase: n::FunctionPhase::Runtime,
+                inline: false,
+                pure: true,
+                is_unsafe: false,
+                declaration: DeclarationId { package: 1, local },
+                name: format!("scalar_{local}"),
+                signature: Term::Function {
+                    parameters: vec![],
+                    result: Box::new(p(P::Bool)),
+                },
+                parameters: vec![],
+                type_parameters: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                entry_snapshots: vec![],
+                defaults: vec![],
+                body: n::Expr {
+                    source: n::SourceRange { start: 0, end: 1 },
+                    ty: p(P::Bool),
+                    kind: K::Literal(n::Literal::Bool(true)),
+                },
+            });
+        }
+        package
+            .function_parameters
+            .push(nir::function_parameters::Declaration {
+                declaration: DeclarationId {
+                    package: 1,
+                    local: 200,
+                },
+                parameters: vec![DeclarationId {
+                    package: 1,
+                    local: 201,
+                }],
+                domains: vec![Term::Optional(Box::new(p(P::Bool)))],
+            });
+        package
+    }
+
+    #[test]
+    fn resource_world_reuse_is_local_and_failed_preparation_is_not_published() {
+        let package = package();
+        let mut analysis = Analysis::new(&package, false);
+        analysis.fuel = 1;
+        assert!(analysis.resource_world_parts().is_none());
+        assert!(analysis.resource_world.is_none());
+        analysis.fuel = 10_000;
+        let first = analysis.resource_world_parts().unwrap();
+        let remaining = analysis.fuel;
+        assert!(remaining < 9_999);
+        let second = analysis.resource_world_parts().unwrap();
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+        assert_eq!(analysis.fuel, remaining - 1);
+        let mut separate = Analysis::new(&package, false);
+        assert!(!std::sync::Arc::ptr_eq(
+            &first,
+            &separate.resource_world_parts().unwrap()
+        ));
+    }
+
+    #[test]
+    fn scalar_cleanup_does_not_refund_resource_world_preparation() {
+        let package = package();
+        let mut analysis = Analysis::new(&package, false);
+        // Scalars need no selected destructor, but this activates the same
+        // protocol-world preparation path used for nontrivial cleanup.
+        analysis.protocols.drop = Some(DeclarationId {
+            package: 1,
+            local: 100,
+        });
+        let before = analysis.fuel;
+        assert!(analysis.transfer_cleanup_is_pure(&package.functions[0], &BTreeMap::new()));
+        let cold_cost = before - analysis.fuel;
+        let before = analysis.fuel;
+        assert!(analysis.transfer_cleanup_is_pure(&package.functions[0], &BTreeMap::new()));
+        let warm_cost = before - analysis.fuel;
+        assert!(
+            cold_cost > warm_cost,
+            "preparation cost must remain charged"
+        );
+        assert!(warm_cost > 0);
     }
 }
