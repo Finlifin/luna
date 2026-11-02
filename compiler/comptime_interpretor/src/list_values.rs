@@ -230,6 +230,63 @@ mod tests {
         assert_eq!(costs[0], costs[1]);
     }
     #[test]
+    fn immutable_value_copies_share_payloads_without_aliasing_mutations() {
+        let package = crate::Package::default();
+        let source = crate::SourceRange { start: 1, end: 2 };
+        let mut costs = Vec::new();
+        for len in [32, 4096] {
+            // This exercises representation copying, not domain admission.
+            let original = Value::List {
+                ty: Term::Primitive(Primitive::Bool),
+                values: vec![Value::Bool(true); len].into(),
+            };
+            original.immutable_copy_work().unwrap();
+            let mut vm =
+                crate::Interpreter::for_comptime(&package, crate::Budget::default()).unwrap();
+            let receiver =
+                crate::value_reference::ValueReference::root(crate::Storage::new(original.clone()));
+            let before = vm.budget.steps;
+            let mut copied = vm.copy_referenced_value(&receiver).unwrap();
+            costs.push(before - vm.budget.steps);
+            assert!(std::ptr::eq(
+                payload(&original).first().unwrap(),
+                payload(&copied).first().unwrap()
+            ));
+            vm.budget.depth = 1;
+            assert_eq!(
+                vm.copy_representation(&original, source, 0)
+                    .unwrap_err()
+                    .kind,
+                crate::ErrorKind::DepthExhausted
+            );
+            vm.budget = crate::Budget::default();
+            let Value::List { values, .. } = &mut copied else {
+                unreachable!()
+            };
+            values[0] = Value::Bool(false);
+            assert!(values.summary().is_none());
+            assert_eq!(payload(&original).first(), Some(&Value::Bool(true)));
+            assert_eq!(vm.copy_representation(&copied, source, 0).unwrap(), copied);
+            let Value::List { values, .. } = &mut copied else {
+                unreachable!()
+            };
+            values[0] = Value::Pointer(
+                crate::Storage::new(Value::Bool(false))
+                    .pointer(Term::Primitive(Primitive::Bool), vec![]),
+            );
+            assert_eq!(
+                vm.copy_representation(&copied, source, 0).unwrap_err().kind,
+                crate::ErrorKind::PhaseMismatch
+            );
+            assert_eq!(
+                vm.copy_representation(&original, source, 0).unwrap(),
+                original
+            );
+        }
+        assert_eq!(costs[0], costs[1]);
+    }
+
+    #[test]
     fn scalar_observations_compose_and_invalidate_without_type_verdicts() {
         let make = |values: Vec<Value>| {
             let mut value = test_type_list(vec![]);

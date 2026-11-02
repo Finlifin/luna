@@ -663,10 +663,14 @@ impl<'a> Interpreter<'a> {
         preserve_identity: bool,
     ) -> Result<Value, Error> {
         if let Value::List { ty, values } = value {
-            if preserve_identity {
-                // A checkpoint preserves nested identities. Validate the
-                // current graph before sharing its immutable payload; a
-                // later list mutation detaches from this snapshot.
+            if preserve_identity || (self.comptime_only && values.summary().is_some()) {
+                // A closed payload summary excludes mutable storage identities.
+                // Such a value copy can share the same persistent snapshot as a
+                // checkpoint. Still check the root's export policy and current
+                // scope; the summary is not a type-admission certificate.
+                if !preserve_identity {
+                    self.copy_type_work(ty, source)?;
+                }
                 self.check_borrowed_representation(value, source, depth)?;
                 return Ok(Value::List {
                     ty: ty.clone(),
@@ -2158,6 +2162,37 @@ mod copy_budget_tests {
     }
 
     use super::*;
+    #[test]
+    fn immutable_payload_summary_does_not_authorize_scoped_root_export() {
+        let package = Package::default();
+        let parameter = DeclarationId {
+            package: 77,
+            local: 1,
+        };
+        let value = Value::List {
+            ty: Term::Rigid {
+                declaration: parameter,
+                sort: nir::Sort::Type,
+            },
+            values: vec![Value::Bool(true); 32].into(),
+        };
+        assert!(
+            value
+                .scoped_copy_work(&BTreeSet::from([parameter]))
+                .is_some()
+        );
+        let Value::List { values, .. } = &value else {
+            unreachable!()
+        };
+        assert!(values.summary().is_some());
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        vm.authorize_abstract_type_parameters(&[parameter]).unwrap();
+        let source = SourceRange { start: 0, end: 1 };
+        assert!(vm.checkpoint_representation(&value, source).is_ok());
+        assert!(vm.copy_representation(&value, source, 0).is_err());
+        assert!(vm.checkpoint_representation(&value, source).is_ok());
+    }
+
     #[test]
     fn representation_copy_charges_width_and_type_metadata_before_cloning() {
         let package = Package::default();
