@@ -1712,8 +1712,6 @@ impl Search<'_> {
         let classes = &theory.classes;
         // Reify actual closed types, not arbitrary EUF domain elements. Missing
         // value-store, runtime or opaque-call interpretations keep Unknown.
-        let mut types = BTreeMap::new();
-        let mut bound_types = BTreeMap::new();
         let mut representatives = HashMap::new();
         for (id, term) in self.terms.nodes.iter().enumerate() {
             if !matches!(
@@ -1730,19 +1728,80 @@ impl Search<'_> {
                 representatives.entry(classes.root(id)).or_insert(id);
             }
         }
-        let mut free = HashMap::new();
+        // Classification selects a domain, not a single canonical model value.
+        // Try combinations transactionally: disequalities and opaque application
+        // collisions can invalidate a choice that satisfies every local kind.
+        let mut domains = Vec::new();
+        let mut seen = BTreeSet::new();
         for &(root, _, _) in &theory.kinds {
-            if !representatives.contains_key(&root) && !free.contains_key(&root) {
-                let candidate = classification::witnesses().into_iter().find(|ty| {
-                    theory
-                        .kinds
-                        .iter()
-                        .filter(|(r, _, _)| *r == root)
-                        .all(|(_, kind, truth)| kind.evaluate(ty) == Some(*truth))
-                })?;
-                free.insert(root, candidate);
+            self.steps = self.steps.checked_sub(1)?;
+            if representatives.contains_key(&root) || !seen.insert(root) {
+                continue;
             }
+            let mut candidates = Vec::new();
+            for candidate in classification::witnesses()
+                .iter()
+                .chain(self.terms.nodes.iter())
+            {
+                nir::type_computations::charge_term(candidate, &mut self.steps).ok()?;
+                if !closed_type(candidate, &self.context.nominal_constructors) {
+                    continue;
+                }
+                let mut accepts = true;
+                for &(other, kind, truth) in &theory.kinds {
+                    self.steps = self.steps.checked_sub(1)?;
+                    if other == root && kind.evaluate(candidate) != Some(truth) {
+                        accepts = false;
+                        break;
+                    }
+                }
+                if accepts {
+                    let mut duplicate = false;
+                    for previous in &candidates {
+                        nir::type_computations::charge_term(previous, &mut self.steps).ok()?;
+                        duplicate |= previous == candidate;
+                    }
+                    if !duplicate {
+                        candidates.push(candidate.clone());
+                    }
+                }
+            }
+            if candidates.is_empty() {
+                return None;
+            }
+            domains.push((root, candidates));
         }
+        let mut positions = vec![0; domains.len()];
+        loop {
+            self.steps = self.steps.checked_sub(1)?;
+            let mut free = HashMap::new();
+            for ((root, candidates), &position) in domains.iter().zip(&positions) {
+                let candidate = &candidates[position];
+                nir::type_computations::charge_term(candidate, &mut self.steps).ok()?;
+                free.insert(*root, candidate.clone());
+            }
+            if let Some(model) = self.witness_with_choices(theory, &representatives, free) {
+                return Some(model);
+            }
+            // Exhausting this finite candidate set proves neither inconsistency
+            // nor uniqueness. The caller retains Unknown when no model replays.
+            let next = (0..positions.len())
+                .rev()
+                .find(|&index| positions[index] + 1 < domains[index].1.len())?;
+            positions[next] += 1;
+            positions[next + 1..].fill(0);
+        }
+    }
+
+    fn witness_with_choices(
+        &mut self,
+        theory: &TheoryModel,
+        representatives: &HashMap<usize, usize>,
+        mut free: HashMap<usize, Term>,
+    ) -> Option<Model> {
+        let classes = &theory.classes;
+        let mut types = BTreeMap::new();
+        let mut bound_types = BTreeMap::new();
         for term in &self.terms.nodes {
             if matches!(
                 term,

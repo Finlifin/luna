@@ -709,3 +709,41 @@ fn scoped_closure_environment_models_require_proof_before_commit() {
     parent.commit(candidate).unwrap();
     assert_eq!(parent.freeze(&I::Meta(input)).unwrap(), expected);
 }
+
+#[test]
+fn classified_model_alternatives_leave_inference_inputs_unassigned() {
+    let mut parent = Engine::default();
+    let input = parent.fresh(Sort::Type);
+    let problem = R::And(vec![
+        R::Kind(
+            I::Meta(input),
+            type_resolution::ptc::TypeKind::UnsignedInteger,
+        ),
+        R::Not(Box::new(R::Equal(I::Meta(input), stable(P::U32)))),
+    ]);
+    assert!(matches!(
+        parent
+            .search_type_inputs(&[input], &problem, &mut Budget::default())
+            .unwrap(),
+        Search::Unresolved(TypeInputOutcome::Ambiguous { .. })
+    ));
+    assert_eq!(parent.inspect(&I::Meta(input)).unwrap(), I::Meta(input));
+    let explicit = R::And(vec![problem, R::Equal(I::Meta(input), stable(P::U8))]);
+    let Search::Proposed {
+        mut candidate,
+        obligation,
+        ..
+    } = parent
+        .search_type_inputs(&[input], &explicit, &mut Budget::default())
+        .unwrap()
+    else {
+        panic!("an explicit type resolves the ambiguity")
+    };
+    candidate.advance(100, Budget::default());
+    assert!(candidate.state(obligation).unwrap().is_proven());
+    parent.commit(candidate).unwrap();
+    assert_eq!(
+        parent.freeze(&I::Meta(input)).unwrap(),
+        Term::Primitive(P::U8)
+    );
+}
