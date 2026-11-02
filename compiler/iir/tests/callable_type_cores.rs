@@ -156,3 +156,62 @@ fn instance_input_frames_share_storage_but_compare_by_content() {
     ));
     assert_eq!(graph.to_string(), copied.to_string());
 }
+
+#[test]
+fn retained_signatures_validate_normal_form_input_shapes() {
+    use nir::normal_forms::{Head, Kind, Parameter, Role};
+    let head = Head {
+        declaration: key(10).declaration,
+        collector: None,
+        role: Role::Opaque,
+        requirements: vec![],
+        parameters: vec![Parameter {
+            declaration: key(11).declaration,
+            binding: nir::program::LocalId {
+                owner: 10,
+                index: 0,
+            },
+            kind: Kind::Type,
+            ty: Term::Primitive(Primitive::Type),
+        }],
+    };
+    let boolean = Term::Primitive(Primitive::Bool);
+    for (kind, arguments, valid) in [
+        (Kind::Type, vec![boolean.clone()], true),
+        // A value-domain parameter may itself receive an ordinary Type value.
+        (Kind::Value, vec![boolean.clone()], true),
+        (Kind::Type, vec![], false),
+        (Kind::Type, vec![boolean.clone(), boolean], false),
+        (Kind::Type, vec![Term::Bool(true)], false),
+        (Kind::Value, vec![Term::Bool(true)], false),
+    ] {
+        let mut head = head.clone();
+        head.parameters[0].kind = kind;
+        let result = Term::NormalForm {
+            head: head.declaration,
+            sort: nir::Sort::Type,
+            arguments,
+        };
+        let identity = CallableIdentity::intern(
+            key(1),
+            signature(result),
+            &mut TypeInterner::default(),
+            &mut 10_000,
+        )
+        .unwrap();
+        let graph = iir::Package {
+            normal_forms: vec![head.clone()],
+            callable_identities: vec![identity],
+            ..Default::default()
+        };
+        let checked = graph.validate(&mut 100_000);
+        if valid {
+            checked.unwrap();
+            assert!(graph.validate(&mut 0).is_err());
+            graph.validate(&mut 100_000).unwrap();
+        } else {
+            let error = checked.expect_err("a retained head identity does not validate its inputs");
+            assert!(error.contains("normal-form"), "{error}");
+        }
+    }
+}

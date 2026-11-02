@@ -161,9 +161,34 @@ impl<'a> TypeLinks<'a> {
                         return Err("IIR nominal reference is dangling".into());
                     }
                 }
-                Term::NormalForm { head, .. } => {
-                    if !self.heads.contains_key(head) {
-                        return Err("IIR normal-form reference is dangling".into());
+                Term::NormalForm {
+                    head, arguments, ..
+                } => {
+                    let definition = self
+                        .heads
+                        .get(head)
+                        .ok_or("IIR normal-form reference is dangling")?;
+                    if arguments.len() != definition.parameters.len() {
+                        return Err(format!(
+                            "IIR normal-form head expects {} inputs, found {}",
+                            definition.parameters.len(),
+                            arguments.len(),
+                        ));
+                    }
+                    for (index, (parameter, argument)) in
+                        definition.parameters.iter().zip(arguments).enumerate()
+                    {
+                        tick(fuel)?;
+                        // A declared Type domain has an unconditional sort
+                        // contract, including an ordinary value parameter whose
+                        // domain is Type. Dependent domains still require the
+                        // producer's semantic formation evidence.
+                        if (parameter.kind == nir::normal_forms::Kind::Type
+                            || parameter.ty == Term::Primitive(nir::Primitive::Type))
+                            && argument.sort() != nir::Sort::Type
+                        {
+                            return Err(format!("IIR normal-form input {index} requires a Type"));
+                        }
                     }
                 }
                 _ => {}

@@ -90,3 +90,19 @@ Exit 0; the three binaries passed 4, 13 and 65 tests respectively. Evidence:
 `/tmp/luna-tools-5b_zu53o/result.json` and its `stdout.log` / `stderr.log`.
 These checks establish the existing core/reference and closed callable contracts,
 not the missing source-to-runtime environment transport described above.
+
+## Subsequent NF input-shape hardening
+
+The audit also exposed an independent artifact-validation hole: TypeLinks only
+checked that an NF head was retained. A frozen callable signature could therefore
+contain an application with missing/excess arguments or a value in a declared
+Type parameter slot (including a value parameter with a literal Type domain).
+This is now rejected by the common IIR type-link traversal,
+with per-parameter work charged to its budget. A value parameter can still receive
+an ordinary Type value; no collection or library-name exception is introduced.
+
+`compiler/iir/tests/callable_type_cores.rs` reproduces the earlier acceptance and
+checks valid Type/value inputs plus exhaustion/retry. IIR and materialization tests
+pass (`/tmp/luna-tools-v0vmlohp/result.json`). This checks arity and unconditional
+Type-parameter sorts only. It does not discharge dependent value domains,
+requirements, acquisition paths or lifetime obligations, and does not close D06.
