@@ -4500,13 +4500,13 @@ fn float_associated_constants_require_type_evidence_and_preserve_stage_boundarie
 }
 
 #[test]
-fn program_assumes_rejects_non_boolean_unchecked_calls_and_type_propositions() {
+fn program_assumes_rejects_non_boolean_unproved_calls_and_type_propositions() {
     rejected(
         "fn bad() { assumes 1; }",
         "integer runtime proxy requires a supported fixed-width integer target",
     );
     for source in [
-        "fn condition() -> bool { true } fn bad() { assumes condition(); }",
+        "fn condition() -> bool { while true {} true } fn bad() { assumes condition(); }",
         "fn bad() { var flag = true; assumes do { flag = false; true }; }",
         "fn bad() { assumes do { assumes true; true }; }",
         "fn bad() { assumes .i32'builtin == .u32'builtin; }",
@@ -4650,7 +4650,7 @@ fn checked_field_predicates_expire_on_overlapping_writes_and_calls() {
 #[test]
 fn checked_field_predicates_do_not_make_calls_effect_free() {
     rejected(
-        "struct Pair { left: .u8'builtin } fn make() -> Pair { Pair { left: 0 } } fn bad() { assumes make().left < 255; }",
+        "struct Pair { left: .u8'builtin } fn make(flag:*bool) -> Pair { flag.* = false; Pair { left: 0 } } fn bad(flag:*bool) { assumes make(flag).left < 255; }",
         "assumes requires a supported effect-free program predicate",
     );
 }

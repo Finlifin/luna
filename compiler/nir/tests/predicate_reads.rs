@@ -110,6 +110,7 @@ fn predicate_shape_rejects_writes_and_owned_pointer_delivery() {
             value: Box::new(yes.clone()),
         },
     );
+    assert!(!nir::program::predicate_call_candidate(&write));
     assert!(!checkable_predicate(&expr(
         boolean(),
         K::Block {
@@ -411,6 +412,10 @@ fn reconstructed_aggregate_predicates_reject_effectful_fields() {
             value: Box::new(pure.clone()),
         },
     );
+    // Source lowering may investigate a call, but the retained check has no
+    // callee-world evidence and must continue rejecting it independently.
+    assert!(nir::program::predicate_call_candidate(&call));
+    assert!(!checkable_predicate(&call));
     let old = LocalId { owner: 7, index: 0 };
     let new = LocalId { owner: 8, index: 1 };
     for (field, accepted) in [

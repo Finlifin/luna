@@ -40,3 +40,21 @@ pub(super) fn validate_defaults(
     )
     .map_err(diagnostic)
 }
+
+pub(super) fn validate_predicates(
+    package: &n::Package,
+    obligations: &[(n::Expr, Span, BTreeSet<n::LocalId>)],
+    identities: &Protocols,
+) -> Result<(), Error> {
+    // Both consumers need a stable, finitely completing observation. Reuse
+    // the behavior proof, not a source `pure` marker or a bool result type.
+    purity::validate_defaults(
+        package,
+        obligations.iter().map(|(value, span, staged)| (value, source(*span), staged)),
+        &protocols(identities),
+    )
+    .map_err(|mut failure| {
+        failure.message = "assumes requires a supported effect-free program predicate; call stability or finite completion could not be certified".into();
+        diagnostic(failure)
+    })
+}

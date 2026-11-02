@@ -4,6 +4,8 @@ fn bad() -> !u8 bool { error 7 }
 fn absent(value: bool) -> ?bool { null }
 
 fn run() -> bool {
+    let checked: ?bool = true;
+    assumes checked.as(OptionalOps<bool>).is_some();
     let present: ?bool = true;
     let missing: ?bool = null;
     let nested = present.as(OptionalOps<bool>).map(absent);

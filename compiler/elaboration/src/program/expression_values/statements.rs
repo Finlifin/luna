@@ -181,6 +181,29 @@ impl Checker<'_, '_> {
             H::Assumes(condition) => {
                 let condition = self.boolean_predicate(condition)?;
                 if !n::checkable_predicate(&condition) {
+                    if n::predicate_call_candidate(&condition) {
+                        self.require_stable_predicate(&condition, expr.span)?;
+                        let at = source(expr.span);
+                        let failure = Box::new(n::Expr {
+                            source: at, ty: p(P::Void),
+                            kind: K::CheckPredicate(Box::new(n::Expr {
+                                source: at, ty: p(P::Bool),
+                                kind: K::Literal(n::Literal::Bool(false)),
+                            })),
+                        });
+                        // Evaluate the decision once with normal short circuiting.
+                        // The true branch retains its observed facts; the failed
+                        // check makes the false branch unreachable. Keeping this
+                        // control edge avoids losing relations through a temporary
+                        // bool whose value domain alone cannot describe them.
+                        return self.finish_value_expression(expr, expected, p(P::Void), K::If {
+                            condition: Box::new(condition),
+                            then_branch: Box::new(n::Expr {
+                                source: at, ty: p(P::Void), kind: K::Unit,
+                            }),
+                            else_branch: Some(failure),
+                        });
+                    }
                     return Err(error(
                         expr.span,
                         "assumes requires a supported effect-free program predicate; calls and type propositions need further contract elaboration",

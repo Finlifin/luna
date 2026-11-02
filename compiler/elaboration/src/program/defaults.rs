@@ -147,8 +147,30 @@ impl Checker<'_, '_> {
         value: &n::Expr,
         span: Span,
     ) -> Result<(), Error> {
+        if let Some(obligation) = self.stable_observation_obligation(value, span)? {
+            self.pending_default_stability.push(obligation);
+        }
+        Ok(())
+    }
+
+    pub(super) fn require_stable_predicate(
+        &mut self,
+        value: &n::Expr,
+        span: Span,
+    ) -> Result<(), Error> {
+        if let Some(obligation) = self.stable_observation_obligation(value, span)? {
+            self.pending_predicate_stability.push(obligation);
+        }
+        Ok(())
+    }
+
+    fn stable_observation_obligation(
+        &mut self,
+        value: &n::Expr,
+        span: Span,
+    ) -> Result<Option<(n::Expr, Span, BTreeSet<n::LocalId>)>, Error> {
         if stable_default(value) {
-            return Ok(());
+            return Ok(None);
         }
         let viewed = self.default_stability_view(value, span)?;
         if !stable_default(&viewed) {
@@ -174,9 +196,9 @@ impl Checker<'_, '_> {
                     }
                 }
             }
-            self.pending_default_stability.push((viewed, span, staged));
+            return Ok(Some((viewed, span, staged)));
         }
-        Ok(())
+        Ok(None)
     }
 
     fn default_stability_view(&mut self, value: &n::Expr, span: Span) -> Result<n::Expr, Error> {

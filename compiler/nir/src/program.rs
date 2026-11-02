@@ -5047,6 +5047,16 @@ impl Pattern {
 /// establishes access permission separately. Calls need a predicate/effect contract
 /// before admission; type propositions use a separate interface.
 pub fn checkable_predicate(expression: &Expr) -> bool {
+    predicate_shape(expression, false)
+}
+
+/// Candidate shape only: calls still require separate stability and finite
+/// completion evidence. Never use this as admission for a retained IR check.
+pub fn predicate_call_candidate(expression: &Expr) -> bool {
+    predicate_shape(expression, true)
+}
+
+fn predicate_shape(expression: &Expr, calls: bool) -> bool {
     if expression.ty != Term::Primitive(crate::Primitive::Bool) {
         return false;
     }
@@ -5061,6 +5071,16 @@ pub fn checkable_predicate(expression: &Expr) -> bool {
             return false;
         }
         match &expr.kind {
+            ExprKind::Call {
+                callee, arguments, ..
+            } if calls => {
+                pending.push(callee);
+                pending.extend(arguments.iter().map(|argument| &argument.value));
+            }
+            ExprKind::Function(_)
+            | ExprKind::FunctionInstance { .. }
+            | ExprKind::TraitMethod { .. }
+                if calls => {}
             ExprKind::BitWindow { value, start, end } => {
                 pending.extend([value.as_ref(), start.as_ref(), end.as_ref()])
             }

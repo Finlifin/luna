@@ -434,6 +434,7 @@ fn elaborate_with_attributes(
         ordinary_behavior_inputs: BTreeMap::new(),
         open_loop_transfers: BTreeMap::new(),
         pending_default_stability: Vec::new(),
+        pending_predicate_stability: Vec::new(),
         specialization_inputs: Vec::new(),
         active_signatures: BTreeSet::new(),
         refinement_subjects: Vec::new(),
@@ -1442,8 +1443,14 @@ fn elaborate_candidate<'a, 'h>(
         &checker.pending_default_stability,
         &checker.protocols,
     );
+    let predicates_result = purity::validate_predicates(
+        &output,
+        &checker.pending_predicate_stability,
+        &checker.protocols,
+    );
     checker.ordinary_behavior_functions = output.functions.split_off(runtime_count);
     defaults_result?;
+    predicates_result?;
     cmtt::expand_quote_functions(
         &mut output,
         package,
@@ -1608,6 +1615,7 @@ struct Checker<'a, 'h> {
     ordinary_behavior_inputs: BTreeMap<n::LocalId, Term>,
     open_loop_transfers: BTreeMap<n::LocalId, open_functions::LoopTransfers>,
     pending_default_stability: Vec<(n::Expr, Span, BTreeSet<n::LocalId>)>,
+    pending_predicate_stability: Vec<(n::Expr, Span, BTreeSet<n::LocalId>)>,
     specialization_inputs: Vec<(n::LocalId, Term, Term)>,
     active_signatures: BTreeSet<OwnerId>,
     refinement_subjects: Vec<Term>,
