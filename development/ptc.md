@@ -996,3 +996,27 @@ exited 0 (`/tmp/luna-tools-9drcq6bk/result.json`). New cases cover proof/witness
 replay, invalid output selections, ambiguity of unselected inputs, budget failure
 and recovery, explicit completion of remaining inputs, and matching candidates
 whose original conditional equation must still reject publication.
+
+### Proved dependencies of projected outputs
+
+Projected search now retains proved bindings for unexported inputs internally.
+For `T == *U and U == A`, with ambient A, searching T, U and a free V while
+requesting only T can therefore return `T == *A`. Previously the symbolic
+resolver could not use U and returned `Unknown(UnvalidatedModel)`. Internal
+bindings must pass the same entailment checks as exported bindings; arbitrary
+model assignments never become substitutions. The returned binding map contains
+only requested outputs, and the inference candidate leaves all other
+metavariables untouched. An unresolved U in `T == *U` still makes T ambiguous.
+
+Verification from `/home/fin/luna`: the new dependency regression failed before
+the fix (`/tmp/luna-tools-471sslu9/result.json`, exit 101).
+`python3 -B development/check.py --timeout 900 -- test -p ptc -p type_resolution`
+then passed (`/tmp/luna-tools-j2q62yzz/result.json`, exit 0). Coverage includes
+input-order independence, replay of exported proofs and model witnesses,
+unresolved dependency ambiguity, and explicit completion of unexported
+metavariables before committing the original obligation. Workspace formatting
+passed (`/tmp/luna-tools-1ruyduer/result.json`, exit 0).
+
+Search remains budgeted and incomplete. Internally examining unexported inputs
+can consume additional proof budget; this change does not supply dependency
+slicing or completeness for every theory model.

@@ -606,3 +606,64 @@ fn projection_does_not_turn_another_searched_input_into_an_ambient_constant() {
         O::Ambiguous { .. }
     ));
 }
+
+#[test]
+fn projected_symbolic_outputs_follow_proved_unexported_dependencies() {
+    let ambient = var(9);
+    let expected = Term::Pointer(Box::new(ambient.clone()));
+    let constraint = F::And(vec![
+        F::equal(var(0), Term::Pointer(Box::new(var(1)))),
+        F::equal(var(1), ambient),
+        F::equal(var(2), var(2)),
+    ]);
+    let context = Context::default();
+    for inputs in [[id(0), id(1), id(2)], [id(2), id(1), id(0)]] {
+        let outcome = context.search_type_input_projection(
+            &inputs,
+            &[id(0)],
+            constraint.clone(),
+            &mut Budget::default(),
+        );
+        let O::Unique(solution) = outcome else {
+            panic!("{outcome}");
+        };
+        assert_eq!(solution.bindings.len(), 1);
+        assert_eq!(solution.bindings[&id(0)].0, expected);
+        let problem = context
+            .type_input_context(&inputs, constraint.clone(), &mut Budget::default())
+            .unwrap();
+        problem
+            .verify_proof(&solution.bindings[&id(0)].1, Budget::default())
+            .unwrap();
+        problem
+            .verify_witness(&solution.model, Budget::default())
+            .unwrap();
+    }
+}
+
+#[test]
+fn unresolved_projection_dependencies_remain_ambiguous() {
+    let context = Context::default();
+    let constraint = F::equal(var(0), Term::Pointer(Box::new(var(1))));
+    let outcome = context.search_type_input_projection(
+        &[id(0), id(1)],
+        &[id(0)],
+        constraint.clone(),
+        &mut Budget::default(),
+    );
+    let O::Ambiguous {
+        candidate,
+        alternative,
+        ..
+    } = outcome
+    else {
+        panic!("{outcome}");
+    };
+    let problem = context
+        .type_input_context(&[id(0), id(1)], constraint, &mut Budget::default())
+        .unwrap();
+    for witness in [&candidate, &alternative] {
+        problem.verify_witness(witness, Budget::default()).unwrap();
+    }
+    assert_ne!(candidate.types[&id(0)], alternative.types[&id(0)]);
+}

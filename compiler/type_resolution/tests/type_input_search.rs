@@ -852,3 +852,65 @@ fn matching_recovers_determined_types_without_defaulting_other_inputs() {
     assert!(parent.commit(candidate).is_err());
     assert_eq!(parent.inspect(&I::Meta(known)).unwrap(), I::Meta(known));
 }
+
+#[test]
+fn projected_symbolic_dependencies_do_not_assign_unrequested_metavariables() {
+    let mut parent = Engine::default();
+    let output = parent.fresh(Sort::Type);
+    let dependency = parent.fresh(Sort::Type);
+    let unrelated = parent.fresh(Sort::Type);
+    let ambient = Term::Rigid {
+        declaration: DeclarationId {
+            package: 921,
+            local: 19,
+        },
+        sort: Sort::Type,
+    };
+    let expected = Term::Pointer(Box::new(ambient.clone()));
+    let problem = R::And(vec![
+        R::Equal(
+            I::Meta(output),
+            I::Instantiate {
+                template: Term::Pointer(Box::new(Term::Bound {
+                    depth: 0,
+                    index: 0,
+                    sort: Sort::Type,
+                })),
+                arguments: vec![I::Meta(dependency)],
+            },
+        ),
+        R::Equal(I::Meta(dependency), I::Stable(ambient.clone())),
+        R::Equal(I::Meta(unrelated), I::Meta(unrelated)),
+    ]);
+    let Search::Proposed {
+        mut candidate,
+        obligation,
+        evidence,
+    } = parent
+        .search_type_input_projection(
+            &[output, dependency, unrelated],
+            &[output],
+            &problem,
+            &mut Budget::default(),
+        )
+        .unwrap()
+    else {
+        panic!("dependent symbolic projection");
+    };
+    assert_eq!(evidence.bindings.len(), 1);
+    assert_eq!(
+        candidate.inspect(&I::Meta(output)).unwrap(),
+        I::Stable(expected.clone())
+    );
+    for input in [dependency, unrelated] {
+        assert_eq!(candidate.inspect(&I::Meta(input)).unwrap(), I::Meta(input));
+    }
+    candidate.advance(100, Budget::default());
+    assert!(!candidate.state(obligation).unwrap().is_proven());
+    candidate.assign(dependency, I::Stable(ambient)).unwrap();
+    candidate.assign(unrelated, stable(P::Char)).unwrap();
+    candidate.advance(100, Budget::default());
+    assert!(candidate.state(obligation).unwrap().is_proven());
+    parent.commit(candidate).unwrap();
+    assert_eq!(parent.freeze(&I::Meta(output)).unwrap(), expected);
+}

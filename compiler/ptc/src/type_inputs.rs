@@ -85,8 +85,14 @@ impl Context {
             Outcome::IllFormed(message) => return TypeInputOutcome::IllFormed(message),
         };
         let mut bindings = BTreeMap::new();
+        if outputs.is_empty() {
+            return TypeInputOutcome::Unique(TypeInputSolution { model, bindings });
+        }
         let mut pending = Vec::new();
-        for &variable in outputs {
+        // Non-exported inputs can still be necessary proof dependencies of a
+        // selected symbolic output. Solve them internally without treating an
+        // arbitrary model assignment as a substitution or exposing it to users.
+        for &variable in inputs {
             let Some(value) = model.types.get(&variable) else {
                 return TypeInputOutcome::Unknown(UnknownReason::UnvalidatedModel);
             };
@@ -111,7 +117,10 @@ impl Context {
         // all unresolved inputs until this dependency closure stops growing;
         // request order must not decide whether an ambient solution is found.
         let mut resolver = symbolic::Resolver::new(&problem);
-        while !pending.is_empty() {
+        while pending
+            .iter()
+            .any(|(variable, _)| selected.contains(variable))
+        {
             let candidates = match symbolic::candidates(&problem, inputs, &bindings, budget) {
                 Ok(candidates) => candidates,
                 Err(reason) => return TypeInputOutcome::Unknown(reason),
@@ -132,8 +141,13 @@ impl Context {
                 break;
             }
         }
-        let unresolved = !pending.is_empty();
+        let unresolved = pending
+            .iter()
+            .any(|(variable, _)| selected.contains(variable));
         for (variable, alternative) in pending {
+            if !selected.contains(&variable) {
+                continue;
+            }
             // Different ambient worlds do not establish ambiguity relative
             // to one fixed surrounding interface.
             match symbolic::same_ambient(&model, &alternative, inputs, budget) {
@@ -166,6 +180,7 @@ impl Context {
         if unresolved {
             return TypeInputOutcome::Unknown(UnknownReason::UnvalidatedModel);
         }
+        bindings.retain(|variable, _| selected.contains(variable));
         TypeInputOutcome::Unique(TypeInputSolution { model, bindings })
     }
 
