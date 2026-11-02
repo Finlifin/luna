@@ -1,8 +1,9 @@
 {- Comptime operations on native optional/error values use value references
    for self and value parameters for callbacks; no comptime pointers. -}
 
-use builtin.{Type, bool, u64};
+use builtin.{Type, bool, u64, Order};
 use numeric.equality.ComptimeEq;
+use numeric.ordering.ComptimeOrd;
 use hashing.{ComptimeHash, mix_byte, mix_digest};
 
 pub pure comptime trait ComptimeErrorResultOps where T, E {
@@ -72,6 +73,25 @@ comptime impl ComptimeEq for !E T where T:- ComptimeEq, E:- ComptimeEq {
         error left => other match {
             _! => false,
             error right => left.as(ComptimeEq).eq(right),
+        },
+    };
+}
+
+{-
+    Single-label error results order success before failure. Matching branches
+    use their payload protocol; different branches do not compare payloads.
+    Both domains must support ordering even when a particular value contains
+    only one branch. No order between different error labels is implied.
+-}
+comptime impl ComptimeOrd for !E T where T:- ComptimeOrd, E:- ComptimeOrd {
+    comptime fn cmp(self, other: Self) -> Order = self match {
+        left! => other match {
+            right! => left.as(ComptimeOrd).cmp(right),
+            error _ => .less,
+        },
+        error left => other match {
+            _! => .greater,
+            error right => left.as(ComptimeOrd).cmp(right),
         },
     };
 }

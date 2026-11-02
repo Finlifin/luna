@@ -11408,3 +11408,44 @@ Validation from `/home/fin/luna`:
   (`/tmp/luna-library-yma9sdpl/summary.json`), using real public sysroot APIs.
 - Workspace formatting passed (`/tmp/luna-tools-vcb_i3cy/result.json`);
   `git diff --check` passed.
+
+### Compositional ordering for qualified comptime values
+
+The shipped ComptimeOrd protocol now has ordinary generic implementations for
+native optional values and single-label error results. Library ordering puts
+absence before presence and success before failure. Matching branches delegate
+to the payload protocol; different branches never compare payloads. Nested
+qualification remains intact, including a present absent optional. Both error
+and success domains must implement ComptimeOrd regardless of the current value.
+These are library conventions, not ABI tag ordering or new PTC equality rules.
+
+The existing default prelude and trait discovery expose cmp/lt/le/gt/ge without
+new compiler intrinsics or runtime Copy requirements. Tests exercise custom
+payload order and equality, mutation of comparator-local snapshots, short
+circuiting, nested lists, stable sorting, and rejected comparisons followed by
+successful invocations in the same VM. Missing payload implementations are
+rejected even for absent optionals or inactive result branches.
+
+Verification from /home/fin/luna:
+
+- `python3 -B development/check.py --timeout 900 -- test -p luna --test
+  library_qualified_ordering --test library_comptime_ordering --test
+  library_protocols --no-fail-fast`: 37 tests passed, exit 0
+  (`/tmp/luna-tools-lxown4zo/result.json`). New tests load the actual sysroot
+  and compare bytecode execution with the reference interpreter.
+- `python3 -B development/library_check.py --timeout 900 --stage
+  sysroot-comptime-ordering`: passed, exit 0
+  (`/tmp/luna-library-peouztrc/summary.json`). The source example sorts optional
+  values and error results during comptime evaluation and runs the native test.
+- Initial test harness compilation used the wrong Rust Function field name
+  (`/tmp/luna-tools-u91iyt72/result.json`, exit 101). Later negative checks
+  expected source names in a declaration-ID diagnostic; they now explicitly
+  select the protocol and check the no-applicable-candidate rejection
+  (`/tmp/luna-tools-z9m3wq46/result.json`, exit 101 before assertion repair).
+  No compiler checking or semantic expectation was relaxed.
+- Workspace format checking passed (`/tmp/luna-tools-azdq35bx/result.json`,
+  exit 0); `git diff --check` passed.
+
+Floating-point total ordering, heterogeneous tuple/record ordering, and ordering
+between multiple error labels are not supplied. Runtime text provenance and the
+single-carrier VM migration remain separate unfinished compiler work.

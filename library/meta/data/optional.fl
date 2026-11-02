@@ -1,9 +1,10 @@
 {- Comptime operations on native optional/error values use value references
    for self and value parameters for callbacks; no comptime pointers. -}
 
-use builtin.{Type, bool, u64};
+use builtin.{Type, bool, u64, Order};
 use hashing.{ComptimeHash, mix_byte, mix_digest};
 use numeric.equality.ComptimeEq;
+use numeric.ordering.ComptimeOrd;
 
 pub pure comptime trait ComptimeOptionalOps where T {
     comptime fn is_some(self) -> bool;
@@ -82,6 +83,24 @@ comptime impl ComptimeEq for ?T where T:- ComptimeEq {
             null => false,
         },
         null => other matches null,
+    };
+}
+
+{-
+    Absence precedes presence. Compare payloads only when both outer layers are
+    present, retaining nested optional layers and the payload's own ordering.
+    This is library ordering, independent of representation tags or addresses.
+-}
+comptime impl ComptimeOrd for ?T where T:- ComptimeOrd {
+    comptime fn cmp(self, other: Self) -> Order = self match {
+        left? => other match {
+            right? => left.as(ComptimeOrd).cmp(right),
+            null => .greater,
+        },
+        null => other match {
+            _? => .less,
+            null => .equal,
+        },
     };
 }
 

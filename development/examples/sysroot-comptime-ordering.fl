@@ -13,11 +13,21 @@ comptime fn ordered_text() -> bool {
     let ordered_tags = tags.sort_by(|left, right| left.lt(right));
     let groups: List<List<u8>> = [[2], [], [1, 2], [1]];
     let ordered_groups = groups.sort_by(|left, right| left.lt(right));
+    let optional_numbers: List<?u8> = [2, null, 1, null];
+    let ordered_optional = optional_numbers.sort_by(|left, right| left.lt(right));
+    let success: !u8 u8 = 7;
+    let failure: !u8 u8 = error 1;
+    let results: List<!u8 u8> = [failure, success];
+    let ordered_results = results.sort_by(|left, right| left.lt(right));
     sorted.eq(["", "a", "a", "ab", "é"])
         and ordered_tags.eq([.alpha, .alpha, .alphabet, .beta])
         and tags[0].eq(.beta)
         and ordered_groups.eq([[], [1], [1, 2], [2]])
         and groups[0].eq([2])
+        and ordered_optional.eq([null, null, 1, 2])
+        and optional_numbers[0].eq(2)
+        and ordered_results.eq([success, failure])
+        and results[0].eq(failure)
         and ("ab".cmp("ac") matches .less)
         and ("same".cmp("same") matches .equal)
         and ("ab".cmp("a") matches .greater)
