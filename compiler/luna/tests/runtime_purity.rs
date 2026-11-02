@@ -1604,3 +1604,29 @@ fn owned_defaults_preserve_symbolic_copy_parameter_domains() {
         );
     }
 }
+
+#[test]
+fn proven_program_checks_preserve_runtime_purity_without_granting_assumptions() {
+    let source = "pure fn checked(value:bool)->bool {
+        if value {assumes value;} else {assumes not value;}
+        value
+    }
+    pure fn literal()->bool {assumes true; true}
+    fn run()->bool {checked(true) and not checked(false) and literal()}";
+    let package = compile(source);
+    assert!(package.to_string().contains("check-predicate"));
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    for source in [
+        "pure fn bad(value:bool)->bool {assumes value; value}",
+        "pure fn bad(value:bool)->bool {assumes value; assumes value; value}",
+        "pure fn bad()->bool {assumes false; true}",
+        "pure fn bad(value:bool,p:*bool)->bool {if value {assumes value; p.* = true;} value}",
+    ] {
+        let failure = compile_with_protocols(source, &Default::default()).unwrap_err();
+        assert!(failure.contains("P4 evidence"), "{failure}");
+    }
+    compile(source);
+}

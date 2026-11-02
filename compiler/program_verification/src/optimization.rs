@@ -50,86 +50,97 @@ pub fn elide_proven_checks(package: &mut Package, limits: &mut Limits) -> Elisio
             report.fallback_functions += package.functions.len() - index;
             break;
         }
-        let mut candidate = package.functions[index].clone();
-        let mut checks = 0;
-        // Detach shared closure bodies before analysis. Distinct capture frames
-        // must never rewrite one shared body based on just one frame's facts.
-        if visit(&mut candidate.body, limits, 0, &mut |expr, _| {
-            checks += usize::from(matches!(expr.kind, K::CheckPredicate(_)));
-            Ok(())
-        })
-        .is_err()
-        {
-            report.fallback_functions += 1;
-            continue;
-        }
-        if checks == 0 {
-            continue;
-        }
-        let Ok(analysis) = flow::analyze_in_package(package, &candidate, limits) else {
-            report.fallback_functions += 1;
-            continue;
-        };
-        let mut proven = BTreeMap::<usize, Option<PredicateProof>>::new();
-        for input in analysis
-            .points
-            .iter()
-            .filter_map(|p| p.check_input.as_ref())
-        {
-            let proof = input
-                .prove(limits)
-                .ok()
-                .filter(|p| p.replay(&input.facts, limits).is_ok());
-            // If a node is visited in more than one analysis context, every
-            // visit must justify removal; one successful visit is insufficient.
-            proven
-                .entry(input.site)
-                .and_modify(|previous| {
-                    if proof.is_none() {
-                        *previous = None;
-                    }
-                })
-                .or_insert(proof);
-        }
-        if !proven.values().any(Option::is_some) {
-            continue;
-        }
-        let mut eliminated = Vec::new();
-        let result = visit(&mut candidate.body, limits, 0, &mut |expr, _| {
-            let site = expr as *const Expr as usize;
-            if expr.ty != Term::Primitive(Primitive::Void) {
-                return Ok(());
+        let candidate = package.functions[index].clone();
+        match elide_function_checks(package, candidate, limits) {
+            Ok((candidate, eliminated)) if !eliminated.is_empty() => {
+                package.functions[index] = candidate;
+                report.eliminated.extend(eliminated);
             }
-            let K::CheckPredicate(condition) = &expr.kind else {
-                return Ok(());
-            };
-            if !nir::program::checkable_predicate(condition) {
-                return Ok(());
-            }
-            let Some(Some(proof)) = proven.remove(&site) else {
-                return Ok(());
-            };
-            let K::CheckPredicate(condition) = std::mem::replace(&mut expr.kind, K::Unit) else {
-                unreachable!()
-            };
-            expr.kind = K::Discard(condition);
-            eliminated.push(ElidedCheck {
-                function: candidate.declaration,
-                source: expr.source,
-                proof,
-            });
-            Ok(())
-        });
-        if result.is_err() || flow::analyze_in_package(package, &candidate, limits).is_err() {
-            report.fallback_functions += 1;
-            continue;
-        }
-        if !eliminated.is_empty() {
-            package.functions[index] = candidate;
-            report.eliminated.extend(eliminated);
+            Ok(_) => {}
+            Err(()) => report.fallback_functions += 1,
         }
     }
     report
+}
+
+/// Analyze an owned instance without publishing changes into its source world.
+/// Callers retain their baseline when proof or post-validation is incomplete.
+pub(crate) fn elide_function_checks(
+    package: &Package,
+    mut candidate: nir::program::Function,
+    limits: &mut Limits,
+) -> Result<(nir::program::Function, Vec<ElidedCheck>), ()> {
+    let mut checks = 0;
+    // Detach shared closure bodies before analysis. Distinct capture frames
+    // must never rewrite one shared body based on just one frame's facts.
+    if visit(&mut candidate.body, limits, 0, &mut |expr, _| {
+        checks += usize::from(matches!(expr.kind, K::CheckPredicate(_)));
+        Ok(())
+    })
+    .is_err()
+    {
+        return Err(());
+    }
+    if checks == 0 {
+        return Ok((candidate, Vec::new()));
+    }
+    let Ok(analysis) = flow::analyze_in_package(package, &candidate, limits) else {
+        return Err(());
+    };
+    let mut proven = BTreeMap::<usize, Option<PredicateProof>>::new();
+    for input in analysis
+        .points
+        .iter()
+        .filter_map(|p| p.check_input.as_ref())
+    {
+        let proof = input
+            .prove(limits)
+            .ok()
+            .filter(|p| p.replay(&input.facts, limits).is_ok());
+        // If a node is visited in more than one analysis context, every
+        // visit must justify removal; one successful visit is insufficient.
+        proven
+            .entry(input.site)
+            .and_modify(|previous| {
+                if proof.is_none() {
+                    *previous = None;
+                }
+            })
+            .or_insert(proof);
+    }
+    if !proven.values().any(Option::is_some) {
+        return Ok((candidate, Vec::new()));
+    }
+    let mut eliminated = Vec::new();
+    let result = visit(&mut candidate.body, limits, 0, &mut |expr, _| {
+        let site = expr as *const Expr as usize;
+        if expr.ty != Term::Primitive(Primitive::Void) {
+            return Ok(());
+        }
+        let K::CheckPredicate(condition) = &expr.kind else {
+            return Ok(());
+        };
+        if !nir::program::checkable_predicate(condition) {
+            return Ok(());
+        }
+        let Some(Some(proof)) = proven.remove(&site) else {
+            return Ok(());
+        };
+        let K::CheckPredicate(condition) = std::mem::replace(&mut expr.kind, K::Unit) else {
+            unreachable!()
+        };
+        expr.kind = K::Discard(condition);
+        eliminated.push(ElidedCheck {
+            function: candidate.declaration,
+            source: expr.source,
+            proof,
+        });
+        Ok(())
+    });
+    if result.is_err() || flow::analyze_in_package(package, &candidate, limits).is_err() {
+        return Err(());
+    }
+    Ok((candidate, eliminated))
 }
 
 // This traversal does not reallocate expression vectors or boxes. Arc bodies

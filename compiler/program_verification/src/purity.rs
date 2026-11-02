@@ -4415,6 +4415,28 @@ impl<'a> Analysis<'a> {
         let Ok(function) = function.instantiate_parameters(&binders, types) else {
             return false;
         };
+        // A proven check has no rejection behavior, but its predicate still
+        // executes. Analyze a private, proof-replayed view; never grant the
+        // checked condition as an unconditional fact or mutate source NIR.
+        let function = if !self.finite {
+            let mut limits = crate::Limits::default();
+            if nir::copy_budget::charge_function_substitution(&function, &[], &[], &mut self.fuel)
+                .is_err()
+            {
+                self.fuel = 0;
+                return false;
+            }
+            limits.arithmetic.steps = self.fuel;
+            let simplified = crate::optimization::elide_function_checks(
+                self.package,
+                function.clone(),
+                &mut limits,
+            );
+            self.fuel = limits.arithmetic.steps;
+            simplified.map(|(function, _)| function).unwrap_or(function)
+        } else {
+            function
+        };
         let Term::Function { parameters, result } = &function.signature else {
             return false;
         };
