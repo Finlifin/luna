@@ -139,3 +139,41 @@ fn exhausting_classified_candidates_is_not_an_inconsistency_proof() {
     );
     assert!(matches!(outcome, TypeInputOutcome::Unknown(_)), "{outcome}");
 }
+
+#[test]
+fn structural_classifications_generate_distinct_shapes_without_source_examples() {
+    for kind in [TypeKind::Pointer, TypeKind::Tuple, TypeKind::Function] {
+        let context = Context::default();
+        let inputs = [id(0), id(1), id(2)];
+        let mut constraints: Vec<_> = (0..3).map(|n| F::kind(input(n), kind)).collect();
+        for a in 0..3 {
+            for b in a + 1..3 {
+                constraints.push(F::equal(input(a), input(b)).negate());
+            }
+        }
+        let constraint = F::And(constraints);
+        let outcome =
+            context.search_type_inputs(&inputs, constraint.clone(), &mut Budget::default());
+        let TypeInputOutcome::Ambiguous {
+            candidate,
+            alternative,
+            ..
+        } = outcome
+        else {
+            panic!("three distinct {kind} types have multiple models: {outcome}")
+        };
+        let problem = context
+            .type_input_context(&inputs, constraint, &mut Budget::default())
+            .unwrap();
+        for witness in [candidate, alternative] {
+            problem.verify_witness(&witness, Budget::default()).unwrap();
+            for a in 0..3 {
+                assert_eq!(kind.evaluate(&witness.types[&id(a)]), Some(true));
+                for b in a + 1..3 {
+                    assert_ne!(witness.types[&id(a)], witness.types[&id(b)]);
+                }
+            }
+        }
+        assert!(context.assumptions().is_empty());
+    }
+}

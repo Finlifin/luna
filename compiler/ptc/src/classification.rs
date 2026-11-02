@@ -111,6 +111,55 @@ pub(super) fn witnesses() -> Vec<Term> {
         },
     ]
 }
+/// Distinct closed structural candidates, used only to construct models.
+/// Width supplies fresh shapes without increasing recursive type depth. Reserve
+/// their representation work before allocating; these are not domain axioms.
+pub(super) fn structural_witnesses(width: usize, fuel: &mut usize) -> Option<[Term; 3]> {
+    let remaining = width
+        .checked_add(1)
+        .and_then(|work| work.checked_mul(3))
+        .and_then(|work| work.checked_add(3))
+        .and_then(|work| fuel.checked_sub(work));
+    let Some(remaining) = remaining else {
+        *fuel = 0;
+        return None;
+    };
+    *fuel = remaining;
+    let shape = || Term::Tuple(vec![Term::Primitive(P::Bool); width]);
+    Some([
+        shape(),
+        Term::Pointer(Box::new(shape())),
+        Term::Function {
+            parameters: vec![],
+            result: Box::new(shape()),
+        },
+    ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn structural_candidates_reserve_storage_before_construction() {
+        for width in [1_000_000, usize::MAX] {
+            let mut fuel = 10;
+            assert!(structural_witnesses(width, &mut fuel).is_none());
+            assert_eq!(fuel, 0);
+        }
+        let mut fuel = 100;
+        let candidates = structural_witnesses(3, &mut fuel).unwrap();
+        assert!(fuel < 100);
+        for (candidate, kind) in
+            candidates
+                .iter()
+                .zip([TypeKind::Tuple, TypeKind::Pointer, TypeKind::Function])
+        {
+            assert_eq!(kind.evaluate(candidate), Some(true));
+        }
+    }
+}
+
 impl fmt::Display for TypeKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {

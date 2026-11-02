@@ -1739,9 +1739,38 @@ impl Search<'_> {
                 continue;
             }
             let mut candidates = Vec::new();
-            for candidate in classification::witnesses()
+            let seeds = classification::witnesses();
+            let mut generated = Vec::new();
+            // A structural category has arbitrarily many Type inhabitants.
+            // One representative cannot satisfy even two distinct pointer
+            // inputs. Generate a bounded supply of fresh shapes; their count
+            // is search coverage, never a claim that the category is exhausted.
+            let structural = [TypeKind::Tuple, TypeKind::Pointer, TypeKind::Function];
+            let mut needs_shapes = false;
+            for category in structural {
+                let mut permitted = true;
+                for &(other, kind, truth) in &theory.kinds {
+                    self.steps = self.steps.checked_sub(1)?;
+                    if other == root && category.consequence(true, kind) != Some(truth) {
+                        permitted = false;
+                        break;
+                    }
+                }
+                needs_shapes |= permitted;
+            }
+            if needs_shapes {
+                for width in 0..=self.terms.nodes.len() {
+                    generated.extend(classification::structural_witnesses(
+                        width,
+                        &mut self.steps,
+                    )?);
+                }
+            }
+            // Prefer existing concrete terms before synthesized structures.
+            for candidate in seeds
                 .iter()
                 .chain(self.terms.nodes.iter())
+                .chain(generated.iter())
             {
                 nir::type_computations::charge_term(candidate, &mut self.steps).ok()?;
                 if !closed_type(candidate, &self.context.nominal_constructors) {
