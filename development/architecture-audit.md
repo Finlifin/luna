@@ -30,7 +30,7 @@
 | R08 | `compiler/elaboration/src/program.rs::ensure_signature`、`compiler/type_resolution/src/obligations.rs::Engine` | 已有候选 metavariable 等待机制；大检查器仍手工保存/恢复多张表，不能说没有任何调度 | Region 统一拥有活动状态，具备真正输入生产者的工作才挂起 |
 | R09 | `compiler/ptc/src/search/trail.rs`、`compiler/ptc/src/lib.rs::Atom`、`model_search.rs::witness` | 已有带理由 trail、四路通知、学习与回跳；Atom 四类，trait 原子仍阻止裸理论模型构造 | 在已有算法上补统一理论协议、模型与 guarded 复用；不从零重写 CDCL |
 | R10 | `compiler/nir/src/types.rs::Primitive::BitVec` | 宽度为 usize；延后签名能在具体实例算宽度，不代表定义端抽象宽度完整 | 类型层保留合法静态宽度项，具体表示边界再检查宽度及资源限制 |
-| R11 | `compiler/elaboration/src/program/function_templates/local_definitions.rs`、`program.rs::ensure_signature` | 最新提交已克隆局部 fn/alias/newtype；仍全量继承外围 telescope，局部 helper 在子句默认值可误依赖未供应输入 | 精确词法依赖分析，替换类型、契约、代码、控制目标共享映射 |
+| R11 | `compiler/elaboration/src/program/function_templates/local_definitions.rs`、`program.rs::ensure_signature` | 已克隆局部 fn/alias/newtype；仍全量继承外围 telescope。已运行局部 helper 正例并确认失败；局部 alias 与顶层 helper 对照通过 | 按[精确依赖反例](dependency-observations.md#5-四个判断精确性是否正确的例子)核验实际 telescope/供应链；不以外提 helper 或改变预期规避 |
 | R12 | `compiler/elaboration/src/definitions.rs::prepare_with_invocation_budget`、`compiler/comptime_interpretor/src/generated_structs/admission_session.rs` | batch 准备/原子发布已有机制，多个 struct/enum/newtype 服务仍各自桥接世界 | 统一 DefinitionTransaction、接收世界校验、发布及恢复协议 |
 | R13 | `compiler/program_verification/src/memory.rs::pointer_input_layout`、`memory/text_regions.rs::TextRegionSummary` | 已有文本 read/return 来源摘要；pointer-only 消费者拒绝 Text，摘要不含全部清理足迹 | 区分指针目标和文本 backing region，打通调用/捕获/返回/清理 |
 | R14 | `compiler/luna/src/host/llvm/`、`compiler/luna/src/host/mod.rs` | LLVM host 已有真实降码，停用 compiler/codegen 并非生产后端 | 暂保留现有 LLVM，先独立已验证 IIR/ABI/目标边界，不先换后端 |

@@ -132,8 +132,48 @@ comptime 条件具备后，只执行选中分支；未选分支的来源和必�
 | f 调 g，g 读取外层 seed | 经调用替换后的 seed；递归组保留该闭包 | 只收集直接自由变量，调用时缺输入 |
 | 引用 pointer to Link 的大小 | pointer 类别及 target 指针表示 | 先要求 Link 的全部布局，制造递归布局环 |
 
-第一项对应 `compiler/luna/tests/function_template_local_definitions.rs` 当前被忽略的
-局部 helper 正例。该测试保持正确期望；本轮没有解除忽略，也没有修改生产代码。
+第一项对应 `compiler/luna/tests/function_template_local_definitions.rs` 中的
+`local_comptime_calls_in_clause_defaults_need_precise_lexical_dependencies`。
+2026-11-04 已用 `--ignored --exact` 实际运行该测试，未改动源码里的忽略标记或预期：
+
+```flurry
+template fn choose(value: bool) -> bool
+where .inverted: bool = do {
+    pure comptime fn flag() -> bool { true }
+    flag()
+};
+fn first use choose<> { value != inverted }
+fn run() -> bool { first(false) }
+```
+
+预期为 true；实际在真实 sysroot 的前端检查阶段失败，报告
+`required comptime evaluation failed: interpretation Type at (source 151 157)`，
+尚未进入 run 的 reference 执行。精确命令为：
+
+```sh
+python3 -B development/check.py --timeout 180 -- test -p luna --test function_template_local_definitions local_comptime_calls_in_clause_defaults_need_precise_lexical_dependencies -- --ignored --exact
+python3 -B development/check.py --timeout 60 -- test -p luna --test function_template_local_definitions clause_defaults_rebind_their_local_definitions -- --exact
+```
+
+| 对照 | 实际结果 | 证据 |
+| --- | --- | --- |
+| 上述局部 comptime helper | 测试退出 101，前端拒绝；正确正例未通过 | `/tmp/luna-tools-vsh5q_r8/result.json` 与 stdout.log |
+| 同模块局部 typealias 的子句默认 | 测试退出 0，预期 true 成立 | `/tmp/luna-tools-bvi2f4uy/result.json` 与 stdout.log |
+| 只将同一个 flag 定义移至顶层，保留默认中的 flag 调用 | reference 执行退出 0，`(bool true)`，stderr 空 | `/tmp/luna-tools-4_cv4k1b/result.json` 与 stdout.log |
+
+第三项的原始/变体输入在 `/tmp/luna-lexical-audit-354y8bfn/{original,hoisted}.fl`，
+执行命令完整保存在对应 result.json；使用[运行基线](architecture-audit.md#6-可复现的现状基线)
+中的独立 driver，已重新核对二进制 hash 与 compiler/library 源码未变。
+Cargo 测试同样包含工作区原有资源分析修改，不是纯 HEAD 构建。
+
+静态路径 `ensure_signature` 先继承父 telescope/captures，再添加父 staged inputs，
+与上述对照共同支持精确词法依赖作为修复切入点。本轮未采集逐步执行轨迹，不能仅凭
+宽泛的 `interpretation Type` 诊断宣称已经排除所有其他原因。
+
+迁移验收应直接展示 flag 的实际隐式 telescope、每个输入的依赖来源及调用供应结果：
+此例不能包含未被它使用的 inverted；另一个只在参数域或 requires 使用 inverted 的
+变体仍须保留该依赖。不能以全局外提 helper、删掉检查或硬编码恒 true 作为修复。
+真正的未供应输入应诊断依赖路径、绑定来源和当前阶段，不能只给一个 Type 错误。
 
 ## 6. 接口生产必须有可观察前缀
 
