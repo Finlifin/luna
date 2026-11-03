@@ -35,6 +35,10 @@ M5 是资源机制与库场景的进一步贯通，不是推迟 M1–M4 所涉�
 
 ## 3. 第一批源码迁移的设计准备
 
+M2 先接通[统一值准入](comptime-value-admission.md)及普通参数的真实消费者，保留既有
+带域 list 编码和闭包共享快照；再让 M3 的宿主响应、代码值与发布使用相应传送契约。
+不能先删除 normal_terms/normal_values 中的检查，或把活动值引用统一复制成冻结数据。
+
 布局观察在 normalization 的反射和 safe 检查中已经需要，不推迟到 M6 才设计。
 M4 接通 TypeRef/环境与布局计划，M6 完成目标调用分类与交付；具体生产者、消费者和
 repr_at 退役条件见[布局与调用 ABI](layout-and-call-abi.md)。仅新增一个布局容器不算迁移。

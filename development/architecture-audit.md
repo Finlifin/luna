@@ -38,8 +38,9 @@
 | R17 | 根 Cargo.toml、各 crate manifest | hir 依赖 nir，ast_lowering 依赖 middle，middle 同时持有旧 ty；elaboration 依赖 verification/materialization/VM | 按语义数据与服务协议重新定依赖方向，不能只移动文件制造反向依赖 |
 | R18 | `compiler/luna/src/build_context.rs`、`compilation_cache.rs`、`package_stream.rs`、`output.rs` | 已有来源绑定快照、保守前端缓存、顺序驻留及单文件原子替换；字段观察未接入缓存，非空输出不等于完整目标接口 | 保留有效机制，补任务/源执行身份区分、实际依赖及多产物 manifest，不能将 v1 当作异步构建服务 |
 | R19 | `compiler/nir/src/target.rs`、`compiler/luna/src/host/llvm.rs::repr_at`、`host/mod.rs::Prepared` | 指针宽度、受预算的机器表示、成对 graph/schedule 已有；ABI 属性未接通，通用布局/调用计划缺失 | 统一反射与后端的表示观察，保留薄指针和已有检查，区分私有机器表示与公开调用契约 |
+| R20 | `compiler/nir/src/comptime_values.rs`、`comptime_interpretor/src/normal_terms.rs`、`normal_values/`、`value_reference.rs`、`elaboration/src/program/constants.rs` | list 已按准确域编码；值引用会重验路径，局部闭包已有共享快照和重建 factory；准入/编码/恢复仍跨多个入口 | 统一受检值与传送契约，保留域和图身份；写入只撤销旧内容证据，不一律废弃值引用 |
 
-R01–R19 是当前证据索引，不是永久兼容承诺。位置用文件与符号定位；后续重构同步更新，
+R01–R20 是当前证据索引，不是永久兼容承诺。位置用文件与符号定位；后续重构同步更新，
 不向本文追加几十轮成功日志。
 
 R09 的接线还需区分三个已有层次：`ptc/src/type_inputs.rs` 已有选定投影及符号解，

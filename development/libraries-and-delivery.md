@@ -40,6 +40,10 @@ builtin.Tuple 的签名引用 meta.List，meta 又使用基础 Type；这是分�
 查找先确定名称来源及 phase 优先级，再进行普通实现选择；不能只给名字加 comptime_ 前缀。
 当前 meta 的 ComptimeEq/Hash/Ord 和可选/错误协议可作为真实迁移案例。
 
+List 的 append_all、固定快照 foreach、逐元素 Eq 短路和 Hash 次数是
+[值准入迁移](comptime-value-admission.md)的公开验收入口。Type 元素继续使用普通列表域；
+内部持久存储复用不绕过元素协议，也不要求 comptime self 取得 runtime Copy。
+
 ## 4. 内存和 allocator
 
 容器必须记录实际 allocator 依赖，而非只保留 trait 类型。借出 view 的有效期、扩容后的

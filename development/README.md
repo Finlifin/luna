@@ -17,6 +17,7 @@
 | [状态与发布协议](elaboration-state-and-publication.md) | 如何暂停、恢复、提交、取消，并保持可见性与 coherence？ |
 | [依赖观察](dependency-observations.md) | 如何观察局部信息、精确捕获外层输入并维护查询依赖？ |
 | [值、执行与发布](values-staging-and-publication.md) | 如何统一参数和值，交织 VM、模板和 builder？ |
+| [Comptime 值准入](comptime-value-admission.md) | 成员资格、值引用、快照、Any/代码见证与缓存资格如何分别检查？ |
 | [求解、资源与降码](solvers-resources-and-lowering.md) | CDCL、程序规格和后端如何分工并交换证据？ |
 | [Type 模型与理论证据](type-models-and-theory-evidence.md) | 模型怎样成为合法替换，跨 theory 的解释与理由如何验证？ |
 | [类型引用与环境](type-references-and-environments.md) | 依赖身份怎样形成类型，并跨调用、捕获、清理和 IIR 交付？ |
@@ -33,6 +34,8 @@
 
 已完成首轮静态证据核对，并细化状态协议和依赖观察设计；列出的源码重构及跨层验收均未实施。
 设计区分世界存储版本、线性可见范围和整体 coherence，明确 VM 动态请求身份与发布边界。
+值准入设计区分实际域、传送、编码和缓存；修正普通赋值一律使值引用失效的表述，
+保留同一存活槽重新定位与独立快照的区别。通用准入及恢复事务尚未迁入实现。
 Type 投影、原义务复核及 theory 证据协议已展开。世界存储选定不可变分块、按路径复制索引
 及单一发布根；具体 Rust 接口、各 theory 的完整准入与见证覆盖和持久 schema
 仍待进一步设计。
