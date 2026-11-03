@@ -189,6 +189,60 @@ builder 返回 Type 也不自动符合 invocation 缓存条件。生成定义的
 的路径可以验证指定接口，不足以单独证明未限定方法的 pure comptime trait 优先级。
 本轮没有执行这些测试，历史名称或断言不作为当前通过证据。
 
+### 11.1 真实六包的两阶段方法基线
+
+2026-11-04 使用[源码构建的独立 driver](architecture-audit.md#6-可复现的现状基线)，
+重新核对源码与二进制 hash 后，经完整 library/default preludes 执行临时输入。
+没有显式 `.as(...)`，没有原始 builtin 访问，也没有禁用资源协议。
+这里的运行证据与上文尚未重跑的既有测试分开记录。
+
+公开接口输入的 comptime 部分如下；同一文件的 `fn run() -> bool` 使用完全相同的主体：
+
+```flurry
+comptime fn staged() -> bool {
+    let present: ?bool = true;
+    let absent: ?bool = null;
+    let success: !bool bool = true;
+    let failure: !bool bool = error false;
+    present.is_some() and absent.is_none()
+        and success.is_ok() and failure.is_err()
+        and "é🦀".byte_length() == 6
+        and ("é".byte(1) matches 169?)
+        and ("é".byte(2) matches null)
+}
+```
+
+实际 NIR 将 staged 的七个成员来源依次选为 ComptimeOptionalOps 两次、
+ComptimeErrorResultOps 两次、ComptimeTextBytes 三次；run 则选为对应三个 runtime
+trait，次数相同。由 dump 中 trait 声明身份与函数里的 interface-instance 对照确认，
+不是仅凭相同返回值推断选择正确。
+
+| 检查 | 结果 | `/tmp/luna-tools-` 下的报告目录后缀 |
+| --- | --- | --- |
+| public.fl，comptime staged | 退出 0，`(bool true)` | unsaox6w |
+| public.fl，dump NIR | 退出 0；上述两组来源身份不同且符合阶段 | jpz5ywa3 |
+| public.fl，interpret run | 退出 1；资源检查拒绝 string-view memory provenance，未交付可执行结果 | 99vt5bdi |
+| values.fl，仅移除两函数的三个文本检查 | interpret run 退出 0，`(bool true)` | 7dneb3ef |
+| priority.fl，用户普通 trait 返回 false，pure comptime trait 同名方法返回 true | comptime staged 及 interpret run（取反）均退出 0、返回 true | zwvqrk8d、t1atswl4 |
+| ambiguous.fl，两个同层 pure comptime trait 提供同名方法 | 退出 1，ambiguous visible trait member；没有改选返回 false 的普通 trait | x417vjeb |
+
+输入与摘取的 staged/run NIR 保存在 `/tmp/luna-library-phase-gcjlk26j`；各报告目录中的
+result.json 保存完整命令、退出值，stdout.log/stderr.log 保存实际输出。工作目录为
+`/home/fin/luna`；公开入口命令为：
+
+```sh
+python3 -B development/reproduce.py --timeout 60 --binary /tmp/luna-design-baseline-driver -- comptime /tmp/luna-library-phase-gcjlk26j/public.fl --entry staged --sysroot /home/fin/luna/library --build-target x86_64 linux 64 --fuel 4000000
+```
+
+runtime 使用同一参数，将命令换成 interpret、入口换成 run；dump 使用 `--emit nir`
+而不带 entry/fuel。本轮未构建 native 产物，未测全部方法、泛型边界或未决候选。
+现状结论是：这组普通可见性与两阶段方法选择已真实接通，可选/错误值的 reference
+路径可执行；文本的方法选择也正确，但 runtime backing storage 交付仍阻塞资源检查。
+后续迁移必须保留来源选择，并补齐文本来源/存活证据；不能为让该例通过而关掉检查、
+把 runtime 方法替成 comptime 计算，或将全部 str 一律当作静态存储。
+
+### 11.2 迁移后的验收仍覆盖完整消费者
+
 | 迁移入口 | 必须核对的消费者 | 不足以替代验收的结果 |
 | --- | --- | --- |
 | 普通 callable / 值域 | 真实 meta.List、Tuple、用户头、具名列表赋值及展开 | 手工构造的已准入 NIR 或只通过某个 builtin 头 |
