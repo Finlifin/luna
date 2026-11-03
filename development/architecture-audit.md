@@ -37,8 +37,9 @@
 | R16 | `compiler/hir/src/arena.rs`、`compiler/middle/src/hir_package.rs`、`compiler/middle/src/ty/interner.rs`、`compiler/symbol/src/lib.rs` | 仍有 lifetime/表示擦除 unsafe；仅凭出现 transmute 不能判不健全 | 单独审计所有者、跨世界句柄、析构和并发边界；不先加 Send/Sync |
 | R17 | 根 Cargo.toml、各 crate manifest | hir 依赖 nir，ast_lowering 依赖 middle，middle 同时持有旧 ty；elaboration 依赖 verification/materialization/VM | 按语义数据与服务协议重新定依赖方向，不能只移动文件制造反向依赖 |
 | R18 | `compiler/luna/src/build_context.rs`、`compilation_cache.rs`、`package_stream.rs`、`output.rs` | 已有来源绑定快照、保守前端缓存、顺序驻留及单文件原子替换；字段观察未接入缓存，非空输出不等于完整目标接口 | 保留有效机制，补任务/源执行身份区分、实际依赖及多产物 manifest，不能将 v1 当作异步构建服务 |
+| R19 | `compiler/nir/src/target.rs`、`compiler/luna/src/host/llvm.rs::repr_at`、`host/mod.rs::Prepared` | 指针宽度、受预算的机器表示、成对 graph/schedule 已有；ABI 属性未接通，通用布局/调用计划缺失 | 统一反射与后端的表示观察，保留薄指针和已有检查，区分私有机器表示与公开调用契约 |
 
-R01–R18 是当前证据索引，不是永久兼容承诺。位置用文件与符号定位；后续重构同步更新，
+R01–R19 是当前证据索引，不是永久兼容承诺。位置用文件与符号定位；后续重构同步更新，
 不向本文追加几十轮成功日志。
 
 R09 的接线还需区分三个已有层次：`ptc/src/type_inputs.rs` 已有选定投影及符号解，
@@ -54,6 +55,10 @@ CodeSession 已精确保活世界；TyCtxt 侧表的输入 owner、arena 载荷�
 
 R18 的源码入口、保留资产和交付缺口详见[构建与产物交付](build-and-artifact-delivery.md)。
 该项为静态审计，不证明实际工具链当前可用，也未运行 native 或驻留测试。
+
+R19 的实际发射与迁移边界见[布局与调用 ABI](layout-and-call-abi.md)。host 控制槽已使用
+thread_local 且入口保存/恢复外层控制指针；这不等于一般跨激活恢复已经完整，也不能
+误报为所有线程共享一个普通全局槽。本轮没有执行对应动态验证。
 
 ## 3. 已经学到的东西应当保留
 

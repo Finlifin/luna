@@ -83,6 +83,10 @@ runtime 服务可以封装 stack pool，明确 runtime 的实例选择即足够�
 这些是完整路径的设计要求，不宣称本轮运行或完成。选择实现批次时以这些路径的阻塞
 决定基础工作顺序，不能在 VM 已无明显收益处无限微调而搁置库。
 
+meta 的布局观察、attrs.abi 和 builtin 的目标数值接口需通过真实公开入口接到
+[表示/调用计划](layout-and-call-abi.md)。反射取得结构不自动授予字段访问；属性求值
+成功不等于 C ABI 可调用；builtin.math/meta.math 也不能由当前机器浮点传参方式补定契约。
+
 其中 build 的真实 mode/target/metadata 接口、pipeline 的任务通道和多产物发布边界
 见[构建与产物交付](build-and-artifact-delivery.md)。工程缓存不能吞掉源 invocation，
 也不能把后端返回 void 或工具退出 0 当作代码及入口已成功交付。

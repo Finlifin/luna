@@ -38,6 +38,7 @@
 | C29 | 稳定句柄不代替拥有者与可见性 | draft/seal → snapshot reader → query/VM | 节点存在却不在当前语义前缀；旧 owner 已释放却按相同 slot 读取 |
 | C30 | build 来源与执行位置/投影目标分开 | 定义来源 → build 观察/inline → target/缓存 | helper 被设备代码使用后仍读自身 host 配置，不能重解释已完成布局查询 |
 | C31 | callback 完成不等于产物交付 | pipeline task → manifest 验证/发布 → link/load | void 返回或工具退出 0，但代码缺失、入口映射陈旧；不得交付成功收据 |
+| C32 | 值相关布局不是待求值类型或 fat pointer | 表示观察 → LayoutPlan/环境 → 反射/ABI/访问 | 尚未求出大小不返回 is_not_sized；普通 *T 仍与 usize 同宽，访问另需真实元数据 |
 
 ## 2. 必须成组设计的用例
 

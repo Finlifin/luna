@@ -116,6 +116,11 @@ NIR 继续承担定义端稳定关系和残余描述；IIR 应是独立的高级
 Function 加一个 key 就视为已经完成。IIR 保留结构化控制、闭包、效应、pattern 和
 BitVec 关系；不预设 SSA，不保留尚待求值的类型 comptime 部分。
 
+表示观察与 LLVM 发射分开：前端反射可按需取得布局，不等待整份 IIR。
+LayoutPlan 保存逻辑到物理投影及合法编码，CallAbiPlan 消费已经取得的实参和环境；
+薄指针不因值相关布局而增宽。具体状态、动态元数据及控制通道见
+[布局与调用 ABI](layout-and-call-abi.md)。
+
 ## 5. 类型和值的最小公共内核
 
 类型内核提供声明引用、受检构造、binder-aware substitution、结构观察接口、预算及
@@ -260,5 +265,5 @@ region/task、候选、VM 请求和发布的状态转换已在[状态协议](ela
 中展开；[理论证据协议](type-models-and-theory-evidence.md)细化模型投影、原义务复核和重放。
 这些仍是设计，尚未接入生产入口。[世界存储](world-storage-and-lifetimes.md)已选择分块、
 索引与回收方向；后续需细化具体 Rust 所有权接口、跨编辑身份映射与持久 schema、
-各 theory 的准入与见证覆盖和开放布局的目标表示。这些是实现设计问题，不要求作者
+各 theory 的准入与见证覆盖、各平台 ABI 分类和动态布局的具体编码。这些是实现设计问题，不要求作者
 为每个局部选择审阅；但不能在它们尚不明确时宣称全链路迁移已经具备开工条件。

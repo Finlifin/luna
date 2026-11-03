@@ -35,6 +35,10 @@ M5 是资源机制与库场景的进一步贯通，不是推迟 M1–M4 所涉�
 
 ## 3. 第一批源码迁移的设计准备
 
+布局观察在 normalization 的反射和 safe 检查中已经需要，不推迟到 M6 才设计。
+M4 接通 TypeRef/环境与布局计划，M6 完成目标调用分类与交付；具体生产者、消费者和
+repr_at 退役条件见[布局与调用 ABI](layout-and-call-abi.md)。仅新增一个布局容器不算迁移。
+
 构建入口和输入身份从 M1 起参与，不能到 M6 才补 build 来源。M6 集成
 [任务与产物协议](build-and-artifact-delivery.md)，在保留现行 wire/resident v1 及
 单文件输出保护的前提下接通字段观察、IIR lease、完整 manifest 和恢复消费者。

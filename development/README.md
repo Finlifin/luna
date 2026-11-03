@@ -20,6 +20,7 @@
 | [求解、资源与降码](solvers-resources-and-lowering.md) | CDCL、程序规格和后端如何分工并交换证据？ |
 | [Type 模型与理论证据](type-models-and-theory-evidence.md) | 模型怎样成为合法替换，跨 theory 的解释与理由如何验证？ |
 | [类型引用与环境](type-references-and-environments.md) | 依赖身份怎样形成类型，并跨调用、捕获、清理和 IIR 交付？ |
+| [布局与调用 ABI](layout-and-call-abi.md) | 固定/值相关布局怎样观察，薄指针、参数交付和控制出口怎样保持契约？ |
 | [六包与交付](libraries-and-delivery.md) | 基础架构怎样支撑真正可用的库？ |
 | [构建与产物交付](build-and-artifact-delivery.md) | 构建上下文、pipeline 任务与缓存如何交付完整代码和入口？ |
 | [迁移计划](refactoring-plan.md) | 按什么顺序替换，何时才允许删除旧路径？ |
@@ -33,9 +34,11 @@
 已完成首轮静态证据核对，并细化状态协议和依赖观察设计；列出的源码重构及跨层验收均未实施。
 设计区分世界存储版本、线性可见范围和整体 coherence，明确 VM 动态请求身份与发布边界。
 Type 投影、原义务复核及 theory 证据协议已展开。世界存储选定不可变分块、按路径复制索引
-及单一发布根；具体 Rust 接口、各 theory 的完整准入与见证覆盖、持久 schema 及开放布局
-表示仍待进一步设计。
+及单一发布根；具体 Rust 接口、各 theory 的完整准入与见证覆盖和持久 schema
+仍待进一步设计。
 类型引用与环境设计明确了 NIR safe 检查、IIR verified 检查及后续证据维护的阶段边界。
+布局/调用设计区分计算进度、值相关大小和目标支持，选择薄指针配合显式元数据环境；
+统一反射/布局观察与调用计划的责任。各平台 ABI 分类和动态布局具体编码尚未实现。
 构建交付设计区分执行宿主、host target 与投影目标，细化任务执行身份、IIR 访问有效期
 及不可变内容/manifest 发布；现有驻留 v1 和元数据 wire 保持各自边界，尚未迁移实现。
 完整 goal 仍在进行，不能以本目录写完代替代码清理或架构迁移完成。

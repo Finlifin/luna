@@ -148,6 +148,9 @@ ordinary/direct passing 等策略各有可验证的边界，不能由后端喜�
 闭包、依赖环境和 handler frame 分别表达其拥有/借用关系；runtime 可以封装 stack pool。
 已经固定的实现和环境不能在 runtime 重新搜索来补前端漏解。
 
+表示观察、固定/值相关布局及完整调用计划见[布局与调用 ABI](layout-and-call-abi.md)。
+它们分别消费类型、target 和环境证据，不用同一个 LLVM Ty 判定所有相等、访问和调用资格。
+
 ## 9. BitVec 与目标能力
 
 定义端 BitVec 宽度可为受约束的 comptime 整数项；具体实例必须确定。
