@@ -13,6 +13,7 @@
 | [架构审计](architecture-audit.md) | 当前源码究竟在哪里偏离，哪些旧报告已经过时？ |
 | [一致性边界](consistency-boundaries.md) | 哪些信息在变换中容易丢失，用什么反例检查？ |
 | [全链路架构](architecture.md) | 谁拥有世界、推断、执行、类型环境和产物？ |
+| [模块边界与退役](module-boundaries-and-retirement.md) | 实际 crate 依赖承载什么，哪些职责须保留，旧路径何时可删除？ |
 | [世界存储与生命周期](world-storage-and-lifetimes.md) | 快照怎样共享节点、原子发布并释放旧数据，句柄如何保证所有者有效？ |
 | [状态与发布协议](elaboration-state-and-publication.md) | 如何暂停、恢复、提交、取消，并保持可见性与 coherence？ |
 | [依赖观察](dependency-observations.md) | 如何观察局部信息、精确捕获外层输入并维护查询依赖？ |

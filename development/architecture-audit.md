@@ -35,7 +35,7 @@
 | R14 | `compiler/luna/src/host/llvm/`、`compiler/luna/src/host/mod.rs` | LLVM host 已有真实降码，停用 compiler/codegen 并非生产后端 | 暂保留现有 LLVM，先独立已验证 IIR/ABI/目标边界，不先换后端 |
 | R15 | `library/std/lib.fl`、`library/builtin/lib.fl`、`library/meta/lib.fl` | std 仍为再导出壳；meta/builtin 已有实际数据与协议。Iterator 已为 inline effect 模式，旧“仍用 next”过期 | 编译器基础改造同时定义真实库贯通验收，不把库重新推迟到最后 |
 | R16 | `compiler/hir/src/arena.rs`、`compiler/middle/src/hir_package.rs`、`compiler/middle/src/ty/interner.rs`、`compiler/symbol/src/lib.rs` | 仍有 lifetime/表示擦除 unsafe；仅凭出现 transmute 不能判不健全 | 单独审计所有者、跨世界句柄、析构和并发边界；不先加 Send/Sync |
-| R17 | 根 Cargo.toml、各 crate manifest | hir 依赖 nir，ast_lowering 依赖 middle，middle 同时持有旧 ty；elaboration 依赖 verification/materialization/VM | 按语义数据与服务协议重新定依赖方向，不能只移动文件制造反向依赖 |
+| R17 | 根 Cargo.toml、各 crate manifest、intrinsic::initialize | 26 个活动成员；HIR 查询实际使用 middle，intrinsic 接收但未使用 TyCtxt；HIR 的 NIR 值入口承载 builder 交付 | 按[模块边界](module-boundaries-and-retirement.md)区分必要通道与旧耦合；先接管消费者再退役，不只移动文件 |
 | R18 | `compiler/luna/src/build_context.rs`、`compilation_cache.rs`、`package_stream.rs`、`output.rs` | 已有来源绑定快照、保守前端缓存、顺序驻留及单文件原子替换；字段观察未接入缓存，非空输出不等于完整目标接口 | 保留有效机制，补任务/源执行身份区分、实际依赖及多产物 manifest，不能将 v1 当作异步构建服务 |
 | R19 | `compiler/nir/src/target.rs`、`compiler/luna/src/host/llvm.rs::repr_at`、`host/mod.rs::Prepared` | 指针宽度、受预算的机器表示、成对 graph/schedule 已有；ABI 属性未接通，通用布局/调用计划缺失 | 统一反射与后端的表示观察，保留薄指针和已有检查，区分私有机器表示与公开调用契约 |
 | R20 | `compiler/nir/src/comptime_values.rs`、`comptime_interpretor/src/normal_terms.rs`、`normal_values/`、`value_reference.rs`、`elaboration/src/program/constants.rs` | list 已按准确域编码；值引用会重验路径，局部闭包已有共享快照和重建 factory；准入/编码/恢复仍跨多个入口 | 统一受检值与传送契约，保留域和图身份；写入只撤销旧内容证据，不一律废弃值引用 |

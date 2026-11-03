@@ -119,6 +119,10 @@ repr_at 退役条件见[布局与调用 ABI](layout-and-call-abi.md)。仅新增
 生产 LLVM 在 luna/host，不因目录叫 codegen 就迁入它，也不先升级 LLVM。
 unsafe 清理以生命周期证明为单位，不能用新增 unchecked Send/Sync 换取编译通过。
 
+现有活动依赖与逐项退役条件见[模块边界](module-boundaries-and-retirement.md)。
+middle 的 HIR 查询必须保留；intrinsic 初始化接收但不使用 TyCtxt，不应据其旧注释
+推断存在必要的类型注册行为。单包与多包入口均须纳入适配器迁移验收。
+
 ## 8. 提交与状态
 
 设计文件保持现行状态，修订正文，不追加每轮日志。完成一个可验收的功能/迁移提交一次，
