@@ -65,6 +65,8 @@ repr_at 退役条件见[布局与调用 ABI](layout-and-call-abi.md)。仅新增
 查询失效。[世界存储](world-storage-and-lifetimes.md)选择分块、持久索引及回收边界，
 并列出旧 arena/侧表退役条件。这些属于 M0 设计成果，不能计为 M1/M3 实现完成；
 具体 Rust 接口和生产消费者迁移仍需完成。
+读取/草稿/安装接口按该文的所有权约束接线：跨暂停保存 ID 与 owning snapshot，
+stale 返回冻结准备物；不能以单块 pin 或静态 lifetime 擦除替代跨块依赖保活。
 
 求解线按[Type 模型与理论证据](type-models-and-theory-evidence.md)保留已有投影搜索与原义务
 复核，接通带世界证据的联合模型；不得以推断出具体值代替候选选择、资源或调用交付。

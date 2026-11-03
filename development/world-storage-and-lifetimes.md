@@ -90,21 +90,36 @@ NodeId 不包含“只能由创建时那个 root 使用”的固定 revision，�
 确需复用的局部 arena/task 槽用 owner/generation，类型上与稳定 NodeId 分开。
 错误节点不能靠一个合法 slot 伪装为受检类型；形成证据仍有自己的构造入口。
 
-可选择以下 Rust 接口形状，名称只是草案：
+借用接口采用以下形状；名称是设计名，尚未加入源码：
 
 ```rust
-impl WorldRead<'_> {
-    fn node<T>(&self, id: NodeId<T>) -> Result<NodeView<'_, T>, HandleError>;
+impl<'world> WorldRead<'world> {
+    fn node<'read, K: NodeKind>(
+        &'read self,
+        id: NodeId<K>,
+    ) -> Result<NodeView<'read, K>, HandleError>;
 }
 
-impl DraftOwner {
-    fn prepare(self, base: &WorldRead<'_>) -> Result<PreparedWorld, PrepareError>;
+impl<K: NodeKind> PinnedNode<K> {
+    fn read(&self) -> WorldRead<'_>;
+    fn id(&self) -> NodeId<K>;
 }
 ```
 
-NodeView 的借用不能长于 reader；跨调用长期保存用 ID 加 owning snapshot 或 owning
-chunk pin，不能把 view 擦为 static。需要发布活动进度时先退回稳定 ID，再保存 continuation。
-实际 generic 约束及数据枚举在实现时确定，不先以此示意建立未接线的公共 crate。
+WorldRead 借用其 root；NodeView 借用不长于 reader，不复制底层载荷，也不将临时查表结果
+的借用延长。NodeKind 是 sealed 的内部分类，关联载荷必须拥有其数据或保存受检 ID，
+不包含擦除生命周期的外部借用。节点表以受检枚举匹配或分类型表取出载荷，不靠根据
+泛型参数进行未检查指针转换。NodeId 的构造字段私有；kind、session、边界仍在查找时验证。
+
+跨调用长期保存默认使用 PinnedNode：它持有 NodeId 和 owning snapshot，读取时重新
+借用该快照。跨暂停保存 ID 与所有者，恢复时重新 lookup，不把 NodeView 擦为 static。
+**单独持有一个 chunk 的 Arc 不足以支持跨块遍历。** A 中的节点引用 B，pin A 不会自动
+保活 B；只有经完整闭包检查的 GraphPin 才能作为快照 pin 的精简替代。
+GraphPin 暂不作为第一版接口，避免在生命周期正确前引入另一套回收协议。
+
+PinnedNode 仅保证存储有效。迁入新的 SemanticView 仍须检查声明可见性、修订与依赖，
+不能因保留了旧快照而把旧 trait 选择当成新世界事实。原始存储读取接口限制在编译器内部；
+源级反射、lookup 和执行入口使用带语义视图的观察服务。
 
 ## 4. 草稿、封块与批次发布
 
@@ -234,5 +249,85 @@ dump 使用携带 WorldRead 的 Display 适配器，以稳定局部编号展示 
 facet、依赖和来源；字符串正确转义。调试地址可另作内部诊断，不成为 S-expression 的
 身份格式或跨运行比较依据。
 
-本文件选择存储和所有权方向，尚未完成具体节点枚举、Rust API、持久 schema 或性能验收。
+本文件选择存储和所有权方向；下文继续明确接口约束，具体节点枚举、完整 Rust 实现、
+持久 schema 与性能验收仍未完成。
 没有修改源码、删除旧 arena 或扩大并发；迁移仍按[计划](refactoring-plan.md)推进。
+
+## 10. 草稿与发布接口的所有权约束
+
+prepare 需要暂停，因此不能把整个准备过程藏在一个必须同步返回的函数里。
+目标 owner 划分为可变 DraftOwner、PreparingPublication continuation、不可变且不可克隆的
+PreparedWorld，以及安装后的 PublicationReceipt。它们不是同一对象上的公开状态字段。
+下面仅表达接口约束，具体服务类型随生产接线确定：
+
+```text
+DraftOwner.begin_prepare(base_snapshot, semantic_view, dependencies)
+    -> PreparingPublication
+
+PreparingPublication.advance(ready_response, allowance)
+    -> Waiting(request)
+     | Ready(PreparedWorld)
+     | Rejected(owned_diagnostic, recoverable_state)
+
+PublicationOwner.install(PreparedWorld)
+    -> Installed(PublicationReceipt, RetiredOwner)
+     | Stale(PreparedWorld, current_base)
+```
+
+advance 的实现不得重做已消费的响应；Waiting 保存稳定身份、拥有者与进度，不跨暂停
+持有 NodeView、可变表条目借用或旧 VM 槽指针。预算不足也不把 continuation 变成成功根。
+生产入口是否采用枚举或分类型回调可由实现决定，但 Ready 必须转移所有权，不能同时
+保留能够修改其块或证据的草稿别名。
+
+PreparedWorld 拥有候选根、基线票据、冻结草稿、接收者证据和预留安装资源。
+install 仅由单一发布 owner 调用，并消费 PreparedWorld；不提供一个公共可克隆 token
+允许多次安装。同一个已经完成的宿主请求收到重复响应时，由 RequestId 的结果记录
+返回先前收据，不再次运行 install，也不重新分配声明身份。
+
+Stale 返回原 PreparedWorld 的所有权，而不是丢弃它并隐式重跑 builder。
+重新准备是显式转换：保留已完成且仍合法的源执行结果，重新核对变化的前提和视图；
+依赖没变不能只凭 world revision 猜测，依赖变了也不能让不纯计算自动重放。
+可修复拒绝必须携带足以继续的受控状态；不可修复拒绝消费草稿并留下独立诊断。
+所有错误及诊断不得借用即将销毁的草稿缓冲。
+
+安装成功时，旧根移动到事先预留的 RetiredOwner 中。调用方负责在安装临界区之外
+安排释放；若未来改为内部队列，队列节点同样在 prepare 中预留，不能在根切换后才
+尝试有失败可能的分配。通知的发布状态先写入可恢复记录，再由外部调度实际唤醒；
+消费者取消不会撤销已经成功的世界发布，也不会使重复通知产生第二次结果交付。
+
+Drop 只清理编译器拥有的数据和登记，不能执行源程序、继续求解或决定发布成功。
+回收超过普通执行预算时仍须完成必要 owner 清理；数据量大的释放按回收策略计费，
+不承诺一次 Drop 总是常数时间。内部节点不允许带任意插件提供的析构回调。
+
+## 11. 依赖闭包与接口验收
+
+封块时分别核对批内 DraftNodeId 和指向已发布数据的 NodeId。
+所有批内预留槽必须有匹配种类的定义或明确不交付；未填的 forward reference 不能
+在封块后靠共享可变单元补写。跨批依赖必须属于基线快照或已纳入候选根的合法依赖。
+草稿 owner 不同但 slot 相同的 ID 不可混用；失败后也不回收稳定身份计数供下一批冒用。
+
+引用闭包包含节点边、切片成员、值载荷、代码常量、证据和来源中的全部存储引用。
+采用按节点种类穷尽匹配的内部访问器收集边；新增节点变体时必须补相应规则，不能用
+默认“无子节点”吞掉新边。收集器负责物理可达性，语义依赖观察仍有自己的规则，
+不能因为某个块被保活就把其中全部声明当成当前查询的语义依赖。
+
+闭包检查允许合法互递归的 ID 环，使用 visited 集合控制遍历；环本身不等于非法。
+按值布局环、类型 occurs 及源阶段限制由各自检查器决定，不用物理图无环性替代它们。
+候选 root 无需永久保留未交付的临时节点；但清理不能遗漏实际代码或证据引用的节点。
+
+迁移时需同时验证编译期 API 约束与运行时语义：
+
+| 情形 | 所需结果 |
+| --- | --- |
+| 返回超过 reader 生命周期的 NodeView | Rust 借用检查拒绝，不依赖运行时恰好没回收 |
+| A 引用 B，丢弃原快照后只留长期节点句柄 | 默认 PinnedNode 仍保活 A/B；单块 Arc 不作为遍历凭据 |
+| 相同 slot 来自不同草稿或 session | 形成/查找拒绝，不读取碰巧存在的节点 |
+| prepare 暂停后原调用栈退出 | continuation 拥有必要快照与状态，恢复不访问旧栈借用 |
+| install 因基线过期被拒绝 | 当前根不变，冻结草稿仍有 owner，不重放源副作用 |
+| install 成功后消费者取消或重复通知 | 世界保留一次发布，VM 结果至多交付一次 |
+| 跨块互递归与按值布局递归 | 存储可达检查与布局检查分别作出结果 |
+| 旧快照 pin 存活，但新语义视图已变化 | 旧节点可安全读取，新查询仍重新验证语义证据 |
+
+这些是实现验收要求，尚未生成对应 Rust 类型或运行 compile-fail、Miri、回收压力测试。
+现有 HirPackageBox 的高阶构造与借用期 accessor、CodeSession 的精确 owner 匹配继续保留，
+直到这些保证在实际新入口中被替代。
