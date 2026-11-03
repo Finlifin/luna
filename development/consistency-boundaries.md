@@ -36,6 +36,8 @@
 | C27 | 投影被确定不等于原义务成立 | model proposal → 原上下文复核 → candidate commit | 搜索 X=u8 且 A=u8 不能固定刚性 A；X=A 不因外围模型不同而歧义 |
 | C28 | safe 与 verified 保持规定阶段 | NIR safe 证据 → 实例化维护 → IIR verified/降码 | 不将定义端资源缺口延后到具体实例可证；新生成代码也须检查 |
 | C29 | 稳定句柄不代替拥有者与可见性 | draft/seal → snapshot reader → query/VM | 节点存在却不在当前语义前缀；旧 owner 已释放却按相同 slot 读取 |
+| C30 | build 来源与执行位置/投影目标分开 | 定义来源 → build 观察/inline → target/缓存 | helper 被设备代码使用后仍读自身 host 配置，不能重解释已完成布局查询 |
+| C31 | callback 完成不等于产物交付 | pipeline task → manifest 验证/发布 → link/load | void 返回或工具退出 0，但代码缺失、入口映射陈旧；不得交付成功收据 |
 
 ## 2. 必须成组设计的用例
 

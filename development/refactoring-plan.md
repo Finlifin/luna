@@ -35,6 +35,11 @@ M5 是资源机制与库场景的进一步贯通，不是推迟 M1–M4 所涉�
 
 ## 3. 第一批源码迁移的设计准备
 
+构建入口和输入身份从 M1 起参与，不能到 M6 才补 build 来源。M6 集成
+[任务与产物协议](build-and-artifact-delivery.md)，在保留现行 wire/resident v1 及
+单文件输出保护的前提下接通字段观察、IIR lease、完整 manifest 和恢复消费者。
+既有工具超时/输出检查继续使用；尚未形成稳定 schema 前不提前承诺跨进程恢复。
+
 不从把 program.rs 分成更多文件开始。先在其实际生产入口确定：
 
 1. 哪些声明数据可形成不可变 snapshot，哪些字段确实属于 Region/Candidate。

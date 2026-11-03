@@ -48,6 +48,11 @@ safe 的全部检查位于 normalized IR，不能推迟到实例化后补做。�
 | DefinitionTransaction | 草稿、预留身份、候选世界、发布收据 | 原世界及已完成签名 | 在 commit 前可见的半批声明 |
 | ArtifactStore | 本次编译已验证的 IR/对象/符号与依赖 | 内容及兼容接口 | 缺文件却声称成功的缓存条目 |
 
+BuildSession 区分执行宿主、host pipeline target 和显式投影目标；build 读取跟随定义
+来源，不能由当前调用者或设备后端替换。构建任务的执行身份不同于源 invocation，产物
+按不可变内容与完整 manifest 发布。具体输入、任务、工具和恢复责任见
+[构建与产物交付](build-and-artifact-delivery.md)。
+
 WorldSnapshot 不是永久单例。builder 成功发布形成后继世界；进行中的查询明确继续使用旧版本
 还是在发布边界重新绑定。不能原地修改世界后继续使用此前的实现选择证明。
 

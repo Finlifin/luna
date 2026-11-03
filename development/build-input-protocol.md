@@ -3,7 +3,8 @@
 这是保留的外部输入契约，不是新架构已经实现的声明。旧 metadata-wire.md 的协议表迁至这里；
 本轮核对了 wire.rs 的头部、primitive 编号和限制定义，未重新运行编码/解码测试。
 重构不得把 S-expression dump 当作该协议，也不得未经版本处理改变现有 tag。
-新 build/产物职责见 [库与交付](libraries-and-delivery.md)及[架构](architecture.md)。
+新 build/产物职责见[构建与产物交付](build-and-artifact-delivery.md)；
+该设计不改变下面的 v1 编码，也不将其扩展为 IIR handle 或 artifact 协议。
 下表 Primitive 名称是现有内部 wire 标签，不是要重新导出的 Flurry 类型别名或关键字。
 
 ## Package metadata wire v1

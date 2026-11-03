@@ -36,8 +36,9 @@
 | R15 | `library/std/lib.fl`、`library/builtin/lib.fl`、`library/meta/lib.fl` | std 仍为再导出壳；meta/builtin 已有实际数据与协议。Iterator 已为 inline effect 模式，旧“仍用 next”过期 | 编译器基础改造同时定义真实库贯通验收，不把库重新推迟到最后 |
 | R16 | `compiler/hir/src/arena.rs`、`compiler/middle/src/hir_package.rs`、`compiler/middle/src/ty/interner.rs`、`compiler/symbol/src/lib.rs` | 仍有 lifetime/表示擦除 unsafe；仅凭出现 transmute 不能判不健全 | 单独审计所有者、跨世界句柄、析构和并发边界；不先加 Send/Sync |
 | R17 | 根 Cargo.toml、各 crate manifest | hir 依赖 nir，ast_lowering 依赖 middle，middle 同时持有旧 ty；elaboration 依赖 verification/materialization/VM | 按语义数据与服务协议重新定依赖方向，不能只移动文件制造反向依赖 |
+| R18 | `compiler/luna/src/build_context.rs`、`compilation_cache.rs`、`package_stream.rs`、`output.rs` | 已有来源绑定快照、保守前端缓存、顺序驻留及单文件原子替换；字段观察未接入缓存，非空输出不等于完整目标接口 | 保留有效机制，补任务/源执行身份区分、实际依赖及多产物 manifest，不能将 v1 当作异步构建服务 |
 
-R01–R17 是当前证据索引，不是永久兼容承诺。位置用文件与符号定位；后续重构同步更新，
+R01–R18 是当前证据索引，不是永久兼容承诺。位置用文件与符号定位；后续重构同步更新，
 不向本文追加几十轮成功日志。
 
 R09 的接线还需区分三个已有层次：`ptc/src/type_inputs.rs` 已有选定投影及符号解，
@@ -50,6 +51,9 @@ R16 需要按边界分别核验：HirPackageBox 已有高阶生命周期构造�
 CodeSession 已精确保活世界；TyCtxt 侧表的输入 owner、arena 载荷析构和 Symbol 指针位编码
 仍须具体审计，不能只凭 lifetime 名称或地址稳定认定安全。目标存储与迁移条件见
 [世界存储与生命周期](world-storage-and-lifetimes.md)；本次没有执行内存安全动态验证。
+
+R18 的源码入口、保留资产和交付缺口详见[构建与产物交付](build-and-artifact-delivery.md)。
+该项为静态审计，不证明实际工具链当前可用，也未运行 native 或驻留测试。
 
 ## 3. 已经学到的东西应当保留
 
