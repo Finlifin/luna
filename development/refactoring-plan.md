@@ -59,6 +59,8 @@ repr_at 退役条件见[布局与调用 ABI](layout-and-call-abi.md)。仅新增
 
 现有 `TypeInterner`、候选 Engine、PTC trail、CodeSession、DefinitionBatch 均先评估
 是否能作为这些接口的实现；不因它们旧而全部重写，不因已有而保留错误责任。
+重绑定迁移保留现有 visitor 的执行 scope 区分，接通各证据检查器的保留/迁移/重检/消除
+结果；不能仅统一结构遍历，就声称类型、资源、控制和来源的跨层迁移已经完成。
 
 [状态与发布协议](elaboration-state-and-publication.md)已给出 owner 划分、状态转换、
 安装边界及恢复要求；[依赖观察](dependency-observations.md)细化接口前缀、精确捕获和
