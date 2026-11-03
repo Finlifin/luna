@@ -1,12 +1,13 @@
 # 当前架构审计与劣化根因
 
 基线：`70214cdd08f71c4980b5e80a9b288cd573710cc5`，dev，2026-11-03。
-本轮为静态源码核对，没有重新运行编译器测试或性能测量；历史结果不冒充本轮证据。
+架构结论以静态源码核对为主；第 6 节单独记录 2026-11-04 的有限运行基线，
+不以历史结果或少量正例冒充新架构验收。
 作者要求先完成设计，本文件不是已经实施的重构报告。
 
 ## 1. 体量与结构事实
 
-当前工作区 compiler 下 `.rs/.fl/.md/.py` 共 1,077 文件、766,700 行，含测试及停用目录；
+初始审计工作区 compiler 下 `.rs/.fl/.md/.py` 共 1,077 文件、766,700 行，含测试及停用目录；
 不是生产代码净行数。development 同口径 86,904 行，根目录旧 Markdown 51 份。
 其中旧 README 21,185 行、comptime-vm 11,451 行、implementation-plan 6,974 行，
 大量按时间追加的结论相互覆盖。规模只用于定位阅读和维护成本，不作为删代码的理由。
@@ -120,3 +121,41 @@ thread_local 且入口保存/恢复外层控制指针；这不等于一般跨激
 | 有证据的优化 | 持久值共享、索引、证明重放 | 保留并纳入新边界，禁止为整齐退回全量复制 |
 
 本轮只实施文档清理，尚未执行上述任何源码删除或迁移。
+
+## 6. 可复现的现状基线
+
+2026-11-04 在 `/home/fin/luna` 从当前源码构建了独立 driver。
+构建时 HEAD 为 `7ddc13d5`，**包含工作区原有、未提交的
+compiler/program_verification/src/moves/effects.rs 修改**，不是纯 HEAD 构建。
+该修改未由本阶段改写或提交。构建前状态、源码 diff 与受保护文件摘要保存在
+`/tmp/luna-design-baseline-run-j1ebxbgw`，独立 driver 为 `/tmp/luna-design-baseline-driver`。
+
+```text
+driver sha256:
+ba11923643f874414560f70c3d27d821cbb8dc7d61e2b4483033b8aa078fa1a8
+```
+
+执行入口如下，所有命令均在仓库根运行：
+
+```sh
+python3 -B development/command.py --timeout 900 -- python3 -B development/build_host_driver.py /tmp/luna-design-baseline-driver
+python3 -B development/reproduce.py --timeout 60 --binary /tmp/luna-design-baseline-driver -- interpret development/examples/sysroot-reflected-field-objects.fl --entry run --sysroot library --build-target x86_64 linux 64 --fuel 4000000
+python3 -B development/reproduce.py --timeout 60 --binary /tmp/luna-design-baseline-driver -- interpret development/repros/default-local-comptime-binding.fl --entry run --sysroot library --build-target x86_64 linux 64 --fuel 4000000
+```
+
+| 项目 | 实际结果 | 本机证据 |
+| --- | --- | --- |
+| 受管 dev 构建与独立 driver 保存 | 退出 0，存在编译警告 | `/tmp/luna-tools-s5xb0qfx/result.json` 及 stderr.log |
+| 真实 sysroot 反射 Object、字段编辑、StructBuilder、生成类型及普通调用 | 退出 0，stdout 为 `(bool true)`，stderr 空 | `/tmp/luna-tools-t6qx5l16/result.json` 与 stdout.log |
+| 默认供应中的局部 comptime const 与不同 mode 实参 | 退出 0，stdout 为 `(bool true)`，stderr 空 | `/tmp/luna-tools-qma9rt_9/result.json` 与 stdout.log |
+
+这两项是现有公开路径的保真输入，应在相应迁移中继续成立。它们不证明任意 definition
+builder 已完整、不证明无关外层输入捕获已修正，也不证明 Tuple/List 专用 Role 已退役。
+执行使用 reference interpreter，未做 LLVM/native、Miri、完整资源验收或全量测试。
+两个进程独立运行并有时间重叠，报告耗时不是隔离性能基准，不与旧性能数字作速度比较。
+
+环境检查还发现：受管 `/tmp/luna-dev-002/target` 原先不存在，仓库旧 `target/debug/luna`
+并非当前子命令 CLI；调用其 `--help` 实际运行旧示例并生成被忽略的 ast.lisp/hir.lisp。
+该旧程序输出不能作为当前源码行为证据，后续复现显式指定上述新 driver。
+临时路径只定位本机证据，不是仓库依赖；未来重现应重新构建到一个未存在的独立路径，
+不能凭文件名复用来源不明的旧二进制。
