@@ -130,6 +130,9 @@ pure comptime 回调的普通返回值与任务交付不能混为一份 invocati
 只允许输出 Type 的 invocation 进入结果缓存，不能借后端管理把所有 void 调用缓存起来。
 输出 Type 也只是必要条件；不纯执行不能被省略，缓存成本和实际依赖仍须单独判断。
 任务结果是否可复用，由其任务契约、执行身份和完整依赖另行决定。
+复用前端结果时还需兑现[源执行与静态结果的关系](dependency-observations.md#9-查询缓存和源执行不能混在一起)：
+若本次源执行返回的新值改变类型、接口或发布身份，不能只补执行行为后交付旧 IR。
+静态重算继续使用同一次执行的完成记录，不以重新构建为由重放外部动作。
 
 拟议任务状态：Prepared → Running → Validating → Published，活动状态也可进入
 Failed 或 Cancelled。CachedCandidate 仅是待核验记录，核验通过才能交付成功收据。
