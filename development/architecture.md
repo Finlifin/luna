@@ -55,6 +55,10 @@ WorldSnapshot 不是永久单例。builder 成功发布形成后继世界；进�
 phase 和 target；静态声明不按检查完成顺序变得可见。loose 环境生成实现的线性使用与
 整个实例的 coherence 分别检查，具体协议见[状态与发布](elaboration-state-and-publication.md)。
 
+物理存储采用拥有节点的不可变分块、按路径复制的目录及单一发布根。节点借用限定在
+reader 生命周期，跨查询保存句柄与 owning snapshot；新 root 不强持有整条旧世界链。
+具体存储、发布后的回收及 unsafe 退役条件见[世界存储](world-storage-and-lifetimes.md)。
+
 ### 源码、属性与接口的生产边界
 
 SourceSnapshot 包含文件内容、模块发现结果、生成源码来源与构建输入身份。仅记录已经打开
@@ -249,6 +253,7 @@ Unknown 保存预算/缺失输入原因，不作为永久否定。正在求值�
 
 region/task、候选、VM 请求和发布的状态转换已在[状态协议](elaboration-state-and-publication.md)
 中展开；[理论证据协议](type-models-and-theory-evidence.md)细化模型投影、原义务复核和重放。
-这些仍是设计，尚未接入生产入口。后续需细化世界增量存储布局、具体 Rust 所有权接口、
-跨编辑身份映射、各 theory 的准入与见证覆盖和开放布局的目标表示。这些是实现设计问题，不要求作者
+这些仍是设计，尚未接入生产入口。[世界存储](world-storage-and-lifetimes.md)已选择分块、
+索引与回收方向；后续需细化具体 Rust 所有权接口、跨编辑身份映射与持久 schema、
+各 theory 的准入与见证覆盖和开放布局的目标表示。这些是实现设计问题，不要求作者
 为每个局部选择审阅；但不能在它们尚不明确时宣称全链路迁移已经具备开工条件。

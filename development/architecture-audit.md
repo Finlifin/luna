@@ -46,6 +46,11 @@ R09 的接线还需区分三个已有层次：`ptc/src/type_inputs.rs` 已有选
 绑定的证明。裸模型遇 trait 返回 Unknown 不表示这些能力不存在；缺口是联合模型和
 跨理论证据的完整交付。迁移细节见[Type 模型与理论证据](type-models-and-theory-evidence.md)。
 
+R16 需要按边界分别核验：HirPackageBox 已有高阶生命周期构造和 owner 借用期访问，
+CodeSession 已精确保活世界；TyCtxt 侧表的输入 owner、arena 载荷析构和 Symbol 指针位编码
+仍须具体审计，不能只凭 lifetime 名称或地址稳定认定安全。目标存储与迁移条件见
+[世界存储与生命周期](world-storage-and-lifetimes.md)；本次没有执行内存安全动态验证。
+
 ## 3. 已经学到的东西应当保留
 
 1. **候选只提出解，原义务仍需兑现。** 普通 NF 输入匹配已摆脱一部分 Tuple/List 特权；

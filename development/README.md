@@ -13,6 +13,7 @@
 | [架构审计](architecture-audit.md) | 当前源码究竟在哪里偏离，哪些旧报告已经过时？ |
 | [一致性边界](consistency-boundaries.md) | 哪些信息在变换中容易丢失，用什么反例检查？ |
 | [全链路架构](architecture.md) | 谁拥有世界、推断、执行、类型环境和产物？ |
+| [世界存储与生命周期](world-storage-and-lifetimes.md) | 快照怎样共享节点、原子发布并释放旧数据，句柄如何保证所有者有效？ |
 | [状态与发布协议](elaboration-state-and-publication.md) | 如何暂停、恢复、提交、取消，并保持可见性与 coherence？ |
 | [依赖观察](dependency-observations.md) | 如何观察局部信息、精确捕获外层输入并维护查询依赖？ |
 | [值、执行与发布](values-staging-and-publication.md) | 如何统一参数和值，交织 VM、模板和 builder？ |
@@ -30,8 +31,9 @@
 
 已完成首轮静态证据核对，并细化状态协议和依赖观察设计；列出的源码重构及跨层验收均未实施。
 设计区分世界存储版本、线性可见范围和整体 coherence，明确 VM 动态请求身份与发布边界。
-Type 投影、原义务复核及 theory 证据协议已展开；具体 Rust 接口、各 theory 的完整准入与
-见证覆盖、世界存储布局及开放布局表示仍待进一步设计。
+Type 投影、原义务复核及 theory 证据协议已展开。世界存储选定不可变分块、按路径复制索引
+及单一发布根；具体 Rust 接口、各 theory 的完整准入与见证覆盖、持久 schema 及开放布局
+表示仍待进一步设计。
 类型引用与环境设计明确了 NIR safe 检查、IIR verified 检查及后续证据维护的阶段边界。
 完整 goal 仍在进行，不能以本目录写完代替代码清理或架构迁移完成。
 保持单代理直接工作，不恢复 graph engineering，也不恢复 prompt 文档问答循环。
