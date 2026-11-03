@@ -69,21 +69,79 @@ query 的失效和循环检测需要保留，不能随着旧 TyCtxt 一起抛弃
 | mir / mir_build | 基本块、place、控制流与聚合降码 | 核对独有处理及 dump/工具消费者；不因此把新 IIR 强制改为旧 MIR |
 | codegen | 旧 LLVM C API 降码、对象输出与测试入口 | 核对仍有价值的用例/算法；生产后端以 luna/host 为准，不恢复旧后端来凑统一目录 |
 
-四个停用 crate 目前不在活动 workspace 中，仅能说明它们不属于当前成员构建路径。
-删除之前还需检查独立脚本、CI、外部调用约定、fixture、文档链接与历史恢复位置；
-本次只定位了它们的入口与 manifest，未完成这一整套删除验收。
-没有调用者的公开包装也须显式决定退役，不能把一次文本搜索当成外部兼容性证明。
+四个停用 crate 的仓库内消费者与资产检查见下节。外部未登记消费者不在本次可观察
+范围内，不能宣称对它们兼容；也不以假想消费者为由永久维持两套语义实现。
+公开 Rust 包装的移除应明确记录为内部 API 退役，而不是伪装成兼容实现。
 
 每个新入口先接管实际消费者，再移除旧入口；adapter 只保留单向转交。
 不能让旧 Ty 与新 TypeRef 各自维护一套可修改的类型身份，再靠调用顺序决定谁覆盖谁。
 缓存、错误诊断、预算耗尽和失败后恢复同属迁移契约，不是删除后的补充工作。
 
-## 4. 与第一条纵向迁移的关系
+## 4. 仓库内清理范围已核定，源码尚未删除
+
+2026-11-04 在 `feeda203` 工作区解析全部活动成员 manifest，并扫描 Git 跟踪文件中的
+旧目录、crate 引用及 `typeck_package`、`resolve_ty_expr`、`build_mir`、`codegen_llvm`
+入口。完整文件 hash、依赖边及命中位置保存于
+`/tmp/luna-retirement-audit-5npq1wjm/inventory.json`。
+
+四个停用目录只有 11 个跟踪文件：4 份 Cargo.toml 和 7 份 Rust 源码；未包含独立
+fixture、tests 或 examples，源码也未声明 `#[test]`。26 个活动成员没有指向它们的
+本地依赖，Cargo.lock 未列入这四个 package。仓库跟踪的开发脚本没有调用上述旧入口，
+当前也没有 `.github` 目录。目录外的匹配是根 manifest 的注释、历史报告及本阶段审计。
+这些结论覆盖仓库内可见输入，不证明外部脚本、外部 CI 或未登记路径依赖不存在。
+
+旧代码不能作为一组“必须恢复通过的测试”迁移：
+
+| 资产 | 实际内容 | 清理决定 |
+| --- | --- | --- |
+| typeck | 按名字识别 primitive/旧别名、专用 Tuple；部分类型不匹配仅记录而不诊断 | 从生产树退役；不搬回旧名称规则和宽松检查 |
+| mir / display | 基本块、place、Copy/Move、聚合及非 S-expression dump | 控制流与位置模型可供历史参考，不保留第二套中间类型身份或旧 dump 契约 |
+| mir_build | 无法识别的表达式落为 Unit，无法识别的位置落为 return place | 退役，不把这些回退当作新降码的容错策略 |
+| codegen | LLVM C API 发射与对象输出；无 main 时生成测试 main，按形参数量塞固定整数并打印 | 不迁移这个伪测试入口；后端继续使用 luna/host 和明确的用户入口、目标、测试协议 |
+
+对应源码锚点为 `typeck/src/resolve_ty.rs::resolve_ty_expr_in`、
+`typeck/src/check.rs::check_body`、`mir_build/src/lib.rs::{lower_expr,lower_place}`、
+`codegen/src/lib.rs::{codegen_test_main,codegen_llvm}`。未尝试修复缺失的 compiler/ty
+依赖或启动旧后端；上述算法阅读也不构成新旧后端行为等价证明。
+
+据此，后续允许修改源码时可将四个目录及根 manifest 的对应停用注释作为一个独立
+退役单元，不必等待新 TypeRef、VM 或全后端重构完成。删除前保存基线提交及文件清单，
+删除后核对路径依赖闭包与活动入口检查；历史由 Git 恢复，不另建一份平行可构建实现。
+根 COMPILER_PROGRESS_REPORT.md 的旧后端断层描述是历史快照，不能用来判断当前
+luna/host 不存在。本阶段仍只修改 development，未改写该报告或正式 docs。
+
+### 4.1 middle 的旧类型子系统须另作一个完整退役单元
+
+活动 manifest 中，ast_lowering、interface、intrinsic、luna 四者依赖 middle。
+进一步核对源码：旧类型侧表的可见调用链是 interface 的 `adt_def/def_ty_exists`
+包装 → LunaDatabase 的同名方法 → TyCtxt；未找到活动生产消费者向这些侧表注册类型。
+intrinsic 的 `_ty_ctxt` 形参未被函数体读取。不能因此连同 Db/HIR 一起删掉。
+
+该退役单元须一起处理：middle::ty 及其重导出、Db::ty_ctxt 的构造与字段、
+LunaDatabase 的两个旧类型查询、interface 对应包装与导入、intrinsic 的无用形参及其
+middle 依赖；同时修正声称仍有旧类型 pass 的模块说明。不能保留空实现或将旧 NFId
+转换成新类型身份来维持表面兼容。HIR 查询、provider 注册、失效、所有者和 session
+生命周期继续由现有机制承担；本项不要求先改名或拆出新 crate。
+
+已针对必须保留的行为运行现有测试：
+
+```sh
+python3 -B development/check.py --timeout 180 -- test -p middle --test query_inputs
+```
+
+工作目录 `/home/fin/luna`，退出 0；两个测试分别覆盖跨 Db clone 的输入替换及观察者
+失效，以及 Db/输入销毁后拥有的 HIR 仍可读取和移动。报告在
+`/tmp/luna-tools-2xbgrcq1/result.json`，stdout 记录两项通过，stderr 含现有构建警告。
+这是修改前保留能力的基线，不是删除后的验收，也未覆盖跨线程安全或全部 HIR 查询。
+删除 TyCtxt 后仍须核对原有生命周期拒绝用例和 auto-trait 变化，不能因某个非 Sync
+字段消失就宣布 Db 可以并发访问，更不能手工增加 Send/Sync 来凑构建通过。
+
+## 5. 与第一条纵向迁移的关系
 
 [迁移计划](refactoring-plan.md)中的用户工厂 → 普通值 → 类型 → builder/调用仍是主干。
 上述模块调整服务于这条生产路径，不能先交付一批无人调用的新 crate，再声称完成重构。
 开始源码迁移时，用真实 sysroot 输入核对单包与多包入口，检查旧入口是否仍被调用，
 以及失败、重新发布和输入变化是否仍保持相同契约。
 
-当前完成的是依赖与退役条件设计。未删除源码、未修改依赖、未执行 Cargo 检查；
-具体 Rust 接口及接线验收随纵向迁移落实，不将静态审计冒充运行结果。
+当前完成的是依赖、资产与退役范围核定，并执行了上述现有 HIR 查询基线。
+未删除源码或修改依赖；具体 Rust 接口及迁移后的接线验收尚未完成。
