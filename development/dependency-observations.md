@@ -175,6 +175,59 @@ Cargo 测试同样包含工作区原有资源分析修改，不是纯 HEAD 构�
 变体仍须保留该依赖。不能以全局外提 helper、删掉检查或硬编码恒 true 作为修复。
 真正的未供应输入应诊断依赖路径、绑定来源和当前阶段，不能只给一个 Type 错误。
 
+### 5.1 已观察到的隐式输入与尚未定位的拒绝点
+
+2026-11-04 继续使用同一源码构建的 driver 作临时对照，没有修改编译器、库或测试。
+输入保存在 `/tmp/luna-lexical-boundary-p2z7vjds`；前两项从上述原始输入作单处替换：
+
+| 输入 | 改动 | `dump --emit nir` 的实际结果 |
+| --- | --- | --- |
+| explicit.fl | `choose<>` 改为 `choose<.inverted = true>` | 退出 0；flag 仍有一个 bool 域的隐式输入 |
+| unused.fl | 默认块末尾的 `flag()` 改为 `true`，保留局部定义 | 退出 0；flag 仍有同一个隐式输入 |
+| body.fl | 默认改为常量，把 helper 放入 `fn first use choose<>` 的主体 | HIR lowering 退出 1，报 flag 名称未解析；未到本次待查的 NIR/VM 边界 |
+
+第三项同时改变了声明位置和调用位置，不是单因素对照；其失败也不能归因于词法
+输入准入。保留原始失败证据，不以它证明或否定前两项观察。各次完整命令、退出状态
+及输出分别在 `/tmp/luna-tools-_j2gj4tz`、`/tmp/luna-tools-19cg279q`、
+`/tmp/luna-tools-6ip6dtdh` 的 result.json、stdout.log、stderr.log 中。
+命令形状为：
+
+```sh
+python3 -B development/reproduce.py --timeout 60 --binary /tmp/luna-design-baseline-driver -- dump /tmp/luna-lexical-boundary-p2z7vjds/unused.fl --emit nir --sysroot /home/fin/luna/library --build-target x86_64 linux 64
+```
+
+前两份实际 NIR 均包含以下输入关系；这是按 dump 字段摘取的关系，不是新增 IR 语法：
+
+| NIR 字段 | dump 中的值 |
+| --- | --- |
+| 父声明的 function-parameters | declaration `(package 0, local 3)`；input `(package 0, local 4)`；domain `bool` |
+| flag 的 function-parameters | declaration `(package 0, local 5)`；同一个 input `(package 0, local 4)`；domain `bool` |
+| flag 的 function | phase comptime、pure true；type-parameters 含上述 input；普通 parameters 为空 |
+| flag 的签名、契约和主体 | `() -> bool`；各 requires/capabilities 为空；主体为常量 true |
+
+因此“无实际依赖的 helper 仍携带父输入”已由生产 NIR 直接证实，不再只是对源码循环
+的推测。显式覆盖默认的成功不能证明原默认可执行；unused 的成功也不代表其 helper
+可以被调用。本次只执行 dump，没有把它们计作 runtime 执行通过。
+
+进一步的静态接线核对把问题分成四个边界：
+
+1. `program.rs::ensure_signature` 全量继承父 type_parameters，并补父 staged inputs；
+   `lexical_function_arguments` 又从父声明枚举供应。生产与供应必须一起改为消费同一需求。
+2. `program/required.rs::prepare_required_expression_with_live_inputs` 在检查 root 之前
+   遍历 visible_comptime_parameters，为部分可见值建立 abstract 输入；之后还会合入
+   specialization_inputs。不能只修局部函数签名，就假设 required 输入也已精确。
+3. `program/required/prepared.rs::invoke_in_package` 对真正未供应的捕获先拒绝，再构造
+   interpreter、授权 abstract 域并调用 invoke_with_prepared_arguments。原失败的
+   `required comptime evaluation failed: interpretation Type` 属于求值错误包装，
+   不等于前面的“未供应捕获”诊断。
+4. `comptime_interpretor/src/function_instances.rs::function_instance_value` 在形成函数值时
+   调用 admit_function_inputs；`lib.rs::validate_function_inputs_in_scope` 会检查数量、
+   替换和普通值域，并将多个失败折叠为 Type。函数值形成与函数主体运行必须分别观察。
+
+本次没有失败现场的实际实参、abstract 授权表或 VM 分支轨迹，不能宣称第 4 项中的
+某一个分支已经被唯一定位。后续实施时须显示这三项及其来源；保留已有数量、作用域和
+值域检查，不能通过扩大 abstract 授权、跳过准入或忽略缺少的输入来消除报错。
+
 ## 6. 接口生产必须有可观察前缀
 
 定义接口的任务按声明依赖供应已成立部分：已注册的 binder 身份、已形成的参数域、
