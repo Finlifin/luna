@@ -26,4 +26,4 @@ python3 -B development/host_examples.py arithmetic number-theory library-tuple l
 
 工具链默认使用 `llvm-config-21` 和 `cc`，可用 `LUNA_LLVM_CONFIG`、`LUNA_CC` 指定已有安装。LLVM 的验证、优化、目标文件生成及链接都属于原生链路。
 
-这里的返回值打印由开发驱动生成，不表示标准库 `println`、完整 sysroot 或全部语言特性已经可用。当前实现边界和验证证据见 [host pipeline](../host-pipeline.md)，前端待补项见 [语义前端检查点](../frontend-checkpoint.md)。
+这里的返回值打印由开发驱动生成，不表示标准库 `println`、完整 sysroot 或全部语言特性已经可用。运行和证据入口见[工具说明](../working-guide.md)，本阶段重新核对的实现边界见[架构审计](../architecture-audit.md)。本页示例本轮未重新运行。
