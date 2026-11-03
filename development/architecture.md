@@ -19,9 +19,10 @@ flowchart TD
   Region <--> Exec[混合解释 / invocation engine]
   Exec --> Requests[带身份的宿主请求]
   Requests --> Region
-  Region --> Frozen[冻结定义、契约和合法残余]
+  Region <--> Safe[NIR safe 检查与语义清理]
+  Safe --> Frozen[冻结已检查定义、契约和合法残余]
   Frozen --> Instance[实例化与高级 IIR]
-  Instance --> Verify[资源、内存、控制和程序规格]
+  Instance --> Verify[证据维护与按模式执行 verified 检查]
   Verify --> Target[目标合法化与 ABI]
   Target --> Artifact[LLVM / 其他 pipeline 产物]
   Query[稳定查询与依赖记录] -.-> World
@@ -32,6 +33,8 @@ flowchart TD
 
 图中的执行回边不表示允许循环求值。请求必须具有已存在的输入或可解释的生产者；
 已知签名支撑递归，与“求出自身尚未产生的值”是两种依赖。
+safe 的全部检查位于 normalized IR，不能推迟到实例化后补做。实例化生成的新定义仍须
+经过相应 normalization；IIR 及后续变换保持证据，verified 的高级检查按模式在 IIR 进行。
 
 ## 2. 数据归属与生命周期
 
@@ -90,9 +93,9 @@ HIR 中每个 take view 保留对应 node kind；属性 multi 前缀先保存其
 ```text
 ResolvedDefinition = syntax + declaration/binder links + provenance
 CheckedInterface = telescope + formation contracts + phase + ABI intent
-OpenDefinition = checked interface + stable residual body + dependencies
+OpenDefinition = checked interface/body + NIR safe evidence + legal residuals + dependencies
 CheckedInstance = instance key + completed comptime types + runtime dependencies
-VerifiedInstance = checked instance + resource/control/specification evidence
+ValidatedInstance = checked instance + preserved safe evidence + mode-specific proofs
 TargetArtifact = target-lowered code + symbols + data + dependency manifest
 ```
 
@@ -130,6 +133,7 @@ EnvironmentPlan 的动作绑定到求值计划，必须说明从何处取、何�
 
 闭合函数身份容器继续要求无环境；需要环境的 callable 使用独立描述，不偷偷放宽旧类型。
 `lift` 的源码生产、类型引用、捕获、调用和 lowering 要形成同一交付线。
+生产入口、环境计划、责任传递与 IIR 验收详见[类型引用与环境](type-references-and-environments.md)。
 
 ## 6. 一次调用的共同计划
 
@@ -175,7 +179,7 @@ collector 收集普通 comptime 值，不先把 Type 元素变成特殊槽。
 ### 稳定 query
 
 首先采用 SourceSnapshot、ResolvedModule、DefinitionInterface、NormalizedDefinition、
-InstantiatedDefinition、VerifiedInstance、TargetArtifact 等具有稳定输入输出的边界。
+InstantiatedDefinition、ValidatedInstance、TargetArtifact 等具有稳定输入输出的边界。
 名字表示职责，未要求把所有表达式变成 query。
 
 query 记录实际读取的接口、主体、属性、实现索引代次、目标与 build 输入；“未找到实现”
@@ -190,11 +194,11 @@ Unknown 保存预算/缺失输入原因，不作为永久否定。正在求值�
 以 `fn keep(comptime flag: bool, value: defer SelectType(flag))` 为语义场景：
 
 1. 解析和 HIR 保存 flag 的身份与 value 的延迟依据，不把 defer 展平成未知 Type。
-2. 定义检查建立合法接口及 residual；普通调用点 supplies flag 后请求 SelectType。
+2. 定义检查建立合法接口、NIR safe 证据及合法 residual；普通调用点 supplies flag 后请求 SelectType。
 3. VmSession 用固定世界运行，必要宿主请求只暂停该帧；不重放已完成计算。
 4. 返回的 Type 经接收世界准入；如果是 NF，保留头；随后检查 value 的域。
-5. 实例化消去 comptime 参数，生成含完整 TypeRef 的高级 IIR。
-6. 资源检查检验 value 的实际转移，环境取得计划交给调用和后端；不能靠类型相同授予 Copy。
+5. 调用在 normalized IR 兑现 value 的转移与环境条件，不能靠类型相同授予 Copy。
+6. 实例化消去 comptime 参数，生成含完整 TypeRef 的高级 IIR，保留环境计划及 safe 证据。
 7. 目标检查决定 ABI，发布本次目标产物；query 记录 SelectType 实际依赖。
 
 若 flag 来自 runtime 内容，阶段检查失败；不能生成动态类型工厂掩盖缺失 comptime 输入。
@@ -211,7 +215,7 @@ Unknown 保存预算/缺失输入原因，不作为永久否定。正在求值�
 | elaboration | 上述服务接口及本地 region | elaboration/program 与分散入口 |
 | comptime engine | 稳定 code/value、宿主请求协议 | comptime_compiler/runtime/interpretor |
 | instance construction | 冻结定义、替换、按需执行服务 | materialization、iir/staging |
-| program checking | IIR、程序规格、资源/控制证据 | verification_core/program_verification |
+| program checking | NIR safe 检查、IIR verified 检查及变换证据维护 | verification_core/program_verification |
 | target lowering | 已交付 IIR、ABI、target manifest | luna/host，暂用现有 LLVM |
 | product driver | 上述边界的装配与产物管理 | luna；不创建 anar |
 

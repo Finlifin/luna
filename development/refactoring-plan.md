@@ -20,7 +20,7 @@
 | M1 身份与产物所有权 | stable world、region、candidate、来源与受限产物构造 | 跨边界共享临时状态、隐式当前世界 | 失败/取消不泄漏；不同世界同号句柄拒绝；生产入口使用新所有者 |
 | M2 通用参数和值 | ArgumentPlan、ContextualExpr、freeze/restore、binder 变换 | NF 专用表达式/TypeList 权限、重复参数准备 | 用户 NF 与真实 Tuple/List 同路径，域/顺序/默认/失败一致 |
 | M3 交织执行与发布 | invocation VM 帧、宿主请求、DefinitionTransaction、精确词法依赖 | invocation fallback、per-kind 发布旁路、全量外围捕获 | 活跃调用中生成并调用定义，重复唤醒无重放，子句 helper 正例通过 |
-| M4 生产 TypeRef 与 IIR | 类型引用、lift 生产、EnvironmentPlan、高级实例 IR | 普通注解仅 Term、仅身份集合的依赖交付 | 同 core 不同对象跨调用/捕获/返回，IIR/资源/后端共同消费 |
+| M4 生产 TypeRef 与 IIR | 类型引用、lift 生产、EnvironmentPlan、NIR safe 接线及高级实例 IR | 普通注解仅 Term、仅身份集合的依赖交付 | 同 core 不同对象跨调用/捕获/返回，safe 证据与环境共同进入 IIR/后端 |
 | M5 资源和库贯通 | 来源/效果摘要、text region、cleanup、inline effect、allocator 边界 | pointer-only 消费者、str 直降绕路、重复来源猜测 | 真实 sysroot 文本及迭代、所有出口清理、死亡来源拒绝 |
 | M6 目标与工程交付 | ABI、pipeline、artifact 依赖和稳定 query 覆盖 | CLI 层隐含语义、只缓存整前端而缺细粒度依赖 | 改主体/接口/impl/配置各有正确失效；native O0/O3 和产物恢复 |
 | M7 退役与规模验证 | 删除已替换实现、停用遗留目录审计、持久化及并发接入 | 两套生产真相、临时 adapter、未被消费者使用的新结构 | 唯一生产接线、跨编辑/失败恢复、规模成本与完整回归 |
@@ -28,6 +28,10 @@
 PTC 的完整理论协议和 Type 模型搜索沿 M1–M4 持续推进：M1 定 world/guard/候选事务，
 M2 接通普通值域，M3 处理可恢复宿主观察，M4 消费 TypeRef 及身份域。
 不能等所有模块重写完才做 solver，也不能用不完整 PTC 给资源层提供伪证明。
+
+M5 是资源机制与库场景的进一步贯通，不是推迟 M1–M4 所涉代码的 safe 检查。
+每个阶段交付均要满足相应 normalized IR 的 safe 义务；IIR verified 与后端证据维护
+不替代它。具体 TypeRef、环境和消费者迁移见[类型引用与环境](type-references-and-environments.md)。
 
 ## 3. 第一批源码迁移的设计准备
 

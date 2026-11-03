@@ -18,6 +18,7 @@
 | [值、执行与发布](values-staging-and-publication.md) | 如何统一参数和值，交织 VM、模板和 builder？ |
 | [求解、资源与降码](solvers-resources-and-lowering.md) | CDCL、程序规格和后端如何分工并交换证据？ |
 | [Type 模型与理论证据](type-models-and-theory-evidence.md) | 模型怎样成为合法替换，跨 theory 的解释与理由如何验证？ |
+| [类型引用与环境](type-references-and-environments.md) | 依赖身份怎样形成类型，并跨调用、捕获、清理和 IIR 交付？ |
 | [六包与交付](libraries-and-delivery.md) | 基础架构怎样支撑真正可用的库？ |
 | [迁移计划](refactoring-plan.md) | 按什么顺序替换，何时才允许删除旧路径？ |
 
@@ -31,6 +32,7 @@
 设计区分世界存储版本、线性可见范围和整体 coherence，明确 VM 动态请求身份与发布边界。
 Type 投影、原义务复核及 theory 证据协议已展开；具体 Rust 接口、各 theory 的完整准入与
 见证覆盖、世界存储布局及开放布局表示仍待进一步设计。
+类型引用与环境设计明确了 NIR safe 检查、IIR verified 检查及后续证据维护的阶段边界。
 完整 goal 仍在进行，不能以本目录写完代替代码清理或架构迁移完成。
 保持单代理直接工作，不恢复 graph engineering，也不恢复 prompt 文档问答循环。
 

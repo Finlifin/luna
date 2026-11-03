@@ -34,6 +34,7 @@
 | C25 | 存储版本、线性可见性与整体 coherence 分开 | scope/frontier → selection/publication → instance close | 较早调用不能看见未来生成实现；逐批成功仍可能整体冲突 |
 | C26 | 动态执行身份不同于指令位置 | VM activation → request/resume → host | 循环同一 PC 要执行两次，同一次暂停重复通知只恢复一次 |
 | C27 | 投影被确定不等于原义务成立 | model proposal → 原上下文复核 → candidate commit | 搜索 X=u8 且 A=u8 不能固定刚性 A；X=A 不因外围模型不同而歧义 |
+| C28 | safe 与 verified 保持规定阶段 | NIR safe 证据 → 实例化维护 → IIR verified/降码 | 不将定义端资源缺口延后到具体实例可证；新生成代码也须检查 |
 
 ## 2. 必须成组设计的用例
 
