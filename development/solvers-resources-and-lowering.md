@@ -126,6 +126,79 @@ verified 的高级证明扩展保持接口边界，本阶段不设计大型验�
 已有 TextRegionSummary 可作事实生产者；不能删除 pointer_input_layout 的 Text 拒绝
 就当完成。需改所有相关消费者后运行真实 sysroot 的原生调用。
 
+### 6.1 已有来源分析不等于可执行资源证据
+
+2026-11-04 对[六包基线](libraries-and-delivery.md#111-真实六包的两阶段方法基线)中
+被资源入口拒绝的同一 public.fl，执行了独立来源分析：
+
+```sh
+python3 -B development/reproduce.py --timeout 60 --binary /tmp/luna-design-baseline-driver -- analyze text-regions /tmp/luna-library-phase-gcjlk26j/public.fl --entry run --sysroot /home/fin/luna/library --build-target x86_64 linux 64 --fuel 4000000
+```
+
+工作目录 `/home/fin/luna`，退出 0，输出含 `(reads (static-text-region))`，returned
+为空（本例返回 bool，不携带文本）。报告在 `/tmp/luna-tools-21fvo5l9/result.json`，
+stdout.log 保存完整摘要，stderr 为空。未重新执行已失败的 interpret，也未改动输入。
+
+源码接线与这一结果一致：`luna/src/text_regions.rs` 通过独立 analyze 命令调用
+`infer_text_regions`；`luna/src/cleanup.rs::field_borrows`、moves 的调用/捕获/返回
+路径和 purity 的资源摘要仍消费 `pointer_input_layout`。后者遇 Text 明确拒绝，
+`owned_fields` 也另有 str 拒绝。因此不能只放开一个入口，更不能将 Text 过滤后返回
+空指针集合，伪装成没有借用依赖。分析命令成功不证明整条调用有可执行的清理计划。
+
+现有 TextRegionSummary 的 reads/returned 是来源信息，明确不含完整 cleanup 足迹；
+Static 表示静态来源类别，Parameter 带参数编号与逻辑字段路径。它不是内存地址表，
+也没有交付每次实际访问的权限、范围与存活证明。未来需要区分静态分配身份时，在
+物化/存储服务中补交付，不能把所有 Static 来源合并为同一个可写或可别名对象。
+
+### 6.2 调用边界交付的最小契约
+
+资源层统一使用带来源的借用描述，Pointer 与 Text 是不同的观察种类。第一批接线
+可以覆盖文本，但数据契约不能把字符存储硬编码成任意指针的 pointee。下列项分别拥有
+证明责任；它们不是一个含混的 `valid` 标记，也不交给 PTC 求解：
+
+| 交付项 | 生产与消费规则 |
+| --- | --- |
+| 叶位置 | 带输入/结果的逻辑路径、物理描述符位置与外到内的 payload guards；布局只说明如何找叶 |
+| 区域来源 | 静态存储、调用者视图或已建立的拥有存储，附所需范围；不得以 callee 局部地址作为 caller 根 |
+| 访问足迹 | 对描述符与 backing storage 的读写分别记录，关联控制条件、调用/回调及 cleanup 出口 |
+| 有效性义务 | 对每个可达访问证明存活、已初始化、权限及范围；Copy/纯度不替代这些证明 |
+| 变更与结果 | 描述符更新、区域失效、返回依赖及其 guards；按实际顺序作用于调用者状态 |
+
+callee 可以在“调用者提供有效视图”的显式前提下形成条件摘要；这不是替调用者断言
+区域真实存在。调用者先按源规则求值实参一次，固定传入的描述符值，再把参数相对
+来源代入实际区域，检查足迹及全部出口，最后交付结果依赖。未知回调需要其受检契约
+或真实摘要；没有来源的活动 Text 叶保持未决/拒绝，不得自动视为静态存储。
+
+描述符的值版本与 backing storage 的存活是两个状态：
+
+- 复制描述符只复制来源关系，不延长 backing storage 的寿命，也不转移其释放责任。
+- 经 `*str` 更新描述符时更新该位置及别名观察；此前复制出的旧描述符仍指向旧区域。
+  若无法确定唯一写入目标，合并可能结果并撤销不再成立的观察，不能做无依据的强更新。
+- backing storage 被释放、移动到不保持地址的位置或失效时，拒绝后续依赖它的访问；
+  描述符本身仍在作用域内不构成反证。保持存储身份的合法移动按实际契约处理。
+- 分支汇合可保守合并所有可能来源，但不能漏掉某条分支；访问受 payload guard 支配，
+  不得先读取 inactive optional/error 载荷再检查 tag。丢失相关性时宁可保留额外义务。
+- 未知、活动叶没有来源、分支没有该叶、无正常返回是不同状态。空集合不能兼任它们。
+  递归分析可用 bottom 作为私有迭代种子，所有依赖完成并收敛前不得发布为已验证摘要。
+
+最后一条保留现有 `text_regions.rs::Query::solve/function_with_callbacks` 的有效设计：
+发现实例后排队，依赖增长重排调用者，失败体延后或报错；不是禁止使用固定点算法。
+新摘要须把 cleanup/回调及失效边一并纳入求解，不将当前有限 reads/returned 包装为
+全量证书。摘要缓存属于其定义世界与实例，跨世界复用另按观察依赖检查。
+
+### 6.3 迁移闭包与反例
+
+同一次接线要覆盖入口前提、普通/间接调用、捕获/handler、返回载荷、描述符写回、
+所有出口 cleanup，以及 purity 对内存足迹的读取；共用来源替换与 guard 规则。
+已有 Text 拒绝只能在对应消费者真正接管后移除，未迁移路径继续明确拒绝。
+不得改变 builtin.TextBytes 的公开接口或按其名字放行；用户的同类 wrapper 走相同规则。
+
+验收至少包含：静态字面量经普通调用读取；调用者两个文本参数择一返回；?str/错误
+载荷的活动分支；复制后改写原描述符；backing 存储失效后的旧视图读取；闭包/析构读取；
+递归摘要预算失败后的重试。正例先检查 NIR safe 证据，再检查 reference/native 的实际
+调用与清理，拒绝例必须在错误访问发生前诊断。不能用现有 Static 正例替代拥有存储
+和生命周期反例。这里规定的是待实现契约，本轮只执行了独立来源分析。
+
 ## 7. 纯度的优化使用方式
 
 分析输出应包含层级、适用区间、依赖版本、读写/身份足迹、完成性和控制风险。
