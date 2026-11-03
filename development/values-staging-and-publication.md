@@ -89,6 +89,10 @@ token 仅属于本次 session，不进入冻结定义或持久 query。宿主 re
 operation、输入和 world 依赖；重复 response 不重复安装值，不恢复已取消帧。
 frame 保存 PC、局部槽、结果目的地、控制和清理进度；异常退出也要回收一次。
 
+请求身份包含 session、activation 和动态执行序号，不能只用 PC：循环经过同一指令是
+新执行，恢复同一次暂停才沿用原请求。响应写槽、推进 PC 和标记 Delivered 一起提交。
+完整状态、取消和预算规则见[状态协议](elaboration-state-and-publication.md)。
+
 若请求有真实未完成输入生产者，region 让该 VM session 等待。若宿主只是预算耗尽，
 不能伪造 waiter。必需结果循环报告依赖链；已存在签名支撑的普通递归仍按函数执行。
 
@@ -164,6 +168,12 @@ quote fn 的普通实参先建立新鲜绑定，主体重复引用也不重算�
 4. 验证发布所需的全部接收方（声明目录、VM、实例/协议索引）并准备 receipt。
 5. 核对基线 revision，原子发布后继世界；竞争收据失效，旧世界仍可只读使用。
 6. 恢复原 invocation，返回可在后继世界使用的句柄/值，不返回活动 checker。
+
+上述安装通过同一 PublicationBundle 版本根交付目录、定义、VM 描述和协议索引；
+用户计算与失败性检查都在 prepare 中进行，install 不再逐个调用可失败回调。
+旧代码仍绑定原语义视图，后续操作通过 staging plan 显式取得新视图，不能整体改标旧缓存。
+逐批安装只授予对应后续位置可见性，最终实例交付仍需整体 coherence。
+详见[发布的线性化点](elaboration-state-and-publication.md)。
 
 结构分配失败、语义失败、接收世界拒绝、revision 过期都不泄漏部分声明。
 事务保留可修复草稿；预算消费不回滚。预留编号可以留下空隙，不能将已观察身份复用给

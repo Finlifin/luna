@@ -43,6 +43,10 @@ M2 接通普通值域，M3 处理可恢复宿主观察，M4 消费 TypeRef 及�
 现有 `TypeInterner`、候选 Engine、PTC trail、CodeSession、DefinitionBatch 均先评估
 是否能作为这些接口的实现；不因它们旧而全部重写，不因已有而保留错误责任。
 
+[状态与发布协议](elaboration-state-and-publication.md)已给出 owner 划分、状态转换、
+安装边界及恢复要求；[依赖观察](dependency-observations.md)细化接口前缀、精确捕获和
+查询失效。这些属于 M0 设计成果，不能计为 M1/M3 实现完成；具体存储和 Rust 接口仍需设计。
+
 ## 4. 一条主干切片的验收方法
 
 以“用户定义工厂接收普通值，产生带依赖的类型，被 builder 和普通调用使用”为切片：

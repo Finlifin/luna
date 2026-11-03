@@ -48,6 +48,10 @@ flowchart TD
 WorldSnapshot 不是永久单例。builder 成功发布形成后继世界；进行中的查询明确继续使用旧版本
 还是在发布边界重新绑定。不能原地修改世界后继续使用此前的实现选择证明。
 
+存储版本不决定全部可见性。SemanticView 还记录作用域、实例、线性可见前缀、候选集合版本、
+phase 和 target；静态声明不按检查完成顺序变得可见。loose 环境生成实现的线性使用与
+整个实例的 coherence 分别检查，具体协议见[状态与发布](elaboration-state-and-publication.md)。
+
 ### 源码、属性与接口的生产边界
 
 SourceSnapshot 包含文件内容、模块发现结果、生成源码来源与构建输入身份。仅记录已经打开
@@ -164,6 +168,10 @@ collector 收集普通 comptime 值，不先把 Type 元素变成特殊槽。
 重复唤醒去重，取消撤销登记；暂停 lambda 子任务不应阻止后续实参提供类型。
 任务状态仅在本次 region 内存活，freeze 另行抽取合法 residual。
 
+观察应细化到参数域、类型头、值或布局等 facet，避免以整份声明 ready 制造假环。
+外层依赖分析分别记录检查和执行需求；精确捕获不能删除用户显式参数。
+生产者前缀、递归依赖闭包及失效规则见[依赖观察](dependency-observations.md)。
+
 ### 稳定 query
 
 首先采用 SourceSnapshot、ResolvedModule、DefinitionInterface、NormalizedDefinition、
@@ -235,6 +243,7 @@ Unknown 保存预算/缺失输入原因，不作为永久否定。正在求值�
 | 先生产证据再改消费者 | 修复 text/依赖类型/cleanup 的信息缺口 | 一次纵向改动可能跨多个 crate，必须明确同批范围 |
 | 复用现有 solver/容器算法 | 已有回跳、证明和共享结构的价值不因重构消失 | 必须审计接线，而不是把旧 API 原封不动套新壳 |
 
-尚需在进一步设计中细化的内容：世界增量存储布局、region task 的具体状态类型、跨编辑
-身份映射、完整 theory 模型协议和开放布局的目标表示。这些是实现设计问题，不要求作者
+region/task、候选、VM 请求和发布的状态转换已在[状态协议](elaboration-state-and-publication.md)
+中展开；这仍是设计，尚未接入生产入口。后续需细化世界增量存储布局、具体 Rust 所有权接口、
+跨编辑身份映射、完整 theory 模型协议和开放布局的目标表示。这些是实现设计问题，不要求作者
 为每个局部选择审阅；但不能在它们尚不明确时宣称全链路迁移已经具备开工条件。

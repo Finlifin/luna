@@ -31,6 +31,8 @@
 | C22 | 生成定义检查和发布原子 | draft → ordinary checking → world/VM | 后半批失败不能留下前半批；修复后可重试 |
 | C23 | 编码/布局不授予资源能力 | layout → bit conversion → move/drop | 相同位宽不允许复制仿射载荷或构造非法 enum 编码 |
 | C24 | 产物与当前版本关联 | query → target → link/cache | 接口不变但内联主体变，旧机器码不可继续复用 |
+| C25 | 存储版本、线性可见性与整体 coherence 分开 | scope/frontier → selection/publication → instance close | 较早调用不能看见未来生成实现；逐批成功仍可能整体冲突 |
+| C26 | 动态执行身份不同于指令位置 | VM activation → request/resume → host | 循环同一 PC 要执行两次，同一次暂停重复通知只恢复一次 |
 
 ## 2. 必须成组设计的用例
 

@@ -65,6 +65,10 @@ Normalization 建立定义端必须成立的契约，instantiation 取得本次�
 检查工作的顺序可以由依赖决定；普通实参的执行顺序、次数和控制依赖必须保留。
 不能为获得类型信息预先运行所有分支，不能在重试时重复已经发生的不纯调用。
 
+loose 环境中的 implementation、derivation 按线性可见性使用；整个实例化结束时，
+生成定义与相关静态作用域中的已检查定义共同接受 coherence 检查。
+前者不能由最新存储版本或任务完成顺序替代，后者不能因逐批发布成功而省略。
+
 冻结保存稳定残余及其契约，不保存活动 metavariable、waiter、VM 栈或候选事务。
 独立 comptime 函数的 invocation 使用 engine 字节码；混合阶段 interpretation
 承担就地解释的职责。两者共享语义，不以执行载体划分两套合法程序。
