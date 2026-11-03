@@ -40,6 +40,12 @@
 R01–R17 是当前证据索引，不是永久兼容承诺。位置用文件与符号定位；后续重构同步更新，
 不向本文追加几十轮成功日志。
 
+R09 的接线还需区分三个已有层次：`ptc/src/type_inputs.rs` 已有选定投影及符号解，
+`type_resolution/src/obligations/type_inputs.rs` 保留原始匹配义务，
+`type_resolution/src/capabilities/propositions.rs` 已能将 trait 选择/排除交给精确 world
+绑定的证明。裸模型遇 trait 返回 Unknown 不表示这些能力不存在；缺口是联合模型和
+跨理论证据的完整交付。迁移细节见[Type 模型与理论证据](type-models-and-theory-evidence.md)。
+
 ## 3. 已经学到的东西应当保留
 
 1. **候选只提出解，原义务仍需兑现。** 普通 NF 输入匹配已摆脱一部分 Tuple/List 特权；

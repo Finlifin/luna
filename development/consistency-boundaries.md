@@ -33,6 +33,7 @@
 | C24 | 产物与当前版本关联 | query → target → link/cache | 接口不变但内联主体变，旧机器码不可继续复用 |
 | C25 | 存储版本、线性可见性与整体 coherence 分开 | scope/frontier → selection/publication → instance close | 较早调用不能看见未来生成实现；逐批成功仍可能整体冲突 |
 | C26 | 动态执行身份不同于指令位置 | VM activation → request/resume → host | 循环同一 PC 要执行两次，同一次暂停重复通知只恢复一次 |
+| C27 | 投影被确定不等于原义务成立 | model proposal → 原上下文复核 → candidate commit | 搜索 X=u8 且 A=u8 不能固定刚性 A；X=A 不因外围模型不同而歧义 |
 
 ## 2. 必须成组设计的用例
 
@@ -98,3 +99,5 @@ O0/O3 结果和可观察轨迹应一致，且每条测试启用真实资源协�
 
 本轮只对设计的来源、源码定位、文档链接、删除范围及受保护文件一致性做检查。
 本表的跨层用例是后续实现验收要求，尚未执行，不计为通过。
+
+求解相关反例的上下文、证据和迁移要求见[Type 模型与理论证据](type-models-and-theory-evidence.md)。
