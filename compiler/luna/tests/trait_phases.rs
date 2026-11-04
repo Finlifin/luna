@@ -817,6 +817,43 @@ fn comptime_only_child_requires_comptime_parent_contribution() {
 }
 
 #[test]
+fn preferred_source_does_not_compare_irrelevant_value_indices() {
+    for bounds in ["Ordinary<a> + Ordinary<b> + Preferred", "Child<a,b>"] {
+        let source = format!(
+            "trait Ordinary where flag: bool {{ comptime fn read() -> bool; }}
+            pure comptime trait Preferred {{ comptime fn read() -> bool; }}
+            trait Child :- Ordinary<a> + Ordinary<b> + Preferred
+            where a: bool, b: bool
+            {{}}
+            struct Subject {{}}
+            impl Ordinary<true> for Subject {{ comptime fn read() -> bool {{ false }} }}
+            impl Ordinary<false> for Subject {{ comptime fn read() -> bool {{ false }} }}
+            comptime impl Preferred for Subject {{ comptime fn read() -> bool {{ true }} }}
+            impl Child<true,false> for Subject {{}}
+            comptime fn choose() -> bool
+            where a: bool, b: bool, T :- {bounds}
+            {{ T.read() }}
+            comptime fn run() -> bool {{ choose<true,false,Subject>() }}"
+        );
+        let package = support::compile(&source);
+        assert_eq!(
+            luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+            comptime_interpretor::Value::Bool(true),
+            "{bounds}"
+        );
+        let unresolved = source.replace(" + Preferred", "");
+        let failure = compile(&unresolved, Emit::Nir)
+            .err()
+            .expect("unresolved sources");
+        assert!(
+            failure.contains("interface identity comparison failed"),
+            "{failure}"
+        );
+        assert!(failure.contains("unresolved"), "{failure}");
+    }
+}
+
+#[test]
 fn comptime_capability_members_prefer_comptime_only_trait_in_either_bound_order() {
     for bounds in ["Ordinary + Staged", "Staged + Ordinary"] {
         let source = format!(

@@ -1,0 +1,27 @@
+{-
+   A generic call must retain witnesses for every declared capability,
+   including interfaces whose methods are not called by the body.
+   The source checker selects Preferred; direct comptime invocation currently
+   rejects the call plan because the unused Ordinary instances are unavailable.
+-}
+trait Ordinary where flag: bool {
+    comptime fn read() -> bool;
+}
+pure comptime trait Preferred {
+    comptime fn read() -> bool;
+}
+struct Subject {}
+impl Ordinary<flag> for Subject
+where flag: bool
+{
+    comptime fn read() -> bool { false }
+}
+comptime impl Preferred for Subject {
+    comptime fn read() -> bool { true }
+}
+comptime fn choose() -> bool
+where a: bool, b: bool, T :- Ordinary<a> + Ordinary<b> + Preferred
+{
+    T.read()
+}
+comptime fn run() -> bool { choose<true,false,Subject>() }

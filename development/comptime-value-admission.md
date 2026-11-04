@@ -2928,6 +2928,54 @@ given 不再将 Symbol、record 等普通值作为 Type 等式提交。调用候
 index_type_relations 可选包装和 index_values_definitely_differ 布尔包装已删除，
 不再有内部自带额度或将耗尽转换成无匹配／未发现差异的公共捷径。
 
+**接口来源的输入身份。** Given 所用的输入比较已抽出为
+type_resolution/input_identity::equivalent，成员来源去重也使用这一入口。
+它比较已准入的输入：精确值身份、已知标量／结构差异、同结构中的 Type 关系，
+以及原调用 telescope 下的 Type 证明；不执行 invocation，不赋值推断变量，
+不把普通数据等式变成 PTC 命题。false 只表示当前身份要求不成立，不是可发布的
+否定 Type 事实。Budget、Unresolved、Invalid 均作为查询失败传播到调用方。
+
+原 same_interface 对每个实参另开证明额度，并将所有非 Entailed 结果压成 false。
+现显式视角、声明期关联投影、泛型 capability 来源和可见 trait 发现都传播失败；
+实参复制预检、普通值遍历与 Type 证明共用传入余额。继承与可见来源查询沿用已有
+搜索预算，声明及上下文入口仍有各自的查询额度，尚未完成全 checker 的预算统一。
+
+来源的阶段筛选先于语义去重。继承遍历只按精确接口键防止重复访问，保留各成员
+来源；隐式调用先选定有效阶段层，再比较该层的完整接口实例。否则低优先级层中
+两个未知值索引会阻断已确定的 pure comptime 来源。显式视角没有这层优先级竞争，
+仍须比较所有实际继承来源；诊断不会把未决身份标记为已确定的来源歧义。
+
+新增单测检查 Type 叶子仅使用当前上下文、已知普通值差异、未知值身份、非法 Type
+作用域，以及预算消耗和恢复。源码回归覆盖直接／父接口约束中的阶段优先级，并在
+去掉优先来源后要求保留 unresolved 身份诊断。它不为通过而增加生产预算。
+声明期主体匹配仍有独立的旧证明路径；此次只迁移完整接口的参数身份比较，不能
+据此宣称所有来源查询均已纳入统一的可暂停任务协议。
+
+该回归最初使用泛型 Ordinary／Child 实现，前端通过后直接 comptime invocation
+报 InvalidCallPlan。追踪定位到 function_instance_value 对 capability 的见证检查：
+未调用成员的泛型接口实例没有进入 VM 的 implemented_interfaces。将三个修改的
+接口模块恢复为 `d873c5e3` 内容后，相同源码仍在同一位置失败，
+`/tmp/luna-tools-2bksb0fw/result.json` 退出 101；追踪证据为
+`/tmp/luna-tools-m07op6hn/result.json`，临时诊断与基线替换均已逐字节恢复。
+独立复现保存在 [comptime-unused-generic-capability.fl](repros/comptime-unused-generic-capability.fl)，
+预期仍是成功返回 true；本次未修复该见证交付缺口。来源优先级回归改用具体实现，
+保留泛型函数中的两个未知值索引，分别验证来源选择与未决失败，不把 VM 缺口当作
+合法拒绝或削弱函数的 capability 检查。
+
+本次验证工作目录 `/home/fin/luna`：
+
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution -p luna
+  --lib --test capabilities --test associated --test receiver_sources --test trait_phases
+  --test trait_domain_substitution --test trait_query_failures --test associated_signatures
+  --test nominal_value_parameters --test cmtt_methods --test library_protocols
+  --no-fail-fast -- --skip code_method_parent_value_clauses_form_indexed_code_signatures`：
+  786 项通过，筛去 1 项已确认未实现的 indexed code signature 用例，退出 0；
+  `/tmp/luna-tools-06l0dj8m/result.json`。包含工作区原有资源分析修改。
+- 七份修改／新增 Rust 文件 scoped rustfmt check 退出 0；
+  `/tmp/luna-tools-tuqwokn1/result.json`。git diff --check 通过。
+
+未执行全 workspace、native 或性能基准；上述泛型见证交付复现仍未修复。
+
 implementation 的标量冲突预检、每个普通值参数的结构遍历、重复 binder 比较与
 后续 Type 匹配共用 head 分区的余额，不再为每个实参刷新额度。调用的显式输入
 约束在试探副本中完成：结构关系提取、Type 匹配及唤醒均沿用余额；失败不发布

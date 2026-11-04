@@ -464,6 +464,7 @@ pub mod calls;
 pub mod capabilities;
 pub mod implementation;
 mod inference_budget;
+pub mod input_identity;
 pub mod matching;
 pub mod obligations;
 

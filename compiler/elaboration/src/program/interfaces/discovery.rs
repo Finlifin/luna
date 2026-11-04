@@ -262,7 +262,12 @@ impl Checker<'_, '_> {
                     match resolution.selection {
                         crate::implementation::Selection::Selected(_) => {
                             for origin in inherited {
-                                if !sources.iter().any(|old| self.same_interface(old, &origin)) {
+                                if !self.contains_interface(
+                                    &sources,
+                                    &origin,
+                                    span,
+                                    &mut budget.steps,
+                                )? {
                                     sources.push(origin);
                                 }
                             }

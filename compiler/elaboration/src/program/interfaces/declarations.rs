@@ -97,10 +97,12 @@ impl Checker<'_, '_> {
                     .iter()
                     .find(|member| self.package.item(**member).unwrap().ident.name.as_str() == name)
                 {
-                    if !found
-                        .iter()
-                        .any(|(old, _)| self.same_interface(old, &instance))
-                    {
+                    if !self.contains_interface(
+                        found.iter().map(|(old, _)| old),
+                        &instance,
+                        span,
+                        &mut fuel,
+                    )? {
                         found.push((instance, *member));
                     }
                     continue;
@@ -238,6 +240,7 @@ impl Checker<'_, '_> {
             }
         }
         let mut established = false;
+        let mut identity_fuel = Budget::default().steps;
         for given in givens {
             if given.subject != subject
                 && !matches!(
@@ -254,11 +257,13 @@ impl Checker<'_, '_> {
                 declaration: given.interface,
                 arguments: given.interface_arguments,
             };
-            if self
-                .declaration_interface_sources(&subject, root, None, span)?
-                .iter()
-                .any(|(interface, _)| self.same_interface(interface, &requested))
-            {
+            let sources = self.declaration_interface_sources(&subject, root, None, span)?;
+            if self.contains_interface(
+                sources.iter().map(|(interface, _)| interface),
+                &requested,
+                span,
+                &mut identity_fuel,
+            )? {
                 established = true;
                 break;
             }

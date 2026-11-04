@@ -134,21 +134,80 @@ impl Checker<'_, '_> {
         Ok(())
     }
 
-    pub(super) fn same_interface(
+    fn same_interface(
         &self,
         a: &n::InterfaceInstance,
         b: &n::InterfaceInstance,
-    ) -> bool {
-        a.declaration == b.declaration
-            && a.arguments.len() == b.arguments.len()
-            && a.arguments.iter().zip(&b.arguments).all(|(a, b)| {
-                a == b
-                    || matches!(
-                        self.context
-                            .prove(Formula::equal(a.clone(), b.clone()), Budget::default()),
-                        Outcome::Entailed(_)
-                    )
-            })
+        span: Span,
+        fuel: &mut usize,
+    ) -> Result<bool, Error> {
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or_else(|| error(span, "interface identity comparison budget exhausted"))?;
+        if a.declaration != b.declaration || a.arguments.len() != b.arguments.len() {
+            return Ok(false);
+        }
+        for (left, right) in a.arguments.iter().zip(&b.arguments) {
+            let equal = type_resolution::input_identity::equivalent(
+                &self.context,
+                left,
+                right,
+                Budget::default().max_depth,
+                &[],
+                self.context.scope(),
+                fuel,
+            )
+            .map_err(|failure| {
+                error(
+                    span,
+                    format!("interface identity comparison failed: {failure}"),
+                )
+            })?;
+            if !equal {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    pub(super) fn contains_interface<'a>(
+        &self,
+        sources: impl IntoIterator<Item = &'a n::InterfaceInstance>,
+        requested: &n::InterfaceInstance,
+        span: Span,
+        fuel: &mut usize,
+    ) -> Result<bool, Error> {
+        let mut incomplete = None;
+        for source in sources {
+            match self.same_interface(source, requested, span, fuel) {
+                Ok(true) => return Ok(true),
+                Ok(false) => {}
+                Err(failure) => {
+                    // An independently established identity can still witness
+                    // membership; unfinished comparisons cannot prove absence.
+                    incomplete.get_or_insert(failure);
+                }
+            }
+        }
+        match incomplete {
+            Some(failure) => Err(failure),
+            None => Ok(false),
+        }
+    }
+
+    fn unique_interfaces(
+        &self,
+        sources: Vec<n::InterfaceInstance>,
+        span: Span,
+        fuel: &mut usize,
+    ) -> Result<Vec<n::InterfaceInstance>, Error> {
+        let mut unique = Vec::new();
+        for source in sources {
+            if !self.contains_interface(&unique, &source, span, fuel)? {
+                unique.push(source);
+            }
+        }
+        Ok(unique)
     }
     pub(crate) fn interface_parameter_binders(
         &self,
@@ -186,7 +245,10 @@ impl Checker<'_, '_> {
         name: &str,
         span: Span,
     ) -> Result<Option<n::InterfaceInstance>, Error> {
-        let mut sources = self.inherited_member_sources(subject, root, name, span)?;
+        let mut fuel = Budget::default().steps;
+        let sources =
+            self.inherited_member_sources_metered(subject, root, name, span, &mut fuel)?;
+        let mut sources = self.unique_interfaces(sources, span, &mut fuel)?;
         if sources.len() > 1 {
             return Err(error(
                 span,
@@ -239,12 +301,9 @@ impl Checker<'_, '_> {
             if interface.methods.iter().any(|m| m.name == name)
                 || interface.associated.iter().any(|a| a.name == name)
             {
-                if !sources
-                    .iter()
-                    .any(|old| self.same_interface(old, &instance))
-                {
-                    sources.push(instance);
-                }
+                // Source consumers apply phase tiers before semantic identity
+                // queries. An irrelevant tier must not demand unresolved inputs.
+                sources.push(instance);
             } else {
                 let (_, arguments) = self.interface_substitution(&instance, subject);
                 let substitution = interface
@@ -362,6 +421,7 @@ impl Checker<'_, '_> {
         let mut sources = Vec::new();
         let mut pending_sources = Vec::new();
         let mut inherited_ambiguities = Vec::new();
+        let mut fuel = Budget::default().steps;
         let frames = self.call_input_frames();
         for capability in crate::capabilities::capability_sources_with_layouts(
             &self.checked_traits,
@@ -401,9 +461,7 @@ impl Checker<'_, '_> {
                 } else {
                     &mut pending_sources
                 };
-                if !target.iter().any(|old| self.same_interface(old, &source)) {
-                    target.push(source);
-                }
+                target.push(source);
             }
         }
         let comptime_only = |source: &n::InterfaceInstance| {
@@ -426,16 +484,24 @@ impl Checker<'_, '_> {
                 "capability member source remains unresolved; cannot select a fallback",
             ));
         }
+        let mut sources = self.unique_interfaces(sources, span, &mut fuel)?;
         if sources.len() > 1 {
+            let mut inherited_ambiguity = false;
+            for group in &inherited_ambiguities {
+                let mut count = 0;
+                for source in &sources {
+                    if self.contains_interface(group, source, span, &mut fuel)? {
+                        count += 1;
+                    }
+                }
+                if count > 1 {
+                    inherited_ambiguity = true;
+                    break;
+                }
+            }
             return Err(error(
                 span,
-                if inherited_ambiguities.iter().any(|group| {
-                    sources
-                        .iter()
-                        .filter(|source| group.iter().any(|old| self.same_interface(old, source)))
-                        .count()
-                        > 1
-                }) {
+                if inherited_ambiguity {
                     "ambiguous inherited member; specify its interface source"
                 } else {
                     "ambiguous capability member; specify its interface source"
