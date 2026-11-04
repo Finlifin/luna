@@ -303,10 +303,24 @@ mod tests {
         assert!(
             crate::call_safety::validate_program(view, &mut 100)
                 .unwrap_err()
+                .to_string()
                 .contains("71..72")
         );
         method.is_unsafe = true;
         crate::call_safety::validate_program(CallableProgram::method(&method).unwrap(), &mut 100)
             .unwrap();
+    }
+    #[test]
+    fn call_safety_resource_failure_is_typed_and_recoverable() {
+        let mut method = method();
+        method.program.preconditions = (0..100).map(flag).collect();
+        let view = CallableProgram::method(&method).unwrap();
+        let mut fuel = 10;
+        assert!(matches!(
+            crate::call_safety::validate_program(view, &mut fuel),
+            Err(crate::call_safety::Error::Budget(_))
+        ));
+        assert_eq!(fuel, 0);
+        crate::call_safety::validate_program(view, &mut 101).unwrap();
     }
 }

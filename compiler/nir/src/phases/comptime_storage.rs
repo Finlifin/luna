@@ -5,14 +5,6 @@ use super::StorageError;
 use crate::{Sort, Term, program::Package};
 use std::collections::HashSet;
 
-pub(super) fn validate(
-    ty: &Term,
-    package: &Package,
-    frames: &[Vec<Sort>],
-) -> Result<(), &'static str> {
-    validate_resolved(ty, package, frames, None, &mut 100_000).map_err(StorageError::message)
-}
-
 pub(super) fn validate_resolved(
     ty: &Term,
     package: &Package,

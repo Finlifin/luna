@@ -1,0 +1,99 @@
+//! End-to-end phase inspection must consume one allowance across callables.
+use super::*;
+use crate::program::{Function, Literal};
+
+fn flag() -> Expr {
+    Expr {
+        source: SourceRange { start: 10, end: 20 },
+        ty: Term::Primitive(Primitive::Bool),
+        kind: K::Literal(Literal::Bool(true)),
+    }
+}
+fn function(local: u32, phase: Phase) -> Function {
+    Function {
+        declaration: crate::DeclarationId { package: 1, local },
+        name: format!("function{local}"),
+        phase,
+        inline: false,
+        pure: false,
+        is_unsafe: false,
+        signature: Term::Function {
+            parameters: vec![],
+            result: Box::new(Term::Primitive(Primitive::Bool)),
+        },
+        parameters: vec![],
+        type_parameters: vec![],
+        body: flag(),
+        defaults: vec![],
+        preconditions: vec![],
+        postconditions: vec![],
+        result_binding: None,
+        entry_snapshots: vec![],
+        requirements: vec![],
+        capabilities: vec![],
+    }
+}
+fn run(package: &Package, fuel: &mut usize) -> Result<BTreeSet<crate::DeclarationId>, Error> {
+    machine_arithmetic_functions_with_budgets(package, &mut 1_000_000, fuel)
+}
+
+#[test]
+fn storage_and_call_safety_consume_the_same_inspection_allowance() {
+    for phase in [Phase::Runtime, Phase::Comptime] {
+        let package = Package {
+            functions: vec![function(1, phase)],
+            ..Default::default()
+        };
+        let mut fuel = 1000;
+        run(&package, &mut fuel).unwrap();
+        let cost = 1000 - fuel;
+        assert!(cost > 1);
+        let mut exact = cost;
+        run(&package, &mut exact).unwrap();
+        assert_eq!(exact, 0);
+        let error = run(&package, &mut (cost - 1)).unwrap_err();
+        assert_eq!(error.message, "call safety validation budget exhausted");
+        assert_eq!(error.source, package.functions[0].body.source);
+        let mut twice = package.clone();
+        twice.functions.push(function(2, phase));
+        assert!(
+            run(&twice, &mut cost.clone())
+                .unwrap_err()
+                .message
+                .contains("budget exhausted")
+        );
+        run(&twice, &mut 1000).unwrap();
+        // A new invocation cannot retain depleted fuel or partial query state.
+        run(&package, &mut cost.clone()).unwrap();
+    }
+}
+
+#[test]
+fn captured_values_do_not_receive_a_fresh_allowance_per_expression() {
+    let mut callable = function(1, Phase::Comptime);
+    callable.body.kind = K::Block {
+        statements: (0..64)
+            .map(|_| Expr {
+                source: SourceRange { start: 80, end: 90 },
+                ty: Term::Primitive(Primitive::Symbol),
+                kind: K::ComptimeValue(Term::Symbol("x".repeat(20_000).into())),
+            })
+            .collect(),
+        result: Some(Box::new(flag())),
+    };
+    let mut package = Package {
+        functions: vec![callable],
+        ..Default::default()
+    };
+    let error = validate(&package).unwrap_err();
+    assert_eq!(error.source, SourceRange { start: 80, end: 90 });
+    assert_eq!(
+        error.message,
+        "captured comptime value validation budget exhausted"
+    );
+    let K::Block { statements, .. } = &mut package.functions[0].body.kind else {
+        unreachable!()
+    };
+    statements.truncate(1);
+    validate(&package).unwrap();
+}

@@ -2133,3 +2133,53 @@ unsafe 检查继续运行；程序契约仍不进入 PTC。没有把移除复制
 `/tmp/luna-tools-_5cbchzz/result.json` 退出 0；上述 869 项为最终版本的重验。
 格式检查 `/tmp/luna-tools-9pn5p2hy/result.json` 退出 0。未运行全 workspace 或
 性能基准；正式 docs 与用户原有工作区修改保持不变。
+
+
+### Phase inspection allowance 的实际归属
+
+phase pass 内的 runtime storage、comptime storage、冻结／staged value admission
+以及 call safety 现已接到同一次 inspection allowance，和既有成员替换、默认值
+绑定观察、pattern／bit selection 准备共用余额。删除原 preparation 私有额度，
+以及这些消费者按查询、值或函数重置 100,000 的路径。外层默认 inspection 额度
+仍为 1,000,000，没有提高原 preparation 限额；声明目录／membership／callable
+frame 的 declaration allowance 保持独立。
+
+`StorageQueries` 同时接收两种存储阶段，分别缓存结果。两者共享同一不可变
+Package 所有者，均在 hash／复制之前支付类型与 frame key 成本，命中也需要预算。
+comptime 查询失败不能借用 runtime 查询的成功结论；Budget 不入缓存，Invalid
+与成功只在同一 world、相同 phase/type/frames 下复用。这没有改变存储语义：
+runtime callable 的参数／结果描述与 comptime 捕获的实际存储仍按各自规则检查。
+
+call safety 返回类型化的 Budget 或 Invalid；共享 visitor 的资源失败不再被
+phase 层统一报告为非法 unsafe 调用。非法操作保留具体源位置与责任诊断；IIR
+及 quote expansion 的旧字符串诊断边界通过 Display 转换。此处没有更改 VM
+构造错误的总分类：phase pass 的公开 Error 仍是来源与消息，constructor 的失败
+预算保留策略也未改为精确计费。
+
+生产 phase 入口的回归以 64 个各自可在旧局部额度内检查的 Symbol 值检验总成本，
+现在在捕获值的源位置报告资源失败，缩小输入可恢复。内部入口另验证恰好足额、
+少一步在 call-safety 处耗尽、多个函数共用额度与再次调用恢复；缓存用例涵盖
+两阶段同类型的相反结论、不同 Package 同号 nominal 的不同字段、展开失败不入
+缓存、正余额预留失败及热查询成本。
+
+这还不是完整 phase 总预算。normal-form/newtype 等元数据验证、predicate shape、
+主 body/pattern 工作栈以及部分临时集合仍有独立额度或成本未接线；内部入口
+据此只命名为 declaration／inspection 两个 allowance，不暴露为 VM 的全量有界
+验证承诺。后续需要一起迁移这些消费者，再统一构造失败的资源分类与实际扣款。
+
+本批验证目录 `/home/fin/luna`，统一入口
+`python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p nir --lib --test phases --no-fail-fast`：70 通过，退出 0；
+  `/tmp/luna-tools-co0ty9ki/result.json`。
+- `-p iir -p comptime_interpretor -p elaboration --lib --test types
+  --test instance_budget --test runtime_function_identities --no-fail-fast`：
+  752 通过，退出 0；`/tmp/luna-tools-p2br0_35/result.json`。
+- `-p luna --test sysroot_preludes --test host_intrinsic_protocol --test trait_phases
+  --test quote_functions --test cmtt_type_inputs --test method_memory_contracts
+  --test snapshot_contracts --no-fail-fast`：267 通过，退出 0；
+  `/tmp/luna-tools-6lk4ls5s/result.json`。
+
+格式检查 `/tmp/luna-tools-co_z870o/result.json` 退出 0。未运行全 workspace 或性能
+基准；没有提高额度、放宽存储／责任检查或改动真实 sysroot 以消除回归。正式 docs
+和用户已有工作区修改保持不变。

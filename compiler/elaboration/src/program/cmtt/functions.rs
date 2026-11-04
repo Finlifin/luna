@@ -1106,7 +1106,7 @@ pub(in crate::program) fn expand_retained_quote_functions(
     for function in output.functions.iter().chain(&output.quote_templates) {
         let result = nir::call_safety::validate(function, &mut remaining);
         *fuel = remaining as u64;
-        result.map_err(|message| error(at(function.body.source), message))?;
+        result.map_err(|reason| error(at(function.body.source), reason.to_string()))?;
     }
     let domains = output.declaration_parameter_domains(&mut remaining);
     *fuel = remaining as u64;

@@ -607,6 +607,7 @@ fn operation_ir_requires_lexical_permission_and_runtime_phase() {
     assert!(
         nir::call_safety::validate(&package.functions[0], &mut 1000)
             .unwrap_err()
+            .to_string()
             .contains("unsafe boundary at 40..70")
     );
     assert!(nir::phases::validate(&package).is_err());

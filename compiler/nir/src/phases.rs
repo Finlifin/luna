@@ -5,6 +5,8 @@ use crate::{Primitive, Sort, Term, contracts::CallableProgram};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod comptime_storage;
+#[cfg(test)]
+mod inspection_tests;
 mod member_types;
 mod parameters;
 mod storage_cache;
@@ -30,14 +32,15 @@ pub fn validate(package: &Package) -> Result<(), Error> {
 pub fn machine_arithmetic_functions(
     package: &Package,
 ) -> Result<std::collections::BTreeSet<crate::DeclarationId>, Error> {
-    machine_arithmetic_functions_with_declaration_budget(package, &mut 1_000_000)
+    machine_arithmetic_functions_with_budgets(package, &mut 1_000_000, &mut 1_000_000)
 }
 
-// Other phase subservices still own separate allowances. Keep this argument
-// explicitly declaration-only until the remaining checks share caller fuel too.
-fn machine_arithmetic_functions_with_declaration_budget(
+// Declaration admission and expression inspection own separate allowances.
+// This is not yet the VM budget: some metadata and shape checks remain local.
+fn machine_arithmetic_functions_with_budgets(
     package: &Package,
     declaration_fuel: &mut usize,
+    inspection_fuel: &mut usize,
 ) -> Result<std::collections::BTreeSet<crate::DeclarationId>, Error> {
     let mut machine_owners = std::collections::BTreeSet::new();
     let parameter_domains = parameters::domains(package, declaration_fuel)
@@ -131,10 +134,10 @@ fn machine_arithmetic_functions_with_declaration_budget(
         .chain(&package.quote_templates)
         .map(|function| (function.declaration, function.parameters.as_slice()))
         .collect();
-    let mut storage_queries = storage_cache::RuntimeStorageQueries::new(package);
-    let mut runtime_storage = |ty: &Term, source, frames: &[Vec<Sort>]| {
+    let mut storage_queries = storage_cache::StorageQueries::new(package);
+    let mut runtime_storage = |ty: &Term, source, frames: &[Vec<Sort>], fuel: &mut usize| {
         storage_queries
-            .check(ty, frames, &mut 100_000)
+            .check_runtime(ty, frames, fuel)
             .map_err(|failure| Error {
                 source,
                 message: failure.message(),
@@ -163,7 +166,6 @@ fn machine_arithmetic_functions_with_declaration_budget(
     };
     // Each work item carries its execution context. Staged inputs/defaults do
     // not change the owner's declaration phase or require cloned summary bodies.
-    let mut preparation_fuel = 1_000_000usize;
     for function in programs() {
         let function = function?;
         let caller_frames = match function.signature.callable_signature() {
@@ -172,7 +174,7 @@ fn machine_arithmetic_functions_with_declaration_budget(
         };
         let ct = function.phase != Phase::Runtime;
         if !ct {
-            runtime_storage(function.signature, function.source, &[])?;
+            runtime_storage(function.signature, function.source, &[], inspection_fuel)?;
         }
         let fail = |source, message| Error { source, message };
 
@@ -350,7 +352,7 @@ fn machine_arithmetic_functions_with_declaration_budget(
                         machine_owners.insert(function.declaration);
                     }
                     if !ct {
-                        runtime_storage(&expr.ty, expr.source, &caller_frames)?;
+                        runtime_storage(&expr.ty, expr.source, &caller_frames, inspection_fuel)?;
                         if !machine
                             && matches!(expr.kind, K::IntegerNegate(_) | K::IntegerBinary { .. })
                             && !deferred_integer
@@ -553,7 +555,7 @@ fn machine_arithmetic_functions_with_declaration_budget(
                             subject,
                         } => {
                             let (contract, member) = trait_index
-                                .associated(interface.declaration, *member, &mut preparation_fuel)
+                                .associated(interface.declaration, *member, inspection_fuel)
                                 .map_err(|failure| error(failure.message()))?;
                             if interface.arguments.len() != contract.type_parameters.len() {
                                 return Err(error(
@@ -566,7 +568,7 @@ fn machine_arithmetic_functions_with_declaration_budget(
                                 subject,
                                 &interface.arguments,
                                 &caller_frames,
-                                &mut preparation_fuel,
+                                inspection_fuel,
                             )
                             .map_err(|failure| {
                                 error(match failure {
@@ -590,7 +592,7 @@ fn machine_arithmetic_functions_with_declaration_budget(
                             subject,
                         } => {
                             let (contract, method) = trait_index
-                                .method(*interface, *member, &mut preparation_fuel)
+                                .method(*interface, *member, inspection_fuel)
                                 .map_err(|failure| error(failure.message()))?;
                             if contract.comptime_only && !ct {
                                 return Err(error(
@@ -629,7 +631,7 @@ fn machine_arithmetic_functions_with_declaration_budget(
                                 method_arguments,
                                 &parameter_domains,
                                 &caller_frames,
-                                &mut preparation_fuel,
+                                inspection_fuel,
                             )
                             .map_err(|failure| {
                                 error(match failure {
@@ -756,7 +758,7 @@ fn machine_arithmetic_functions_with_declaration_budget(
                                     if parameter.sort == Sort::Runtime {
                                         let free = crate::free_bindings::collect(
                                             &argument.value,
-                                            &mut preparation_fuel,
+                                            inspection_fuel,
                                         )
                                         .map_err(|reason| {
                                             error(match reason {
@@ -1109,7 +1111,7 @@ fn machine_arithmetic_functions_with_declaration_budget(
                             subject,
                         } => {
                             let member = trait_index
-                                .retained_method(*declaration, &mut preparation_fuel)
+                                .retained_method(*declaration, inspection_fuel)
                                 .map_err(|failure| error(failure.message()))?;
                             let trait_target;
                             let target = if let Some(member) = member {
@@ -1255,10 +1257,11 @@ fn machine_arithmetic_functions_with_declaration_budget(
                             selections,
                             value,
                         } => {
-                            preparation_fuel =
-                                preparation_fuel.checked_sub(selections.len()).ok_or_else(
-                                    || error("bit selection validation budget exhausted"),
-                                )?;
+                            *inspection_fuel = inspection_fuel
+                                .checked_sub(selections.len())
+                                .ok_or_else(|| {
+                                    error("bit selection validation budget exhausted")
+                                })?;
                             let Term::Pointer(storage) = &pointer.ty else {
                                 return Err(error("bit writeback requires a pointer"));
                             };
@@ -1286,10 +1289,11 @@ fn machine_arithmetic_functions_with_declaration_budget(
                             value,
                             ..
                         } => {
-                            preparation_fuel =
-                                preparation_fuel.checked_sub(selections.len()).ok_or_else(
-                                    || error("bit selection validation budget exhausted"),
-                                )?;
+                            *inspection_fuel = inspection_fuel
+                                .checked_sub(selections.len())
+                                .ok_or_else(|| {
+                                    error("bit selection validation budget exhausted")
+                                })?;
                             if let Some(message) = crate::program::bit_update_error_in(
                                 storage_type,
                                 selections,
@@ -1372,7 +1376,7 @@ fn machine_arithmetic_functions_with_declaration_budget(
                                             &package.normal_forms,
                                             pattern,
                                             &value.ty,
-                                            &mut preparation_fuel,
+                                            inspection_fuel,
                                         )
                                         .map_err(|_| {
                                             fail(
@@ -1423,7 +1427,7 @@ fn machine_arithmetic_functions_with_declaration_budget(
                             let staged = crate::preparation::inputs_with_layouts(
                                 &package.normal_forms,
                                 expr,
-                                &mut preparation_fuel,
+                                inspection_fuel,
                             )
                             .map_err(|_| {
                                 fail(
@@ -1516,7 +1520,7 @@ fn machine_arithmetic_functions_with_declaration_budget(
                                 &expr.ty,
                                 package.target,
                                 parameters,
-                                &mut 100_000,
+                                inspection_fuel,
                             )
                             .map_err(|error| fail(expr.source, error.message()))?;
                         }
@@ -1525,7 +1529,7 @@ fn machine_arithmetic_functions_with_declaration_budget(
                                 value,
                                 &expr.ty,
                                 package.target,
-                                &mut 100_000,
+                                inspection_fuel,
                             )
                             .map_err(|error| fail(expr.source, error.message()))?;
                         }
@@ -1552,13 +1556,26 @@ fn machine_arithmetic_functions_with_declaration_budget(
                 .map(|parameter| &parameter.ty)
                 .chain(ct.then_some(result.as_ref()))
             {
-                comptime_storage::validate(domain, package, &frames).map_err(|message| Error {
-                    source: function.source,
-                    message,
-                })?;
+                storage_queries
+                    .check_comptime(domain, &frames, inspection_fuel)
+                    .map_err(|error| Error {
+                        source: function.source,
+                        message: error.message(),
+                    })?;
             }
         }
-        crate::call_safety::validate_program(function, &mut 100_000).map_err(|_| Error {source: function.source, message: "unsafe function call requires an unsafe boundary or declaration telescope is invalid"})?;
+        crate::call_safety::validate_program(function, inspection_fuel).map_err(
+            |error| match error {
+                crate::call_safety::Error::Budget(_) => Error {
+                    source: function.source,
+                    message: "call safety validation budget exhausted",
+                },
+                crate::call_safety::Error::Invalid { source, message } => Error {
+                    source: source.unwrap_or(function.source),
+                    message,
+                },
+            },
+        )?;
     }
     Ok(machine_owners)
 }
