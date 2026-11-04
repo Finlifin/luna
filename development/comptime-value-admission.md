@@ -2080,3 +2080,56 @@ identity，移除重复项后恢复。索引测试还覆盖宽名称预留失败
 修正 fixture；`/tmp/luna-tools-341lsc60/result.json` 退出 101，不作为通过证据。
 格式检查 `/tmp/luna-tools-a43zfj65/result.json` 退出 0。未运行全 workspace 或性能
 基准。正式 docs 与用户原有工作区修改保持不变。
+
+
+### Trait 契约只读视图与 summary 构造边界
+
+phase validation 与 IIR validation 不再为了遍历方法的程序契约而调用空实参
+summary 实例化。两者使用借用原始签名、参数绑定、requires、ensures 和 entry
+snapshots 的 `CallableProgram`；method 视图没有 body，普通函数视图保留原 body
+与 defaults。phase 不再收集所有 owned summaries，也不复制名称、capabilities、
+requirements 和整棵契约表达式。这里是只读检查适配器，不是新的可执行 IR，不能
+作为 invocation 入口或实现选择证据；其 Display 采用 S-expression。
+
+方法 phase 仍从原 callable signature 取得，普通 telescope 视图与 unsafe 责任
+分别保留。Generator、PatternGenerator 和 DataConsumer 不经此入口转成普通
+callable。参数／结果绑定冲突、snapshot 约束、契约形状、表达式阶段和 lexical
+unsafe 检查继续运行；程序契约仍不进入 PTC。没有把移除复制理解为移除检查。
+
+共享不可变 visitor 与 call-safety visitor 按原来的后进先出顺序惰性取得根节点，
+不先分配与 requires／ensures／defaults 数量相等的根引用数组；子树仍复用原有
+遍历规则和调用者 fuel。回调取得原表达式的引用，遇到资源错误即停止，后续调用
+从原不可变输入重新检查。此变更不证明子树所有临时分配都已纳入统一预算。
+
+无预算的 `MethodContract::program_summary` 和 `program_summary_parameters`
+已移除。程序验证中实际需要实例化的 summary 继续走已有的
+`program_summary_declaration_inputs`，显式传入声明域、caller frames 和 fuel；
+该路径仍构造 owned Function summary。本次没有重写完整 summary 表示，也没有
+把整个 phase pass 接到 VM 总预算；storage、predicate shape 和完整 body traversal
+的额度／成本归属仍需继续整理。
+
+新增检查覆盖原始 signature／表达式／snapshot 引用身份、无虚构 body、根遍历
+顺序和预算耗尽后重试、前后置条件都拒绝非法形状、snapshot 绑定、comptime phase
+与 unsafe scope 不越过兄弟根。IIR 用例把同一契约移到 ensures 后，仍拒绝内部
+未完成的类型值；contextual code 的拒绝与原有有界 summary 的声明输入检查保留。
+
+本批验证目录 `/home/fin/luna`，统一入口
+`python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p nir -p iir -p comptime_interpretor -p program_verification --lib --test calls
+  --test code_interfaces --test phases --test types --test instance_budget
+  --test runtime_function_identities --no-fail-fast`：869 通过，退出 0；
+  `/tmp/luna-tools-8fcyo6r7/result.json`。
+- `-p luna --test trait_phases --test quote_functions --test associated_signatures
+  --test associated_purity --test deferred_associated_values --test cmtt_type_inputs
+  --test sysroot_preludes --no-fail-fast`：237 通过，退出 0；
+  `/tmp/luna-tools-17d514ij/result.json`。
+- `-p luna --test method_memory_contracts --test snapshot_contracts --no-fail-fast`：
+  13 通过，退出 0；`/tmp/luna-tools-geop83tl/result.json`。
+
+首次局部编译因新测试的 source position 使用 usize 而非 u32 失败，修正后通过；
+`/tmp/luna-tools-ws63n769/result.json` 退出 101，不作为通过证据。共享 visitor 的
+惰性根改动前，局部与消费者检查分别为 `/tmp/luna-tools-9rz0aw03/result.json`、
+`/tmp/luna-tools-_5cbchzz/result.json` 退出 0；上述 869 项为最终版本的重验。
+格式检查 `/tmp/luna-tools-9pn5p2hy/result.json` 退出 0。未运行全 workspace 或
+性能基准；正式 docs 与用户原有工作区修改保持不变。

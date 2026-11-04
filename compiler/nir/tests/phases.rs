@@ -2087,3 +2087,103 @@ fn duplicate_associated_identities_cannot_make_phase_lookup_order_dependent() {
     package.traits[0].associated.pop();
     nir::phases::validate(&package).unwrap();
 }
+
+#[test]
+fn borrowed_method_contracts_keep_predicate_and_snapshot_admission() {
+    use nir::program::{EntrySnapshot, MethodContract};
+    let input = LocalId {
+        owner: 80,
+        index: 0,
+    };
+    let snapshot = LocalId {
+        owner: 80,
+        index: 1,
+    };
+    let mut package = Package {
+        traits: vec![nir::program::Trait {
+            declaration: DeclarationId {
+                package: 1,
+                local: 81,
+            },
+            self_parameter: DeclarationId {
+                package: 1,
+                local: 82,
+            },
+            name: "Contract".into(),
+            comptime_only: false,
+            parameter_types: vec![],
+            type_parameters: vec![],
+            requirements: vec![],
+            capabilities: vec![],
+            parents: vec![],
+            associated: vec![],
+            methods: vec![MethodContract {
+                declaration: DeclarationId {
+                    package: 1,
+                    local: 80,
+                },
+                name: "check".into(),
+                signature: function(80, Phase::Runtime, &[Sort::Runtime])
+                    .signature
+                    .into(),
+                phase: Default::default(),
+                is_quote: false,
+                pure: true,
+                is_unsafe: false,
+                type_parameters: vec![],
+                type_arguments: vec![],
+                parameter_bindings: vec![input],
+                capabilities: vec![],
+                requirements: vec![],
+                by_value_receiver: false,
+                by_reference_receiver: false,
+                default: None,
+                program: nir::contracts::ProgramContract {
+                    preconditions: vec![flag(K::Local(input))],
+                    postconditions: vec![flag(K::Local(snapshot))],
+                    entry_snapshots: vec![EntrySnapshot {
+                        parameter: input,
+                        binding: snapshot,
+                    }],
+                    result_binding: None,
+                },
+            }],
+        }],
+        ..Default::default()
+    };
+    let owners = nir::phases::machine_arithmetic_functions(&package).unwrap();
+    assert!(owners.contains(&package.traits[0].methods[0].declaration));
+    package.traits[0].methods[0].program.result_binding = Some(input);
+    assert_eq!(
+        nir::phases::validate(&package).unwrap_err().message,
+        "result binding aliases an input parameter"
+    );
+    package.traits[0].methods[0].program.result_binding = None;
+    package.traits[0].methods[0].program.entry_snapshots[0].binding = input;
+    assert_eq!(
+        nir::phases::validate(&package).unwrap_err().message,
+        "invalid entry snapshot binding"
+    );
+    package.traits[0].methods[0].program.entry_snapshots[0].binding = snapshot;
+    for post in [false, true] {
+        let program = &mut package.traits[0].methods[0].program;
+        let condition = if post {
+            &mut program.postconditions[0]
+        } else {
+            &mut program.preconditions[0]
+        };
+        condition.ty = Term::Primitive(Primitive::U32);
+        condition.source = SourceRange { start: 90, end: 95 };
+        let error = nir::phases::validate(&package).unwrap_err();
+        assert_eq!(error.message, "invalid program contract predicate");
+        assert_eq!(error.source, SourceRange { start: 90, end: 95 });
+        let program = &mut package.traits[0].methods[0].program;
+        let condition = if post {
+            &mut program.postconditions[0]
+        } else {
+            &mut program.preconditions[0]
+        };
+        condition.ty = Term::Primitive(Primitive::Bool);
+        nir::phases::validate(&package).unwrap();
+    }
+}

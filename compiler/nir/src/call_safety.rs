@@ -3,18 +3,24 @@
 use crate::program::{ExprKind as K, Function};
 
 pub fn validate(function: &Function, fuel: &mut usize) -> Result<(), String> {
+    validate_program(crate::contracts::CallableProgram::function(function), fuel)
+}
+
+pub fn validate_program(
+    function: crate::contracts::CallableProgram<'_>,
+    fuel: &mut usize,
+) -> Result<(), String> {
     if function.signature.is_unsafe_callable() {
         return Err(
             "function declaration requires an unqualified parameter/result telescope".into(),
         );
     }
-    let mut pending: Vec<_> = std::iter::once(&function.body)
-        .chain(&function.preconditions)
-        .chain(&function.postconditions)
-        .chain(function.defaults.iter().map(|(_, value)| value))
-        .map(|expr| (expr, function.is_unsafe))
-        .collect();
-    while let Some((root, permitted)) = pending.pop() {
+    let mut roots = function.roots().rev();
+    let mut pending = Vec::new();
+    while let Some((root, permitted)) = pending
+        .pop()
+        .or_else(|| roots.next().map(|root| (root, function.is_unsafe)))
+    {
         crate::visit::expression_pruned(root, fuel, |expr, _| {
             if let K::UnsafeScope(body) = &expr.kind {
                 pending.push((body, true));

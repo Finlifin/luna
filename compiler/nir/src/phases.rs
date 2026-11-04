@@ -1,7 +1,7 @@
 //! Execution-phase boundary for runtime and phase-bearing comptime callables.
 //! This validates phase only, not resource legality, purity, or termination.
 use crate::program::{Expr, ExprKind as K, FunctionPhase as Phase, Package, Pattern, SourceRange};
-use crate::{Primitive, Sort, Term};
+use crate::{Primitive, Sort, Term, contracts::CallableProgram};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod comptime_storage;
@@ -140,33 +140,39 @@ fn machine_arithmetic_functions_with_declaration_budget(
                 message: failure.message(),
             })
     };
-    let interface_summaries = package
-        .traits
-        .iter()
-        .flat_map(|t| &t.methods)
-        .map(|method| {
-            method.program_summary(&[], &[]).map_err(|_| Error {
-                source: SourceRange { start: 0, end: 0 },
-                message: "invalid trait program contract signature",
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    // Validation borrows method contracts. Only actual specialization needs
+    // an owned summary, and that path has its own caller-supplied budget.
+    let programs = || {
+        package
+            .functions
+            .iter()
+            .chain(&package.quote_templates)
+            .map(|function| Ok(CallableProgram::function(function)))
+            .chain(
+                package
+                    .traits
+                    .iter()
+                    .flat_map(|t| &t.methods)
+                    .map(|method| {
+                        CallableProgram::method(method).map_err(|_| Error {
+                            source: SourceRange { start: 0, end: 0 },
+                            message: "invalid trait program contract signature",
+                        })
+                    }),
+            )
+    };
     // Each work item carries its execution context. Staged inputs/defaults do
     // not change the owner's declaration phase or require cloned summary bodies.
     let mut preparation_fuel = 1_000_000usize;
-    for function in package
-        .functions
-        .iter()
-        .chain(&package.quote_templates)
-        .chain(&interface_summaries)
-    {
+    for function in programs() {
+        let function = function?;
         let caller_frames = match function.signature.callable_signature() {
             Term::Function { parameters, .. } => vec![parameters.iter().map(|p| p.sort).collect()],
             _ => vec![],
         };
         let ct = function.phase != Phase::Runtime;
         if !ct {
-            runtime_storage(&function.signature, function.body.source, &[])?;
+            runtime_storage(function.signature, function.source, &[])?;
         }
         let fail = |source, message| Error { source, message };
 
@@ -175,34 +181,34 @@ fn machine_arithmetic_functions_with_declaration_budget(
             .is_some_and(|binding| function.parameters.contains(&binding))
         {
             return Err(fail(
-                function.body.source,
+                function.source,
                 "result binding aliases an input parameter",
             ));
         }
         let mut frozen = BTreeSet::new();
-        for snapshot in &function.entry_snapshots {
+        for snapshot in function.entry_snapshots {
             if !function.parameters.contains(&snapshot.parameter)
                 || function.parameters.contains(&snapshot.binding)
                 || function.result_binding == Some(snapshot.binding)
                 || !frozen.insert(snapshot.binding)
             {
-                return Err(fail(function.body.source, "invalid entry snapshot binding"));
+                return Err(fail(function.source, "invalid entry snapshot binding"));
             }
         }
-        let mut work = vec![Work::Expr(&function.body, false, ct)];
+        let mut work: Vec<_> = function
+            .body
+            .into_iter()
+            .map(|body| Work::Expr(body, false, ct))
+            .collect();
         if !function.preconditions.is_empty() || !function.postconditions.is_empty() {
             machine_owners.insert(function.declaration);
             if function.phase == Phase::NormalForm {
                 return Err(fail(
-                    function.body.source,
+                    function.source,
                     "normal-form program preconditions are not implemented",
                 ));
             }
-            for condition in function
-                .preconditions
-                .iter()
-                .chain(&function.postconditions)
-            {
+            for condition in function.preconditions.iter().chain(function.postconditions) {
                 if !crate::program::checkable_predicate(condition) {
                     return Err(fail(condition.source, "invalid program contract predicate"));
                 }
@@ -221,7 +227,7 @@ fn machine_arithmetic_functions_with_declaration_budget(
                     Pattern::NominalType { fields, .. } => {
                         if !ct {
                             return Err(fail(
-                                function.body.source,
+                                function.source,
                                 "nominal input decomposition requires comptime",
                             ));
                         }
@@ -241,10 +247,7 @@ fn machine_arithmetic_functions_with_declaration_budget(
                             .iter()
                             .any(|(_, destination)| frozen.contains(destination))
                         {
-                            return Err(fail(
-                                function.body.source,
-                                "entry snapshots are immutable",
-                            ));
+                            return Err(fail(function.source, "entry snapshots are immutable"));
                         }
                         work.push(Work::Pattern(pattern, ct));
                     }
@@ -257,10 +260,7 @@ fn machine_arithmetic_functions_with_declaration_budget(
                         binding,
                     } => {
                         if frozen.contains(binding) {
-                            return Err(fail(
-                                function.body.source,
-                                "entry snapshots are immutable",
-                            ));
+                            return Err(fail(function.source, "entry snapshots are immutable"));
                         }
                         work.push(Work::Pattern(pattern, ct));
                     }
@@ -279,10 +279,7 @@ fn machine_arithmetic_functions_with_declaration_budget(
                         work.extend(fields.iter().map(|pattern| Work::Pattern(pattern, ct)));
                     }
                     Pattern::CodeEvidence { .. } => {
-                        return Err(fail(
-                            function.body.source,
-                            "unresolved pattern-code evidence",
-                        ));
+                        return Err(fail(function.source, "unresolved pattern-code evidence"));
                     }
                     Pattern::OptionalAbsent
                     | Pattern::Wild
@@ -1544,12 +1541,8 @@ fn machine_arithmetic_functions_with_declaration_budget(
             }
         }
     }
-    for function in package
-        .functions
-        .iter()
-        .chain(&package.quote_templates)
-        .chain(&interface_summaries)
-    {
+    for function in programs() {
+        let function = function?;
         if let Term::Function { parameters, result } = function.signature.callable_signature() {
             let ct = function.phase != Phase::Runtime;
             let frames = vec![parameters.iter().map(|parameter| parameter.sort).collect()];
@@ -1560,12 +1553,12 @@ fn machine_arithmetic_functions_with_declaration_budget(
                 .chain(ct.then_some(result.as_ref()))
             {
                 comptime_storage::validate(domain, package, &frames).map_err(|message| Error {
-                    source: function.body.source,
+                    source: function.source,
                     message,
                 })?;
             }
         }
-        crate::call_safety::validate(function, &mut 100_000).map_err(|_| Error {source: function.body.source, message: "unsafe function call requires an unsafe boundary or declaration telescope is invalid"})?;
+        crate::call_safety::validate_program(function, &mut 100_000).map_err(|_| Error {source: function.source, message: "unsafe function call requires an unsafe boundary or declaration telescope is invalid"})?;
     }
     Ok(machine_owners)
 }

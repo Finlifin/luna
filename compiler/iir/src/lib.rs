@@ -261,10 +261,9 @@ impl Package {
                 for argument in &method.type_arguments {
                     self.validate_type(&links, argument, fuel)?;
                 }
-                let summary = method
-                    .program_summary(&[], &[])
-                    .map_err(|e| e.to_string())?;
-                visit::expressions(&summary, fuel, |expr, fuel| {
+                let program = nir::contracts::CallableProgram::method(method)
+                    .map_err(|error| error.to_string())?;
+                visit::program_expressions(program, fuel, |expr, fuel| {
                     self.validate_expression_types_in(&links, expr, fuel)
                 })?;
             }

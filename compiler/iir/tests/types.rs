@@ -563,9 +563,22 @@ fn type_list_constants_validate_embedded_types_and_domain_authority() {
         "{failure}"
     );
     contract_package.validate(&mut 10_000).unwrap();
+    // Move the same contract root to ensures. Inspection must still reach
+    // nested completed values without constructing an owned function summary.
+    let program = &mut contract_package.interfaces[0].methods[0].program;
+    program.postconditions = std::mem::take(&mut program.preconditions);
+    contract_package.validate(&mut 10_000).unwrap();
+    let mut fuel = 1;
+    assert!(
+        contract_package
+            .validate(&mut fuel)
+            .unwrap_err()
+            .contains("budget")
+    );
+    contract_package.validate(&mut 10_000).unwrap();
     let predicate = &mut contract_package.interfaces[0].methods[0]
         .program
-        .preconditions[0];
+        .postconditions[0];
     let K::Block { statements, .. } = &mut predicate.kind else {
         unreachable!()
     };

@@ -30,6 +30,21 @@ pub fn expressions<'a>(
 ) -> Result<(), String> {
     walk(function, fuel, visit, true)
 }
+/// Inspect original declaration/contract expressions without materializing a
+/// synthetic function. Root references are consumed lazily, in work-stack order.
+pub fn program_expressions<'a>(
+    program: crate::contracts::CallableProgram<'a>,
+    fuel: &mut usize,
+    mut visit: impl FnMut(&'a Expr, &mut usize) -> Result<(), String>,
+) -> Result<(), String> {
+    walk_roots(
+        program.roots(),
+        fuel,
+        |expr, fuel| visit(expr, fuel).map(|_| true),
+        true,
+        true,
+    )
+}
 /// Visit one runtime environment, excluding defaults, closure bodies and
 /// handler arms evaluated in their own resource contexts.
 pub fn expressions_in_scope<'a>(
@@ -258,7 +273,7 @@ fn walk<'a>(
     )
 }
 fn walk_roots<'a, E: From<Error>>(
-    roots: impl Iterator<Item = &'a Expr>,
+    roots: impl DoubleEndedIterator<Item = &'a Expr>,
     fuel: &mut usize,
     mut visit: impl FnMut(&'a Expr, &mut usize) -> Result<bool, E>,
     include_defaults: bool,
@@ -268,8 +283,11 @@ fn walk_roots<'a, E: From<Error>>(
         Expr(&'a Expr),
         Pattern(&'a P),
     }
-    let mut work: Vec<_> = roots.map(Node::Expr).collect();
-    while let Some(node) = work.pop() {
+    // Keep root order without allocating one slot per contract/default. The
+    // same lazy root stream serves ordinary functions and borrowed summaries.
+    let mut roots = roots.rev();
+    let mut work = Vec::new();
+    while let Some(node) = work.pop().or_else(|| roots.next().map(Node::Expr)) {
         if *fuel == 0 {
             return Err(Error::Budget("IIR traversal budget exhausted").into());
         }

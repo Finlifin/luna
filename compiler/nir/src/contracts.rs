@@ -1,11 +1,13 @@
 //! Program specifications, kept separate from type predicates and trait selection.
 mod alignment;
+mod program_view;
 use crate::program::{
     EntrySnapshot, Expr, ExprKind as K, Function, FunctionPhase, LocalId, MethodContract,
     SourceRange,
 };
 use crate::{DeclarationId, Term, TypeError};
 pub use alignment::BindingAlignment;
+pub use program_view::CallableProgram;
 use std::{collections::BTreeMap, fmt};
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -212,76 +214,6 @@ impl MethodContract {
                 .iter()
                 .copied()
                 .filter(|id| !parameters.contains(id))
-                .collect(),
-            defaults: vec![],
-            body: Expr {
-                source: SourceRange { start: 0, end: 0 },
-                ty: Term::Primitive(crate::Primitive::Void),
-                kind: K::Unit,
-            },
-        })
-    }
-    /// An interface-only callable summary. The unit body is never invoked.
-    pub fn program_summary(
-        &self,
-        parameters: &[DeclarationId],
-        arguments: &[Term],
-    ) -> Result<Function, TypeError> {
-        let binders: Vec<_> = parameters
-            .iter()
-            .map(|id| crate::DeclarationParameter {
-                declaration: *id,
-                sort: crate::Sort::Type,
-            })
-            .collect();
-        self.program_summary_parameters(&binders, arguments)
-    }
-    pub fn program_summary_parameters(
-        &self,
-        parameters: &[crate::DeclarationParameter],
-        arguments: &[Term],
-    ) -> Result<Function, TypeError> {
-        let signature = self
-            .signature
-            .ordinary()?
-            .instantiate_parameters(parameters, arguments)?;
-        let program = self.program.instantiate_parameters(parameters, arguments)?;
-        Ok(Function {
-            declaration: self.declaration,
-            name: self.name.clone(),
-            phase: if signature.is_comptime_callable() {
-                FunctionPhase::Comptime
-            } else {
-                FunctionPhase::Runtime
-            },
-            inline: false,
-            pure: self.pure,
-            is_unsafe: self.is_unsafe,
-            signature: signature.callable_signature().clone(),
-            parameters: self.parameter_bindings.clone(),
-            preconditions: program.preconditions,
-            postconditions: program.postconditions,
-            result_binding: program.result_binding,
-            entry_snapshots: program.entry_snapshots,
-            capabilities: self
-                .capabilities
-                .iter()
-                .map(|requirement| requirement.instantiate_parameters(parameters, arguments))
-                .collect::<Result<_, _>>()?,
-            requirements: self
-                .requirements
-                .iter()
-                .map(|requirement| requirement.instantiate_parameters(parameters, arguments))
-                .collect::<Result<_, _>>()?,
-            type_parameters: self
-                .type_parameters
-                .iter()
-                .copied()
-                .filter(|parameter| {
-                    !parameters
-                        .iter()
-                        .any(|binder| binder.declaration == *parameter)
-                })
                 .collect(),
             defaults: vec![],
             body: Expr {

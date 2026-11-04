@@ -212,12 +212,20 @@ fn method_contract_summary_preserves_and_instantiates_local_binders() {
         requirements: vec![],
         default: None,
     };
-    let open = contract.program_summary(&[], &[]).unwrap();
+    let open = contract
+        .program_summary_declaration_inputs(&[], &[], &[], &[], &mut 1000)
+        .unwrap();
     assert!(open.pure);
     assert_eq!(open.type_parameters, vec![id(1)]);
     assert_eq!(open.capabilities, contract.capabilities);
     let closed = contract
-        .program_summary(&[id(1)], &[p(Primitive::Bool)])
+        .program_summary_declaration_inputs(
+            &[id(1)],
+            &[p(Primitive::Type)],
+            &[p(Primitive::Bool)],
+            &[],
+            &mut 1000,
+        )
         .unwrap();
     assert!(closed.pure);
     assert!(closed.type_parameters.is_empty());
@@ -236,19 +244,11 @@ fn method_contract_summary_preserves_and_instantiates_local_binders() {
             declaration: id(4),
             sort: Sort::ComptimeValue,
         });
-    let binders = [
-        nir::DeclarationParameter {
-            declaration: id(1),
-            sort: Sort::Type,
-        },
-        nir::DeclarationParameter {
-            declaration: id(4),
-            sort: Sort::ComptimeValue,
-        },
-    ];
+    let parameters = [id(1), id(4)];
+    let domains = [p(Primitive::Type), p(Primitive::Symbol)];
     let arguments = [p(Primitive::Bool), Term::Symbol("px".into())];
     let summary = indexed
-        .program_summary_parameters(&binders, &arguments)
+        .program_summary_declaration_inputs(&parameters, &domains, &arguments, &[], &mut 1000)
         .unwrap();
     assert_eq!(
         summary.capabilities[0].interface_arguments,
@@ -257,7 +257,13 @@ fn method_contract_summary_preserves_and_instantiates_local_binders() {
     assert!(summary.type_parameters.is_empty());
     assert!(
         indexed
-            .program_summary(&[id(1), id(4)], &arguments)
+            .program_summary_declaration_inputs(
+                &parameters,
+                &[p(Primitive::Type), p(Primitive::Type)],
+                &arguments,
+                &[],
+                &mut 1000
+            )
             .is_err()
     );
     // The caller's Type input and the method's own input occupy distinct frames.

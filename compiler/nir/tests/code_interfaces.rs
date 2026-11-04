@@ -307,8 +307,14 @@ fn code_method_contract_cannot_publish_an_ordinary_program_summary() {
         default: None,
     };
     assert!(matches!(
-        method.program_summary(&[], &[]),
+        nir::contracts::CallableProgram::method(&method),
         Err(nir::TypeError::ContextualCodeNotCallable)
+    ));
+    assert!(matches!(
+        method.program_summary_declaration_inputs(&[], &[], &[], &[], &mut 1000),
+        Err(nir::type_computations::Error::Scope(
+            nir::TypeError::ContextualCodeNotCallable
+        ))
     ));
     assert!(
         method
@@ -316,14 +322,19 @@ fn code_method_contract_cannot_publish_an_ordinary_program_summary() {
             .contains("(signature (code-function-signature")
     );
     assert!(matches!(
-        method.program_summary(
+        method.program_summary_declaration_inputs(
             &[DeclarationId {
                 package: 1,
                 local: 3
             }],
-            &[]
+            &[],
+            &[],
+            &[],
+            &mut 1000
         ),
-        Err(nir::TypeError::ContextualCodeNotCallable)
+        Err(nir::type_computations::Error::Scope(
+            nir::TypeError::ContextualCodeNotCallable
+        ))
     ));
     let mut ordinary = method.clone();
     ordinary.parameter_bindings.clear();
@@ -333,13 +344,18 @@ fn code_method_contract_cannot_publish_an_ordinary_program_summary() {
     }))
     .into();
     assert_eq!(
-        ordinary.program_summary(&[], &[]).unwrap().phase,
+        ordinary
+            .program_summary_declaration_inputs(&[], &[], &[], &[], &mut 1000)
+            .unwrap()
+            .phase,
         nir::program::FunctionPhase::Comptime
     );
     ordinary.is_unsafe = true;
     ordinary.signature =
         Term::UnsafeFunction(Box::new(ordinary.signature.ordinary().unwrap().clone())).into();
-    let summary = ordinary.program_summary(&[], &[]).unwrap();
+    let summary = ordinary
+        .program_summary_declaration_inputs(&[], &[], &[], &[], &mut 1000)
+        .unwrap();
     assert!(summary.is_unsafe);
     assert!(summary.callable_type().is_comptime_callable());
     assert_eq!(
@@ -347,13 +363,23 @@ fn code_method_contract_cannot_publish_an_ordinary_program_summary() {
         ordinary.signature.ordinary().unwrap()
     );
     assert!(ordinary.to_string().contains("(unsafe true)"));
-    assert!(method.program_summary(&[], &[]).is_err());
+    assert!(
+        method
+            .program_summary_declaration_inputs(&[], &[], &[], &[], &mut 1000)
+            .is_err()
+    );
     let consumer = consumer_signature();
     method.parameter_bindings = consumer.inputs.iter().map(|(id, _)| *id).collect();
     method.signature = nir::code_interfaces::MethodSignature::DataConsumer(consumer);
     assert!(matches!(
-        method.program_summary(&[], &[]),
+        nir::contracts::CallableProgram::method(&method),
         Err(nir::TypeError::ContextualCodeNotCallable)
+    ));
+    assert!(matches!(
+        method.program_summary_declaration_inputs(&[], &[], &[], &[], &mut 1000),
+        Err(nir::type_computations::Error::Scope(
+            nir::TypeError::ContextualCodeNotCallable
+        ))
     ));
     assert!(
         method
