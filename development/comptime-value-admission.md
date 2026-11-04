@@ -1165,3 +1165,9 @@ IIR TypeLinks、elaboration 的借用元数据入口，以及 VM 的旧描述／
 初次 NIR 检查漏写 newtype ConversionError 的显式转换，编译失败于
 `/tmp/luna-tools-mz57ov6y`；补齐 Budget／Invalid 映射后执行上述检查。
 未运行全 workspace、native 或性能基准。正式 docs 和原有工作区修改均未纳入。
+
+后续单独纠正该变参拒绝例的诊断断言：统一的子句签名检查会先拒绝未注册的
+收集域，诊断为 `variadic clause input requires a bound meta.List<T>`。拒绝要求、
+注册后的展开成功及所有非法载荷检查不变，没有改生产代码。使用同一入口执行
+`-p luna --test newtypes mixed_trait -- --nocapture`，两项通过、退出 0，证据
+`/tmp/luna-tools-vglziu_q/result.json`；该项不再列作未解决基线失败。

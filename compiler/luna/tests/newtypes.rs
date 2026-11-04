@@ -6300,7 +6300,7 @@ fn mixed_trait_arguments_expand_literal_and_computed_packets() {
                     .err()
                     .expect("unbound constructors must not supply packet layout");
                 assert!(
-                    error.contains("variadic normal-form input requires a bound meta.List<T>"),
+                    error.contains("variadic clause input requires a bound meta.List<T>"),
                     "{error}"
                 );
                 continue;
