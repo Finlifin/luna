@@ -220,10 +220,7 @@ impl Checker<'_, '_> {
             }
             candidate
                 .refine_type_views_metered(
-                    |ty, budget| {
-                        self.callable_input_view_metered(ty, budget, expr.span)
-                            .map_err(|e| e.message)
-                    },
+                    |ty, budget| self.callable_input_view_metered(ty, budget),
                     crate::ptc::Budget::default(),
                 )
                 .map_err(|e| call_inference_error(expr.span, e))?;

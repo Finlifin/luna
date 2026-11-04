@@ -6,7 +6,7 @@ use crate::capabilities::{Qualification, World};
 use crate::implementation::{Selection, TypeAssessment, TypeEvidence};
 use crate::ptc::{Budget, Formula, Outcome};
 use nir::program::{ExprKind, InterfaceInstance};
-use nir::{Primitive, Term};
+use nir::{NominalAdmissionError as QueryError, Primitive, Term};
 use std::fmt;
 
 /// The selected result and its exact implementation substitution travel
@@ -19,6 +19,80 @@ pub struct AssociatedTypeResolution {
 }
 
 impl World<'_> {
+    fn check_associated_formation(
+        &self,
+        contract: &nir::program::Trait,
+        substitution: &nir::DeclarationSubstitution<'_>,
+        budget: &mut Budget,
+        resolve: &mut dyn FnMut(
+            &InterfaceInstance,
+            &Term,
+            &mut Budget,
+        ) -> Result<crate::capabilities::Resolution, QueryError>,
+    ) -> Result<(), QueryError> {
+        for requirement in &contract.requirements {
+            let mut pending = vec![(requirement, 0usize)];
+            while let Some((predicate, depth)) = pending.pop() {
+                if depth >= budget.max_depth.min(64) {
+                    return Err(QueryError::Budget);
+                }
+                budget.steps = budget.steps.checked_sub(1).ok_or(QueryError::Budget)?;
+                match predicate {
+                    nir::program::TypePredicate::And(items)
+                    | nir::program::TypePredicate::Or(items) => {
+                        if items.len() > budget.steps {
+                            return Err(QueryError::Budget);
+                        }
+                        pending.extend(items.iter().map(|item| (item, depth + 1)));
+                    }
+                    nir::program::TypePredicate::Not(inner) => pending.push((inner, depth + 1)),
+                    _ => {}
+                }
+            }
+            let requirement =
+                substitution.instantiate_predicate_bounded(requirement, &mut budget.steps)?;
+            match self
+                .context
+                .prove_metered(Formula::from_predicate(&requirement), budget)
+            {
+                Outcome::Entailed(_) => {}
+                Outcome::Unknown {
+                    reason: crate::ptc::UnknownReason::BudgetExhausted,
+                    ..
+                } => return Err(QueryError::Budget),
+                Outcome::Unknown { reason, .. } => {
+                    return Err(QueryError::Unresolved(format!(
+                        "associated interface requirement: {reason:?}"
+                    )));
+                }
+                Outcome::NotEntailed(_) => {
+                    return Err(QueryError::Unresolved(
+                        "associated interface requirement is not established".into(),
+                    ));
+                }
+                Outcome::IllFormed(reason) => return Err(QueryError::Invalid(reason)),
+            }
+        }
+        for capability in &contract.capabilities {
+            let capability =
+                substitution.instantiate_requirement_bounded(capability, &mut budget.steps)?;
+            if self.given_metered(&capability, budget)?.is_some() {
+                continue;
+            }
+            let resolved = resolve(
+                &capability.interface_instance(),
+                &capability.subject,
+                budget,
+            )?;
+            if !matches!(resolved.types.selection, Selection::Selected(_)) {
+                return Err(QueryError::Unresolved(
+                    "associated interface capability is not established".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Resolve a well-scoped Type projection after its input substitutions.
     /// Member lookup has already chosen an origin (including inherited origins).
     /// The caller must establish any requested child view separately.
@@ -26,16 +100,16 @@ impl World<'_> {
         &self,
         projection: &Term,
         budget: Budget,
-    ) -> Result<AssociatedTypeResolution, String> {
-        self.resolve_associated_type_budgeted(projection, budget)
+    ) -> Result<AssociatedTypeResolution, QueryError> {
+        self.resolve_associated_type_budgeted(projection, &mut { budget })
             .map(|(result, _)| result)
     }
 
     fn resolve_associated_type_budgeted(
         &self,
         projection: &Term,
-        budget: Budget,
-    ) -> Result<(AssociatedTypeResolution, usize), String> {
+        budget: &mut Budget,
+    ) -> Result<(AssociatedTypeResolution, usize), QueryError> {
         self.resolve_associated_type_using(
             projection,
             budget,
@@ -48,233 +122,156 @@ impl World<'_> {
     fn resolve_associated_type_using(
         &self,
         projection: &Term,
-        budget: Budget,
+        budget: &mut Budget,
         resolve: &mut dyn FnMut(
             &InterfaceInstance,
             &Term,
             &mut Budget,
-        ) -> Result<crate::capabilities::Resolution, String>,
-    ) -> Result<(AssociatedTypeResolution, usize), String> {
+        ) -> Result<crate::capabilities::Resolution, QueryError>,
+    ) -> Result<(AssociatedTypeResolution, usize), QueryError> {
         let mut fuel = budget.steps;
-        charge_projection_copy(projection, &mut fuel)?;
-        projection.check_scope(&[]).map_err(|e| e.to_string())?;
-        let Term::AssociatedType {
-            origin,
-            subject,
-            arguments,
-        } = projection
-        else {
-            return Err("associated Type query requires a projection".into());
-        };
-        let contract = self
-            .traits
-            .iter()
-            .find(|t| t.declaration == origin.interface)
-            .ok_or("associated Type query has no originating interface")?;
-        if arguments.len() != contract.type_parameters.len() {
-            return Err("associated Type query interface argument count mismatch".into());
-        }
-        let member = contract
-            .associated
-            .iter()
-            .find(|m| m.declaration == origin.member)
-            .ok_or("associated Type query member does not belong to its interface")?;
-        let parameters = contract.binders_with_self(&mut fuel)?;
-        let inputs: Vec<_> = std::iter::once(subject.as_ref().clone())
-            .chain(arguments.iter().cloned())
-            .collect();
-        charge_projection_substitution(&member.ty, &parameters, &inputs, &mut fuel)?;
-        let substitution = contract
-            .input_substitution(&inputs, &[], &mut fuel)
-            .map_err(|e| e.to_string())?;
-        let member_type = substitution
-            .instantiate_bounded(&member.ty, &mut fuel)
-            .map_err(|e| e.to_string())?;
-        if member_type != Term::Primitive(Primitive::Type) {
-            return Err("associated projection member is not Type-valued".into());
-        }
-        // Reserve a disjoint allowance for each proof/search rather than
-        // resetting the full caller budget at every formation obligation.
-        let queries = contract
-            .requirements
-            .len()
-            .saturating_add(contract.capabilities.len().saturating_mul(2))
-            .saturating_add(1);
-        let query_steps = fuel / queries.saturating_mul(2);
-        if query_steps == 0 {
-            return Err("associated Type query budget exhausted".into());
-        }
-        fuel -= query_steps * queries;
-        let query_budget = Budget {
-            steps: query_steps,
-            ..budget
-        };
-        // Interface-parameter constraints are formation obligations, not
-        // assumptions supplied by selecting an implementation.
-        for requirement in &contract.requirements {
-            let mut pending = vec![(requirement, 0usize)];
-            while let Some((requirement, depth)) = pending.pop() {
-                if depth >= budget.max_depth.min(64) {
-                    return Err("associated Type requirement depth exhausted".into());
-                }
-                fuel = fuel
-                    .checked_sub(1)
-                    .ok_or("associated Type query budget exhausted")?;
-                match requirement {
-                    nir::program::TypePredicate::Trait(requirement) => {
-                        charge_projection_substitution(
-                            &requirement.subject,
-                            &parameters,
-                            &inputs,
-                            &mut fuel,
-                        )?;
-                        for argument in &requirement.interface_arguments {
-                            charge_projection_substitution(
-                                argument,
-                                &parameters,
-                                &inputs,
-                                &mut fuel,
-                            )?;
-                        }
-                    }
-                    nir::program::TypePredicate::Equal(a, b) => {
-                        charge_projection_substitution(a, &parameters, &inputs, &mut fuel)?;
-                        charge_projection_substitution(b, &parameters, &inputs, &mut fuel)?;
-                    }
-                    nir::program::TypePredicate::And(items)
-                    | nir::program::TypePredicate::Or(items) => {
-                        if items.len() > fuel {
-                            return Err("associated Type query budget exhausted".into());
-                        }
-                        pending.extend(items.iter().map(|item| (item, depth + 1)));
-                    }
-                    nir::program::TypePredicate::Not(inner) => pending.push((inner, depth + 1)),
-                    nir::program::TypePredicate::Bool(_) => (),
-                }
-            }
-            let requirement = substitution
-                .instantiate_predicate_bounded(requirement, &mut fuel)
-                .map_err(|e| e.to_string())?;
-            if !matches!(
-                self.context
-                    .prove(Formula::from_predicate(&requirement), query_budget),
-                Outcome::Entailed(_)
-            ) {
-                return Err("associated Type interface requirement is not established".into());
-            }
-        }
-        for capability in &contract.capabilities {
-            charge_projection_substitution(&capability.subject, &parameters, &inputs, &mut fuel)?;
-            for argument in &capability.interface_arguments {
-                charge_projection_substitution(argument, &parameters, &inputs, &mut fuel)?;
-            }
-            let capability = substitution
-                .instantiate_requirement_bounded(capability, &mut fuel)
-                .map_err(|e| e.to_string())?;
-            if self.given(&capability, query_budget)?.is_some() {
-                continue;
-            }
-            let mut allowance = query_budget;
-            let resolved = resolve(
-                &capability.interface_instance(),
-                &capability.subject,
-                &mut allowance,
-            )?;
-            fuel += allowance.steps;
-            if !matches!(resolved.types.selection, Selection::Selected(_)) {
-                return Err("associated Type interface capability is not established".into());
-            }
-        }
-        let interface = InterfaceInstance {
-            declaration: origin.interface,
-            arguments: arguments.clone(),
-        };
-        // Formation is complete. The final selection can use the remaining
-        // work, then return its unused allowance for evidence validation and
-        // later projections. Repeatedly halving here starves nested adapters
-        // even when the preceding formation checks are inexpensive.
-        let mut allowance = Budget {
-            steps: fuel + query_budget.steps,
-            ..budget
-        };
-        let resolution = resolve(&interface, subject, &mut allowance)?;
-        fuel = allowance.steps;
-        let Selection::Selected(selected) = resolution.types.selection else {
-            let pending = resolution
-                .qualifications
+        let result = (|| {
+            charge_projection_copy(projection, &mut fuel)?;
+            projection.check_scope(&[]).map_err(|e| e.to_string())?;
+            let Term::AssociatedType {
+                origin,
+                subject,
+                arguments,
+            } = projection
+            else {
+                return Err("associated Type query requires a projection".into());
+            };
+            let contract = self
+                .traits
                 .iter()
-                .filter_map(|(id, qualification)| {
-                    matches!(qualification, Qualification::Pending(_))
-                        .then(|| format!("(candidate {id} {qualification})"))
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
-            return Err(format!(
-                "associated Type implementation selection is unresolved: {} (remaining-steps {fuel}) (pending {pending})",
-                resolution.types.selection
-            ));
-        };
-        let Some(TypeAssessment::Applicable(evidence)) =
-            resolution.types.assessments.get(&selected)
-        else {
-            return Err("associated Type selection lacks type evidence".into());
-        };
-        let Some(qualification @ Qualification::Proved(_)) =
-            resolution.qualifications.get(&selected)
-        else {
-            return Err("associated Type selection lacks capability evidence".into());
-        };
-        let implementation = self
-            .implementations
-            .iter()
-            .find(|i| i.declaration == selected)
-            .ok_or("associated Type selection has no implementation contract")?;
-        let mut values = implementation
-            .associated
-            .iter()
-            .filter(|(id, _)| *id == origin.member);
-        let (_, value) = values
-            .next()
-            .ok_or("selected implementation has no associated Type value")?;
-        if values.next().is_some() {
-            return Err("selected implementation has duplicate associated Type values".into());
-        }
-        let binders = implementation
-            .parameter_binders()
-            .map_err(|e| e.to_string())?;
-        nir::copy_budget::charge_substitution(value, &binders, &evidence.type_arguments, &mut fuel)
-            .map_err(|_| "associated Type substitution budget exhausted")?;
-        let substitution = nir::DeclarationSubstitution::bounded(
-            &implementation.type_parameters,
-            &implementation.parameter_types,
-            &evidence.type_arguments,
-            &[],
-            &mut fuel,
-        )
-        .map_err(|e| e.to_string())?;
-        let mut completed = value.clone();
-        completed
-            .rewrite_types(&mut |ty| substitution.instantiate_bounded(ty, &mut fuel))
-            .map_err(|e| e.to_string())?;
-        if completed.ty != Term::Primitive(Primitive::Type) {
-            return Err("selected associated value has a non-Type contract".into());
-        }
-        let ExprKind::TypeValue(value) = completed.kind else {
-            return Err("selected associated value is not a completed Type template".into());
-        };
-        charge_projection_copy(&value, &mut fuel)?;
-        value.check_scope(&[]).map_err(|e| e.to_string())?;
-        if value.sort() != nir::Sort::Type {
-            return Err("selected associated Type template has the wrong sort".into());
-        }
-        Ok((
-            AssociatedTypeResolution {
+                .find(|t| t.declaration == origin.interface)
+                .ok_or("associated Type query has no originating interface")?;
+            if arguments.len() != contract.type_parameters.len() {
+                return Err("associated Type query interface argument count mismatch".into());
+            }
+            let member = contract
+                .associated
+                .iter()
+                .find(|m| m.declaration == origin.member)
+                .ok_or("associated Type query member does not belong to its interface")?;
+            let parameters = contract.binders_with_self(&mut fuel)?;
+            let inputs: Vec<_> = std::iter::once(subject.as_ref().clone())
+                .chain(arguments.iter().cloned())
+                .collect();
+            charge_projection_substitution(&member.ty, &parameters, &inputs, &mut fuel)?;
+            let substitution = contract.input_substitution(&inputs, &[], &mut fuel)?;
+            let member_type = substitution.instantiate_bounded(&member.ty, &mut fuel)?;
+            if member_type != Term::Primitive(Primitive::Type) {
+                return Err("associated projection member is not Type-valued".into());
+            }
+            let mut formation_budget = Budget {
+                steps: fuel,
+                ..*budget
+            };
+            let formed = self.check_associated_formation(
+                contract,
+                &substitution,
+                &mut formation_budget,
+                resolve,
+            );
+            fuel = formation_budget.steps;
+            formed?;
+            let interface = InterfaceInstance {
+                declaration: origin.interface,
+                arguments: arguments.clone(),
+            };
+            // Formation is complete. The final selection can use the remaining
+            // work, then return its unused allowance for evidence validation and
+            // later projections. Repeatedly halving here starves nested adapters
+            // even when the preceding formation checks are inexpensive.
+            let mut allowance = Budget {
+                steps: fuel,
+                ..*budget
+            };
+            let resolution = resolve(&interface, subject, &mut allowance);
+            fuel = allowance.steps;
+            let resolution = resolution?;
+            let Selection::Selected(selected) = resolution.types.selection else {
+                let pending = resolution
+                    .qualifications
+                    .iter()
+                    .filter_map(|(id, qualification)| {
+                        matches!(qualification, Qualification::Pending(_))
+                            .then(|| format!("(candidate {id} {qualification})"))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                return Err(QueryError::Unresolved(format!(
+                    "associated Type implementation selection is unresolved: {} (remaining-steps {fuel}) (pending {pending})",
+                    resolution.types.selection
+                )));
+            };
+            let Some(TypeAssessment::Applicable(evidence)) =
+                resolution.types.assessments.get(&selected)
+            else {
+                return Err("associated Type selection lacks type evidence".into());
+            };
+            let Some(qualification @ Qualification::Proved(_)) =
+                resolution.qualifications.get(&selected)
+            else {
+                return Err("associated Type selection lacks capability evidence".into());
+            };
+            let implementation = self
+                .implementations
+                .iter()
+                .find(|i| i.declaration == selected)
+                .ok_or("associated Type selection has no implementation contract")?;
+            let mut values = implementation
+                .associated
+                .iter()
+                .filter(|(id, _)| *id == origin.member);
+            let (_, value) = values
+                .next()
+                .ok_or("selected implementation has no associated Type value")?;
+            if values.next().is_some() {
+                return Err("selected implementation has duplicate associated Type values".into());
+            }
+            let binders = implementation
+                .parameter_binders()
+                .map_err(|e| e.to_string())?;
+            nir::copy_budget::charge_substitution(
                 value,
-                evidence: evidence.clone(),
-                qualification: qualification.clone(),
-            },
-            fuel,
-        ))
+                &binders,
+                &evidence.type_arguments,
+                &mut fuel,
+            )
+            .map_err(|_| QueryError::Budget)?;
+            let substitution = nir::DeclarationSubstitution::bounded(
+                &implementation.type_parameters,
+                &implementation.parameter_types,
+                &evidence.type_arguments,
+                &[],
+                &mut fuel,
+            )?;
+            let mut completed = value.clone();
+            completed.rewrite_types(&mut |ty| substitution.instantiate_bounded(ty, &mut fuel))?;
+            if completed.ty != Term::Primitive(Primitive::Type) {
+                return Err("selected associated value has a non-Type contract".into());
+            }
+            let ExprKind::TypeValue(value) = completed.kind else {
+                return Err("selected associated value is not a completed Type template".into());
+            };
+            charge_projection_copy(&value, &mut fuel)?;
+            value.check_scope(&[]).map_err(|e| e.to_string())?;
+            if value.sort() != nir::Sort::Type {
+                return Err("selected associated Type template has the wrong sort".into());
+            }
+            Ok((
+                AssociatedTypeResolution {
+                    value,
+                    evidence: evidence.clone(),
+                    qualification: qualification.clone(),
+                },
+                fuel,
+            ))
+        })();
+        budget.steps = fuel;
+        result
     }
 }
 
@@ -314,7 +311,7 @@ impl World<'_> {
         &self,
         ty: &Term,
         budget: Budget,
-    ) -> Result<AssociatedTypeNormalization, String> {
+    ) -> Result<AssociatedTypeNormalization, QueryError> {
         self.normalize_associated_types_budgeted(ty, budget)
             .map(|(result, _)| result)
     }
@@ -323,8 +320,8 @@ impl World<'_> {
         &self,
         ty: &Term,
         budget: Budget,
-    ) -> Result<(AssociatedTypeNormalization, usize), String> {
-        self.normalize_associated_types_mode(ty, budget, false, None, None)
+    ) -> Result<(AssociatedTypeNormalization, usize), QueryError> {
+        self.normalize_associated_types_mode(ty, &mut { budget }, false, None, None)
             .map(|(result, remaining, _)| (result, remaining))
     }
 
@@ -335,9 +332,9 @@ impl World<'_> {
         ty: &Term,
         budget: Budget,
         cache: &mut std::collections::HashMap<Term, Term>,
-    ) -> Result<(AssociatedTypeNormalization, usize), String> {
+    ) -> Result<(AssociatedTypeNormalization, usize), QueryError> {
         let (result, remaining, completed) =
-            self.normalize_associated_types_mode(ty, budget, false, Some(cache), None)?;
+            self.normalize_associated_types_mode(ty, &mut { budget }, false, Some(cache), None)?;
         cache.extend(completed);
         Ok((result, remaining))
     }
@@ -349,7 +346,7 @@ impl World<'_> {
         &self,
         ty: &Term,
         budget: Budget,
-    ) -> Result<AssociatedTypeNormalization, String> {
+    ) -> Result<AssociatedTypeNormalization, QueryError> {
         self.associated_type_view_metered(ty, &mut { budget })
     }
 
@@ -357,18 +354,9 @@ impl World<'_> {
         &self,
         ty: &Term,
         budget: &mut Budget,
-    ) -> Result<AssociatedTypeNormalization, String> {
-        let result = self.normalize_associated_types_mode(ty, *budget, true, None, None);
-        match result {
-            Ok((value, remaining, _)) => {
-                budget.steps = remaining;
-                Ok(value)
-            }
-            Err(error) => {
-                budget.steps = 0;
-                Err(error)
-            }
-        }
+    ) -> Result<AssociatedTypeNormalization, QueryError> {
+        self.normalize_associated_types_mode(ty, budget, true, None, None)
+            .map(|(value, _, _)| value)
     }
 
     pub fn associated_type_view_cached(
@@ -376,9 +364,9 @@ impl World<'_> {
         ty: &Term,
         budget: Budget,
         cache: &mut std::collections::HashMap<Term, Term>,
-    ) -> Result<(AssociatedTypeNormalization, usize), String> {
+    ) -> Result<(AssociatedTypeNormalization, usize), QueryError> {
         let (value, remaining, completed) =
-            self.normalize_associated_types_mode(ty, budget, true, Some(cache), None)?;
+            self.normalize_associated_types_mode(ty, &mut { budget }, true, Some(cache), None)?;
         cache.extend(completed);
         Ok((value, remaining))
     }
@@ -386,13 +374,13 @@ impl World<'_> {
     pub(crate) fn associated_type_view_for_selection(
         &self,
         ty: &Term,
-        budget: Budget,
+        budget: &mut Budget,
         resolve: &mut dyn FnMut(
             &InterfaceInstance,
             &Term,
             &mut Budget,
-        ) -> Result<crate::capabilities::Resolution, String>,
-    ) -> Result<(Term, usize), String> {
+        ) -> Result<crate::capabilities::Resolution, QueryError>,
+    ) -> Result<(Term, usize), QueryError> {
         self.normalize_associated_types_mode(ty, budget, true, None, Some(resolve))
             .map(|(result, remaining, _)| (result.value, remaining))
     }
@@ -400,7 +388,7 @@ impl World<'_> {
     fn normalize_associated_types_mode(
         &self,
         ty: &Term,
-        budget: Budget,
+        budget: &mut Budget,
         preserve_given: bool,
         shared: Option<&std::collections::HashMap<Term, Term>>,
         resolve: Option<
@@ -408,7 +396,7 @@ impl World<'_> {
                 &InterfaceInstance,
                 &Term,
                 &mut Budget,
-            ) -> Result<crate::capabilities::Resolution, String>,
+            ) -> Result<crate::capabilities::Resolution, QueryError>,
         >,
     ) -> Result<
         (
@@ -416,13 +404,13 @@ impl World<'_> {
             usize,
             std::collections::HashMap<Term, Term>,
         ),
-        String,
+        QueryError,
     > {
         let mut normalizer = Normalizer {
             world: self,
             resolve,
             preserve_given,
-            budget,
+            budget: *budget,
             remaining: budget.steps,
             active: std::collections::HashSet::new(),
             completed: std::collections::HashMap::new(),
@@ -434,24 +422,28 @@ impl World<'_> {
                 Vec::new()
             },
         };
-        normalizer.charge_copy(ty)?;
-        ty.check_scope(&normalizer.frames)
-            .map_err(|e| e.to_string())?;
-        if ty.sort() != nir::Sort::Type {
-            return Err("associated normalization requires a Type".into());
-        }
-        let value = normalizer.normalize(ty, 0)?;
-        value
-            .check_scope(&normalizer.frames)
-            .map_err(|e| e.to_string())?;
-        Ok((
-            AssociatedTypeNormalization {
-                value,
-                steps: normalizer.steps,
-            },
-            normalizer.remaining,
-            normalizer.completed,
-        ))
+        let result = (|| {
+            normalizer.charge_copy(ty)?;
+            ty.check_scope(&normalizer.frames)
+                .map_err(|e| e.to_string())?;
+            if ty.sort() != nir::Sort::Type {
+                return Err("associated normalization requires a Type".into());
+            }
+            let value = normalizer.normalize(ty, 0)?;
+            value
+                .check_scope(&normalizer.frames)
+                .map_err(|e| e.to_string())?;
+            Ok((
+                AssociatedTypeNormalization {
+                    value,
+                    steps: std::mem::take(&mut normalizer.steps),
+                },
+                normalizer.remaining,
+                std::mem::take(&mut normalizer.completed),
+            ))
+        })();
+        budget.steps = normalizer.remaining;
+        result
     }
 }
 
@@ -461,7 +453,7 @@ struct Normalizer<'a, 'w, 'r> {
             &InterfaceInstance,
             &Term,
             &mut Budget,
-        ) -> Result<crate::capabilities::Resolution, String>,
+        ) -> Result<crate::capabilities::Resolution, QueryError>,
     >,
     world: &'a World<'w>,
     preserve_given: bool,
@@ -474,28 +466,28 @@ struct Normalizer<'a, 'w, 'r> {
     frames: Vec<Vec<nir::Sort>>,
 }
 impl Normalizer<'_, '_, '_> {
-    fn spend(&mut self, steps: usize) -> Result<(), String> {
+    fn spend(&mut self, steps: usize) -> Result<(), QueryError> {
         self.remaining = self
             .remaining
             .checked_sub(steps)
-            .ok_or("associated normalization budget exhausted")?;
+            .ok_or(QueryError::Budget)?;
         Ok(())
     }
-    fn charge_copy(&mut self, term: &Term) -> Result<(), String> {
+    fn charge_copy(&mut self, term: &Term) -> Result<(), QueryError> {
         charge_projection_copy(term, &mut self.remaining)
     }
-    fn many(&mut self, terms: &[Term], depth: usize) -> Result<Vec<Term>, String> {
+    fn many(&mut self, terms: &[Term], depth: usize) -> Result<Vec<Term>, QueryError> {
         if terms.len() > self.remaining {
-            return Err("associated normalization budget exhausted".into());
+            return Err(QueryError::Budget);
         }
         terms
             .iter()
             .map(|term| self.normalize(term, depth))
             .collect()
     }
-    fn normalize(&mut self, term: &Term, depth: usize) -> Result<Term, String> {
+    fn normalize(&mut self, term: &Term, depth: usize) -> Result<Term, QueryError> {
         if depth >= self.budget.max_depth.min(64) {
-            return Err("associated normalization depth exhausted".into());
+            return Err(QueryError::Budget);
         }
         self.spend(1)?;
         Ok(match term {
@@ -513,7 +505,7 @@ impl Normalizer<'_, '_, '_> {
                             arguments: self.many(&operation.arguments, depth + 1)?,
                         })
                     })
-                    .collect::<Result<Vec<_>, String>>()?;
+                    .collect::<Result<Vec<_>, QueryError>>()?;
                 Term::computation(operations, self.normalize(result, depth + 1)?)
             }
             Term::AssociatedType {
@@ -577,8 +569,7 @@ impl Normalizer<'_, '_, '_> {
                         .input_substitution(&inputs, &self.frames, &mut self.remaining)
                         .and_then(|substitution| {
                             substitution.instantiate_bounded(&member.ty, &mut self.remaining)
-                        })
-                        .map_err(|e| e.to_string())?;
+                        })?;
                     if ty != Term::Primitive(Primitive::Type) {
                         return Err("associated projection member is not Type-valued".into());
                     }
@@ -606,7 +597,7 @@ impl Normalizer<'_, '_, '_> {
                     };
                     let query_steps = self.remaining / 2;
                     if query_steps == 0 {
-                        return Err("associated view budget exhausted".into());
+                        return Err(QueryError::Budget);
                     }
                     let given = nir::program::TraitRequirement {
                         subject: subject.as_ref().clone(),
@@ -655,8 +646,7 @@ impl Normalizer<'_, '_, '_> {
                             .input_substitution(&inputs, &[], &mut self.remaining)
                             .and_then(|substitution| {
                                 substitution.instantiate_bounded(&member.ty, &mut self.remaining)
-                            })
-                            .map_err(|e| e.to_string())?;
+                            })?;
                         if ty != Term::Primitive(Primitive::Type) {
                             return Err("associated projection member is not Type-valued".into());
                         }
@@ -667,23 +657,32 @@ impl Normalizer<'_, '_, '_> {
                     }
                 }
                 if !self.active.insert(key.clone()) {
-                    return Err("cyclic associated Type projection".into());
+                    return Err(QueryError::Unresolved(
+                        "cyclic associated Type projection".into(),
+                    ));
                 }
                 let result = (|| {
-                    let allowance = Budget {
+                    let mut allowance = Budget {
                         steps: self.remaining,
                         ..self.budget
                     };
                     let resolved = if let Some(resolve) = self.resolve.as_deref_mut() {
                         self.world
-                            .resolve_associated_type_using(&key, allowance, resolve)
+                            .resolve_associated_type_using(&key, &mut allowance, resolve)
                     } else {
-                        self.world.resolve_associated_type_budgeted(&key, allowance)
+                        self.world
+                            .resolve_associated_type_budgeted(&key, &mut allowance)
                     };
-                    let (resolution, remaining) = resolved.map_err(|message| {
-                        format!("associated Type normalization of {key}: {message}")
+                    self.remaining = allowance.steps;
+                    let (resolution, _) = resolved.map_err(|error| match error {
+                        QueryError::Budget => QueryError::Budget,
+                        QueryError::Invalid(message) => QueryError::Invalid(format!(
+                            "associated Type normalization of {key}: {message}"
+                        )),
+                        QueryError::Unresolved(message) => QueryError::Unresolved(format!(
+                            "associated Type normalization of {key}: {message}"
+                        )),
                     })?;
-                    self.remaining = remaining;
                     let value = self.normalize(&resolution.value, depth + 1)?;
                     self.charge_copy(&value)?;
                     self.charge_copy(&key)?;
@@ -753,7 +752,7 @@ impl Normalizer<'_, '_, '_> {
             },
             Term::Record(fields) | Term::RecordValue(fields) => {
                 if fields.len() > self.remaining {
-                    return Err("associated normalization budget exhausted".into());
+                    return Err(QueryError::Budget);
                 }
                 let mut output = Vec::with_capacity(fields.len());
                 for (name, ty) in fields {
@@ -779,7 +778,7 @@ impl Normalizer<'_, '_, '_> {
             }
             Term::Function { parameters, result } => {
                 if parameters.len() > self.remaining {
-                    return Err("associated normalization budget exhausted".into());
+                    return Err(QueryError::Budget);
                 }
                 self.frames
                     .push(parameters.iter().map(|p| p.sort).collect());
@@ -792,8 +791,8 @@ impl Normalizer<'_, '_, '_> {
                                 ty: self.normalize(&p.ty, depth + 1)?,
                             })
                         })
-                        .collect::<Result<_, String>>()?;
-                    Ok::<_, String>(Term::Function {
+                        .collect::<Result<_, QueryError>>()?;
+                    Ok::<_, QueryError>(Term::Function {
                         parameters,
                         result: Box::new(self.normalize(result, depth + 1)?),
                     })
@@ -863,14 +862,13 @@ fn charge_projection_substitution(
     parameters: &[nir::DeclarationParameter],
     arguments: &[Term],
     fuel: &mut usize,
-) -> Result<(), String> {
+) -> Result<(), QueryError> {
     nir::type_computations::charge_parameter_substitution(term, parameters, arguments, fuel)
-        .map_err(|e| e.to_string())
+        .map_err(QueryError::from)
 }
 
-pub fn charge_projection_copy(term: &Term, fuel: &mut usize) -> Result<(), String> {
-    nir::type_budget::charge_structure(term, fuel)
-        .map_err(|_| "memory summary type budget exhausted".to_string())
+pub fn charge_projection_copy(term: &Term, fuel: &mut usize) -> Result<(), QueryError> {
+    nir::type_budget::charge_structure(term, fuel).map_err(|_| QueryError::Budget)
 }
 
 #[cfg(test)]
@@ -958,6 +956,7 @@ mod view_tests {
             world
                 .associated_type_view(&invalid, Budget::default())
                 .unwrap_err()
+                .to_string()
                 .contains("member does not belong")
         );
         let without_givens = World {
@@ -1050,6 +1049,7 @@ mod view_tests {
             without_givens
                 .associated_type_view(&bad_member, Budget::default())
                 .unwrap_err()
+                .to_string()
                 .contains("member does not belong")
         );
         assert!(
@@ -1070,12 +1070,14 @@ mod view_tests {
             world
                 .associated_type_view(&projection, Budget::default())
                 .unwrap_err()
+                .to_string()
                 .contains("not Type-valued")
         );
         assert!(
             world
                 .associated_type_view(&callable, Budget::default())
                 .unwrap_err()
+                .to_string()
                 .contains("not Type-valued")
         );
     }
@@ -1162,11 +1164,82 @@ mod shared_cache_tests {
             assumptions: &[],
             context: &context,
         };
+        // Both normalization entry paths must debit recursive selection once.
+        // The standalone view receives the same half-allowance as prerequisite_type.
+        let mut view_budget = Budget {
+            steps: 50_000,
+            ..Budget::default()
+        };
+        let view = world
+            .associated_type_view_metered(&projection, &mut view_budget)
+            .unwrap();
+        let mut sequential = Budget {
+            steps: 100_000 - (50_000 - view_budget.steps),
+            ..Budget::default()
+        };
+        let target: InterfaceInstance = id(90).into();
+        let direct = world
+            .resolve_instance_metered(&target, &view.value, &mut sequential)
+            .unwrap();
+        let mut nested = Budget::default();
+        let projected = world
+            .resolve_projected_instance_metered(&target, &projection, &mut nested)
+            .unwrap();
+        assert_eq!(projected.types.selection, direct.types.selection);
+        assert_eq!(
+            nested.steps, sequential.steps,
+            "nested query work must be debited exactly once"
+        );
+
+        // Host query failures retain their category and actual consumption;
+        // neither an error nor an unspent reservation can zero the caller.
+        for failure in [
+            QueryError::Budget,
+            QueryError::Invalid("bad origin".into()),
+            QueryError::Unresolved("pending origin".into()),
+        ] {
+            let mut consumption = Vec::new();
+            for cost in [0, 17] {
+                let mut budget = Budget::default();
+                let mut invocations = 0;
+                let result = world.associated_type_view_for_selection(
+                    &projection,
+                    &mut budget,
+                    &mut |_, _, allowance| {
+                        invocations += 1;
+                        allowance.steps -= cost;
+                        Err(failure.clone())
+                    },
+                );
+                let error = result.unwrap_err();
+                assert_eq!(
+                    std::mem::discriminant(&error),
+                    std::mem::discriminant(&failure)
+                );
+                assert_eq!(invocations, 1);
+                assert!(budget.steps > 0 && budget.steps < 100_000);
+                consumption.push(100_000 - budget.steps);
+            }
+            assert_eq!(consumption[1] - consumption[0], 17);
+        }
         let mut invalid = projection.clone();
         let Term::AssociatedType { origin, .. } = &mut invalid else {
             unreachable!()
         };
         origin.member = id(99);
+        let mut invalid_budget = Budget::default();
+        assert!(matches!(
+            world.associated_type_view_metered(&invalid, &mut invalid_budget),
+            Err(QueryError::Invalid(_))
+        ));
+        assert!(invalid_budget.steps > 0 && invalid_budget.steps < 100_000);
+        assert_eq!(
+            world
+                .associated_type_view_metered(&projection, &mut invalid_budget)
+                .unwrap()
+                .value,
+            result
+        );
         let mut cache = std::collections::HashMap::new();
         assert!(
             world
@@ -1313,102 +1386,21 @@ impl World<'_> {
         let member_type = substitution
             .instantiate_bounded(&member.ty, &mut fuel)
             .map_err(|e| e.to_string())?;
-        // Reserve a disjoint allowance for each proof/search rather than
-        // resetting the full caller budget at every formation obligation.
-        let queries = contract
-            .requirements
-            .len()
-            .saturating_add(contract.capabilities.len().saturating_mul(2))
-            .saturating_add(1);
-        let query_steps = fuel / queries.saturating_mul(2);
-        if query_steps == 0 {
-            return Err("associated value query budget exhausted".into());
-        }
-        fuel -= query_steps * queries;
-        let query_budget = Budget {
-            steps: query_steps,
+        let mut selection_budget = Budget {
+            steps: fuel,
             ..budget
         };
-        // Interface-parameter constraints are formation obligations, not
-        // assumptions supplied by selecting an implementation.
-        for requirement in &contract.requirements {
-            let mut pending = vec![(requirement, 0usize)];
-            while let Some((requirement, depth)) = pending.pop() {
-                if depth >= budget.max_depth.min(64) {
-                    return Err("associated value requirement depth exhausted".into());
-                }
-                fuel = fuel
-                    .checked_sub(1)
-                    .ok_or("associated value query budget exhausted")?;
-                match requirement {
-                    nir::program::TypePredicate::Trait(requirement) => {
-                        charge_projection_substitution(
-                            &requirement.subject,
-                            &parameters,
-                            &inputs,
-                            &mut fuel,
-                        )?;
-                        for argument in &requirement.interface_arguments {
-                            charge_projection_substitution(
-                                argument,
-                                &parameters,
-                                &inputs,
-                                &mut fuel,
-                            )?;
-                        }
-                    }
-                    nir::program::TypePredicate::Equal(a, b) => {
-                        charge_projection_substitution(a, &parameters, &inputs, &mut fuel)?;
-                        charge_projection_substitution(b, &parameters, &inputs, &mut fuel)?;
-                    }
-                    nir::program::TypePredicate::And(items)
-                    | nir::program::TypePredicate::Or(items) => {
-                        if items.len() > fuel {
-                            return Err("associated value query budget exhausted".into());
-                        }
-                        pending.extend(items.iter().map(|item| (item, depth + 1)));
-                    }
-                    nir::program::TypePredicate::Not(inner) => pending.push((inner, depth + 1)),
-                    nir::program::TypePredicate::Bool(_) => (),
-                }
-            }
-            let requirement = substitution
-                .instantiate_predicate_bounded(requirement, &mut fuel)
-                .map_err(|e| e.to_string())?;
-            if !matches!(
-                self.context
-                    .prove(Formula::from_predicate(&requirement), query_budget),
-                Outcome::Entailed(_)
-            ) {
-                return Err("associated value interface requirement is not established".into());
-            }
-        }
-        for capability in &contract.capabilities {
-            charge_projection_substitution(&capability.subject, &parameters, &inputs, &mut fuel)?;
-            for argument in &capability.interface_arguments {
-                charge_projection_substitution(argument, &parameters, &inputs, &mut fuel)?;
-            }
-            let capability = substitution
-                .instantiate_requirement_bounded(capability, &mut fuel)
-                .map_err(|e| e.to_string())?;
-            if self.given(&capability, query_budget)?.is_some() {
-                continue;
-            }
-            let resolved = self.resolve_projected_instance(
-                &capability.interface_instance(),
-                &capability.subject,
-                query_budget,
-            )?;
-            if !matches!(resolved.types.selection, Selection::Selected(_)) {
-                return Err("associated value interface capability is not established".into());
-            }
-        }
-        let mut selection_budget = query_budget;
+        self.check_associated_formation(
+            contract,
+            &substitution,
+            &mut selection_budget,
+            &mut |interface, subject, allowance| {
+                self.resolve_projected_instance_metered(interface, subject, allowance)
+            },
+        )?;
         let resolution =
             self.resolve_projected_instance_metered(interface, subject, &mut selection_budget)?;
-        // This allowance was reserved above. Return only the solver's unused
-        // work, including prerequisite normalization, to the enclosing query.
-        fuel += selection_budget.steps;
+        fuel = selection_budget.steps;
         let Selection::Selected(selected) = resolution.types.selection else {
             return Err(format!(
                 "associated value implementation selection is unresolved: {}",

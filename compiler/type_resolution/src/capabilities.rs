@@ -429,21 +429,12 @@ impl World<'_> {
         budget.steps = budget.steps.min(solver.remaining);
         result
     }
-    pub(crate) fn resolve_projected_instance(
-        &self,
-        interface: &InterfaceInstance,
-        subject: &Term,
-        budget: Budget,
-    ) -> Result<Resolution, String> {
-        self.resolve_projected_instance_metered(interface, subject, &mut { budget })
-    }
-
     pub(crate) fn resolve_projected_instance_metered(
         &self,
         interface: &InterfaceInstance,
         subject: &Term,
         budget: &mut Budget,
-    ) -> Result<Resolution, String> {
+    ) -> Result<Resolution, QueryError> {
         let mut solver = Solver {
             world: self,
             scope: ResolutionScope::capture(self),
@@ -457,17 +448,15 @@ impl World<'_> {
                 .iter()
                 .map(|ty| solver.prerequisite_type(ty, *budget, 0))
                 .collect::<Result<_, _>>()?;
-            solver
-                .resolve(
-                    &InterfaceInstance {
-                        declaration: interface.declaration,
-                        arguments,
-                    },
-                    &subject,
-                    *budget,
-                    0,
-                )
-                .map_err(String::from)
+            solver.resolve(
+                &InterfaceInstance {
+                    declaration: interface.declaration,
+                    arguments,
+                },
+                &subject,
+                *budget,
+                0,
+            )
         })();
         budget.steps = budget.steps.min(solver.remaining);
         result
@@ -740,11 +729,11 @@ impl Solver<'_, '_> {
         ty: &Term,
         budget: Budget,
         depth: usize,
-    ) -> Result<Term, String> {
+    ) -> Result<Term, QueryError> {
         // Reserve only part of the remaining search for one projection. A
         // pending projection must not hide a later definitely false premise.
         if depth >= budget.max_depth.min(64) {
-            return Err("capability normalization depth exhausted".into());
+            return Err(QueryError::Budget);
         }
         if ty.is_structural_index_value() {
             crate::associated::charge_projection_copy(ty, &mut self.remaining)?;
@@ -754,17 +743,22 @@ impl Solver<'_, '_> {
         }
         let allowance = budget.steps.min(self.remaining / 2);
         if allowance == 0 {
-            return Err("capability normalization budget exhausted".into());
+            return Err(QueryError::Budget);
         }
         let world = self.world;
+        let mut normalization_budget = Budget {
+            steps: allowance,
+            ..budget
+        };
         let normalized = world.associated_type_view_for_selection(
             ty,
-            Budget {
-                steps: allowance,
-                ..budget
-            },
+            &mut normalization_budget,
             &mut |interface, subject, budget| {
-                let before = self.remaining;
+                // The normalizer owns this allowance. The selection stack is
+                // shared, but debit this recursive work only through its meter.
+                let outer = self.remaining;
+                let permitted = budget.steps.min(outer);
+                self.remaining = permitted;
                 let result = (|| {
                     let subject = self.prerequisite_type(subject, *budget, depth + 1)?;
                     let arguments = interface
@@ -781,26 +775,14 @@ impl Solver<'_, '_> {
                         *budget,
                         depth + 1,
                     )
-                    .map_err(String::from)
                 })();
-                budget.steps = budget.steps.saturating_sub(before - self.remaining);
+                budget.steps -= permitted - self.remaining;
+                self.remaining = outer;
                 result
             },
         );
-        match normalized {
-            Ok((ty, remaining)) => {
-                self.remaining = self
-                    .remaining
-                    .checked_sub(allowance - remaining)
-                    .ok_or("capability normalization budget exhausted")?;
-                Ok(ty)
-            }
-            Err(error) => {
-                // A failed nested normalization cannot return a fresh allowance.
-                self.remaining = self.remaining.saturating_sub(allowance);
-                Err(error)
-            }
-        }
+        self.remaining -= allowance - normalization_budget.steps;
+        normalized.map(|(ty, _)| ty)
     }
 
     fn qualify(&mut self, evidence: &TypeEvidence, budget: Budget, depth: usize) -> Qualification {
@@ -852,7 +834,7 @@ impl Solver<'_, '_> {
                 Err(error) => incomplete_given = Some(error.to_string()),
             }
             let requirement = match (|| {
-                Ok::<_, String>(TraitRequirement {
+                Ok::<_, QueryError>(TraitRequirement {
                     interface: requirement.interface,
                     subject: self.prerequisite_type(&requirement.subject, budget, depth)?,
                     interface_arguments: requirement
@@ -864,7 +846,7 @@ impl Solver<'_, '_> {
             })() {
                 Ok(requirement) => requirement,
                 Err(error) => {
-                    pending = Some(error);
+                    pending = Some(error.to_string());
                     continue;
                 }
             };

@@ -263,7 +263,8 @@ fn type_input_dispatch_uses_source_methods_and_real_meta_cache_protocols() {
     );
 
     // With result retention disabled, every success includes execution and
-    // source result admission. Insufficient allowance must never publish a result.
+    // source result admission. Optional proof minimization scales with fuel,
+    // so observed warm work is not a lower bound on every successful query.
     let mut uncached = prepare(0);
     uncached
         .invoke(inputs(true), &mut Context::new(1_000_000))
@@ -271,10 +272,25 @@ fn type_input_dispatch_uses_source_methods_and_real_meta_cache_protocols() {
     let mut warm = Context::new(1_000_000);
     uncached.invoke(inputs(true), &mut warm).unwrap();
     let work = 1_000_000 - warm.remaining();
+    let warm_invocations = uncached.last_execution_stats().bytecode_invocations;
     assert!(work > 1);
+    assert!(warm_invocations > 0);
     for allowance in [0, 1, work / 2, work - 1] {
         let mut limited = Context::new(allowance);
-        assert!(uncached.invoke(inputs(true), &mut limited).is_err());
+        let observed = uncached.invoke(inputs(true), &mut limited);
+        if allowance <= 1 {
+            assert!(observed.is_err(), "input admission requires work");
+        }
+        if let Ok(outcome) = observed {
+            assert_eq!(*outcome.value, Value::Type(Term::Primitive(Primitive::U8)));
+            assert!(!outcome.reused);
+            assert_eq!(
+                uncached.last_execution_stats().bytecode_invocations,
+                warm_invocations
+            );
+            assert_eq!(uncached.last_execution_stats().bytecode_compilations, 0);
+        }
+        assert!(limited.remaining() <= allowance);
         assert_eq!(uncached.cached_results(), 0);
         let mut recovered = Context::new(1_000_000);
         let outcome = uncached.invoke(inputs(true), &mut recovered).unwrap();

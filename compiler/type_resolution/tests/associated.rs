@@ -85,7 +85,7 @@ fn query(
     implementations: &[Implementation],
     term: &Term,
     budget: Budget,
-) -> Result<type_resolution::associated::AssociatedTypeResolution, String> {
+) -> Result<type_resolution::associated::AssociatedTypeResolution, nir::NominalAdmissionError> {
     with_world(traits, implementations, |world| {
         world.resolve_associated_type(term, budget)
     })
@@ -95,7 +95,7 @@ fn normalize(
     implementations: &[Implementation],
     term: &Term,
     budget: Budget,
-) -> Result<type_resolution::associated::AssociatedTypeNormalization, String> {
+) -> Result<type_resolution::associated::AssociatedTypeNormalization, nir::NominalAdmissionError> {
     with_world(traits, implementations, |world| {
         world.normalize_associated_types(term, budget)
     })
@@ -283,6 +283,7 @@ fn absent_or_incomplete_selection_never_falls_back_to_trait_default() {
     assert!(
         query(&[contract()], &[], &term, Budget::default())
             .unwrap_err()
+            .to_string()
             .contains("unresolved")
     );
     let mut impl_ = implementation(holder(ty(P::Bool)), ty(P::Bool));
@@ -290,6 +291,7 @@ fn absent_or_incomplete_selection_never_falls_back_to_trait_default() {
     assert!(
         query(&[contract()], &[impl_], &term, Budget::default())
             .unwrap_err()
+            .to_string()
             .contains("no associated Type value")
     );
 }
@@ -306,6 +308,7 @@ fn member_origin_arity_and_type_contract_are_validated() {
     assert!(
         query(&[contract()], &[impl_.clone()], &foreign, Budget::default())
             .unwrap_err()
+            .to_string()
             .contains("does not belong")
     );
     assert!(
@@ -316,6 +319,7 @@ fn member_origin_arity_and_type_contract_are_validated() {
             Budget::default()
         )
         .unwrap_err()
+        .to_string()
         .contains("argument count")
     );
     let mut trait_ = contract();
@@ -328,6 +332,7 @@ fn member_origin_arity_and_type_contract_are_validated() {
             Budget::default()
         )
         .unwrap_err()
+        .to_string()
         .contains("not Type-valued")
     );
 }
@@ -342,6 +347,7 @@ fn interface_requirements_and_implementation_capabilities_are_not_erased() {
     assert!(
         query(&[trait_], &[impl_.clone()], &term, Budget::default())
             .unwrap_err()
+            .to_string()
             .contains("requirement")
     );
     impl_.capabilities.push(TraitRequirement {
@@ -352,6 +358,7 @@ fn interface_requirements_and_implementation_capabilities_are_not_erased() {
     assert!(
         query(&[contract()], &[impl_], &term, Budget::default())
             .unwrap_err()
+            .to_string()
             .contains("unresolved")
     );
 }
@@ -400,6 +407,7 @@ fn malformed_selected_values_do_not_pass_as_type_templates() {
     assert!(
         query(&[contract()], &[impl_.clone()], &term, Budget::default())
             .unwrap_err()
+            .to_string()
             .contains("duplicate")
     );
     impl_.associated.pop();
@@ -407,6 +415,7 @@ fn malformed_selected_values_do_not_pass_as_type_templates() {
     assert!(
         query(&[contract()], &[impl_], &term, Budget::default())
             .unwrap_err()
+            .to_string()
             .contains("not a completed Type template")
     );
 }
@@ -430,6 +439,7 @@ fn interface_capability_formation_is_checked_before_returning_a_value() {
             Budget::default()
         )
         .unwrap_err()
+        .to_string()
         .contains("capability")
     );
     let mut marker = contract();
@@ -469,7 +479,8 @@ fn deeply_nested_interface_requirements_fail_before_recursive_substitution() {
             Budget::default()
         )
         .unwrap_err()
-        .contains("depth exhausted")
+        .to_string()
+        .contains("budget exhausted")
     );
 }
 
@@ -513,6 +524,7 @@ fn recursive_normalization_rejects_cycles_without_poisoning_later_queries() {
             world
                 .normalize_associated_types(&root, Budget::default())
                 .unwrap_err()
+                .to_string()
                 .contains("cyclic")
         );
         let good = world
@@ -623,7 +635,8 @@ fn normalization_enforces_depth_budget_and_caches_per_world_only() {
             }
         )
         .unwrap_err()
-        .contains("depth")
+        .to_string()
+        .contains("budget")
     );
 }
 
@@ -639,6 +652,7 @@ fn normalization_cache_hits_charge_the_expanded_type_payload() {
     assert!(
         normalize(&[contract()], &[impl_], &repeated, Budget::default())
             .unwrap_err()
+            .to_string()
             .contains("budget")
     );
 }
@@ -803,7 +817,10 @@ fn associated_type_expansion_is_bounded_and_a_later_query_can_recover() {
                 },
             )
             .unwrap_err();
-        assert!(failure.contains("budget"), "{failure}");
+        assert!(
+            matches!(failure, nir::NominalAdmissionError::Budget),
+            "{failure}"
+        );
         let recovered = world
             .resolve_associated_type(
                 &root,
@@ -988,12 +1005,14 @@ fn prepared_methods_preserve_default_binders_and_pending_contracts() {
             world
                 .prepare_method(&instance, id(20), &[], false, &mut fuel)
                 .unwrap_err()
+                .to_string()
                 .contains("count mismatch")
         );
         assert!(
             world
                 .prepare_method(&instance, id(99), &[ty(P::U8)], false, &mut fuel)
                 .unwrap_err()
+                .to_string()
                 .contains("unknown dispatch member")
         );
         let (method, specialized) = world

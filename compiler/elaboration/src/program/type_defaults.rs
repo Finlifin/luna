@@ -878,10 +878,7 @@ impl<'h> Checker<'_, 'h> {
     ) -> Result<(), Error> {
         candidate
             .refine_type_views_metered(
-                |ty, budget| {
-                    self.callable_input_view_metered(ty, budget, span)
-                        .map_err(|error| error.message)
-                },
+                |ty, budget| self.callable_input_view_metered(ty, budget),
                 crate::ptc::Budget::default(),
             )
             .map_err(|error| call_inference_error(span, error))

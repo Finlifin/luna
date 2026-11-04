@@ -41,10 +41,7 @@ impl Checker<'_, '_> {
         }
         candidate
             .refine_type_views_metered(
-                |ty, budget| {
-                    self.callable_input_view_metered(ty, budget, span)
-                        .map_err(|e| e.message)
-                },
+                |ty, budget| self.callable_input_view_metered(ty, budget),
                 crate::ptc::Budget::default(),
             )
             .map_err(|cause| call_inference_error(span, cause))?;
@@ -453,10 +450,7 @@ impl Checker<'_, '_> {
             if routes.iter().any(|route| route.is_collected()) {
                 candidate
                     .refine_type_views_metered(
-                        |ty, budget| {
-                            self.callable_input_view_metered(ty, budget, span)
-                                .map_err(|e| e.message)
-                        },
+                        |ty, budget| self.callable_input_view_metered(ty, budget),
                         crate::ptc::Budget::default(),
                     )
                     .map_err(|e| call_inference_error(span, e))?;

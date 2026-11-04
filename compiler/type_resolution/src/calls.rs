@@ -99,7 +99,7 @@ pub enum Error {
         requirement: String,
         status: &'static str,
     },
-    TypeView(String),
+    TypeView(nir::NominalAdmissionError),
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -592,7 +592,7 @@ impl CallCandidate {
         ) -> Result<Term, Error> {
             *fuel = fuel
                 .checked_sub(1)
-                .ok_or_else(|| Error::TypeView("result context budget exhausted".into()))?;
+                .ok_or_else(|| Error::TypeView(nir::NominalAdmissionError::Budget))?;
             let index = components.len();
             components.push(if let Some(ty) = ty {
                 if ty.sort() != Sort::Type {
@@ -620,7 +620,7 @@ impl CallCandidate {
             fuel: &mut usize,
         ) -> Result<Term, Error> {
             if depth >= 128 || *fuel == 0 {
-                return Err(Error::TypeView("result context budget exhausted".into()));
+                return Err(Error::TypeView(nir::NominalAdmissionError::Budget));
             }
             *fuel -= 1;
             match context {
@@ -963,7 +963,7 @@ impl CallCandidate {
     /// No inference variable or unsettled obligation is exported as a fact.
     pub fn refine_type_views(
         &mut self,
-        mut resolve: impl FnMut(&Term, Budget) -> Result<Term, String>,
+        mut resolve: impl FnMut(&Term, Budget) -> Result<Term, nir::NominalAdmissionError>,
         budget: Budget,
     ) -> Result<(), Error> {
         let I::Instantiate { template, .. } = &self.signature else {
@@ -977,14 +977,14 @@ impl CallCandidate {
             ..budget
         };
         if allowance.steps == 0 {
-            return Err(Error::TypeView("call type-view budget exhausted".into()));
+            return Err(Error::TypeView(nir::NominalAdmissionError::Budget));
         }
         self.refine_type_views_metered(
             |ty, remaining| {
                 remaining.steps = remaining
                     .steps
                     .checked_sub(allowance.steps)
-                    .ok_or("call type-view budget exhausted")?;
+                    .ok_or(nir::NominalAdmissionError::Budget)?;
                 resolve(ty, allowance)
             },
             budget,
@@ -995,7 +995,7 @@ impl CallCandidate {
     /// transactional: a failed later query publishes none of the earlier views.
     pub fn refine_type_views_metered(
         &mut self,
-        mut resolve: impl FnMut(&Term, &mut Budget) -> Result<Term, String>,
+        mut resolve: impl FnMut(&Term, &mut Budget) -> Result<Term, nir::NominalAdmissionError>,
         budget: Budget,
     ) -> Result<(), Error> {
         let I::Instantiate { template, .. } = &self.signature else {
@@ -1010,7 +1010,7 @@ impl CallCandidate {
             ..budget
         };
         if queries.steps == 0 {
-            return Err(Error::TypeView("call type-view budget exhausted".into()));
+            return Err(Error::TypeView(nir::NominalAdmissionError::Budget));
         }
         let mut fuel = budget.steps / 2;
         let mut changes = Vec::new();
@@ -1225,9 +1225,7 @@ impl CallCandidate {
         depth: usize,
     ) -> Result<InputContext, Error> {
         if depth >= 128 || *fuel == 0 {
-            return Err(Error::TypeView(
-                "input checking context budget exhausted".into(),
-            ));
+            return Err(Error::TypeView(nir::NominalAdmissionError::Budget));
         }
         *fuel -= 1;
         if let Some(ty) = self.inspect_component(term.clone())? {
@@ -1242,9 +1240,9 @@ impl CallCandidate {
             I::Stable(template) => (template, None),
             I::Meta(id) => {
                 for &index in &self.dependent_value_parameters {
-                    *fuel = fuel.checked_sub(1).ok_or_else(|| {
-                        Error::TypeView("input checking context budget exhausted".into())
-                    })?;
+                    *fuel = fuel
+                        .checked_sub(1)
+                        .ok_or_else(|| Error::TypeView(nir::NominalAdmissionError::Budget))?;
                     if matches!(self.engine.inspect(&self.types[index]).map_err(Error::Obligations)?, I::Meta(other) if other == id)
                     {
                         return Ok(InputContext::UnknownDependentValue);
@@ -1256,7 +1254,7 @@ impl CallCandidate {
         if let Some((domain, fields)) = self.engine.tuple_input(&template) {
             *fuel = fuel
                 .checked_sub(fields.len())
-                .ok_or_else(|| Error::TypeView("input checking context budget exhausted".into()))?;
+                .ok_or_else(|| Error::TypeView(nir::NominalAdmissionError::Budget))?;
             crate::associated::charge_projection_copy(domain, fuel).map_err(Error::TypeView)?;
         }
         let mut field_context = |field: Term| -> Result<InputContext, Error> {
@@ -1375,9 +1373,7 @@ impl CallCandidate {
         depth: usize,
     ) -> Result<Option<CallableContext>, Error> {
         if depth >= 128 || *fuel == 0 {
-            return Err(Error::TypeView(
-                "input checking context budget exhausted".into(),
-            ));
+            return Err(Error::TypeView(nir::NominalAdmissionError::Budget));
         }
         *fuel -= 1;
         let shape = self.engine.inspect(term).map_err(Error::Obligations)?;

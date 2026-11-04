@@ -1167,15 +1167,19 @@ fn stable_type_views_resume_obligations_transactionally_and_remain_candidate_loc
         .unwrap();
     let before = projection(primitive(P::Bool));
     assert_eq!(candidate.parameter_type(1).unwrap(), Some(before.clone()));
-    let mut queries = 0;
-    assert!(
-        candidate
+    for failure in [
+        nir::NominalAdmissionError::Budget,
+        nir::NominalAdmissionError::Unresolved("pending dependent query".into()),
+        nir::NominalAdmissionError::Invalid("failed dependent query".into()),
+    ] {
+        let mut queries = 0;
+        let error = candidate
             .refine_type_views_metered(
                 |ty, budget| {
                     budget.steps -= 1;
                     queries += 1;
                     if queries == 3 {
-                        return Err("failed dependent query".into());
+                        return Err(failure.clone());
                     }
                     Ok(if *ty == before {
                         primitive(P::Bool)
@@ -1183,11 +1187,14 @@ fn stable_type_views_resume_obligations_transactionally_and_remain_candidate_loc
                         ty.clone()
                     })
                 },
-                Budget::default()
+                Budget::default(),
             )
-            .is_err()
-    );
-    assert_eq!(candidate.parameter_type(1).unwrap(), Some(before.clone()));
+            .unwrap_err();
+        assert!(
+            matches!(error, type_resolution::calls::Error::TypeView(cause) if cause == failure)
+        );
+        assert_eq!(candidate.parameter_type(1).unwrap(), Some(before.clone()));
+    }
     candidate
         .refine_type_views(
             |ty, _| {

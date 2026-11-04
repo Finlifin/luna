@@ -27,7 +27,7 @@ impl Scheme {
         let computation = |error| match error {
             nir::type_computations::Error::Scope(error) => Error::Shape(error),
             nir::type_computations::Error::Budget => exhausted(),
-            error => Error::TypeView(error.to_string()),
+            error => Error::TypeView(error.into()),
         };
         budget.steps = budget.steps.checked_sub(ids.len()).ok_or_else(exhausted)?;
         for domain in domains {

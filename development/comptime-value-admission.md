@@ -2623,6 +2623,64 @@ memoization 的 bound contract 消费者将 typed Budget 与 Outcome 的 BudgetE
   --check --edition 2024 --config skip_children=true` 检查，退出 0；
   `/tmp/luna-tools-zrf1o7nt/result.json`。
 
+**关联 Type 投影与调用视图。** Type projection、normalization／view、projected
+resolution 与 prerequisite_type 使用 typed admission 错误。递归查询未决、循环投影
+是 Unresolved；非法 origin／member／sort 是 Invalid；结构复制、替换和形成证明的
+资源失败保持 Budget，不根据剩余额度或诊断文本猜测分类。条件求解不再通过
+`if let Ok` 吞掉投影失败；其独立证明／未完成反模型规则与 trait 事实相同。
+projection support replay 同样将 Budget 保留为 ProofError::BudgetExhausted。
+
+Type 与普通关联值共用 check_associated_formation：有界检查 predicate 结构，再由
+DeclarationSubstitution 的 bounded 接口检查实际替换载荷，最后按同一余额证明形成
+要求和能力。删除两段各自枚举谓词、预留固定份额并另做证明的代码；既有形成遍历
+深度上限保持。普通关联值的 payload／initializer 检查仍执行，不能用 Type 视图代替
+完整值准入。
+
+Normalizer 先在查询私有状态完成，成功或失败都把实际余额传回 metered 入口；失败
+不再无条件清空调用者预算。宿主的 selection callback 借用同一活动查询栈，但本次
+工作由局部 normalizer 计费；回调临时使用获配额度并归还宿主计数器，normalizer
+结束时只扣一次。这样避免递归 selection 先扣宿主、返回后又扣局部总消耗。
+shared completed cache 仍只在整次归约成功后扩展，失败前已完成的前缀不发布。
+NF 只遍历输入而不展开头；definition-side given 视图与 IIR 的严格闭合要求不合并。
+
+普通调用的 TypeView 错误与 refine_type_views 回调也保留该分类。elaboration 的
+callable_input_view_metered 不再先制造源码诊断、再拆出 message 传回求解器；最终
+call_inference_error／带 span 的便捷入口负责渲染。候选在所有观察成功后才发布新
+等式，Budget、Unresolved、Invalid 都不能提交部分参数视图。
+
+回归比较同一投影的嵌套 selection 与顺序查询消耗，验证递归工作只扣一次；注入
+三类失败并增加固定工作量，验证外层扣款差额准确且保留正余额。另检查错误成员后
+合法重试、缓存前缀回滚、深度限制、NF 不展开及调用候选失败后的原类型。
+
+调用集成测试不再假定大预算下观测到的消耗是最小成功额度。诊断运行中，完整热
+调用消耗 4804 步；提供 4803 步时消耗 4768 步，仍执行三次字节码调用、返回 u8，
+且没有复用结果。PTC 的冲突解释与学习精简按剩余额度分配工作，精简不足时保留
+原有有效证据，因此成功所需额度不由一次运行的消耗确定。测试保留 0／1 步拒绝，
+其余探测额度若成功则检查正确结果、完整执行、无结果复用和无缓存写入；每次都
+检查不超支及随后正常额度恢复。生产预算和语义检查未放宽。诊断证据为
+`/tmp/luna-tools-mvnqsa_k/result.json`（旧断言退出 101）。
+
+本次接线验证（工作目录 `/home/fin/luna`）：
+
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution
+  --lib --test associated --test calls --test capabilities
+  --test projection_copy_budget --no-fail-fast`：最终 149 项通过，退出 0；
+  `/tmp/luna-tools-eho931yy/result.json`。
+- 同一入口 `test -p luna`，选择 `associated_signatures`、
+  `deferred_associated_values`、`normal_input_plans`、`open_normal_input_plans`、
+  `prepared_invocations`、`invocation_value_templates`、`dynamic_trait_clauses`、
+  `trait_domain_substitution`、`sysroot_preludes`、`scoped_comptime_callables`、
+  `library_list_equality`，附 `--no-fail-fast`：93 通过、上述旧额度断言 1 失败，
+  退出 101；`/tmp/luna-tools-aq3laqs5/result.json`。修正断言后重跑
+  `test -p luna --test invocation_value_templates`：4 项通过，退出 0；
+  `/tmp/luna-tools-b1j8xco6/result.json`。其余十组未重复执行。
+- 同一入口 `check -p type_resolution -p luna --tests`：退出 0；
+  `/tmp/luna-tools-s6uoxnw_/result.json`。此后仅将两个输入上下文耗尽分支
+  从字符串改为 Budget，并由上述最终 type_resolution 测试覆盖编译。
+- 本次十六个 Rust 文件通过 `development/command.py --timeout 120 -- rustfmt
+  --check --edition 2024 --config skip_children=true`，退出 0；
+  `/tmp/luna-tools-v24wvrxz/result.json`。
+
 **Given 前提查询。** World／Solver 的 given 系列接口现在返回
 `Result<Option<TraitRequirement>, NominalAdmissionError>`：只有 `Ok(None)` 表示
 已完成查询但没有见证。输入／域非法、预算不足、关系未决分别保留 Invalid、Budget、
@@ -2682,10 +2740,12 @@ PTC 会按当前预算为传播与学习分配额度，较小预算可能走更�
 - fresh phase pass 仍使用自己的默认额度，VM 随后再做结构检查；构造失败的
   for_comptime_in_budget 仍保守保留全部 reservation，尚非精确失败扣款。
 - 后续关联项／方法签名与 world capability 的部分实例化尚未有界。
-- 直接 trait resolution、世界命题与条件事实已保留 typed 失败；projected resolution、
-  prerequisite_type、inherent 查询和 qualification／TypeAssessment 的部分内部原因
-  仍有 String 或可选结果边界。条件中的投影失败也仍须迁移。proof replay 仍有
-  合并 admission 错误的路径，完整求解链的 Pending／资源／反例传播未完成。
+- 直接／projected trait resolution、世界命题、条件事实和 Type 投影已保留 typed
+  失败。inherent 查询、普通 associated value 的最终值校验、qualification／
+  TypeAssessment 的部分内部原因仍有 String 或可选结果边界。普通关联值查询和
+  DeclarationWorld 的外围失败扣款也仍有保守处理；不能据 metered Type view 的
+  实际扣款声称全部预算所有权已完成。proof replay 仍有合并 admission 错误的路径，
+  完整求解链的 Pending／资源／反例传播未完成。
   当前查询复用 NominalAdmissionError，并不意味着所有能力选择都属于值域检查；
   全链路查询协议仍须按所属层次完成统一。
 - 旧 layout／callable 可选观察器把 Unresolved 表示为 unavailable view，仍不能
@@ -2723,4 +2783,4 @@ library_iteration 的 flat_map_short_circuit_cleans_inner_and_outer_remainders
 也未将其标为通过或修复。
 
 未跑全 workspace 或性能基准。正式 docs、moves/effects.rs 与 library/README.md
-此前的工作区修改保持原字节内容；没有为获得通过而改写失败用例或增大运行预算。
+此前的工作区修改保持原字节内容；测试断言的调整与证据见上文，生产预算未增大。

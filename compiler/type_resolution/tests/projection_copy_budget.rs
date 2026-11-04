@@ -16,8 +16,7 @@ fn projection_copy_charges_inputs_hidden_in_callable_values() {
     };
     assert!(
         charge_projection_copy(&term, &mut 10_000)
-            .unwrap_err()
-            .contains("budget")
+            .is_err_and(|error| matches!(error, nir::NominalAdmissionError::Budget))
     );
     let term = Term::ClosureSnapshot {
         factory: id,

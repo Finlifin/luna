@@ -3264,48 +3264,41 @@ impl Checker<'_, '_> {
         budget: Budget,
         span: Span,
     ) -> Result<Term, Error> {
-        self.callable_input_view_metered(signature, &mut { budget }, span)
+        self.callable_input_view_metered(signature, &mut { budget })
+            .map_err(|failure| error(span, failure))
     }
 
     pub(super) fn callable_input_view_metered(
         &self,
         signature: &Term,
         budget: &mut Budget,
-        span: Span,
-    ) -> Result<Term, Error> {
+    ) -> Result<Term, nir::NominalAdmissionError> {
         // This view is also used for complete interface argument vectors.
         // A finished scalar index has no associated Type projection to solve.
         if signature.is_structural_index_value() {
-            crate::associated::charge_projection_copy(signature, &mut budget.steps)
-                .map_err(|e| error(span, e))?;
+            crate::associated::charge_projection_copy(signature, &mut budget.steps)?;
             return Ok(signature.clone());
         }
         if !self.interfaces_ready {
-            crate::associated::charge_projection_copy(signature, &mut budget.steps)
-                .map_err(|e| error(span, e))?;
+            crate::associated::charge_projection_copy(signature, &mut budget.steps)?;
             return Ok(signature.clone());
         }
         if !signature
             .substitution_parameters()
-            .map_err(|e| error(span, e.to_string()))?
+            .map_err(|e| e.to_string())?
             .is_empty()
             && self.context.scope() != self.call_input_frames().as_slice()
         {
             let parameters = self.call_inference_scope();
             if parameters.is_empty() {
-                return Err(error(
-                    span,
-                    "dependent callable has no enclosing function frame",
-                ));
+                return Err("dependent callable has no enclosing function frame".into());
             }
             let scoped = Term::Function {
                 parameters,
                 result: Box::new(signature.clone()),
             };
-            scoped
-                .check_scope(&[])
-                .map_err(|e| error(span, e.to_string()))?;
-            let checked = self.callable_input_view_metered(&scoped, budget, span)?;
+            scoped.check_scope(&[]).map_err(|e| e.to_string())?;
+            let checked = self.callable_input_view_metered(&scoped, budget)?;
             let Term::Function { result, .. } = checked else {
                 unreachable!()
             };
@@ -3321,6 +3314,5 @@ impl Checker<'_, '_> {
         }
         .associated_type_view_metered(signature, budget)
         .map(|value| value.value)
-        .map_err(|message| error(span, message))
     }
 }

@@ -318,14 +318,20 @@ impl Solver<'_, '_> {
             obligations -= 1;
             // Normalization uses the original world and the active selection
             // stack. A candidate cannot justify itself with its own equation.
-            if let Ok(value) = self.prerequisite_type(ty, allowance, depth + 1) {
-                if value != *ty {
+            match self.prerequisite_type(ty, allowance, depth + 1) {
+                Ok(value) if value != *ty => {
                     context.assume(Formula::equal(ty.clone(), value.clone()));
                     projections.push(ConditionProjection {
                         source: ty.clone(),
                         value,
                     });
                 }
+                Ok(_) => {}
+                Err(QueryError::Budget) => pending_reason = Some(UnknownReason::BudgetExhausted),
+                Err(QueryError::Unresolved(reason)) => {
+                    pending_reason.get_or_insert(UnknownReason::UnresolvedPrerequisite(reason));
+                }
+                Err(QueryError::Invalid(reason)) => return Outcome::IllFormed(reason),
             }
         }
         let mut proof_budget = Budget {
@@ -652,7 +658,10 @@ impl World<'_> {
                     };
                     let (normalized, remaining) = self
                         .associated_type_view_cached(&projection.source, allowance, &mut completed)
-                        .map_err(|_| ProofError::Invalid)?;
+                        .map_err(|error| match error {
+                            QueryError::Budget => ProofError::BudgetExhausted,
+                            _ => ProofError::Invalid,
+                        })?;
                     fuel = remaining;
                     if normalized.value != projection.value {
                         return Err(ProofError::Invalid);
