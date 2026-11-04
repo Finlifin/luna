@@ -1,48 +1,8 @@
 //! Inherited template code gives block-local declarations fresh instance identities.
 use comptime_interpretor::Value;
-use luna::{
-    cli::{self, Command},
-    frontend::{self, Artifact},
-};
-use std::sync::atomic::{AtomicUsize, Ordering};
-
-fn compile(source: &str) -> Result<nir::program::Package, String> {
-    static NEXT: AtomicUsize = AtomicUsize::new(0);
-    let path = std::env::temp_dir().join(format!(
-        "luna-template-locals-{}-{}.fl",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::write(&path, source).unwrap();
-    let library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
-    let Command::Check(options) = cli::parse([
-        "check".into(),
-        path.clone().into_os_string(),
-        "--sysroot".into(),
-        library.into_os_string(),
-        "--build-target".into(),
-        "x86_64".into(),
-        "linux".into(),
-        "64".into(),
-    ])
-    .unwrap() else {
-        panic!("check command")
-    };
-    let result = frontend::compile(&options);
-    std::fs::remove_file(path).unwrap();
-    match result {
-        Ok(Artifact::Nir(package)) => Ok(package),
-        Ok(_) => panic!("NIR artifact"),
-        Err(error) => Err(error.to_string()),
-    }
-}
-
-fn run(source: &str) -> Value {
-    let package = compile(source).unwrap();
-    let graph = luna::instantiation::instantiate(&package, "run", 1_000_000).unwrap();
-    let mut vm = comptime_interpretor::Interpreter::from_iir(&graph, Default::default()).unwrap();
-    vm.invoke_instance(&graph.roots[0], vec![]).unwrap()
-}
+#[path = "support/sysroot_execution.rs"]
+mod sysroot;
+use sysroot::{compile, run};
 
 #[test]
 fn signature_defaults_can_define_lexical_functions() {
@@ -488,20 +448,4 @@ fn ordinary_clauses_and_opaque_heads_share_public_list_value_domains() {
         fn run() -> bool { const result = compare(); result }
     ";
     assert_eq!(run(source), Value::Bool(true));
-}
-
-#[test]
-#[ignore = "ordinary clause collectors still restrict the domain to List<Type>"]
-fn ordinary_clause_collectors_accept_non_type_element_domains() {
-    assert_eq!(
-        run("
-        comptime fn first() -> bool
-        where ...values: meta.List<bool>
-        {
-            values[0]
-        }
-        fn run() -> bool { const result = first<.values = [true, false]>(); result }
-    "),
-        Value::Bool(true)
-    );
 }

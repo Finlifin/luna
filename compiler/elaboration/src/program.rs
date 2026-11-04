@@ -24,6 +24,7 @@ use arguments::route_arguments;
 mod bit_indices;
 pub mod build_context;
 mod builtin_bindings;
+mod clause_inputs;
 mod cmtt;
 mod constants;
 mod defaults;
@@ -1980,21 +1981,27 @@ impl Checker<'_, '_> {
                 self.ready_signature_capabilities(owner, &mut pending_capabilities, false)?;
                 if let hir::clause::ClauseParamKind::Varadic(_, declared) = parameter.kind {
                     let ty = self.type_expr(declared)?;
-                    if !sig.modifiers.is_normal_form_head || self.list_element_type(&ty).is_none() {
+                    if self.list_element_type(&ty).is_none() {
                         return Err(error(
                             parameter.span,
-                            "variadic normal-form input requires a bound meta.List<T>",
+                            "variadic clause input requires a bound meta.List<T>",
                         ));
                     }
                     if !std::ptr::eq(parameter, sig.clause_params.last().unwrap()) {
                         return Err(error(
                             parameter.span,
-                            "variadic normal-form input must be the final parameter",
+                            "variadic clause input must be the final parameter",
                         ));
                     }
                     let id = parameter.definition.ok_or_else(|| {
                         error(parameter.span, "missing normal-form parameter identity")
                     })?;
+                    if !sig.modifiers.is_normal_form_head {
+                        type_parameters.push(DeclarationId {
+                            package: semantic_package(&self.package_identities, id.pkg),
+                            local: id.index,
+                        });
+                    }
                     normal_parameters.push((
                         DeclarationId {
                             package: semantic_package(&self.package_identities, id.pkg),
@@ -3991,7 +3998,7 @@ impl Checker<'_, '_> {
                     ItemKind::Fn(sig, _) if sig.modifiers.is_normal_form_head)
                 {
                     self.ensure_signature(owner, expr.span)?;
-                    if !self.normal_type_list_tail(owner) {
+                    if !self.clause_has_collector(owner) {
                         if let Some(arguments) = normal::literal_spreads(args) {
                             let expanded = Expr {
                                 hir_id: expr.hir_id,
@@ -4003,7 +4010,7 @@ impl Checker<'_, '_> {
                     }
                     if (self.has_optional_type_clauses(owner)
                         || self.normal_type_inputs_need_plan(owner, args)
-                        || (!self.normal_type_list_tail(owner)
+                        || (!self.clause_has_collector(owner)
                             && args.iter().any(|a| matches!(a, Arg::Expand(_)))))
                         && self.normal_parameters[&owner]
                             .iter()
@@ -4058,7 +4065,7 @@ impl Checker<'_, '_> {
                         });
                     }
                     let parameters = self.normal_parameters[&owner].clone();
-                    let variadic = self.normal_type_list_tail(owner);
+                    let variadic = self.clause_has_collector(owner);
                     let (routed, order) = self.normal_type_list_route(owner, args, expr.span)?;
                     let args = routed.as_slice();
                     if if variadic {
@@ -4662,7 +4669,7 @@ impl Checker<'_, '_> {
                     context.admit_list_inference_head(head);
                 }
                 if Some(head) == self.protocols.tuple
-                    && self.normal_type_list_tail(*owner)
+                    && self.clause_has_collector(*owner)
                     && self.normal_parameters[owner].len() == 1
                     && self.is_type_list_type(&self.normal_parameters[owner][0].2)
                 {

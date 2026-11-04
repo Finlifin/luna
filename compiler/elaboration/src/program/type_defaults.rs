@@ -41,7 +41,11 @@ impl<'h> Checker<'_, 'h> {
                 .iter()
                 .position(|clause| {
                     clause.name.name == name.name
-                        && matches!(clause.kind, hir::clause::ClauseParamKind::Optional(..))
+                        && matches!(
+                            clause.kind,
+                            hir::clause::ClauseParamKind::Optional(..)
+                                | hir::clause::ClauseParamKind::Varadic(..)
+                        )
                 })
                 .ok_or_else(|| error(span, "unknown named type argument"));
         }
@@ -54,7 +58,12 @@ impl<'h> Checker<'_, 'h> {
             *positional += 1;
         }
         let slot = *positional;
-        *positional += 1;
+        if !clauses
+            .get(slot)
+            .is_some_and(|clause| matches!(clause.kind, hir::clause::ClauseParamKind::Varadic(..)))
+        {
+            *positional += 1;
+        }
         Ok(slot)
     }
 
@@ -249,137 +258,6 @@ impl<'h> Checker<'_, 'h> {
             domains,
             &parameters,
         )
-    }
-
-    pub(super) fn prepared_clause_inputs_in_domains(
-        &mut self,
-        owner: OwnerId,
-        args: &[Arg<'_>],
-        count: usize,
-        statements: &mut Vec<n::Expr>,
-        span: Span,
-        domains: &[Term],
-        parameters: &[DeclarationId],
-    ) -> Result<Vec<(Option<hir::common::Ident>, n::Expr)>, Error> {
-        if domains.iter().all(|domain| *domain == p(P::Type)) {
-            return self.prepared_type_inputs(args, count, statements, span);
-        }
-        if let Some(expanded) = normal::literal_spreads(args) {
-            return self.prepared_clause_inputs_in_domains(
-                owner, &expanded, count, statements, span, domains, parameters,
-            );
-        }
-        let clauses = self.type_clause_params(owner);
-        let mut positional = 0;
-        let mut inputs = Vec::new();
-        let mut known_binders = Vec::new();
-        let mut known_values = Vec::new();
-        let mut pending_types = parameters
-            .iter()
-            .zip(domains)
-            .filter_map(|(parameter, domain)| (*domain == p(P::Type)).then_some(*parameter))
-            .collect::<BTreeSet<_>>();
-        // Captured values can determine a nominal domain just like captured
-        // Types. Concrete captures are already substituted by the projection;
-        // any remaining dependency must wait for the selected instance.
-        pending_types.extend(self.nominal_captures(owner, span)?);
-        for (argument_index, arg) in args.iter().enumerate() {
-            if let Arg::Expand(input) = arg {
-                let packet = self.expr(input, None)?;
-                let positional_domains = clauses
-                    .iter()
-                    .zip(domains)
-                    .filter_map(|(clause, domain)| {
-                        (!matches!(clause.kind, hir::clause::ClauseParamKind::Optional(..)))
-                            .then_some(domain.clone())
-                    })
-                    .collect::<Vec<_>>();
-                let fields = self.prepared_packet_fields(
-                    &packet,
-                    args,
-                    argument_index,
-                    &positional_domains,
-                    input.span,
-                )?;
-                let mut pattern = Vec::with_capacity(fields.len());
-                for field in fields {
-                    let slot = Self::type_input_slot(&clauses, None, &mut positional, span)?;
-                    let domain = domains
-                        .get(slot)
-                        .ok_or_else(|| error(span, "type argument count mismatch"))?;
-                    let domain = self.instantiate_trait_domain(
-                        &domain,
-                        &known_binders,
-                        &known_values,
-                        span,
-                    )?;
-                    if !pending_types.iter().any(|id| domain.mentions_rigid(*id)) {
-                        self.require(&field, &domain, input.span)?;
-                    }
-                    if domains[slot] == p(P::Type) {
-                        pending_types.insert(parameters[slot]);
-                    }
-                    let binding = self.spread_binding(input.span)?;
-                    self.locals.insert(binding, field.clone());
-                    pattern.push(n::Pattern::Binding {
-                        binding,
-                        inner: Box::new(n::Pattern::Wild),
-                    });
-                    inputs.push((
-                        None,
-                        n::Expr {
-                            source: packet.source,
-                            ty: field,
-                            kind: K::Local(binding),
-                        },
-                    ));
-                }
-                // Destructure once even when the packet contains no fields:
-                // its producer's effects and early exits still belong here.
-                statements.push(n::Expr {
-                    source: packet.source,
-                    ty: if is_never(&packet.ty) {
-                        p(P::Never)
-                    } else {
-                        p(P::Void)
-                    },
-                    kind: K::LetPattern {
-                        pattern: n::Pattern::Tuple(pattern),
-                        value: Box::new(packet),
-                        guard: None,
-                        otherwise: None,
-                    },
-                });
-                continue;
-            }
-            let (name, input) = match arg {
-                Arg::Positional(input) => (None, *input),
-                Arg::Named(name, input) => (Some(*name), *input),
-                _ => {
-                    return Err(error(span, "unsupported nominal input routing protocol"));
-                }
-            };
-            let slot = Self::type_input_slot(&clauses, name, &mut positional, span)?;
-            let domain = domains
-                .get(slot)
-                .ok_or_else(|| error(span, "type argument count mismatch"))?;
-            let domain =
-                self.instantiate_trait_domain(&domain, &known_binders, &known_values, span)?;
-            let dependent = pending_types.iter().any(|id| domain.mentions_rigid(*id));
-            let value = self.expr(input, (!dependent).then_some(&domain))?;
-            if let K::TypeValue(ty) = &value.kind {
-                known_binders.push(nir::DeclarationParameter {
-                    declaration: parameters[slot],
-                    sort: Sort::Type,
-                });
-                known_values.push(ty.clone());
-                pending_types.remove(&parameters[slot]);
-            } else if domains[slot] == p(P::Type) {
-                pending_types.insert(parameters[slot]);
-            }
-            inputs.push((name, self.bind_type_input(value, statements, span)?));
-        }
-        Ok(inputs)
     }
 
     pub(super) fn prepared_packet_fields(

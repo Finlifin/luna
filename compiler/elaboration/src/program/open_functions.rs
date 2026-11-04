@@ -3043,13 +3043,13 @@ impl Checker<'_, '_> {
                 }
                 self.ensure_signature(owner, expr.span)?;
                 let parameters = self.normal_parameters[&owner].clone();
-                let expanded = if self.normal_type_list_tail(owner) {
-                    self.normal_prefix_literal_spreads(owner, arguments)
+                let expanded = if self.clause_has_collector(owner) {
+                    self.clause_prefix_literal_spreads(owner, arguments)
                 } else {
                     normal::literal_spreads(arguments)
                 };
                 let arguments = expanded.as_deref().unwrap_or(arguments);
-                if self.normal_type_list_tail(owner)
+                if self.clause_has_collector(owner)
                     && parameters[..parameters.len() - 1]
                         .iter()
                         .all(|(_, _, ty)| *ty == p(P::Type))
@@ -3083,7 +3083,7 @@ impl Checker<'_, '_> {
                     self.require_description(&result, expected, expr.span)?;
                     return Ok(result);
                 }
-                if self.normal_type_list_tail(owner) {
+                if self.clause_has_collector(owner) {
                     return self.describe_known_region(expr, expected);
                 }
                 let clauses = self.type_clause_params(owner);

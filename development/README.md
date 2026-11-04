@@ -50,7 +50,7 @@
 | --- | --- |
 | 真实 sysroot 的反射/builder、默认局部 const | [运行基线](architecture-audit.md#6-可复现的现状基线)通过；driver 包含工作区原有资源分析改动，不是纯 HEAD 构建 |
 | 局部 helper 子句默认 | [已按声明根/调用闭包选择输入](dependency-observations.md#54-声明根依赖选择与调用闭包已接通)，默认 helper 正例恢复；[staged 默认值已分离残余与冻结表示](dependency-observations.md#55-invocation-残余值与冻结值分离)，[默认值定义端类型前提已进入 P3 检查](dependency-observations.md#56-默认值的定义端类型前提进入-p3-检查)，抽象 Copy 的表示/清理证据仍缺失 |
-| 普通值、NF 与名义输入 | [共同值域检查](comptime-value-admission.md#10-已接通的共同值域检查)已接管递归成员检查，删除普通 callable 的伪造 NF 头适配；完整值传送与 ArgumentPlan 尚未完成 |
+| 普通值、NF 与名义输入 | [共同值域检查](comptime-value-admission.md#10-已接通的共同值域检查)已接管递归成员检查，删除普通 callable 的伪造 NF 头适配；[普通 comptime 子句的列表收集](comptime-value-admission.md#11-普通子句输入与列表收集)已接入共同域检查，完整值传送与 ArgumentPlan 尚未完成 |
 | HIR 查询保留能力 | [两个现有测试](module-boundaries-and-retirement.md#41-middle-的旧类型子系统须另作一个完整退役单元)覆盖输入失效与拥有结果的寿命；后续源码退役也已重跑这些检查及生命周期拒绝例 |
 | 两阶段方法与文本资源 | [真实六包的来源选择及有限调用](libraries-and-delivery.md#111-真实六包的两阶段方法基线)已核对；[文本来源分析成功而资源执行失败](solvers-resources-and-lowering.md#61-已有来源分析不等于可执行资源证据)，交付尚未接通 |
 

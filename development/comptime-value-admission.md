@@ -263,14 +263,58 @@ VM 的签名查询移到 `callable_domains.rs`，typed 结果区分实际缺失�
 `/tmp/luna-admission-baseline-wr76d3vj`；对照后已逐字节恢复本次源码。这项失败尚未修复，
 不能以共有值域检查通过推断 invocation staging 或结果缓存准备已经完成。
 
-真实六包尝试还暴露普通函数子句收集器的既有限制：`ensure_signature` 对 variadic
-调用 `is_type_list_type`，要求元素域恰为 Type。合法的
-`where ...values: meta.List<bool>` 因而在值准入之前就被拒绝。
-`ordinary_clause_collectors_accept_non_type_element_domains` 保留期望成功的 ignored
-回归；单独显式运行此例仍退出 101，证据为 `/tmp/luna-tools-i2jbbvo7/result.json`。
-另一个 ignored 仍是泛型 Copy 默认值的 P3/资源证据缺口。不得把这两个实现缺口
-变成语言禁止。下一步应沿声明输入到参数收集的完整路径移除该 Type 专用限制，
-包括普通子句的实例输入和默认/展开顺序，不能只换一个条件掩盖遗漏的绑定槽。
+真实六包尝试还暴露普通函数子句收集器的既有限制。进一步核对 `bcd5127e`
+中的 `ensure_signature`：旧条件是 `!is_normal_form_head || list_element_type(...).is_none()`，
+它拒绝所有普通函数的 variadic 子句，而非只接受 `List<Type>`；前一版记录对根因的
+描述不准确。`where ...values: meta.List<bool>` 在值准入之前就被拒绝，旧现场为
+`/tmp/luna-tools-i2jbbvo7/result.json`。第 11 节说明后续迁移的实际接通范围。
+泛型 Copy 默认值的 P3/资源证据缺口仍独立存在。
 
 源码验收只要求同头同参的 NF 相等；不同实参不能自动证明 opaque NF 结果不等，
 不通过放宽 PTC 的非单射边界来验证值域传送。当前源码仍保留各实参的实际描述与域。
+
+
+## 11. 普通子句输入与列表收集
+
+收集参数仍是一个普通 comptime 值输入。声明时将其 ID、完整域和声明位置登记进
+普通函数的输入 telescope；不会把列表拆成多个函数泛型槽，也不创建伪造 NF 头。
+现阶段使用已经绑定的集合协议 `meta.List<T>`，元素域不限定为 Type；其他用户收集
+协议仍待统一 ArgumentPlan 支持，不能把现有列表接线提升为语言唯一允许的收集域。
+
+`program/clause_inputs.rs` 接管原先位于 `type_defaults.rs` 的普通输入准备，NF 与普通
+子句共用收集器识别、固定前缀计数和字面前缀展开。值准备仍与 NF 的上下文参数树不同；
+这一步没有宣称两条参数计划已完全合一。
+
+普通 comptime callable 的已知签名路径现在保留以下关系：
+
+- 每个显式元素、列表展开或完整供应在源码位置求值并绑定一次。默认计算仍在显式
+  输入之后进行，读取本次已绑定输入；继承输入仍由词法依赖计划供应。
+- `.values = expression` 直接供应完整列表。它与逐项收集或展开互斥，重复名称及
+  既收集又整体供应均拒绝；展开空列表也属于一次显式收集，并保留其生产者行为。
+- 固定前缀使用 tuple 展开，尾部使用列表展开，不把空 tuple 或 Type tuple 当作列表。
+  省略尾部产生该声明域下的空列表。列表元素逐项接受域检查，最终列表接受完整域检查。
+- 保存函数值会保存已取得的子句列表快照，之后修改来源变量不能改变那个实例。
+  失败 invocation 后，其他实例仍可形成与执行；提前退出阻止后续生产者执行。
+- 多段列表只在所有生产者已绑定后组装，使用已有列表值及 `ListConcat` 节点；组装树
+  保持平衡，避免连续展开产生线性深度的 NIR 和反复复制全部前缀。它不重排生产者。
+
+实际边界仍须显式保留：普通 runtime callable 的 required 子句供应继续走旧
+`trait_clause_arguments_with_prefix` 路径，尚未共享这份准备计划；签名本身依赖值输入、
+或元素域尚需后面的 Type 供应才能取得时，也还需要统一的 ContextualExpr/ArgumentPlan。
+尤其不能通过提前调用后面的 Type 生产函数，为先出现的列表字面量制造上下文。
+这些缺口应保留期望成功的独立回归，不修改语言规则来追认实现限制。
+
+本阶段在 `/home/fin/luna` 使用 `development/check.py --timeout 900 -- test -p luna`
+检查 `ordinary_clause_collectors`、`function_template_local_definitions`、
+`comptime_clause_inputs`、`dependent_list_collectors`、`nominal_value_parameters`、
+`normal_form_domains`、`normal_form_methods`，并显式 `--skip
+memoized_value_indexed_keys_keep_declaration_and_value_arguments`：394 项通过、3 项 ignored、
+1 项既有失败被筛除，命令退出 0，证据 `/tmp/luna-tools-_gt2wxx9/result.json`。
+名义输入的既有失败仍使用第 10 节已做过的基线对照，不重复伪装成新结果。
+
+新收集器组通过真实 sysroot 验证 10 项，包括 128 段列表展开；其两项 ignored 单独
+用 `--test ordinary_clause_collectors -- --ignored --nocapture` 执行，退出 101：runtime
+实例路径仍把首个 bool 当作完整列表输入，先供应的列表字面量仍缺元素上下文。
+现场 `/tmp/luna-tools-mc58vqey/result.json` 保留两种不同失败，不把 ignored 当作验收。
+其余一项 ignored 是既有抽象 Copy 默认值问题。已修改 Rust 文件的 rustfmt check
+退出 0，证据 `/tmp/luna-tools-vldv5jur/result.json`；未运行全 workspace 或 native 检查。

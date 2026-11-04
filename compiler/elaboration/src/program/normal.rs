@@ -68,7 +68,7 @@ impl Checker<'_, '_> {
             .get(&owner)
             .ok_or_else(|| error(span, "bound Tuple declaration is not a normal-form head"))?;
         if parameters.len() != 1
-            || !self.normal_type_list_tail(owner)
+            || !self.clause_has_collector(owner)
             || !self.is_type_list_type(&parameters[0].2)
         {
             return Err(error(
@@ -205,15 +205,8 @@ impl Checker<'_, '_> {
             _ => None,
         }
     }
-    pub(super) fn normal_type_list_tail(&self, owner: OwnerId) -> bool {
-        self.type_clause_params(owner)
-            .last()
-            .is_some_and(|parameter| {
-                matches!(parameter.kind, hir::clause::ClauseParamKind::Varadic(..))
-            })
-    }
     pub(super) fn normal_type_inputs_need_plan(&self, owner: OwnerId, inputs: &[Arg<'_>]) -> bool {
-        if !self.normal_type_list_tail(owner) {
+        if !self.clause_has_collector(owner) {
             return false;
         }
         if inputs.iter().any(|input| matches!(input, Arg::Named(..)))
@@ -224,7 +217,7 @@ impl Checker<'_, '_> {
         {
             return true;
         }
-        let mut remaining = self.normal_fixed_prefix_count(owner);
+        let mut remaining = self.clause_fixed_prefix_count(owner);
         for input in inputs {
             match input {
                 Arg::Positional(_) => remaining = remaining.saturating_sub(1),
@@ -233,60 +226,6 @@ impl Checker<'_, '_> {
             }
         }
         false
-    }
-
-    fn normal_fixed_prefix_count(&self, owner: OwnerId) -> usize {
-        self.type_clause_params(owner)
-            .iter()
-            .filter(|clause| {
-                !matches!(
-                    clause.kind,
-                    hir::clause::ClauseParamKind::Optional(..)
-                        | hir::clause::ClauseParamKind::Varadic(..)
-                )
-            })
-            .count()
-    }
-
-    pub(super) fn normal_prefix_literal_spreads<'h>(
-        &self,
-        owner: OwnerId,
-        inputs: &[Arg<'h>],
-    ) -> Option<Vec<Arg<'h>>> {
-        let whole_collector = self.type_clause_params(owner).last().is_some_and(|clause| {
-            inputs
-                .iter()
-                .any(|input| matches!(input, Arg::Named(name, _) if name.name == clause.name.name))
-        });
-        let mut remaining = self.normal_fixed_prefix_count(owner);
-        let mut expanded = Vec::new();
-        let mut changed = false;
-        for input in inputs {
-            match input {
-                Arg::Expand(value) if remaining > 0 => match value.kind {
-                    H::Tuple(fields) if fields.len() <= remaining || whole_collector => {
-                        remaining = remaining.saturating_sub(fields.len());
-                        expanded.extend(fields.iter().map(Arg::Positional));
-                        changed = true;
-                    }
-                    H::Unit => {
-                        changed = true;
-                    }
-                    _ => {
-                        // A computed packet can determine the remaining prefix
-                        // later. Do not flatten subsequent tail list inputs.
-                        remaining = 0;
-                        expanded.push(input.clone());
-                    }
-                },
-                Arg::Positional(_) => {
-                    remaining = remaining.saturating_sub(1);
-                    expanded.push(input.clone());
-                }
-                _ => expanded.push(input.clone()),
-            }
-        }
-        changed.then_some(expanded)
     }
 
     pub(super) fn normal_type_list_route<'hir>(
@@ -300,14 +239,14 @@ impl Checker<'_, '_> {
         // A named whole collector leaves positional inputs exclusively for
         // the fixed prefix. Expand literal packets before assigning dependent
         // contexts, without confusing a trailing List<Type> spread with a tuple.
-        if self.normal_type_list_tail(owner)
+        if self.clause_has_collector(owner)
             && inputs.iter().any(|input| matches!(input, Arg::Named(..)))
         {
             if let Some(expanded) = literal_spreads(inputs) {
                 return self.normal_type_list_route(owner, &expanded, span);
             }
         }
-        if self.normal_type_list_tail(owner)
+        if self.clause_has_collector(owner)
             && inputs.len() == count
             && inputs[..count - 1]
                 .iter()
@@ -319,7 +258,7 @@ impl Checker<'_, '_> {
                 return self.normal_type_list_route(owner, &routed, span);
             }
         }
-        if !self.normal_type_list_tail(owner) || !inputs.iter().any(|a| matches!(a, Arg::Named(..)))
+        if !self.clause_has_collector(owner) || !inputs.iter().any(|a| matches!(a, Arg::Named(..)))
         {
             return Ok((inputs.to_vec(), (0..count).collect()));
         }
@@ -699,7 +638,7 @@ impl Checker<'_, '_> {
         let parameters = self.normal_parameters.get(&owner)?;
         Some(nir::normal_forms::Head {
             collector: self
-                .normal_type_list_tail(owner)
+                .clause_has_collector(owner)
                 .then(|| parameters.len() - 1),
             role: if Some(declaration(self.package, &self.package_identities, owner))
                 == self.protocols.tuple
@@ -878,18 +817,18 @@ impl Checker<'_, '_> {
         self.ensure_signature(owner, expr.span)?;
         self.ensure_contract(owner, expr.span)?;
         if self.normal_type_inputs_need_plan(owner, inputs) {
-            if let Some(expanded) = self.normal_prefix_literal_spreads(owner, inputs) {
+            if let Some(expanded) = self.clause_prefix_literal_spreads(owner, inputs) {
                 return self.normal_type_expression(expr, owner, &expanded, expected);
             }
             return self.defaulted_normal_expression(owner, inputs, expr.span, expected);
         }
-        if !self.normal_type_list_tail(owner) {
+        if !self.clause_has_collector(owner) {
             if let Some(inputs) = literal_spreads(inputs) {
                 return self.normal_type_expression(expr, owner, &inputs, expected);
             }
         }
         if self.has_optional_type_clauses(owner)
-            || (!self.normal_type_list_tail(owner)
+            || (!self.clause_has_collector(owner)
                 && inputs.iter().any(|arg| matches!(arg, Arg::Expand(_))))
         {
             if self.normal_parameters[&owner]
@@ -901,7 +840,7 @@ impl Checker<'_, '_> {
             return self.defaulted_type_expression(owner, inputs, expr.span, expected);
         }
         let parameters = self.normal_parameters[&owner].clone();
-        let variadic = self.normal_type_list_tail(owner);
+        let variadic = self.clause_has_collector(owner);
         let (routed, order) = self.normal_type_list_route(owner, inputs, expr.span)?;
         let inputs = routed.as_slice();
         if if variadic {
@@ -3180,7 +3119,7 @@ impl Checker<'_, '_> {
                 })
                 .map(|((_, _, ty), _)| ty.clone())
                 .collect::<Vec<_>>();
-            let collector = self.normal_type_list_tail(owner).then(|| clauses.len() - 1);
+            let collector = self.clause_has_collector(owner).then(|| clauses.len() - 1);
             let whole_collector = collector.is_some_and(|slot| {
                 inputs.iter().any(|input|
                 matches!(input, Arg::Named(name, _) if name.name == clauses[slot].name.name))
