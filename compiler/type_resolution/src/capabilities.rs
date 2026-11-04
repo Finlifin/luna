@@ -15,6 +15,7 @@ mod closed_inputs;
 mod conditions;
 mod given;
 mod propositions;
+mod qualification;
 pub use conditions::ConditionSupport;
 pub use propositions::{TraitDecision, TraitTruth, WorldProposition};
 
@@ -22,7 +23,7 @@ pub use propositions::{TraitDecision, TraitTruth, WorldProposition};
 pub enum Qualification {
     Proved(Vec<Witness>),
     Excluded(Vec<Witness>),
-    Pending(String),
+    Pending(QueryError),
 }
 #[derive(Clone, Debug)]
 pub struct Witness {
@@ -510,6 +511,7 @@ impl World<'_> {
                 },
             )
             .map_err(|e| format!("inherent capability query: {e:?}"))?;
+        qualification::check_selection(&types, &qualifications)?;
         Ok(Resolution {
             scope: solver.scope.clone(),
             types,
@@ -633,16 +635,7 @@ impl Solver<'_, '_> {
         // less specific implementation instead of reporting a missing phase.
         let result = (|| {
             let types = types?;
-            if matches!(types.selection, Selection::Deferred { .. })
-                && types.assessments.values().any(|assessment| {
-                    matches!(
-                        assessment,
-                        crate::implementation::TypeAssessment::BudgetExhausted
-                    )
-                })
-            {
-                return Err(QueryError::Budget);
-            }
+            qualification::check_selection(&types, &qualifications)?;
             if let Selection::Selected(selected) = types.selection {
                 self.check_comptime_parent_phases(interface, subject, selected, budget, depth)?;
             }
@@ -794,168 +787,19 @@ impl Solver<'_, '_> {
         self.remaining -= allowance - normalization_budget.steps;
         normalized.map(|(ty, _)| ty)
     }
-
-    fn qualify(&mut self, evidence: &TypeEvidence, budget: Budget, depth: usize) -> Qualification {
-        let Some(implementation) = self
-            .world
-            .implementations
-            .iter()
-            .find(|i| i.declaration == evidence.implementation)
-        else {
-            return Qualification::Pending("missing implementation contract".into());
-        };
-        let mut witnesses = Vec::new();
-        let mut pending = None;
-        let substitution = match nir::DeclarationSubstitution::bounded(
-            &implementation.type_parameters,
-            &implementation.parameter_types,
-            &evidence.type_arguments,
-            self.world.context.scope(),
-            &mut self.remaining,
-        ) {
-            Ok(substitution) => substitution,
-            Err(error) => return Qualification::Pending(error.to_string()),
-        };
-        for capability in &implementation.capabilities {
-            if self.remaining == 0 {
-                return Qualification::Pending("capability resolution budget exhausted".into());
-            }
-            self.remaining -= 1;
-            let requirement = match substitution
-                .instantiate_requirement_bounded(capability, &mut self.remaining)
-            {
-                Ok(requirement) => requirement,
-                Err(e) => return Qualification::Pending(e.to_string()),
-            };
-            let mut incomplete_given = None;
-            match self.given(&requirement, budget) {
-                Ok(Some(given)) => {
-                    witnesses.push(Witness {
-                        requirement,
-                        origin: Origin::Given(given),
-                    });
-                    continue;
-                }
-                Ok(None) => {}
-                Err(error @ nir::NominalAdmissionError::Invalid(_)) => {
-                    pending = Some(error.to_string());
-                    continue;
-                }
-                Err(error) => incomplete_given = Some(error.to_string()),
-            }
-            let requirement = match (|| {
-                Ok::<_, QueryError>(TraitRequirement {
-                    interface: requirement.interface,
-                    subject: self.prerequisite_type(&requirement.subject, budget, depth)?,
-                    interface_arguments: requirement
-                        .interface_arguments
-                        .iter()
-                        .map(|ty| self.prerequisite_type(ty, budget, depth))
-                        .collect::<Result<_, _>>()?,
-                })
-            })() {
-                Ok(requirement) => requirement,
-                Err(error) => {
-                    pending = Some(error.to_string());
-                    continue;
-                }
-            };
-            match self.given(&requirement, budget) {
-                Ok(Some(given)) => {
-                    witnesses.push(Witness {
-                        requirement,
-                        origin: Origin::Given(given),
-                    });
-                    continue;
-                }
-                Ok(None) => {}
-                Err(error @ nir::NominalAdmissionError::Invalid(_)) => {
-                    pending = Some(error.to_string());
-                    continue;
-                }
-                Err(error) => incomplete_given = Some(error.to_string()),
-            }
-            let resolution = match self.resolve(
-                &requirement.interface_instance(),
-                &requirement.subject,
-                budget,
-                depth,
-            ) {
-                Ok(r) => r,
-                Err(e) => {
-                    pending = Some(e.to_string());
-                    continue;
-                }
-            };
-            if !matches!(resolution.types.selection, Selection::Selected(_)) {
-                if let Some(reason) = incomplete_given {
-                    pending = Some(reason);
-                    continue;
-                }
-            }
-            match resolution.types.selection {
-                Selection::Selected(id) => {
-                    let Some(crate::implementation::TypeAssessment::Applicable(evidence)) =
-                        resolution.types.assessments.get(&id)
-                    else {
-                        return Qualification::Pending("missing nested type evidence".into());
-                    };
-                    let Some(Qualification::Proved(premises)) = resolution.qualifications.get(&id)
-                    else {
-                        return Qualification::Pending("missing nested capability evidence".into());
-                    };
-                    witnesses.push(Witness {
-                        requirement,
-                        origin: Origin::Implementation {
-                            declaration: id,
-                            arguments: evidence.type_arguments.clone(),
-                            premises: premises.clone(),
-                        },
-                    });
-                }
-                Selection::NoApplicableCandidate => {
-                    if std::iter::once(&requirement.subject)
-                        .chain(&requirement.interface_arguments)
-                        .any(|term| {
-                            crate::implementation::Key::from_type(term, budget)
-                                .map_or(true, |key| key.is_open())
-                        })
-                    {
-                        pending = Some(
-                            "absence for an abstract capability subject is not established".into(),
-                        );
-                        continue;
-                    }
-                    witnesses.push(Witness {
-                        requirement,
-                        origin: Origin::Absent,
-                    });
-                    return Qualification::Excluded(witnesses);
-                }
-                other => {
-                    let cause = resolution.qualifications.values().find_map(|q| match q {
-                        Qualification::Pending(reason) => Some(reason.as_str()),
-                        _ => None,
-                    });
-                    pending = Some(match cause {
-                        Some(reason) => {
-                            format!("nested capability is unsettled: {other}; {reason}")
-                        }
-                        None => format!("nested capability is unsettled: {other}"),
-                    });
-                }
-            }
-        }
-        match pending {
-            Some(reason) => Qualification::Pending(reason),
-            None => Qualification::Proved(witnesses),
-        }
-    }
 }
 impl fmt::Display for Qualification {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Pending(reason) => write!(f, "(capability-pending {reason:?})"),
+            Self::Pending(reason) => match reason {
+                QueryError::Budget => f.write_str("(capability-pending (budget-exhausted))"),
+                QueryError::Unresolved(reason) => {
+                    write!(f, "(capability-pending (unresolved {reason:?}))")
+                }
+                QueryError::Invalid(reason) => {
+                    write!(f, "(capability-pending (invalid {reason:?}))")
+                }
+            },
             Self::Proved(witnesses) | Self::Excluded(witnesses) => {
                 write!(
                     f,

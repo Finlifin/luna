@@ -288,8 +288,7 @@ impl Invocation {
                 values,
                 context,
                 false,
-            )
-            .map_err(Error::Evaluation)?;
+            )?;
             return Ok(Outcome {
                 value: std::sync::Arc::new(value),
                 reused: false,
@@ -552,8 +551,8 @@ fn execute(
                 let work = input
                     .value()
                     .immutable_clone_work()
-                    .ok_or("unbounded invocation input")?;
-                context.spend::<String>(work).map_err(|e| e.to_string())?;
+                    .ok_or_else(|| Error::Evaluation("unbounded invocation input".into()))?;
+                context.spend::<String>(work)?;
             }
             let values = inputs.iter().map(|input| input.value().clone()).collect();
             evaluate(
@@ -587,7 +586,7 @@ fn evaluate(
     values: Vec<Value>,
     context: &mut Context,
     cache_result: bool,
-) -> Result<(Value, bool), String> {
+) -> Result<(Value, bool), Error<String>> {
     let solver = |predicate: &TypePredicate, remaining: &mut u64| {
         crate::implementation_world::solve_metered(world, predicate, budget, remaining)
     };
@@ -633,10 +632,8 @@ fn evaluate(
             .with_budgeted_type_solver(&solver)
             .with_budgeted_pointer_copy_permission(&pointer_copy),
         Err(error) => {
-            context
-                .spend::<String>((steps - vm_budget.steps) as usize)
-                .map_err(|e| e.to_string())?;
-            return Err(error.to_string());
+            context.spend::<String>((steps - vm_budget.steps) as usize)?;
+            return Err(evaluation_error(error, None));
         }
     };
     let result = vm.with_code_session(code_session, |vm| {
@@ -665,15 +662,25 @@ fn evaluate(
         bytecode_compilations: vm.bytecode_compilations(),
         bytecode_invocations: vm.bytecode_invocations(),
     };
-    context
-        .spend::<String>((steps - vm.remaining_steps()) as usize)
-        .map_err(|e| e.to_string())?;
-    result.map_err(
-        |e: comptime_interpretor::Error| match copy_failure.borrow().as_ref() {
-            Some(reason) => format!("{e}; pointer Copy evidence: {reason}"),
-            None => e.to_string(),
-        },
-    )
+    context.spend::<String>((steps - vm.remaining_steps()) as usize)?;
+    result.map_err(|error| evaluation_error(error, copy_failure.borrow().as_deref()))
+}
+
+fn evaluation_error(
+    error: comptime_interpretor::Error,
+    copy_failure: Option<&str>,
+) -> Error<String> {
+    use comptime_interpretor::ErrorKind;
+    if matches!(
+        error.kind,
+        ErrorKind::StepsExhausted | ErrorKind::DepthExhausted
+    ) {
+        return Error::BudgetExhausted;
+    }
+    Error::Evaluation(match copy_failure {
+        Some(reason) => format!("{error}; pointer Copy evidence: {reason}"),
+        None => error.to_string(),
+    })
 }
 
 // Only type predicates enter this transformation; state contracts stay in the VM.

@@ -3218,7 +3218,7 @@ fn incomplete_given_equality_does_not_authorize_absence_or_exclusion() {
         )
         .unwrap();
     assert!(
-        matches!(result.qualifications.get(&id(20)), Some(Qualification::Pending(reason)) if reason.contains("UnvalidatedModel"))
+        matches!(result.qualifications.get(&id(20)), Some(Qualification::Pending(reason)) if matches!(reason, nir::NominalAdmissionError::Unresolved(message) if message.contains("UnvalidatedModel")))
     );
     assert!(!matches!(
         result.types.selection,
@@ -3502,4 +3502,272 @@ fn incomplete_world_queries_cannot_refute_but_independent_evidence_can_prove() {
         ctx.prove(absent.negate(), Budget::default()),
         Outcome::Entailed(_)
     ));
+}
+
+#[test]
+fn nested_qualification_depth_failure_is_resource_failure_and_retryable() {
+    use nir::NominalAdmissionError as Failure;
+    use type_resolution::capabilities::TraitTruth;
+    use type_resolution::ptc::TraitQuery;
+    let subject = Term::Primitive(Primitive::Bool);
+    let implementations: Vec<_> = (0..12)
+        .map(|level| {
+            implementation(
+                400 + level,
+                500 + level,
+                subject.clone(),
+                vec![],
+                if level == 11 {
+                    vec![]
+                } else {
+                    vec![requirement(501 + level, subject.clone())]
+                },
+            )
+        })
+        .collect();
+    let traits: Vec<_> = (500..512).map(marker).collect();
+    let index = index(&implementations);
+    let context = context();
+    let world = World {
+        index: &index,
+        implementations: &implementations,
+        traits: &traits,
+        assumptions: &[],
+        context: &context,
+    };
+    let query = TraitQuery {
+        interface: id(500),
+        subject: subject.clone(),
+        arguments: vec![],
+    };
+    for depth in [4, 6, 8] {
+        let mut budget = Budget {
+            max_depth: depth,
+            ..Budget::default()
+        };
+        assert!(matches!(
+            world.resolve_instance_metered(&id(500).into(), &subject, &mut budget),
+            Err(Failure::Budget)
+        ));
+        assert!(budget.steps > 0 && budget.steps < Budget::default().steps);
+        let mut budget = Budget {
+            max_depth: depth,
+            ..Budget::default()
+        };
+        assert!(matches!(
+            world.decide_trait_metered(&query, &mut budget),
+            Err(Failure::Budget)
+        ));
+    }
+    for _ in 0..2 {
+        let resolution = world.resolve(id(500), &subject, Budget::default()).unwrap();
+        assert_eq!(resolution.types.selection, Selection::Selected(id(400)));
+        assert!(matches!(
+            resolution.qualifications[&id(400)],
+            Qualification::Proved(_)
+        ));
+        assert_eq!(
+            world
+                .decide_trait(&query, Budget::default())
+                .unwrap()
+                .truth(),
+            TraitTruth::Established
+        );
+    }
+}
+
+#[test]
+fn qualification_failure_priority_preserves_independent_exclusions() {
+    use nir::NominalAdmissionError as Failure;
+    let subject = Term::Primitive(Primitive::Bool);
+    for reverse in [false, true] {
+        for include_absent in [false, true] {
+            let mut requirements = vec![
+                requirement(500, subject.clone()),
+                requirement(600, subject.clone()),
+            ];
+            if include_absent {
+                requirements.push(requirement(700, subject.clone()));
+            }
+            if reverse {
+                requirements.reverse();
+            }
+            let mut implementations = vec![
+                implementation(20, 100, subject.clone(), vec![], requirements),
+                implementation(
+                    30,
+                    600,
+                    subject.clone(),
+                    vec![],
+                    vec![requirement(600, subject.clone())],
+                ),
+            ];
+            implementations.extend((0..12).map(|level| {
+                implementation(
+                    400 + level,
+                    500 + level,
+                    subject.clone(),
+                    vec![],
+                    if level == 11 {
+                        vec![]
+                    } else {
+                        vec![requirement(501 + level, subject.clone())]
+                    },
+                )
+            }));
+            let index = index(&implementations);
+            let context = context();
+            let world = World {
+                index: &index,
+                implementations: &implementations,
+                traits: &[],
+                assumptions: &[],
+                context: &context,
+            };
+            let result = world.resolve(
+                id(100),
+                &subject,
+                Budget {
+                    max_depth: 8,
+                    ..Budget::default()
+                },
+            );
+            if include_absent {
+                let result = result.unwrap();
+                assert_eq!(result.types.selection, Selection::NoApplicableCandidate);
+                assert!(matches!(
+                    result.qualifications[&id(20)],
+                    Qualification::Excluded(_)
+                ));
+            } else {
+                assert!(matches!(result, Err(Failure::Budget)), "{result:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn qualification_closed_inputs_use_proved_views_without_expanding_heads() {
+    use type_resolution::ptc::Formula;
+    let subject = Term::Primitive(Primitive::Bool);
+    let implementations = [implementation(
+        20,
+        100,
+        subject.clone(),
+        vec![],
+        vec![requirement(101, var())],
+    )];
+    let index = index(&implementations);
+    let mut context = context();
+    let resolve = |context: &Context| {
+        World {
+            index: &index,
+            implementations: &implementations,
+            traits: &[],
+            assumptions: &[],
+            context,
+        }
+        .resolve(id(100), &subject, Budget::default())
+        .unwrap()
+    };
+    let open = resolve(&context);
+    assert!(matches!(open.types.selection, Selection::Deferred { .. }));
+    assert!(matches!(
+        open.qualifications[&id(20)],
+        Qualification::Pending(nir::NominalAdmissionError::Unresolved(_))
+    ));
+    context.assume(Formula::equal(var(), Term::Primitive(Primitive::Char)));
+    let closed = resolve(&context);
+    assert_eq!(closed.types.selection, Selection::NoApplicableCandidate);
+    assert!(matches!(
+        closed.qualifications[&id(20)],
+        Qualification::Excluded(_)
+    ));
+}
+
+#[test]
+fn malformed_qualification_is_invalid_and_never_negative_evidence() {
+    use nir::NominalAdmissionError as Failure;
+    let subject = Term::Primitive(Primitive::Bool);
+    let mut implementations = [implementation(
+        20,
+        100,
+        subject.clone(),
+        vec![],
+        vec![requirement(101, Term::Bool(true))],
+    )];
+    let index = index(&implementations);
+    let context = context();
+    let resolve = |implementations: &[Implementation]| {
+        World {
+            index: &index,
+            implementations,
+            traits: &[],
+            assumptions: &[],
+            context: &context,
+        }
+        .resolve(id(100), &subject, Budget::default())
+    };
+    assert!(matches!(
+        resolve(&implementations),
+        Err(Failure::Invalid(_))
+    ));
+    implementations[0].capabilities.clear();
+    assert_eq!(
+        resolve(&implementations).unwrap().types.selection,
+        Selection::Selected(id(20))
+    );
+    assert_eq!(
+        Qualification::Pending(Failure::Budget).to_string(),
+        "(capability-pending (budget-exhausted))"
+    );
+}
+
+#[test]
+fn independent_exclusion_survives_a_failed_capability_payload_reservation() {
+    use nir::NominalAdmissionError as Failure;
+    let subject = Term::Primitive(Primitive::Bool);
+    for reverse in [false, true] {
+        for include_absent in [false, true] {
+            let mut requirements = vec![requirement(
+                101,
+                Term::Record(vec![("wide".repeat(50_000), subject.clone())]),
+            )];
+            if include_absent {
+                requirements.push(requirement(102, subject.clone()));
+            }
+            if reverse {
+                requirements.reverse();
+            }
+            let implementations = [implementation(
+                20,
+                100,
+                subject.clone(),
+                vec![],
+                requirements,
+            )];
+            let index = index(&implementations);
+            let context = context();
+            let world = World {
+                index: &index,
+                implementations: &implementations,
+                traits: &[],
+                assumptions: &[],
+                context: &context,
+            };
+            let mut budget = Budget::default();
+            let result = world.resolve_instance_metered(&id(100).into(), &subject, &mut budget);
+            assert!(budget.steps > 0 && budget.steps < Budget::default().steps);
+            if include_absent {
+                let result = result.unwrap();
+                assert_eq!(result.types.selection, Selection::NoApplicableCandidate);
+                assert!(matches!(
+                    result.qualifications[&id(20)],
+                    Qualification::Excluded(_)
+                ));
+            } else {
+                assert!(matches!(result, Err(Failure::Budget)));
+            }
+        }
+    }
 }

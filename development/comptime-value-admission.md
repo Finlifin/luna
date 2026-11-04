@@ -2847,6 +2847,51 @@ implementation evidence replay 的域准入和关系提取保留 BudgetExhausted
 走默认“不存在”分支。条件证据 replay 现在扣除 given 查询的实际开销，Budget 保持
 ProofError::BudgetExhausted；其他错误仍受既有 replay 错误类型的限制。
 
+Qualification 的 Pending 载荷使用结构化查询错误，保留 Budget、Unresolved 与
+Invalid；dump 分别输出 budget-exhausted、unresolved、invalid。替换、given、投影和
+嵌套选择不再先转成字符串，后遇到的普通未决也不会覆盖先前的预算耗尽或非法输入。
+候选仍先完成各前提的判断：另一独立前提若确定为假，可以排除整个合取，不因更早的
+未决或资源失败而强行保留候选。选择仍为 Deferred 时才向外传播保留的资源／非法
+失败；纯粹的递归未决保留为 Pending，不制造正面或负面证据。
+
+qualification 的封闭输入检查复用世界命题的 closed_inputs_metered，使用同一余额，
+不再给每个结构键刷新预算或将检查失败转换成“开放”。调用者已证明的结构等式可以
+建立封闭性；没有关系证据时仍不能从抽象主体推导不存在实现，也不展开 NF 的函数体。
+固有方法选择采用同一失败检查，但公开入口的字符串错误和独立预算尚未迁移。
+
+invocation 的 VM 创建／执行结果也保留资源分类：StepsExhausted 与 DepthExhausted
+转换为执行器的 BudgetExhausted，其他执行错误在现有诊断边界渲染。缓存的
+query_pure_admitted 回调直接返回执行器错误，避免再次包进 Evaluation 字符串；
+键形成、输入复制、求值与结果准入失败都不会发布缓存结果。无结果缓存的普通返回
+路径复用同一求值适配器。简单 query_pure 包装仍把调用者给出的普通求值错误包装为
+Evaluation，它不是接收 VM 分类错误的入口。
+
+Qualification／invocation 迁移验证（工作目录 `/home/fin/luna`）：
+
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution
+  -p comptime_executor -p luna --lib --test capabilities --test associated
+  --test inherent --test implementation_phases --test cache --test trait_query_failures
+  --test associated_signatures --test deferred_associated_values --test normal_input_plans
+  --test sysroot_preludes --test library_list_equality --test library_once --test trait_phases
+  --test prepared_invocations --test invocation_value_templates --no-fail-fast`：
+  355 项通过，退出 0；`/tmp/luna-tools-yx5xxm7s/result.json`。
+- 九个修改／新增 Rust 文件通过 scoped rustfmt check，退出 0；
+  `/tmp/luna-tools-q5rmfj2g/result.json`。git diff --check 通过。
+- 补充 `test -p luna --test execution memoized --no-fail-fast`：12 项通过，
+  1 项失败，退出 101；`/tmp/luna-tools-uuwynjcn/result.json`。失败用例
+  memoized_invocation_specializes_nested_type_forwarding 在 elaboration 的
+  1465..1484 报 Type domain equality: UnvalidatedModel，尚未进入本次 invocation
+  适配器。将四个已修改生产文件临时换回 `75926c2e` 内容、保留其余工作区，执行
+  同一入口 `test -p luna --test execution
+  memoized_invocation_specializes_nested_type_forwarding -- --exact`，复现相同失败：
+  `/tmp/luna-tools-hgbu7sb2/result.json`，退出 101。对照后逐字节恢复并核对开发源码；
+  该基线不算本次通过或修复，也不调整用例预期。
+
+新回归覆盖嵌套深度失败后重试、失败原因顺序、非法前提、宽载荷预留失败后独立排除、
+调用者等式支持的封闭性，以及真实 sysroot 中多层 trait 约束经过 invocation 的失败
+分类、拒绝与恢复。源码回归最初暴露 VM 的 StepsExhausted 被转成 Evaluation 字符串；
+修复执行器边界后才通过，未增大预算或接受字符串匹配作为替代分类。
+
 回归区分非法作用域、真实无匹配、宽载荷耗尽与重试；覆盖缺少 NF congruence 时
 保留 Pending、独立给定证据及 implementation 证明、补齐关系证据后成功、损坏继承
 边不能导致假阴性，以及普通 record 值内 Type 关系与标量差异。两个旧的完整
@@ -2873,8 +2918,8 @@ PTC 会按当前预算为传播与学习分配额度，较小预算可能走更�
   for_comptime_in_budget 仍保守保留全部 reservation，尚非精确失败扣款。
 - 后续关联项／方法签名与 world capability 的部分实例化尚未有界。
 - 直接／projected trait resolution、世界命题、条件事实、Type 投影及普通关联值的
-  payload／initializer 校验已保留 typed 失败。inherent 查询、qualification／
-  TypeAssessment 的部分内部原因仍有 String 或可选结果边界。
+  payload／initializer 校验及 qualification 已保留 typed 失败。inherent 查询的
+  公开入口、TypeAssessment 的部分内部原因仍有 String 或可选结果边界。
   DeclarationWorld 的构建与完成类型查询已共用各自调用者的余额，构建失败不发布
   半成品，归约结果按外层事务发布；其他便利入口自行建立的预算仍待迁移。
   不能据 metered Type/value view 的

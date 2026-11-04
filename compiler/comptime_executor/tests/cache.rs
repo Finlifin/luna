@@ -427,3 +427,58 @@ fn admitted_queries_continue_uncached_at_capacity_without_losing_hits() {
     }
     assert_eq!(executions, 3);
 }
+
+#[test]
+fn admitted_evaluation_preserves_resource_failures_and_publishes_only_on_success() {
+    let mut cache = Cache::new(scope(), 2);
+    let mut context = Context::new(100);
+    let mut protocol = FoldCase::default();
+    let failure = cache.query_pure_admitted(
+        query(1),
+        vec!["alpha".into()],
+        &mut context,
+        &mut protocol,
+        |_, context| {
+            context.spend(3)?;
+            context.spend(1000)?;
+            Ok((42, true))
+        },
+    );
+    assert!(matches!(failure, Err(Error::BudgetExhausted)));
+    assert!(context.remaining() > 0 && context.remaining() < 100);
+    assert!(cache.is_empty());
+    let failure = cache.query_pure_admitted(
+        query(1),
+        vec!["alpha".into()],
+        &mut context,
+        &mut protocol,
+        |_, _| Err(Error::Evaluation("failed computation")),
+    );
+    assert!(matches!(
+        failure,
+        Err(Error::Evaluation("failed computation"))
+    ));
+    assert!(cache.is_empty());
+    let result = cache
+        .query_pure_admitted(
+            query(1),
+            vec!["alpha".into()],
+            &mut context,
+            &mut protocol,
+            |_, _| Ok((42, true)),
+        )
+        .unwrap();
+    assert!(!result.reused);
+    assert_eq!(*result.value, 42);
+    let result = cache
+        .query_pure_admitted(
+            query(1),
+            vec!["ALPHA".into()],
+            &mut context,
+            &mut protocol,
+            |_, _| panic!("retry must have published only its successful result"),
+        )
+        .unwrap();
+    assert!(result.reused);
+    assert_eq!(cache.len(), 1);
+}

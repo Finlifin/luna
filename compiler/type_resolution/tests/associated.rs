@@ -706,7 +706,7 @@ fn capability_projection_qualification_shares_cycles_and_recovers_after_failure(
                 .unwrap();
             assert!(!matches!(result.types.selection, Selection::Selected(_)));
             assert!(result.qualifications.values().any(|q| matches!(q,
-            type_resolution::capabilities::Qualification::Pending(reason) if reason.contains("recursive") || reason.contains("pending"))));
+            type_resolution::capabilities::Qualification::Pending(reason) if matches!(reason, nir::NominalAdmissionError::Unresolved(message) if message.contains("recursive") || message.contains("pending")))));
         },
     );
     with_world(&traits, &[source, target, allowed], |world| {

@@ -11,7 +11,14 @@ impl World<'_> {
         query: &TraitQuery,
         budget: &mut Budget,
     ) -> Result<bool, QueryError> {
-        for input in query.inputs() {
+        self.closed_inputs_metered(query.inputs(), budget)
+    }
+    pub(super) fn closed_inputs_metered<'t>(
+        &self,
+        inputs: impl IntoIterator<Item = &'t Term>,
+        budget: &mut Budget,
+    ) -> Result<bool, QueryError> {
+        for input in inputs {
             if !closed(input, self.context, budget, 0, &mut HashSet::new())? {
                 return Ok(false);
             }

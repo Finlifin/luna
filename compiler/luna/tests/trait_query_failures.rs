@@ -226,3 +226,99 @@ fn associated_selection_returns_actual_fuel_and_typed_failures_in_the_sysroot_wo
         assert!(invocation.last_execution_stats().bytecode_invocations > 0);
     }
 }
+
+#[test]
+fn nested_source_capabilities_preserve_exhaustion_through_invocation() {
+    use nir::NominalAdmissionError as Failure;
+    use type_resolution::{capabilities::World, dispatch::DeclarationWorld, ptc::Budget};
+    let source = "trait First {} trait Second {} trait Third {} trait Fourth {} trait Last {}
+        impl First for T where T :- Second {}
+        impl Second for T where T :- Third {}
+        impl Third for T where T :- Fourth {}
+        impl Fourth for T where T :- Last {}
+        impl Last for bool {}
+        pure comptime fn accept(comptime T: Type) -> bool
+        where requires T :- First
+        {
+            true
+        }";
+    let package = sysroot::compile(source).unwrap();
+    let first = package
+        .traits
+        .iter()
+        .find(|t| t.name == "First")
+        .unwrap()
+        .declaration;
+    let implementation = package
+        .implementations
+        .iter()
+        .find(|i| i.interface == Some(first))
+        .unwrap();
+    assert!(
+        !implementation.capabilities.is_empty(),
+        "source must exercise capability qualification"
+    );
+    let (declarations, _) = DeclarationWorld::new(&package, Budget::default(), None).unwrap();
+    let world = World {
+        index: declarations.index(),
+        implementations: &package.implementations,
+        traits: &package.traits,
+        assumptions: declarations.assumptions(),
+        context: declarations.context(),
+    };
+    let subject = Term::Primitive(Primitive::Bool);
+    let mut shallow = Budget {
+        max_depth: 4,
+        ..Budget::default()
+    };
+    assert!(matches!(
+        world.resolve_instance_metered(&first.into(), &subject, &mut shallow),
+        Err(Failure::Budget)
+    ));
+    assert!(shallow.steps > 0 && shallow.steps < Budget::default().steps);
+    world.resolve(first, &subject, Budget::default()).unwrap();
+    let declaration = package
+        .functions
+        .iter()
+        .find(|f| f.name == "accept")
+        .unwrap()
+        .declaration;
+    let mut call = luna::memoization::Invocation::prepare(
+        &package,
+        &intrinsic::LangItems::new(),
+        declaration,
+        vec![],
+        8,
+        Default::default(),
+    )
+    .unwrap();
+    for steps in [32, 128, 512] {
+        let mut budget = Context::new(steps);
+        match call.invoke(vec![Value::Type(subject.clone())], &mut budget) {
+            Err(Error::BudgetExhausted) => {
+                assert_eq!(call.last_execution_stats().bytecode_invocations, 0)
+            }
+            Err(error) => panic!("steps {steps}: {error:?}"),
+            Ok(value) => assert_eq!(*value.value, Value::Bool(true)),
+        }
+        assert!(budget.remaining() <= steps);
+        assert_eq!(call.cached_results(), 0);
+    }
+    let rejected = call.invoke(
+        vec![Value::Type(Term::Primitive(Primitive::Char))],
+        &mut Context::new(1_000_000),
+    );
+    assert!(matches!(rejected, Err(Error::Protocol(_))));
+    assert_eq!(call.last_execution_stats().bytecode_invocations, 0);
+    for _ in 0..2 {
+        let value = call
+            .invoke(
+                vec![Value::Type(subject.clone())],
+                &mut Context::new(1_000_000),
+            )
+            .unwrap();
+        assert_eq!(*value.value, Value::Bool(true));
+        assert!(!value.reused);
+        assert_eq!(call.cached_results(), 0);
+    }
+}

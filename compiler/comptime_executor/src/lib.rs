@@ -166,20 +166,26 @@ impl<V, R> Cache<V, R> {
             context,
             protocol,
             false,
-            |inputs, context| evaluate(inputs, context).map(|value| (value, true)),
+            |inputs, context| {
+                evaluate(inputs, context)
+                    .map(|value| (value, true))
+                    .map_err(Error::Evaluation)
+            },
         )
     }
 
     /// A successful computation may decline publication when its result cannot
     /// be frozen. It still returns the result, but later calls must execute again.
     /// At capacity, misses execute without publication; existing hits still work.
+    /// The callback preserves resource errors separately from evaluation errors.
+    /// Failed evaluation never publishes a result or changes the key guard.
     pub fn query_pure_admitted<P: KeyProtocol<V>>(
         &mut self,
         query: QueryId,
         inputs: Vec<V>,
         context: &mut Context,
         protocol: &mut P,
-        evaluate: impl FnOnce(&[V], &mut Context) -> Result<(R, bool), P::Error>,
+        evaluate: impl FnOnce(&[V], &mut Context) -> Result<(R, bool), Error<P::Error>>,
     ) -> Result<Outcome<R>, Error<P::Error>> {
         self.query(query, inputs, context, protocol, true, evaluate)
     }
@@ -190,7 +196,7 @@ impl<V, R> Cache<V, R> {
         context: &mut Context,
         protocol: &mut P,
         allow_uncached: bool,
-        evaluate: impl FnOnce(&[V], &mut Context) -> Result<(R, bool), P::Error>,
+        evaluate: impl FnOnce(&[V], &mut Context) -> Result<(R, bool), Error<P::Error>>,
     ) -> Result<Outcome<R>, Error<P::Error>> {
         if context.forming_key {
             return Err(Error::ReentrantKeyFormation);
@@ -234,7 +240,7 @@ impl<V, R> Cache<V, R> {
             return Err(Error::CapacityExceeded);
         }
         context.spend(1)?;
-        let (value, publish) = evaluate(&inputs, context).map_err(Error::Evaluation)?;
+        let (value, publish) = evaluate(&inputs, context)?;
         let value = Arc::new(value);
         if !publish || self.count >= self.capacity {
             return Ok(Outcome {
