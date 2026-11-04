@@ -682,7 +682,15 @@ fn evaluate(
             };
             match validation {
                 Ok(()) => true,
-                Err(error) if error.kind == comptime_interpretor::ErrorKind::Type => false,
+                Err(error)
+                    if matches!(
+                        error.kind,
+                        comptime_interpretor::ErrorKind::Type
+                            | comptime_interpretor::ErrorKind::FunctionInputRejected(_)
+                    ) =>
+                {
+                    false
+                }
                 Err(error) => return Err(error),
             }
         };

@@ -177,6 +177,8 @@ Cargo 测试同样包含工作区原有资源分析修改，不是纯 HEAD 构�
 
 ### 5.1 已观察到的隐式输入与尚未定位的拒绝点
 
+本节保留清理前基线；拒绝分支现已由 §5.3 的运行轨迹定位。
+
 2026-11-04 继续使用同一源码构建的 driver 作临时对照，没有修改编译器、库或测试。
 输入保存在 `/tmp/luna-lexical-boundary-p2z7vjds`；前两项从上述原始输入作单处替换：
 
@@ -224,7 +226,7 @@ python3 -B development/reproduce.py --timeout 60 --binary /tmp/luna-design-basel
    调用 admit_function_inputs；`lib.rs::validate_function_inputs_in_scope` 会检查数量、
    替换和普通值域，并将多个失败折叠为 Type。函数值形成与函数主体运行必须分别观察。
 
-本次没有失败现场的实际实参、abstract 授权表或 VM 分支轨迹，不能宣称第 4 项中的
+上述清理前核对没有实际实参、abstract 授权表或 VM 分支轨迹，尚不能宣称第 4 项中的
 某一个分支已经被唯一定位。后续实施时须显示这三项及其来源；保留已有数量、作用域和
 值域检查，不能通过扩大 abstract 授权、跳过准入或忽略缺少的输入来消除报错。
 
@@ -256,6 +258,63 @@ Bound 槽解释为当前函数的参数槽；模板克隆后按新身份重新�
 true/false 与 u8 的 7；确认执行结果且拒绝 `outer(u8, true)`。原有测试继续覆盖模板
 身份、局部别名、公开库方法、默认供应、输入顺序与隐藏槽不可由调用者显式供应。
 没有运行全量或 native 验收，不能据此声称完整依赖迁移完成。
+
+### 5.3 已定位的值域拒绝及准入诊断接线
+
+在 `15645a0e` 基线上对同一个 ignored 正例临时插桩，采集到：
+
+| 观察项 | 实际值 |
+| --- | --- |
+| 失败来源 | `(source 151 157)`，形成 flag 的函数实例时 |
+| 隐式参数 | `(declaration (package 0) (local 4))`，即外围 inverted |
+| 实参 | 同一个声明身份的 rigid，sort 为 comptime-value |
+| 声明域 | bool |
+| invocation 的 abstract type/value 授权表 | 均为空 |
+| 具体拒绝 | 普通值域准入返回 `nominal value index lacks matching completed domain evidence` |
+
+两次有效采集的完整命令、输出及退出 101 分别在
+`/tmp/luna-tools-bc_9s0l4/result.json`、`/tmp/luna-tools-9mzea3bq/result.json`；
+stdout.log 保留逐项实参和原因。中间 `/tmp/luna-tools-px3e7mk_` 是插桩借用错误导致的
+构建失败，不是第三次运行证据。临时插桩已全部移除，原文件副本及 hash 保存在
+`/tmp/luna-lexical-admission-snyr9zly`。这些本机路径不属于编译输入或公共接口。
+
+因此本例已经区分数量/替换、值域准入、函数主体执行三个边界：失败发生在值域准入，
+不是 helper 的 true 主体，也不是调用的求值预算。required 准备没有为尚在供应的
+默认输入发明 abstract 授权，这是应保留的约束；修复应消除 flag 对 inverted 的
+伪依赖，不能把“rigid 具有 bool 域描述”当成已取得这个值的证据。
+
+生产实现现把这组准入职责移至 `comptime_interpretor/src/function_inputs.rs`。
+`FunctionInputRejected` 保留完整 telescope 中的 slot、声明身份、domain/value 阶段和
+已分类的原始拒绝原因，Display 为 S-expression，随现有 Error 的 source 传到 required 诊断。
+不复制失败实参及大域结构。明确的 Budget 原因仍返回 StepsExhausted；未定位到具体输入的数量
+和整体替换失败暂仍走既有分类，没有伪造 slot。memoization 的结果准入消费者继续把
+确定拒绝视为不发布缓存，不能把细化后的拒绝误当作新的执行异常。
+
+新增 VM 案例验证依赖域第二个输入的拒绝位置、失败不发布实例/编译主体、失败后合法
+重试，以及缺少 symbolic evidence 时重复失败、只有显式授权匹配域后才形成实例。
+原有列表域/作用域/预算测试保留原判定，runtime 函数身份测试同时检查新增的诊断字段。
+旧 normal-form Head 适配分支仍有一个独立缺口：Object/list/callable 检查的
+ApplicationError 会混合部分工作量限制与 InputType，不能仅凭剩余 fuel 非零就把它
+包装成“已证明的值域拒绝”。本次保留该分支原分类，不新增这样的断言；后续统一普通
+值准入时须替换带 Option/bool 回调的失败协议，明确 Budget/Unknown/Invalid 后一起
+迁移消费者，不能只改错误文本。该适配分支及 Tuple/List 的旧 Role 检查尚未退役。
+
+这项接线解决信息丢失，不等于 §4 的精确依赖选择已实现；默认 helper 正例继续保留
+ignore，不能将它改成一个期望拒绝的语言测试。
+
+移除插桩后，用生产诊断重跑同一正例仍退出 101，已输出 slot 0、声明 `(0, 4)`、
+value 阶段和上述原始原因；证据为 `/tmp/luna-tools-8curxt4h/result.json` 及 stdout.log。
+这证明 required 的错误传递已接通，不是该语言正例已通过。真实 sysroot 的其余局部
+定义用例通过，见 `/tmp/luna-tools-kqtauaj_/result.json`；memoization 结果准入的
+预算/拒绝恢复两项通过，见 `/tmp/luna-tools-8xwkup8h/result.json`。所有命令的工作目录
+均为 `/home/fin/luna`，编译包含用户原有的资源分析修改；没有执行全 workspace/native。
+最终 VM 单元与选定的函数输入、实例预算、函数身份测试通过，完整命令及结果见
+`/tmp/luna-tools-nz21x7y5/result.json`；退出 0，不包含上述已知失败的语言正例。
+
+依赖收集还须注意：模板复制的 local_definitions 只登记部分 OwnerNodes，主体则由
+BodyId 引用。不能把扁平节点索引当作完整 HIR 遍历。后续从声明/主体实际根进入结构
+遍历，分别处理域、默认、契约、属性、模式和已选择的调用/证明依赖；单扫函数体或
+节点索引都不能作为删除隐式输入的充分依据。
 
 ## 6. 接口生产必须有可观察前缀
 

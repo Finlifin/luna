@@ -387,7 +387,16 @@ fn body_free_runtime_identity_checks_unused_value_parameter_domains() {
                 }
             );
         } else {
-            assert_eq!(result.unwrap_err().kind, ErrorKind::Type);
+            let ErrorKind::FunctionInputRejected(rejection) = result.unwrap_err().kind else {
+                panic!("expected a declaration input rejection");
+            };
+            assert_eq!(rejection.parameter, id(3));
+            assert_eq!(rejection.index, 0);
+            assert_eq!(
+                rejection.stage,
+                comptime_interpretor::InputAdmissionStage::Value
+            );
+            assert!(!rejection.reason.is_empty());
         }
     }
 }
@@ -444,7 +453,16 @@ fn runtime_identity_admission_checks_structured_value_layouts() {
                 }
             );
         } else {
-            assert_eq!(result.unwrap_err().kind, ErrorKind::Type);
+            let ErrorKind::FunctionInputRejected(rejection) = result.unwrap_err().kind else {
+                panic!("expected a declaration input rejection");
+            };
+            assert_eq!(rejection.parameter, id(3));
+            assert_eq!(rejection.index, 0);
+            assert_eq!(
+                rejection.stage,
+                comptime_interpretor::InputAdmissionStage::Value
+            );
+            assert!(!rejection.reason.is_empty());
         }
     }
 }

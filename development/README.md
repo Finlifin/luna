@@ -49,7 +49,7 @@
 | 现状路径 | 已核对结果与位置 |
 | --- | --- |
 | 真实 sysroot 的反射/builder、默认局部 const | [运行基线](architecture-audit.md#6-可复现的现状基线)通过；driver 包含工作区原有资源分析改动，不是纯 HEAD 构建 |
-| 局部 helper 子句默认 | [正确正例失败，生产 NIR 证实过度捕获](dependency-observations.md#51-已观察到的隐式输入与尚未定位的拒绝点)；VM 具体失败实参尚未采集 |
+| 局部 helper 子句默认 | [正确正例失败，生产 NIR 证实过度捕获](dependency-observations.md#51-已观察到的隐式输入与尚未定位的拒绝点)；[VM 值域拒绝已定位](dependency-observations.md#53-已定位的值域拒绝及准入诊断接线)，隐式依赖仍待精确化 |
 | HIR 查询保留能力 | [两个现有测试](module-boundaries-and-retirement.md#41-middle-的旧类型子系统须另作一个完整退役单元)覆盖输入失效与拥有结果的寿命；后续源码退役也已重跑这些检查及生命周期拒绝例 |
 | 两阶段方法与文本资源 | [真实六包的来源选择及有限调用](libraries-and-delivery.md#111-真实六包的两阶段方法基线)已核对；[文本来源分析成功而资源执行失败](solvers-resources-and-lowering.md#61-已有来源分析不等于可执行资源证据)，交付尚未接通 |
 

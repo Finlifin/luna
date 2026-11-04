@@ -27,7 +27,9 @@ mod default_code;
 mod dynamic_instances;
 mod environment;
 mod field_access;
+mod function_inputs;
 mod function_instances;
+pub use function_inputs::{FunctionInputRejection, InputAdmissionStage};
 mod iir_execution;
 use iir_execution::ConcreteNominal;
 mod immutable_storage;
@@ -750,6 +752,7 @@ impl Default for Budget {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ErrorKind {
+    FunctionInputRejected(Box<FunctionInputRejection>),
     InvalidDefinition(DefinitionBuildError),
     BuildMetadataUnavailable {
         owner: u64,
@@ -793,6 +796,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.kind {
             ErrorKind::InvalidDefinition(reason) => write!(f, "interpretation {reason}")?,
+            ErrorKind::FunctionInputRejected(reason) => write!(f, "interpretation {reason}")?,
             _ => write!(f, "interpretation {:?}", self.kind)?,
         }
         if self.kind == ErrorKind::StepsExhausted {
@@ -4496,122 +4500,6 @@ impl<'a> Interpreter<'a> {
                 self.eval(&resolved, environment)
             }
         }
-    }
-
-    fn validate_function_inputs(
-        &self,
-        parameters: &[DeclarationId],
-        arguments: &[Term],
-        fuel: &mut usize,
-    ) -> Result<(), ErrorKind> {
-        self.validate_function_inputs_in_scope(parameters, arguments, &[], fuel)
-    }
-
-    fn validate_function_inputs_in_scope(
-        &self,
-        parameters: &[DeclarationId],
-        arguments: &[Term],
-        frames: &[Vec<nir::Sort>],
-        fuel: &mut usize,
-    ) -> Result<(), ErrorKind> {
-        *fuel = fuel
-            .checked_sub(parameters.len())
-            .ok_or(ErrorKind::StepsExhausted)?;
-        if parameters.len() != arguments.len() {
-            return Err(ErrorKind::Type);
-        }
-        let substitution = self
-            .function_substitution_bounded(parameters, arguments, frames, fuel)
-            .map_err(|error| {
-                if matches!(error, nir::type_computations::Error::Budget) {
-                    ErrorKind::StepsExhausted
-                } else {
-                    ErrorKind::Type
-                }
-            })?;
-        let binders = self.input_binders(parameters);
-        for (binder, argument) in binders.iter().zip(arguments) {
-            let raw = self
-                .declaration_parameter_domains
-                .get(&binder.declaration)
-                .unwrap_or(&Term::Primitive(Primitive::Type));
-            let domain = substitution
-                .instantiate_bounded(raw, fuel)
-                .map_err(|error| {
-                    if matches!(error, nir::type_computations::Error::Budget) {
-                        ErrorKind::StepsExhausted
-                    } else {
-                        ErrorKind::Type
-                    }
-                })?;
-            if domain == Term::Primitive(Primitive::Type) {
-                continue;
-            }
-            if domain == Term::Primitive(Primitive::Object)
-                || self.list_element(&domain).is_some()
-                || matches!(domain.callable_signature(), Term::Function { .. })
-            {
-                nir::type_computations::charge_term(&domain, fuel)
-                    .map_err(|_| ErrorKind::StepsExhausted)?;
-                // Ordinary function clauses have the same value-domain contract
-                // as normal-form inputs; this descriptor is only a checker,
-                // never a new declaration or a type identity.
-                let contract = nir::normal_forms::Head {
-                    collector: None,
-                    declaration: binder.declaration,
-                    role: nir::normal_forms::Role::Opaque,
-                    requirements: vec![],
-                    parameters: vec![nir::normal_forms::Parameter {
-                        declaration: binder.declaration,
-                        binding: LocalId {
-                            owner: binder.declaration.local,
-                            index: 0,
-                        },
-                        kind: nir::normal_forms::Kind::Value,
-                        ty: domain.clone(),
-                    }],
-                };
-                contract.check_arguments_in_scope_with_callable_values_budgeted_in(
-                    std::slice::from_ref(argument),
-                    |id| self.normal_forms.get(&id).is_some_and(|head| head.role == nir::normal_forms::Role::Tuple),
-                    |id| self.normal_forms.get(&id).is_some_and(|head| head.role == nir::normal_forms::Role::TypeList),
-                    |ty, variant, fuel| self.normal_value_fields(ty, variant, fuel),
-                    |value, domain| matches!(value, Term::Rigid { declaration, sort: nir::Sort::ComptimeValue }
-                        if self.abstract_value_parameters.get(declaration) == Some(domain)),
-                    |value, frames, fuel| self.normal_value_callable_signature_view(value, frames, fuel),
-                    frames, fuel, self.target,
-                ).map_err(|_| if *fuel == 0 { ErrorKind::StepsExhausted } else { ErrorKind::Type })?;
-                continue;
-            }
-            nir::validate_declaration_arguments_with_collections_in(
-                &[binder.declaration],
-                &[domain],
-                std::slice::from_ref(argument),
-                fuel,
-                |ty, variant, fuel| self.admitted_nominal_layout(ty, variant, fuel),
-                |value, domain, _| matches!(value, Term::Rigid {declaration,sort:nir::Sort::ComptimeValue} if self.abstract_value_parameters.get(declaration)==Some(domain)), |domain, fuel| self.admitted_collection_domain(domain, fuel), self.target)
-            .map_err(|failure| {
-                if matches!(failure, nir::NominalAdmissionError::Budget) {
-                    ErrorKind::StepsExhausted
-                } else {
-                    ErrorKind::Type
-                }
-            })?;
-        }
-        Ok(())
-    }
-
-    fn admit_function_inputs(
-        &mut self,
-        parameters: &[DeclarationId],
-        arguments: &[Term],
-        source: SourceRange,
-    ) -> Result<(), Error> {
-        let mut fuel = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
-        let before = fuel;
-        let checked = self.validate_function_inputs(parameters, arguments, &mut fuel);
-        self.budget.steps -= (before - fuel) as u64;
-        checked.map_err(|kind| self.failure(kind, Some(source)))
     }
 
     #[inline(never)]
