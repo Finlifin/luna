@@ -4,12 +4,14 @@
 //! completion. Recursion/loops alone do not violate P4; neither mode authorizes
 //! unknown calls, external storage effects or unaccounted resource cleanup.
 mod defaults;
+mod observations;
 mod type_domains;
 use crate::control;
 use crate::memory::{CallableInput, CallablePlace};
 pub use defaults::{copy_scalar, stable_default};
 use nir::program::{self as n, ExprKind as K};
 use nir::{DeclarationId, Primitive as P, Sort, Term};
+pub use observations::{ObservationScope, StableObservation, validate_defaults};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 fn p(value: P) -> Term {
@@ -687,34 +689,6 @@ pub fn validate_runtime_promises(package: &n::Package, protocols: &Protocols) ->
     Ok(())
 }
 
-pub fn validate_defaults<'a>(
-    package: &n::Package,
-    obligations: impl IntoIterator<Item = (&'a n::Expr, n::SourceRange, &'a BTreeSet<n::LocalId>)>,
-    protocols: &Protocols,
-) -> Result<(), Error> {
-    let mut analysis = Analysis::new(package, true);
-    analysis.protocols = protocols.clone();
-    for (value, span, staged) in obligations {
-        analysis.fuel = analysis.fuel.saturating_sub(staged.len());
-        let introduced: Vec<_> = staged
-            .iter()
-            .copied()
-            .filter(|binding| analysis.staged_parameters.insert(*binding))
-            .collect();
-        let valid = analysis.default_expression(value);
-        for binding in introduced {
-            analysis.staged_parameters.remove(&binding);
-        }
-        if !valid {
-            return Err(error(
-                span,
-                "default expression requires P3 stability/termination evidence; call graph or operations could not be certified",
-            ));
-        }
-    }
-    Ok(())
-}
-
 type ResourceWorld = std::sync::Arc<(crate::ptc::Context, crate::implementation::Index)>;
 
 struct Analysis<'a> {
@@ -746,7 +720,10 @@ struct Analysis<'a> {
 
 impl<'a> Analysis<'a> {
     fn new(package: &'a n::Package, finite: bool) -> Self {
-        let mut fuel = 100_000;
+        Self::with_fuel(package, finite, 100_000)
+    }
+
+    fn with_fuel(package: &'a n::Package, finite: bool, mut fuel: usize) -> Self {
         let parameter_sorts = package.declaration_parameter_sorts(&mut fuel).ok();
         let mut staged_parameters = BTreeSet::new();
         for function in &package.functions {
@@ -815,15 +792,15 @@ impl<'a> Analysis<'a> {
         // richer memory representations than the synthetic boundary handles.
         // Keep this proof independent: a failed attempt must not leak callable
         // or resource assumptions into the temporary-owning path below.
-        let mut observation = Self::new(self.package, self.finite);
-        observation.protocols = self.protocols.clone();
         let Some(remaining) = self.fuel.checked_sub(self.staged_parameters.len()) else {
             self.fuel = 0;
             return false;
         };
         self.fuel = remaining;
+        let mut observation = Self::with_fuel(self.package, self.finite, self.fuel);
+        observation.protocols = self.protocols.clone();
+        observation.resource_world = self.resource_world.clone();
         observation.staged_parameters = self.staged_parameters.clone();
-        observation.fuel = self.fuel;
         let observed = observation.expression(value, &mut BTreeSet::new(), false, 0);
         self.fuel = observation.fuel;
         if observed {

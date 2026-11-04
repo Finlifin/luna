@@ -414,6 +414,49 @@ NIR 现在用 `StagedValue(Term)` 表达尚依赖当前 invocation 的值表达�
 | `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib bytecode::compilation_tests` | 9 项通过，退出 0；`/tmp/luna-tools-xialfurl/result.json`；先前 `/tmp/luna-tools-91a6bo0c/result.json` 使用错误过滤器、实际 0 项，不算验证 |
 | 修改过的 Rust 文件 `rustfmt --check` | 退出 0；完整命令见 `/tmp/luna-tools-i1dsomyq/result.json` |
 
+### 5.6 默认值的定义端类型前提进入 P3 检查
+
+继续追踪 §5.5 的泛型默认值后，发现两个不同层次的缺口。延后检查原来只保存
+`(Expr, Span, staged bindings)`，丢失定义端的声明参数、调用帧 sort 和类型前提；
+资源层的 `copy::acquire` 又要求具体表示与清理证据，不能仅凭一个抽象 `T:- Copy`
+获得这些证据。当前迁移修复前者，不把后者改成无条件许可。
+
+`StableObservation` 取代旧三元组，包含表达式、来源、staged 可用性及
+`ObservationScope`。生产端从定义自身收集参数与 `definition_requirements`；默认值和
+`assumes` predicate 均通过此协议交付。两个结构提供 S-expression `Display`。
+这些字段是检查的前提与义务，不是已经通过的 P3 证明，也不保存活动推断器。
+
+P3 与 runtime pure 共用 `type_domains` 的有限类型域覆盖算法。只有 PTC 证明声明
+前提穷尽这些类型分支后，才对私有表达式副本逐分支替换、检查行为。PTC 仅证明类型
+覆盖；终止、外部写入、调用及清理仍由程序验证负责。无法证明覆盖时继续检查原泛型
+义务，不以搜到的某几个实例冒充全集，不展开 opaque NF 头，不改源 NIR 或执行默认。
+
+例如 `fn keep(input: T, .value: T = input) -> T` 配合
+`where T, requires T == bool or T == u8`，现在可通过真实 sysroot 编译并分别执行。
+去掉该前提时，即使现有调用者只传 bool/u8，也不能以调用样本替代定义端证明；加入
+无限循环的默认值仍不满足 P3。此路径同样没有为 Tuple、List 或某个库定义增加特判。
+
+每个义务、每个类型分支使用独立的行为状态和调用证明缓存，仅共享不可变资源声明
+索引；所有分支与初始化共用同一份剩余预算。观察路径重建分析器时也不再覆盖掉刚刚
+消耗的初始化预算。源码独立回归检查先成功后失败的上下文隔离、opaque 备选分支、
+源表达式不变、预算耗尽与重新验证；已有行为缓存、递归和类型域回归仍通过。
+
+本次仍不是完整的定义 proof environment 迁移：抽象 Copy 的表示/清理证明、任意
+类型域和更一般的依赖环境尚未接通。§5.5 的泛型 Copy 正例继续保留 ignored；没有
+改成预期拒绝，也没有让 PTC 承担程序资源证明。
+
+本阶段从 `/home/fin/luna` 运行以下针对性检查，均退出 0，包含工作区原有资源分析
+修改；未执行全 workspace/native：
+
+- `program_verification --test purity`：类型覆盖、来源与 P3/P4 边界，
+  `/tmp/luna-tools-mr7_zq0g/result.json`。
+- `program_verification --lib purity::`：16 项，含共享预算失败/恢复和既有分析状态回归，
+  `/tmp/luna-tools-6hjwhx9r/result.json`。
+- luna 的 `function_template_local_definitions`、`default_calls`、`runtime_purity`、
+  `trait_purity`：分别 21、43、65、21 项通过；前者保留上述 1 项 ignored，
+  `/tmp/luna-tools-2rxinmue/result.json`。命令均由 `development/check.py --timeout 900 -- test`
+  入口执行，详细参数保存在各 result.json。
+
 ## 6. 接口生产必须有可观察前缀
 
 定义接口的任务按声明依赖供应已成立部分：已注册的 binder 身份、已形成的参数域、

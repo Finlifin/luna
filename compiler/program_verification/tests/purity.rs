@@ -1,8 +1,93 @@
 //! Source-independent behavior checks retain P3/P4 and diagnostic boundaries.
 use nir::program::{Expr, ExprKind, Function, FunctionPhase, LocalId, Package, SourceRange};
 use nir::{DeclarationId, Primitive, Term};
-use program_verification::purity::{Protocols, validate_defaults, validate_runtime_promises};
+use program_verification::purity::{
+    Protocols, StableObservation, validate_defaults, validate_runtime_promises,
+};
 use std::collections::BTreeSet;
+
+fn observation(value: &Expr, source: SourceRange, staged: &BTreeSet<LocalId>) -> StableObservation {
+    StableObservation {
+        value: value.clone(),
+        source,
+        staged_parameters: staged.clone(),
+        scope: Default::default(),
+    }
+}
+
+#[test]
+fn default_type_coverage_is_definition_scoped_and_checks_every_case() {
+    use nir::{DeclarationParameter, Sort};
+    let id = DeclarationId {
+        package: 1,
+        local: 9,
+    };
+    let ty = Term::Rigid {
+        declaration: id,
+        sort: Sort::Type,
+    };
+    let source = SourceRange { start: 12, end: 18 };
+    let mut covered = observation(
+        &Expr {
+            source,
+            ty: ty.clone(),
+            kind: ExprKind::Local(LocalId { owner: 5, index: 2 }),
+        },
+        source,
+        &BTreeSet::new(),
+    );
+    covered.scope.parameters.push(DeclarationParameter {
+        declaration: id,
+        sort: Sort::Type,
+    });
+    covered.scope.input_scope.push(Sort::Runtime);
+    covered
+        .scope
+        .requirements
+        .push(nir::program::TypePredicate::Or(vec![
+            nir::program::TypePredicate::Equal(ty.clone(), Term::Primitive(Primitive::Bool)),
+            nir::program::TypePredicate::Equal(ty.clone(), Term::Primitive(Primitive::U8)),
+        ]));
+    let package = Package::default();
+    let protocols = Protocols::default();
+    validate_defaults(&package, [&covered], &protocols).unwrap();
+    assert_eq!(covered.value.ty, ty, "coverage must not rewrite source NIR");
+    let dump = covered.to_string();
+    assert!(
+        dump.starts_with("(stable-observation (source 12 18) (observation-scope"),
+        "{dump}"
+    );
+    assert!(dump.contains("(input-scope runtime)"), "{dump}");
+    assert_eq!(dump.matches('(').count(), dump.matches(')').count());
+
+    let mut unknown = covered.clone();
+    unknown.source = SourceRange { start: 20, end: 30 };
+    unknown.scope.requirements.clear();
+    // Reuse identical declaration and local IDs: a preceding scope's proof
+    // cannot turn an unconstrained obligation into a scalar-only one.
+    let failure = validate_defaults(&package, [&covered, &unknown], &protocols).unwrap_err();
+    assert_eq!(failure.source, unknown.source);
+    assert!(validate_defaults(&package, [&unknown, &covered], &protocols).is_err());
+    validate_defaults(&package, [&covered], &protocols).unwrap();
+
+    // Seeing a scalar candidate does not establish exhaustiveness. The opaque
+    // alternative must remain unknown; its normal-form body is not unfolded.
+    unknown.scope.requirements = vec![nir::program::TypePredicate::Or(vec![
+        nir::program::TypePredicate::Equal(ty.clone(), Term::Primitive(Primitive::Bool)),
+        nir::program::TypePredicate::Equal(
+            ty,
+            Term::NormalForm {
+                head: DeclarationId {
+                    package: 1,
+                    local: 10,
+                },
+                sort: Sort::Type,
+                arguments: vec![],
+            },
+        ),
+    ])];
+    assert!(validate_defaults(&package, [&unknown], &protocols).is_err());
+}
 
 #[test]
 fn nonterminating_private_loop_is_p4_but_not_a_stable_default() {
@@ -55,8 +140,12 @@ fn nonterminating_private_loop_is_p4_but_not_a_stable_default() {
         start: 100,
         end: 120,
     };
-    let failure =
-        validate_defaults(&package, [(&body, default_site, &staged)], &protocols).unwrap_err();
+    let failure = validate_defaults(
+        &package,
+        [&observation(&body, default_site, &staged)],
+        &protocols,
+    )
+    .unwrap_err();
     assert_eq!(failure.source, default_site);
     assert!(failure.message.contains("P3"));
     let value = Expr {
@@ -64,7 +153,12 @@ fn nonterminating_private_loop_is_p4_but_not_a_stable_default() {
         ty: Term::Primitive(Primitive::Bool),
         kind: ExprKind::Literal(nir::program::Literal::Bool(true)),
     };
-    validate_defaults(&package, [(&value, default_site, &staged)], &protocols).unwrap();
+    validate_defaults(
+        &package,
+        [&observation(&value, default_site, &staged)],
+        &protocols,
+    )
+    .unwrap();
     validate_runtime_promises(&package, &protocols).unwrap();
 }
 
@@ -129,7 +223,7 @@ fn stable_defaults_discard_tuple_values_using_registered_collector_layout() {
         vec![tuple(vec![boolean.clone()])],
     ] {
         let body = block(tuple(fields));
-        validate_defaults(&package, [(&body, source, &staged)], &protocols).unwrap();
+        validate_defaults(&package, [&observation(&body, source, &staged)], &protocols).unwrap();
     }
     let good = tuple(vec![boolean.clone()]);
     let mut foreign_domain = good.clone();
@@ -164,11 +258,16 @@ fn stable_defaults_discard_tuple_values_using_registered_collector_layout() {
     }]);
     for rejected in [foreign_domain, affine] {
         let body = block(rejected);
-        assert!(validate_defaults(&package, [(&body, source, &staged)], &protocols).is_err());
+        assert!(
+            validate_defaults(&package, [&observation(&body, source, &staged)], &protocols)
+                .is_err()
+        );
     }
     package.normal_forms[0].role = Role::Opaque;
     let body = block(good);
-    assert!(validate_defaults(&package, [(&body, source, &staged)], &protocols).is_err());
+    assert!(
+        validate_defaults(&package, [&observation(&body, source, &staged)], &protocols).is_err()
+    );
     package.normal_forms[0].role = Role::Tuple;
-    validate_defaults(&package, [(&body, source, &staged)], &protocols).unwrap();
+    validate_defaults(&package, [&observation(&body, source, &staged)], &protocols).unwrap();
 }

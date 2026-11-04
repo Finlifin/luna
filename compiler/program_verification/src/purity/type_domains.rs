@@ -79,12 +79,12 @@ fn primitive_truth(
 // case. Do not rediscover that identity by searching every Cartesian prefix.
 // Equalities beneath alternatives or negation are not unconditional premises.
 fn given_alias(
-    function: &n::Function,
+    requirements: &[n::TypePredicate],
     parameter: &Term,
     earlier: &[Term],
     fuel: &mut usize,
 ) -> Option<usize> {
-    let mut pending: Vec<_> = function.requirements.iter().collect();
+    let mut pending: Vec<_> = requirements.iter().collect();
     while let Some(requirement) = pending.pop() {
         *fuel = fuel.checked_sub(1)?;
         match requirement {
@@ -113,9 +113,6 @@ pub(super) fn cases(
     parameters: &[Term],
     fuel: &mut usize,
 ) -> Option<Vec<Vec<Term>>> {
-    if parameters.is_empty() || parameters.iter().any(|t| t.sort() != Sort::Type) {
-        return None;
-    }
     let Term::Function {
         parameters: runtime,
         ..
@@ -123,10 +120,27 @@ pub(super) fn cases(
     else {
         return None;
     };
-    let mut context =
-        crate::ptc::Context::with_scope(vec![runtime.iter().map(|p| p.sort).collect()]);
+    cases_in_scope(
+        &function.requirements,
+        &runtime.iter().map(|p| p.sort).collect::<Vec<_>>(),
+        parameters,
+        fuel,
+    )
+}
+
+pub(super) fn cases_in_scope(
+    requirements: &[n::TypePredicate],
+    input_scope: &[Sort],
+    parameters: &[Term],
+    fuel: &mut usize,
+) -> Option<Vec<Vec<Term>>> {
+    if parameters.is_empty() || parameters.iter().any(|t| t.sort() != Sort::Type) {
+        return None;
+    }
+    *fuel = fuel.checked_sub(input_scope.len())?;
+    let mut context = crate::ptc::Context::with_scope(vec![input_scope.to_vec()]);
     let mut candidates = Vec::new();
-    for requirement in &function.requirements {
+    for requirement in requirements {
         nir::copy_budget::charge_predicate_substitution(requirement, &[], &[], fuel).ok()?;
         context.assume(crate::ptc::Formula::from_predicate(requirement));
         let mut pending = vec![requirement];
@@ -158,7 +172,7 @@ pub(super) fn cases(
     }
     let mut result: Vec<Vec<Term>> = vec![vec![]];
     for (index, parameter) in parameters.iter().enumerate() {
-        if let Some(alias) = given_alias(function, parameter, &parameters[..index], fuel) {
+        if let Some(alias) = given_alias(requirements, parameter, &parameters[..index], fuel) {
             *fuel = fuel.checked_sub(result.len())?;
             for inputs in &mut result {
                 inputs.push(inputs[alias].clone());
@@ -183,7 +197,7 @@ pub(super) fn cases(
                 inputs.push(ty.clone());
                 let mut known = true;
                 let mut excluded = false;
-                for requirement in &function.requirements {
+                for requirement in requirements {
                     match primitive_truth(requirement, parameters, &inputs, fuel, 0)? {
                         Some(false) => {
                             excluded = true;

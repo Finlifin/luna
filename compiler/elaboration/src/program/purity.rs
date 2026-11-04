@@ -1,7 +1,7 @@
 //! Source diagnostics and resource identities for NIR behavior verification.
-use super::{Error, Protocols, Span, n, source};
+use super::{Error, Protocols, n};
 use crate::verification::purity;
-use std::collections::BTreeSet;
+pub(super) use purity::{ObservationScope, StableObservation};
 
 fn protocols(value: &Protocols) -> purity::Protocols {
     purity::Protocols {
@@ -28,29 +28,22 @@ pub(super) fn validate_runtime_promises(
 }
 pub(super) fn validate_defaults(
     package: &n::Package,
-    obligations: &[(n::Expr, Span, BTreeSet<n::LocalId>)],
+    obligations: &[StableObservation],
     identities: &Protocols,
 ) -> Result<(), Error> {
-    purity::validate_defaults(
-        package,
-        obligations
-            .iter()
-            .map(|(value, span, staged)| (value, source(*span), staged)),
-        &protocols(identities),
-    )
-    .map_err(diagnostic)
+    purity::validate_defaults(package, obligations, &protocols(identities)).map_err(diagnostic)
 }
 
 pub(super) fn validate_predicates(
     package: &n::Package,
-    obligations: &[(n::Expr, Span, BTreeSet<n::LocalId>)],
+    obligations: &[StableObservation],
     identities: &Protocols,
 ) -> Result<(), Error> {
     // Both consumers need a stable, finitely completing observation. Reuse
     // the behavior proof, not a source `pure` marker or a bool result type.
     purity::validate_defaults(
         package,
-        obligations.iter().map(|(value, span, staged)| (value, source(*span), staged)),
+        obligations,
         &protocols(identities),
     )
     .map_err(|mut failure| {

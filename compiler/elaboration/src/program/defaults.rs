@@ -168,7 +168,7 @@ impl Checker<'_, '_> {
         &mut self,
         value: &n::Expr,
         span: Span,
-    ) -> Result<Option<(n::Expr, Span, BTreeSet<n::LocalId>)>, Error> {
+    ) -> Result<Option<purity::StableObservation>, Error> {
         if stable_default(value) {
             return Ok(None);
         }
@@ -181,7 +181,22 @@ impl Checker<'_, '_> {
             // the lexical stage evidence with the obligation, rather than
             // recovering it accidentally from some caller's formed instance.
             let mut staged = BTreeSet::new();
+            let mut scope = purity::ObservationScope::default();
             if let Some(owner) = self.signature_owner {
+                if let Some(parameters) = self.type_parameters.get(&owner) {
+                    scope.parameters = self.input_binders(parameters);
+                }
+                scope.requirements = self.definition_requirements(owner);
+                if let Some(signature) = self
+                    .signatures
+                    .get(&owner)
+                    .or_else(|| self.interface_signatures.get(&owner))
+                {
+                    if let Term::Function { parameters, .. } = signature.callable_signature() {
+                        scope.input_scope =
+                            parameters.iter().map(|parameter| parameter.sort).collect();
+                    }
+                }
                 if let Some(ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) =
                     self.package.item(owner).map(|item| &item.kind)
                 {
@@ -196,7 +211,12 @@ impl Checker<'_, '_> {
                     }
                 }
             }
-            return Ok(Some((viewed, span, staged)));
+            return Ok(Some(purity::StableObservation {
+                value: viewed,
+                source: source(span),
+                staged_parameters: staged,
+                scope,
+            }));
         }
         Ok(None)
     }

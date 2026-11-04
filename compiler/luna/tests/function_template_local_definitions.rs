@@ -434,6 +434,29 @@ fn staged_default_values_keep_callee_bindings_and_argument_order() {
 }
 
 #[test]
+fn generic_defaults_keep_definition_type_coverage() {
+    let source = "
+        fn keep(input: T, .value: T = input) -> T
+        where T, requires T == bool or T == u8
+        {
+            value
+        }
+        fn run() -> bool { keep<bool>(true) and keep<u8>(7) == 7 }
+    ";
+    assert_eq!(run(source), Value::Bool(true));
+    // A concrete caller does not establish coverage of the generic definition.
+    let unconstrained = source.replace("where T, requires T == bool or T == u8", "where T");
+    let error = compile(&unconstrained).unwrap_err();
+    assert!(error.contains("P3 stability/termination"), "{error}");
+    let diverging = source.replace(
+        ".value: T = input",
+        ".value: T = do { while true {} input }",
+    );
+    let error = compile(&diverging).unwrap_err();
+    assert!(error.contains("P3 stability/termination"), "{error}");
+}
+
+#[test]
 #[ignore = "generic default P3 evidence remains unresolved, including with a Copy premise"]
 fn generic_default_stability_needs_its_definition_proof_environment() {
     let source = "
