@@ -113,10 +113,70 @@ pub(super) type Aliases<'a> = Declarations<'a, nir::type_aliases::Contract>;
 
 pub(super) type NormalForms<'a> = Declarations<'a, nir::normal_forms::Head>;
 
+/// Non-executable metadata still reserves declaration identities. This passive
+/// index belongs to one immutable source world and grants no execution authority.
+#[derive(Default)]
+pub(super) struct ReservedDeclarations {
+    identities: std::sync::OnceLock<BTreeSet<DeclarationId>>,
+}
+
+impl ReservedDeclarations {
+    pub(super) fn contains(
+        &self,
+        package: &Package,
+        id: DeclarationId,
+        budget: &mut Budget,
+    ) -> Result<bool, Error> {
+        if let Some(identities) = self.identities.get() {
+            return Ok(identities.contains(&id));
+        }
+        let charge = |budget: &mut Budget, amount: usize| {
+            budget.steps = budget
+                .steps
+                .checked_sub(u64::try_from(amount).unwrap_or(u64::MAX))
+                .ok_or(Error {
+                    kind: ErrorKind::StepsExhausted,
+                    source: None,
+                })?;
+            Ok::<_, Error>(())
+        };
+        let mut identities = BTreeSet::new();
+        for interface in &package.traits {
+            charge(
+                budget,
+                interface
+                    .methods
+                    .len()
+                    .saturating_add(interface.associated.len())
+                    .saturating_add(2),
+            )?;
+            identities.insert(interface.declaration);
+            identities.insert(interface.self_parameter);
+            identities.extend(interface.methods.iter().map(|method| method.declaration));
+            identities.extend(interface.associated.iter().map(|member| member.declaration));
+        }
+        for implementation in &package.implementations {
+            charge(budget, 1)?;
+            identities.insert(implementation.declaration);
+        }
+        for parameters in &package.function_parameters {
+            charge(budget, 1)?;
+            identities.insert(parameters.declaration);
+        }
+        for template in &package.quote_templates {
+            charge(budget, 1)?;
+            identities.insert(template.declaration);
+        }
+        // Failed preparation never publishes a partial set or a cached absence.
+        Ok(self.identities.get_or_init(|| identities).contains(&id))
+    }
+}
+
 pub(super) struct SourceIndexes {
     // Published only after successful comptime preparation. Owning the exact
     // snapshot makes the phase-validation evidence immune to address reuse.
     pub(super) source: Arc<Package>,
+    pub(super) reserved_declarations: Arc<ReservedDeclarations>,
     pub(super) implementations: Arc<HashMap<(InterfaceInstance, Term), DeclarationId>>,
     pub(super) methods:
         Arc<HashMap<(InterfaceInstance, Term, DeclarationId), (DeclarationId, Vec<Term>)>>,
@@ -151,3 +211,6 @@ impl HeadLookup for BTreeMap<DeclarationId, &nir::normal_forms::Head> {
         self.get(id).copied()
     }
 }
+
+#[cfg(test)]
+mod reserved_tests;

@@ -959,6 +959,7 @@ pub struct Interpreter<'a> {
     struct_builder:
         Option<&'a dyn Fn(&StructBuildRequest, &mut u64) -> Result<PreparedStructBuild<'a>, Error>>,
     declaration_world: Option<&'a Package>,
+    reserved_source_declarations: Option<Arc<declaration_index::ReservedDeclarations>>,
     target: Option<nir::target::TargetData>,
     effect_declarations: declaration_index::Effects<'a>,
     effect_state: effects::State,

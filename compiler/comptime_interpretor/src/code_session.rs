@@ -135,6 +135,11 @@ impl<'program> Interpreter<'program> {
         let indexes = session.indexes.get_or_insert_with(|| {
             Arc::new(declaration_index::SourceIndexes {
                 source: source.clone(),
+                reserved_declarations: vm
+                    .reserved_source_declarations
+                    .as_ref()
+                    .expect("source VM")
+                    .clone(),
                 implementations: vm.implemented_interfaces.clone(),
                 methods: vm.method_bodies.clone(),
                 associated: vm.associated_values.positions.clone(),

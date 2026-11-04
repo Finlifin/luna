@@ -163,6 +163,7 @@ impl<'a> Interpreter<'a> {
             contextual_code_cache: Default::default(),
             prepared_instance_cache: Default::default(),
             declaration_world: None,
+            reserved_source_declarations: None,
             // IIR retains occurrence environments, not the source effect world.
             effect_declarations: Default::default(),
             effect_state: super::effects::State::default(),

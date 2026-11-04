@@ -618,6 +618,34 @@ Admission 与 Commit；receipt 的 world 身份、revision 检查及竞争收据
 - 六个修改／新增 Rust 文件 scoped rustfmt 检查：
   `/tmp/luna-tools-6vw9vkw8/result.json`，退出 0。未运行全 workspace、native 或性能基准。
 
+### 源世界的保留身份索引
+
+发布新定义时，活动 VM 目录继续首先决定身份是否已占用。对于不在执行目录中的
+trait、Self、方法、关联成员、impl、无主体函数参数表和 quote template 身份，
+`ReservedDeclarations` 按不可变源世界惰性建立完整集合，取代每个新身份都扫描
+全部元数据的路径。IIR 继续使用已有 graph declaration index。
+
+首次构建按当前 VM 预算收费，只有全部成功才发布集合；预算失败不缓存半成品，
+也不把失败解释为身份不存在。后续查找仍支付入口工作，并查询有序集合。对于 R 个
+保留身份，构建时间 O(R log R)、空间 O(R)，后续查询 O(log R)；这是结构复杂度，
+尚未进行墙钟性能测量。没有实际发布需求的 VM 不触发这项额外构建。
+
+该被动索引通过 CodeSession 的 SourceIndexes 复用，绑定同一 Arc 源快照，不能
+仅凭相同声明编号跨世界复用。生成定义仍留在各 VM 的活动目录，成功发布、失败
+回滚及查找缺失都不进入这个共享集合。身份保留不授予执行、阶段或证明权限。
+
+工作目录 `/home/fin/luna` 的验证：
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor
+  --lib reserved_tests -- --nocapture`：`/tmp/luna-tools-bvrw2ss2/result.json`，
+  退出 0，2 项通过。覆盖预算失败后重试、各类元数据冲突、预热后有限预算查询、
+  精确快照隔离、生成定义提交／回滚的 VM 隔离，以及身份不授予执行权限。
+- 与上一节相同的 VM／luna lib、builder、generated/reflected definition 和
+  library meta object 集成命令：`/tmp/luna-tools-5024jsbd/result.json`，退出 101，
+  695 项通过、1 项失败。失败仍是上述 `Symbol` fixture 问题；未修改其预期。
+- 七个修改／新增 Rust 文件 scoped rustfmt 检查：
+  `/tmp/luna-tools-44hr2uh7/result.json`，退出 0。没有进行性能基准测量。
+
 ## 10. 删除旧路径的条件
 
 | 旧路径 | 删除前必须看到的生产行为 |

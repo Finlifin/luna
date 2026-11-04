@@ -159,6 +159,12 @@ impl<'a> Interpreter<'a> {
             contextual_code_cache: Default::default(),
             prepared_instance_cache: Default::default(),
             declaration_world: Some(package),
+            reserved_source_declarations: Some(
+                positions
+                    .as_ref()
+                    .map(|index| index.reserved_declarations.clone())
+                    .unwrap_or_default(),
+            ),
             effect_declarations,
             effect_state: effects::State::default(),
             effect_values: None,

@@ -262,54 +262,16 @@ impl<'world> Interpreter<'world> {
         if let Some(indexes) = &self.graph_indexes {
             return Ok(indexes.declarations.contains(&id));
         }
-        // Trait/impl and body-free telescope identities are not all represented
-        // by executable function tables. They still occupy declaration space.
+        // Source-only reservations are prepared once for the immutable world.
+        // Local publications above remain authoritative and never enter this cache.
         let world = self
             .declaration_world
             .ok_or_else(|| self.failure(ErrorKind::PhaseMismatch, None))?;
-        for interface in &world.traits {
-            self.integer_operation(None, |budget| {
-                budget.consume(
-                    interface
-                        .methods
-                        .len()
-                        .saturating_add(interface.associated.len())
-                        .saturating_add(1),
-                )
-            })?;
-            if interface.declaration == id
-                || interface.self_parameter == id
-                || interface
-                    .methods
-                    .iter()
-                    .any(|method| method.declaration == id)
-                || interface
-                    .associated
-                    .iter()
-                    .any(|member| member.declaration == id)
-            {
-                return Ok(true);
-            }
-        }
-        for implementation in &world.implementations {
-            self.tick(None)?;
-            if implementation.declaration == id {
-                return Ok(true);
-            }
-        }
-        for parameters in &world.function_parameters {
-            self.tick(None)?;
-            if parameters.declaration == id {
-                return Ok(true);
-            }
-        }
-        for template in &world.quote_templates {
-            self.tick(None)?;
-            if template.declaration == id {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        let reserved = self
+            .reserved_source_declarations
+            .as_ref()
+            .ok_or_else(|| self.failure(ErrorKind::PhaseMismatch, None))?;
+        reserved.contains(world, id, &mut self.budget)
     }
 }
 
