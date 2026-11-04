@@ -683,7 +683,7 @@ impl Checker<'_, '_> {
                 continue;
             }
             let predicate = self.boolean_predicate(value)?;
-            if !n::checkable_predicate(&predicate) {
+            if !self.program_predicate_shape(&predicate, false, value.span)? {
                 return Err(error(
                     value.span,
                     "test template contract requires a supported effect-free program predicate",

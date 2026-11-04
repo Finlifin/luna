@@ -5208,6 +5208,14 @@ impl<'a> Interpreter<'a> {
         Ok(Flow::Value(result))
     }
 
+    fn check_predicate_shape(&mut self, condition: &Expr) -> Result<bool, Error> {
+        let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+        let mut fuel = before;
+        let result = nir::program::checkable_predicate(condition, &mut fuel);
+        self.budget.steps -= (before - fuel) as u64;
+        result.map_err(|_| self.failure(ErrorKind::StepsExhausted, Some(condition.source)))
+    }
+
     #[inline(never)]
     fn eval_check_predicate(
         &mut self,
@@ -5220,9 +5228,7 @@ impl<'a> Interpreter<'a> {
         else {
             unreachable!()
         };
-        if expr.ty != Term::Primitive(Primitive::Void)
-            || !nir::program::checkable_predicate(condition)
-        {
+        if expr.ty != Term::Primitive(Primitive::Void) || !self.check_predicate_shape(condition)? {
             return Err(self.failure(ErrorKind::Type, Some(expr.source)));
         }
         let value = value!(self.eval(condition, environment));
@@ -5690,7 +5696,7 @@ impl<'a> Interpreter<'a> {
             }
             for condition in interface_program.preconditions {
                 if this.cleanup_schedule.is_some() {
-                    if !nir::program::checkable_predicate(&condition) {
+                    if !this.check_predicate_shape(&condition)? {
                         return Err(this.failure(ErrorKind::Type, Some(condition.source)));
                     }
                     let Flow::Value(Value::Bool(passed)) =
@@ -8321,5 +8327,58 @@ fn test_type_list(types: Vec<nir::Term>) -> Value {
             arguments: vec![nir::Term::Primitive(nir::Primitive::Type)],
         },
         values: types.into_iter().map(Value::Type).collect(),
+    }
+}
+
+#[cfg(test)]
+mod predicate_shape_budget_tests {
+    use super::*;
+
+    #[test]
+    fn tree_predicate_preparation_reports_resource_failure_before_evaluation() {
+        let source = SourceRange { start: 70, end: 80 };
+        let flag = || Expr {
+            source,
+            ty: Term::Primitive(Primitive::Bool),
+            kind: K::Literal(Literal::Bool(true)),
+        };
+        let condition = Expr {
+            kind: K::Block {
+                statements: (0..100).map(|_| flag()).collect(),
+                result: Some(Box::new(flag())),
+            },
+            ..flag()
+        };
+        let check = Expr {
+            source,
+            ty: Term::Primitive(Primitive::Void),
+            kind: K::CheckPredicate(Box::new(condition)),
+        };
+        let package = Package::default();
+        let mut vm = Interpreter::for_comptime_tree(
+            &package,
+            Budget {
+                steps: 10_000,
+                depth: 128,
+            },
+        )
+        .unwrap();
+        vm.budget.steps = 20;
+        let Err(error) = vm.eval_check_predicate(&check, &mut Default::default()) else {
+            panic!("unmetered predicate check")
+        };
+        assert_eq!(error.kind, ErrorKind::StepsExhausted);
+        assert_eq!(error.source, Some(source));
+        assert!(vm.remaining_steps() > 0 && vm.remaining_steps() < 20);
+        assert!(vm.events.is_empty());
+        vm.budget.steps = 10_000;
+        assert!(matches!(
+            vm.eval_check_predicate(&check, &mut Default::default()),
+            Ok(Flow::Value(Value::Unit))
+        ));
+        assert!(matches!(
+            vm.events.as_slice(),
+            [Event::CheckPredicate { passed: true, .. }]
+        ));
     }
 }

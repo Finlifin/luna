@@ -1096,3 +1096,38 @@ fn template_dependency_depth_is_a_resource_error_and_compilation_can_retry() {
     let small = template(expr(K::Unit));
     compiler.compile(&small, &mut 100_000).unwrap();
 }
+
+#[test]
+fn wide_predicate_does_not_compile_to_a_false_shape_guard() {
+    let flag = || Expr {
+        source: nir::program::SourceRange { start: 30, end: 40 },
+        ty: Term::Primitive(Primitive::Bool),
+        kind: K::Literal(nir::program::Literal::Bool(true)),
+    };
+    let body = expr(K::CheckPredicate(Box::new(Expr {
+        kind: K::Block {
+            statements: (0..10_001).map(|_| flag()).collect(),
+            result: Some(Box::new(flag())),
+        },
+        ..flag()
+    })));
+    let code = compile(&body, &mut 1_000_000).unwrap();
+    let guards: Vec<_> = code
+        .instructions()
+        .iter()
+        .filter_map(|instruction| {
+            if let comptime_compiler::Op::PreparePredicate { valid } = instruction.op {
+                Some(valid)
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(guards, [true]);
+    assert!(matches!(compile(&body, &mut 20), Err(Error::Budget(_))));
+    let retry = compile(&body, &mut 1_000_000).unwrap();
+    assert!(retry.instructions().iter().all(|instruction| !matches!(
+        instruction.op,
+        comptime_compiler::Op::PreparePredicate { valid: false }
+    )));
+}

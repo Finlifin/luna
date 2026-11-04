@@ -2162,8 +2162,7 @@ phase 层统一报告为非法 unsafe 调用。非法操作保留具体源位置
 两阶段同类型的相反结论、不同 Package 同号 nominal 的不同字段、展开失败不入
 缓存、正余额预留失败及热查询成本。
 
-这还不是完整 phase 总预算。normal-form/newtype 等元数据验证、predicate shape、
-主 body/pattern 工作栈以及部分临时集合仍有独立额度或成本未接线；内部入口
+这还不是完整 phase 总预算。normal-form/newtype 等元数据验证、主 body/pattern 工作栈以及部分临时集合仍有独立额度或成本未接线；内部入口
 据此只命名为 declaration／inspection 两个 allowance，不暴露为 VM 的全量有界
 验证承诺。后续需要一起迁移这些消费者，再统一构造失败的资源分类与实际扣款。
 
@@ -2183,3 +2182,54 @@ phase 层统一报告为非法 unsafe 调用。非法操作保留具体源位置
 格式检查 `/tmp/luna-tools-co_z870o/result.json` 退出 0。未运行全 workspace 或性能
 基准；没有提高额度、放宽存储／责任检查或改动真实 sysroot 以消除回归。正式 docs
 和用户已有工作区修改保持不变。
+
+
+### Predicate shape：支持结论与资源失败分离
+
+程序谓词 shape 检查移入 NIR 的单一实现，两个入口均显式接收调用者 fuel，返回
+`Result<bool, PredicateShapeError>`。Ok(false) 只表示当前 read-only 片段不接纳
+该形状；Budget 单独返回，不再用 10,000 的私有上限把大谓词改判为非法。shape
+不是谓词真值、指针有效性、稳定性或终止证明，候选调用入口仍不能用作最终准入。
+
+所有生产调用者已迁移：phase 使用共享 inspection allowance；elaboration 使用
+required work；字节码编译使用编译额度，资源失败不生成 `PreparePredicate false`；
+树解释器及 interface／exit checks 使用 invocation steps，失败保留原条件位置。
+资源验证的 moves、memory、text region 和 flow guards 使用各自现有分析额度；
+可选 check elision 的资源错误进入原有事务回退，不发布部分删改。无预算的布尔
+生产入口已删除，少数既有小 fixture 用测试局部适配器显式供应额度并 unwrap。
+
+批量表达式、match arms 和 pattern children 在扩展工作栈前预留宽度成本；
+类型比较、pointer／intrinsic helper 的输入类型预先计费。嵌入 frozen value 的
+Budget 不再折成 false；错误 value domain 仍是 unsupported shape。pattern guard
+与 observation 和外层表达式共用 fuel，不得凭 pattern 层次重新取得额度。预算
+预留失败可以留下正余额；调用者依据类型化结果判断失败，不根据剩余额度猜测。
+
+回归覆盖超过旧 10,000 节点上限的合法谓词、宽度预留失败与重试、pattern guard
+中的非法操作、捕获值资源失败与域错误的区分。phase 正例和字节码的 true shape
+guard 验证生产接线；树解释器验证耗尽发生在求值及 CheckPredicate event 之前，
+足额重试后才产生成功事件。原有指针、intrinsic、候选调用和纯度责任未放宽。
+
+本次没有把 shape 当作完整类型／存储／程序验证，也没有改变底层 pointer 和
+intrinsic helper 的其他准入契约。normal-form/newtype metadata、主 phase 遍历
+及临时集合的总预算接线仍未完成；VM constructor 的全局错误分类与失败精确
+计费也仍待后续统一。
+
+本批验证目录 `/home/fin/luna`，统一入口
+`python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p nir -p comptime_compiler -p comptime_interpretor -p program_verification
+  --lib --test predicate_reads --test phases --no-fail-fast`：665 通过，退出 0；
+  `/tmp/luna-tools-9d96iuwy/result.json`。
+- `-p elaboration -p comptime_compiler --lib --test control --no-fail-fast`：
+  206 通过，退出 0；`/tmp/luna-tools-5a03493a/result.json`。
+- `-p luna --test predicate_calls --test integer_contracts --test snapshot_contracts
+  --test method_memory_contracts --test staged_aggregate_contracts
+  --test host_intrinsic_protocol --test sysroot_preludes --test quote_functions
+  --no-fail-fast`：225 通过、1 个既有 ignore，退出 0；
+  `/tmp/luna-tools-23i823ra/result.json`。ignore 是
+  `comptime_decisions_check_their_results_before_returning_types`，原因为 comptime
+  call stability 仍缺 phase-aware value-reference evidence，本次未修改或宣称解决。
+
+格式检查 `/tmp/luna-tools-ut_lz41d/result.json` 退出 0。未运行全 workspace 或性能
+基准。正式 docs 与原有工作区修改保持不变；通过检查不能替代完整 phase／VM
+预算及程序谓词调用协议的后续交付。

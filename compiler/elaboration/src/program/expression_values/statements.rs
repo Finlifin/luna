@@ -180,8 +180,8 @@ impl Checker<'_, '_> {
             }
             H::Assumes(condition) => {
                 let condition = self.boolean_predicate(condition)?;
-                if !n::checkable_predicate(&condition) {
-                    if n::predicate_call_candidate(&condition) {
+                if !self.program_predicate_shape(&condition, false, expr.span)? {
+                    if self.program_predicate_shape(&condition, true, expr.span)? {
                         self.require_stable_predicate(&condition, expr.span)?;
                         let at = source(expr.span);
                         let failure = Box::new(n::Expr {

@@ -112,7 +112,7 @@ pub(crate) fn elide_function_checks(
         return Ok((candidate, Vec::new()));
     }
     let mut eliminated = Vec::new();
-    let result = visit(&mut candidate.body, limits, 0, &mut |expr, _| {
+    let result = visit(&mut candidate.body, limits, 0, &mut |expr, limits| {
         let site = expr as *const Expr as usize;
         if expr.ty != Term::Primitive(Primitive::Void) {
             return Ok(());
@@ -120,7 +120,9 @@ pub(crate) fn elide_function_checks(
         let K::CheckPredicate(condition) = &expr.kind else {
             return Ok(());
         };
-        if !nir::program::checkable_predicate(condition) {
+        if !nir::program::checkable_predicate(condition, &mut limits.arithmetic.steps)
+            .map_err(|_| Unknown::Arithmetic(comptime_runtime::Error::BudgetExhausted))?
+        {
             return Ok(());
         }
         let Some(Some(proof)) = proven.remove(&site) else {

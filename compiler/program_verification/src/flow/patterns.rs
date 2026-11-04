@@ -178,7 +178,9 @@ impl Walker<'_> {
                 return Ok(Some(selected));
             }
             Pattern::Guard { pattern, condition } => {
-                if !nir::program::checkable_predicate(condition) {
+                if !nir::program::checkable_predicate(condition, &mut self.limits.arithmetic.steps)
+                    .map_err(|_| Unknown::Arithmetic(comptime_runtime::Error::BudgetExhausted))?
+                {
                     return Ok(None);
                 }
                 let Some(selected) =
@@ -1061,10 +1063,14 @@ impl Walker<'_> {
         let mut compose_tags = !tail && *result_type == Term::Primitive(nir::Primitive::Bool);
         for (_, pattern, guards, _) in &collected {
             let pattern = *pattern;
-            compose_tags &= guards
-                .iter()
-                .flatten()
-                .all(|guard| nir::program::checkable_predicate(guard));
+            for guard in guards.iter().flatten() {
+                if !nir::program::checkable_predicate(guard, &mut self.limits.arithmetic.steps)
+                    .map_err(|_| Unknown::Arithmetic(comptime_runtime::Error::BudgetExhausted))?
+                {
+                    compose_tags = false;
+                    break;
+                }
+            }
             if let Pattern::Variant {
                 declaration, index, ..
             } = pattern

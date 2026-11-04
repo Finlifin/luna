@@ -7456,7 +7456,7 @@ impl<'a> Infer<'a, '_> {
             | K::EnsurePredicate(condition)
             | K::CheckPredicate(condition) => {
                 if self.ty(&expr.ty)? != Term::Primitive(Primitive::Void)
-                    || !nir::program::checkable_predicate(condition)
+                    || !nir::program::checkable_predicate(condition, self.fuel)?
                 {
                     return Err("invalid runtime predicate check".into());
                 }
@@ -8590,7 +8590,7 @@ fn infer_body(
     infer.install_code_inputs(&function.parameters, parameters, inputs, &code_inputs)?;
     infer.record_parameter_cleanup_reads(&function.parameters, parameters, function.body.source)?;
     for predicate in &function.preconditions {
-        if !nir::program::checkable_predicate(predicate) {
+        if !nir::program::checkable_predicate(predicate, infer.fuel)? {
             return Err("invalid runtime predicate check".into());
         }
         infer.walk_guard(predicate, 0)?;
@@ -8649,7 +8649,7 @@ fn infer_body(
         infer.environment.pointers.insert(binding, targets);
     }
     for predicate in &function.postconditions {
-        if !nir::program::checkable_predicate(predicate) {
+        if !nir::program::checkable_predicate(predicate, infer.fuel)? {
             return Err("invalid runtime predicate check".into());
         }
         infer.walk_guard(predicate, 0)?;

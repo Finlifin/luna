@@ -554,6 +554,23 @@ impl Checker<'_, '_> {
         Ok(expression)
     }
 
+    pub(super) fn program_predicate_shape(
+        &mut self,
+        expression: &n::Expr,
+        calls: bool,
+        span: Span,
+    ) -> Result<bool, Error> {
+        let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let mut fuel = before;
+        let result = if calls {
+            n::predicate_call_candidate(expression, &mut fuel)
+        } else {
+            n::checkable_predicate(expression, &mut fuel)
+        };
+        self.required_steps -= (before - fuel) as u64;
+        result.map_err(|reason| error(span, reason.to_string()))
+    }
+
     pub(super) fn program_preconditions(&mut self, owner: OwnerId) -> Result<Vec<n::Expr>, Error> {
         let values = self
             .program_requirements
@@ -563,7 +580,7 @@ impl Checker<'_, '_> {
         let mut result = Vec::new();
         for value in values {
             let expression = self.boolean_predicate(value)?;
-            if !n::checkable_predicate(&expression) {
+            if !self.program_predicate_shape(&expression, false, value.span)? {
                 return Err(error(
                     value.span,
                     "requires needs a supported effect-free program predicate",
@@ -624,7 +641,7 @@ impl Checker<'_, '_> {
             .into_iter()
             .map(|value| {
                 let expr = self.boolean_predicate(value)?;
-                if !n::checkable_predicate(&expr) {
+                if !self.program_predicate_shape(&expr, false, value.span)? {
                     return Err(error(
                         value.span,
                         "ensures needs a supported effect-free program predicate",

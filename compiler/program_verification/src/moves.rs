@@ -2211,7 +2211,9 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         if !flow.live {
             return Ok(());
         }
-        if !nir::program::checkable_predicate(condition) {
+        if !nir::program::checkable_predicate(condition, &mut self.fuel)
+            .map_err(|reason| error(condition.source, reason))?
+        {
             return Err(error(condition.source, "invalid runtime predicate check"));
         }
         self.observe_guard(condition, flow, depth + 1)?;
@@ -15455,7 +15457,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             | K::EnsurePredicate(condition)
             | K::CheckPredicate(condition) => {
                 if expr.ty != Term::Primitive(nir::Primitive::Void)
-                    || !nir::program::checkable_predicate(condition)
+                    || !nir::program::checkable_predicate(condition, &mut self.fuel)
+                        .map_err(|reason| error(condition.source, reason))?
                 {
                     return Err(error(source, "invalid runtime predicate check"));
                 }

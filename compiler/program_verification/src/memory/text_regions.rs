@@ -604,7 +604,7 @@ impl Query<'_, '_> {
     }
 
     fn contract(&mut self, predicate: &Expr, locals: &Locals) -> Result<(), String> {
-        if !nir::program::checkable_predicate(predicate) {
+        if !nir::program::checkable_predicate(predicate, self.fuel)? {
             return Err("invalid text region program predicate".into());
         }
         let mut observation = self.locals_copy(locals)?;

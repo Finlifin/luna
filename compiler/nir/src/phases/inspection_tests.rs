@@ -97,3 +97,26 @@ fn captured_values_do_not_receive_a_fresh_allowance_per_expression() {
     statements.truncate(1);
     validate(&package).unwrap();
 }
+
+#[test]
+fn contract_shape_uses_phase_fuel_instead_of_reporting_an_invalid_predicate() {
+    let mut callable = function(1, Phase::Comptime);
+    callable.preconditions = vec![Expr {
+        kind: K::Block {
+            statements: (0..10_001).map(|_| flag()).collect(),
+            result: Some(Box::new(flag())),
+        },
+        ..flag()
+    }];
+    let package = Package {
+        functions: vec![callable],
+        ..Default::default()
+    };
+    let error = run(&package, &mut 20).unwrap_err();
+    assert_eq!(
+        error.message,
+        "program predicate inspection budget exhausted"
+    );
+    assert_eq!(error.source, package.functions[0].preconditions[0].source);
+    validate(&package).unwrap();
+}

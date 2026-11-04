@@ -3015,7 +3015,8 @@ fn compile_root<'a>(
                         *fuel = allowance as usize;
                         charged.map_err(|error| copy_error(error, source))?;
                         let valid = expr.ty == Term::Primitive(Primitive::Void)
-                            && nir::program::checkable_predicate(condition);
+                            && nir::program::checkable_predicate(condition, fuel)
+                                .map_err(|_| Error::Budget(condition.source))?;
                         let value = fresh();
                         emit(&mut work, Op::Unit(dst));
                         emit(

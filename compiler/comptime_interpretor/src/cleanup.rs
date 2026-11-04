@@ -1272,7 +1272,7 @@ impl<'a> Interpreter<'a> {
                 this.retain_prepared(0, origin, value)?;
             }
             for condition in &conditions {
-                if !nir::program::checkable_predicate(condition) {
+                if !this.check_predicate_shape(condition)? {
                     return Err(this.failure(ErrorKind::Type, Some(condition.source)));
                 }
                 let Flow::Value(Value::Bool(passed)) = this.eval(condition, environment)? else {
@@ -2479,7 +2479,7 @@ impl Interpreter<'_> {
             exit.environment.insert(binding, value.clone());
         }
         for condition in &exit.conditions {
-            if !nir::program::checkable_predicate(condition) {
+            if !self.check_predicate_shape(condition)? {
                 return Err(self.failure(ErrorKind::Type, Some(condition.source)));
             }
             let evaluated = match self.eval(condition, &mut exit.environment)? {

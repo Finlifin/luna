@@ -211,7 +211,14 @@ fn machine_arithmetic_functions_with_budgets(
                 ));
             }
             for condition in function.preconditions.iter().chain(function.postconditions) {
-                if !crate::program::checkable_predicate(condition) {
+                if !crate::program::checkable_predicate(condition, inspection_fuel).map_err(
+                    |_| {
+                        fail(
+                            condition.source,
+                            "program predicate inspection budget exhausted",
+                        )
+                    },
+                )? {
                     return Err(fail(condition.source, "invalid program contract predicate"));
                 }
                 work.push(Work::Expr(condition, false, ct));
@@ -1098,7 +1105,13 @@ fn machine_arithmetic_functions_with_budgets(
                                 machine_owners.insert(function.declaration);
                             }
                             if expr.ty != Term::Primitive(Primitive::Void)
-                                || !crate::program::checkable_predicate(condition)
+                                || !crate::program::checkable_predicate(condition, inspection_fuel)
+                                    .map_err(|_| {
+                                        fail(
+                                            condition.source,
+                                            "program predicate inspection budget exhausted",
+                                        )
+                                    })?
                             {
                                 return Err(error(
                                     "program check requires a supported effect-free bool predicate and void result",

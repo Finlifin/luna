@@ -1,7 +1,14 @@
 use nir::{
     Primitive as P, Term,
-    program::{Expr, ExprKind as K, Literal, LocalId, SourceRange, checkable_predicate},
+    program::{Expr, ExprKind as K, Literal, LocalId, SourceRange},
 };
+
+fn checkable_predicate(value: &Expr) -> bool {
+    nir::program::checkable_predicate(value, &mut 10_000).unwrap()
+}
+fn predicate_call_candidate(value: &Expr) -> bool {
+    nir::program::predicate_call_candidate(value, &mut 10_000).unwrap()
+}
 
 fn expr(ty: Term, kind: K) -> Expr {
     Expr {
@@ -110,7 +117,7 @@ fn predicate_shape_rejects_writes_and_owned_pointer_delivery() {
             value: Box::new(yes.clone()),
         },
     );
-    assert!(!nir::program::predicate_call_candidate(&write));
+    assert!(!predicate_call_candidate(&write));
     assert!(!checkable_predicate(&expr(
         boolean(),
         K::Block {
@@ -414,7 +421,7 @@ fn reconstructed_aggregate_predicates_reject_effectful_fields() {
     );
     // Source lowering may investigate a call, but the retained check has no
     // callee-world evidence and must continue rejecting it independently.
-    assert!(nir::program::predicate_call_candidate(&call));
+    assert!(predicate_call_candidate(&call));
     assert!(!checkable_predicate(&call));
     let old = LocalId { owner: 7, index: 0 };
     let new = LocalId { owner: 8, index: 1 };
@@ -477,4 +484,76 @@ fn reconstructed_aggregate_predicates_reject_effectful_fields() {
             }
         }
     }
+}
+
+#[test]
+fn predicate_inspection_distinguishes_resource_failure_and_recovers() {
+    use nir::program::{PredicateShapeError, checkable_predicate as check};
+    let wide = expr(
+        boolean(),
+        K::Block {
+            statements: (0..10_001)
+                .map(|_| expr(boolean(), K::Literal(Literal::Bool(true))))
+                .collect(),
+            result: Some(Box::new(expr(boolean(), K::Literal(Literal::Bool(true))))),
+        },
+    );
+    let mut limited = 20;
+    assert_eq!(check(&wide, &mut limited), Err(PredicateShapeError::Budget));
+    // Width reservation fails before allocating the root's child work items.
+    assert!(limited > 0 && limited < 20);
+    assert_eq!(check(&wide, &mut 100_000), Ok(true));
+    let invalid = expr(boolean(), K::Return(None));
+    assert_eq!(check(&invalid, &mut 100), Ok(false));
+    assert_eq!(check(&wide, &mut 100_000), Ok(true));
+}
+
+#[test]
+fn predicate_pattern_observations_share_the_expression_allowance() {
+    use nir::program::{MatchArm, Pattern, PredicateShapeError, checkable_predicate as check};
+    let mut value = expr(
+        boolean(),
+        K::Match {
+            value: Box::new(expr(boolean(), K::Literal(Literal::Bool(true)))),
+            arms: vec![MatchArm {
+                pattern: Pattern::Or(vec![Pattern::Wild; 1000]),
+                guard: None,
+                body: expr(boolean(), K::Literal(Literal::Bool(true))),
+            }],
+        },
+    );
+    let mut fuel = 20;
+    assert_eq!(check(&value, &mut fuel), Err(PredicateShapeError::Budget));
+    assert!(fuel > 0);
+    assert_eq!(check(&value, &mut 10_000), Ok(true));
+    let K::Match { arms, .. } = &mut value.kind else {
+        unreachable!()
+    };
+    arms[0].pattern = Pattern::Guard {
+        pattern: Box::new(Pattern::Wild),
+        condition: Box::new(expr(boolean(), K::Return(None))),
+    };
+    assert_eq!(check(&value, &mut 10_000), Ok(false));
+}
+
+#[test]
+fn frozen_predicate_inputs_keep_budget_errors_distinct_from_wrong_domains() {
+    use nir::program::{PredicateShapeError, checkable_predicate as check};
+    let value = expr(
+        boolean(),
+        K::Block {
+            statements: vec![expr(
+                Term::Primitive(P::Symbol),
+                K::ComptimeValue(Term::Symbol("s".repeat(1000).into())),
+            )],
+            result: Some(Box::new(expr(boolean(), K::Literal(Literal::Bool(true))))),
+        },
+    );
+    assert_eq!(check(&value, &mut 100), Err(PredicateShapeError::Budget));
+    assert_eq!(check(&value, &mut 10_000), Ok(true));
+    let invalid = expr(
+        boolean(),
+        K::ComptimeValue(Term::Symbol("not a bool".into())),
+    );
+    assert_eq!(check(&invalid, &mut 100), Ok(false));
 }

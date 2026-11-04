@@ -1774,7 +1774,9 @@ fn integer_zero_counts_lower_with_a_defined_zero_flag() {
 
 #[test]
 fn scalar_intrinsic_predicates_revalidate_evidence_and_all_operands() {
-    use nir::program::{LocalId, checkable_predicate};
+    use nir::program::LocalId;
+    let checkable_predicate =
+        |expr: &Expr| nir::program::checkable_predicate(expr, &mut 10_000).unwrap();
     let package = support::compile("^intrinsic_enum enum Ops {bound}");
     let tag = tag(&package, "Ops", 0);
     let make = |ty, kind| Expr {
