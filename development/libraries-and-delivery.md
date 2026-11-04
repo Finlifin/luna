@@ -255,4 +255,42 @@ runtime 使用同一参数，将命令换成 interpret、入口换成 run；dump
 
 验证按当前纵向迁移选择最小充分组，不要求每次改动运行完整 sysroot/native 矩阵。
 但修改公共绑定、prelude 或协议身份时，实际跨包消费者属于同一交付闭包，不能留给
-“编译器完成后再修库”。库文件尚不修改；这里明确下一阶段的共同迁移责任。
+“编译器完成后再修库”。本节明确共同迁移责任；后续实际接线进展见下文。
+
+## 12. Type 协议比较接入既有类型等式
+
+`meta/types/equality.fl` 为 Type 提供 `ComptimeEq` 实现，根模块加载该实现，
+现有默认 prelude 继续导出原 ComptimeEq 身份。实现直接使用 `self == other`，
+由既有类型命题执行机制处理；没有新增按类型名字识别的编译器分支，也没有用 Rust
+Term 的结构比较替代 Flurry 的语义相等。默认 `ne` 仍通过同一接口的 `eq` 取反。
+
+Type 不是 runtime 值域的普通数字；实现归入 types 目录，复用 numeric/equality 中
+既有协议声明，不复制 trait。List<Type>、List<List<Type>>、?Type 通过现有泛型
+容器实现组合，容器不取得额外的类型等式权限。未知等式沿普通调用传播为
+TypeContractUnresolved；不能把“无法证明”当成 false 或让 ne 返回 true。
+
+真实 sysroot 验收包含：
+
+- typealias 与目标相等、不同 primitive／名义声明／newtype 不等。
+- 同一 opaque normal-form 应用自反；不因 Identity<T> 的正文返回 T 就展开其头。
+- 效应行顺序不同但语义相等的 Type 比较。
+- 默认方法发现、默认 ne、嵌套容器比较、空列表与可选载荷、长度及首个不等元素短路。
+- Identity<bool> 与 bool 的 eq、ne、列表元素比较均保留 Unknown；预算失败后恢复，
+  重复执行也不能将 Unknown 变成已缓存的布尔答案。
+
+此变更完成的是协议接线，不改变类型理论。Type 的 ComptimeHash 仍缺失，所以真实
+meta 键协议尚不能完整支持 Type 输入。其后续实现必须让已证明相等的语义类型具有
+兼容的哈希，考虑别名、类型构造等式、范式参数的所属等式域和适用世界；不能直接
+复制 Term 的结构 Hash，也不能用恒定摘要占位并宣称键协议完成。
+
+验证工作目录为 `/home/fin/luna`。使用
+`python3 -B development/check.py --timeout 900 -- test -p luna`：
+
+| 参数 | 结果 | 证据目录 |
+| --- | --- | --- |
+| `--test library_type_equality` | 退出 0，2 通过；真实 sysroot 与默认 prelude | `/tmp/luna-tools-tgbukhxp` |
+| `--test library_list_equality --test library_list_hash --test invocation_value_templates --no-fail-fast` | 退出 0，3 + 13 + 4 通过 | `/tmp/luna-tools-y80jj9ad` |
+
+新测试的 Rust 格式化经 `/tmp/luna-tools-8kp97zc3` 退出 0，提交范围 diff 检查通过。
+隔离 meta fixture 同步包含真实 types/equality 模块；只有真实 sysroot 的测试负责证明
+公开包接线成立，未将拼接 fixture 当作跨包验收。

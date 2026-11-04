@@ -8,6 +8,7 @@ use data.{object, integer, list, list_equality, list_hashing, list_ordering, opt
 use definitions.{structs, enums, newtypes};
 use numeric.{scalar_math, equality, ordering};
 use reflection.structure;
+use types.equality as type_equality;
 
 pub use object.*;
 pub use optional.ComptimeOptionalOps;

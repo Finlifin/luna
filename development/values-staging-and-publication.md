@@ -469,8 +469,10 @@ package、挑选伪造私有声明身份、移除 Type 实参并实例化整份 
 
 编写该用例同时确认了未完成能力，不能据此声称任意 Type 输入缓存已经可用：
 
-- meta 的 ComptimeEq／ComptimeHash 当前没有 Type 实现，直接为 Type 输入准备真实
-  键协议会得到 `no-applicable-candidate`；不能提供恒定 Hash 占位实现掩盖缺口。
+- 当时 meta 的 ComptimeEq／ComptimeHash 都没有 Type 实现。后续已接通
+  [Type 的 ComptimeEq](libraries-and-delivery.md#12-type-协议比较接入既有类型等式)，
+  ComptimeHash 仍未接通，直接为 Type 输入准备完整键协议仍会失败；不能提供恒定
+  Hash 占位实现掩盖缺口。
 - `SelectFor(if flag { bool } else { u8 })` 的 required Type 输入当前不能依赖尚未供应
   的外层 flag，报 `required comptime input ... is not available`，证据为
   `/tmp/luna-tools-ng7jwxcd`。分支内的具体 Type 调用已通过，不代表一般待定 Type

@@ -1,0 +1,11 @@
+use builtin.{Type, bool};
+use numeric.equality.ComptimeEq;
+
+{-
+    Type equality uses the ordinary type proposition and its proof context.
+    An unresolved proposition remains an invocation failure, not false; opaque
+    normal-form heads are never unfolded to make this protocol decide.
+-}
+comptime impl ComptimeEq for Type {
+    comptime fn eq(self, other: Self) -> bool { self == other }
+}
