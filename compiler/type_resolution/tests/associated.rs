@@ -1090,17 +1090,16 @@ fn associated_queries_complete_dependent_type_value_domains() {
         assert_eq!(resolved.value, holder(ty(P::Bool)));
         assert_eq!(resolved.evidence.type_arguments, inputs);
         let value = world
-            .resolve_associated_value_plan_budgeted(
+            .resolve_associated_value_plan_metered(
                 &nir::program::InterfaceInstance {
                     declaration: id(1),
                     arguments: inputs,
                 },
                 id(2),
                 &ty(P::Bool),
-                Budget::default(),
+                &mut Budget::default(),
             )
-            .unwrap()
-            .0;
+            .unwrap();
         assert!(
             matches!(value.value.kind, ExprKind::TypeValue(ref result) if *result == holder(ty(P::Bool)))
         );
@@ -1192,19 +1191,19 @@ fn completed_associated_tuples_follow_current_declaration_layout_evidence() {
             assumptions: &[],
             context: &context,
         }
-        .resolve_associated_value_plan_budgeted(
+        .resolve_associated_value_plan_metered(
             &InterfaceInstance {
                 declaration: id(1),
                 arguments: vec![],
             },
             id(2),
             &ty(P::Bool),
-            Budget::default(),
+            &mut Budget::default(),
         )
     };
     assert!(resolve(&index).is_err());
     index.set_normal_form_metadata(vec![head.clone()]);
-    assert_eq!(resolve(&index).unwrap().0.value, payload);
+    assert_eq!(resolve(&index).unwrap().value, payload);
     let revision = index.revision();
     index.set_normal_form_metadata(vec![head.clone()]);
     assert_eq!(index.revision(), revision);
@@ -1229,10 +1228,10 @@ fn completed_associated_tuples_follow_current_declaration_layout_evidence() {
         assert!(index.revision() > revision);
         assert!(resolve(&index).is_err());
         index.set_normal_form_metadata(vec![head.clone()]);
-        assert_eq!(resolve(&index).unwrap().0.value, payload);
+        assert_eq!(resolve(&index).unwrap().value, payload);
     }
     index.set_normal_form_metadata(vec![head.clone(), head.clone()]);
     assert!(resolve(&index).is_err());
     index.set_normal_form_metadata(vec![head]);
-    assert_eq!(resolve(&index).unwrap().0.value, payload);
+    assert_eq!(resolve(&index).unwrap().value, payload);
 }

@@ -24,3 +24,6 @@ comptime_interpretor = { path = "../comptime_interpretor" }
 comptime_executor = { path = "../comptime_executor" }
 
 comptime_runtime = { path = "../comptime_runtime" }
+
+[dev-dependencies]
+type_resolution = { path = "../type_resolution" }

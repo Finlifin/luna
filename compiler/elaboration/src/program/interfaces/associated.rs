@@ -397,29 +397,39 @@ impl Checker<'_, '_> {
                         &|ty, fuel| {
                             let element = self.list_element_type(ty);
                             if let Some(element) = element {
-                                nir::type_computations::charge_term(element, fuel)
-                                    .map_err(|_| "completed collection budget exhausted")?;
+                                nir::type_computations::charge_term(element, fuel)?;
                             }
                             Ok(element.cloned())
                         },
                         &|id, fuel| {
-                            *fuel = fuel.checked_sub(1)?;
-                            match (self.structs.get(&id), self.enums.get(&id)) {
+                            *fuel = fuel
+                                .checked_sub(1)
+                                .ok_or(nir::NominalAdmissionError::Budget)?;
+                            Ok(match (self.structs.get(&id), self.enums.get(&id)) {
                                 (Some(definition), None) => Some(
                                     nir::normal_forms::NominalValueDeclaration::Struct(definition),
                                 ),
                                 (None, Some(definition)) => Some(
                                     nir::normal_forms::NominalValueDeclaration::Enum(definition),
                                 ),
-                                _ => None,
-                            }
+                                (None, None) => None,
+                                _ => return Err("duplicate completed nominal declaration".into()),
+                            })
                         },
                         self.target,
                         &mut fuel,
                     );
                     self.required_steps -= (before - fuel) as u64;
-                    if completed.is_ok() {
-                        return Ok(template);
+                    match completed {
+                        Ok(()) => return Ok(template),
+                        Err(
+                            failure @ (nir::NominalAdmissionError::Budget
+                            | nir::NominalAdmissionError::Unresolved(_)),
+                        ) => return Err(error(span, failure)),
+                        // A checked program may require invocation rather than
+                        // completed-value reconstruction. Its phase and closure
+                        // are checked below before publishing an initializer.
+                        Err(nir::NominalAdmissionError::Invalid(_)) => {}
                     }
                     constants::charge_copy(&template, &mut self.required_steps, span)?;
                     fuel = self.required_steps.min(100_000) as usize;

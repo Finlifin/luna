@@ -442,6 +442,7 @@ dependencies = [
  "parse",
  "resolve",
  "rustc_span",
+ "type_resolution",
  "vfs",
 ]
 

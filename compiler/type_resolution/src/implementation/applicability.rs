@@ -307,6 +307,8 @@ pub enum TypeAssessment {
         actual: Term,
     },
     ForbiddenSubject(Term),
+    /// The candidate could not be checked within its resource allowance.
+    BudgetExhausted,
     Pending(String),
     Invalid(String),
 }
@@ -317,7 +319,7 @@ impl TypeAssessment {
             Self::Excluded(_) | Self::ValueIndexMismatch { .. } | Self::ForbiddenSubject(_) => {
                 Applicability::Excluded
             }
-            Self::Pending(_) | Self::Invalid(_) => Applicability::Pending,
+            Self::BudgetExhausted | Self::Pending(_) | Self::Invalid(_) => Applicability::Pending,
         }
     }
 }
@@ -335,7 +337,7 @@ pub(super) fn validate(
     subject: &Term,
     arguments: &[Term],
     budget: Budget,
-) -> Result<usize, String> {
+) -> Result<usize, nir::type_computations::Error> {
     enum Work<'a> {
         Term(&'a Term),
         Predicate(&'a TypePredicate),
@@ -349,7 +351,7 @@ pub(super) fn validate(
         .saturating_add(2)
         > fuel
     {
-        return Err("input budget exhausted".into());
+        return Err(nir::type_computations::Error::Budget);
     }
     let mut pending = vec![(Work::Term(subject), 0), (Work::Term(&head.subject), 0)];
     pending.extend(
@@ -362,7 +364,7 @@ pub(super) fn validate(
     pending.extend(head.requirements.iter().map(|p| (Work::Predicate(p), 0)));
     while let Some((work, depth)) = pending.pop() {
         if fuel == 0 || depth >= budget.max_depth.min(128) {
-            return Err("input budget exhausted".into());
+            return Err(nir::type_computations::Error::Budget);
         }
         fuel -= 1;
         match work {
@@ -370,7 +372,7 @@ pub(super) fn validate(
                 arguments, subject, ..
             }) => {
                 if arguments.len().saturating_add(1) > fuel {
-                    return Err("input budget exhausted".into());
+                    return Err(nir::type_computations::Error::Budget);
                 }
                 pending.push((Work::Term(subject), depth + 1));
                 pending.extend(arguments.iter().map(|t| (Work::Term(t), depth + 1)));
@@ -392,19 +394,19 @@ pub(super) fn validate(
                 Term::ListConcat { ty, parts: fields } | Term::NominalValue { ty, fields, .. },
             ) => {
                 if fields.len().saturating_add(1) > fuel {
-                    return Err("input budget exhausted".into());
+                    return Err(nir::type_computations::Error::Budget);
                 }
                 pending.push((Work::Term(ty), depth + 1));
                 pending.extend(fields.iter().map(|field| (Work::Term(field), depth + 1)));
             }
             Work::Term(Term::Record(fields) | Term::RecordValue(fields)) => {
                 if fields.len() > fuel {
-                    return Err("input budget exhausted".into());
+                    return Err(nir::type_computations::Error::Budget);
                 }
                 for (name, ty) in fields {
                     fuel = fuel
                         .checked_sub(name.len())
-                        .ok_or("input budget exhausted")?;
+                        .ok_or(nir::type_computations::Error::Budget)?;
                     pending.push((Work::Term(ty), depth + 1));
                 }
             }
@@ -420,7 +422,7 @@ pub(super) fn validate(
                 },
             ) => {
                 if items.len() > fuel {
-                    return Err("input budget exhausted".into());
+                    return Err(nir::type_computations::Error::Budget);
                 }
                 pending.extend(items.iter().map(|t| (Work::Term(t), depth + 1)));
             }
@@ -434,18 +436,18 @@ pub(super) fn validate(
             Work::Term(Term::Symbol(name) | Term::String(name)) => {
                 fuel = fuel
                     .checked_sub(name.len())
-                    .ok_or("input budget exhausted")?;
+                    .ok_or(nir::type_computations::Error::Budget)?;
             }
             Work::Term(Term::Function { parameters, result }) => {
                 if parameters.len() > fuel {
-                    return Err("input budget exhausted".into());
+                    return Err(nir::type_computations::Error::Budget);
                 }
                 pending.extend(parameters.iter().map(|p| (Work::Term(&p.ty), depth + 1)));
                 pending.push((Work::Term(result), depth + 1));
             }
             Work::Term(Term::ErrorResult { errors, result }) => {
                 if errors.len().saturating_add(1) > fuel {
-                    return Err("input budget exhausted".into());
+                    return Err(nir::type_computations::Error::Budget);
                 }
                 pending.push((Work::Term(result), depth + 1));
                 pending.extend(errors.iter().map(|ty| (Work::Term(ty), depth + 1)));
@@ -453,13 +455,13 @@ pub(super) fn validate(
             Work::Term(Term::Computation { effects, result }) => {
                 fuel = fuel
                     .checked_sub(effects.len())
-                    .ok_or("input budget exhausted")?;
+                    .ok_or(nir::type_computations::Error::Budget)?;
                 let width = effects
                     .iter()
                     .try_fold(1usize, |sum, op| sum.checked_add(op.arguments.len()))
-                    .ok_or("input budget exhausted")?;
+                    .ok_or(nir::type_computations::Error::Budget)?;
                 if width > fuel {
-                    return Err("input budget exhausted".into());
+                    return Err(nir::type_computations::Error::Budget);
                 }
                 pending.push((Work::Term(result), depth + 1));
                 for operation in effects {
@@ -473,7 +475,7 @@ pub(super) fn validate(
             }
             Work::Term(Term::ContextualClosure { context, signature }) => {
                 if fuel < 2 {
-                    return Err("input budget exhausted".into());
+                    return Err(nir::type_computations::Error::Budget);
                 }
                 pending.push((Work::Term(context), depth + 1));
                 pending.push((Work::Term(signature), depth + 1));
@@ -483,14 +485,14 @@ pub(super) fn validate(
                 signature,
             }) => {
                 if environment.len() > fuel {
-                    return Err("input budget exhausted".into());
+                    return Err(nir::type_computations::Error::Budget);
                 }
                 pending.extend(environment.iter().map(|t| (Work::Term(t), depth + 1)));
                 pending.push((Work::Term(signature), depth + 1));
             }
             Work::Predicate(TypePredicate::Trait(requirement)) => {
                 if requirement.interface_arguments.len() > fuel {
-                    return Err("input budget exhausted".into());
+                    return Err(nir::type_computations::Error::Budget);
                 }
                 pending.push((Work::Term(&requirement.subject), depth + 1));
                 pending.extend(
@@ -507,7 +509,7 @@ pub(super) fn validate(
             Work::Predicate(TypePredicate::Not(p)) => pending.push((Work::Predicate(p), depth + 1)),
             Work::Predicate(TypePredicate::And(items) | TypePredicate::Or(items)) => {
                 if items.len() > fuel {
-                    return Err("input budget exhausted".into());
+                    return Err(nir::type_computations::Error::Budget);
                 }
                 pending.extend(items.iter().map(|p| (Work::Predicate(p), depth + 1)));
             }
@@ -522,6 +524,10 @@ fn unresolved(formula: Formula, context: &Context, budget: Budget) -> TypeAssess
     match context.prove(formula.negate(), budget) {
         Outcome::Entailed(proof) => TypeAssessment::Excluded(proof),
         Outcome::IllFormed(reason) => TypeAssessment::Invalid(reason),
+        Outcome::Unknown {
+            reason: crate::ptc::UnknownReason::BudgetExhausted,
+            ..
+        } => TypeAssessment::BudgetExhausted,
         _ => TypeAssessment::Pending("type relation has not been proved or refuted".into()),
     }
 }
@@ -569,11 +575,11 @@ impl ImplementationHead {
             .checked_sub(self.type_parameters.len())
             .ok_or_else(|| {
                 budget.steps = 0;
-                TypeAssessment::Pending("interface discovery budget exhausted".into())
+                TypeAssessment::BudgetExhausted
             })?;
-        budget.steps = validate(self, subject, &[], *budget).map_err(|reason| {
+        budget.steps = validate(self, subject, &[], *budget).map_err(|_| {
             budget.steps = 0;
-            TypeAssessment::Pending(reason)
+            TypeAssessment::BudgetExhausted
         })?;
         // Match a local receiver projection of the head. Its incomplete proof
         // never escapes: retaining the original argument equations would turn
@@ -601,7 +607,7 @@ impl ImplementationHead {
             layouts,
         )?;
         let computation = |error: nir::type_computations::Error| match error {
-            nir::type_computations::Error::Budget => TypeAssessment::Pending(error.to_string()),
+            nir::type_computations::Error::Budget => TypeAssessment::BudgetExhausted,
             error => TypeAssessment::Invalid(error.to_string()),
         };
         let substitution = nir::DeclarationSubstitution::bounded(
@@ -716,7 +722,7 @@ impl ImplementationHead {
     ) -> Result<HeadMatch, TypeAssessment> {
         let remaining = match validate(self, subject, interface_arguments, budget) {
             Ok(remaining) => remaining,
-            Err(reason) => return Err(TypeAssessment::Pending(reason)),
+            Err(_) => return Err(TypeAssessment::BudgetExhausted),
         };
         if self.interface_arguments.len() != interface_arguments.len() {
             return Err(TypeAssessment::Invalid(
@@ -724,7 +730,7 @@ impl ImplementationHead {
             ));
         }
         if self.type_parameters.len() > budget.steps {
-            return Err(TypeAssessment::Pending("parameter budget exhausted".into()));
+            return Err(TypeAssessment::BudgetExhausted);
         }
         if self.type_parameters.iter().collect::<BTreeSet<_>>().len() != self.type_parameters.len()
         {
@@ -775,7 +781,7 @@ impl ImplementationHead {
         let allowance =
             remaining / (8 + self.interface_arguments.len() * 4 + self.requirements.len() * 2);
         if allowance == 0 {
-            return Err(TypeAssessment::Pending("candidate budget exhausted".into()));
+            return Err(TypeAssessment::BudgetExhausted);
         }
         let budget = Budget {
             steps: allowance,
@@ -922,7 +928,7 @@ impl ImplementationHead {
             }
             if template
                 .index_values_definitely_differ_budgeted(actual, &mut head_budget.steps)
-                .map_err(|error| TypeAssessment::Pending(error.to_string()))?
+                .map_err(|_| TypeAssessment::BudgetExhausted)?
             {
                 return Err(TypeAssessment::ValueIndexMismatch {
                     position,
@@ -947,9 +953,9 @@ impl ImplementationHead {
                 let mut pending = vec![(template, actual)];
                 let fuel = &mut head_budget.steps;
                 while let Some((template, actual)) = pending.pop() {
-                    *fuel = fuel.checked_sub(1).ok_or_else(|| {
-                        TypeAssessment::Pending("value index matching budget exhausted".into())
-                    })?;
+                    *fuel = fuel
+                        .checked_sub(1)
+                        .ok_or_else(|| TypeAssessment::BudgetExhausted)?;
                     if template.sort() == Sort::Type && actual.sort() == Sort::Type {
                         relations.push((
                             instantiate(template)
@@ -963,9 +969,9 @@ impl ImplementationHead {
                         sort: Sort::ComptimeValue,
                     } = template
                     {
-                        *fuel = fuel.checked_sub(parameters.len()).ok_or_else(|| {
-                            TypeAssessment::Pending("value binder lookup budget exhausted".into())
-                        })?;
+                        *fuel = fuel
+                            .checked_sub(parameters.len())
+                            .ok_or_else(|| TypeAssessment::BudgetExhausted)?;
                         if let Some(input) = parameters.iter().position(|p| {
                             p.declaration == *declaration && p.sort == Sort::ComptimeValue
                         }) {
@@ -1017,15 +1023,13 @@ impl ImplementationHead {
                             }
                             let Some(type_relations) = bound
                                 .index_type_relations_budgeted(actual, fuel)
-                                .map_err(|error| TypeAssessment::Pending(error.to_string()))?
+                                .map_err(|_| TypeAssessment::BudgetExhausted)?
                             else {
                                 if (!bound.is_structural_index_value()
                                     || !actual.is_structural_index_value())
                                     && !bound
                                         .index_values_definitely_differ_budgeted(actual, fuel)
-                                        .map_err(|error| {
-                                            TypeAssessment::Pending(error.to_string())
-                                        })?
+                                        .map_err(|_| TypeAssessment::BudgetExhausted)?
                                 {
                                     return Err(TypeAssessment::Pending(
                                         "symbolic record index identity is unresolved".into(),
@@ -1058,9 +1062,7 @@ impl ImplementationHead {
                     {
                         if left_variant == right_variant && left.len() == right.len() {
                             if left.len().saturating_add(1) > fuel.saturating_sub(pending.len()) {
-                                return Err(TypeAssessment::Pending(
-                                    "value index matching budget exhausted".into(),
-                                ));
+                                return Err(TypeAssessment::BudgetExhausted);
                             }
                             pending.push((left_ty, right_ty));
                             pending.extend(left.iter().zip(right).rev());
@@ -1113,9 +1115,7 @@ impl ImplementationHead {
                     if let (Term::TupleValue(left), Term::TupleValue(right)) = (template, actual) {
                         if left.len() == right.len() {
                             if left.len() > fuel.saturating_sub(pending.len()) {
-                                return Err(TypeAssessment::Pending(
-                                    "value index matching budget exhausted".into(),
-                                ));
+                                return Err(TypeAssessment::BudgetExhausted);
                             }
                             pending.extend(left.iter().zip(right).rev());
                             continue;
@@ -1127,9 +1127,7 @@ impl ImplementationHead {
                             && left.iter().zip(right).all(|((a, _), (b, _))| a == b)
                         {
                             if left.len() > fuel.saturating_sub(pending.len()) {
-                                return Err(TypeAssessment::Pending(
-                                    "value index matching budget exhausted".into(),
-                                ));
+                                return Err(TypeAssessment::BudgetExhausted);
                             }
                             pending.extend(
                                 left.iter().zip(right).rev().map(|((_, a), (_, b))| (a, b)),
@@ -1201,6 +1199,12 @@ impl ImplementationHead {
         let (mut candidate, ids) = match root.match_many_metered(&relations, &mut inference_budget)
         {
             Ok(candidate) => candidate,
+            Err(
+                crate::matching::MatchError::BudgetExhausted
+                | crate::matching::MatchError::Inference(crate::InferenceError::Budget),
+            ) => {
+                return Err(TypeAssessment::BudgetExhausted);
+            }
             Err(reason) => {
                 return Err(TypeAssessment::Pending(format!(
                     "head inference: {reason:?}"
@@ -1210,6 +1214,7 @@ impl ImplementationHead {
         candidate.advance_metered(ids.len(), &mut inference_budget);
         let mut proofs = Vec::new();
         let mut pending = pending_interface_domain;
+        let mut exhausted = false;
         for id in ids {
             match candidate.state(id) {
                 Some(State::Solved(Outcome::Entailed(proof))) => proofs.push(proof.clone()),
@@ -1221,9 +1226,13 @@ impl ImplementationHead {
                     ) {
                         return Err(assessment);
                     }
+                    exhausted |= matches!(assessment, TypeAssessment::BudgetExhausted);
                     pending = true;
                 }
-                Some(State::Solved(Outcome::Unknown { residual, .. })) => {
+                Some(State::Solved(Outcome::Unknown {
+                    residual, reason, ..
+                })) => {
+                    exhausted |= matches!(reason, crate::ptc::UnknownReason::BudgetExhausted);
                     let assessment = unresolved(residual.clone(), context, budget);
                     if matches!(
                         assessment,
@@ -1231,6 +1240,7 @@ impl ImplementationHead {
                     ) {
                         return Err(assessment);
                     }
+                    exhausted |= matches!(assessment, TypeAssessment::BudgetExhausted);
                     pending = true;
                 }
                 Some(
@@ -1252,9 +1262,11 @@ impl ImplementationHead {
             )? {
                 return Ok(matched);
             }
-            return Err(TypeAssessment::Pending(
-                "head obligations are unsettled".into(),
-            ));
+            return Err(if exhausted {
+                TypeAssessment::BudgetExhausted
+            } else {
+                TypeAssessment::Pending("head obligations are unsettled".into())
+            });
         }
         let arguments = match types
             .iter()
@@ -1279,9 +1291,8 @@ impl ImplementationHead {
             &mut domain_fuel,
         )
         .map_err(|error| match error {
-            nir::NominalAdmissionError::Budget | nir::NominalAdmissionError::Unresolved(_) => {
-                TypeAssessment::Pending(error.to_string())
-            }
+            nir::NominalAdmissionError::Budget => TypeAssessment::BudgetExhausted,
+            nir::NominalAdmissionError::Unresolved(message) => TypeAssessment::Pending(message),
             nir::NominalAdmissionError::Invalid(message) => TypeAssessment::Invalid(message),
         })?;
         let substitution = nir::DeclarationSubstitution::bounded(
@@ -1292,7 +1303,7 @@ impl ImplementationHead {
             &mut domain_fuel,
         )
         .map_err(|error| match error {
-            nir::type_computations::Error::Budget => TypeAssessment::Pending(error.to_string()),
+            nir::type_computations::Error::Budget => TypeAssessment::BudgetExhausted,
             error => TypeAssessment::Invalid(error.to_string()),
         })?;
         let requirements = match self
@@ -1305,9 +1316,7 @@ impl ImplementationHead {
         {
             Ok(requirements) => requirements,
             Err(nir::type_computations::Error::Budget) => {
-                return Err(TypeAssessment::Pending(
-                    "requirement substitution budget exhausted".into(),
-                ));
+                return Err(TypeAssessment::BudgetExhausted);
             }
             Err(error) => return Err(TypeAssessment::Invalid(error.to_string())),
         };
@@ -1380,6 +1389,7 @@ impl HeadMatch {
         } = evidence;
         let mut requirements = Vec::new();
         let mut pending = None;
+        let mut exhausted = false;
         // The head reserved two query slots per requirement. Positive proofs
         // usually settle the requirement alone; reuse their unspent work rather
         // than stranding it in negative queries that will never execute.
@@ -1388,7 +1398,7 @@ impl HeadMatch {
             .checked_mul(pending_requirements.len())
             .and_then(|steps| steps.checked_mul(2))
         else {
-            return TypeAssessment::Pending("requirement budget overflow".into());
+            return TypeAssessment::BudgetExhausted;
         };
         for (index, requirement) in pending_requirements.iter().enumerate() {
             let requirement = Formula::from_predicate(requirement);
@@ -1422,6 +1432,16 @@ impl HeadMatch {
                         Outcome::Entailed(proof) => return TypeAssessment::Excluded(proof),
                         Outcome::IllFormed(reason) => return TypeAssessment::Invalid(reason),
                         negative => {
+                            exhausted |= matches!(
+                                positive_reason,
+                                Some(crate::ptc::UnknownReason::BudgetExhausted)
+                            ) || matches!(
+                                &negative,
+                                Outcome::Unknown {
+                                    reason: crate::ptc::UnknownReason::BudgetExhausted,
+                                    ..
+                                }
+                            );
                             let detail = match (positive_reason, negative) {
                                 (
                                     Some(reason),
@@ -1443,6 +1463,9 @@ impl HeadMatch {
                     }
                 }
             }
+        }
+        if exhausted {
+            return TypeAssessment::BudgetExhausted;
         }
         if let Some(reason) = pending {
             return TypeAssessment::Pending(reason);
@@ -1629,6 +1652,7 @@ impl fmt::Display for TypeAssessment {
                 "(value-index-mismatch (position {position}) (expected {expected}) (actual {actual}))"
             ),
             Self::ForbiddenSubject(ty) => write!(f, "(forbidden-subject {ty})"),
+            Self::BudgetExhausted => f.write_str("(pending (budget-exhausted))"),
             Self::Pending(reason) => write!(f, "(pending {reason:?})"),
             Self::Invalid(reason) => write!(f, "(invalid {reason:?})"),
         }
@@ -2530,9 +2554,36 @@ mod shared_requirement_budget {
                 residual: goal,
             }
         });
-        assert!(matches!(exhausted, TypeAssessment::Pending(_)));
+        assert!(matches!(exhausted, TypeAssessment::BudgetExhausted));
+        assert_eq!(exhausted.to_string(), "(pending (budget-exhausted))");
         let recovered = matched(predicates)
             .discharge_metered_with(|goal, budget| context.prove_metered(goal, budget));
         assert!(matches!(recovered, TypeAssessment::Applicable(_)));
+    }
+
+    #[test]
+    fn independent_refutation_survives_an_earlier_resource_failure() {
+        let context = Context::default();
+        let mut calls = 0;
+        let assessment = matched(vec![TypePredicate::Bool(true), TypePredicate::Bool(false)])
+            .discharge_metered_with(|goal, budget| {
+                calls += 1;
+                if calls <= 2 {
+                    budget.steps -= 1;
+                    Outcome::Unknown {
+                        reason: crate::ptc::UnknownReason::BudgetExhausted,
+                        residual: goal,
+                    }
+                } else {
+                    // Inject a checked independent proof at a known callback
+                    // cost; PTC's own resource limits are tested separately.
+                    budget.steps -= 1;
+                    context.prove(goal, Budget::default())
+                }
+            });
+        let TypeAssessment::Excluded(proof) = assessment else {
+            panic!("independent negative evidence must still exclude: {assessment:?}");
+        };
+        context.verify_proof(&proof, Budget::default()).unwrap();
     }
 }

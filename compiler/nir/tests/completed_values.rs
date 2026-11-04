@@ -66,7 +66,7 @@ fn frozen() -> Expr {
         },
     )
 }
-fn validate(value: &Expr) -> Result<(), &'static str> {
+fn validate(value: &Expr) -> Result<(), nir::NominalAdmissionError> {
     nir::completed_values::validate(value, &mut 10000)
 }
 
@@ -441,10 +441,19 @@ fn frozen_newtypes_require_the_exact_declared_representation() {
         validate(&value).is_err(),
         "a nominal name is not representation evidence"
     );
-    assert!(
-        nir::completed_values::validate_with_newtypes(&value, std::iter::once(&definition), &mut 1)
-            .is_err()
-    );
+    for steps in 0..128 {
+        let mut fuel = steps;
+        let result = nir::completed_values::validate_with_newtypes(
+            &value,
+            std::iter::once(&definition),
+            &mut fuel,
+        );
+        assert!(
+            matches!(result, Ok(()) | Err(nir::NominalAdmissionError::Budget)),
+            "steps {steps}: {result:?}"
+        );
+        assert!(fuel <= steps);
+    }
     let wrong = expr(
         wrapper.clone(),
         K::NewtypeConvert(Box::new(expr(
@@ -864,13 +873,13 @@ fn nominal_completed_values_check_instantiated_layouts_and_constructor_identity(
         ],
     };
     let lookup = |id, _: &mut usize| {
-        if id == record.declaration {
+        Ok(if id == record.declaration {
             Some(D::Struct(&record))
         } else if id == enumeration.declaration {
             Some(D::Enum(&enumeration))
         } else {
             None
-        }
+        })
     };
     let check = |value: &Expr, fuel: &mut usize| {
         nir::completed_values::validate_with_declarations(
@@ -1031,7 +1040,7 @@ fn typed_tuple_payloads_use_declaration_layouts_for_reconstruction_and_transport
             value,
             std::iter::empty(),
             &|ty| metadata.tuple_elements(ty),
-            &|_, _| None,
+            &|_, _| Ok(None),
             None,
             fuel,
         )
@@ -1196,12 +1205,11 @@ fn completed_collections_require_layout_and_completed_elements() {
             &|ty, fuel| {
                 let element = metadata.list_element(ty);
                 if let Some(element) = element {
-                    nir::type_computations::charge_term(element, fuel)
-                        .map_err(|_| "budget exhausted")?;
+                    nir::type_computations::charge_term(element, fuel)?;
                 }
                 Ok(element.cloned())
             },
-            &|_, _| None,
+            &|_, _| Ok(None),
             None,
             fuel,
         )
@@ -1244,4 +1252,85 @@ fn completed_collections_require_layout_and_completed_elements() {
         assert!(check(&bad, &mut 10000).is_err());
     }
     assert!(check(&good, &mut 1).is_err());
+}
+
+#[test]
+fn completed_evidence_failures_preserve_category_and_consumed_work() {
+    use nir::NominalAdmissionError as Error;
+    let candidate = expr(boolean(), K::TypeList(vec![]));
+    for failure in [
+        Error::Budget,
+        Error::Unresolved("layout pending".into()),
+        Error::Invalid("bad layout authority".into()),
+    ] {
+        let mut spent = Vec::new();
+        for cost in [0, 17] {
+            let mut fuel = 1000;
+            let error = nir::completed_values::validate_with_collection_evidence_in(
+                &candidate,
+                std::iter::empty(),
+                &|_| None,
+                &|_, fuel| {
+                    *fuel -= cost;
+                    Err(failure.clone())
+                },
+                &|_, _| Ok(None),
+                None,
+                &mut fuel,
+            )
+            .unwrap_err();
+            assert_eq!(error, failure);
+            assert!(fuel > 0 && fuel < 1000);
+            spent.push(1000 - fuel);
+        }
+        assert_eq!(spent[1] - spent[0], 17);
+    }
+    // A failed multi-unit charge may leave fuel. That is still a resource
+    // failure, not evidence that the payload violates its declared domain.
+    let text = expr(
+        Term::Primitive(Primitive::Symbol),
+        K::Literal(nir::program::Literal::Symbol("x".repeat(1000))),
+    );
+    let mut fuel = 100;
+    assert_eq!(
+        nir::completed_values::validate(&text, &mut fuel),
+        Err(Error::Budget)
+    );
+    assert!(fuel > 0);
+    nir::completed_values::validate(&text, &mut 10_000).unwrap();
+}
+
+#[test]
+fn completed_nominal_lookup_distinguishes_absence_budget_and_duplicate_identity() {
+    use nir::NominalAdmissionError as Error;
+    use nir::normal_forms::NominalValueDeclaration;
+    let decl = |local| nir::DeclarationId { package: 1, local };
+    let definition = nir::program::Struct {
+        declaration: decl(800),
+        name: "Payload".into(),
+        type_parameters: vec![],
+        parameter_types: vec![],
+        capabilities: vec![],
+        requirements: vec![],
+        fields: vec![],
+    };
+    let mut package = nir::program::Package::default();
+    package.structs.push(definition.clone());
+    let lookup = nir::completed_values::lookup_nominal;
+    assert!(matches!(
+        lookup(&package, decl(800), &mut 0),
+        Err(Error::Budget)
+    ));
+    assert!(lookup(&package, decl(801), &mut 10).unwrap().is_none());
+    assert!(matches!(
+        lookup(&package, decl(800), &mut 10),
+        Ok(Some(NominalValueDeclaration::Struct(_)))
+    ));
+    package.structs.push(definition);
+    assert!(matches!(
+        lookup(&package, decl(800), &mut 10),
+        Err(Error::Invalid(_))
+    ));
+    package.structs.pop();
+    assert!(lookup(&package, decl(800), &mut 10).unwrap().is_some());
 }

@@ -1404,23 +1404,7 @@ impl Builder<'_> {
                 };
                 let subject = self.normalized_type(subject)?;
                 let expected = self.normalized_type(&expr.ty)?;
-                let (selected, remaining) = crate::capabilities::World {
-                    index: self.world.index(),
-                    implementations: &self.package.implementations,
-                    traits: &self.package.traits,
-                    assumptions: self.world.assumptions(),
-                    context: self.world.context(),
-                }
-                .resolve_associated_value_plan_budgeted(
-                    &interface,
-                    *member,
-                    &subject,
-                    Budget {
-                        steps: self.fuel,
-                        ..self.budget
-                    },
-                )?;
-                self.fuel = remaining;
+                let selected = self.associated_value_plan(&interface, *member, &subject)?;
                 if selected.value.ty != expected {
                     return Err("associated expression type disagrees with selected member".into());
                 }
@@ -2242,6 +2226,28 @@ impl Builder<'_> {
         }
         Err("interface value input normalization requires domain evidence".into())
     }
+    fn associated_value_plan(
+        &mut self,
+        interface: &n::InterfaceInstance,
+        member: Id,
+        subject: &Term,
+    ) -> Result<crate::associated::AssociatedValueResolution, String> {
+        let mut budget = Budget {
+            steps: self.fuel,
+            ..self.budget
+        };
+        let selected = crate::capabilities::World {
+            index: self.world.index(),
+            implementations: &self.package.implementations,
+            traits: &self.package.traits,
+            assumptions: self.world.assumptions(),
+            context: self.world.context(),
+        }
+        .resolve_associated_value_plan_metered(interface, member, subject, &mut budget);
+        self.fuel = budget.steps;
+        selected.map_err(String::from)
+    }
+
     fn normalized_type(&mut self, ty: &Term) -> Result<Term, String> {
         self.world.normalized_type(ty, self.budget, &mut self.fuel)
     }
@@ -2703,23 +2709,11 @@ impl Builder<'_> {
                     .iter()
                     .any(|(member, _)| *member == origin.member)
                 {
-                    let (selected, remaining) = crate::capabilities::World {
-                        index: self.world.index(),
-                        implementations: &self.package.implementations,
-                        traits: &self.package.traits,
-                        assumptions: self.world.assumptions(),
-                        context: self.world.context(),
-                    }
-                    .resolve_associated_value_plan_budgeted(
+                    let selected = self.associated_value_plan(
                         &selected_interface,
                         origin.member,
                         &selected_subject,
-                        Budget {
-                            steps: self.fuel,
-                            ..self.budget
-                        },
                     )?;
-                    self.fuel = remaining;
                     self.output[slot]
                         .associated
                         .push((origin.member, selected.value.clone()));
@@ -3005,23 +2999,7 @@ impl Builder<'_> {
                         .iter()
                         .any(|(id, _)| id == member)
                 {
-                    let (selected, remaining) = crate::capabilities::World {
-                        index: self.world.index(),
-                        implementations: &self.package.implementations,
-                        traits: &self.package.traits,
-                        assumptions: self.world.assumptions(),
-                        context: self.world.context(),
-                    }
-                    .resolve_associated_value_plan_budgeted(
-                        &interface,
-                        *member,
-                        &subject,
-                        Budget {
-                            steps: self.fuel,
-                            ..self.budget
-                        },
-                    )?;
-                    self.fuel = remaining;
+                    let selected = self.associated_value_plan(&interface, *member, &subject)?;
                     // Publish the demand before traversing dependencies; recursive
                     // initialization is bounded by the comptime interpreter.
                     if selected.requires_invocation {

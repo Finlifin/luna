@@ -1592,15 +1592,21 @@ impl<'a> Interpreter<'a> {
                         };
                         completed_tuple_heads.get(head)?.tuple_elements(ty)
                     },
-                    &|ty, fuel| {
-                        nir::normal_forms::list_element_budgeted(package, ty, fuel)
-                            .map_err(|_| "invalid completed collection layout evidence")
-                    },
+                    &|ty, fuel| nir::normal_forms::list_element_budgeted(package, ty, fuel),
                     &|id, fuel| nir::completed_values::lookup_nominal(package, id, fuel),
                     package.target,
                     &mut value_fuel,
                 )
-                .map_err(|_| invalid())?;
+                .map_err(|failure| Error {
+                    kind: match failure {
+                        nir::NominalAdmissionError::Budget => ErrorKind::StepsExhausted,
+                        nir::NominalAdmissionError::Unresolved(_) => {
+                            ErrorKind::TypeContractUnresolved
+                        }
+                        nir::NominalAdmissionError::Invalid(_) => ErrorKind::InvalidCallPlan,
+                    },
+                    source: Some(value.source),
+                })?;
                 nir::completed_values::validate_with_collection_evidence_in(
                     original,
                     package.newtypes.iter(),
@@ -1610,15 +1616,21 @@ impl<'a> Interpreter<'a> {
                         };
                         completed_tuple_heads.get(head)?.tuple_elements(ty)
                     },
-                    &|ty, fuel| {
-                        nir::normal_forms::list_element_budgeted(package, ty, fuel)
-                            .map_err(|_| "invalid completed collection layout evidence")
-                    },
+                    &|ty, fuel| nir::normal_forms::list_element_budgeted(package, ty, fuel),
                     &|id, fuel| nir::completed_values::lookup_nominal(package, id, fuel),
                     package.target,
                     &mut value_fuel,
                 )
-                .map_err(|_| invalid())?;
+                .map_err(|failure| Error {
+                    kind: match failure {
+                        nir::NominalAdmissionError::Budget => ErrorKind::StepsExhausted,
+                        nir::NominalAdmissionError::Unresolved(_) => {
+                            ErrorKind::TypeContractUnresolved
+                        }
+                        nir::NominalAdmissionError::Invalid(_) => ErrorKind::InvalidCallPlan,
+                    },
+                    source: Some(value.source),
+                })?;
                 nir::copy_budget::charge_substitution(
                     original,
                     &input_binders(&implementation.type_parameters),

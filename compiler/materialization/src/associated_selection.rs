@@ -15,18 +15,18 @@ pub fn resolve_associated_value_for_invocation(
             member,
         } = &access.kind
         else {
-            return Err("expected associated value access".to_owned());
+            return Err(nir::NominalAdmissionError::from(
+                "expected associated value access",
+            ));
         };
-        let (selected, rest) = world.resolve_associated_value_plan_budgeted(
-            interface,
-            *member,
-            subject,
-            Budget {
-                steps: fuel,
-                ..Default::default()
-            },
-        )?;
-        fuel = rest;
+        let mut budget = Budget {
+            steps: fuel,
+            ..Default::default()
+        };
+        let selected =
+            world.resolve_associated_value_plan_metered(interface, *member, subject, &mut budget);
+        fuel = budget.steps;
+        let selected = selected?;
         let initializer =
             nir::associated_initializers::AssociatedInitializer::new(selected.value, &mut fuel)?;
         Ok(comptime_interpretor::AssociatedSelection {
@@ -34,12 +34,21 @@ pub fn resolve_associated_value_for_invocation(
             requires_invocation: selected.requires_invocation,
         })
     })();
-    if result.is_err() {
-        fuel = 0;
-    }
     *remaining -= (before - fuel) as u64;
-    result.map_err(|_: String| comptime_interpretor::Error {
-        kind: comptime_interpretor::ErrorKind::UnmaterializedDispatch,
-        source: Some(access.source),
-    })
+    result.map_err(
+        |failure: nir::NominalAdmissionError| comptime_interpretor::Error {
+            kind: match failure {
+                nir::NominalAdmissionError::Budget => {
+                    comptime_interpretor::ErrorKind::StepsExhausted
+                }
+                nir::NominalAdmissionError::Unresolved(_) => {
+                    comptime_interpretor::ErrorKind::TypeContractUnresolved
+                }
+                nir::NominalAdmissionError::Invalid(_) => {
+                    comptime_interpretor::ErrorKind::UnmaterializedDispatch
+                }
+            },
+            source: Some(access.source),
+        },
+    )
 }

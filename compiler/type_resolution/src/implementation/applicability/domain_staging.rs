@@ -16,13 +16,13 @@ impl ImplementationHead {
     ) -> Result<Option<HeadMatch>, TypeAssessment> {
         let pending = |error: String| TypeAssessment::Pending(error);
         let computation = |error: nir::type_computations::Error| match error {
-            nir::type_computations::Error::Budget => pending(error.to_string()),
+            nir::type_computations::Error::Budget => TypeAssessment::BudgetExhausted,
             error => TypeAssessment::Invalid(error.to_string()),
         };
         if budget.max_depth == 0 {
-            return Err(pending("dependent head staging depth exhausted".into()));
+            return Err(TypeAssessment::BudgetExhausted);
         }
-        budget.steps = validate(self, subject, interface_arguments, budget).map_err(pending)?;
+        budget.steps = validate(self, subject, interface_arguments, budget).map_err(computation)?;
         let parameters = self
             .parameter_binders()
             .map_err(|error| TypeAssessment::Invalid(error.to_string()))?;
@@ -37,6 +37,7 @@ impl ImplementationHead {
                     known.push(value);
                 }
                 Err(crate::InferenceError::Unresolved(_)) => {}
+                Err(crate::InferenceError::Budget) => return Err(TypeAssessment::BudgetExhausted),
                 Err(error) => {
                     return Err(pending(format!("dependent input observation: {error:?}")));
                 }
@@ -172,7 +173,7 @@ impl ImplementationHead {
                 "staged head requirements changed".into(),
             ));
         }
-        budget.steps = validate(self, subject, interface_arguments, budget).map_err(pending)?;
+        budget.steps = validate(self, subject, interface_arguments, budget).map_err(computation)?;
         let mut original = self.clone();
         original.requirements.clear();
         original

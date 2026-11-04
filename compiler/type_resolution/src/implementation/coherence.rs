@@ -170,7 +170,8 @@ fn separation_goal(
     b: &ImplementationHead,
     budget: Budget,
 ) -> Result<(Formula, Budget), String> {
-    let mut fuel = super::applicability::validate(a, &b.subject, &b.interface_arguments, budget)?;
+    let mut fuel = super::applicability::validate(a, &b.subject, &b.interface_arguments, budget)
+        .map_err(|error| error.to_string())?;
     fuel = super::applicability::validate(
         b,
         &a.subject,
@@ -179,7 +180,8 @@ fn separation_goal(
             steps: fuel,
             ..budget
         },
-    )?;
+    )
+    .map_err(|error| error.to_string())?;
     // Substitution visits terms once per parameter in the current NIR helper.
     let parameter_count = a
         .type_parameters

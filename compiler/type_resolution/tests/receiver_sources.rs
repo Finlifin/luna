@@ -147,7 +147,7 @@ fn discovery_failure_does_not_publish_partial_inputs_or_poison_later_queries() {
             &BTreeMap::new(),
             None
         ),
-        Err(TypeAssessment::Pending(_))
+        Err(TypeAssessment::BudgetExhausted)
     ));
     assert_eq!(
         discover(&head, &subject, &Context::default())
@@ -265,7 +265,7 @@ fn metered_discovery_returns_unused_fuel_and_charges_failed_queries() {
             &BTreeMap::new(),
             None,
         ),
-        Err(TypeAssessment::Pending(_))
+        Err(TypeAssessment::BudgetExhausted)
     ));
     assert_eq!(empty.steps, 0);
     let unresolved = head(Term::Optional(Box::new(input(1))), &[1, 2], vec![input(2)]);

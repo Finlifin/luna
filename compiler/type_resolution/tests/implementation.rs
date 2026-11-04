@@ -829,7 +829,7 @@ fn fixed_scalar_indices_select_infer_and_replay_without_value_equations() {
                     ..Budget::default()
                 }
             ),
-            TypeAssessment::Pending(_)
+            TypeAssessment::BudgetExhausted
         ));
         assert!(matches!(
             h.assess_types(&ty(P::Integer), &inputs, &context, Budget::default()),
@@ -847,7 +847,7 @@ fn fixed_scalar_indices_select_infer_and_replay_without_value_equations() {
                     ..Budget::default()
                 }
             ),
-            TypeAssessment::Pending(_)
+            TypeAssessment::BudgetExhausted
         ));
     }
 }
@@ -1094,7 +1094,7 @@ fn tuple_kind_conflict_excludes_uninferable_generic_candidates() {
                     ..Budget::default()
                 }
             ),
-            TypeAssessment::Pending(_)
+            TypeAssessment::BudgetExhausted
         ));
         assert!(matches!(
             candidate.assess_types(&subject, &[], &trusted, Budget::default()),
@@ -2018,7 +2018,7 @@ fn record_label_budget_does_not_publish_candidate_applicability() {
                 max_depth: 128
             }
         ),
-        TypeAssessment::Pending(_)
+        TypeAssessment::BudgetExhausted
     ));
     assert!(matches!(
         candidate.assess_types(&subject, &[], &context(), Budget::default()),
@@ -3450,7 +3450,7 @@ fn disjunctive_subject_eligibility_keeps_symbolic_identity_and_replays() {
                 ..Budget::default()
             }
         ),
-        TypeAssessment::Pending(_)
+        TypeAssessment::BudgetExhausted
     ));
     for other in [
         var(3),
@@ -3729,7 +3729,7 @@ fn symbolic_scalar_union_excludes_error_heads_within_the_candidate_budget() {
     );
     assert!(matches!(
         candidate.assess_types(&subject, &[], &context, Budget { steps: 1, ..budget }),
-        TypeAssessment::Pending(_)
+        TypeAssessment::BudgetExhausted
     ));
     assert!(matches!(
         candidate.assess_types(&subject, &[], &context, budget),
@@ -3775,7 +3775,7 @@ fn repeated_record_value_matching_and_replay_preserve_exhaustion() {
         };
         match h.assess_types(&ty(P::Bool), &inputs, &context, budget) {
             TypeAssessment::Applicable(_) => {}
-            TypeAssessment::Pending(_) => pending += 1,
+            TypeAssessment::BudgetExhausted => pending += 1,
             other => panic!(
                 "unfinished matching must not refute or invalidate the input: {steps}: {other:?}"
             ),

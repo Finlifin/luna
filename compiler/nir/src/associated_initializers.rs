@@ -3,6 +3,7 @@
 use crate::{
     DeclarationParameter, Term,
     program::{Expr, ExprKind as K},
+    value_admission::Error,
 };
 use std::fmt;
 
@@ -11,7 +12,7 @@ pub struct AssociatedInitializer {
     expression: Expr,
 }
 impl AssociatedInitializer {
-    pub fn new(expression: Expr, fuel: &mut usize) -> Result<Self, String> {
+    pub fn new(expression: Expr, fuel: &mut usize) -> Result<Self, Error> {
         if !crate::free_bindings::collect(&expression, fuel)?.is_empty() {
             return Err("associated initializer cannot capture caller locals".into());
         }
@@ -32,9 +33,9 @@ impl AssociatedInitializer {
         parameters: &[DeclarationParameter],
         arguments: &[Term],
         fuel: &mut usize,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, Error> {
         crate::copy_budget::charge_substitution(&self.expression, parameters, arguments, fuel)
-            .map_err(|_| "associated initializer substitution budget exhausted")?;
+            .map_err(|_| Error::Budget)?;
         let expression = self
             .expression
             .instantiate_parameters(parameters, arguments)
@@ -42,11 +43,11 @@ impl AssociatedInitializer {
         Self::new(expression, fuel)
     }
 }
-fn check_calls(expression: &Expr, fuel: &mut usize, depth: usize) -> Result<(), String> {
+fn check_calls(expression: &Expr, fuel: &mut usize, depth: usize) -> Result<(), Error> {
     if depth >= 128 {
-        return Err("associated initializer nesting exhausted".into());
+        return Err(Error::Budget);
     }
-    crate::visit::expression_pruned(expression, fuel, |node, fuel| {
+    crate::visit::expression_pruned_checked(expression, fuel, |node, fuel| {
         if let K::Call { callee, .. } = &node.kind {
             if !callee.ty.is_comptime_callable() {
                 return Err("associated initializer cannot invoke a runtime callable".into());

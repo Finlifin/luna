@@ -633,6 +633,16 @@ impl Solver<'_, '_> {
         // less specific implementation instead of reporting a missing phase.
         let result = (|| {
             let types = types?;
+            if matches!(types.selection, Selection::Deferred { .. })
+                && types.assessments.values().any(|assessment| {
+                    matches!(
+                        assessment,
+                        crate::implementation::TypeAssessment::BudgetExhausted
+                    )
+                })
+            {
+                return Err(QueryError::Budget);
+            }
             if let Selection::Selected(selected) = types.selection {
                 self.check_comptime_parent_phases(interface, subject, selected, budget, depth)?;
             }

@@ -209,3 +209,31 @@ fn substitution_charges_unused_inputs_once_instead_of_expanding_them() {
             .is_err()
     );
 }
+
+#[test]
+fn initializer_limits_do_not_become_phase_or_capture_failures() {
+    use nir::NominalAdmissionError as Error;
+    let program = call(true);
+    let mut successes = 0;
+    let mut exhausted = 0;
+    for steps in 0..64 {
+        let mut fuel = steps;
+        match AssociatedInitializer::new(program.clone(), &mut fuel) {
+            Ok(initializer) => {
+                successes += 1;
+                assert_eq!(initializer.expression(), &program);
+            }
+            Err(Error::Budget) => exhausted += 1,
+            Err(error) => panic!("steps {steps}: {error}"),
+        }
+        assert!(fuel <= steps);
+    }
+    assert!(successes > 0 && exhausted > 0);
+    let mut fuel = 1000;
+    assert!(matches!(
+        AssociatedInitializer::new(call(false), &mut fuel),
+        Err(Error::Invalid(_))
+    ));
+    assert!(fuel > 0 && fuel < 1000);
+    assert!(AssociatedInitializer::new(program, &mut fuel).is_ok());
+}

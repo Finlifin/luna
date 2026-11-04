@@ -2681,6 +2681,72 @@ call_inference_error／带 span 的便捷入口负责渲染。候选在所有观
   --check --edition 2024 --config skip_children=true`，退出 0；
   `/tmp/luna-tools-v24wvrxz/result.json`。
 
+**普通关联值与 initializer 的接收边界。** completed_values 的结构遍历、字面量、
+捕获值、newtype 转换、error transport 和名义字段替换现在传播 typed admission
+错误。名义声明 lookup 返回 Result<Option<_>>：成功查完没有声明才是 None；遍历
+耗尽是 Budget，重复身份是 Invalid。集合域回调也保留其失败类型，不再将资源不足
+或未决布局转成无布局。字段替换直接使用 instantiate_value_fields_checked，删除
+先变成 Option 再猜测原因的调用。tuple 的既有可选布局观察器尚未在此统一迁移。
+
+AssociatedInitializer 的自由绑定分析、捕获 initializer 检查和表达式遍历使用同一
+typed 错误。深度／步骤失败保持 Budget；runtime 调用和捕获调用者 local 仍非法。
+这是检查初始化程序能否被保留，不证明其已经执行或成为 completed value。
+elaboration 对完成值检查的 Budget／Unresolved 直接报告，不能据此改走待执行
+initializer；确实不是完成值的程序继续经过原有 phase／闭合检查。
+
+World 的 resolve_associated_value_plan_metered 统一选择完成值或初始化计划。
+形成检查、实现选择、替换、完成类型视图和最终 payload 检查在每条返回路径交还
+实际余额；内部缓存只属于本次查询，失败不会发布结果。旧的仅成功返回余额的
+plan_budgeted 和内部 value_budgeted 入口退役。materialization 的三处需求统一走
+同一个适配入口，保留外围字符串诊断，但不再丢失失败前已发生的扣款。
+
+invocation 的宿主选择回调不再遇到任何失败就清空余额并统一报
+UnmaterializedDispatch。Budget 映射为 StepsExhausted，Unresolved 映射为
+TypeContractUnresolved，Invalid 保持 UnmaterializedDispatch；均保留访问来源。
+VM 构造对已完成关联值的校验同样区分资源／未决／非法。这不表示 VM 构造的
+全部预算已统一：其外围 reservation 和独立 phase pass 仍是下述剩余边界。
+
+真实 sysroot 的逐额度回归还暴露了两个上游丢失点：trait binder 的旧字符串包装，
+以及将候选额度不足写为普通 Pending 文本的 TypeAssessment。关联 Type/value
+现在使用 binders_with_self_checked；TypeAssessment 增加 BudgetExhausted 状态，
+输入遍历、参数／替换、普通值关系、候选推断与 requirement 证明中已确定的资源
+失败保留该状态。它在选择层仍是 pending，不能充当反例；若某个独立证据已完成
+排除或选择，保留该结论；若 Deferred 选择含资源失败，则 World 向调用者返回
+Budget。dump 使用 `(pending (budget-exhausted))`。结构资格观察、qualification
+等尚有未统一的内部原因，不能据此声称所有候选 Pending 都已保留完整失败链。
+
+这条关联值接线的验证（工作目录 `/home/fin/luna`）：
+
+- `python3 -B development/check.py --timeout 900 -- test -p nir -p type_resolution
+  -p luna --test completed_values --test associated_initializers --test associated
+  --test projection_copy_budget --test trait_query_failures --test implementation
+  --test capabilities --no-fail-fast`：`/tmp/luna-tools-2lsh4gau/result.json`，
+  183 通过、6 个旧资源状态断言失败，退出 101；其中 NIR 的 26 项和真实 sysroot
+  查询边界的 2 项全部通过。资源断言随后改为要求 BudgetExhausted，而不是放宽为
+  任意 Pending；真正未决参数仍要求 Pending。
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution
+  --no-fail-fast`：355 通过、receiver_sources 的两处同类旧断言失败，退出 101；
+  `/tmp/luna-tools-5kokc8r5/result.json`。修正后同一入口
+  `test -p type_resolution --lib --test receiver_sources --no-fail-fast`：29 项通过，
+  退出 0；`/tmp/luna-tools-b5grbvrh/result.json`。该组包含新增的独立反证测试：
+  在注入资源失败后，另一个 requirement 的有效反证仍可排除候选。
+- 同一入口 `test -p luna`，选择 `associated_signatures`、
+  `deferred_associated_values`、`trait_query_failures`、`normal_input_plans`、
+  `open_normal_input_plans`、`prepared_invocations`、`invocation_value_templates`、
+  `dynamic_trait_clauses`、`sysroot_preludes`、`library_list_hash`、
+  `library_list_equality`，附 `--no-fail-fast`：88 项通过，退出 0；
+  `/tmp/luna-tools-k_pv0e88/result.json`。
+- 同一入口 `test -p comptime_interpretor --lib associated --no-fail-fast`：
+  19 项通过，退出 0；`/tmp/luna-tools-hjluzwr8/result.json`。
+- 本次 18 个 Rust 文件的 scoped rustfmt check：退出 0；
+  `/tmp/luna-tools-pxm5v8x7/result.json`。git diff --check 通过。
+
+NIR 新回归区分声明缺失／重复／耗尽，注入三类集合证据失败并验证 17 步工作差额，
+扫描 newtype 和 initializer 额度并检查失败后恢复。sysroot 回归比较直接选择与宿主
+回调的同一查询（包括 initializer 形成）的余额和分类，再通过真实 invocation
+验证布尔结果、执行事件与无结果缓存。Luna 的 type_resolution dev-dependency 仅供
+该生产边界测试使用，不为测试复制世界构造逻辑。
+
 **Given 前提查询。** World／Solver 的 given 系列接口现在返回
 `Result<Option<TraitRequirement>, NominalAdmissionError>`：只有 `Ok(None)` 表示
 已完成查询但没有见证。输入／域非法、预算不足、关系未决分别保留 Invalid、Budget、
@@ -2740,10 +2806,10 @@ PTC 会按当前预算为传播与学习分配额度，较小预算可能走更�
 - fresh phase pass 仍使用自己的默认额度，VM 随后再做结构检查；构造失败的
   for_comptime_in_budget 仍保守保留全部 reservation，尚非精确失败扣款。
 - 后续关联项／方法签名与 world capability 的部分实例化尚未有界。
-- 直接／projected trait resolution、世界命题、条件事实和 Type 投影已保留 typed
-  失败。inherent 查询、普通 associated value 的最终值校验、qualification／
-  TypeAssessment 的部分内部原因仍有 String 或可选结果边界。普通关联值查询和
-  DeclarationWorld 的外围失败扣款也仍有保守处理；不能据 metered Type view 的
+- 直接／projected trait resolution、世界命题、条件事实、Type 投影及普通关联值的
+  payload／initializer 校验已保留 typed 失败。inherent 查询、qualification／
+  TypeAssessment 的部分内部原因仍有 String 或可选结果边界。
+  DeclarationWorld 的外围失败扣款也仍有保守处理；不能据 metered Type/value view 的
   实际扣款声称全部预算所有权已完成。proof replay 仍有合并 admission 错误的路径，
   完整求解链的 Pending／资源／反例传播未完成。
   当前查询复用 NominalAdmissionError，并不意味着所有能力选择都属于值域检查；
