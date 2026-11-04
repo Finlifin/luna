@@ -324,3 +324,104 @@ fn method_signature_queries_preserve_missing_invalid_and_budget_outcomes() {
     assert_eq!(query(&invalid, &mut 1000), Ok(None));
     assert_eq!(query(&method, &mut 1000), Ok(Some(callable(boolean()))));
 }
+
+#[test]
+fn construction_shares_work_across_metadata_and_recovers_after_exhaustion() {
+    let package = package(30);
+    let mut baseline = Budget::default();
+    let world = DeclarationWorld::new_metered(&package, &mut baseline, None).unwrap();
+    let work = Budget::default().steps - baseline.steps;
+    assert!(work > 30);
+    assert!(std::ptr::eq(
+        world.function_declaration(id(1)).unwrap(),
+        &package.functions[0]
+    ));
+    for steps in [0, 1, work / 2, work - 1] {
+        let mut limited = Budget {
+            steps,
+            ..Budget::default()
+        };
+        assert!(matches!(
+            DeclarationWorld::new_metered(&package, &mut limited, None),
+            Err(AdmissionError::Budget)
+        ));
+        assert!(limited.steps <= steps);
+    }
+    let mut exact = Budget {
+        steps: work,
+        ..Budget::default()
+    };
+    DeclarationWorld::new_metered(&package, &mut exact, None).unwrap();
+    assert_eq!(exact.steps, 0);
+    let mut retry = Budget::default();
+    DeclarationWorld::new_metered(&package, &mut retry, None).unwrap();
+    assert_eq!(retry.steps, baseline.steps);
+}
+
+#[test]
+fn metadata_payloads_are_charged_but_borrowed_function_bodies_are_not_copied() {
+    let mut package = package(0);
+    let mut f = function(200);
+    let symbol = Term::Primitive(Primitive::Symbol);
+    let Term::Function { result, .. } = &mut f.signature else {
+        unreachable!()
+    };
+    *result = Box::new(symbol.clone());
+    f.body.ty = symbol;
+    f.body.kind = ExprKind::Literal(nir::program::Literal::Symbol("x".into()));
+    package.functions.push(f);
+    let mut short = Budget::default();
+    DeclarationWorld::new_metered(&package, &mut short, None).unwrap();
+    package.functions.last_mut().unwrap().body.kind =
+        ExprKind::Literal(nir::program::Literal::Symbol("x".repeat(200_000)));
+    let mut long = Budget::default();
+    let world = DeclarationWorld::new_metered(&package, &mut long, None).unwrap();
+    assert_eq!(short.steps, long.steps);
+    assert!(std::ptr::eq(
+        world.function_declaration(id(200)).unwrap(),
+        package.functions.last().unwrap()
+    ));
+    package.structs.push(nir::program::Struct {
+        declaration: id(300),
+        name: "Payload".into(),
+        type_parameters: vec![],
+        parameter_types: vec![],
+        capabilities: vec![],
+        requirements: vec![],
+        fields: vec![("x".repeat(200_000), boolean())],
+    });
+    let mut limited = Budget::default();
+    assert!(matches!(
+        DeclarationWorld::new_metered(&package, &mut limited, None),
+        Err(AdmissionError::Budget)
+    ));
+    assert!(limited.steps > 0 && limited.steps < Budget::default().steps);
+    package.structs[0].fields[0].0 = "small".into();
+    DeclarationWorld::new_metered(&package, &mut limited, None).unwrap();
+}
+
+#[test]
+fn supplied_assumption_payloads_share_the_world_construction_allowance() {
+    let package = Package::default();
+    let context = type_resolution::ptc::Context::default();
+    let assumptions = [nir::program::TraitRequirement {
+        interface: id(10),
+        interface_arguments: vec![],
+        subject: Term::Record(vec![("x".repeat(2000), boolean())]),
+    }];
+    let mut limited = Budget {
+        steps: 100,
+        ..Budget::default()
+    };
+    assert!(matches!(
+        DeclarationWorld::new_metered(&package, &mut limited, Some((&context, &assumptions))),
+        Err(AdmissionError::Budget)
+    ));
+    assert!(limited.steps > 0 && limited.steps < 100);
+    let mut enough = Budget::default();
+    let world =
+        DeclarationWorld::new_metered(&package, &mut enough, Some((&context, &assumptions)))
+            .unwrap();
+    assert_eq!(world.assumptions(), &assumptions);
+    assert!(enough.steps < Budget::default().steps - 2000);
+}

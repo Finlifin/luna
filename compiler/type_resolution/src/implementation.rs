@@ -543,13 +543,23 @@ impl Index {
         declaration: DeclarationId,
         domain: Term,
     ) -> Result<(), String> {
-        nir::type_computations::charge_term(&domain, &mut 100_000)
-            .map_err(|error| error.to_string())?;
+        self.register_parameter_domain_metered(declaration, domain, &mut 100_000)
+            .map_err(String::from)
+    }
+
+    pub fn register_parameter_domain_metered(
+        &mut self,
+        declaration: DeclarationId,
+        domain: Term,
+        fuel: &mut usize,
+    ) -> Result<(), nir::NominalAdmissionError> {
+        nir::type_computations::charge_term(&domain, fuel)?;
         if domain.sort() != nir::Sort::Type {
             return Err("declaration parameter domain must be a Type".into());
         }
         domain.check_scope(&[]).map_err(|error| error.to_string())?;
         if let Some(previous) = self.parameter_domains.get(&declaration) {
+            nir::type_computations::charge_term(previous, fuel)?;
             return if previous == &domain {
                 Ok(())
             } else {
@@ -591,19 +601,29 @@ impl Index {
         self.revision
     }
     pub fn insert(&mut self, head: ImplementationHead, budget: Budget) -> Result<(), Error> {
+        self.insert_metered(head, &mut { budget })
+    }
+
+    /// Publish one contribution only after ownership and every key validate;
+    /// failures retain the work consumed from the shared construction budget.
+    pub fn insert_metered(
+        &mut self,
+        head: ImplementationHead,
+        budget: &mut Budget,
+    ) -> Result<(), Error> {
         if self.contributions.contains(&head.declaration) {
             return Err(Error::DuplicateDeclaration(head.declaration));
         }
-        let mut fuel = budget.steps;
+        let fuel = &mut budget.steps;
         // Open interfaces remain provisional in the supplemental bucket. Once
         // fixed, declarations must pass ownership before becoming observable.
-        self.check_ownership(&head, &mut fuel, budget.max_depth)?;
-        let key = Key::with_fuel(&head.subject, &mut fuel, budget.max_depth)?;
+        self.check_ownership(&head, fuel, budget.max_depth)?;
+        let key = Key::with_fuel(&head.subject, fuel, budget.max_depth)?;
         let precision = key.precision();
         let arguments = head
             .interface_arguments
             .iter()
-            .map(|ty| Key::with_fuel(ty, &mut fuel, budget.max_depth))
+            .map(|ty| Key::with_fuel(ty, fuel, budget.max_depth))
             .collect::<Result<_, _>>()?;
         // Publish only after all keys have validated successfully.
         self.contributions.insert(head.declaration);

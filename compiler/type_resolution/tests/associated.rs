@@ -952,7 +952,7 @@ fn declaration_world_queries_keep_caches_private_and_failure_fuel_spent() {
     let mut unknown = budget.steps;
     let error =
         normalize_concrete_type(&first, &projection(ty(P::I32), vec![]), &mut unknown).unwrap_err();
-    assert!(error.contains("remaining-steps"), "{error}");
+    assert!(error.to_string().contains("remaining-steps"), "{error}");
     assert!(
         unknown > 0 && unknown < budget.steps,
         "failed selection returns only unused fuel"

@@ -2755,11 +2755,25 @@ normalization 的缓存入口已经发布子结果，外层复制仍可能失败
 
 归约成功或失败都交回预算余额；normalized_type 使用 typed admission 错误。
 materialization 在已有字符串诊断边界渲染，但不改写余额。normalize_concrete_type
-只在世界构建失败时保留原有整份 allowance 扣款；世界已经建立后，查询失败按实际
-追踪消耗返回余额，允许调用者继续独立检查。此处未统一 DeclarationWorld::new：
-Context::from_package 的独立验证预算、各 Index::insert 复用预算、布局元数据复制及
-parameter domain 注册的独立额度仍须一起迁移，不能仅去掉外围清零就声称构建失败
-也已精确计费。便利入口的字符串结果也不作为 typed query 成果。
+现在贯通构建与归约的 typed admission 结果，两阶段都交回追踪到的剩余额度，
+构建失败不再人为清零，允许调用者继续独立检查。
+
+**DeclarationWorld 的构建事务。** new_metered 接收调用者的可变预算，Context 的
+NF／newtype 验证与构造器注册、每个 implementation 的所有权及索引键检查、声明
+参数域收集与注册都从同一余额扣款。Index 的 insert_metered 和参数域注册先完成
+检查再更新索引；失败不改变贡献集合、参数域或 revision。整份世界在私有局部状态
+中建立，全部成功后才返回，构建失败不留下可供查询的半成品。
+
+世界保留的前提、NF 头、nominal 布局及 implementation head 在复制前按结构和
+载荷预检，包含字段名、枚举编码及字符串数据。函数声明仍从源包借用，既不复制
+也不遍历函数体；增大 body 不会增加这里的元数据复制开销。预检不是形成证明，
+不替代后续域检查，也不执行或展开 NF 函数体。
+
+materialization 的生产入口使用 new_metered，继续从构建余额处理输入。
+DeclarationWorld::new、Index::insert 等已有便利入口委托同一实现，但保留其拥有
+预算／字符串诊断的旧接口；Context 的独立便利入口仍提供默认验证额度。其他调用方
+自行建立的预算尚未因此统一。此处计量结构工作与保留载荷，不声称逐条计量排序、
+hash 或分配的 CPU 指令，也尚未完成 stable world 的分块共享与增量复用。
 
 事务回归使用同一个声明世界的底层归约找到“子结果完成、根保留失败”的实际额度，
 不假设大额度观测消耗是最小成功阈值。失败后重试与全新世界具有相同开销；成功后
@@ -2778,6 +2792,26 @@ parameter domain 注册的独立额度仍须一起迁移，不能仅去掉外围
   associated 的 26 项与上一条范围重叠，不累加为独立用例。
 - 四个修改的 Rust 文件通过 scoped rustfmt check，退出 0；
   `/tmp/luna-tools-10wgpspg/result.json`。git diff --check 通过。
+
+构建事务迁移的验证（工作目录 `/home/fin/luna`）：
+
+- `python3 -B development/check.py --timeout 900 -- check -p type_resolution
+  -p luna --tests`：退出 0；`/tmp/luna-tools-mbloika0/result.json`。
+- 同一入口 `test -p type_resolution --lib --test world_construction
+  --test callable_world --test associated --test implementation --test capabilities
+  --no-fail-fast`：188 项通过，退出 0；`/tmp/luna-tools-_64qogyo/result.json`。
+- 同一入口 `test -p ptc -p luna --test type_inputs --test nominal_models
+  --test associated_signatures --test deferred_associated_values
+  --test trait_query_failures --test normal_input_plans --test prepared_invocations
+  --test invocation_value_templates --test sysroot_preludes --test library_list_equality
+  --no-fail-fast`：81 项通过，退出 0；`/tmp/luna-tools-3uqmbpuy/result.json`。
+- 八个修改／新增 Rust 文件的 scoped rustfmt check：退出 0；
+  `/tmp/luna-tools-bk1b81wm/result.json`。git diff --check 通过。
+
+新增回归覆盖重复注册不发布、域冲突保留原值、批量 implementation 共用额度、
+失败后恢复、宽载荷预检与函数体借用。这里的确定性构建不做证明搜索，可用实际
+消耗检查精确额度；该断言不推广到 PTC 的自适应证明路径。生产预算未增大，
+未运行全 workspace 或性能基准。
 
 **Given 前提查询。** World／Solver 的 given 系列接口现在返回
 `Result<Option<TraitRequirement>, NominalAdmissionError>`：只有 `Ok(None)` 表示
@@ -2841,8 +2875,9 @@ PTC 会按当前预算为传播与学习分配额度，较小预算可能走更�
 - 直接／projected trait resolution、世界命题、条件事实、Type 投影及普通关联值的
   payload／initializer 校验已保留 typed 失败。inherent 查询、qualification／
   TypeAssessment 的部分内部原因仍有 String 或可选结果边界。
-  DeclarationWorld 的构建失败扣款仍有保守处理；其完成类型查询已按外层事务发布并
-  返回实际归约余额。不能据 metered Type/value view 的
+  DeclarationWorld 的构建与完成类型查询已共用各自调用者的余额，构建失败不发布
+  半成品，归约结果按外层事务发布；其他便利入口自行建立的预算仍待迁移。
+  不能据 metered Type/value view 的
   实际扣款声称全部预算所有权已完成。proof replay 仍有合并 admission 错误的路径，
   完整求解链的 Pending／资源／反例传播未完成。
   当前查询复用 NominalAdmissionError，并不意味着所有能力选择都属于值域检查；

@@ -7,6 +7,7 @@ use crate::{
 use nir::value_admission::Error as AdmissionError;
 use nir::{DeclarationId as Id, Term, program as n};
 use std::collections::{BTreeMap, HashMap};
+mod construction;
 
 pub struct DeclarationWorld<'a> {
     normalized_types: HashMap<Term, Term>,
@@ -25,14 +26,43 @@ impl<'a> DeclarationWorld<'a> {
         budget: Budget,
         context: Option<(&Context, &[n::TraitRequirement])>,
     ) -> Result<(Self, usize), String> {
+        let mut budget = budget;
+        Self::new_metered(package, &mut budget, context)
+            .map(|world| (world, budget.steps))
+            .map_err(String::from)
+    }
+
+    /// Build privately using one allowance. Failed construction publishes no
+    /// index or world and returns its unspent budget to the caller.
+    pub fn new_metered(
+        package: &'a n::Package,
+        budget: &mut Budget,
+        context: Option<(&Context, &[n::TraitRequirement])>,
+    ) -> Result<Self, AdmissionError> {
+        construction::requirements(
+            context.map_or(&[], |(_, assumptions)| assumptions),
+            &mut budget.steps,
+        )?;
         let assumptions = context
             .map(|(_, assumptions)| assumptions.to_vec())
             .unwrap_or_default();
         let context = match context {
             Some((context, _)) => context.clone(),
-            None => Context::from_package(package)
-                .map_err(|reason| format!("dispatch type context: {reason}"))?,
+            None => Context::from_package_metered(package, &mut budget.steps).map_err(|error| {
+                use nir::normal_forms::ValidationError as E;
+                match error {
+                    E::Budget | E::Newtype(nir::newtypes::ValidationError::Budget) => {
+                        AdmissionError::Budget
+                    }
+                    error => AdmissionError::Invalid(format!("dispatch type context: {error}")),
+                }
+            })?,
         };
+        construction::spend(
+            &mut budget.steps,
+            package.builtin_implementation_packages.len(),
+        )?;
+        construction::layouts(package, &mut budget.steps)?;
         let mut index = Index::for_builtin_packages(
             package.target,
             package.builtin_implementation_packages.iter().copied(),
@@ -41,9 +71,11 @@ impl<'a> DeclarationWorld<'a> {
         index.sync_nominal_layouts(&package.structs, &package.enums, &package.newtypes);
 
         for implementation in &package.implementations {
+            construction::spend(&mut budget.steps, 1)?;
             if implementation.interface.is_some() {
+                construction::implementation(implementation, &mut budget.steps)?;
                 index
-                    .insert(
+                    .insert_metered(
                         ImplementationHead {
                             parameter_types: implementation.parameter_types.clone(),
                             declaration: implementation.declaration,
@@ -55,20 +87,21 @@ impl<'a> DeclarationWorld<'a> {
                         },
                         budget,
                     )
-                    .map_err(|e| format!("dispatch index: {e:?}"))?;
+                    .map_err(|error| match error {
+                        crate::implementation::Error::BudgetExhausted => AdmissionError::Budget,
+                        error => AdmissionError::Invalid(format!("dispatch index: {error:?}")),
+                    })?;
             }
         }
-        let mut input_fuel = budget.steps;
-        let domains = package.declaration_parameter_domains(&mut input_fuel)?;
+        let input_fuel = &mut budget.steps;
+        let domains = package.declaration_parameter_domains_checked(input_fuel)?;
         // Immutable declaration metadata is indexed once per world. No function
         // invocation result, predicate outcome or mutable state is cached here.
         let mut callable_functions = HashMap::new();
         let mut runtime_callables = HashMap::new();
         let mut normal_heads = HashMap::new();
         for function in &package.functions {
-            input_fuel = input_fuel
-                .checked_sub(1)
-                .ok_or("callable index budget exhausted")?;
+            *input_fuel = input_fuel.checked_sub(1).ok_or(AdmissionError::Budget)?;
             if callable_functions
                 .insert(function.declaration, function)
                 .is_some()
@@ -77,9 +110,7 @@ impl<'a> DeclarationWorld<'a> {
             }
         }
         for identity in &package.runtime_function_identities {
-            input_fuel = input_fuel
-                .checked_sub(1)
-                .ok_or("callable index budget exhausted")?;
+            *input_fuel = input_fuel.checked_sub(1).ok_or(AdmissionError::Budget)?;
             if runtime_callables
                 .insert(identity.declaration, identity)
                 .is_some()
@@ -88,14 +119,13 @@ impl<'a> DeclarationWorld<'a> {
             }
         }
         for head in &package.normal_forms {
-            input_fuel = input_fuel
-                .checked_sub(1)
-                .ok_or("callable index budget exhausted")?;
+            *input_fuel = input_fuel.checked_sub(1).ok_or(AdmissionError::Budget)?;
             if normal_heads.insert(head.declaration, head).is_some() {
                 return Err("duplicate normal-form callable identity".into());
             }
         }
 
+        construction::spend(input_fuel, domains.len())?;
         let declaration_parameter_sorts = domains
             .iter()
             .map(|(id, domain)| {
@@ -110,22 +140,19 @@ impl<'a> DeclarationWorld<'a> {
             })
             .collect();
         for (id, domain) in domains {
-            index.register_parameter_domain(id, domain)?;
+            index.register_parameter_domain_metered(id, domain, input_fuel)?;
         }
-        Ok((
-            Self {
-                normalized_types: HashMap::new(),
-                package,
-                index,
-                context,
-                assumptions,
-                declaration_parameter_sorts,
-                callable_functions,
-                runtime_callables,
-                normal_heads,
-            },
-            input_fuel,
-        ))
+        Ok(Self {
+            normalized_types: HashMap::new(),
+            package,
+            index,
+            context,
+            assumptions,
+            declaration_parameter_sorts,
+            callable_functions,
+            runtime_callables,
+            normal_heads,
+        })
     }
     /// Borrow checked metadata without scanning or copying executable bodies.
     pub fn function_declaration(&self, declaration: Id) -> Option<&'a n::Function> {
@@ -440,25 +467,20 @@ impl<'a> DeclarationWorld<'a> {
 }
 
 /// Query a concrete annotation without executing or expanding any body.
-/// Query failures preserve unused work. World construction still reserves its
-/// whole allowance on failure until its metadata builders share a failure meter.
+/// Construction and normalization share one allowance on every outcome.
 pub fn normalize_concrete_type(
     package: &n::Package,
     ty: &Term,
     fuel: &mut usize,
-) -> Result<Term, String> {
-    let budget = Budget {
+) -> Result<Term, AdmissionError> {
+    let mut budget = Budget {
         steps: *fuel,
         ..Budget::default()
     };
-    let (mut world, remaining) = DeclarationWorld::new(package, budget, None).map_err(|error| {
-        *fuel = 0;
-        error
-    })?;
-    *fuel = remaining;
-    world
-        .normalized_type(ty, budget, fuel)
-        .map_err(String::from)
+    let world = DeclarationWorld::new_metered(package, &mut budget, None);
+    *fuel = budget.steps;
+    let mut world = world?;
+    world.normalized_type(ty, budget, fuel)
 }
 
 impl DeclarationWorld<'_> {

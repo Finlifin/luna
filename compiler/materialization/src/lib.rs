@@ -467,7 +467,9 @@ fn build(
         roots,
         Roots::All | Roots::AllWithMethods(_) | Roots::Dispatch(_) | Roots::Invocation(_)
     );
-    let (world, mut input_fuel) = DeclarationWorld::new(package, budget, context)?;
+    let mut construction_budget = budget;
+    let world = DeclarationWorld::new_metered(package, &mut construction_budget, context)?;
+    let mut input_fuel = construction_budget.steps;
     let inline_effects = if matches!(roots, Roots::Iir(_)) {
         input_fuel = input_fuel
             .checked_sub(package.effects.len())

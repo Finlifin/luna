@@ -280,7 +280,16 @@ impl Context {
     /// caller assumptions or equations from function bodies. External head
     /// descriptors are compiler-issued contracts, as in required computation.
     pub fn from_package(package: &nir::program::Package) -> Result<Self, &'static str> {
-        nir::normal_forms::validate(package)?;
+        Self::from_package_metered(package, &mut 100_000).map_err(|error| error.message())
+    }
+
+    /// Build declaration theory using the caller's remaining construction work.
+    /// The temporary context becomes observable only after all metadata checks.
+    pub fn from_package_metered(
+        package: &nir::program::Package,
+        fuel: &mut usize,
+    ) -> Result<Self, nir::normal_forms::ValidationError> {
+        nir::normal_forms::validate_in(package, fuel)?;
         let mut context = Self::default();
         for declaration in package
             .structs
@@ -289,9 +298,15 @@ impl Context {
             .chain(package.enums.iter().map(|e| e.declaration))
             .chain(package.newtypes.iter().map(|n| n.declaration))
         {
+            *fuel = fuel
+                .checked_sub(1)
+                .ok_or(nir::normal_forms::ValidationError::Budget)?;
             context.admit_nominal_constructor(declaration);
         }
         for head in &package.normal_forms {
+            *fuel = fuel
+                .checked_sub(1)
+                .ok_or(nir::normal_forms::ValidationError::Budget)?;
             context.admit_congruence(head.declaration);
             if head.role == nir::normal_forms::Role::TypeList {
                 context.admit_list_inference_head(head.declaration);
