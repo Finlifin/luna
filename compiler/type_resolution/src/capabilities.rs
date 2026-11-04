@@ -6,7 +6,7 @@ use crate::implementation::{
 };
 use crate::ptc::{Budget, Context, Formula, Outcome};
 use nir::program::{Implementation, InterfaceInstance, Trait, TraitRequirement};
-use nir::{DeclarationId as Id, Term};
+use nir::{DeclarationId as Id, NominalAdmissionError as QueryError, Term};
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
@@ -75,6 +75,33 @@ pub struct World<'a> {
 }
 
 pub(crate) use crate::implementation::equivalent_domains;
+
+/// A partial world cannot justify a countermodel. Preserve independent proofs
+/// and do not hide final proof exhaustion behind an earlier missing fact.
+fn retain_incomplete_queries(
+    outcome: Outcome,
+    pending: Option<crate::ptc::UnknownReason>,
+) -> Outcome {
+    use crate::ptc::UnknownReason;
+    match (outcome, pending) {
+        (
+            Outcome::Unknown {
+                reason: UnknownReason::BudgetExhausted,
+                residual,
+            },
+            _,
+        ) => Outcome::Unknown {
+            reason: UnknownReason::BudgetExhausted,
+            residual,
+        },
+        (Outcome::NotEntailed(witness), Some(reason)) => Outcome::Unknown {
+            reason,
+            residual: witness.goal,
+        },
+        (Outcome::Unknown { residual, .. }, Some(reason)) => Outcome::Unknown { reason, residual },
+        (outcome, _) => outcome,
+    }
+}
 
 /// Member lookup roots implied by capabilities. Parents are traversed for
 /// their parameter capabilities, but remain inside their child's member lookup
@@ -373,7 +400,7 @@ impl World<'_> {
         interface: Id,
         subject: &Term,
         budget: Budget,
-    ) -> Result<Resolution, String> {
+    ) -> Result<Resolution, QueryError> {
         self.resolve_instance(&interface.into(), subject, budget)
     }
     pub fn resolve_instance(
@@ -381,7 +408,7 @@ impl World<'_> {
         interface: &InterfaceInstance,
         subject: &Term,
         budget: Budget,
-    ) -> Result<Resolution, String> {
+    ) -> Result<Resolution, QueryError> {
         self.resolve_instance_metered(interface, subject, &mut { budget })
     }
     /// Report work tracked by the capability solver, including failed queries.
@@ -391,7 +418,7 @@ impl World<'_> {
         interface: &InterfaceInstance,
         subject: &Term,
         budget: &mut Budget,
-    ) -> Result<Resolution, String> {
+    ) -> Result<Resolution, QueryError> {
         let mut solver = Solver {
             world: self,
             scope: ResolutionScope::capture(self),
@@ -430,15 +457,17 @@ impl World<'_> {
                 .iter()
                 .map(|ty| solver.prerequisite_type(ty, *budget, 0))
                 .collect::<Result<_, _>>()?;
-            solver.resolve(
-                &InterfaceInstance {
-                    declaration: interface.declaration,
-                    arguments,
-                },
-                &subject,
-                *budget,
-                0,
-            )
+            solver
+                .resolve(
+                    &InterfaceInstance {
+                        declaration: interface.declaration,
+                        arguments,
+                    },
+                    &subject,
+                    *budget,
+                    0,
+                )
+                .map_err(String::from)
         })();
         budget.steps = budget.steps.min(solver.remaining);
         result
@@ -516,9 +545,9 @@ impl Solver<'_, '_> {
         subject: &Term,
         budget: Budget,
         depth: usize,
-    ) -> Result<Resolution, String> {
+    ) -> Result<Resolution, QueryError> {
         if depth >= budget.max_depth.min(128) || self.remaining == 0 {
-            return Err("capability resolution budget exhausted".into());
+            return Err(QueryError::Budget);
         }
         self.remaining -= 1;
         if let Some(contract) = self
@@ -542,7 +571,9 @@ impl Solver<'_, '_> {
         }
         let key = (interface.clone(), subject.clone());
         if !self.active.insert(key.clone()) {
-            return Err("recursive capability obligation remains pending".into());
+            return Err(QueryError::Unresolved(
+                "recursive capability obligation remains pending".into(),
+            ));
         }
         let mut qualifications = BTreeMap::new();
         let mut condition_support = BTreeMap::new();
@@ -598,7 +629,13 @@ impl Solver<'_, '_> {
                     (assessment, state)
                 },
             )
-            .map_err(|e| format!("capability query: {e:?}"));
+            .map_err(|error| match error {
+                crate::implementation::Error::BudgetExhausted => QueryError::Budget,
+                crate::implementation::Error::UndeterminedPhaseRelationship(reason) => {
+                    QueryError::Unresolved(reason)
+                }
+                error => QueryError::Invalid(format!("capability query: {error:?}")),
+            });
         self.remaining = self
             .remaining
             .saturating_sub(before_search - search_budget.steps);
@@ -628,7 +665,7 @@ impl Solver<'_, '_> {
         selected: Id,
         budget: Budget,
         depth: usize,
-    ) -> Result<(), String> {
+    ) -> Result<(), QueryError> {
         let Some(contract) = self
             .world
             .traits
@@ -645,13 +682,9 @@ impl Solver<'_, '_> {
         let arguments: Vec<_> = std::iter::once(subject.clone())
             .chain(interface.arguments.iter().cloned())
             .collect();
-        let substitution = contract
-            .input_substitution(&arguments, &[], &mut self.remaining)
-            .map_err(|error| error.to_string())?;
+        let substitution = contract.input_substitution(&arguments, &[], &mut self.remaining)?;
         for parent in &contract.parents {
-            let parent = substitution
-                .instantiate_interface_bounded(parent, &mut self.remaining)
-                .map_err(|error| error.to_string())?;
+            let parent = substitution.instantiate_interface_bounded(parent, &mut self.remaining)?;
             // A comptime-only declaration makes the phase part of the given
             // interface's contract. Ordinary interface evidence cannot do so.
             if self
@@ -676,7 +709,9 @@ impl Solver<'_, '_> {
             // exists; check the phase of its eventual concrete selection.
             let resolution = self.resolve(&parent, subject, budget, depth + 1)?;
             let Selection::Selected(selected) = resolution.types.selection else {
-                return Err("parent interface comptime phase remains unresolved".into());
+                return Err(QueryError::Unresolved(
+                    "parent interface comptime phase remains unresolved".into(),
+                ));
             };
             if !self.world.implementations.iter().any(|implementation| {
                 implementation.declaration == selected && implementation.phases.comptime
@@ -746,6 +781,7 @@ impl Solver<'_, '_> {
                         *budget,
                         depth + 1,
                     )
+                    .map_err(String::from)
                 })();
                 budget.steps = budget.steps.saturating_sub(before - self.remaining);
                 result
@@ -855,7 +891,7 @@ impl Solver<'_, '_> {
             ) {
                 Ok(r) => r,
                 Err(e) => {
-                    pending = Some(e);
+                    pending = Some(e.to_string());
                     continue;
                 }
             };

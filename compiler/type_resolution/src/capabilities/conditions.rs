@@ -35,6 +35,82 @@ mod tests {
     use nir::{DeclarationId, Primitive};
 
     #[test]
+    fn nested_condition_resolution_retains_recursion_and_budget_failures() {
+        let contract = Trait {
+            declaration: DeclarationId {
+                package: 95,
+                local: 1,
+            },
+            self_parameter: DeclarationId {
+                package: 95,
+                local: 2,
+            },
+            name: "Nested".into(),
+            comptime_only: false,
+            parameter_types: vec![],
+            type_parameters: vec![],
+            parents: vec![],
+            associated: vec![],
+            methods: vec![],
+            capabilities: vec![],
+            requirements: vec![],
+        };
+        let query = TraitQuery {
+            interface: contract.declaration,
+            subject: Term::Primitive(Primitive::Bool),
+            arguments: vec![],
+        };
+        let traits = [contract];
+        let index = Index::default();
+        let context = Context::default();
+        let world = World {
+            index: &index,
+            context: &context,
+            traits: &traits,
+            implementations: &[],
+            assumptions: &[],
+        };
+        let mut solver = Solver {
+            world: &world,
+            scope: ResolutionScope::capture(&world),
+            active: HashSet::new(),
+            remaining: 100_000,
+        };
+        let key = (
+            InterfaceInstance {
+                declaration: query.interface,
+                arguments: vec![],
+            },
+            query.subject.clone(),
+        );
+        solver.active.insert(key.clone());
+        assert!(
+            matches!(solver.condition_fact(&query, Budget::default(), 0),
+            Err(QueryError::Unresolved(reason)) if reason.contains("recursive"))
+        );
+        assert!(solver.active.contains(&key));
+        solver.active.remove(&key);
+        assert!(matches!(
+            solver.condition_fact(
+                &query,
+                Budget {
+                    steps: 0,
+                    ..Budget::default()
+                },
+                0
+            ),
+            Err(QueryError::Budget)
+        ));
+        assert!(
+            !solver
+                .condition_fact(&query, Budget::default(), 0)
+                .unwrap()
+                .truth
+        );
+        assert!(solver.active.is_empty());
+    }
+
+    #[test]
     fn conditional_formation_proofs_consume_their_reserved_allowance() {
         let id = |local| DeclarationId { package: 94, local };
         let trait_with = |requirements| Trait {
@@ -82,11 +158,11 @@ mod tests {
             (result, 100_000 - solver.remaining)
         };
         let (empty, baseline) = check(&[trait_with(vec![])], 10_000);
-        assert!(!empty.unwrap().unwrap().truth);
+        assert!(!empty.unwrap().truth);
         let count = 32;
         let traits = [trait_with(vec![TypePredicate::Bool(true); count])];
         let (complete, consumed) = check(&traits, 10_000);
-        assert!(!complete.unwrap().unwrap().truth);
+        assert!(!complete.unwrap().truth);
         let mut proof_budget = Budget {
             steps: 10_000,
             max_depth: 128,
@@ -101,7 +177,7 @@ mod tests {
         let (short, consumed) = check(&traits, 8);
         assert!(matches!(short, Err(nir::NominalAdmissionError::Budget)));
         assert!(consumed > 0 && consumed <= 8);
-        assert!(!check(&traits, 10_000).0.unwrap().unwrap().truth);
+        assert!(!check(&traits, 10_000).0.unwrap().truth);
         let malformed = [trait_with(vec![TypePredicate::Equal(
             Term::Bool(true),
             Term::Primitive(Primitive::Bool),
@@ -217,12 +293,11 @@ impl Solver<'_, '_> {
             };
             obligations -= 1;
             match self.condition_fact(query, allowance, depth + 1) {
-                Ok(Some(fact)) => {
+                Ok(fact) => {
                     let atom = Formula::Trait(query.clone());
                     context.assume(if fact.truth { atom } else { atom.negate() });
                     facts.push(fact);
                 }
-                Ok(None) => {}
                 Err(nir::NominalAdmissionError::Budget) => {
                     pending_reason = Some(UnknownReason::BudgetExhausted);
                 }
@@ -262,16 +337,7 @@ impl Solver<'_, '_> {
         self.remaining -= before - proof_budget.steps;
         // A missing fact does not prevent an independent proof. It does
         // prevent a partial-world countermodel from excluding the candidate.
-        let outcome = match (outcome, pending_reason) {
-            (Outcome::NotEntailed(witness), Some(reason)) => Outcome::Unknown {
-                reason,
-                residual: witness.goal,
-            },
-            (Outcome::Unknown { residual, .. }, Some(reason)) => {
-                Outcome::Unknown { reason, residual }
-            }
-            (outcome, _) => outcome,
-        };
+        let outcome = retain_incomplete_queries(outcome, pending_reason);
         if let Outcome::Entailed(proof) = &outcome {
             support.push(ConditionSupport {
                 context,
@@ -288,7 +354,7 @@ impl Solver<'_, '_> {
         query: &TraitQuery,
         budget: Budget,
         depth: usize,
-    ) -> Result<Option<ConditionFact>, nir::NominalAdmissionError> {
+    ) -> Result<ConditionFact, nir::NominalAdmissionError> {
         let outer = self.remaining;
         let allowance = outer.min(budget.steps);
         self.remaining = allowance;
@@ -302,7 +368,7 @@ impl Solver<'_, '_> {
         query: &TraitQuery,
         budget: Budget,
         depth: usize,
-    ) -> Result<Option<ConditionFact>, nir::NominalAdmissionError> {
+    ) -> Result<ConditionFact, nir::NominalAdmissionError> {
         if depth >= budget.max_depth.min(128) || self.remaining == 0 {
             return Err(nir::NominalAdmissionError::Budget);
         }
@@ -349,7 +415,11 @@ impl Solver<'_, '_> {
             self.remaining -= before - proof_budget.steps;
             match outcome {
                 Outcome::Entailed(_) => {}
-                Outcome::NotEntailed(_) => return Ok(None),
+                Outcome::NotEntailed(_) => {
+                    return Err(QueryError::Unresolved(
+                        "conditional interface requirement is not established".into(),
+                    ));
+                }
                 Outcome::Unknown {
                     reason: UnknownReason::BudgetExhausted,
                     ..
@@ -372,16 +442,20 @@ impl Solver<'_, '_> {
             let capability =
                 substitution.instantiate_requirement_bounded(capability, &mut self.remaining)?;
             if self.given(&capability, budget)?.is_none() {
-                let Ok(resolution) = self.resolve(
+                let resolution = self.resolve(
                     &capability.interface_instance(),
                     &capability.subject,
                     budget,
                     depth + 1,
-                ) else {
-                    return Ok(None);
-                };
-                if !matches!(resolution.types.selection, Selection::Selected(_)) {
-                    return Ok(None);
+                )?;
+                match resolution.types.selection {
+                    Selection::Selected(_) => {}
+                    _ => {
+                        return Err(QueryError::Unresolved(format!(
+                            "conditional interface capability: {}",
+                            resolution.types.selection
+                        )));
+                    }
                 }
             }
         }
@@ -392,25 +466,23 @@ impl Solver<'_, '_> {
         };
         let incomplete_given = match self.given(&requirement, budget) {
             Ok(Some(given)) => {
-                return Ok(Some(ConditionFact {
+                return Ok(ConditionFact {
                     query: query.clone(),
                     truth: true,
                     given: Some(given),
                     resolution: None,
-                }));
+                });
             }
             Ok(None) => None,
             Err(error @ nir::NominalAdmissionError::Invalid(_)) => return Err(error),
             Err(error) => Some(error),
         };
-        let Ok(resolution) = self.resolve(
+        let resolution = self.resolve(
             &requirement.interface_instance(),
             &query.subject,
             budget,
             depth,
-        ) else {
-            return incomplete_given.map_or(Ok(None), Err);
-        };
+        )?;
         if !matches!(resolution.types.selection, Selection::Selected(_)) {
             if let Some(error) = incomplete_given {
                 return Err(error);
@@ -428,17 +500,36 @@ impl Solver<'_, '_> {
             {
                 true
             }
-            Selection::NoApplicableCandidate if self.world.closed_trait_inputs(query, budget) => {
+            Selection::NoApplicableCandidate => {
+                let mut allowance = Budget {
+                    steps: self.remaining.min(budget.steps),
+                    ..budget
+                };
+                let before = allowance.steps;
+                let closed = self
+                    .world
+                    .closed_trait_inputs_metered(query, &mut allowance);
+                self.remaining -= before - allowance.steps;
+                if !closed? {
+                    return Err(QueryError::Unresolved(
+                        "conditional trait inputs remain open".into(),
+                    ));
+                }
                 false
             }
-            _ => return Ok(None),
+            _ => {
+                return Err(QueryError::Unresolved(format!(
+                    "conditional trait query: {}",
+                    resolution.types.selection
+                )));
+            }
         };
-        Ok(Some(ConditionFact {
+        Ok(ConditionFact {
             query: query.clone(),
             truth,
             given: None,
             resolution: Some(Box::new(resolution)),
-        }))
+        })
     }
 }
 

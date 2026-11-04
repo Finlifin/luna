@@ -477,10 +477,19 @@ impl Invocation {
             let before = proof_budget.steps;
             let outcome = world.check_predicate_metered(&predicate, &mut proof_budget);
             context.spend::<String>(before - proof_budget.steps)?;
-            if !matches!(outcome.map_err(Error::Protocol)?, ptc::Outcome::Entailed(_)) {
-                return Err(Error::Protocol(
-                    "memoized function bound type contract is not established".into(),
-                ));
+            match outcome {
+                Ok(ptc::Outcome::Entailed(_)) => {}
+                Err(nir::NominalAdmissionError::Budget)
+                | Ok(ptc::Outcome::Unknown {
+                    reason: ptc::UnknownReason::BudgetExhausted,
+                    ..
+                }) => return Err(Error::BudgetExhausted),
+                Err(error) => return Err(Error::Protocol(error.to_string())),
+                Ok(outcome) => {
+                    return Err(Error::Protocol(format!(
+                        "memoized function bound type contract is not established: {outcome}"
+                    )));
+                }
             }
         }
         Ok((types, result))

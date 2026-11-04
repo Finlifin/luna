@@ -6,38 +6,38 @@ use crate::implementation::Key;
 use crate::ptc::TraitQuery;
 
 impl World<'_> {
-    pub(super) fn closed_trait_inputs(&self, query: &TraitQuery, budget: Budget) -> bool {
-        let allowance = Budget {
-            steps: budget.steps / query.arguments.len().saturating_add(1),
-            ..budget
-        };
-        query
-            .inputs()
-            .all(|input| closed(input, self.context, allowance, 0, &mut HashSet::new()))
+    pub(super) fn closed_trait_inputs_metered(
+        &self,
+        query: &TraitQuery,
+        budget: &mut Budget,
+    ) -> Result<bool, QueryError> {
+        for input in query.inputs() {
+            if !closed(input, self.context, budget, 0, &mut HashSet::new())? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 }
 fn closed(
     ty: &Term,
     context: &Context,
-    budget: Budget,
+    budget: &mut Budget,
     depth: usize,
     active: &mut HashSet<Term>,
-) -> bool {
-    if depth >= budget.max_depth.min(64) || budget.steps < 4 {
-        return false;
+) -> Result<bool, QueryError> {
+    if depth >= budget.max_depth.min(64) {
+        return Err(QueryError::Budget);
     }
-    let allowance = Budget {
-        steps: budget.steps / 4,
-        ..budget
-    };
-    let Ok(key) = Key::from_type(ty, allowance) else {
-        return false;
-    };
+    let key = Key::from_type_metered(ty, budget).map_err(|error| match error {
+        crate::implementation::Error::BudgetExhausted => QueryError::Budget,
+        error => QueryError::Invalid(format!("closed trait input: {error:?}")),
+    })?;
     if !key.is_open() {
-        return true;
+        return Ok(true);
     }
     if !active.insert(ty.clone()) {
-        return false;
+        return Ok(false);
     }
     let children: Vec<&Term> = match ty {
         Term::Nominal { arguments, .. } | Term::Tuple(arguments) => arguments.iter().collect(),
@@ -63,24 +63,33 @@ fn closed(
         // A rigid/projection/opaque input needs an actual equality proof to a
         // structural type. A recursive equation does not establish closure.
         _ => {
-            let result = match context.structural_view(ty, allowance) {
+            let (view, consumed) = context.structural_view_metered(ty, *budget);
+            budget.steps -= consumed;
+            let result = match view {
                 Ok(Some((view, _proof))) if &view != ty => {
-                    closed(&view, context, allowance, depth + 1, active)
+                    closed(&view, context, budget, depth + 1, active)
                 }
-                _ => false,
+                Ok(_) => Ok(false),
+                Err(crate::ptc::UnknownReason::BudgetExhausted) => Err(QueryError::Budget),
+                Err(reason) => Err(QueryError::Unresolved(format!(
+                    "closed trait input view: {reason:?}"
+                ))),
             };
             active.remove(ty);
             return result;
         }
     };
-    let allowance = Budget {
-        steps: allowance.steps / children.len().max(1),
-        ..allowance
-    };
-    let result = !children.is_empty()
-        && children
-            .into_iter()
-            .all(|child| closed(child, context, allowance, depth + 1, active));
+    let result = (|| {
+        if children.is_empty() {
+            return Ok(false);
+        }
+        for child in children {
+            if !closed(child, context, budget, depth + 1, active)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    })();
     active.remove(ty);
     result
 }

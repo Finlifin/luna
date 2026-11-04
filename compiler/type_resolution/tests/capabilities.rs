@@ -1886,13 +1886,10 @@ fn absence_decisions_use_context_equalities_without_guessing_or_unfolding() {
         arguments: vec![],
         subject: var(),
     };
-    assert_eq!(
-        world
-            .decide_trait(&query, Budget::default())
-            .unwrap()
-            .truth(),
-        TraitTruth::Pending
-    );
+    let decision = world.decide_trait(&query, Budget::default()).unwrap();
+    assert_eq!(decision.truth(), TraitTruth::Pending);
+    assert!(decision.pending_reason().is_some());
+    assert!(decision.to_string().contains("pending-reason"));
     let opaque = Term::NormalForm {
         head: id(9),
         sort: Sort::Type,
@@ -1910,13 +1907,10 @@ fn absence_decisions_use_context_equalities_without_guessing_or_unfolding() {
         arguments: vec![],
         subject: opaque,
     };
-    assert_eq!(
-        world
-            .decide_trait(&query, Budget::default())
-            .unwrap()
-            .truth(),
-        TraitTruth::Pending
-    );
+    let decision = world.decide_trait(&query, Budget::default()).unwrap();
+    assert_eq!(decision.truth(), TraitTruth::Pending);
+    assert!(decision.pending_reason().is_some());
+    assert!(decision.to_string().contains("pending-reason"));
 }
 
 #[test]
@@ -3117,7 +3111,9 @@ fn comptime_parent_phase_can_follow_only_comptime_only_given_evidence() {
         if parent_comptime_only {
             assert_eq!(result.unwrap().types.selection, Selection::Selected(id(20)));
         } else {
-            assert!(result.unwrap_err().contains("phase remains unresolved"));
+            assert!(
+                matches!(result, Err(nir::NominalAdmissionError::Unresolved(reason)) if reason.contains("phase remains unresolved"))
+            );
         }
     }
 }
@@ -3349,4 +3345,161 @@ fn given_lookup_compares_type_leaves_inside_ordinary_record_values() {
         Ok(Some(assumptions[0].clone()))
     );
     assert_eq!(world.given(&query(true, b), Budget::default()), Ok(None));
+}
+
+#[test]
+fn trait_query_failures_keep_budget_invalid_and_unresolved_distinct() {
+    use nir::{NominalAdmissionError as E, program::TypePredicate as Q};
+    use type_resolution::capabilities::TraitTruth;
+    let ctx = context();
+    let mut contract = marker(100);
+    contract.requirements = vec![Q::Bool(true); 16];
+    let traits = [contract];
+    let ix = index(&[]);
+    let world = World {
+        index: &ix,
+        implementations: &[],
+        traits: &traits,
+        assumptions: &[],
+        context: &ctx,
+    };
+    let query = trait_query(100, Term::Primitive(Primitive::Bool));
+    let mut full = Budget::default();
+    assert_eq!(
+        world
+            .decide_trait_metered(&query, &mut full)
+            .unwrap()
+            .truth(),
+        TraitTruth::Excluded
+    );
+    let cost = Budget::default().steps - full.steps;
+    assert!(cost > 16);
+    for steps in 0..=cost + 8 {
+        let mut budget = Budget {
+            steps,
+            ..Budget::default()
+        };
+        match world.decide_trait_metered(&query, &mut budget) {
+            Err(E::Budget) => {}
+            Ok(decision) => assert_eq!(decision.truth(), TraitTruth::Excluded),
+            Err(other) => panic!("budget {steps} misclassified: {other:?}"),
+        }
+        assert!(budget.steps <= steps);
+    }
+    let malformed = trait_query(100, Term::Bool(true));
+    assert!(matches!(
+        world.decide_trait(&malformed, Budget::default()),
+        Err(E::Invalid(_))
+    ));
+    let unformed = [Trait {
+        requirements: vec![Q::Equal(var(), Term::Primitive(Primitive::Bool))],
+        ..traits[0].clone()
+    }];
+    let unresolved = World {
+        traits: &unformed,
+        ..world
+    };
+    assert!(matches!(
+        unresolved.decide_trait(&query, Budget::default()),
+        Err(E::Unresolved(_))
+    ));
+    assert_eq!(
+        world
+            .decide_trait(&query, Budget::default())
+            .unwrap()
+            .truth(),
+        TraitTruth::Excluded
+    );
+}
+
+#[test]
+fn incomplete_world_queries_cannot_refute_but_independent_evidence_can_prove() {
+    use nir::program::TypePredicate as Q;
+    use type_resolution::ptc::{Formula as F, Outcome, UnknownReason};
+    let ctx = context();
+    let subject = Term::Primitive(Primitive::Bool);
+    let mut recursive = implementation(20, 100, subject.clone(), vec![], vec![]);
+    recursive.requirements = vec![Q::Trait(requirement(100, subject.clone()))];
+    let implementations = [
+        recursive,
+        implementation(21, 101, subject.clone(), vec![], vec![]),
+    ];
+    let mut unformed = marker(102);
+    unformed.requirements = vec![Q::Equal(var(), subject.clone())];
+    let traits = [marker(100), marker(101), unformed];
+    let ix = index(&implementations);
+    let world = World {
+        index: &ix,
+        implementations: &implementations,
+        traits: &traits,
+        assumptions: &[],
+        context: &ctx,
+    };
+    // Cover both a successful query with Pending selection and a failed
+    // formation query. Neither supplies a closed-world negative fact.
+    for interface in [100, 102] {
+        let atom = F::Trait(trait_query(interface, subject.clone()));
+        for goal in [atom.clone(), atom.clone().negate()] {
+            let result = world.prove_proposition(goal, Budget::default()).unwrap();
+            assert!(
+                matches!(
+                    result.outcome(),
+                    Outcome::Unknown {
+                        reason: UnknownReason::UnresolvedPrerequisite(_),
+                        ..
+                    }
+                ),
+                "{result}"
+            );
+            assert!(result.verify(&world, Budget::default()).is_err());
+        }
+        for reverse in [false, true] {
+            let mut alternatives = vec![atom.clone(), F::Trait(trait_query(101, subject.clone()))];
+            if reverse {
+                alternatives.reverse();
+            }
+            let proof = world
+                .prove_proposition(F::Or(alternatives), Budget::default())
+                .unwrap();
+            assert!(matches!(proof.outcome(), Outcome::Entailed(_)), "{proof}");
+            proof.verify(&world, Budget::default()).unwrap();
+        }
+    }
+    // Once the final proof runs out of fuel, earlier semantic Pending must
+    // not turn the resource failure into an apparently well-funded unknown.
+    for steps in 0..200 {
+        let mut budget = Budget {
+            steps,
+            ..Budget::default()
+        };
+        let result = world
+            .prove_proposition_metered(F::Trait(trait_query(100, subject.clone())), &mut budget);
+        if budget.steps == 0 {
+            match result {
+                Err(nir::NominalAdmissionError::Budget) => {}
+                Ok(result) => assert!(
+                    matches!(
+                        result.outcome(),
+                        Outcome::Unknown {
+                            reason: UnknownReason::BudgetExhausted,
+                            ..
+                        }
+                    ),
+                    "steps {steps}: {result}"
+                ),
+                Err(error) => panic!("steps {steps}: {error:?}"),
+            }
+        }
+    }
+    // A completed negative query remains usable and never mutates the caller.
+    let absent = F::Trait(trait_query(101, Term::Primitive(Primitive::Char)));
+    let proof = world
+        .prove_proposition(absent.clone().negate(), Budget::default())
+        .unwrap();
+    assert!(matches!(proof.outcome(), Outcome::Entailed(_)));
+    proof.verify(&world, Budget::default()).unwrap();
+    assert!(!matches!(
+        ctx.prove(absent.negate(), Budget::default()),
+        Outcome::Entailed(_)
+    ));
 }

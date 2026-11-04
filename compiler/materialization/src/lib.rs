@@ -1207,7 +1207,7 @@ impl Builder<'_> {
     fn prove_requirement(
         &self,
         requirement: &n::TypePredicate,
-    ) -> Result<crate::ptc::Outcome, String> {
+    ) -> Result<crate::ptc::Outcome, nir::NominalAdmissionError> {
         crate::capabilities::World {
             index: self.world.index(),
             implementations: &self.package.implementations,

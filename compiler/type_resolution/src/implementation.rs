@@ -60,6 +60,9 @@ impl Key {
         let mut fuel = budget.steps;
         Self::with_fuel(ty, &mut fuel, budget.max_depth)
     }
+    pub(crate) fn from_type_metered(ty: &Term, budget: &mut Budget) -> Result<Self, Error> {
+        Self::with_fuel(ty, &mut budget.steps, budget.max_depth)
+    }
     fn with_fuel(ty: &Term, fuel: &mut usize, max_depth: usize) -> Result<Self, Error> {
         fn build(ty: &Term, fuel: &mut usize, depth: usize, limit: usize) -> Result<Key, Error> {
             spend(fuel)?;

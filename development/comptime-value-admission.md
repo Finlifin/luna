@@ -2560,8 +2560,10 @@ value_admission 内核，退役该路径重复构造单参数声明并经过布�
 **条件 trait 形成。** capability 的 condition_fact 返回 typed admission 结果，
 域准入、参数替换或前提证明的 Budget 不再转换成 IllFormed；Unresolved 通过
 UnknownReason::UnresolvedPrerequisite 保留诊断原因，真正非法输入才保持
-IllFormed。条件事实查询只使用分给自己的额度，成功、失败和未决后均将未用额度
-归还外层；形成要求改用 prove_metered，证明工作不再由新的临时 Budget 隐藏。
+IllFormed。条件事实查询直接返回 `Result<ConditionFact, NominalAdmissionError>`，
+不再用 `Option` 容纳被吞掉的 nested resolution 失败；递归、形成前提未建立和
+输入闭合性未决都保留原因。查询只使用分给自己的额度，成功、失败和未决后均将
+未用额度归还外层；形成要求使用 prove_metered，证明工作不再由新的临时 Budget 隐藏。
 
 未完成的条件事实不进入候选的局部 Context，也不能用缺失事实的反模型排除候选。
 其余独立事实仍可继续证明目标；若已有独立的 Entailed 结果，不因一个未决的析取
@@ -2573,6 +2575,53 @@ NF 头不展开的边界保持。
 回归覆盖缺失 NF congruence 导致条件候选 Pending、补充证据后选择并 replay
 成功，以及另一个已建立的析取分支独立完成证明。形成检查还验证重复前提证明的
 成本、子查询额度上限、语义拒绝、资源失败与后续重试。
+
+**世界查询与闭合性。** World 的直接 resolve／resolve_instance、decide_trait、
+prove_proposition 与 check_predicate 系列返回同一个 typed admission 错误。
+声明域、替换、索引查询的预算失败不先转成字符串；递归能力义务及未决的父 trait
+阶段检查是 Unresolved，明确的阶段不匹配仍是 Invalid。elaboration 的 trait 查询
+与 materialization 的要求查询保留该类型直到各自的诊断出口。
+
+闭合性观察使用 `closed_trait_inputs_metered`，共享余额串行检查各输入与子结构，
+Key 构造和结构视图按实际报告的工作扣款；删除固定切片的保守整份扣款包装。
+`Ok(false)` 表示确实观察到开放结构；预算不足为 Budget，视图无法完成为 Unresolved。
+已形成 trait 的开放／未决查询仍产生 Pending decision，并通过 pending_reason 和
+S-expression dump 保留原因。预算失败不会伪装成普通的开放输入。
+
+世界命题求解不会把 Pending decision 或未完成查询当成负事实，也不会用缺失事实的
+反模型交付 NotEntailed；没有独立证明时返回带原因的 Unknown。其他已确立事实仍可
+独立证明析取目标，证明只属于当前 world／context，不写回原始 Context。
+非 metered 的 check_predicate 直接委托 metered 入口，直接证明与世界查询不再分别
+获得完整的新额度。条件与世界命题共用最终结果整理：最后的证明若已耗尽，保留
+BudgetExhausted，不被更早的语义 Pending 覆盖。此处不引入完整联合模型搜索，
+也不改变 PTC 只处理类型命题的边界。
+
+memoization 的 bound contract 消费者将 typed Budget 与 Outcome 的 BudgetExhausted
+映射到 executor 的资源错误，而不是 Protocol；其他拒绝仍保留具体原因。真实 sysroot
+回归在不足额度和不满足 trait 的输入上检查零主体执行、无缓存写入及后续合法重试。
+该用例返回 bool，按既定规则不进入 Type 结果缓存，不声称覆盖 TypeHash 或完整缓存协议。
+
+回归覆盖逐预算的形成／闭合检查、非法输入与未决前提的分类、递归失败后的 active
+集合和重试、正反目标均不得由循环证明、两种析取顺序的独立证明，以及真实闭合输入
+的有效否定证据。已有 opaque NF 视图仍不展开头，Pending 的原因可直接观察。
+
+世界查询这条接线的验证（工作目录 `/home/fin/luna`）：
+
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution
+  --lib --test capabilities --no-fail-fast`：69 项通过，退出 0；
+  `/tmp/luna-tools-jfa9vzwv/result.json`。
+- 同一入口 `test -p type_resolution -p luna`，选择 `implementation_phases`、
+  `associated`、`projection_copy_budget`、`trait_domain_substitution`、
+  `dynamic_trait_clauses`、`normal_input_plans`、`library_list_equality`、
+  `sysroot_preludes`、`associated_signatures`、`prepared_invocations`、
+  `trait_query_failures`，附 `--no-fail-fast`：101 项通过，退出 0；
+  `/tmp/luna-tools-ns8b3x6o/result.json`。
+- 同一入口 `test -p luna --test execution
+  memoized_invocation_checks_dependent_type_contracts_before_caching -- --exact`：
+  1 项通过，退出 0；`/tmp/luna-tools-r1hdnoen/result.json`。
+- 改动的十个 Rust 文件经 `development/command.py --timeout 120 -- rustfmt
+  --check --edition 2024 --config skip_children=true` 检查，退出 0；
+  `/tmp/luna-tools-zrf1o7nt/result.json`。
 
 **Given 前提查询。** World／Solver 的 given 系列接口现在返回
 `Result<Option<TraitRequirement>, NominalAdmissionError>`：只有 `Ok(None)` 表示
@@ -2633,10 +2682,12 @@ PTC 会按当前预算为传播与学习分配额度，较小预算可能走更�
 - fresh phase pass 仍使用自己的默认额度，VM 随后再做结构检查；构造失败的
   for_comptime_in_budget 仍保守保留全部 reservation，尚非精确失败扣款。
 - 后续关联项／方法签名与 world capability 的部分实例化尚未有界。
-- 条件 trait 形成、given 与要求 discharge 已保留具体未决原因，但 capability 的公开
-  resolve／decide_trait 和 projection 仍有 String、is_ok 或可选结果边界；
-  条件形成中的旧 nested resolution 失败仍可能只表示暂无事实。proof replay
-  也仍有合并 admission 错误的路径，完整求解链的 Pending／资源／反例传播未完成。
+- 直接 trait resolution、世界命题与条件事实已保留 typed 失败；projected resolution、
+  prerequisite_type、inherent 查询和 qualification／TypeAssessment 的部分内部原因
+  仍有 String 或可选结果边界。条件中的投影失败也仍须迁移。proof replay 仍有
+  合并 admission 错误的路径，完整求解链的 Pending／资源／反例传播未完成。
+  当前查询复用 NominalAdmissionError，并不意味着所有能力选择都属于值域检查；
+  全链路查询协议仍须按所属层次完成统一。
 - 旧 layout／callable 可选观察器把 Unresolved 表示为 unavailable view，仍不能
   保留具体原因；typed admission 直接消费完整错误。后续须迁移这些观察器及其
   消费者，不能把本次新增分类说成所有描述观察都已无损。
@@ -2646,7 +2697,7 @@ PTC 会按当前预算为传播与学习分配额度，较小预算可能走更�
 
 验证证据见下；历史中间版本的逐轮日志由 git 保留，不作为当前实现状态。
 
-最终源码的验证范围与输出锚点如下（工作目录 `/home/fin/luna`）：
+值关系提取、域准入与 replay 迁移的既有证据如下（工作目录 `/home/fin/luna`）：
 
 - `python3 -B development/check.py --timeout 900 -- test -p type_resolution -p nir
   --test calls --test implementation --test trait_parameters --no-fail-fast`：
