@@ -48,10 +48,7 @@ struct Activation<'a> {
 
 enum Execution<'a> {
     Associated {
-        expression: Body<'a>,
-        result_type: Term,
-        key: Option<(InterfaceInstance, Term, DeclarationId)>,
-        source: SourceRange,
+        activation: associated_execution::Activation<'a>,
         environment: Environment,
     },
     Contract {
@@ -69,10 +66,10 @@ impl Execution<'_> {
     fn parts(&mut self) -> (&Expr, Option<DeclarationId>, &mut Environment) {
         match self {
             Self::Associated {
-                expression,
+                activation,
                 environment,
                 ..
-            } => (expression.expression(), None, environment),
+            } => (activation.expression.expression(), None, environment),
             Self::Invocation(activation) => {
                 let frame = &mut activation.frame;
                 (
@@ -241,13 +238,8 @@ impl<'a> Interpreter<'a> {
         flow: Result<Flow, Error>,
     ) -> Completion {
         match execution {
-            Execution::Associated {
-                result_type,
-                key,
-                source,
-                ..
-            } => Completion::Ordinary {
-                flow: self.complete_associated_value(key, &result_type, source, flow),
+            Execution::Associated { activation, .. } => Completion::Ordinary {
+                flow: activation.complete(self, flow),
                 defaults: None,
             },
             Execution::Invocation(activation) => Completion::Ordinary {

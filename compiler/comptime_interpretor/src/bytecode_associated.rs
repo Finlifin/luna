@@ -666,3 +666,113 @@ fn associated_input_domains_admit_values_and_reject_mismatches() {
         }
     }
 }
+
+#[test]
+fn selected_associated_body_observes_its_domain_once_before_execution() {
+    let type_type = Term::Primitive(Primitive::Type);
+    let function = nir::program::Function {
+        declaration: id(9),
+        name: "Domain".into(),
+        phase: nir::program::FunctionPhase::Comptime,
+        inline: false,
+        pure: false,
+        is_unsafe: false,
+        type_parameters: vec![],
+        requirements: vec![],
+        capabilities: vec![],
+        preconditions: vec![],
+        postconditions: vec![],
+        result_binding: None,
+        entry_snapshots: vec![],
+        parameters: vec![],
+        defaults: vec![],
+        signature: Term::Function {
+            parameters: vec![],
+            result: Box::new(type_type.clone()),
+        },
+        body: Expr {
+            source: SOURCE,
+            ty: type_type.clone(),
+            kind: K::TypeValue(Term::Primitive(Primitive::Bool)),
+        },
+    };
+    let callable = function.callable_type();
+    let package = Package {
+        functions: vec![function],
+        ..Default::default()
+    };
+    let projection = Term::AssociatedType {
+        origin: Box::new(nir::AssociatedTypeOrigin {
+            interface: id(1),
+            member: id(3),
+        }),
+        arguments: vec![],
+        subject: Box::new(Term::Primitive(Primitive::Bool)),
+    };
+    let resolver = |access: &Expr, fuel: &mut u64| {
+        *fuel -= 1;
+        let K::AssociatedValue { member, .. } = access.kind else {
+            unreachable!()
+        };
+        let value = if member == id(3) {
+            Expr {
+                source: SOURCE,
+                ty: type_type.clone(),
+                kind: K::Call {
+                    callee: Box::new(Expr {
+                        source: SOURCE,
+                        ty: callable.clone(),
+                        kind: K::Function(id(9)),
+                    }),
+                    arguments: vec![],
+                    parameter_bindings: vec![],
+                },
+            }
+        } else {
+            Expr {
+                source: SOURCE,
+                ty: projection.clone(),
+                kind: K::Block {
+                    statements: vec![],
+                    result: Some(Box::new(expr(K::Literal(Literal::Bool(true))))),
+                },
+            }
+        };
+        Ok(AssociatedSelection {
+            initializer: {
+                let mut construction_fuel = usize::try_from(*fuel).unwrap();
+                let initializer = nir::associated_initializers::AssociatedInitializer::new(
+                    value,
+                    &mut construction_fuel,
+                )
+                .unwrap();
+                *fuel = construction_fuel as u64;
+                initializer
+            },
+            requires_invocation: true,
+        })
+    };
+    for compiled in [false, true] {
+        let mut vm = Interpreter::for_comptime(&package, Budget::default())
+            .unwrap()
+            .with_associated_resolver(&resolver);
+        vm.bytecode_enabled = compiled;
+        for _ in 0..3 {
+            let before = vm.events.len();
+            assert!(matches!(
+                run(&mut vm, &read(2), &mut Environment::default(), compiled).unwrap(),
+                Flow::Value(Value::Bool(true))
+            ));
+            let entered: Vec<_> = vm.events[before..]
+                .iter()
+                .filter_map(|event| match event {
+                    Event::EnterFunction(declaration) => Some(*declaration),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(entered, [id(9)], "one fresh domain observation per access");
+            assert!(!vm.associated_values.contains_key(&key(3)));
+            assert!(vm.active_associated_initializers.is_empty());
+        }
+    }
+}

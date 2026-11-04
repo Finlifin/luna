@@ -37,6 +37,7 @@ pub(super) struct Session<'vm, 'a, 'r> {
     vm: &'vm mut Interpreter<'a>,
     root: Root<'r>,
     execution: Option<Execution<'a>>,
+    associated_request: Option<associated_execution::Request>,
     stack: Vec<StackEntry<'a>>,
     result: Option<Completion>,
     terminal: bool,
@@ -48,6 +49,7 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
             vm,
             root,
             execution: None,
+            associated_request: None,
             stack: Vec::new(),
             result: None,
             terminal: false,
@@ -90,7 +92,10 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
         let result = self.step();
         if !matches!(result, Ok(Poll::Pending)) {
             debug_assert!(
-                self.stack.is_empty() && self.execution.is_none() && self.result.is_none()
+                self.stack.is_empty()
+                    && self.execution.is_none()
+                    && self.result.is_none()
+                    && self.associated_request.is_none()
             );
             if result.is_err() {
                 self.root.cancel();
@@ -105,10 +110,27 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
             vm,
             root,
             execution,
+            associated_request,
             stack,
             result,
             ..
         } = self;
+        if let Some(request) = associated_request.take() {
+            match vm.resolve_associated_request(request) {
+                Ok(activation) => {
+                    *execution = Some(Execution::Associated {
+                        activation,
+                        environment: Environment::default(),
+                    });
+                }
+                Err(error) => {
+                    *result = Some(Completion::Ordinary {
+                        flow: Err(error),
+                        defaults: None,
+                    });
+                }
+            }
+        }
         if let Some(mut active) = execution.take() {
             let owned = match &active {
                 Execution::Invocation(activation) if activation.frame.stable_code.is_none() => {
@@ -122,8 +144,8 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                 }
                 _ => None,
             };
-            let code = if let Execution::Associated { expression, .. } = &active {
-                match expression {
+            let code = if let Execution::Associated { activation, .. } = &active {
+                match &activation.expression {
                     Body::Package(expression) => vm.borrowed_invocation_code(expression),
                     Body::Owned(expression) => vm.owned_invocation_code(expression),
                 }
@@ -272,14 +294,14 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                     &access.ty,
                     source,
                 ) {
-                    Ok((expression, key, result_type)) => {
+                    Ok(associated_execution::Preparation::Ready(activation)) => {
                         *execution = Some(Execution::Associated {
-                            expression,
-                            result_type,
-                            key,
-                            source,
+                            activation,
                             environment: Environment::default(),
                         })
+                    }
+                    Ok(associated_execution::Preparation::Request(request)) => {
+                        *associated_request = Some(request);
                     }
                     Err(error) => {
                         *result = Some(Completion::Ordinary {
@@ -339,6 +361,9 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
         if self.terminal {
             return;
         }
+        // A pending selection has not called the host or acquired an initializer
+        // key. Discard it before draining errors so cancellation cannot resolve it.
+        self.associated_request = None;
         let error = self.vm.failure(ErrorKind::InvalidControlFlow, None);
         self.result = if let Some(active) = self.execution.take() {
             Some(self.vm.complete_execution(active, Err(error)))
@@ -385,7 +410,7 @@ impl fmt::Display for Session<'_, '_, '_> {
                 Execution::Invocation(active) => {
                     write!(f, "(invocation {})", active.frame.function)
                 }
-                Execution::Associated { source, .. } => write!(f, "(associated {source})"),
+                Execution::Associated { activation, .. } => write!(f, "{activation}"),
                 Execution::Contract { .. } => f.write_str("(contract)"),
                 Execution::Default { .. } => f.write_str("(default)"),
             }
@@ -400,6 +425,10 @@ impl fmt::Display for Session<'_, '_, '_> {
         if let Some(value) = &self.execution {
             f.write_str(" ")?;
             execution(f, value)?;
+        }
+        f.write_str(") (request")?;
+        if let Some(request) = &self.associated_request {
+            write!(f, " {request}")?;
         }
         f.write_str(") (completion")?;
         if let Some(completion) = &self.result {
@@ -593,6 +622,125 @@ mod tests {
             assert_eq!(vm.invocation_depth, 0);
             assert_eq!(vm.depth, 0);
         }
+    }
+
+    #[test]
+    fn associated_requests_cancel_without_resolving_or_replaying_initializers() {
+        use std::cell::RefCell;
+        let package = Package::default();
+        let access = |member| {
+            expr(
+                ty(Primitive::Bool),
+                K::AssociatedValue {
+                    interface: InterfaceInstance {
+                        declaration: id(1),
+                        arguments: vec![],
+                    },
+                    subject: ty(Primitive::Bool),
+                    member: id(member),
+                },
+            )
+        };
+        let body = expr(
+            ty(Primitive::Bool),
+            K::Block {
+                statements: vec![mark()],
+                result: Some(Box::new(access(2))),
+            },
+        );
+        let code = Arc::new(comptime_compiler::compile(&body, &mut 10000).unwrap());
+        let mut completed_polls = None;
+        let mut pending_cancellations = 0;
+        for limit in std::iter::once(usize::MAX).chain(0..64) {
+            if completed_polls.is_some_and(|count| limit >= count) {
+                break;
+            }
+            let calls = RefCell::new(Vec::new());
+            let resolver = |request: &Expr, fuel: &mut u64| {
+                let K::AssociatedValue { member, .. } = request.kind else {
+                    unreachable!()
+                };
+                calls.borrow_mut().push(member);
+                let value = if member.local < 5 {
+                    access(member.local + 1)
+                } else {
+                    expr(ty(Primitive::Bool), K::Literal(Literal::Bool(true)))
+                };
+                Ok(AssociatedSelection {
+                    initializer: {
+                        let mut construction_fuel = usize::try_from(*fuel).unwrap();
+                        let initializer = nir::associated_initializers::AssociatedInitializer::new(
+                            value,
+                            &mut construction_fuel,
+                        )
+                        .unwrap();
+                        *fuel = construction_fuel as u64;
+                        initializer
+                    },
+                    requires_invocation: true,
+                })
+            };
+            let mut vm = Interpreter::for_comptime(&package, Budget::default())
+                .unwrap()
+                .with_associated_resolver(&resolver);
+            let mut environment = Environment::from([(local(1), Value::Bool(false))]);
+            let mut frame = vm.start_frame(&code, &mut environment).unwrap();
+            let mut session = Box::new(Session::fragment(&mut vm, &mut frame));
+            let mut polls = 0;
+            while polls < limit {
+                polls += 1;
+                if let Poll::Ready(flow) = session.poll().unwrap() {
+                    assert!(matches!(flow, Some(Flow::Value(Value::Bool(true)))));
+                    assert_eq!(*calls.borrow(), vec![id(2), id(3), id(4), id(5)]);
+                    completed_polls = Some(polls);
+                    break;
+                }
+                session = Box::new(*session);
+            }
+            if session.associated_request.is_some() {
+                pending_cancellations += 1;
+                assert!(
+                    session
+                        .to_string()
+                        .contains("(request (associated-request ")
+                );
+            }
+            let called = calls.borrow().clone();
+            let remaining = session.vm.remaining_steps();
+            session.cancel();
+            assert_eq!(*calls.borrow(), called, "cancel must not call the resolver");
+            assert_eq!(session.vm.remaining_steps(), remaining);
+            assert!(session.vm.active_associated_initializers.is_empty());
+            assert_eq!(
+                session.poll().unwrap_err().kind,
+                ErrorKind::InvalidControlFlow
+            );
+            drop(session);
+            if limit != usize::MAX {
+                assert_eq!(
+                    vm.resume_frame(&mut frame, 1024).err().unwrap().kind,
+                    ErrorKind::InvalidControlFlow
+                );
+            }
+            let restored = frame.restore_environment();
+            assert_eq!(restored[&local(1)], Value::Bool(polls > 0));
+            assert!(matches!(
+                vm.execute_code(
+                    &code,
+                    &mut Environment::from([(local(1), Value::Bool(false))])
+                )
+                .unwrap(),
+                Flow::Value(Value::Bool(true))
+            ));
+            assert_eq!(
+                *calls.borrow(),
+                vec![id(2), id(3), id(4), id(5)],
+                "fresh execution only resolves selections missing after cancellation"
+            );
+            assert!(vm.active_associated_initializers.is_empty());
+        }
+        assert!(completed_polls.is_some());
+        assert_eq!(pending_cancellations, 4);
     }
 
     #[test]

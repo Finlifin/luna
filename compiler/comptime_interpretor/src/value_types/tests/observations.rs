@@ -16,32 +16,44 @@ fn associated_completion_rechecks_values_and_always_releases_initializer_state()
         Term::Primitive(Primitive::Bool),
         id(6),
     );
+    let initializer = Expr {
+        source: SOURCE,
+        ty: nominal.clone(),
+        kind: K::Record {
+            declaration: id(1),
+            fields: vec![Expr {
+                source: SOURCE,
+                ty: Term::Primitive(Primitive::Bool),
+                kind: K::Literal(nir::program::Literal::Bool(true)),
+            }],
+        },
+    };
+    vm.associated_initializers.insert(key.clone(), &initializer);
     for (result, expected) in [
-        (ContractOutcome::Unknown, ErrorKind::TypeContractUnresolved),
-        (ContractOutcome::Rejected, ErrorKind::TypeContractRejected),
+        (
+            ContractOutcome::Unknown,
+            Some(ErrorKind::TypeContractUnresolved),
+        ),
+        (
+            ContractOutcome::Rejected,
+            Some(ErrorKind::TypeContractRejected),
+        ),
+        (ContractOutcome::Satisfied, None),
     ] {
         outcome.set(result);
-        vm.active_associated_initializers.insert(key.clone());
-        assert_eq!(
-            vm.complete_associated_value(
-                Some(key.clone()),
-                &nominal,
-                SOURCE,
-                Ok(Flow::Value(packet.clone()))
-            )
-            .unwrap_err()
-            .kind,
-            expected
-        );
+        let associated_execution::Preparation::Ready(active) = vm
+            .prepare_associated_value(&key.0, &key.1, key.2, &nominal, SOURCE)
+            .unwrap()
+        else {
+            panic!("existing initializer must not request selection")
+        };
+        let result = active.complete(&mut vm, Ok(Flow::Value(packet.clone())));
+        match expected {
+            Some(error) => assert_eq!(result.unwrap_err().kind, error),
+            None => assert!(matches!(result.unwrap(), Flow::Value(value) if value == packet)),
+        }
         assert!(vm.active_associated_initializers.is_empty());
     }
-    outcome.set(ContractOutcome::Satisfied);
-    vm.active_associated_initializers.insert(key.clone());
-    assert!(
-        matches!(vm.complete_associated_value(Some(key), &nominal, SOURCE,
-        Ok(Flow::Value(packet.clone()))).unwrap(), Flow::Value(value) if value == packet)
-    );
-    assert!(vm.active_associated_initializers.is_empty());
     assert!(vm.assumed_interfaces.is_empty());
 }
 

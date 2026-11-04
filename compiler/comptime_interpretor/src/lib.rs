@@ -877,6 +877,7 @@ macro_rules! value {
 }
 
 mod associated_catalog;
+mod associated_execution;
 mod code_session;
 mod contextual_code;
 mod declaration_index;
@@ -3791,133 +3792,6 @@ impl<'a> Interpreter<'a> {
         .map(Flow::Value)
     }
 
-    #[inline(never)]
-    fn eval_associated_value(&mut self, expr: &Expr) -> Result<Flow, Error> {
-        let K::AssociatedValue {
-            interface,
-            subject,
-            member,
-        } = &expr.kind
-        else {
-            unreachable!()
-        };
-        let (selected, key, result_type) =
-            self.prepare_associated_value(interface, subject, *member, &expr.ty, expr.source)?;
-        // Initializers cannot read the caller's lexical environment.
-        let result = self.eval(selected.expression(), &mut Environment::default());
-        self.complete_associated_value(key, &result_type, expr.source, result)
-    }
-
-    fn prepare_associated_value(
-        &mut self,
-        interface: &InterfaceInstance,
-        subject: &Term,
-        member: DeclarationId,
-        ty: &Term,
-        source: SourceRange,
-    ) -> Result<
-        (
-            invocation::Body<'a>,
-            Option<(InterfaceInstance, Term, DeclarationId)>,
-            Term,
-        ),
-        Error,
-    > {
-        let selected_subject = self.selected_type_view(subject, Some(source))?;
-        let selected_arguments = interface
-            .arguments
-            .iter()
-            .map(|argument| self.selected_type_view(argument, Some(source)))
-            .collect::<Result<Vec<_>, _>>()?;
-        let selected_interface = InterfaceInstance {
-            declaration: interface.declaration,
-            arguments: selected_arguments,
-        };
-        let key = (selected_interface, selected_subject, member);
-        // Observe the result domain once, before entering the initializer.
-        // Its associated Type programs must not be re-run at return checking.
-        let result_type = self.selected_type_view(ty, Some(source))?;
-        if !self.associated_values.contains_key(&key)
-            && !self.associated_initializers.contains_key(&key)
-        {
-            let resolver = self
-                .associated_resolver
-                .filter(|_| self.comptime_only && self.graph.is_none())
-                .ok_or_else(|| self.failure(ErrorKind::UnmaterializedDispatch, Some(source)))?;
-            self.charge_copy_work(Some(source), |fuel| {
-                for term in std::iter::once(&key.1)
-                    .chain(&key.0.arguments)
-                    .chain(std::iter::once(ty))
-                {
-                    nir::copy_budget::charge_type_substitution(term, &[], &[], fuel)?;
-                }
-                Ok(())
-            })?;
-            let access = Expr {
-                source,
-                ty: ty.clone(),
-                kind: K::AssociatedValue {
-                    interface: key.0.clone(),
-                    subject: key.1.clone(),
-                    member,
-                },
-            };
-            let before = self.budget.steps;
-            let selected = resolver(&access, &mut self.budget.steps);
-            if self.budget.steps > before {
-                self.budget.steps = 0;
-                return Err(self.failure(ErrorKind::StepsExhausted, Some(source)));
-            }
-            let selected = selected?;
-            let expression = selected.initializer.into_expression();
-            nir::copy_budget::charge_expression(&expression, &mut self.budget.steps)
-                .map_err(|_| self.failure(ErrorKind::StepsExhausted, Some(source)))?;
-            if self.selected_type_view(&expression.ty, Some(source))? != result_type {
-                return Err(self.failure(ErrorKind::Type, Some(source)));
-            }
-            let catalog = if selected.requires_invocation {
-                &mut self.associated_initializers
-            } else {
-                &mut self.associated_values
-            };
-            catalog.insert_owned(key.clone(), Arc::new(expression));
-        }
-        let selected = self
-            .associated_values
-            .get_body(&key)
-            .or_else(|| {
-                self.comptime_only
-                    .then(|| self.associated_initializers.get_body(&key))
-                    .flatten()
-            })
-            .ok_or_else(|| self.failure(ErrorKind::UnmaterializedDispatch, Some(source)))?;
-        if self.selected_type_view(&selected.expression().ty, Some(source))? != result_type {
-            return Err(self.failure(ErrorKind::Type, Some(source)));
-        }
-        let initializing = self.associated_initializers.contains_key(&key);
-        if initializing && !self.active_associated_initializers.insert(key.clone()) {
-            return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source)));
-        }
-        Ok((selected, initializing.then_some(key), result_type))
-    }
-
-    fn complete_associated_value(
-        &mut self,
-        key: Option<(InterfaceInstance, Term, DeclarationId)>,
-        ty: &Term,
-        source: SourceRange,
-        result: Result<Flow, Error>,
-    ) -> Result<Flow, Error> {
-        if let Some(key) = key {
-            self.active_associated_initializers.remove(&key);
-        }
-        let result = result?;
-        let Flow::Value(value) = result else {
-            return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source)));
-        };
-        self.check_value_type(&value, ty, Some(source))?;
-        Ok(Flow::Value(value))
-    }
     #[inline(never)]
     fn eval_trait_method(
         &mut self,

@@ -277,7 +277,7 @@ frame 保存 PC、局部槽、结果目的地、控制和清理进度；异常�
 身份分配器。成功完成后的借入环境／计划清理仍遵循原调用者契约。这里验证的是正常
 Rust 控制流下的主动放弃与 Drop，不宣称进程崩溃或任意 panic 中可以恢复外部副作用。
 
-会话 dump 使用 S-expression，显示 root、排队计算、待交付类别和嵌套 code／plan。
+会话 dump 使用 S-expression，显示 root、排队计算、关联选择请求、待交付类别和嵌套 code／plan。
 活动会话仍不是可冻结值，不进入 CodeSession、结果缓存或持久查询。尚缺的是前端
 区域、宿主 request 身份与受检 response 的实际生产接线；不能把内部 Poll::Pending
 解释为等待宿主，也不能利用此会话容器提前执行域生产者。
@@ -307,6 +307,52 @@ Rust 控制流下的主动放弃与 Drop，不宣称进程崩溃或任意 panic 
   `/tmp/luna-tools-kqxlw7nu/result.json`，退出 0，7 项通过。
 - 五个修改／新增 Rust 文件的 rustfmt 检查：`/tmp/luna-tools-i92usp8x/result.json`，
   退出 0。未运行全 workspace、native 或性能基准。
+
+### 已接通：关联选择请求与初始化器准入分离
+
+`associated_execution` 将关联访问分成 `Preparation::Request` 和已准入的
+`Activation`。请求保留选定的 subject、interface 参数、原始访问和本次已观察的
+结果域。字节码驱动将待处理请求保存在 Session 中，下一次推进才调用现有 resolver；
+取消先丢弃请求，再沿调用栈交付失败。因此请求尚未处理时，不会因取消而调用宿主，
+也没有需要释放的初始化器活动 key。已进入初始化器的 key 由 Activation 完成时
+释放，返回值仍经过共同值域检查。树解释同步消费同样的准备与准入接口。
+
+宿主响应的表达式在进入目录前支付复制工作、检查结果域并取得初始化权限；随后
+直接使用该 Activation，不再插入目录后重新取出并重复检查。此前首次选择会对主体
+类型调用两次 `selected_type_view`，可能实际执行两次关联 Type 程序。当前每次访问
+只观察一次选定主体的结果域，保存访问端已观察的结果域用于完成检查。后续独立访问
+仍重新观察，不缓存不纯程序结果，也不把 invocation initializer 改成常量。
+
+Request 和 Activation 都有 S-expression Display，Session dump 包含待处理请求。
+两者只属于当前 VM 的执行现场，不进入 CodeSession。已有 resolver 的禁止补充预算、
+阶段限制、响应域拒绝、初始化循环与错误恢复检查继续生效。
+
+这仍是内部驱动边界：resolver 本身同步执行，subject／参数／结果域的观察仍可同步
+执行关联 Type 程序。尚未提供公共 HostRequest/response API、跨请求身份验证或前端
+region 的可恢复检查，不能把此处 Pending 宣称为完整宿主等待协议。它也不回滚已发生
+的宿主副作用。
+
+验证使用 `/home/fin/luna` 工作区：
+
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor
+  --lib associated -- --nocapture`：`/tmp/luna-tools-iw2cjddy/result.json`，退出 0，
+  25 项通过。新用例逐个取消四层关联选择链的所有严格执行前缀，核对 resolver
+  次数、预算、活动 key、caller 写入保留和同一 VM 重试；首次选择与后续读取均核对
+  实际 Type 函数进入事件。既有完成值域用例改经真实准入取得 Activation，未放宽
+  Unknown／Rejected 的预期。
+- 将四份相关生产／测试文件暂换为 `b7a2aeb1`，保留新域观察回归单独运行：
+  `/tmp/luna-tools-z8p1svtv/result.json`，退出 101，实际进入 `Domain` 两次、预期
+  一次。对照后四份文件逐字节恢复。新 fixture 初稿把未观察的关联域直接放在 bool
+  literal 上，被既有 literal 检查拒绝；最终用合法的带关联结果域 block 承载该值，
+  未修改 literal 检查。
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor
+  -p luna --lib --test deferred_associated_values --test associated_signatures
+  --test associated_purity --test comptime_bytecode_traits --test library_protocols
+  --no-fail-fast`：`/tmp/luna-tools-kpcapuye/result.json`，退出 0，632 项通过。
+  包括 VM 全部 491 项单元检查、关联域／默认值／纯度、LLVM O0/O3 的关联值路径，
+  以及真实 sysroot 协议。没有运行全 workspace 测试或性能基准。
+- 六个修改／新增 Rust 文件 scoped rustfmt 检查：
+  `/tmp/luna-tools-9konbg79/result.json`，退出 0。
 
 ## 6. 缓存分别回答不同问题
 
