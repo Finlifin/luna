@@ -730,7 +730,14 @@ fn object_set_rejects_bad_indices_and_immutable_rebinding() {
 #[test]
 fn object_ranges_preserve_order_domains_duplicates_and_snapshots() {
     let source = include_str!("../../../development/examples/sysroot-meta-object-methods.fl");
-    assert_eq!(invoke(&format!("typealias Object=meta.Object;typealias Type=.Type'builtin;typealias char=.char'builtin;{source}")).unwrap(),Value::Bool(true));
+    assert_eq!(
+        invoke(&format!(
+            "use meta.builtin.{{Type, char, Symbol, Integer}};
+             typealias Object = meta.Object; {source}"
+        ))
+        .unwrap(),
+        Value::Bool(true)
+    );
 }
 
 #[test]
@@ -768,20 +775,43 @@ fn object_range_failures_leave_inputs_usable_and_vm_recovers() {
                 comptime_interpretor::ErrorKind::IndexOutOfBounds
             );
         }
-        let before = vm.bytecode_invocations();
-        let Value::Object(value) = vm
-            .invoke(support::id(&package, name), vec![integer(0), integer(3)])
-            .unwrap()
-        else {
+        let entry = support::id(&package, name);
+        let before = vm.events().len();
+        let Value::Object(value) = vm.invoke(entry, vec![integer(0), integer(3)]).unwrap() else {
             panic!("Object")
         };
+        let entries = value
+            .entries()
+            .iter()
+            .map(|entry| {
+                (
+                    entry.key(),
+                    entry.value().ty.clone(),
+                    entry.value().value.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let boolean = Term::Primitive(Primitive::Bool);
         assert_eq!(
-            value.entries().len(),
-            if name == "range_slice" { 3 } else { 1 }
+            entries,
+            if name == "range_slice" {
+                vec![
+                    (Some("flag"), boolean.clone(), Value::Bool(true)),
+                    (None, Term::Primitive(Primitive::Char), Value::Char('x')),
+                    (Some("flag"), boolean, Value::Bool(false)),
+                ]
+            } else {
+                vec![(None, boolean, Value::Bool(false))]
+            }
         );
         assert_eq!(
-            vm.bytecode_invocations() - before,
-            if name == "range_slice" { 2 } else { 10 }
+            vm.events()[before..]
+                .iter()
+                .filter(|event| {
+                    matches!(event, comptime_interpretor::Event::EnterFunction(id) if *id == entry)
+                })
+                .count(),
+            1
         );
     }
     for body in [
