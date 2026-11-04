@@ -642,14 +642,21 @@ impl Checker<'_, '_> {
     }
 
     pub(super) fn copy_alias_type(&mut self, ty: &Term, span: Span) -> Result<Term, Error> {
-        let mut budget = comptime_runtime::Budget {
-            steps: self.required_steps as usize,
-            max_limbs: 4096,
-        };
-        let start = budget.steps;
-        let result = super::normal::clone_known_term(ty, &mut budget);
-        self.required_steps -= (start - budget.steps) as u64;
-        result.ok_or_else(|| error(span, "type alias expansion budget exhausted"))
+        let start = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let mut fuel = start;
+        let result = nir::copy_budget::clone_term(ty, &mut fuel);
+        self.required_steps -= (start - fuel) as u64;
+        result.map_err(|limit| {
+            let message = match limit {
+                nir::copy_budget::CopyBudgetExhausted::Steps => {
+                    "type alias expansion budget exhausted"
+                }
+                nir::copy_budget::CopyBudgetExhausted::Depth => {
+                    "type alias expansion depth exceeded"
+                }
+            };
+            error(span, message)
+        })
     }
 
     pub(super) fn check_alias_definition(

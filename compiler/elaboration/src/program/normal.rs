@@ -2365,122 +2365,9 @@ fn known_type_equality(
 }
 
 pub(super) fn clone_known_term(term: &Term, budget: &mut comptime_runtime::Budget) -> Option<Term> {
-    let mut pending = vec![(term, 0usize)];
-    while let Some((term, depth)) = pending.pop() {
-        if depth >= 128 {
-            return None;
-        }
-        budget.consume(1).ok()?;
-        match term {
-            Term::Computation { effects, result } => {
-                budget.consume(effects.len()).ok()?;
-                let width = effects
-                    .iter()
-                    .try_fold(1usize, |sum, op| sum.checked_add(op.arguments.len()))?;
-                if width > budget.steps {
-                    return None;
-                }
-                pending.push((result, depth + 1));
-                for operation in effects {
-                    pending.extend(operation.arguments.iter().map(|item| (item, depth + 1)));
-                }
-            }
-            Term::AssociatedType {
-                arguments, subject, ..
-            } => {
-                if arguments.len().saturating_add(1) > budget.steps {
-                    return None;
-                }
-                pending.push((subject, depth + 1));
-                pending.extend(arguments.iter().map(|item| (item, depth + 1)));
-            }
-            Term::OptionalValue { ty, value } => {
-                pending.push((ty, depth + 1));
-                if let Some(value) = value {
-                    pending.push((value, depth + 1));
-                }
-            }
-            Term::ErrorValue { ty, label, value } => {
-                pending.push((ty, depth + 1));
-                if let Some(label) = label {
-                    pending.push((label, depth + 1));
-                }
-                pending.push((value, depth + 1));
-            }
-            Term::ListConcat { ty, parts: fields } | Term::NominalValue { ty, fields, .. } => {
-                if fields.len().saturating_add(1) > budget.steps {
-                    return None;
-                }
-                pending.push((ty, depth + 1));
-                pending.extend(fields.iter().map(|field| (field, depth + 1)));
-            }
-            Term::Record(fields) | Term::RecordValue(fields) => {
-                if fields.len() > budget.steps {
-                    return None;
-                }
-                for (name, ty) in fields {
-                    budget.consume(name.len()).ok()?;
-                    pending.push((ty, depth + 1));
-                }
-            }
-            Term::Tuple(items)
-            | Term::TupleValue(items)
-            | Term::Nominal {
-                arguments: items, ..
-            }
-            | Term::NormalForm {
-                arguments: items, ..
-            } => {
-                if items.len() > budget.steps {
-                    return None;
-                }
-                pending.extend(items.iter().map(|item| (item, depth + 1)));
-            }
-            Term::Optional(inner)
-            | Term::Pointer(inner)
-            | Term::ComptimeFunction(inner)
-            | Term::NormalFormFunction(inner, _)
-            | Term::UnsafeFunction(inner) => pending.push((inner, depth + 1)),
-            Term::Function { parameters, result } => {
-                if parameters.len() > budget.steps {
-                    return None;
-                }
-                pending.push((result, depth + 1));
-                pending.extend(parameters.iter().map(|p| (&p.ty, depth + 1)));
-            }
-            Term::Closure {
-                environment,
-                signature,
-            } => {
-                if environment.len() > budget.steps {
-                    return None;
-                }
-                pending.push((signature, depth + 1));
-                pending.extend(environment.iter().map(|item| (item, depth + 1)));
-            }
-            Term::Integer(value) => {
-                budget.consume(value.bit_len().div_ceil(32)).ok()?;
-            }
-            Term::Float(value) => {
-                budget
-                    .consume(
-                        value
-                            .digits()
-                            .len()
-                            .saturating_add(value.exponent().bit_len().div_ceil(32)),
-                    )
-                    .ok()?;
-            }
-            Term::BitVec(value) => {
-                budget.consume(value.words().len()).ok()?;
-            }
-            Term::String(value) | Term::Symbol(value) => {
-                budget.consume(value.len()).ok()?;
-            }
-            _ => {}
-        }
-    }
-    Some(term.clone())
+    // Opportunistic observation may decline to supply evidence. Required copies
+    // call the typed service directly so a resource limit remains a diagnostic.
+    nir::copy_budget::clone_term(term, &mut budget.steps).ok()
 }
 
 #[cfg(test)]
@@ -2882,6 +2769,79 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn observed_copy_cannot_hide_payloads_or_depth_in_callable_and_error_terms() {
+        fn wrappers(value: &Term) -> Vec<Term> {
+            let id = nir::DeclarationId {
+                package: 1,
+                local: 1,
+            };
+            let mut terms = vec![
+                Term::ErrorResult {
+                    errors: vec![value.clone()],
+                    result: Box::new(Term::Unit),
+                },
+                Term::ErrorResult {
+                    errors: vec![],
+                    result: Box::new(value.clone()),
+                },
+                Term::ClosureContextValue(vec![value.clone()]),
+                Term::ContextualClosure {
+                    context: Box::new(value.clone()),
+                    signature: Box::new(Term::Unit),
+                },
+                Term::ContextualClosure {
+                    context: Box::new(Term::ClosureContextType),
+                    signature: Box::new(value.clone()),
+                },
+                Term::FunctionValue {
+                    declaration: id,
+                    arguments: vec![value.clone()],
+                },
+                Term::ClosureSnapshot {
+                    factory: id,
+                    arguments: vec![value.clone()],
+                },
+            ];
+            // Each method identity owns three independent sources of terms.
+            for slot in 0..3 {
+                terms.push(Term::MethodValue(Box::new(nir::TraitMethodIdentity {
+                    interface: nir::program::InterfaceInstance {
+                        declaration: id,
+                        arguments: if slot == 0 {
+                            vec![value.clone()]
+                        } else {
+                            vec![]
+                        },
+                    },
+                    subject: if slot == 1 { value.clone() } else { Term::Unit },
+                    member: id,
+                    method_arguments: if slot == 2 {
+                        vec![value.clone()]
+                    } else {
+                        vec![]
+                    },
+                })));
+            }
+            terms
+        }
+        for value in wrappers(&Term::String("x".repeat(128).into())) {
+            let mut short = Budget {
+                steps: 64,
+                ..Default::default()
+            };
+            assert!(clone_known_term(&value, &mut short).is_none(), "{value}");
+            assert_eq!(
+                clone_known_term(&value, &mut Budget::default()),
+                Some(value)
+            );
+        }
+        let deep = (0..128).fold(Term::Unit, |inner, _| Term::Optional(Box::new(inner)));
+        for value in wrappers(&deep) {
+            assert!(clone_known_term(&value, &mut Budget::default()).is_none());
+        }
     }
 
     #[test]

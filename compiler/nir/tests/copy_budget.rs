@@ -573,3 +573,59 @@ fn input_dependency_scan_covers_hidden_types_and_shared_bodies() {
     }));
     assert!(!expression_has_contextual_types(&closed, &mut 1000).unwrap());
 }
+
+#[test]
+fn term_copy_reports_exhaustion_even_with_unspent_fuel_and_recovers() {
+    use nir::copy_budget::clone_term;
+    let value = Term::TupleValue(vec![Term::String("x".repeat(128).into())]);
+    let mut short = 64;
+    assert_eq!(
+        clone_term(&value, &mut short),
+        Err(CopyBudgetExhausted::Steps)
+    );
+    assert!(short > 0);
+    assert_eq!(clone_term(&value, &mut 256), Ok(value));
+
+    let wide = Term::TupleValue(vec![Term::Unit; 128]);
+    let mut short = 64;
+    assert_eq!(
+        clone_term(&wide, &mut short),
+        Err(CopyBudgetExhausted::Steps)
+    );
+    assert!(short > 0);
+    assert_eq!(clone_term(&wide, &mut 256), Ok(wide));
+}
+
+#[test]
+fn term_copy_preserves_open_opaque_identity_without_certifying_scope() {
+    use nir::copy_budget::clone_term;
+    let value = Term::NormalForm {
+        head: DeclarationId {
+            package: 7,
+            local: 11,
+        },
+        sort: nir::Sort::Type,
+        arguments: vec![Term::Bound {
+            depth: 2,
+            index: 3,
+            sort: nir::Sort::Type,
+        }],
+    };
+    assert!(value.check_scope(&[]).is_err());
+    assert_eq!(clone_term(&value, &mut 100), Ok(value));
+}
+
+#[test]
+fn term_copy_distinguishes_depth_from_steps_at_the_boundary() {
+    use nir::copy_budget::clone_term;
+    let allowed = (0..127).fold(Term::Unit, |inner, _| Term::Optional(Box::new(inner)));
+    let mut fuel = 128;
+    assert_eq!(clone_term(&allowed, &mut fuel), Ok(allowed.clone()));
+    assert_eq!(fuel, 0);
+    let deep = Term::Optional(Box::new(allowed));
+    assert_eq!(
+        clone_term(&deep, &mut 10_000),
+        Err(CopyBudgetExhausted::Depth)
+    );
+    assert_eq!(clone_term(&Term::Unit, &mut 1), Ok(Term::Unit));
+}

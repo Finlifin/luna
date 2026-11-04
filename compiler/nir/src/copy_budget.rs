@@ -12,6 +12,21 @@ pub enum CopyBudgetExhausted {
     Depth,
 }
 
+/// Copy an immutable term only after charging all structural edges and payloads.
+/// This does not establish scope, formation, value admission or type equality.
+/// Failure retains its reason even when some fuel remains; callers must not
+/// infer success or the exhausted limit from the remaining counter alone.
+pub fn clone_term(value: &Term, fuel: &mut usize) -> Result<Term, CopyBudgetExhausted> {
+    crate::type_computations::visit_expanded_term_for_copy(
+        value,
+        fuel,
+        128,
+        &std::collections::BTreeMap::new(),
+        &mut |_| {},
+    )?;
+    Ok(value.clone())
+}
+
 pub fn charge_expression(value: &n::Expr, steps: &mut u64) -> Result<(), CopyBudgetExhausted> {
     charge_tree(value, steps, false)
 }

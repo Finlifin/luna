@@ -412,3 +412,46 @@ required 参数包；固定值子句也复用同一准备服务。覆盖范围�
 仍以缺少列表元素上下文失败，退出 101，证据 `/tmp/luna-tools-byp6h53s/result.json`。
 格式检查退出 0：`/tmp/luna-tools-kj3a8iy5/result.json`；未跑全 workspace/native 或性能
 基准。这里没有把静态检查重排描述为任意动态域均已支持。
+
+
+## 14. 静态观察复制复用完整结构预算
+
+静态观察器原有的 `clone_known_term` 自行遍历 Term，并以通配分支忽略未列出的结构。
+它遗漏 ErrorResult、ClosureContextValue、ContextualClosure、FunctionValue、
+ClosureSnapshot 和 MethodValue 的子项，导致这些结构内的载荷与深度无法计入复制预算。
+现删除该遍历，改由 `nir::copy_budget::clone_term` 在公共完整结构预检成功后才复制。
+该入口复用 `visit_children` 及已有载荷计费，不另建一份 Term 边列表。
+
+这项服务只保证复制资源受限。它不执行 NF 头，不替换开放绑定，不证明 scope、形成
+或值域成员资格；接收者仍承担原有准入责任。即使剩余 fuel 非零，下一项载荷、宽度
+或深度也可能已超过预算，因而调用者必须检查 Result，不能从计数器猜测结果。
+
+静态观察的可选适配器仍可以放弃提供证据；必需的类型别名展开则直接消费带类型的
+复制结果，将 Steps 与 Depth 分别报告为预算耗尽与展开深度超限，并记回已消耗工作。
+这次没有将整个 `known_normal_input` 改成带类型的观察结果。未知值、未支持观察、
+算术无效以及不同资源限制在该观察器其余分支中的分类仍须统一；不能把本次复制边界
+修正描述为通用可恢复观察协议已完成，更不能用 fuel 归零作为这项迁移的替代。
+
+回归覆盖所有上述遗漏结构，其中 MethodValue 分别覆盖 subject、interface arguments
+和 method arguments；检查隐藏载荷、过深嵌套、非零剩余预算下的失败及新预算下恢复。
+另保留精确十进制载荷、结构复制成本及深度边界检查，验证开放 opaque 身份原样保存，
+没有因复制成功而获得作用域证明。
+
+本节在 `/home/fin/luna` 使用 `development/check.py --timeout 900 -- test` 验证：
+`-p nir --test copy_budget` 19 项通过，证据 `/tmp/luna-tools-j0zcj4mv/result.json`；
+`-p elaboration --lib program::normal::` 13 项通过，证据
+`/tmp/luna-tools-wut3z1t9/result.json`；`-p luna --test ordinary_clause_collectors
+--test normal_form_domains --test comptime_clause_inputs` 共 75 项通过、1 项既有 ignored，
+证据 `/tmp/luna-tools-lcd010m3/result.json`，上述命令均退出 0。ignored 仍为需要执行
+Type 生产者才能完成接收域的用例，本节没有解决它。
+
+另运行 `-p luna --test elaboration alias`：12 项通过、2 项失败，退出 101，证据
+`/tmp/luna-tools-232hgxp2/result.json`。两个失败分别是
+`generic_aliases_check_arity_scope_cycles_and_target_types` 与
+`typealias_defaults_reject_invalid_unused_defaults_and_missing_parameters`；都期望
+`unresolved type equality`，实际拒绝诊断为 `type mismatch`。以 `828c1fa7` 的三个
+生产文件替换本阶段变更、保留其余工作区后执行相同检查，结果和失败诊断一致，基线
+证据 `/tmp/luna-tools-j6an4vhn/result.json` 退出 101；随后三个文件逐字节恢复。
+没有修改测试预期，也不把这两项既有失败记为本次通过。原工作区受保护修改保持不变。
+修改文件 rustfmt check 退出 0，证据 `/tmp/luna-tools-wp09l2u0/result.json`；
+`git diff --check` 通过。未执行全 workspace、native 或性能检查。
