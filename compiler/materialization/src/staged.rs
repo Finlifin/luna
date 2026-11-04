@@ -147,7 +147,11 @@ impl Builder<'_> {
             Roots::Dispatch(&roots),
             BTreeSet::new(),
             &[],
-            Some((self.world.context(), self.world.assumptions())),
+            Some(DispatchContext {
+                types: self.world.context(),
+                assumptions: self.world.assumptions(),
+                value_parameters: &[],
+            }),
             None,
         )?;
         snapshot.dispatch_instances = prepared.dispatch;

@@ -165,7 +165,7 @@ fn dynamic_nominal_associated_values_keep_their_formation_contracts() {
 }
 
 #[test]
-#[ignore = "private dispatch snapshots lack scoped evidence for symbolic value inputs"]
+#[ignore = "VM construction validates symbolic dispatch before installing invocation value scope"]
 fn dynamic_nominal_clause_values_keep_their_formation_contracts() {
     assert_eq!(
         invoke_packet_program(

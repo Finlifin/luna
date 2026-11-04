@@ -3178,7 +3178,7 @@ validate_immutable_input，在替换前检查新值和旧值；这条路径没�
 保留见证但具备接收世界查询服务的值，才验证此完成入口的主动检查。动态枚举的
 标签名称用例则确实在修复前返回 Type。两条解释路径共用观察完成逻辑。
 
-**私有 dispatch 快照的值域证据缺口仍未解决。**
+**本阶段结束时的缺口；后续 dispatch 接线见第 36 节。**
 dynamic_nominal_clause_values_keep_their_formation_contracts 保留成功预期，当前显式
 ignore，原因是源码还未进入 VM 就在 required comptime dispatch 准备中失败：
 `interface value input normalization requires domain evidence`。
@@ -3458,3 +3458,53 @@ library_iteration 的 flat_map_short_circuit_cleans_inner_and_outer_remainders
 
 未跑全 workspace 或性能基准。正式 docs、moves/effects.rs 与 library/README.md
 此前的工作区修改保持原字节内容；测试断言的调整与证据见上文，生产预算未增大。
+
+## 36. 私有 dispatch 的声明域准入与调用作用域
+
+required invocation 现在先完成可见值参数筛选、已检查 substitution 的调用方参数
+转送及输入依赖观察，再将本次合法的 `abstract_value_parameters` 交给私有 dispatch。
+声明目录仅用于查询 trait 的参数域；它不授予目录中所有参数当前可见的权限。
+值域作用域独立于 PTC Context，不将普通值成员资格改造成类型命题。
+
+materialization/input_admission.rs 对接口的完整输入 telescope 执行受预算代入：
+Self 与 Type 参数先取得类型视图，普通值按实例化后的声明域交给共享 value_admission。
+嵌套 optional 等表示递归检查 payload；符号叶子必须与本次显式作用域的 binder 和
+域一致。不能用 `is_symbolic_index_value` 放行，也不能仅凭 payload 的自报类型放行。
+已有 trait 前提只消解类型义务，在跳过可执行 dispatch 选择前仍须检查值输入。
+
+这个作用域仅存在于私有准备过程。常规 dispatch、IIR 与独立方法选择不自动继承它；
+成功不修改 package、不补全抽象值、不向声明目录或全局前提发布授权。所有作用域复制、
+域代入及共享准入工作消费本次准备额度。required invocation 从剩余预算中划出原有
+上限以内的 dispatch 额度并扣回实际成功消耗；失败保守保留整笔额度，不因重试补充。
+
+**源码用例尚未端到端接通。** 原先失败的具体输入确认为
+`(rigid (id (declaration (package 0) (local 15))) (sort comptime-value))`，即外层 flag。
+现在它已通过 dispatch 准备，但同一正例在 VM 构造时返回 InvalidCallPlan，仍保留
+成功预期和显式 ignore，原因已更新。构造器检查 dispatch 实现参数时使用无符号值
+授权的准入回调，而 required 的 Type Session 与普通值调用均在构造完成后才安装
+abstract value scope。这是下一步需要统一的构造边界，不是允许删除构造检查的理由。
+
+后续应让私有 comptime 构造在校验 dispatch 前取得已授权的调用作用域；Type Session
+与普通值 invocation 共用该入口。独立 runtime/闭合构造和共享 SourceIndexes 仍必须
+保持闭合，不能把带调用方权限的成功构造当成任何调用都能复用的声明证明。还需分别
+验证域冲突、预算失败后的恢复及作用域不泄漏。先保存 packet 到局部再供应子句的
+required input unavailable 问题仍独立存在；本阶段没有声称解决该生产者就绪路径。
+
+验证证据（工作目录 `/home/fin/luna`）：
+
+- 修改前以原正例显式 `--ignored` 运行，报告
+  `/tmp/luna-tools-9fv3sqo2/result.json`，退出 101，补充诊断确认上述刚性值输入。
+- 接线后对 `comptime_nominal_capabilities` 使用 `--include-ignored`，报告
+  `/tmp/luna-tools-v0grngsb/result.json`，退出 101；六项通过，目标正例继续在
+  VM 构造失败，未改写预期。
+- `python3 -B development/check.py --timeout 900 -- test -p materialization --
+  --nocapture`：`/tmp/luna-tools-lrbotzr7/result.json`，退出 0，27 项通过。
+  五项新测试覆盖声明目录不授权、缺失/错误 binder 或域拒绝、嵌套符号 payload、
+  依赖 Type 参数的域、trait 前提不能授权、失败不发布及重新准备恢复。
+- 修改的五个实现/测试文件 rustfmt 检查：
+  `/tmp/luna-tools-m2mc1ohg/result.json`，退出 0。
+- 七组 luna 集成检查（comptime_nominal_capabilities、deferred_associated_values、
+  associated_signatures、dynamic_trait_clauses、normal_input_plans、symbols、
+  library_protocols）：`/tmp/luna-tools-efr7ak88/result.json`，退出 0；108 项通过，
+  1 项上述正例显式忽略。使用真实 sysroot 的库协议用例包括在内。该轮运行时 ignore
+  的原因文字尚未更新；之后仅修正原因文字，没有改动用例内容或预期。

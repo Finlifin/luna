@@ -7,6 +7,7 @@ pub use associated_selection::resolve_associated_value_for_invocation;
 mod captured_templates;
 mod conditional_calls;
 mod dead_tails;
+mod input_admission;
 mod mutable_callbacks;
 mod recursive_factories;
 mod staged;
@@ -92,6 +93,7 @@ struct Builder<'a> {
     retain_templates: bool,
     package: &'a n::Package,
     world: DeclarationWorld<'a>,
+    value_scope: input_admission::ValueScope,
     queue: VecDeque<Task>,
     functions: HashSet<(Id, Vec<Term>)>,
     staged_functions: HashMap<(Id, Vec<Term>), n::Function>,
@@ -227,7 +229,11 @@ pub fn resolve_method_identity_in_context(
         Roots::MethodIdentity(callee, &mut selected),
         BTreeSet::new(),
         &[],
-        Some((context, assumptions)),
+        Some(DispatchContext {
+            types: context,
+            assumptions,
+            value_parameters: &[],
+        }),
         None,
     );
     match result {
@@ -324,19 +330,35 @@ pub fn dispatch_instances_in_context(
     package: &n::Package,
     context: &Context,
     assumptions: &[n::TraitRequirement],
+    value_parameters: &[(Id, Term)],
     live_methods: &[comptime_interpretor::TraitMethodIdentity],
-    budget: Budget,
+    budget: &mut Budget,
 ) -> Result<Vec<n::DispatchInstance>, String> {
-    build(
+    let result = build(
         package,
-        budget,
+        *budget,
         Roots::AllWithMethods(live_methods),
         BTreeSet::new(),
         &[],
-        Some((context, assumptions)),
+        Some(DispatchContext {
+            types: context,
+            assumptions,
+            value_parameters,
+        }),
         None,
-    )
-    .map(|result| result.dispatch)
+    );
+    match result {
+        Ok(result) => {
+            budget.steps = result.remaining;
+            Ok(result.dispatch)
+        }
+        Err(reason) => {
+            // A failed private build publishes no graph and cannot refund
+            // work performed before its diagnostic was produced.
+            budget.steps = 0;
+            Err(reason)
+        }
+    }
 }
 /// Materialize an explicit set of function instances. Failure publishes no
 /// partial graph; recursive calls reuse the same instance identity.
@@ -450,13 +472,19 @@ struct BuildResult {
     type_cores: nir::TypeInterner,
 }
 
+struct DispatchContext<'a> {
+    types: &'a Context,
+    assumptions: &'a [n::TraitRequirement],
+    value_parameters: &'a [(Id, Term)],
+}
+
 fn build(
     package: &n::Package,
     budget: Budget,
     roots: Roots<'_>,
     runtime_bindings: BTreeSet<nir::RuntimeId>,
     type_roots: &[nir::Term],
-    context: Option<(&Context, &[n::TraitRequirement])>,
+    context: Option<DispatchContext<'_>>,
     expansion: Option<&dyn Expansion>,
 ) -> Result<BuildResult, String> {
     let body_free_selection = matches!(roots, Roots::QuoteMethod(..) | Roots::MethodIdentity(..));
@@ -468,8 +496,16 @@ fn build(
         Roots::All | Roots::AllWithMethods(_) | Roots::Dispatch(_) | Roots::Invocation(_)
     );
     let mut construction_budget = budget;
-    let world = DeclarationWorld::new_metered(package, &mut construction_budget, context)?;
+    let world = DeclarationWorld::new_metered(
+        package,
+        &mut construction_budget,
+        context.as_ref().map(|c| (c.types, c.assumptions)),
+    )?;
     let mut input_fuel = construction_budget.steps;
+    let value_scope = input_admission::ValueScope::new(
+        context.as_ref().map_or(&[], |c| c.value_parameters),
+        &mut input_fuel,
+    )?;
     let inline_effects = if matches!(roots, Roots::Iir(_)) {
         input_fuel = input_fuel
             .checked_sub(package.effects.len())
@@ -499,6 +535,7 @@ fn build(
         ),
         package,
         world,
+        value_scope,
         queue: VecDeque::new(),
         functions: HashSet::new(),
         staged_functions: HashMap::new(),
@@ -639,6 +676,13 @@ fn build(
         match task {
             Task::Function(id, arguments) => builder.function(id, arguments)?,
             Task::Interface(interface, subject) => {
+                // A premise can discharge the type obligation, but it cannot
+                // grant scope or representation evidence to its value inputs.
+                let capability = builder.normalized_capability(&n::TraitRequirement {
+                    interface: interface.declaration,
+                    interface_arguments: interface.arguments,
+                    subject,
+                })?;
                 // A given obligation has no executable dispatch identity.
                 // Method/value demands still call interface() directly.
                 let given = crate::capabilities::World {
@@ -648,26 +692,10 @@ fn build(
                     assumptions: builder.world.assumptions(),
                     context: builder.world.context(),
                 }
-                .given(
-                    &n::TraitRequirement {
-                        interface: interface.declaration,
-                        interface_arguments: interface.arguments.clone(),
-                        subject: subject.clone(),
-                    },
-                    budget,
-                )?
+                .given(&capability, budget)?
                 .is_some();
                 if !given {
-                    if builder.instances.is_some() {
-                        let capability = builder.normalized_capability(&n::TraitRequirement {
-                            interface: interface.declaration,
-                            interface_arguments: interface.arguments,
-                            subject,
-                        })?;
-                        builder.interface(capability.interface_instance(), capability.subject)?;
-                    } else {
-                        builder.interface(interface, subject)?;
-                    }
+                    builder.interface(capability.interface_instance(), capability.subject)?;
                 }
             }
             Task::Type(ty) => builder.ty(ty)?,
@@ -923,8 +951,12 @@ impl Builder<'_> {
             self.queue.push_back(Task::Type(subject));
             subject = selected_subject;
         }
-        for argument in &mut interface.arguments {
-            let selected = self.normalized_interface_input(argument)?;
+        let arguments = self.normalized_interface_arguments(
+            interface.declaration,
+            &subject,
+            &interface.arguments,
+        )?;
+        for (argument, selected) in interface.arguments.iter_mut().zip(arguments) {
             if selected != *argument {
                 self.queue.push_back(Task::Type(argument.clone()));
                 *argument = selected;
@@ -1398,11 +1430,11 @@ impl Builder<'_> {
             {
                 let interface = n::InterfaceInstance {
                     declaration: interface.declaration,
-                    arguments: interface
-                        .arguments
-                        .iter()
-                        .map(|ty| self.normalized_interface_input(ty))
-                        .collect::<Result<_, _>>()?,
+                    arguments: self.normalized_interface_arguments(
+                        interface.declaration,
+                        subject,
+                        &interface.arguments,
+                    )?,
                 };
                 let subject = self.normalized_type(subject)?;
                 let expected = self.normalized_type(&expr.ty)?;
@@ -2159,11 +2191,11 @@ impl Builder<'_> {
         Ok(n::TraitRequirement {
             interface: capability.interface,
             subject: self.normalized_type(&capability.subject)?,
-            interface_arguments: capability
-                .interface_arguments
-                .iter()
-                .map(|argument| self.normalized_interface_input(argument))
-                .collect::<Result<_, _>>()?,
+            interface_arguments: self.normalized_interface_arguments(
+                capability.interface,
+                &capability.subject,
+                &capability.interface_arguments,
+            )?,
         })
     }
     fn normalized_predicate(
@@ -2226,7 +2258,9 @@ impl Builder<'_> {
         if self.admit_nominal_index(input)? || input.is_structural_index_value() {
             return Ok(input.clone());
         }
-        Err("interface value input normalization requires domain evidence".into())
+        Err(format!(
+            "interface value input normalization requires domain evidence: {input}"
+        ))
     }
     fn associated_value_plan(
         &mut self,
