@@ -1,6 +1,7 @@
 //! Frozen callable inputs require signature evidence from a declaration world.
 use nir::normal_forms::{ApplicationError, Head, Kind, Parameter, Role, supported_input_type};
 use nir::program::LocalId;
+use nir::value_admission::{DomainQueries, Error};
 use nir::{DeclarationId, DeclarationSubstitution, Primitive as P, Sort, Term};
 
 fn id(local: u32) -> DeclarationId {
@@ -51,31 +52,40 @@ fn check(
     frames: &[Vec<Sort>],
     fuel: &mut usize,
 ) -> Result<(), ApplicationError> {
-    descriptor.check_arguments_in_scope_with_callables_budgeted_in(
+    descriptor.check_arguments(
         inputs,
-        |_| false,
-        |_| false,
-        |_, _, _| None,
-        |_, _| false,
-        |declaration, arguments, caller_frames, fuel| {
-            // This test registry contains one ordinary generic declaration.
-            *fuel = fuel.checked_sub(1)?;
-            if declaration != id(10) {
-                return None;
-            }
-            let substitution = DeclarationSubstitution::bounded(
-                &[id(11)],
-                &[p(P::Type)],
-                arguments,
-                caller_frames,
-                fuel,
-            )
-            .ok()?;
-            substitution.instantiate_bounded(signature, fuel).ok()
-        },
         frames,
         fuel,
-        None,
+        &mut DomainQueries {
+            layout: &mut |_, _, _| Err("missing test layout".into()),
+            declared: &mut |_, _, _| false,
+            collection: &mut |_, _| Ok(None),
+            callable: &mut |value, caller_frames, fuel| {
+                // This test registry contains one ordinary generic declaration.
+                *fuel = fuel.checked_sub(1).ok_or(Error::Budget)?;
+                let nir::CallableValueRef::Function {
+                    declaration,
+                    arguments,
+                } = value
+                else {
+                    return Ok(None);
+                };
+                if declaration != id(10) {
+                    return Ok(None);
+                }
+                let substitution = DeclarationSubstitution::bounded(
+                    &[id(11)],
+                    &[p(P::Type)],
+                    arguments,
+                    caller_frames,
+                    fuel,
+                )?;
+                Ok(Some(std::borrow::Cow::Owned(
+                    substitution.instantiate_bounded(signature, fuel)?,
+                )))
+            },
+            target: None,
+        },
     )
 }
 fn generic() -> Term {
@@ -143,18 +153,20 @@ fn declaration_signature_controls_domain_phase_and_safety() {
             .is_err()
         );
     }
-    // Old callers supply no declaration authority and must continue to reject.
+    // Abstract-value evidence cannot substitute for a callable signature.
     assert!(
         descriptor
-            .check_arguments_in_scope_with_collections_budgeted_in(
+            .check_arguments(
                 &[identity(vec![p(P::Bool)])],
-                |_| false,
-                |_| false,
-                |_, _, _| None,
-                |_, _| true,
                 &[],
                 &mut 10000,
-                None,
+                &mut DomainQueries {
+                    layout: &mut |_, _, _| Err("missing test layout".into()),
+                    declared: &mut |_, _, _| true,
+                    collection: &mut |_, _| Ok(None),
+                    callable: &mut |_, _, _| Ok(None),
+                    target: None,
+                },
             )
             .is_err()
     );

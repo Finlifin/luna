@@ -161,7 +161,10 @@ fn records_keep_named_domains_across_nominal_and_nf_admission() {
         }],
     };
     check(&value, &domain, &[], false, &mut 1000).unwrap();
-    head.check_closed_arguments(&[value.clone()]).unwrap();
+    with_queries(false, |queries| {
+        head.check_arguments(&[value.clone()], &[], &mut 100_000, queries)
+    })
+    .unwrap();
     nir::validate_declaration_arguments(&[id(2)], &[domain.clone()], &[value.clone()], &mut 1000)
         .unwrap();
     let mut bad = value.clone();
@@ -169,11 +172,20 @@ fn records_keep_named_domains_across_nominal_and_nf_admission() {
         fields[0].1 = Term::Integer(comptime_runtime::Integer::from_u128(256));
     }
     assert!(check(&bad, &domain, &[], false, &mut 1000).is_err());
-    assert!(head.check_closed_arguments(&[bad.clone()]).is_err());
+    assert!(
+        with_queries(false, |queries| head.check_arguments(
+            &[bad.clone()],
+            &[],
+            &mut 100_000,
+            queries
+        ))
+        .is_err()
+    );
     assert!(nir::validate_declaration_arguments(&[id(2)], &[domain], &[bad], &mut 1000).is_err());
-    let failure = head
-        .check_closed_arguments_budgeted(&[value], |_| false, |_, _, _| None, &mut 0)
-        .unwrap_err();
+    let failure = with_queries(false, |queries| {
+        head.check_arguments(&[value], &[], &mut 0, queries)
+    })
+    .unwrap_err();
     assert_eq!(
         failure,
         nir::normal_forms::ApplicationError::Budget { index: 0 }

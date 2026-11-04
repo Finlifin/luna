@@ -1,6 +1,56 @@
 use nir::normal_forms::{ApplicationError, Head, Kind, Parameter, supported_input_type};
 use nir::program::LocalId;
+use nir::value_admission::DomainQueries;
 use nir::{DeclarationId, Primitive as P, Sort, Term};
+
+macro_rules! queries {
+    () => {
+        nir::value_admission::DomainQueries {
+            layout: &mut |_, _, _| Err("missing test layout".into()),
+            declared: &mut |_, _, _| false,
+            collection: &mut |_, _| Ok(None),
+            callable: &mut |_, _, _| Ok(None),
+            target: None,
+        }
+    };
+}
+
+fn list_head() -> Head {
+    Head {
+        declaration: id(90),
+        role: nir::normal_forms::Role::TypeList,
+        collector: None,
+        requirements: vec![],
+        parameters: vec![parameter(91, Kind::Type, primitive(P::Type))],
+    }
+}
+fn tuple_head() -> Head {
+    Head {
+        declaration: id(9),
+        role: nir::normal_forms::Role::Tuple,
+        collector: Some(0),
+        requirements: vec![],
+        parameters: vec![parameter(
+            10,
+            Kind::Value,
+            Term::NormalForm {
+                head: id(90),
+                sort: Sort::Type,
+                arguments: vec![primitive(P::Type)],
+            },
+        )],
+    }
+}
+fn collection_domain(
+    domain: &Term,
+    fuel: &mut usize,
+) -> Result<Option<Term>, nir::value_admission::Error> {
+    let Some(element) = list_head().list_element(domain) else {
+        return Ok(None);
+    };
+    nir::type_computations::charge_term(element, fuel)?;
+    Ok(Some(element.clone()))
+}
 
 fn id(local: u32) -> DeclarationId {
     DeclarationId { package: 1, local }
@@ -113,15 +163,20 @@ fn dependent_list_parameters_use_the_same_value_contract_for_types_and_bools() {
         requirements: vec![],
     };
     let check = |arguments: &[Term], trusted: bool, fuel: &mut usize| {
-        descriptor.check_arguments_in_scope_with_collections_budgeted_in(
+        descriptor.check_arguments(
             arguments,
-            |_| false,
-            |head| trusted && head == id(90),
-            |_, _, _| None,
-            |_, _| false,
             &[],
             fuel,
-            None,
+            &mut DomainQueries {
+                collection: &mut |domain, fuel| {
+                    if trusted {
+                        collection_domain(domain, fuel)
+                    } else {
+                        Ok(None)
+                    }
+                },
+                ..queries!()
+            },
         )
     };
     let types = vec![primitive(P::Type), type_list(vec![primitive(P::Bool)])];
@@ -174,21 +229,31 @@ fn frozen_collection_inputs_require_identity_authority_and_element_domains() {
         ],
     );
     let check = |argument: &Term, trusted: bool, fuel: &mut usize| {
-        descriptor.check_arguments_in_scope_with_collections_budgeted_in(
+        descriptor.check_arguments(
             std::slice::from_ref(argument),
-            |_| false,
-            |declaration| trusted && declaration == id(90),
-            |_, _, _| None,
-            |_, _| false,
             &[],
             fuel,
-            None,
+            &mut DomainQueries {
+                collection: &mut |domain, fuel| {
+                    if trusted {
+                        collection_domain(domain, fuel)
+                    } else {
+                        Ok(None)
+                    }
+                },
+                ..queries!()
+            },
         )
     };
     assert!(good.check_scope(&[]).is_ok());
     assert!(
         descriptor
-            .check_closed_arguments(std::slice::from_ref(&good))
+            .check_arguments(
+                std::slice::from_ref(&good),
+                &[],
+                &mut 100_000,
+                &mut queries!()
+            )
             .is_err()
     );
     assert!(check(&good, false, &mut 100_000).is_err());
@@ -238,15 +303,14 @@ fn dependent_collection_domains_validate_ordinary_type_list_payloads() {
         ),
     ];
     let check = |element, value| {
-        descriptor.check_arguments_in_scope_with_collections_budgeted_in(
+        descriptor.check_arguments(
             &[element, value],
-            |_| false,
-            |declaration| declaration == id(90),
-            |_, _, _| None,
-            |_, _| false,
             &[],
             &mut 100_000,
-            None,
+            &mut DomainQueries {
+                collection: &mut collection_domain,
+                ..queries!()
+            },
         )
     };
     assert!(check(primitive(P::Type), type_list(vec![primitive(P::Bool)])).is_ok());
@@ -281,7 +345,12 @@ fn symbol_normal_inputs_do_not_accept_strings_or_types() {
     assert!(supported_input_type(&primitive(P::Symbol), &[]));
     assert!(
         descriptor
-            .check_closed_arguments(&[Term::Symbol("ready".into())])
+            .check_arguments(
+                &[Term::Symbol("ready".into())],
+                &[],
+                &mut 100_000,
+                &mut queries!()
+            )
             .is_ok()
     );
     for invalid in [
@@ -290,13 +359,18 @@ fn symbol_normal_inputs_do_not_accept_strings_or_types() {
         Term::Bool(true),
     ] {
         assert_eq!(
-            descriptor.check_closed_arguments(&[invalid]),
+            descriptor.check_arguments(&[invalid], &[], &mut 100_000, &mut queries!()),
             Err(ApplicationError::InputType { index: 0 })
         );
     }
     assert!(
         head(primitive(P::Str))
-            .check_closed_arguments(&[Term::Symbol("ready".into())])
+            .check_arguments(
+                &[Term::Symbol("ready".into())],
+                &[],
+                &mut 100_000,
+                &mut queries!()
+            )
             .is_err()
     );
 }
@@ -352,24 +426,39 @@ fn nominal_domains_require_metadata_and_prior_type_inputs() {
     };
     assert!(
         descriptor
-            .check_closed_arguments(&[primitive(P::Bool), valid.clone()])
+            .check_arguments(
+                &[primitive(P::Bool), valid.clone()],
+                &[],
+                &mut 100_000,
+                &mut queries!()
+            )
             .is_err()
     );
     assert!(
         descriptor
-            .check_closed_arguments_with_layouts(
+            .check_arguments(
                 &[primitive(P::Bool), valid.clone()],
-                |_| false,
-                lookup
+                &[],
+                &mut 100_000,
+                &mut DomainQueries {
+                    layout: &mut |ty, variant, _| lookup(ty, variant)
+                        .ok_or_else(|| "missing test layout".into()),
+                    ..queries!()
+                }
             )
             .is_ok()
     );
     assert!(
         descriptor
-            .check_closed_arguments_with_layouts(
+            .check_arguments(
                 &[primitive(P::F32), valid.clone()],
-                |_| false,
-                lookup
+                &[],
+                &mut 100_000,
+                &mut DomainQueries {
+                    layout: &mut |ty, variant, _| lookup(ty, variant)
+                        .ok_or_else(|| "missing test layout".into()),
+                    ..queries!()
+                }
             )
             .is_err()
     );
@@ -380,12 +469,30 @@ fn nominal_domains_require_metadata_and_prior_type_inputs() {
     };
     assert!(
         descriptor
-            .check_closed_arguments_with_layouts(&[primitive(P::Bool), invalid], |_| false, lookup)
+            .check_arguments(
+                &[primitive(P::Bool), invalid],
+                &[],
+                &mut 100_000,
+                &mut DomainQueries {
+                    layout: &mut |ty, variant, _| lookup(ty, variant)
+                        .ok_or_else(|| "missing test layout".into()),
+                    ..queries!()
+                }
+            )
             .is_err()
     );
     assert!(
         descriptor
-            .check_closed_arguments_with_layouts(&[primitive(P::Bool), valid], |_| false, lookup)
+            .check_arguments(
+                &[primitive(P::Bool), valid],
+                &[],
+                &mut 100_000,
+                &mut DomainQueries {
+                    layout: &mut |ty, variant, _| lookup(ty, variant)
+                        .ok_or_else(|| "missing test layout".into()),
+                    ..queries!()
+                }
+            )
             .is_ok()
     );
 }
@@ -405,18 +512,18 @@ fn normal_form_input_budget_is_shared_across_the_telescope() {
     let mut low = 150;
     assert!(
         descriptor
-            .check_closed_arguments_budgeted(&arguments, |_| false, |_, _, _| None, &mut low)
+            .check_arguments(&arguments, &[], &mut low, &mut queries!())
             .is_err()
     );
     assert!(low < 150);
     let mut enough = 1000;
     descriptor
-        .check_closed_arguments_budgeted(&arguments, |_| false, |_, _, _| None, &mut enough)
+        .check_arguments(&arguments, &[], &mut enough, &mut queries!())
         .unwrap();
     assert!(enough < 1000);
     let mut again = 1000;
     descriptor
-        .check_closed_arguments_budgeted(&arguments, |_| false, |_, _, _| None, &mut again)
+        .check_arguments(&arguments, &[], &mut again, &mut queries!())
         .unwrap();
     assert_eq!(enough, again);
 }
@@ -434,7 +541,11 @@ fn record_normal_inputs_check_names_shape_and_nested_ranges() {
         Term::Float32(0),
     ];
     let valid = value("data", Term::TupleValue(fields.clone()));
-    assert!(descriptor.check_closed_arguments(&[valid.clone()]).is_ok());
+    assert!(
+        descriptor
+            .check_arguments(&[valid.clone()], &[], &mut 100_000, &mut queries!())
+            .is_ok()
+    );
     let mut overflow = fields.clone();
     overflow[0] = Term::Integer(comptime_runtime::Integer::from_u128(256));
     let mut wrong_width = fields.clone();
@@ -448,10 +559,14 @@ fn record_normal_inputs_check_names_shape_and_nested_ranges() {
         primitive(P::Bool),
     ] {
         assert_eq!(
-            descriptor.check_closed_arguments(&[invalid]),
+            descriptor.check_arguments(&[invalid], &[], &mut 100_000, &mut queries!()),
             Err(ApplicationError::InputType { index: 0 })
         );
-        assert!(descriptor.check_closed_arguments(&[valid.clone()]).is_ok());
+        assert!(
+            descriptor
+                .check_arguments(&[valid.clone()], &[], &mut 100_000, &mut queries!())
+                .is_ok()
+        );
     }
 }
 
@@ -476,11 +591,21 @@ fn record_normal_inputs_resolve_prior_type_arguments() {
     };
     assert!(
         descriptor
-            .check_closed_arguments(&[primitive(P::Bool), value("payload", Term::Bool(true))])
+            .check_arguments(
+                &[primitive(P::Bool), value("payload", Term::Bool(true))],
+                &[],
+                &mut 100_000,
+                &mut queries!()
+            )
             .is_ok()
     );
     assert_eq!(
-        descriptor.check_closed_arguments(&[primitive(P::F32), value("payload", Term::Bool(true))]),
+        descriptor.check_arguments(
+            &[primitive(P::F32), value("payload", Term::Bool(true))],
+            &[],
+            &mut 100_000,
+            &mut queries!()
+        ),
         Err(ApplicationError::InputType { index: 1 })
     );
 }
@@ -491,7 +616,12 @@ fn duplicate_and_oversized_record_labels_are_rejected_before_comparison() {
     assert!(!supported_input_type(&repeated, &[]));
     assert!(
         head(repeated)
-            .check_closed_arguments(&[Term::RecordValue(vec![("x".into(), Term::Bool(true)); 2])])
+            .check_arguments(
+                &[Term::RecordValue(vec![("x".into(), Term::Bool(true)); 2])],
+                &[],
+                &mut 100_000,
+                &mut queries!()
+            )
             .is_err()
     );
     let label = "x".repeat(100_001);
@@ -501,12 +631,22 @@ fn duplicate_and_oversized_record_labels_are_rejected_before_comparison() {
     ));
     assert!(
         head(record(&label, primitive(P::Bool)))
-            .check_closed_arguments(&[value(&label, Term::Bool(true))])
+            .check_arguments(
+                &[value(&label, Term::Bool(true))],
+                &[],
+                &mut 100_000,
+                &mut queries!()
+            )
             .is_err()
     );
     assert!(
         head(record("x", primitive(P::Bool)))
-            .check_closed_arguments(&[value("x", Term::Bool(true))])
+            .check_arguments(
+                &[value("x", Term::Bool(true))],
+                &[],
+                &mut 100_000,
+                &mut queries!()
+            )
             .is_ok()
     );
 }
@@ -542,15 +682,26 @@ fn bound_tuple_value_domains_require_identity_and_check_nested_elements() {
     assert!(supported(&shape, &[], trusted));
     let descriptor = head(shape.clone());
     let check = |values: &[Term]| {
-        descriptor.check_arguments_in_scope_with_collections_budgeted_in(
+        descriptor.check_arguments(
             values,
-            trusted,
-            |head| head == id(90),
-            |_, _, _| None,
-            |_, _| false,
             &[],
             &mut 100_000,
-            None,
+            &mut DomainQueries {
+                collection: &mut collection_domain,
+                layout: &mut |ty, variant, fuel| {
+                    let heads = [list_head(), tuple_head()];
+                    if variant.is_some() {
+                        return Err("tuple variant is invalid".into());
+                    }
+                    nir::type_computations::charge_term(ty, fuel)?;
+                    nir::normal_forms::registered_tuple_fields(ty, |id| {
+                        heads.iter().find(|h| h.declaration == id)
+                    })
+                    .map(<[Term]>::to_vec)
+                    .ok_or_else(|| "missing tuple evidence".into())
+                },
+                ..queries!()
+            },
         )
     };
     let valid = Term::TupleValue(vec![
@@ -559,7 +710,11 @@ fn bound_tuple_value_domains_require_identity_and_check_nested_elements() {
             255,
         ))]),
     ]);
-    assert!(descriptor.check_closed_arguments(&[valid.clone()]).is_err());
+    assert!(
+        descriptor
+            .check_arguments(&[valid.clone()], &[], &mut 100_000, &mut queries!())
+            .is_err()
+    );
     assert!(check(&[valid.clone()]).is_ok());
     for bad in [
         Term::TupleValue(vec![]),
@@ -599,17 +754,25 @@ fn exact_float_normal_inputs_do_not_accept_rounded_runtime_values() {
     );
     let descriptor = head(primitive(P::Float));
     assert!(supported_input_type(&primitive(P::Float), &[]));
-    assert!(descriptor.check_closed_arguments(&[value.clone()]).is_ok());
+    assert!(
+        descriptor
+            .check_arguments(&[value.clone()], &[], &mut 100_000, &mut queries!())
+            .is_ok()
+    );
     for wrong in [
         Term::Float64(0.1f64.to_bits()),
         Term::Float32(0.1f32.to_bits()),
         primitive(P::Float),
     ] {
-        assert!(descriptor.check_closed_arguments(&[wrong]).is_err());
+        assert!(
+            descriptor
+                .check_arguments(&[wrong], &[], &mut 100_000, &mut queries!())
+                .is_err()
+        );
     }
     assert!(
         head(primitive(P::F64))
-            .check_closed_arguments(&[value])
+            .check_arguments(&[value], &[], &mut 100_000, &mut queries!())
             .is_err()
     );
 }
@@ -713,10 +876,19 @@ fn nominal_domains_preserve_value_prefix_sorts_and_instances() {
         (true, false, false),
         (false, true, false),
     ] {
-        let result = descriptor.check_closed_arguments_with_layouts(
+        let result = descriptor.check_arguments(
             &[Term::Bool(index), object(value)],
-            |_| false,
-            |_, variant| variant.is_none().then(|| vec![primitive(P::Bool)]),
+            &[],
+            &mut 100_000,
+            &mut DomainQueries {
+                layout: &mut |_, variant, _| {
+                    variant
+                        .is_none()
+                        .then(|| vec![primitive(P::Bool)])
+                        .ok_or_else(|| "missing test layout".into())
+                },
+                ..queries!()
+            },
         );
         assert_eq!(result.is_ok(), expected);
     }
@@ -750,16 +922,22 @@ fn residual_normal_inputs_require_exact_domains_without_weakening_closed_admissi
     };
     let inputs = vec![primitive(P::Bool), value("flag", symbol.clone())];
     let check = |inputs: &[Term], fuel: &mut usize| {
-        descriptor.check_arguments_with_evidence_budgeted(
+        descriptor.check_arguments(
             inputs,
-            |_| false,
-            |_, _, _| None,
-            |input, domain| input == &symbol && domain == &primitive(P::Bool),
+            &[],
             fuel,
+            &mut DomainQueries {
+                declared: &mut |input, domain, _| input == &symbol && domain == &primitive(P::Bool),
+                ..queries!()
+            },
         )
     };
     assert!(check(&inputs, &mut 10000).is_ok());
-    assert!(descriptor.check_closed_arguments(&inputs).is_err());
+    assert!(
+        descriptor
+            .check_arguments(&inputs, &[], &mut 100_000, &mut queries!())
+            .is_err()
+    );
     assert!(
         check(
             &[primitive(P::Char), value("flag", symbol.clone())],
@@ -781,12 +959,14 @@ fn residual_normal_inputs_require_exact_domains_without_weakening_closed_admissi
     };
     assert!(
         types
-            .check_arguments_with_evidence_budgeted(
+            .check_arguments(
                 &[symbol],
-                |_| false,
-                |_, _, _| None,
-                |_, _| true,
-                &mut 10000
+                &[],
+                &mut 10000,
+                &mut DomainQueries {
+                    declared: &mut |_, _, _| true,
+                    ..queries!()
+                }
             )
             .is_err()
     );
@@ -806,14 +986,20 @@ fn error_inputs_validate_payload_domain_and_full_branch_membership() {
         input(None, Term::Bool(true)),
         input(Some(Box::new(primitive(P::Char))), Term::Char('a')),
     ] {
-        descriptor.check_closed_arguments(&[value]).unwrap();
+        descriptor
+            .check_arguments(&[value], &[], &mut 100_000, &mut queries!())
+            .unwrap();
     }
     for value in [
         input(None, Term::Char('a')),
         input(Some(Box::new(primitive(P::Char))), Term::Bool(true)),
         input(Some(Box::new(primitive(P::Bool))), Term::Bool(true)),
     ] {
-        assert!(descriptor.check_closed_arguments(&[value]).is_err());
+        assert!(
+            descriptor
+                .check_arguments(&[value], &[], &mut 100_000, &mut queries!())
+                .is_err()
+        );
     }
     assert!(!supported_input_type(
         &Term::error_result(
@@ -844,16 +1030,23 @@ fn residual_error_success_requires_the_unflattened_inner_domain() {
     assert!(argument.has_pending_error_branch());
     assert!(
         descriptor
-            .check_closed_arguments(std::slice::from_ref(&argument))
+            .check_arguments(
+                std::slice::from_ref(&argument),
+                &[],
+                &mut 100_000,
+                &mut queries!()
+            )
             .is_err()
     );
     let check = |domain: &Term| {
-        descriptor.check_arguments_with_evidence_budgeted(
+        descriptor.check_arguments(
             std::slice::from_ref(&argument),
-            |_| false,
-            |_, _, _| None,
-            |value, expected| value == &pending && expected == domain,
+            &[],
             &mut 10000,
+            &mut DomainQueries {
+                declared: &mut |value, expected, _| value == &pending && expected == domain,
+                ..queries!()
+            },
         )
     };
     check(&inner).unwrap();
@@ -931,37 +1124,49 @@ fn platform_normal_inputs_validate_target_ranges_recursively() {
     ] {
         let descriptor = head(record("count", primitive(domain)));
         let arguments = [value("count", Term::Integer(integer))];
-        assert!(descriptor.check_closed_arguments(&arguments).is_err());
+        assert!(
+            descriptor
+                .check_arguments(&arguments, &[], &mut 100_000, &mut queries!())
+                .is_err()
+        );
         for (width, accepted) in [(32, accepted32), (64, accepted64)] {
             let target = Some(TargetData::new(width).unwrap());
             let mut exhausted = 0;
             assert!(
                 descriptor
-                    .check_closed_arguments_budgeted_in(
+                    .check_arguments(
                         &arguments,
-                        |_| false,
-                        |_, _, _| None,
+                        &[],
                         &mut exhausted,
-                        target
+                        &mut DomainQueries {
+                            target,
+                            ..queries!()
+                        }
                     )
                     .is_err()
             );
             let mut fuel = 10000;
             assert_eq!(
                 descriptor
-                    .check_closed_arguments_budgeted_in(
+                    .check_arguments(
                         &arguments,
-                        |_| false,
-                        |_, _, _| None,
+                        &[],
                         &mut fuel,
-                        target
+                        &mut DomainQueries {
+                            target,
+                            ..queries!()
+                        }
                     )
                     .is_ok(),
                 accepted
             );
             assert!(fuel < 10000);
             // Reusing a descriptor after checking another target cannot cache its range.
-            assert!(descriptor.check_closed_arguments(&arguments).is_err());
+            assert!(
+                descriptor
+                    .check_arguments(&arguments, &[], &mut 100_000, &mut queries!())
+                    .is_err()
+            );
         }
     }
 }
@@ -974,10 +1179,15 @@ fn optional_normal_inputs_preserve_layer_and_validate_payload_domain() {
     assert!(supported_input_type(&domain, &[]));
     for payload in [None, Some(Box::new(Term::Bool(true)))] {
         descriptor
-            .check_closed_arguments(&[Term::OptionalValue {
-                ty: Box::new(domain.clone()),
-                value: payload,
-            }])
+            .check_arguments(
+                &[Term::OptionalValue {
+                    ty: Box::new(domain.clone()),
+                    value: payload,
+                }],
+                &[],
+                &mut 100_000,
+                &mut queries!(),
+            )
             .unwrap();
     }
     for value in [
@@ -990,7 +1200,11 @@ fn optional_normal_inputs_preserve_layer_and_validate_payload_domain() {
             value: None,
         },
     ] {
-        assert!(descriptor.check_closed_arguments(&[value]).is_err());
+        assert!(
+            descriptor
+                .check_arguments(&[value], &[], &mut 100_000, &mut queries!())
+                .is_err()
+        );
     }
     assert!(!supported_input_type(
         &Term::Optional(Box::new(Term::Pointer(Box::new(boolean)))),
@@ -999,10 +1213,15 @@ fn optional_normal_inputs_preserve_layer_and_validate_payload_domain() {
     let empty = Term::Optional(Box::new(primitive(P::Never)));
     assert!(supported_input_type(&empty, &[]));
     head(empty.clone())
-        .check_closed_arguments(&[Term::OptionalValue {
-            ty: Box::new(empty),
-            value: None,
-        }])
+        .check_arguments(
+            &[Term::OptionalValue {
+                ty: Box::new(empty),
+                value: None,
+            }],
+            &[],
+            &mut 100_000,
+            &mut queries!(),
+        )
         .unwrap();
 }
 
@@ -1025,7 +1244,12 @@ fn frozen_objects_check_every_stored_domain_and_preserve_duplicate_keys() {
     assert!(good.check_scope(&[]).is_ok());
     assert!(
         descriptor
-            .check_closed_arguments(std::slice::from_ref(&good))
+            .check_arguments(
+                std::slice::from_ref(&good),
+                &[],
+                &mut 100_000,
+                &mut queries!()
+            )
             .is_ok()
     );
     for bad in [
@@ -1043,25 +1267,25 @@ fn frozen_objects_check_every_stored_domain_and_preserve_duplicate_keys() {
             fields: vec![],
         },
     ] {
-        assert!(descriptor.check_closed_arguments(&[bad]).is_err());
         assert!(
             descriptor
-                .check_closed_arguments(std::slice::from_ref(&good))
+                .check_arguments(&[bad], &[], &mut 100_000, &mut queries!())
+                .is_err()
+        );
+        assert!(
+            descriptor
+                .check_arguments(
+                    std::slice::from_ref(&good),
+                    &[],
+                    &mut 100_000,
+                    &mut queries!()
+                )
                 .is_ok()
         );
     }
     assert!(
         descriptor
-            .check_arguments_in_scope_with_collections_budgeted_in(
-                &[good],
-                |_| false,
-                |_| false,
-                |_, _, _| None,
-                |_, _| false,
-                &[],
-                &mut 1,
-                None,
-            )
+            .check_arguments(&[good], &[], &mut 1, &mut queries!())
             .is_err()
     );
 }
@@ -1192,15 +1416,14 @@ fn collection_admission_never_supplies_a_missing_value_domain() {
             });
             let wrap = |input| if nested { value("items", input) } else { input };
             let check = |input, fuel: &mut usize| {
-                descriptor.check_arguments_in_scope_with_collections_budgeted_in(
+                descriptor.check_arguments(
                     &[wrap(input)],
-                    |_| false,
-                    |declaration| declaration == id(90),
-                    |_, _, _| None,
-                    |_, _| false,
                     &[],
                     fuel,
-                    None,
+                    &mut DomainQueries {
+                        collection: &mut collection_domain,
+                        ..queries!()
+                    },
                 )
             };
             let valid = type_list(fields.clone());
@@ -1271,6 +1494,10 @@ fn opaque_normal_domains_preserve_scope_without_granting_value_layouts() {
             fields: vec![Term::Bool(true)],
         },
     ] {
-        assert!(descriptor.check_closed_arguments(&[value]).is_err());
+        assert!(
+            descriptor
+                .check_arguments(&[value], &[], &mut 100_000, &mut queries!())
+                .is_err()
+        );
     }
 }

@@ -1030,8 +1030,13 @@ tuple 返回 None，与本文件第 2 节区分表示和接纳的边界冲突；
 `Head::check_arguments` 现在直接接收 `value_admission::DomainQueries`，NF 参数
 循环只负责按声明顺序代入域并准入值。布局、集合元素域、抽象值证据、callable
 签名和目标事实来自接收世界，不再在生产检查入口中通过 `is_tuple`／`is_list`
-布尔回调重新推断表示。原来的长参数适配层只向这个唯一循环转发；编译器生产
-调用方已全部迁出，尚有旧 NIR 测试使用便利接口，未宣称这些接口已经删除。
+布尔回调重新推断表示。编译器生产调用方及 NIR／luna 测试均已迁入这一入口，
+原来的 13 个 `check_closed_arguments*`／分级 evidence 适配接口已删除，没有保留
+另一套默认预算、隐式空作用域或 shape-only 集合授权入口。
+
+测试直接声明所需 DomainQueries；无证据 fixture 只提供拒绝／缺失结果，不封装
+参数检查。集合与元组用例提供注册 Head 的视图，callable 用例直接交付带 Budget／
+Invalid 区分的签名查询，保留原来的拒绝、作用域、目标范围、预算和失败恢复断言。
 
 VM 的普通调用与 NF 形成检查共用 `with_admission_queries`；源声明世界的 callable
 专门化和 materialization 共用另一组由 `DeclarationWorld` 提供的查询。IIR 从保留
@@ -1071,3 +1076,13 @@ ArgumentPlan，这次迁移不改变输入求值顺序或授予新的结果缓�
 补齐借用类型后完成上述检查。较早的 VM／源码检查不替代最终证据。Rust 格式检查
 `/tmp/luna-tools-psp0ba5c` 退出 0，提交范围 diff 检查通过。未跑全 workspace、native
 或性能基准；正式 docs 及原有资源分析、library README 的修改保持原样。
+
+后续适配接口退役仅删除旧转发层，统一检查核心保持不变。工作目录仍为
+`/home/fin/luna`，使用同一 `development/check.py --timeout 900 -- test` 入口：
+`-p nir --test normal_inputs --test normal_callable_inputs --test value_admission
+--no-fail-fast` 的 36 项通过（`/tmp/luna-tools-ubn0xdfj`），
+`-p luna --test nominal_staging --no-fail-fast` 的 11 项通过
+（`/tmp/luna-tools-ytdq5xtr`），两者退出 0。初次转换测试闭包时两处缺少参数类型
+标注，分别在 `/tmp/luna-tools-p1t_1ufe`、`/tmp/luna-tools-igc2pig2` 编译失败；
+补齐标注后完成上述检查。已全仓核对旧接口无剩余代码引用，没有再跑全量 VM
+或 workspace，也没有改变任何语言预期。

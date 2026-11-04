@@ -256,16 +256,34 @@ fn nominal_normal_form_admission_rejects_forged_type_arguments_and_recovers() {
         .iter()
         .find(|metadata| metadata.declaration == head)
         .unwrap();
-    assert!(descriptor.check_closed_arguments(&arguments).is_err());
-    assert!(
-        descriptor
-            .check_closed_arguments_with_layouts(
-                &arguments,
-                |_| false,
-                |ty, variant| nir::normal_forms::nominal_value_fields(&package, ty, variant)
-            )
-            .is_ok()
-    );
+    let check = |registered: bool| {
+        descriptor.check_arguments(
+            &arguments,
+            &[],
+            &mut 100_000,
+            &mut nir::value_admission::DomainQueries {
+                layout: &mut |ty, variant, fuel| {
+                    if !registered {
+                        return Err("missing declaration world".into());
+                    }
+                    nir::normal_forms::nominal_value_fields_budgeted(&package, ty, variant, fuel)
+                        .ok_or_else(|| {
+                            if *fuel == 0 {
+                                nir::value_admission::Error::Budget
+                            } else {
+                                "missing nominal layout".into()
+                            }
+                        })
+                },
+                declared: &mut |_, _, _| false,
+                collection: &mut |_, _| Ok(None),
+                callable: &mut |_, _, _| Ok(None),
+                target: package.target,
+            },
+        )
+    };
+    assert!(check(false).is_err());
+    assert!(check(true).is_ok());
 }
 
 #[test]
