@@ -16,10 +16,23 @@ pub fn instantiate<'a>(
     frames: &[Vec<Sort>],
     fuel: &mut usize,
 ) -> Result<Vec<Term>, Error> {
+    let substitution = prepare(parameters, domains, arguments, frames, fields.len(), fuel)?;
+    fields
+        .map(|field| substitution.instantiate_bounded(field, fuel))
+        .collect()
+}
+
+fn prepare<'a>(
+    parameters: &[DeclarationId],
+    domains: &[Term],
+    arguments: &'a [Term],
+    frames: &'a [Vec<Sort>],
+    field_count: usize,
+    fuel: &mut usize,
+) -> Result<crate::DeclarationSubstitution<'a>, Error> {
     *fuel = fuel
         .checked_sub(
-            fields
-                .len()
+            field_count
                 .saturating_add(parameters.len())
                 .saturating_add(arguments.len()),
         )
@@ -27,11 +40,7 @@ pub fn instantiate<'a>(
     for domain in domains {
         crate::type_computations::charge_term(domain, fuel)?;
     }
-    let substitution =
-        crate::DeclarationSubstitution::bounded(parameters, domains, arguments, frames, fuel)?;
-    fields
-        .map(|field| substitution.instantiate_bounded(field, fuel))
-        .collect()
+    crate::DeclarationSubstitution::bounded(parameters, domains, arguments, frames, fuel)
 }
 
 impl Struct {
@@ -54,31 +63,61 @@ impl Struct {
 }
 
 impl Enum {
-    /// All possible payloads, including inactive variants. Reserve traversal and
-    /// reference storage before collecting; empty alternatives still cost work.
+    // Reserve traversal and output slots before collecting either view. The
+    // complete parameter frame is validated once, including payload-free enums.
+    fn prepare_stored_fields<'a>(
+        &self,
+        arguments: &'a [Term],
+        frames: &'a [Vec<Sort>],
+        fuel: &mut usize,
+    ) -> Result<crate::DeclarationSubstitution<'a>, Error> {
+        *fuel = fuel.checked_sub(self.variants.len()).ok_or(Error::Budget)?;
+        let count = self.variants.iter().try_fold(0usize, |count, variant| {
+            count.checked_add(variant.fields.len()).ok_or(Error::Budget)
+        })?;
+        prepare(
+            &self.type_parameters,
+            &self.parameter_types,
+            arguments,
+            frames,
+            count,
+            fuel,
+        )
+    }
+
+    /// All possible payload types. Names and variant metadata are not copied.
     pub fn instantiate_stored_fields(
         &self,
         arguments: &[Term],
         frames: &[Vec<Sort>],
         fuel: &mut usize,
     ) -> Result<Vec<Term>, Error> {
-        *fuel = fuel.checked_sub(self.variants.len()).ok_or(Error::Budget)?;
-        let count = self.variants.iter().try_fold(0usize, |count, variant| {
-            count.checked_add(variant.fields.len()).ok_or(Error::Budget)
-        })?;
-        *fuel = fuel.checked_sub(count).ok_or(Error::Budget)?;
-        let fields: Vec<_> = self
-            .variants
+        let substitution = self.prepare_stored_fields(arguments, frames, fuel)?;
+        self.variants
             .iter()
             .flat_map(|variant| &variant.fields)
-            .collect();
-        instantiate(
-            &self.type_parameters,
-            &self.parameter_types,
-            arguments,
-            fields.into_iter(),
-            frames,
-            fuel,
-        )
+            .map(|field| substitution.instantiate_bounded(field, fuel))
+            .collect()
+    }
+
+    /// Retain every variant position, including empty alternatives, for branch
+    /// consumers such as cleanup. This does not reinterpret the source tag ABI.
+    pub fn instantiate_variant_fields(
+        &self,
+        arguments: &[Term],
+        frames: &[Vec<Sort>],
+        fuel: &mut usize,
+    ) -> Result<Vec<Vec<Term>>, Error> {
+        let substitution = self.prepare_stored_fields(arguments, frames, fuel)?;
+        self.variants
+            .iter()
+            .map(|variant| {
+                variant
+                    .fields
+                    .iter()
+                    .map(|field| substitution.instantiate_bounded(field, fuel))
+                    .collect()
+            })
+            .collect()
     }
 }

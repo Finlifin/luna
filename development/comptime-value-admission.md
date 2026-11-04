@@ -1284,8 +1284,9 @@ bool；它们是外层诊断／选择边界，没有第二套存储算法。源�
 检查与代入。闭合值准入继续通过空 frames 使用它，开放存储描述保留嵌套 binder 深度。
 
 Struct／Enum 的 `instantiate_stored_fields` 仅交付字段类型，不复制随后被丢弃的
-字段名称、变体名称或 shape。Enum 先预留全部变体遍历及字段引用收集的成本，再
-一次代入完整字段集合；空变体仍消耗遍历预算，零字段的声明仍验证完整参数帧。
+字段名称、变体名称或 shape。Enum 先预留全部变体遍历及输出字段槽位的成本，再
+一次准备参数帧并代入完整字段集合；无需临时收集字段引用数组。空变体仍消耗遍历
+预算，零字段的声明仍验证完整参数帧。
 值准入的选中变体查询继续只代入选中字段，两种选择共用核心而不互相替代。
 
 NIR runtime／comptime 存储检查、VM 源声明存储检查，以及生成器的数据检查均已
@@ -1343,5 +1344,53 @@ flow 接收端将代入 Budget 映射为 Unknown(Arithmetic(BudgetExhausted))，
   --test invocation_value_templates --no-fail-fast`：535 通过，退出 0；
   `/tmp/luna-tools-01zlbjae/result.json`。包含真实 sysroot 调用模板与相关流分析回归。
 
-未运行全 workspace、native 或性能基准。materialization、cleanup 和覆盖检查等
-仍有需要完整字段或分支元数据的旧消费者，不能据此宣称全链路布局迁移完成。
+未运行全 workspace、native 或性能基准。materialization 和覆盖检查等仍有旧元数据
+消费者；cleanup 的按分支字段视图已按下述迁移，不能据此宣称全链路布局服务完成。
+
+
+cleanup 的名义布局检查也已退役无界 named-field／variant 实例化。旧实现只计费
+未代入的字段形状；一个含 32 个字段的类型实参被复制到 64 个泛型字段时，即使
+给定预算 2000 也返回成功。改动前回归 `/tmp/luna-tools-yxkoryri/result.json`
+退出 101，表明源形状检查不能界定实参替换后的输出成本。
+
+Enum 新增 `instantiate_variant_fields`：与平铺的 `instantiate_stored_fields`
+共用一次有预算的参数帧准备，并保留每个原始变体位置及字段顺序，包括空分支。
+它不复制名称或 shape，也不重新定义源码 tag／错误结果 ABI。cleanup 消费这个
+分支视图；struct 消费平铺字段视图。每次替换通过同一 bounded substitution
+预先计费；失败不交付部分布局，也不留可被后续成功复用的残缺查询结果。
+
+回归同时检查 struct／enum 的展开成本、非法参数域拒绝、足额预算恢复，以及空
+分支位置和嵌套调用者 scope。清理责任取得、析构函数选择、已移动字段过滤和
+出口执行顺序仍由现有 cleanup 协议决定，本次没有用字段视图代替资源检查。
+
+
+本次验证目录 `/home/fin/luna`，统一入口
+`python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p program_verification --lib
+  cleanup_layout_bounds_expanded_fields_and_preserves_variant_positions -- --nocapture`：
+  1 通过，退出 0；`/tmp/luna-tools-yg1yn7ov/result.json`。
+- `-p nir --test nominal_parameters --test phases --no-fail-fast`：65 通过，
+  退出 0；`/tmp/luna-tools-bxsy8sbj/result.json`。
+- `-p comptime_interpretor -p program_verification --lib --no-fail-fast`：VM 451、
+  程序验证 105 通过，退出 0；`/tmp/luna-tools-0cndat2n/result.json`。
+- `-p luna --test drop --test match_cleanup --test temporary_method_cleanup
+  --test conditional_capture_cleanup --test invocation_value_templates --no-fail-fast`：
+  后四组共 19 通过；Drop 在固定 2 MiB 栈的
+  `optional_inline_call_chains_preserve_defaults_contracts_and_owned_returns`
+  中栈溢出并 SIGABRT，整条命令退出 101；`/tmp/luna-tools-9hv6a0ce/result.json`。
+- 保留最终测试、仅恢复本轮前 `64aab766` 的三个 Rust 文件后，以
+  `-p luna --test drop optional_inline_call_chains_preserve_defaults_contracts_and_owned_returns
+  -- --exact` 复现相同栈溢出，退出 101；`/tmp/luna-tools-rlwsjqx6/result.json`。
+- 恢复最终源码，以 `-p luna --test drop --
+  --skip optional_inline_call_chains_preserve_defaults_contracts_and_owned_returns`
+  继续其余用例：995 通过、1 失败、1 过滤，退出 101；
+  `/tmp/luna-tools-ydxugoj0/result.json`。失败项为
+  `scheduled_handler_borrowed_copy_record_rejects_unproved_owner_layouts`，
+  预期拒绝却成功。再将同样三个文件恢复至 `64aab766`，以该完整名称和
+  `-- --exact` 单独复现相同失败，退出 101；`/tmp/luna-tools-m9hg5dnb/result.json`。
+
+两次基线对照均在 finally 中逐字节恢复最终源码，并核对已有修改的摘要。
+未修改 Drop 测试、扩大栈或放宽拒绝预期；两个基线缺陷仍未修复，不能将整组 Drop
+报告为通过。未运行全 workspace、native 或性能基准。正式 docs 和原有工作区
+修改未纳入本次交付，materialization／覆盖检查等元数据消费者仍待迁移。

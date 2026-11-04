@@ -320,33 +320,18 @@ fn layout(package: &Package, ty: &Term, fuel: &mut usize) -> Result<Layout<Term>
                 .iter()
                 .find(|s| s.declaration == *declaration)
             {
-                for (_, field) in &definition.fields {
-                    crate::memory::bound_type(field, fuel)?;
-                }
                 Ok(Layout::Fields(
                     definition
-                        .instantiate_fields(arguments)
-                        .map_err(|e| e.to_string())?
-                        .into_iter()
-                        .map(|(_, ty)| ty)
-                        .collect(),
+                        .instantiate_stored_fields(arguments, &[], fuel)
+                        .map_err(|error| error.to_string())?,
                 ))
             } else if let Some(definition) =
                 package.enums.iter().find(|e| e.declaration == *declaration)
             {
-                for variant in &definition.variants {
-                    step(fuel, 0)?;
-                    for field in &variant.fields {
-                        crate::memory::bound_type(field, fuel)?;
-                    }
-                }
                 Ok(Layout::Variants(
                     definition
-                        .instantiate_variants(arguments)
-                        .map_err(|e| e.to_string())?
-                        .into_iter()
-                        .map(|v| v.fields)
-                        .collect(),
+                        .instantiate_variant_fields(arguments, &[], fuel)
+                        .map_err(|error| error.to_string())?,
                 ))
             } else if let Some(definition) = package
                 .newtypes
@@ -1318,6 +1303,106 @@ impl crate::moves::CleanupPolicy for CleanupSession<'_, '_> {
 mod tuple_layout_tests {
     use super::*;
     use nir::normal_forms::{Head, Role};
+
+    #[test]
+    fn cleanup_layout_bounds_expanded_fields_and_preserves_variant_positions() {
+        use nir::program::{Enum, Struct, Variant, VariantShape};
+        use nir::{DeclarationId, Primitive, Sort};
+        let id = |local| DeclarationId { package: 9, local };
+        let parameter = Term::Rigid {
+            declaration: id(2),
+            sort: Sort::Type,
+        };
+        let argument = Term::Record(
+            (0..32)
+                .map(|i| (format!("field{i}"), Term::Primitive(Primitive::Bool)))
+                .collect(),
+        );
+        let ty = Term::Nominal {
+            declaration: id(1),
+            arguments: vec![argument.clone()],
+        };
+        for enumeration in [false, true] {
+            let mut package = Package::default();
+            if enumeration {
+                package.enums.push(Enum {
+                    declaration: id(1),
+                    name: "Choices".into(),
+                    type_parameters: vec![id(2)],
+                    parameter_types: vec![Term::Primitive(Primitive::Type)],
+                    requirements: vec![],
+                    capabilities: vec![],
+                    groups: vec![],
+                    encoding: None,
+                    symbol_encoding: None,
+                    is_intrinsic: false,
+                    variants: vec![
+                        Variant {
+                            name: "first".into(),
+                            shape: VariantShape::Unit,
+                            fields: vec![],
+                        },
+                        Variant {
+                            name: "wide".into(),
+                            shape: VariantShape::Tuple,
+                            fields: vec![parameter.clone(); 64],
+                        },
+                        Variant {
+                            name: "third".into(),
+                            shape: VariantShape::Unit,
+                            fields: vec![],
+                        },
+                        Variant {
+                            name: "last".into(),
+                            shape: VariantShape::Tuple,
+                            fields: vec![Term::Primitive(Primitive::Bool)],
+                        },
+                    ],
+                });
+            } else {
+                package.structs.push(Struct {
+                    declaration: id(1),
+                    name: "Fields".into(),
+                    type_parameters: vec![id(2)],
+                    parameter_types: vec![Term::Primitive(Primitive::Type)],
+                    requirements: vec![],
+                    capabilities: vec![],
+                    fields: (0..64)
+                        .map(|i| (format!("slot{i}"), parameter.clone()))
+                        .collect(),
+                });
+            }
+            let failure = layout(&package, &ty, &mut 2000)
+                .err()
+                .expect("expanded field copies must consume budget");
+            assert!(failure.contains("budget"), "{failure}");
+            let expanded = layout(&package, &ty, &mut 100_000).unwrap();
+            match expanded {
+                Layout::Fields(fields) if !enumeration => {
+                    assert_eq!(fields, vec![argument.clone(); 64])
+                }
+                Layout::Variants(variants) if enumeration => {
+                    assert_eq!(
+                        variants,
+                        vec![
+                            vec![],
+                            vec![argument.clone(); 64],
+                            vec![],
+                            vec![Term::Primitive(Primitive::Bool)]
+                        ]
+                    );
+                }
+                _ => panic!("layout changed nominal kind"),
+            }
+            let invalid = Term::Nominal {
+                declaration: id(1),
+                arguments: vec![Term::Bool(true)],
+            };
+            let failure = layout(&package, &invalid, &mut 100_000).unwrap_err();
+            assert!(!failure.contains("budget"), "{failure}");
+            layout(&package, &ty, &mut 100_000).unwrap();
+        }
+    }
 
     #[test]
     fn cleanup_tuple_layout_uses_trusted_identity_and_preserves_fields() {

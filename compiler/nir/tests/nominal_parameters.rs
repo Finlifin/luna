@@ -1233,4 +1233,38 @@ fn all_variant_storage_fields_charge_empty_alternatives_and_validate_empty_frame
         .instantiate_stored_fields(&args, &[], &mut renamed_fuel)
         .unwrap();
     assert_eq!(fuel, renamed_fuel);
+    let outer = Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: Sort::Type,
+    };
+    let groups = definition
+        .instantiate_variant_fields(&[outer.clone()], &[vec![Sort::Type]], &mut 1000)
+        .unwrap();
+    assert_eq!(groups.len(), 129);
+    assert!(groups[..128].iter().all(Vec::is_empty));
+    assert_eq!(groups[128], vec![Term::Pointer(Box::new(outer))]);
+    assert!(matches!(
+        definition.instantiate_variant_fields(&args, &[], &mut 16),
+        Err(Error::Budget)
+    ));
+    assert!(matches!(
+        definition.instantiate_variant_fields(&[], &[], &mut 1000),
+        Err(Error::Scope(_))
+    ));
+    assert!(matches!(
+        definition.instantiate_variant_fields(
+            &[Term::Bound {
+                depth: 0,
+                index: 0,
+                sort: Sort::Type
+            }],
+            &[],
+            &mut 1000,
+        ),
+        Err(Error::Scope(_))
+    ));
+    definition
+        .instantiate_variant_fields(&args, &[], &mut 1000)
+        .unwrap();
 }
