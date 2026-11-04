@@ -314,3 +314,38 @@ fn independent_compilations_share_constants_only_in_the_matching_code_session() 
         "the session must not own constant payloads"
     );
 }
+
+#[test]
+fn staged_values_are_not_executable_frozen_constants() {
+    let package = Package::default();
+    let expression = Expr {
+        kind: K::StagedValue(Term::Bound {
+            depth: 0,
+            index: 0,
+            sort: nir::Sort::ComptimeValue,
+        }),
+        ..body()
+    };
+    assert!(
+        matches!(comptime_compiler::compile(&expression, &mut 1000), Err(comptime_compiler::Error::Unsupported(source)) if source == expression.source)
+    );
+    let mut tree = Interpreter::for_comptime_tree(&package, Budget::default()).unwrap();
+    assert_eq!(
+        tree.eval(&expression, &mut Environment::new())
+            .unwrap_err()
+            .kind,
+        ErrorKind::PhaseMismatch
+    );
+    let mut completed = expression;
+    completed
+        .rewrite_types(&mut |term| term.substitute(&[Term::Bool(true)]))
+        .unwrap();
+    let code = Arc::new(comptime_compiler::compile(&completed, &mut 1000).unwrap());
+    let mut compiled = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    assert!(matches!(
+        compiled
+            .execute_code(&code, &mut Environment::new())
+            .unwrap(),
+        Flow::Value(Value::Bool(true))
+    ));
+}

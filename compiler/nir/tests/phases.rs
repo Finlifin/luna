@@ -1784,3 +1784,32 @@ fn optional_storage_checks_payload_phase_at_every_layer() {
         nir::phases::validate_runtime_storage(&legal, &package, &[]).unwrap();
     }
 }
+
+#[test]
+fn staged_value_phase_validation_keeps_frozen_and_invocation_scopes_distinct() {
+    let slot = Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: Sort::ComptimeValue,
+    };
+    let mut f = function(100, Phase::Runtime, &[Sort::ComptimeValue]);
+    f.body = flag(K::StagedValue(slot.clone()));
+    let mut package = Package {
+        functions: vec![f],
+        ..Package::default()
+    };
+    nir::phases::validate(&package).unwrap();
+    package.functions[0].body.kind = K::ComptimeValue(slot.clone());
+    assert!(
+        nir::phases::validate(&package)
+            .unwrap_err()
+            .message
+            .contains("unbound invocation slot")
+    );
+    package.functions[0].body.kind = K::StagedValue(slot);
+    let Term::Function { parameters, .. } = &mut package.functions[0].signature else {
+        unreachable!()
+    };
+    parameters[0].sort = Sort::Runtime;
+    assert!(nir::phases::validate(&package).is_err());
+}

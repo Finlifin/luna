@@ -3482,6 +3482,7 @@ impl<'a> Interpreter<'a> {
             K::Unit | K::Local(_) | K::Function(_) | K::Break(_) | K::Continue(_) => {
                 self.eval_leaf(expr, environment)
             }
+            K::StagedValue(_) => Err(self.failure(ErrorKind::PhaseMismatch, Some(expr.source))),
             K::ComptimeValue(..) | K::TypeValue(..) => self.eval_type_value(expr, environment),
             K::NormalFormType { .. } => self.eval_normal_form_type(expr, environment),
             K::FunctionType { .. } | K::FunctionResultType { .. } => {

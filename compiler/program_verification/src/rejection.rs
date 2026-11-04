@@ -342,6 +342,7 @@ fn scan<'a>(
                 | K::FunctionInstance { .. }
                 | K::TraitMethod { .. }
                 | K::ComptimeValue(_)
+                | K::StagedValue(_)
                 | K::TypeValue(_)
                 | K::Break(_)
                 | K::Continue(_) => (),

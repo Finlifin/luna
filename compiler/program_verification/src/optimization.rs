@@ -433,6 +433,7 @@ fn visit(
         }
         K::AssociatedValue { .. }
         | K::ComptimeValue(_)
+        | K::StagedValue(_)
         | K::TypeValue(_)
         | K::TraitMethod { .. }
         | K::FunctionInstance { .. }

@@ -132,3 +132,32 @@ fn type_elements_do_not_erase_the_declared_list_identity() {
         );
     }
 }
+
+#[test]
+fn staged_values_require_their_own_nonruntime_frame_and_domain() {
+    use nir::comptime_values::{validate, validate_staged_in};
+    let boolean = Term::Primitive(P::Bool);
+    let slot = Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: Sort::ComptimeValue,
+    };
+    let frame = [nir::Parameter {
+        sort: Sort::ComptimeValue,
+        ty: boolean.clone(),
+    }];
+    validate_staged_in(&slot, &boolean, None, &frame, &mut 100).unwrap();
+    assert!(validate(&slot, &boolean, &mut 100).is_err());
+    assert!(validate_staged_in(&slot, &boolean, None, &[], &mut 100).is_err());
+    assert!(validate_staged_in(&slot, &Term::Primitive(P::U8), None, &frame, &mut 100).is_err());
+    let runtime = [nir::Parameter {
+        sort: Sort::Runtime,
+        ty: boolean.clone(),
+    }];
+    assert!(validate_staged_in(&slot, &boolean, None, &runtime, &mut 100).is_err());
+    assert_eq!(
+        validate_staged_in(&slot, &boolean, None, &frame, &mut 0),
+        Err(Error::Budget)
+    );
+    validate_staged_in(&slot, &boolean, None, &frame, &mut 100).unwrap();
+}

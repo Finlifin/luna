@@ -550,6 +550,7 @@ fn walk_roots<'a>(
                     }
                     K::AssociatedValue { .. }
                     | K::ComptimeValue(_)
+                    | K::StagedValue(_)
                     | K::TypeValue(_)
                     | K::Literal(_)
                     | K::Local(_)
@@ -960,6 +961,7 @@ fn walk_mut(
                     }
                     K::AssociatedValue { .. }
                     | K::ComptimeValue(_)
+                    | K::StagedValue(_)
                     | K::TypeValue(_)
                     | K::Literal(_)
                     | K::Local(_)

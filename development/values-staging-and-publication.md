@@ -267,3 +267,12 @@ quote fn 的普通实参先建立新鲜绑定，主体重复引用也不重算�
 | 全量外围捕获 | 递归局部声明的精确依赖和真实循环均有源码证据 |
 
 混合 interpretation、runtime reference、原子发布及接收世界检查不在删除名单中。
+
+
+## 当前 NIR 迁移：残余值不等于冻结数据
+
+[依赖观察 §5.5](dependency-observations.md#55-invocation-残余值与冻结值分离)已接通
+`StagedValue(Term)`：共同替换按 invocation 槽是否仍存在区分残余表达式和冻结值，
+实参供应后再恢复普通值表示。它不新增源语言的值种类或新的缓存资格，也不是完整
+OpenDefinition/WorldView 已经落地。冻结入口、实际执行入口及 IIR 仍要求相应完成证据，
+不能借参数域已知就取得还没有供应的输入值。

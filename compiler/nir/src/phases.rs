@@ -1696,6 +1696,24 @@ pub fn machine_arithmetic_functions(
                             }
                             work.push(Work::Expr(selector, false, ct));
                         }
+                        K::StagedValue(value) => {
+                            let Term::Function { parameters, .. } =
+                                function.signature.callable_signature()
+                            else {
+                                return Err(fail(
+                                    expr.source,
+                                    "staged value has no invocation frame",
+                                ));
+                            };
+                            crate::comptime_values::validate_staged_in(
+                                value,
+                                &expr.ty,
+                                package.target,
+                                parameters,
+                                &mut 100_000,
+                            )
+                            .map_err(|error| fail(expr.source, error.message()))?;
+                        }
                         K::ComptimeValue(value) => {
                             crate::comptime_values::validate_in(
                                 value,

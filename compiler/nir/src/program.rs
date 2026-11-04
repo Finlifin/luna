@@ -1106,6 +1106,10 @@ pub enum ExprKind {
     /// A captured comptime value. Invocation substitutes its declaration identity;
     /// reading it never invokes or unfolds a normal-form head.
     ComptimeValue(Term),
+    /// A value expression still bound to the owning invocation telescope.
+    /// Unlike ComptimeValue this is residual code, not a frozen payload. Input
+    /// substitution must close it before runtime lowering or VM execution.
+    StagedValue(Term),
     /// Origin-bound host metadata. Only the selected immutable descriptor is admitted.
     BuildMetadata {
         owner: u64,
@@ -3380,6 +3384,7 @@ impl fmt::Display for ExprKind {
             }
             Self::TypeValue(ty) => write!(f, "(type-value {ty})"),
             Self::ComptimeValue(value) => write!(f, "(comptime-value {value})"),
+            Self::StagedValue(value) => write!(f, "(staged-value {value})"),
             Self::BuildMetadata {
                 owner,
                 selector,
@@ -4246,16 +4251,25 @@ impl Expr {
             ExprKind::TypeValue(ty) => {
                 *ty = rewriter.ty(ty)?;
             }
-            ExprKind::ComptimeValue(value) => {
+            ExprKind::ComptimeValue(value) | ExprKind::StagedValue(value) => {
                 *value = rewriter.ty(value)?;
-                // A dependent value input can acquire Type as its domain after
-                // specialization. Publish the same representation as any other
-                // Type value; do not leave a data-value node around a Type term.
-                if self.ty == Term::Primitive(crate::Primitive::Type)
+                // Reclassification moves the rewritten payload; it must not
+                // duplicate a potentially large immutable value graph.
+                let value = std::mem::replace(value, Term::Unit);
+                self.kind = if self.ty == Term::Primitive(crate::Primitive::Type)
                     && value.sort() == crate::Sort::Type
                 {
-                    self.kind = ExprKind::TypeValue(value.clone());
-                }
+                    ExprKind::TypeValue(value)
+                } else if !value
+                    .substitution_parameters()
+                    .is_ok_and(|inputs| inputs.is_empty())
+                {
+                    // Malformed scope is retained for validation, never treated
+                    // as evidence that the value has become closed.
+                    ExprKind::StagedValue(value)
+                } else {
+                    ExprKind::ComptimeValue(value)
+                };
             }
 
             ExprKind::BitWritePointer {

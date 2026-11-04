@@ -1429,7 +1429,9 @@ impl Checker<'_, '_> {
             return None;
         }
         match &expr.kind {
-            K::TypeValue(ty) | K::ComptimeValue(ty) => clone_known_term(ty, budget),
+            K::TypeValue(ty) | K::ComptimeValue(ty) | K::StagedValue(ty) => {
+                clone_known_term(ty, budget)
+            }
             K::OptionalAbsent if matches!(expr.ty, Term::Optional(_)) => {
                 Some(Term::OptionalValue {
                     ty: Box::new(clone_known_term(&expr.ty, budget)?),

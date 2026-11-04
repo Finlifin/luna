@@ -3261,6 +3261,7 @@ impl Walker<'_> {
             | K::Local(_)
             | K::Unit
             | K::ComptimeValue(_)
+            | K::StagedValue(_)
             | K::TypeValue(_)
             | K::Function(_)
             | K::FunctionInstance { .. }
@@ -4848,6 +4849,9 @@ impl Walker<'_> {
             K::Local(local) => {
                 result = self.local_value(state, *local)?;
             }
+            K::StagedValue(_) => {
+                result = self.unknown_value(&expr.ty)?;
+            }
             K::Unit
             | K::Function(_)
             | K::FunctionInstance { .. }
@@ -5526,6 +5530,7 @@ impl Walker<'_> {
             | K::Local(_)
             | K::Unit
             | K::ComptimeValue(_)
+            | K::StagedValue(_)
             | K::TypeValue(_)
             | K::Function(_)
             | K::FunctionInstance { .. }

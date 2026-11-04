@@ -240,6 +240,7 @@ pub(super) fn check(
             | K::Match { .. }
             | K::Loop { .. }
             | K::ComptimeValue(_)
+                | K::StagedValue(_)
             | K::Literal(_)
             | K::Unit
             | K::Local(_)

@@ -84,6 +84,51 @@ pub fn validate_in(
     target: Option<crate::target::TargetData>,
     fuel: &mut usize,
 ) -> Result<(), Error> {
+    validate_scoped(value, domain, target, &[], fuel)
+}
+
+/// Representation and phase check for residual values under an invocation.
+/// This does not freeze the value or discharge its eventual domain admission.
+pub fn validate_staged_in(
+    value: &Term,
+    domain: &Term,
+    target: Option<crate::target::TargetData>,
+    parameters: &[crate::Parameter],
+    fuel: &mut usize,
+) -> Result<(), Error> {
+    crate::type_computations::charge_term(value, fuel).map_err(|_| Error::Budget)?;
+    *fuel = fuel.checked_sub(parameters.len()).ok_or(Error::Budget)?;
+    let frames = vec![parameters.iter().map(|p| p.sort).collect()];
+    validate_scoped(value, domain, target, &frames, fuel)?;
+    domain
+        .check_scope(&frames)
+        .map_err(|_| Error::Invalid("staged value domain has invalid invocation scope"))?;
+    let inputs = value
+        .substitution_parameters()
+        .map_err(|_| Error::Invalid("staged value has invalid invocation scope"))?;
+    if inputs.values().any(|sort| *sort == Sort::Runtime) {
+        return Err(Error::Invalid("staged value reads a runtime input"));
+    }
+    if let Term::Bound {
+        depth: 0, index, ..
+    } = value
+    {
+        if parameters.get(*index).is_none_or(|p| p.ty != *domain) {
+            return Err(Error::Invalid(
+                "staged value disagrees with its input domain",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_scoped(
+    value: &Term,
+    domain: &Term,
+    target: Option<crate::target::TargetData>,
+    frames: &[Vec<Sort>],
+    fuel: &mut usize,
+) -> Result<(), Error> {
     crate::type_computations::charge_term(value, fuel).map_err(|_| Error::Budget)?;
     crate::type_computations::charge_term(domain, fuel).map_err(|_| Error::Budget)?;
     if value.sort() != Sort::ComptimeValue {
@@ -96,9 +141,9 @@ pub fn validate_in(
             "captured comptime value requires a non-Type value domain",
         ));
     }
-    // Declaration parameters may remain symbolic, but invocation-local slots
-    // cannot be smuggled into this immutable value representation.
-    value.check_scope(&[]).map_err(|_| {
+    // Frozen callers supply an empty frame; residual expressions must supply
+    // their owning invocation frame. Neither path invents missing binders.
+    value.check_scope(frames).map_err(|_| {
         Error::Invalid("captured comptime value contains an unbound invocation slot")
     })?;
     if matches!(value, Term::ClosureContextValue(_)) != matches!(domain, Term::ClosureContextType) {

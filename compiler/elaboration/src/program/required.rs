@@ -2906,7 +2906,8 @@ pub(super) fn references(
                 K::AssociatedValue { member, .. } => {
                     associated.insert(*member);
                 }
-                K::ComptimeValue(_)
+                K::StagedValue(_)
+                | K::ComptimeValue(_)
                 | K::TypeValue(_)
                 | K::Literal(_)
                 | K::Local(_)

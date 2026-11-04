@@ -762,3 +762,39 @@ fn nested_metadata_rewrites_use_the_heap_frontier() {
         query = *selector;
     }
 }
+
+#[test]
+fn value_substitution_preserves_residual_scope_until_inputs_are_bound() {
+    let boolean = Term::Primitive(Primitive::Bool);
+    let input = Term::Rigid {
+        declaration: id(4),
+        sort: Sort::ComptimeValue,
+    };
+    let slot = Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: Sort::ComptimeValue,
+    };
+    let mut value = Expr {
+        ty: boolean.clone(),
+        kind: K::ComptimeValue(input.clone()),
+        source: SourceRange { start: 2, end: 3 },
+    };
+    value
+        .rewrite_types(&mut |term| {
+            Ok::<_, ()>(if *term == input {
+                slot.clone()
+            } else {
+                term.clone()
+            })
+        })
+        .unwrap();
+    assert_eq!(value.kind, K::StagedValue(slot.clone()));
+    assert!(value.to_string().contains("(staged-value "));
+    assert!(nir::completed_values::validate(&value, &mut 100).is_err());
+    value
+        .rewrite_types(&mut |term| term.substitute(&[Term::Bool(true)]))
+        .unwrap();
+    assert_eq!(value.kind, K::ComptimeValue(Term::Bool(true)));
+    nir::completed_values::validate(&value, &mut 100).unwrap();
+}

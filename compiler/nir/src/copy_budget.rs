@@ -412,7 +412,7 @@ fn charge_node_observed(
                         }
                         0
                     }
-                    K::TypeValue(ty) | K::ComptimeValue(ty) => {
+                    K::TypeValue(ty) | K::ComptimeValue(ty) | K::StagedValue(ty) => {
                         work.push((Node::Type(ty), depth + 1));
                         0
                     }

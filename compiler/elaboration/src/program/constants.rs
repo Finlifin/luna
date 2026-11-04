@@ -3164,7 +3164,7 @@ impl Checker<'_, '_> {
                     pending.extend(guard.as_deref());
                     pending.extend(otherwise.as_deref());
                 }
-                K::TypeValue(ty) | K::ComptimeValue(ty) => {
+                K::TypeValue(ty) | K::ComptimeValue(ty) | K::StagedValue(ty) => {
                     deferred |= type_bindings.iter().any(|id| ty.mentions_rigid(*id));
                     deferred |= !ty
                         .substitution_parameters()

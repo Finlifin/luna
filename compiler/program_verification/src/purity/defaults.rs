@@ -194,9 +194,12 @@ pub fn stable_default(expr: &n::Expr) -> bool {
         | K::EffectRun { .. }
         | K::EffectComputation { .. }
         | K::EffectRequest { .. } => false,
-        K::ComptimeValue(_) | K::AssociatedValue { .. } | K::Literal(_) | K::Local(_) | K::Unit => {
-            true
-        }
+        K::ComptimeValue(_)
+        | K::StagedValue(_)
+        | K::AssociatedValue { .. }
+        | K::Literal(_)
+        | K::Local(_)
+        | K::Unit => true,
         K::BitSlice { value, .. }
         | K::BitConvert(value)
         | K::Snapshot(value)

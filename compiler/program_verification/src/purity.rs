@@ -2009,9 +2009,11 @@ impl<'a> Analysis<'a> {
                 self.fuel = budget.steps;
                 valid
             }
-            K::ComptimeValue(_) | K::Literal(_) | K::Unit | K::AssociatedValue { .. } => {
-                self.copy_type(&value.ty)
-            }
+            K::ComptimeValue(_)
+            | K::StagedValue(_)
+            | K::Literal(_)
+            | K::Unit
+            | K::AssociatedValue { .. } => self.copy_type(&value.ty),
             K::Assign { place, value } => {
                 if !private.contains(&place.root)
                     || (self.finite && !self.resource_scope && !self.copy_type(&value.ty))

@@ -351,9 +351,9 @@ Type/值身份。相关调用接线还统一了两条默认参数路径对 Type/
 全量捕获后问题仍存在（`/tmp/luna-tools-p4qdb0an/result.json`）；统一 Type/值规范化后，
 正确的拒绝变成 `captured comptime value contains an unbound invocation slot`
 （`/tmp/luna-tools-q43h17at/result.json`）。不能放宽冻结值验证来接受活动槽；后续需要在
-默认表达式重绑定时恢复正确的 caller 值读取。正例保留为
-`staged_default_reads_require_caller_value_reification`，暂时显式 ignore；它不是已交付能力，
-也没有改成期望拒绝。上述临时插桩和全量捕获对照已移除。
+默认表达式重绑定时恢复正确的 caller 值读取。在 `1d299a6b` 中，正例保留为
+`staged_default_reads_require_caller_value_reification` 并显式 ignore，没有改成期望拒绝。
+该缺口现在由 §5.5 的表达式表示分离解决；上述临时插桩和全量捕获对照已移除。
 
 本阶段命令均从 `/home/fin/luna` 运行，包含工作区原有资源分析改动；没有执行全量或
 native 验收。受影响检查及本机证据如下：
@@ -366,6 +366,53 @@ native 验收。受影响检查及本机证据如下：
 | `python3 -B development/check.py --timeout 900 -- test -p nir --test type_computations` | 退出 0；16 通过，包括普通值/Type 参数的有界观察和 opaque head 身份；`/tmp/luna-tools-zj3ed0_5/result.json` |
 | 局部定义入口过滤 `staged_default_reads_require_caller_value_reification -- --ignored` | 当前生产代码仍退出 101，原因仍为冻结值包含 invocation 槽；`/tmp/luna-tools-nkj5a52f/result.json`，不是通过证据 |
 | 修改过的 Rust 文件 `rustfmt --check` | 退出 0；完整命令见 `/tmp/luna-tools-mk3pubm6/result.json` |
+
+### 5.5 invocation 残余值与冻结值分离
+
+默认值不能只做类型项替换后继续保留 `K::ComptimeValue`：把 declaration rigid 换成
+caller 的 Bound 槽后，原表达式已经成为依赖 invocation 的残余。另一个尝试——直接
+换成 caller Local 读取——也不成立，因为默认实参只在已准备的 callee 参数环境中执行。
+实际拒绝见 `/tmp/luna-tools-btdsb5uy/result.json`：`call default references an
+unavailable parameter binding`。这不是放宽默认作用域或冻结验证的理由。
+
+NIR 现在用 `StagedValue(Term)` 表达尚依赖当前 invocation 的值表达式，Display 为
+`(staged-value ...)`。它是残余代码节点，不是另一类可缓存/冻结的 comptime 值。
+共同的表达式替换在引入槽后转换节点；实参绑定完成后转换回 `ComptimeValue`，结果域
+成为 Type 时仍转换为 `TypeValue`。转换移动载荷，不额外复制整个不可变值。
+因此普通参数、聚合字段、闭包主体和模板默认值通过同一替换接线，不靠识别默认值的
+源码形式，也不为闭包增加运行时捕获改变原来检查过的 callable 类型。
+
+阶段检查核对所属 invocation frame、sort、直接输入的域以及预算，拒绝 runtime 槽。
+冻结值原入口仍使用空 frame，不能传入额外 scope 冒充完成值；completed-value 检查
+也不接受 staged 表达式。域成员资格仍由既有 invocation 准入负责，表示/阶段检查不能
+替代它。required 依赖观察和已知符号输入观察保留这些残余输入，程序流分析不给它们
+捏造已知常量事实；纯度按已形成输入读取处理。字节码不能编译未绑定节点，树解释器
+报告 PhaseMismatch；dispatch/IIR 出口同样拒绝未完成节点。
+
+原 staged 默认值正例恢复正常运行；真实 sysroot 案例还覆盖 bool/u8 的不同实例、
+元组默认值、零运行时捕获的闭包默认值、callee 先前参数读取、覆盖默认和显式实参
+只执行一次。NIR 拒绝例覆盖冻结/残余区分、错误域、缺失 frame、runtime 槽、预算
+耗尽后重试；VM 检查绑定前拒绝、绑定后字节码执行，不以跳过验证换取通过。
+
+扩大用例时还确认独立的 P3 证据缺口：没有任何词法捕获的
+`fn keep(input: T, .value: T = input) -> T where T:- Copy` 仍无法证明默认值稳定性。
+`generic_default_stability_needs_its_definition_proof_environment` 保留正例并显式 ignore；
+单独执行仍退出 101，见 `/tmp/luna-tools-q3mmu66n/result.json`。这项问题与槽重绑定不同，
+不能以 `Copy` 自动替代完整 P3 证明，也不能把暂时无法证明改成语言禁止。
+
+当前表示仍依赖旧 NIR 的 invocation telescope，没有实现 WorldView/TypeRef 的完整
+接收协议；程序规格对这些未绑定值仍保守分析，可能缺少精度。未来统一值和环境时需
+迁移这一表达式边界，不能再次把尚未绑定的槽包装成独立冻结值。
+
+本阶段验证从 `/home/fin/luna` 运行，包含用户原有资源分析改动；没有运行全量/native：
+
+| 检查 | 结果与证据 |
+| --- | --- |
+| `python3 -B development/check.py --timeout 900 -- test -p luna --test function_template_local_definitions --test comptime_clause_inputs --test scoped_comptime_callables --test comptime_bytecode_defaults` | 退出 0；局部定义 20 通过、上述泛型 P3 正例 1 ignored，其他三组分别 46、20、9 通过；`/tmp/luna-tools-wk3zppk1/result.json` |
+| 完成载荷移动及执行拒绝调整后，局部定义入口过滤 `staged_default` | 3 项通过，退出 0；`/tmp/luna-tools-fuf0kfxs/result.json` |
+| `python3 -B development/check.py --timeout 900 -- test -p nir --test comptime_values --test type_rewrite --test phases` | 退出 0；4、14、37 项分别通过；`/tmp/luna-tools-nd6z9cmx/result.json` |
+| `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor --lib bytecode::compilation_tests` | 9 项通过，退出 0；`/tmp/luna-tools-xialfurl/result.json`；先前 `/tmp/luna-tools-91a6bo0c/result.json` 使用错误过滤器、实际 0 项，不算验证 |
+| 修改过的 Rust 文件 `rustfmt --check` | 退出 0；完整命令见 `/tmp/luna-tools-i1dsomyq/result.json` |
 
 ## 6. 接口生产必须有可观察前缀
 

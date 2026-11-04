@@ -3543,6 +3543,9 @@ impl Builder<'_> {
                     }
                 }
             }
+            K::StagedValue(_) => {
+                return Err("dispatch retains an unbound staged value".into());
+            }
             K::ComptimeValue(ty) | K::TypeValue(ty) => {
                 if self.instances.is_some() {
                     iir::completed_type(ty, &self.runtime_bindings, &mut self.fuel)?;

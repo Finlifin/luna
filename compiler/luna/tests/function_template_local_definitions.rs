@@ -333,7 +333,6 @@ fn domain_prerequisites_and_default_only_reads_remain_inputs() {
 }
 
 #[test]
-#[ignore = "copied defaults still freeze caller invocation slots instead of reifying reads"]
 fn staged_default_reads_require_caller_value_reification() {
     let source = "
         fn outer(comptime T: Type, comptime seed: T, comptime flag: bool) -> bool {
@@ -392,4 +391,58 @@ fn signature_domains_and_inherited_proof_inputs_survive_selection() {
         failure.contains("requirement") || failure.contains("constraint"),
         "{failure}"
     );
+}
+
+#[test]
+fn staged_default_values_keep_domains_aggregates_and_thin_closures() {
+    let source = "
+        fn number(comptime seed: u8) -> u8 {
+            fn read(.value: u8 = seed) -> u8 { value }
+            read()
+        }
+        fn closures(comptime seed: bool) -> bool {
+            fn read(.action: fn() -> bool = || seed) -> bool { action() }
+            read()
+        }
+        fn products(comptime seed: bool) -> bool {
+            fn read(.value: Tuple<bool, bool> = (seed, not seed)) -> bool {
+                value match { (a, b) => a != b }
+            }
+            read()
+        }
+        fn run() -> bool {
+            number(7) == 7 and number(9) == 9
+                and closures(true) and not closures(false)
+                and products(true) and products(false)
+        }
+    ";
+    assert_eq!(run(source), Value::Bool(true));
+}
+
+#[test]
+fn staged_default_values_keep_callee_bindings_and_argument_order() {
+    let source = "
+        fn outer(comptime seed: bool) -> bool {
+            fn choose(value: bool, .output: bool = value != seed) -> bool { output }
+            var value = false;
+            let result = choose(do { value = not value; value });
+            result and value and not choose(true, .output = false)
+        }
+        fn run() -> bool { outer(false) and not outer(true) }
+    ";
+    assert_eq!(run(source), Value::Bool(true));
+}
+
+#[test]
+#[ignore = "generic default P3 evidence remains unresolved, including with a Copy premise"]
+fn generic_default_stability_needs_its_definition_proof_environment() {
+    let source = "
+        fn keep(input: T, .value: T = input) -> T
+        where T:- Copy
+        {
+            value
+        }
+        fn run() -> bool { keep<bool>(true) and keep<u8>(7) == 7 }
+    ";
+    assert_eq!(run(source), Value::Bool(true));
 }

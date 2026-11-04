@@ -436,6 +436,9 @@ impl Package {
                         })
                     }
 
+                    K::StagedValue(_) => {
+                        return Err("IIR retains an unbound staged value".into());
+                    }
                     K::ComptimeValue(_) => {
                         return Err("IIR requires captured comptime value materialization".into());
                     }
