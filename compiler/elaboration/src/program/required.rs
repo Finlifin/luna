@@ -2342,7 +2342,6 @@ impl Checker<'_, '_> {
                         error(expr.span, format!("required comptime evaluation cannot execute a runtime function or normal-form head: {failure}"))
                     } else { error(expr.span, failure.to_string()) }
                 })?;
-            let implementation_index = prepared::implementation_index(&package, expr.span)?;
             let prepared =
                 PreparedRequired {
                     copy_authority: self.protocols.copy.zip(self.protocols.drop).map(
@@ -2365,8 +2364,7 @@ impl Checker<'_, '_> {
                             (copy, drop, std::sync::Arc::new(resources))
                         },
                     ),
-                    package,
-                    implementation_index,
+                    world: prepared::RequiredWorld::new(package, expr.span)?,
                     entry,
                     inputs,
                     result_type,

@@ -1,6 +1,7 @@
 # 世界存储、句柄与生命周期
 
-状态：设计，未实现；源码核对基线 `7178e238`。
+状态：整体目标仍是设计；required 计算的声明快照所有权已按第 1.1 节接入生产。
+初始源码审计基线为 `7178e238`。
 本文细化[全链路架构](architecture.md)中的 WorldSnapshot 和 PublicationBundle，
 与[发布状态协议](elaboration-state-and-publication.md)、[依赖观察](dependency-observations.md)
 共同决定存储边界，不改变源语言可见性或声明身份。
@@ -9,7 +10,7 @@
 ## 1. 已有所有权保护不能因重构而丢失
 
 下列路径均以 `compiler/` 为根，记录初始静态审计。旧 middle::ty 已在源码清理中删除，
-其余世界存储迁移尚未实施；未运行 Miri、并发或内存压力验证。
+第 1.1 节以外的世界存储迁移仍待实施；未运行 Miri、并发或内存压力验证。
 
 | 入口 | 已存在的约束 | 需要进一步处理的问题 |
 | --- | --- | --- |
@@ -27,6 +28,56 @@
 安全证明。旧表长期持有的引用，必须连同所有输入来源、后续查找与析构一起审计。
 例如 `register_def_ty/register_node_ty` 接收 Ty 后擦除 lifetime，需验证所存 Ty 的 owner
 确实由接收上下文保活；借用能够短暂重叠，不自动证明来源 owner 相同。
+
+### 1.1 Required 计算的共享声明快照
+
+`compiler/elaboration/src/program/required/prepared.rs` 的 RequiredWorld 把已检查的
+NIR Package 与从它构造的 implementation Index 放在同一 owner 中。构造函数消费
+package，索引建立成功才返回 Arc；字段保持模块私有，生产入口不能分别替换声明
+或索引。它是准备计算的声明世界，不是第 10 节尚待实现的待发布 PreparedWorld。
+
+PreparedRequired 持有这个 owner，其输入赋值、scope substitution、调用前提及
+context 仍属于具体准备结果。fork 共享声明世界，复制本次调用的供应状态；不再
+深拷贝 package 或重新建立索引。派生过程中没有声明检查或执行，不需要诊断 span，
+也不再用 Result 暗示这里会重新准备代码。索引建立失败仍在最初的准备入口报告。
+
+普通 invocation 从自身 owner 取得 package 与索引，不能由调用者另传一个世界。
+builder 发布也以这同一快照建立发布服务，服务和 invocation 的借用期间保活 owner。
+已有 definition identity cursor 检查通过只读 accessor 取得原快照游标；调用者产生
+了更新的定义时，仍按既有路径重新准备，不向旧快照补入当前声明或活动推断状态。
+
+共享声明不缓存计算结果。每次 invocation 仍按自己的输入、预算与 live graph 执行；
+输入赋值失败不会污染其他派生调用。原准备结果释放后，未完成的派生调用继续保活
+快照，最后一个 owner 释放后 package 与索引一起回收。S-expression dump 继续展开
+实际 package、index 和调用供应，输出不依赖 Arc 地址。
+
+回归覆盖相同 owner／索引共享、失败输入路由的原子性、派生调用不同输入的独立结果、
+不同快照中同号声明的不同结果，以及 Weak 观察的最后引用释放。原有 live closure
+连续调用和 builder 公开接口检查继续覆盖实际执行。测试夹具只在唯一 owner 时允许
+修改函数片段；生产没有可变访问器或 Arc::make_mut 旁路。
+
+当前仍是单份完整 package 的共享所有权。初次准备会收集声明并建立索引，输入供应
+与上下文仍会复制；没有完成分块存储、跨编辑增量索引、稳定句柄或通用发布事务。
+不以此宣称 M1 的完整 WorldSnapshot 已实现，也没有测量整体编译性能收益。
+
+本切片的检查证据（工作目录 `/home/fin/luna`）：
+
+- `python3 -B development/check.py --timeout 900 -- test -p elaboration --lib
+  prepared --no-fail-fast`：15 通过、157 filtered，退出 0；
+  `/tmp/luna-tools-6ov93h5v/result.json`。
+- `python3 -B development/check.py --timeout 900 -- test -p luna
+  --test prepared_invocations --test prepared_input_dependencies
+  --test staged_invocation_reuse --test invocation_value_templates
+  --test builder_invocations --test sysroot_preludes --test normal_input_plans
+  --no-fail-fast`：128 通过、1 失败，退出 101；
+  `/tmp/luna-tools-6cgm_0g3/result.json`。唯一失败是
+  enum_builder_edits_payloads_groups_and_runtime_patterns 的 fixture 在 HIR
+  lowering 找不到 Symbol，不能称为完整 builder 主题通过。
+- 将本轮涉及源码切回 `b2d402ae`、保留此前已有工作区修改，对该 enum builder
+  用例执行 `--exact` 对照，同样因 Symbol 未解析而退出 101；
+  `/tmp/luna-tools-tnid5emr/result.json`。对照后本轮源码逐字节恢复，没有修改
+  fixture、预期或运行额度来获得通过。
+- 修改源码的 rustfmt check 退出 0；`/tmp/luna-tools-pu_lr7q6/result.json`。
 
 ## 2. 目标物理结构
 

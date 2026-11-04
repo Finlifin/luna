@@ -3,10 +3,26 @@
 use super::restore::{restore_required_packet, restore_required_type_input};
 use super::*;
 use comptime_interpretor::InvocationValue;
+use std::sync::Arc;
+
+/// Own the declarations and their derived index together. Once published into
+/// a preparation, this world is immutable; invocation state lives elsewhere.
+pub(super) struct RequiredWorld {
+    package: n::Package,
+    implementation_index: crate::implementation::Index,
+}
+impl RequiredWorld {
+    pub(super) fn new(package: n::Package, span: Span) -> Result<Arc<Self>, Error> {
+        let implementation_index = implementation_index(&package, span)?;
+        Ok(Arc::new(Self {
+            package,
+            implementation_index,
+        }))
+    }
+}
 
 pub(in crate::program) struct PreparedRequired {
-    pub package: n::Package,
-    pub implementation_index: crate::implementation::Index,
+    pub(super) world: Arc<RequiredWorld>,
     pub entry: DeclarationId,
     pub inputs: Vec<(n::LocalId, Term, Option<Term>)>,
     pub result_type: Term,
@@ -22,6 +38,10 @@ pub(in crate::program) struct PreparedRequired {
 }
 
 impl PreparedRequired {
+    pub(in crate::program) fn definition_identity_cursor(&self) -> u32 {
+        self.world.package.definition_identity_cursor
+    }
+
     /// Observe the carried invocation inputs and code without consulting a
     /// current Checker, copying the snapshot, or running its computations.
     /// Ambient abstract binders authorize transport; they are not input uses.
@@ -55,7 +75,7 @@ impl PreparedRequired {
         // The preparation has already selected its callable closure. Inspect
         // the contracts/defaults carried with those functions as well as their
         // signatures and bodies; do not scan the surrounding declaration world.
-        for function in &self.package.functions {
+        for function in &self.world.package.functions {
             if !input_observation::function(function, steps, span)?.is_disjoint(&declarations) {
                 return Ok(true);
             }
@@ -63,10 +83,9 @@ impl PreparedRequired {
         Ok(false)
     }
 
-    pub(in crate::program) fn fork(&self, span: Span) -> Result<Self, Error> {
-        Ok(Self {
-            package: self.package.clone(),
-            implementation_index: implementation_index(&self.package, span)?,
+    pub(in crate::program) fn fork(&self) -> Self {
+        Self {
+            world: Arc::clone(&self.world),
             entry: self.entry,
             inputs: self.inputs.clone(),
             result_type: self.result_type.clone(),
@@ -79,7 +98,7 @@ impl PreparedRequired {
             context: self.context.clone(),
             in_signature: self.in_signature,
             copy_authority: self.copy_authority.clone(),
-        })
+        }
     }
 
     /// Supply only captured, pending declaration inputs. Check the complete
@@ -140,28 +159,25 @@ impl PreparedRequired {
         steps: &mut u64,
         span: Span,
     ) -> Result<(Value, Term), Error> {
-        let mut prepared = self;
-        let package = std::mem::take(&mut prepared.package);
-        prepared.invoke_in_package(&package, values, steps, span, None)
+        self.invoke_in_world(values, steps, span, None)
     }
 
     pub(in crate::program) fn invoke_publishing(
-        mut self,
+        self,
         values: Vec<(n::LocalId, Value)>,
         steps: &mut u64,
         span: Span,
         package_identity: u64,
         next_identity: &mut u32,
     ) -> Result<((Value, Term), crate::definitions::PublishedDefinitions), Error> {
-        let package = std::mem::take(&mut self.package);
-        use crate::definitions::StructBuildService;
+        let world = Arc::clone(&self.world);
         let publisher = crate::definitions::AllocatedDefinitionPublisher::new(
-            &package,
+            &world.package,
             package_identity,
             *next_identity,
             usize::MAX,
         );
-        let result = self.invoke_in_package(&package, values, steps, span, Some(&publisher));
+        let result = self.invoke_in_world(values, steps, span, Some(&publisher));
         let diagnostic = publisher.last_diagnostic();
         let (definitions, next) = publisher.finish();
         *next_identity = next;
@@ -172,14 +188,16 @@ impl PreparedRequired {
         Ok((result, definitions))
     }
 
-    fn invoke_in_package(
+    fn invoke_in_world(
         self,
-        package: &n::Package,
         values: Vec<(n::LocalId, Value)>,
         steps: &mut u64,
         span: Span,
         builder: Option<&dyn crate::definitions::StructBuildService>,
     ) -> Result<(Value, Term), Error> {
+        let world = Arc::clone(&self.world);
+        let package = &world.package;
+        let implementation_index = &world.implementation_index;
         let build = |request: &comptime_interpretor::StructBuildRequest, fuel: &mut u64| {
             builder
                 .expect("configured builder service")
@@ -208,8 +226,7 @@ impl PreparedRequired {
             }
         }
         let PreparedRequired {
-            package: _,
-            implementation_index,
+            world: _,
             entry,
             inputs,
             result_type,
@@ -260,7 +277,7 @@ impl PreparedRequired {
                 (&restored, scoped_context.as_ref().unwrap())
             };
             let world = crate::capabilities::World {
-                index: &implementation_index,
+                index: implementation_index,
                 implementations: &package.implementations,
                 traits: &package.traits,
                 assumptions: &invocation_assumptions,
@@ -292,7 +309,7 @@ impl PreparedRequired {
             let mut fuel = usize::try_from(*remaining).unwrap_or(usize::MAX);
             let before = fuel;
             let world = crate::capabilities::World {
-                index: &implementation_index,
+                index: implementation_index,
                 implementations: &resources.implementations,
                 traits: &resources.traits,
                 assumptions: &invocation_assumptions,
@@ -321,7 +338,7 @@ impl PreparedRequired {
         };
         let associated_resolver = |access: &n::Expr, remaining: &mut u64| {
             let world = crate::capabilities::World {
-                index: &implementation_index,
+                index: implementation_index,
                 implementations: &package.implementations,
                 traits: &package.traits,
                 assumptions: &invocation_assumptions,
@@ -526,7 +543,7 @@ impl std::fmt::Display for PreparedRequired {
         write!(
             f,
             ") (in-signature {}) (context {}) (implementation-index {}) (program {})",
-            self.in_signature, self.context, self.implementation_index, self.package
+            self.in_signature, self.context, self.world.implementation_index, self.world.package
         )?;
         if let Some((copy, drop, package)) = &self.copy_authority {
             write!(f, " (copy-authority (copy {copy}) (drop {drop}) {package})")?;
@@ -538,6 +555,14 @@ impl std::fmt::Display for PreparedRequired {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    impl PreparedRequired {
+        fn package_mut(&mut self) -> &mut n::Package {
+            &mut Arc::get_mut(&mut self.world)
+                .expect("unique test fixture")
+                .package
+        }
+    }
 
     fn literal_preparation(type_result: bool) -> PreparedRequired {
         let entry = DeclarationId {
@@ -579,10 +604,8 @@ mod tests {
             }],
             ..Default::default()
         };
-        let implementation_index = implementation_index(&package, Span::default()).unwrap();
         PreparedRequired {
-            package,
-            implementation_index,
+            world: RequiredWorld::new(package, Span::default()).unwrap(),
             entry,
             inputs: vec![],
             result_type,
@@ -595,6 +618,84 @@ mod tests {
             context: crate::ptc::Context::default(),
             in_signature: false,
             copy_authority: None,
+        }
+    }
+
+    #[test]
+    fn prepared_forks_share_declarations_and_isolate_input_assignments() {
+        let span = Span::default();
+        let mut prepared = literal_preparation(false);
+        let binding = n::LocalId {
+            owner: 11,
+            index: 0,
+        };
+        let function = &mut prepared.package_mut().functions[0];
+        function.parameters = vec![binding];
+        function.signature = Term::Function {
+            parameters: vec![nir::Parameter {
+                sort: Sort::ComptimeValue,
+                ty: p(P::Bool),
+            }],
+            result: Box::new(p(P::Bool)),
+        };
+        function.body.kind = K::Local(binding);
+        prepared.inputs = vec![(binding, p(P::Bool), None)];
+        let owner = Arc::downgrade(&prepared.world);
+        let mut first = prepared.fork();
+        let mut second = prepared.fork();
+        assert!(Arc::ptr_eq(&prepared.world, &first.world));
+        assert!(std::ptr::eq(
+            &first.world.implementation_index,
+            &second.world.implementation_index
+        ));
+        assert!(
+            first
+                .bind_inputs(
+                    vec![(binding, Term::Bool(true)), (binding, Term::Bool(false))],
+                    span
+                )
+                .is_err()
+        );
+        assert_eq!(first.inputs, prepared.inputs);
+        first
+            .bind_inputs(vec![(binding, Term::Bool(true))], span)
+            .unwrap();
+        assert!(prepared.inputs[0].2.is_none());
+        assert!(second.inputs[0].2.is_none());
+        second
+            .bind_inputs(vec![(binding, Term::Bool(false))], span)
+            .unwrap();
+        drop(prepared);
+        assert!(owner.upgrade().is_some());
+        assert_eq!(
+            first.invoke(&mut 100_000, span).unwrap().0,
+            Value::Bool(true)
+        );
+        assert!(owner.upgrade().is_some());
+        assert_eq!(
+            second.invoke(&mut 100_000, span).unwrap().0,
+            Value::Bool(false)
+        );
+        assert!(owner.upgrade().is_none());
+    }
+
+    #[test]
+    fn prepared_worlds_keep_same_numbered_declarations_separate() {
+        let span = Span::default();
+        let first = literal_preparation(false);
+        let mut second = literal_preparation(false);
+        second.package_mut().functions[0].body.kind = K::Literal(n::Literal::Bool(false));
+        assert_eq!(first.entry, second.entry);
+        assert!(!Arc::ptr_eq(&first.world, &second.world));
+        for _ in 0..3 {
+            assert_eq!(
+                first.fork().invoke(&mut 100_000, span).unwrap().0,
+                Value::Bool(true)
+            );
+            assert_eq!(
+                second.fork().invoke(&mut 100_000, span).unwrap().0,
+                Value::Bool(false)
+            );
         }
     }
 
@@ -660,10 +761,10 @@ mod tests {
                     interface_arguments: vec![term],
                 })
             },
-            |p, term| p.package.functions[0].signature = term,
-            |p, term| p.package.functions[0].body.kind = K::StagedValue(term),
+            |p, term| p.package_mut().functions[0].signature = term,
+            |p, term| p.package_mut().functions[0].body.kind = K::StagedValue(term),
             |p, term| {
-                p.package.functions[0]
+                p.package_mut().functions[0]
                     .requirements
                     .push(n::TypePredicate::Not(Box::new(n::TypePredicate::Equal(
                         term,
@@ -671,28 +772,29 @@ mod tests {
                     ))))
             },
             |p, term| {
-                p.package.functions[0]
+                let entry = p.entry;
+                p.package_mut().functions[0]
                     .capabilities
                     .push(n::TraitRequirement {
                         subject: term,
-                        interface: p.entry,
+                        interface: entry,
                         interface_arguments: vec![],
                     })
             },
             |p, term| {
-                let mut predicate = p.package.functions[0].body.clone();
+                let mut predicate = p.package_mut().functions[0].body.clone();
                 predicate.kind = K::TypeValue(term);
-                p.package.functions[0].preconditions.push(predicate);
+                p.package_mut().functions[0].preconditions.push(predicate);
             },
             |p, term| {
-                let mut predicate = p.package.functions[0].body.clone();
+                let mut predicate = p.package_mut().functions[0].body.clone();
                 predicate.kind = K::TypeValue(term);
-                p.package.functions[0].postconditions.push(predicate);
+                p.package_mut().functions[0].postconditions.push(predicate);
             },
             |p, term| {
-                let mut default = p.package.functions[0].body.clone();
+                let mut default = p.package_mut().functions[0].body.clone();
                 default.kind = K::TypeValue(term);
-                p.package.functions[0].defaults.push((0, default));
+                p.package_mut().functions[0].defaults.push((0, default));
             },
         ];
         for (index, place) in placements.iter().enumerate() {
@@ -728,7 +830,7 @@ mod tests {
             sort: Sort::Type,
         });
         prepared.scoped_arguments.push(p(P::U8));
-        let function = &mut prepared.package.functions[0];
+        let function = &mut prepared.package_mut().functions[0];
         function.type_parameters.push(input);
         function.capabilities.push(n::TraitRequirement {
             subject: p(P::Bool),
@@ -766,13 +868,13 @@ mod tests {
             local: 90,
         };
         let mut prepared = literal_preparation(true);
-        let mut body = prepared.package.functions[0].body.clone();
+        let mut body = prepared.package_mut().functions[0].body.clone();
         body.kind = K::StagedValue(Term::Rigid {
             declaration: input,
             sort: Sort::Type,
         });
         let body = std::sync::Arc::new(body);
-        prepared.package.functions[0].body.kind = K::Closure {
+        prepared.package_mut().functions[0].body.kind = K::Closure {
             parameters: vec![],
             captures: vec![],
             body: body.clone(),
@@ -791,7 +893,8 @@ mod tests {
                 .uses_declaration_inputs(&[input], &mut 1000, Span::default())
                 .unwrap()
         );
-        let K::Closure { body: observed, .. } = &prepared.package.functions[0].body.kind else {
+        let K::Closure { body: observed, .. } = &prepared.package_mut().functions[0].body.kind
+        else {
             panic!()
         };
         assert!(std::sync::Arc::ptr_eq(&body, observed));
@@ -805,7 +908,7 @@ mod tests {
         for type_result in [false, true] {
             let make = || {
                 let mut prepared = literal_preparation(type_result);
-                prepared.package.functions[0].requirements = vec![n::TypePredicate::And(
+                prepared.package_mut().functions[0].requirements = vec![n::TypePredicate::And(
                     (0..64)
                         .map(|_| {
                             n::TypePredicate::Not(Box::new(n::TypePredicate::Equal(
@@ -856,7 +959,7 @@ mod tests {
                     sort: Sort::ComptimeValue,
                 }),
             )];
-            let function = &mut prepared.package.functions[0];
+            let function = &mut prepared.package_mut().functions[0];
             function.parameters = vec![binding];
             function.signature = Term::Function {
                 parameters: vec![Parameter {
@@ -900,7 +1003,7 @@ mod tests {
             index: 0,
         };
         let mut prepared = literal_preparation(true);
-        let function = &mut prepared.package.functions[0];
+        let function = &mut prepared.package_mut().functions[0];
         function.parameters = vec![binding];
         function.signature = Term::Function {
             parameters: vec![Parameter {
@@ -921,7 +1024,7 @@ mod tests {
         };
         let mut context = crate::InferenceContext::default();
         let mut session = Session::new_in_scope_with_pointer_copy(
-            &prepared.package,
+            &prepared.world.package,
             &context,
             &mut Budget {
                 steps: 10_000,
@@ -1020,14 +1123,15 @@ mod tests {
                 owner: 11,
                 index: 0,
             };
-            let function = &mut prepared.package.functions[0];
+            let result_type = prepared.result_type.clone();
+            let function = &mut prepared.package_mut().functions[0];
             function.parameters = vec![binding];
             function.signature = Term::Function {
                 parameters: vec![Parameter {
                     sort: Sort::Runtime,
                     ty: p(P::Bool),
                 }],
-                result: Box::new(prepared.result_type.clone()),
+                result: Box::new(result_type),
             };
             let result = function.body.clone();
             function.body.kind = K::Block {
@@ -1093,7 +1197,7 @@ mod tests {
             owner: 11,
             index: 0,
         };
-        let function = &mut prepared.package.functions[0];
+        let function = &mut prepared.package_mut().functions[0];
         function.parameters = vec![binding];
         function.signature = Term::Function {
             parameters: vec![Parameter {
@@ -1175,7 +1279,7 @@ mod tests {
                 owner: 11,
                 index: 0,
             };
-            let function = &mut prepared.package.functions[0];
+            let function = &mut prepared.package_mut().functions[0];
             function.parameters = vec![binding];
             function.signature = Term::Function {
                 parameters: vec![Parameter {
@@ -1258,7 +1362,7 @@ mod tests {
             } else {
                 read()
             };
-            let mut factory = prepared.package.clone();
+            let mut factory = prepared.package_mut().clone();
             factory.functions[0].signature = Term::Function {
                 parameters: vec![],
                 result: Box::new(callback_type.clone()),
@@ -1283,7 +1387,7 @@ mod tests {
             );
             let mut producer = Interpreter::for_comptime(&factory, Budget::default()).unwrap();
             let callback = producer.invoke(prepared.entry, vec![]).unwrap();
-            let function = &mut prepared.package.functions[0];
+            let function = &mut prepared.package_mut().functions[0];
             function.parameters = vec![selector, frozen];
             function.signature = Term::Function {
                 parameters: vec![
@@ -1326,8 +1430,7 @@ mod tests {
                 let before = steps;
                 assert!(
                     prepared
-                        .fork(span)
-                        .unwrap()
+                        .fork()
                         .invoke_with_live_inputs(invalid, &mut steps, span)
                         .is_err()
                 );
@@ -1335,8 +1438,7 @@ mod tests {
             }
             for expected in [true, false, true] {
                 let (value, ty) = prepared
-                    .fork(span)
-                    .unwrap()
+                    .fork()
                     .invoke_with_live_inputs(vec![(selector, callback.clone())], &mut steps, span)
                     .unwrap();
                 assert_eq!(ty, result_type);
@@ -1369,8 +1471,7 @@ mod tests {
             arguments: vec![frozen_types(vec![p(P::Bool), p(P::U8)])],
         };
         let prepared = PreparedRequired {
-            package: n::Package::default(),
-            implementation_index: crate::implementation::Index::default(),
+            world: RequiredWorld::new(n::Package::default(), Span::default()).unwrap(),
             entry: declaration,
             inputs: vec![(
                 n::LocalId {
@@ -1425,7 +1526,7 @@ mod tests {
     }
 }
 
-pub(super) fn implementation_index(
+fn implementation_index(
     package: &n::Package,
     span: Span,
 ) -> Result<crate::implementation::Index, Error> {

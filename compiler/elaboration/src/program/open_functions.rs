@@ -6648,7 +6648,7 @@ impl Checker<'_, '_> {
         // declaration snapshot. Reprepare completed source with these inputs;
         // never graft current inference state into a saved computation.
         let late_definitions = matches!(annotation, Annotation::Pending(computation)
-            if computation.package.definition_identity_cursor != self.next_definition_identity);
+            if computation.definition_identity_cursor() != self.next_definition_identity);
         if !annotation.is_pending()
             || (live.iter().all(Option::is_none) && !callable_input && !late_definitions)
         {
@@ -6784,7 +6784,7 @@ impl Checker<'_, '_> {
                     })?;
                     values.push((*binding, value.clone()));
                 }
-                let mut invocation = computation.fork(span)?;
+                let mut invocation = computation.fork();
                 for (_, ty, _) in &mut invocation.inputs {
                     *ty = ty
                         .substitute_partial(symbols)
