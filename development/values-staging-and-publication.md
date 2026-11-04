@@ -134,7 +134,7 @@ ignored 用例，仍报 `191..201: list literal requires an element type context
 | `clause_inputs::prepared_clause_inputs_in_domains` | 保存 HIR 输入；静态域就绪后重排检查，最终仍按源码位置准备输入 | 无可用域时仍进入普通 `expr(None)`，没有可恢复的上下文检查请求 |
 | `dynamic_instances::prepare_callable_clause_packet` | 保存普通值 local 与静态身份，分别用于执行和实例描述 | Type 输入仍要求 `TypeValue`；直接放行 Type local 不能保证 callable 签名已完成 |
 | `input_collection::Frame` | NF／名义输入的源码顺序、已执行值、域唤醒、终止与清理 | 消费的仍是 `NormalFormArgument`，不持有普通前端区域或其检查义务 |
-| `invocation::run_executions` | 同一 VM 内部的字节码／输入计划栈 | 栈由同步调用拥有，不能交回宿主后继续普通前端检查 |
+| `invocation::session::Session` | 独占 VM 的完整驱动现场，可在内部推进边界保存、移动与取消 | 生产入口仍同步驱动；尚无对外宿主请求与普通前端检查响应 |
 | `PreparedRequired::invoke_in_world` | 独立准备世界、限定的类型前提、同步 builder 服务 | builder 的 `prepare` 回调不是通用的前端暂停／恢复协议 |
 
 其中 Type local 的限制来自源码审计，尚未绕过首个错误单独复现。字节码已有的
@@ -256,6 +256,57 @@ frame 保存 PC、局部槽、结果目的地、控制和清理进度；异常�
 外部不纯操作只有在源控制流明确要求、候选选择已确定后执行。请求身份与进度保证
 同一会话恢复不重放，不承诺崩溃后自动 exactly-once；崩溃重启或取消后重跑的外部任务
 须由 build 任务契约定义。内存事务不能回滚外部文件或进程。
+
+### 已接通：驱动现场归执行会话所有
+
+原 `run_executions` 的局部调用栈、待启动计算和待交付结果已经迁入
+`invocation::session::Session`。生产中的字节码 invocation、借入 fragment、借入输入
+计划都由该会话驱动，默认值、关联值、契约与嵌套类型计划仍使用同一调用栈。
+固定树模式的轻量入口保留，避免每层树解释都挂上字节码驱动栈帧。
+
+会话在存活期间独占借用 Interpreter；暂停现场不能被拿去交给另一个 VM，也不能
+同时在原 VM 上启动不相干的外部调用。根入口用枚举区分 invocation、fragment 和
+输入计划，不能同时供应两个 root。每次 poll 推进一次驱动迭代，至多执行一个
+字节码片段；已有同步准备和树解释仍受各自预算控制。这不是硬实时调度、instruction
+级抢占或 `HostRequest` 已完成的承诺。
+
+正常完成和语义失败都终止会话，重复 poll 拒绝继续。放弃尚未完成的会话时，将一次
+内部失败沿既有交付路径向外传播：恢复各调用层保存的 effect 身份、调用深度和检查
+上下文，归还已借出的环境，移除输入计划自有绑定，并使借入 root 不能恢复执行。
+取消不执行剩余 producer、默认值或契约，不撤销已经发生的写入，也不回退 effect
+身份分配器。成功完成后的借入环境／计划清理仍遵循原调用者契约。这里验证的是正常
+Rust 控制流下的主动放弃与 Drop，不宣称进程崩溃或任意 panic 中可以恢复外部副作用。
+
+会话 dump 使用 S-expression，显示 root、排队计算、待交付类别和嵌套 code／plan。
+活动会话仍不是可冻结值，不进入 CodeSession、结果缓存或持久查询。尚缺的是前端
+区域、宿主 request 身份与受检 response 的实际生产接线；不能把内部 Poll::Pending
+解释为等待宿主，也不能利用此会话容器提前执行域生产者。
+
+验证使用 `/home/fin/luna` 工作区：
+
+- 新的会话用例逐一放弃嵌套调用与依赖输入计划的每个严格执行前缀，覆盖会话移动、
+  未启动的根调用、等待子调用、已完成但未交付的结果、staged 深度恢复、计划自有
+  绑定清理及同一 VM 的重新调用。取消前后的事件、输入执行预算及 caller 环境分别
+  核对；重复 poll 和继续已取消的 root 拒绝。无效 fixture 最初被既有 packet
+  preparation 检查拒绝，已修正为合法 tuple pattern，没有放宽该检查。
+- `python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor
+  -p luna --lib --test clause_packet_preparation --test comptime_bytecode_defaults
+  --test comptime_bytecode_traits --test comptime_bytecode_types --test normal_input_plans
+  --test open_normal_input_plans --test nominal_staging --test builder_invocations
+  --test library_protocols --no-fail-fast`：`/tmp/luna-tools-xr0efrj7/result.json`，
+  退出 101，751 项通过、2 项失败。VM 的 487 项与 luna 的 84 项单元检查通过；
+  完整命令不能记为全通过。
+- enum builder 的失败仍在 HIR lowering：共享 fixture 缺少 `Symbol` 绑定；与
+  [先前源码对照](comptime-value-admission.md#12-required-与-invocation-共享-callable-参数包)
+  记录一致。另一失败是 `deferred_normal_inputs_run_bytecode_before_their_domains_arrive`
+  要求上下文输入总计数为 2、实际为 3；已用本次修改前的四份 VM 生产文件单独对照，
+  同样在第 551 行失败，`/tmp/luna-tools-0z_8e64c/result.json`，退出 101。对照后本次
+  修改逐字节恢复。两项 fixture／计数预期本次均未修改。
+- 恢复后 `python3 -B development/check.py --timeout 900 -- test
+  -p comptime_interpretor --lib invocation:: -- --nocapture`：
+  `/tmp/luna-tools-kqxlw7nu/result.json`，退出 0，7 项通过。
+- 五个修改／新增 Rust 文件的 rustfmt 检查：`/tmp/luna-tools-i92usp8x/result.json`，
+  退出 0。未运行全 workspace、native 或性能基准。
 
 ## 6. 缓存分别回答不同问题
 

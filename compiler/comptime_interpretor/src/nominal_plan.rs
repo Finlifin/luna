@@ -370,6 +370,11 @@ impl Frame<'_, '_> {
     }
 }
 impl InputPlan for Frame<'_, '_> {
+    fn cancel(&mut self, environment: &mut Environment) {
+        self.terminal = true;
+        self.cleanup(environment);
+    }
+
     fn next_input(
         &mut self,
         vm: &mut Interpreter<'_>,

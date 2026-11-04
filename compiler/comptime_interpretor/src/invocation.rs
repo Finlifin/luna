@@ -1,6 +1,8 @@
 //! Invocation admission, owned frame state, delivery and caller restoration.
 //! These boundaries are shared by the migration interpreter and linear bodies.
 use super::*;
+mod session;
+use session::Session;
 
 pub(super) enum Body<'a> {
     Package(&'a Expr),
@@ -146,14 +148,15 @@ impl<'a> Interpreter<'a> {
             let result = self.eval(frame.body.expression(), &mut frame.environment);
             return self.complete_invocation(activation, result);
         }
-        match self.run_executions(Some(Execution::Invocation(activation)), None, None)? {
+        match Session::invocation(self, activation).run()? {
             Some(Flow::Value(value)) => Ok(value),
             _ => Err(self.failure(ErrorKind::InvalidControlFlow, None)),
         }
     }
 
     pub(super) fn run_fragment(&mut self, frame: &mut bytecode::Frame) -> Result<Flow, Error> {
-        self.run_executions(None, Some(frame), None)?
+        Session::fragment(self, frame)
+            .run()?
             .ok_or_else(|| self.failure(ErrorKind::InvalidControlFlow, None))
     }
 
@@ -180,7 +183,8 @@ impl<'a> Interpreter<'a> {
                 _ => Err(self.failure(ErrorKind::InvalidControlFlow, None)),
             };
         }
-        self.run_executions(None, None, Some((frame, environment)))?
+        Session::plan(self, frame, environment)
+            .run()?
             .ok_or_else(|| self.failure(ErrorKind::InvalidControlFlow, None))
     }
     fn start_type_plan(
@@ -213,250 +217,7 @@ impl<'a> Interpreter<'a> {
         frame: &mut nominal_inputs::Frame<'_>,
         environment: &mut Environment,
     ) -> Result<Option<Flow>, Error> {
-        self.run_executions(None, None, Some((frame, environment)))
-    }
-
-    // Function bodies, defaults and a borrowed fragment root share one driver.
-    // Native recursion remains only at migration and contract boundaries.
-    fn run_executions(
-        &mut self,
-        mut execution: Option<Execution<'a>>,
-        mut root: Option<&mut bytecode::Frame>,
-        mut plan: Option<(&mut dyn input_collection::InputPlan, &mut Environment)>,
-    ) -> Result<Option<Flow>, Error> {
-        let mut stack: Vec<StackEntry<'a>> = Vec::new();
-        let mut result = None;
-        loop {
-            if let Some(mut active) = execution.take() {
-                let owned = match &active {
-                    Execution::Invocation(activation) if activation.frame.stable_code.is_none() => {
-                        match &activation.frame.body {
-                            Body::Owned(body) => Some(body.clone()),
-                            Body::Package(_) => None,
-                        }
-                    }
-                    Execution::Default { expression, .. }
-                    | Execution::Contract { expression, .. } => Some(expression.clone()),
-                    _ => None,
-                };
-                let code = if let Execution::Associated { expression, .. } = &active {
-                    match expression {
-                        Body::Package(expression) => self.borrowed_invocation_code(expression),
-                        Body::Owned(expression) => self.owned_invocation_code(expression),
-                    }
-                } else {
-                    let (expression, identity, _) = active.parts();
-                    match owned {
-                        Some(body) => self.owned_invocation_code(&body),
-                        None => self.invocation_code(expression, identity),
-                    }
-                };
-                result = match code {
-                    Ok(Some(code)) => {
-                        // Suspended bytecode activations live on the explicit stack.
-                        // Keep the native guard for tree evaluation and preparation.
-                        if let Execution::Invocation(activation) = &mut active {
-                            activation.saved.counts_native_depth = false;
-                            self.depth -= 1;
-                        }
-                        match self.start_frame(&code, active.parts().2) {
-                            Ok(code_frame) => {
-                                match &active {
-                                    Execution::Invocation(_) => self.bytecode_invocations += 1,
-                                    Execution::Default { .. } => {
-                                        self.bytecode_default_evaluations += 1
-                                    }
-                                    Execution::Contract { .. } | Execution::Associated { .. } => {}
-                                }
-                                stack.push(StackEntry::Code(
-                                    StackContext::Execution(active),
-                                    code_frame,
-                                ));
-                                None
-                            }
-                            Err(error) => Some(self.complete_execution(active, Err(error))),
-                        }
-                    }
-                    Ok(None) => {
-                        let (expression, _, environment) = active.parts();
-                        let flow = self.eval(expression, environment);
-                        Some(self.complete_execution(active, flow))
-                    }
-                    Err(error) => Some(self.complete_execution(active, Err(error))),
-                };
-            }
-            if let Some(delivered) = result.take() {
-                let (flow, defaults) = match delivered {
-                    Completion::Input(input) => {
-                        if let Some(StackEntry::Plan(active)) = stack.last_mut() {
-                            let outcome =
-                                active
-                                    .frame
-                                    .accept_input(self, &mut active.environment, input);
-                            if !matches!(&outcome, Ok(None)) {
-                                let Some(StackEntry::Plan(active)) = stack.pop() else {
-                                    unreachable!()
-                                };
-                                result = Some(active.complete(outcome.map(|flow| flow.unwrap())));
-                            }
-                        } else {
-                            let (frame, environment) = plan.as_mut().expect("input plan root");
-                            if let Some(flow) = frame.accept_input(self, environment, input)? {
-                                return Ok(Some(flow));
-                            }
-                        }
-                        continue;
-                    }
-                    Completion::Ordinary { flow, defaults } => (flow, defaults),
-                };
-                let Some(parent) = stack
-                    .last_mut()
-                    .and_then(StackEntry::code)
-                    .or_else(|| root.as_deref_mut())
-                else {
-                    return flow.map(Some);
-                };
-                let propagation = match parent.receive(flow, defaults) {
-                    Ok(None) => None,
-                    Ok(Some(flow)) => Some(Ok(flow)),
-                    Err(error) => Some(Err(error)),
-                };
-                if let Some(flow) = propagation {
-                    // Defaults may return from their enclosing invocation.
-                    // Restore each activation before propagating a transfer/error.
-                    if let Some(StackEntry::Code(parent, code)) = stack.pop() {
-                        result = Some(self.complete_stack(parent, code, flow));
-                        continue;
-                    }
-                    return flow.map(Some);
-                }
-            }
-            if let Some(StackEntry::Plan(active)) = stack.last_mut() {
-                match active.frame.next_input(self, &mut active.environment) {
-                    Ok(input_collection::Progress::Input(bytecode::InputFrame {
-                        code,
-                        finish,
-                    })) => {
-                        stack.push(StackEntry::Code(StackContext::Input(finish), code));
-                    }
-                    outcome => {
-                        let Some(StackEntry::Plan(active)) = stack.pop() else {
-                            unreachable!()
-                        };
-                        let flow = outcome.map(|progress| match progress {
-                            input_collection::Progress::Complete(flow) => flow,
-                            _ => unreachable!(),
-                        });
-                        result = Some(active.complete(flow));
-                    }
-                }
-                continue;
-            }
-            if stack.is_empty() {
-                if let Some((frame, environment)) = plan.as_mut() {
-                    match frame.next_input(self, environment)? {
-                        input_collection::Progress::Input(bytecode::InputFrame {
-                            code,
-                            finish,
-                        }) => {
-                            stack.push(StackEntry::Code(StackContext::Input(finish), code));
-                        }
-                        input_collection::Progress::Complete(flow) => return Ok(Some(flow)),
-                        input_collection::Progress::InputsComplete => return Ok(None),
-                    }
-                    continue;
-                }
-            }
-            let code = stack
-                .last_mut()
-                .and_then(StackEntry::code)
-                .or_else(|| root.as_deref_mut())
-                .expect("active execution");
-            match self.resume_frame(code, 1024) {
-                Ok(bytecode::Progress::TypeInputPlan {
-                    expression,
-                    environment,
-                }) => match self.start_type_plan(expression, &environment) {
-                    Ok(frame) => stack.push(StackEntry::Plan(Box::new(PlanActivation {
-                        frame,
-                        environment,
-                    }))),
-                    Err(error) => {
-                        result = Some(Completion::Ordinary {
-                            flow: Err(error),
-                            defaults: Some(environment),
-                        })
-                    }
-                },
-                Ok(bytecode::Progress::Associated { access, source }) => {
-                    match self.prepare_associated_value(
-                        &access.interface,
-                        &access.subject,
-                        access.member,
-                        &access.ty,
-                        source,
-                    ) {
-                        Ok((expression, key, result_type)) => {
-                            execution = Some(Execution::Associated {
-                                expression,
-                                result_type,
-                                key,
-                                source,
-                                environment: Environment::default(),
-                            })
-                        }
-                        Err(error) => {
-                            result = Some(Completion::Ordinary {
-                                flow: Err(error),
-                                defaults: None,
-                            })
-                        }
-                    }
-                }
-                Ok(bytecode::Progress::Contract {
-                    expression,
-                    environment,
-                }) => {
-                    execution = Some(Execution::Contract {
-                        expression,
-                        environment,
-                    });
-                }
-                Ok(bytecode::Progress::Suspended) => {}
-                Ok(bytecode::Progress::Default {
-                    expression,
-                    environment,
-                }) => {
-                    execution = Some(Execution::Default {
-                        expression,
-                        environment,
-                    });
-                }
-                Ok(bytecode::Progress::Call { callee, arguments }) => {
-                    match self.begin_invocation(callee, arguments, None) {
-                        Ok(child) => execution = Some(Execution::Invocation(child)),
-                        Err(error) => {
-                            result = Some(Completion::Ordinary {
-                                flow: Err(error),
-                                defaults: None,
-                            })
-                        }
-                    }
-                }
-                outcome => {
-                    let flow = match outcome {
-                        Ok(bytecode::Progress::Complete(flow)) => Ok(flow),
-                        Err(error) => Err(error),
-                        _ => unreachable!("handled suspension"),
-                    };
-                    if let Some(StackEntry::Code(completed, code)) = stack.pop() {
-                        result = Some(self.complete_stack(completed, code, flow));
-                    } else {
-                        return flow.map(Some);
-                    }
-                }
-            }
-        }
+        Session::plan(self, frame, environment).run()
     }
 
     fn complete_stack(
@@ -1187,8 +948,7 @@ mod tests {
         assert_eq!(vm.depth, 1);
         assert_eq!(vm.effect_state.invocation, parent_identity);
         assert!(matches!(
-            vm.run_executions(Some(Execution::Invocation(parent)), None, None)
-                .unwrap(),
+            Session::invocation(&mut vm, parent).run().unwrap(),
             Some(Flow::Value(Value::Bool(true)))
         ));
         assert_eq!(vm.depth, 0);

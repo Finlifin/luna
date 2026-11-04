@@ -39,6 +39,11 @@ struct PatternScope {
 }
 
 impl Frame {
+    pub(super) fn cancel(&mut self) {
+        self.terminal = true;
+        self.waiting = None;
+    }
+
     fn prepare_type(&mut self, register: usize, ty: Term) {
         let slot = self
             .code

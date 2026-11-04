@@ -53,8 +53,9 @@ pub(super) enum Progress {
     Complete(Flow),
 }
 
-pub(super) trait InputPlan {
+pub(super) trait InputPlan: fmt::Display {
     fn cleanup(&self, environment: &mut Environment);
+    fn cancel(&mut self, environment: &mut Environment);
     fn next_input(
         &mut self,
         vm: &mut Interpreter<'_>,
@@ -254,6 +255,11 @@ impl<S: Source> Frame<S> {
 }
 
 impl<S: Source> InputPlan for Frame<S> {
+    fn cancel(&mut self, environment: &mut Environment) {
+        self.terminal = true;
+        self.source.cleanup(environment);
+    }
+
     fn cleanup(&self, environment: &mut Environment) {
         self.source.cleanup(environment);
     }
