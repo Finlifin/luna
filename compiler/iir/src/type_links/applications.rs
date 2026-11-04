@@ -102,7 +102,7 @@ impl TypeLinks<'_> {
                     }
                     nominal_fields(ty, variant, fuel)
                 },
-                declared: &mut |_, _, _| false,
+                declared: &mut |_, _, _| Ok(false),
                 collection: &mut |domain, fuel| {
                     let Term::NormalForm { head, .. } = domain else {
                         return Ok(None);

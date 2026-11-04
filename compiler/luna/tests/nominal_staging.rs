@@ -275,7 +275,7 @@ fn nominal_normal_form_admission_rejects_forged_type_arguments_and_recovers() {
                             }
                         })
                 },
-                declared: &mut |_, _, _| false,
+                declared: &mut |_, _, _| Ok(false),
                 collection: &mut |_, _| Ok(None),
                 callable: &mut |_, _, _| Ok(None),
                 target: package.target,

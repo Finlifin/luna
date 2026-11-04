@@ -61,7 +61,7 @@ fn check(
         fuel,
         &mut DomainQueries {
             layout: &mut |_, _, _| Err("missing test layout".into()),
-            declared: &mut |_, _, _| false,
+            declared: &mut |_, _, _| Ok(false),
             collection: &mut |_, _| Ok(None),
             callable: &mut |value, caller_frames, fuel| {
                 // This test registry contains one ordinary generic declaration.
@@ -165,7 +165,7 @@ fn declaration_signature_controls_domain_phase_and_safety() {
                 &mut 10000,
                 &mut DomainQueries {
                     layout: &mut |_, _, _| Err("missing test layout".into()),
-                    declared: &mut |_, _, _| true,
+                    declared: &mut |_, _, _| Ok(true),
                     collection: &mut |_, _| Ok(None),
                     callable: &mut |_, _, _| Ok(None),
                     target: None,

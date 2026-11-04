@@ -38,7 +38,7 @@ fn with_queries<R>(registered: bool, check: impl FnOnce(&mut DomainQueries<'_, '
     check(&mut DomainQueries {
         layout: &mut |_, _, _| Err("missing layout evidence".into()),
         declared: &mut |value, domain, _| {
-            registered
+            Ok(registered
                 && *domain == p(P::Bool)
                 && matches!(
                     value,
@@ -47,7 +47,7 @@ fn with_queries<R>(registered: bool, check: impl FnOnce(&mut DomainQueries<'_, '
                         depth: 0,
                         index: 0
                     }
-                )
+                ))
         },
         collection: &mut |domain, fuel| {
             if registered && *domain == list(signature()) {

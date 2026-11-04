@@ -365,7 +365,7 @@ impl<'a> DeclarationWorld<'a> {
                 }
                 nir::normal_forms::query_nominal_value_fields(self.package, ty, variant, fuel)
             },
-            declared: &mut |_, _, _| false,
+            declared: &mut |_, _, _| Ok(false),
             collection: &mut |domain, fuel| {
                 let Term::NormalForm { head, .. } = domain else {
                     return Ok(None);

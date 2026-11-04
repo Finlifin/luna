@@ -148,7 +148,7 @@ pub fn capability_sources_with_layouts(
             traits,
             domains,
             &mut remaining,
-            |_, _, _| false,
+            |_, _, _| Ok(false),
             layouts,
         )?;
         let arguments: Vec<_> = std::iter::once(current.subject.clone())
@@ -245,7 +245,7 @@ pub fn subject_requirements_with_layouts(
                 traits,
                 domains,
                 &mut remaining,
-                |_, _, _| false,
+                |_, _, _| Ok(false),
                 layouts,
             )
             .is_err()
@@ -548,7 +548,13 @@ impl Solver<'_, '_> {
                 &self.world.index.parameter_domains,
                 &mut self.remaining,
                 |left, right, fuel| {
-                    equivalent_domains(self.world.context, left, right, budget.max_depth, fuel)
+                    Ok(equivalent_domains(
+                        self.world.context,
+                        left,
+                        right,
+                        budget.max_depth,
+                        fuel,
+                    ))
                 },
                 Some(&self.world.index.nominal_layouts),
             )?;
@@ -754,7 +760,13 @@ impl Solver<'_, '_> {
                         &world.index.parameter_domains,
                         fuel,
                         |left, right, fuel| {
-                            equivalent_domains(world.context, left, right, budget.max_depth, fuel)
+                            Ok(equivalent_domains(
+                                world.context,
+                                left,
+                                right,
+                                budget.max_depth,
+                                fuel,
+                            ))
                         },
                         Some(&world.index.nominal_layouts),
                     )

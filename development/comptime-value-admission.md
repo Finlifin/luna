@@ -2469,105 +2469,68 @@ record label 测试的资源／语义混淆。最终检查已覆盖相应修正�
 预算与稳定世界证据仍须继续迁移。正式 docs 和原有工作区修改保持不变。
 
 
-### VM 构造中的 opaque 元数据成本与快照证据
+### VM 构造与声明域准入：当前接线
 
-新 VM 构造现通过 `invocation_budget::validate_opaque_metadata` 调用
-`normal_forms::validate_in`，把 NF／newtype 结构检查的实际消耗扣入调用方 Budget，
-不再使用一份隐藏的 100,000 额度。外层与 newtype 内层 Budget 均保留为
-`StepsExhausted`；Invalid 仍归 `InvalidCallPlan`。批次预留失败留下正余额时也不能
-误判为语义错误。depth 配置不被修改，失败后的新构造不继承任何部分索引。
+构造器的资源失败必须保持为 StepsExhausted，非法元数据、作用域、sort 或值域仍
+拒绝为 InvalidCallPlan。失败的批次预留可能留下正余额；不能根据余额是否为零
+猜测错误类别。构造期间没有用户执行事件，不发布部分索引或前提闭包。
 
-`with_assumptions_and_index` 已在入口按 Package 地址过滤 SourceIndexes；索引本身
-持有原始 Arc 快照，避免仅靠地址或声明编号转交证据。匹配的索引已证明该快照的
-结构元数据有效，因此内部带 premises 的构造分支复用这份检查结果；premises 的
-接口、参数及闭包检查仍执行。相同内容的副本、修改后的 Package 和同号声明均不能
-借用原快照的验证结果。NF 主体依旧不执行，未把 caller assumptions 当作 NF 等式。
+**元数据与快照。** 新世界通过 `normal_forms::validate_in` 检查 NF／newtype
+结构并支付构造额度，外层和 newtype 内层的 Budget 均保留分类。
+SourceIndexes 持有原 Arc 快照，只能在精确 Package 身份匹配时复用结构证明；
+同内容副本、修改后的世界及同号声明不能借用。caller premises 不属于结构证明，
+仍须单独检查。公开 for_comptime_in_session 目前只传空 premises；非空 premises
+与索引组合由内部构造器回归覆盖，尚未新增公开的带前提 session API。
 
-这一复用的可达范围必须区分：公开 `for_comptime_in_session` 当前只传空 premises，
-继续走既有的完整索引复用途径；带非空 premises 与索引的组合目前由内部构造器
-回归覆盖。本批没有新增公开的带前提 session API，也不把内部用例说成已对外接通
-的新能力。生产交付是新世界构造的预算接线与错误分类；内部复用规则维护现有构造器
-对精确快照证据的统一解释。
+**前提闭包。** `constructor_premises::expand` 借用初始 premises，先预留队列批次，
+再在键复制／哈希和替换输入复制前检查嵌套 Term。父 trait 与 capability 通过
+Trait::input_substitution 及 DeclarationSubstitution 的 bounded 接口展开；重复
+替换载荷按展开结果计费。队列、声明参数域与后续 binder 检查共用同一份余额，
+成功后将剩余额度交给执行器。去重与原有 64 层展开上限保留，前提不提供方法体。
+即使叶节点没有后续边，也检查 Self／实参的作用域与 sort；普通 comptime 值仍按
+其声明域使用。这项结构检查不替代 scalar range、requirements 或方法可用性。
 
-回归检查元数据预留失败仍有正余额、精确成功成本、newtype 内层资源耗尽、非法
-collector 拒绝与修复后重试。真实 fresh constructor 在每个不足的额度上返回
-StepsExhausted，充足额度后得到无执行事件的新 VM。内部索引回归同时检查 caller
-premise 确实安装、未知接口仍拒绝、同内容副本必须支付新检查成本、被修改世界必须
-拒绝，以及失败后原 session 仍可使用。
+**trait 值域准入。** Trait 的 validate_arguments 系列现在直接返回共享的
+NominalAdmissionError（value_admission::Error），保留 Budget 与 Invalid。
+参数 binder、Term 预检、声明替换和布局查询不再先转换成 String。
+声明域查找仍按声明身份取得独立证据，不以待验证的参数槽反推实际域；冲突、
+缺失与不匹配证据继续拒绝。VM 的具体 implementation 检查消费这个分类，资源
+耗尽不再变成 InvalidCallPlan。
 
-恢复工作时，暂停前的 `/tmp` 日志与构建缓存已不在，不能用聊天中的通过记录替代
-当前可检验证据。本批在 `/home/fin/luna` 重新运行，统一入口
-`python3 -B development/check.py --timeout 900 -- test`：
+**嵌套查询。** DomainQueries::declared 与 trait Type 域关系回调均返回
+Result<bool, AdmissionError>。scalar、record、optional、nominal 及 record 内
+nominal 的声明查询和关系检查都传播错误；Ok(false) 仅表示没有匹配的证据，
+不是预算失败。Type 关系不建立值索引相等，也不展开 NF 头。已经无调用者的
+validate_symbolic_value 与 validate_record_index 私有包装已删除。
 
-- `-p comptime_interpretor -p elaboration --lib --test instance_budget
-  --test invocation_budget --test generated_normal_forms --no-fail-fast`：641 通过，
-  退出 0；`/tmp/luna-tools-al2ectu2/result.json`。
-- `-p luna --test newtypes --test normal_input_plans --test cmtt_type_inputs
-  --test sysroot_preludes --test library_list_equality --test trait_phases
-  --no-fail-fast`：340 通过，退出 0；`/tmp/luna-tools-qnyzd9ak/result.json`。
-- `-p luna --test key_code_sessions --no-fail-fast`：3 通过，退出 0；
-  `/tmp/luna-tools-am2vewue/result.json`。公开 key protocol 保持新鲜输入、契约与接收者
-  存储，不复用用户调用结果。
-- `-p luna --test builder_invocations public_newtype_builder --no-fail-fast`：
-  6 通过、80 filtered out，退出 0；`/tmp/luna-tools-yajlgzls/result.json`。
-  仅验证该筛选组，不声称整个 builder 集通过。
+回归检验不同 inherited premises 的替换、重复循环终止、叶节点、非法接口与
+参数、宽输入和重复替换载荷；fresh 构造及具体 implementation 准入在每个不足
+额度上返回资源错误，精确额度成功，失败后重试保持原世界且无执行事件。
+嵌套值准入还逐级扫描不足额度，并在有正余额时注入查询资源错误和语义错误，
+验证原分类传播；关系不成立仍拒绝，独立关系证据成立才接受。
 
-格式检查 `/tmp/luna-tools-b5q2jsaz/result.json` 退出 0。未跑全 workspace 或性能
-基准；已有错误分类／示例／handler 基线问题未在此批宣称解决。正式 docs、用户
-已有源码及 library 修改保持不变。
+当前尚未完成的边界：
 
-完整 constructor 计费仍未完成：fresh comptime 构造先执行的 phase pass 仍使用
-自己的默认额度，随后才进入本批计费的 VM 元数据检查；并未消除这条 fresh 路径的
-所有重复观察。`for_comptime_in_budget` 的构造失败仍保守保留全部 reservation，
-不是精确失败扣款。PTC 的独立 metadata compatibility 入口、其他构造检查的资源
-分类及共享状态所有权仍需继续迁移。
+- fresh phase pass 仍使用自己的默认额度，VM 随后再做结构检查；构造失败的
+  for_comptime_in_budget 仍保守保留全部 reservation，尚非精确失败扣款。
+- 后续关联项／方法签名与 world capability 的部分实例化尚未有界。
+- PTC 的 equivalent_domains 仍是布尔证明接口，其适配器仅包装已有返回值；
+  solver 内部 Unknown／资源失败的完整迁移不由本节的 typed admission 解决。
+  PTC 外层仍有 String 与可选结果边界，不能据此宣称完整求解链已保留错误分类。
+- nominal 的既有公开 evidence 包装仍接收总布尔关系，再适配到共享内核；
+  需要可失败域查询的消费者必须直接走 fallible DomainQueries。各公开包装的
+  后续迁移以及旧 index shape 布尔观察仍待处理。
 
+验证证据见下；历史中间版本的逐轮日志由 git 保留，不作为当前实现状态。
 
-### VM 构造的 trait 前提闭包与共享额度
+最终源码于 `/home/fin/luna` 使用
+`python3 -B development/check.py --timeout 900 -- test` 检查：
 
-`constructor_premises::expand` 接管 caller-established premises 的继承和 capability
-闭包。初始输入借用，工作队列按批次在分配前预留；键的复制与哈希前检查嵌套 Term，
-替换输入的第二份复制也计费。派生前提通过既有 `Trait::input_substitution` 和
-`DeclarationSubstitution` 的 bounded 接口生成，重复出现的替换载荷按展开结果计费。
-同一前提仍去重，原有 64 层展开上限保持；这些前提不提供方法实现，也不是 NF 展开
-或额外类型等式的依据。
+| 范围与参数 | 结果 | 输出锚点 |
+| --- | --- | --- |
+| `-p nir -p comptime_interpretor -p type_resolution -p iir --lib --test trait_parameters --test value_admission --test normal_inputs --test normal_callable_inputs --test capabilities --test implementation --test implementation_phases --no-fail-fast` | 778 通过，退出 0 | `/tmp/luna-tools-ut52yw59/result.json` |
+| `-p luna --test trait_phases --test trait_domain_substitution --test dynamic_trait_clauses --test comptime_bytecode_traits --test sysroot_preludes --test library_list_equality --test normal_input_plans --test cmtt_type_inputs --test nominal_staging --test newtypes --no-fail-fast` | 371 通过，退出 0 | `/tmp/luna-tools-1fsy9ddt/result.json` |
+| 修改文件的 rustfmt check | 退出 0 | `/tmp/luna-tools-i1m80uby/result.json` |
 
-前提队列、声明参数域和后续 trait binder 检查现在共用同一份剩余额度，替代两份
-各自从完整余额起步、构造末尾才合账的计数器。成功构造只扣实际消耗，剩余额度
-交给执行器。后续五处 binder 消费改用 `binders_with_self_checked`，Budget 映射为
-StepsExhausted，结构／scope 错误仍映射为 InvalidCallPlan；不再先转换成 String
-而丢失分类。
-
-前提输入统一建立结构替换也修复了叶节点漏洞：没有父 trait 或 capability 的前提
-以前不会真正检查 Self／实参 sort。现在无论是否有后续边，都检查替换的作用域与
-sort，Type 参数不能接收 bool 值，bool 域可以接收普通 comptime bool 值，Self 必须
-是 Type。这不是完整的值域 admission；scalar range、用户 requirements 和方法
-可用性仍由原来的所属边界负责，不能用结构替换冒充这些证明。
-
-回归覆盖父 trait 与 capability 的不同参数替换、重复前提、重复循环终止、未知
-接口、参数数量／sort 错误、叶节点、宽输入与重复替换载荷。公开
-for_comptime_with_assumptions 在每个不足额度上都应返回 StepsExhausted，精确额度
-则成功；失败后重新构造得到相同闭包，原 Package 不变且没有执行事件。
-
-这一批没有完成构造器的全部预算迁移。具体 implementation 的
-validate_arguments_with_layouts 仍经过 String 错误接口；后续关联项／方法签名及
-world capability 的部分实例化尚未有界，需继续迁移。fresh phase pass 与 VM 构造
-仍未统一预算，失败 reservation 策略保持原状。正式 docs、已有源码与 library
-修改均不属于本次提交范围。
-
-本批在 `/home/fin/luna` 通过统一入口
-`python3 -B development/check.py --timeout 900 -- test` 验证最终源码：
-
-- `-p comptime_interpretor -p elaboration --lib --test instance_budget
-  --test invocation_budget --test generated_normal_forms --no-fail-fast`：645 通过，
-  退出 0；`/tmp/luna-tools-5zxvtjra/result.json`。
-- `-p luna --test trait_phases --test trait_domain_substitution
-  --test dynamic_trait_clauses --test comptime_bytecode_traits --test sysroot_preludes
-  --test library_list_equality --test normal_input_plans --test cmtt_type_inputs
-  --no-fail-fast`：148 通过，退出 0；`/tmp/luna-tools-p_927o_0/result.json`。
-- 修改文件的 rustfmt check：退出 0；`/tmp/luna-tools-j81zmuts/result.json`。
-
-最初的新拒绝例使用了 Integer 不支持的 From 转换，导致
-`/tmp/luna-tools-3vlsuo3s/result.json` 编译失败；改用普通 bool 值检验相同的 sort
-契约，最终检查已覆盖。早期版本的通过记录不替代上述最终源码验证。未跑全
-workspace 或性能基准；之前已记录的其他基线问题没有在本批宣称解决。
+未跑全 workspace 或性能基准，其他已记录基线问题不在这批宣称解决。
+正式 docs、program verification 与 library 的既有工作区修改保持原字节内容。

@@ -133,6 +133,92 @@ mod tests {
     use super::*;
     use nir::{DeclarationId, Primitive, Term};
 
+    #[test]
+    fn concrete_trait_input_admission_keeps_budget_failures_distinct() {
+        let id = |local| DeclarationId { package: 76, local };
+        let mut package = Package {
+            traits: vec![nir::program::Trait {
+                declaration: id(1),
+                self_parameter: id(2),
+                name: "Indexed".into(),
+                comptime_only: false,
+                type_parameters: vec![id(3)],
+                parameter_types: vec![Term::Primitive(Primitive::Bool)],
+                associated: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+                parents: vec![],
+                methods: vec![],
+            }],
+            implementations: vec![nir::program::Implementation {
+                declaration: id(4),
+                interface: Some(id(1)),
+                subject: Term::Primitive(Primitive::Bool),
+                interface_arguments: vec![Term::Bool(true)],
+                phases: nir::program::ImplementationPhases {
+                    runtime: true,
+                    comptime: false,
+                },
+                type_parameters: vec![],
+                parameter_types: vec![],
+                associated: vec![],
+                associated_initializers: vec![],
+                capabilities: vec![],
+                requirements: vec![],
+                methods: vec![],
+            }],
+            ..Default::default()
+        };
+        let before = package.to_string();
+        let vm = Interpreter::for_comptime(
+            &package,
+            Budget {
+                steps: 10_000,
+                depth: 128,
+            },
+        )
+        .unwrap();
+        let cost = 10_000 - vm.remaining_steps();
+        for steps in 0..cost {
+            assert_eq!(
+                Interpreter::for_comptime(&package, Budget { steps, depth: 128 })
+                    .err()
+                    .expect("insufficient fuel")
+                    .kind,
+                ErrorKind::StepsExhausted,
+                "steps {steps}"
+            );
+        }
+        assert_eq!(
+            Interpreter::for_comptime(
+                &package,
+                Budget {
+                    steps: cost,
+                    depth: 128
+                }
+            )
+            .unwrap()
+            .remaining_steps(),
+            0
+        );
+        assert_eq!(package.to_string(), before);
+        package.implementations[0].interface_arguments[0] = Term::Char('x');
+        assert_eq!(
+            Interpreter::new(&package, Budget::default())
+                .err()
+                .unwrap()
+                .kind,
+            ErrorKind::InvalidCallPlan
+        );
+        package.implementations[0].interface_arguments[0] = Term::Bool(false);
+        assert!(
+            Interpreter::for_comptime(&package, Budget::default())
+                .unwrap()
+                .events()
+                .is_empty()
+        );
+    }
+
     fn opaque_package() -> Package {
         Package {
             normal_forms: vec![nir::normal_forms::Head {

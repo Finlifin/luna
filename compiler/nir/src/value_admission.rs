@@ -49,7 +49,8 @@ impl From<Error> for String {
 /// Query work and owned descriptions must consume the shared fuel.
 pub struct DomainQueries<'a, 'signature> {
     pub layout: &'a mut dyn FnMut(&Term, Option<u32>, &mut usize) -> Result<Vec<Term>, Error>,
-    pub declared: &'a mut dyn FnMut(&Term, &Term, &mut usize) -> bool,
+    /// False means no matching declaration evidence; failure is not absence.
+    pub declared: &'a mut dyn FnMut(&Term, &Term, &mut usize) -> Result<bool, Error>,
     pub collection: &'a mut dyn FnMut(&Term, &mut usize) -> Result<Option<Term>, Error>,
     pub callable: &'a mut dyn FnMut(
         crate::CallableValueRef<'_>,
@@ -100,7 +101,7 @@ fn validate_value(
         }
     ) {
         return if *domain != Term::Primitive(Primitive::Type)
-            && (queries.declared)(argument, domain, fuel)
+            && (queries.declared)(argument, domain, fuel)?
         {
             Ok(())
         } else {

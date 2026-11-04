@@ -10,7 +10,7 @@ macro_rules! queries {
     () => {
         nir::value_admission::DomainQueries {
             layout: &mut |_, _, _| Err("missing test layout".into()),
-            declared: &mut |_, _, _| false,
+            declared: &mut |_, _, _| Ok(false),
             collection: &mut |_, _| Ok(None),
             callable: &mut |_, _, _| Ok(None),
             target: None,
@@ -938,7 +938,9 @@ fn residual_normal_inputs_require_exact_domains_without_weakening_closed_admissi
             &[],
             fuel,
             &mut DomainQueries {
-                declared: &mut |input, domain, _| input == &symbol && domain == &primitive(P::Bool),
+                declared: &mut |input, domain, _| {
+                    Ok(input == &symbol && domain == &primitive(P::Bool))
+                },
                 ..queries!()
             },
         )
@@ -975,7 +977,7 @@ fn residual_normal_inputs_require_exact_domains_without_weakening_closed_admissi
                 &[],
                 &mut 10000,
                 &mut DomainQueries {
-                    declared: &mut |_, _, _| true,
+                    declared: &mut |_, _, _| Ok(true),
                     ..queries!()
                 }
             )
@@ -1055,7 +1057,7 @@ fn residual_error_success_requires_the_unflattened_inner_domain() {
             &[],
             &mut 10000,
             &mut DomainQueries {
-                declared: &mut |value, expected, _| value == &pending && expected == domain,
+                declared: &mut |value, expected, _| Ok(value == &pending && expected == domain),
                 ..queries!()
             },
         )

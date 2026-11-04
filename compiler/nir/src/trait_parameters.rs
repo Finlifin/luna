@@ -1,5 +1,6 @@
 //! Declaration domains for trait indices. Identity and domain formation do not
 //! establish an implementation, a runtime environment, or a program contract.
+use crate::NominalAdmissionError as AdmissionError;
 use crate::{DeclarationParameter, Primitive, Sort, Term, program::Trait};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -435,7 +436,7 @@ impl Trait {
         arguments: &[Term],
         scope: &[Vec<Sort>],
         fuel: &mut usize,
-    ) -> Result<(), String> {
+    ) -> Result<(), AdmissionError> {
         self.validate_arguments_in_declarations(arguments, scope, &[], fuel)
     }
 
@@ -447,7 +448,7 @@ impl Trait {
         scope: &[Vec<Sort>],
         declarations: &[Trait],
         fuel: &mut usize,
-    ) -> Result<(), String> {
+    ) -> Result<(), AdmissionError> {
         self.validate_argument_domains(
             None,
             arguments,
@@ -455,7 +456,7 @@ impl Trait {
             declarations,
             &BTreeMap::new(),
             fuel,
-            &mut |_, _, _| false,
+            &mut |_, _, _| Ok(false),
             None,
         )
     }
@@ -469,8 +470,8 @@ impl Trait {
         scope: &[Vec<Sort>],
         declarations: &[Trait],
         fuel: &mut usize,
-    ) -> Result<(), String> {
-        crate::type_computations::charge_term(subject, fuel).map_err(|e| e.to_string())?;
+    ) -> Result<(), AdmissionError> {
+        crate::type_computations::charge_term(subject, fuel)?;
         subject.check_scope(scope).map_err(|e| e.to_string())?;
         if subject.sort() != Sort::Type {
             return Err("trait subject must be a Type".into());
@@ -482,7 +483,7 @@ impl Trait {
             declarations,
             &BTreeMap::new(),
             fuel,
-            &mut |_, _, _| false,
+            &mut |_, _, _| Ok(false),
             None,
         )
     }
@@ -497,7 +498,7 @@ impl Trait {
         declarations: &[Trait],
         domains: &BTreeMap<crate::DeclarationId, Term>,
         fuel: &mut usize,
-    ) -> Result<(), String> {
+    ) -> Result<(), AdmissionError> {
         self.validate_arguments_with_domain_relations(
             subject,
             arguments,
@@ -505,12 +506,13 @@ impl Trait {
             declarations,
             domains,
             fuel,
-            |_, _, _| false,
+            |_, _, _| Ok(false),
         )
     }
 
     /// The caller may discharge equality of Type domains using its checked context.
-    /// This callback never establishes equality of value indices.
+    /// This callback never establishes equality of value indices. Lookup and
+    /// proof resource failures must remain errors, even if fuel remains.
     pub fn validate_arguments_with_domain_relations(
         &self,
         subject: &Term,
@@ -519,8 +521,8 @@ impl Trait {
         declarations: &[Trait],
         domains: &BTreeMap<crate::DeclarationId, Term>,
         fuel: &mut usize,
-        mut equivalent: impl FnMut(&Term, &Term, &mut usize) -> bool,
-    ) -> Result<(), String> {
+        mut equivalent: impl FnMut(&Term, &Term, &mut usize) -> Result<bool, AdmissionError>,
+    ) -> Result<(), AdmissionError> {
         self.validate_arguments_with_layouts(
             subject,
             arguments,
@@ -543,10 +545,10 @@ impl Trait {
         declarations: &[Trait],
         domains: &BTreeMap<crate::DeclarationId, Term>,
         fuel: &mut usize,
-        mut equivalent: impl FnMut(&Term, &Term, &mut usize) -> bool,
+        mut equivalent: impl FnMut(&Term, &Term, &mut usize) -> Result<bool, AdmissionError>,
         layouts: Option<&crate::program::Package>,
-    ) -> Result<(), String> {
-        crate::type_computations::charge_term(subject, fuel).map_err(|e| e.to_string())?;
+    ) -> Result<(), AdmissionError> {
+        crate::type_computations::charge_term(subject, fuel)?;
         subject.check_scope(scope).map_err(|e| e.to_string())?;
         if subject.sort() != Sort::Type {
             return Err("trait subject must be a Type".into());
@@ -571,17 +573,17 @@ impl Trait {
         declarations: &[Trait],
         domains: &BTreeMap<crate::DeclarationId, Term>,
         fuel: &mut usize,
-        equivalent: &mut impl FnMut(&Term, &Term, &mut usize) -> bool,
+        equivalent: &mut impl FnMut(&Term, &Term, &mut usize) -> Result<bool, AdmissionError>,
         layouts: Option<&crate::program::Package>,
-    ) -> Result<(), String> {
+    ) -> Result<(), AdmissionError> {
         let target = layouts.and_then(|package| package.target);
-        let binders = self.parameter_binders(fuel)?;
+        let binders = self.parameter_binders_checked(fuel)?;
         if arguments.len() != binders.len() {
             return Err("trait interface argument count mismatch".into());
         }
         if binders.iter().all(|binder| binder.sort == Sort::Type) {
             for argument in arguments {
-                crate::type_computations::charge_term(argument, fuel).map_err(|e| e.to_string())?;
+                crate::type_computations::charge_term(argument, fuel)?;
                 argument.check_scope(scope).map_err(|e| e.to_string())?;
                 if argument.sort() != Sort::Type {
                     return Err("trait interface argument sort mismatch".into());
@@ -595,7 +597,7 @@ impl Trait {
         ids.push(self.self_parameter);
         declared_domains.push(Term::Primitive(Primitive::Type));
         inputs.push(if let Some(subject) = subject {
-            crate::type_computations::charge_term(subject, fuel).map_err(|e| e.to_string())?;
+            crate::type_computations::charge_term(subject, fuel)?;
             subject.clone()
         } else {
             Term::Rigid {
@@ -608,19 +610,16 @@ impl Trait {
                 .parameter_types
                 .get(index)
                 .unwrap_or(&Term::Primitive(Primitive::Type));
-            crate::type_computations::charge_term(domain, fuel).map_err(|e| e.to_string())?;
-            crate::type_computations::charge_term(argument, fuel).map_err(|e| e.to_string())?;
+            crate::type_computations::charge_term(domain, fuel)?;
+            crate::type_computations::charge_term(argument, fuel)?;
             ids.push(self.type_parameters[index]);
             declared_domains.push(domain.clone());
             inputs.push(argument.clone());
         }
         let substitution =
-            crate::DeclarationSubstitution::bounded(&ids, &declared_domains, &inputs, scope, fuel)
-                .map_err(|e| e.to_string())?;
+            crate::DeclarationSubstitution::bounded(&ids, &declared_domains, &inputs, scope, fuel)?;
         for (index, argument) in arguments.iter().enumerate() {
-            let domain = substitution
-                .instantiate_bounded(&declared_domains[index + 1], fuel)
-                .map_err(|e| e.to_string())?;
+            let domain = substitution.instantiate_bounded(&declared_domains[index + 1], fuel)?;
             if domain == Term::Primitive(Primitive::Type) {
                 continue;
             }
@@ -650,16 +649,19 @@ impl Trait {
                             sort: Sort::ComptimeValue,
                         } = value
                         else {
-                            return false;
+                            return Ok(false);
                         };
-                        declared_value_domain(*declaration, declarations, domains, scope, fuel)
-                            .is_ok_and(|actual| {
-                                actual == *expected || equivalent(&actual, expected, fuel)
-                            })
+                        let actual = declared_value_domain(
+                            *declaration,
+                            declarations,
+                            domains,
+                            scope,
+                            fuel,
+                        )?;
+                        Ok(actual == *expected || equivalent(&actual, expected, fuel)?)
                     },
                     target,
-                )
-                .map_err(|e| e.to_string())?;
+                )?;
                 continue;
             }
             if matches!(argument, Term::RecordValue(_)) && argument.is_symbolic_index_value() {
@@ -690,18 +692,16 @@ impl Trait {
                                         sort: Sort::ComptimeValue,
                                     } = value
                                     else {
-                                        return false;
+                                        return Ok(false);
                                     };
-                                    declared_value_domain(
+                                    let actual = declared_value_domain(
                                         *declaration,
                                         declarations,
                                         domains,
                                         scope,
                                         fuel,
-                                    )
-                                    .is_ok_and(|actual| {
-                                        actual == *expected || equivalent(&actual, expected, fuel)
-                                    })
+                                    )?;
+                                    Ok(actual == *expected || equivalent(&actual, expected, fuel)?)
                                 },
                                 target,
                             )?;
@@ -714,12 +714,14 @@ impl Trait {
                         else {
                             return Ok(false);
                         };
-                        Ok(
-                            declared_value_domain(*declaration, declarations, domains, scope, fuel)
-                                .is_ok_and(|actual| {
-                                    actual == *expected || equivalent(&actual, expected, fuel)
-                                }),
-                        )
+                        let actual = declared_value_domain(
+                            *declaration,
+                            declarations,
+                            domains,
+                            scope,
+                            fuel,
+                        )?;
+                        Ok(actual == *expected || equivalent(&actual, expected, fuel)?)
                     },
                     target,
                 )?;
@@ -754,7 +756,7 @@ impl Trait {
                 } => declared_value_domain(*declaration, declarations, domains, scope, fuel)?,
                 _ => return Err("trait value argument requires declared domain evidence".into()),
             };
-            if domain != actual && !equivalent(&domain, &actual, fuel) {
+            if domain != actual && !equivalent(&domain, &actual, fuel)? {
                 return Err("trait value argument domain mismatch".into());
             }
         }
@@ -768,23 +770,22 @@ fn declared_value_domain(
     domains: &BTreeMap<crate::DeclarationId, Term>,
     scope: &[Vec<Sort>],
     fuel: &mut usize,
-) -> Result<Term, String> {
+) -> Result<Term, AdmissionError> {
     let mut found = None;
     for owner in declarations {
-        let binders = owner.parameter_binders(fuel)?;
+        let binders = owner.parameter_binders_checked(fuel)?;
         for (slot, binder) in binders.iter().enumerate() {
             if binder.declaration == declaration {
                 if found.is_some() || binder.sort != Sort::ComptimeValue {
                     return Err("ambiguous or mismatched trait value declaration".into());
                 }
-                crate::type_computations::charge_term(&owner.parameter_types[slot], fuel)
-                    .map_err(|e| e.to_string())?;
+                crate::type_computations::charge_term(&owner.parameter_types[slot], fuel)?;
                 found = Some(owner.parameter_types[slot].clone());
             }
         }
     }
     if let Some(domain) = domains.get(&declaration) {
-        crate::type_computations::charge_term(domain, fuel).map_err(|e| e.to_string())?;
+        crate::type_computations::charge_term(domain, fuel)?;
         if domain.sort() != Sort::Type || found.as_ref().is_some_and(|old| old != domain) {
             return Err("conflicting trait value declaration domain".into());
         }
@@ -794,13 +795,6 @@ fn declared_value_domain(
     found.ok_or_else(|| "trait value argument requires declared domain evidence".into())
 }
 
-pub(crate) fn validate_record_index(
-    value: &Term,
-    domain: &Term,
-    fuel: &mut usize,
-) -> Result<(), crate::nominal_parameters::AdmissionError> {
-    validate_record_index_with(value, domain, fuel, |_, _, _| false)
-}
 /// Check record shape and concrete leaves; the callback admits only symbolic
 /// leaves whose declaration domain is established by the caller.
 pub fn validate_record_index_with(

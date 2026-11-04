@@ -603,7 +603,7 @@ pub fn admit_with_collections_in<'a>(
                     fuel,
                     &mut crate::value_admission::DomainQueries {
                         layout: &mut layout,
-                        declared: &mut declared,
+                        declared: &mut |value, domain, fuel| Ok(declared(value, domain, fuel)),
                         collection: &mut collection,
                         callable: &mut |_, _, _| Ok(None),
                         target,
@@ -627,23 +627,13 @@ pub fn admit_with_collections_in<'a>(
 
 /// The caller has already checked scope and charged the input tree. Symbolic
 /// leaves require independent declaration-domain evidence supplied by `declared`.
-pub(crate) fn validate_symbolic_value(
-    argument: &Term,
-    domain: &Term,
-    fuel: &mut usize,
-    layout: impl FnMut(&Term, Option<u32>, &mut usize) -> Result<Vec<Term>, AdmissionError>,
-    declared: impl FnMut(&Term, &Term, &mut usize) -> bool,
-) -> Result<(), AdmissionError> {
-    validate_symbolic_value_in(argument, domain, &[], fuel, layout, declared, None)
-}
-
 pub(crate) fn validate_symbolic_value_in(
     argument: &Term,
     domain: &Term,
     frames: &[Vec<Sort>],
     fuel: &mut usize,
     mut layout: impl FnMut(&Term, Option<u32>, &mut usize) -> Result<Vec<Term>, AdmissionError>,
-    mut declared: impl FnMut(&Term, &Term, &mut usize) -> bool,
+    mut declared: impl FnMut(&Term, &Term, &mut usize) -> Result<bool, AdmissionError>,
     target: Option<crate::target::TargetData>,
 ) -> Result<(), AdmissionError> {
     crate::value_admission::validate(

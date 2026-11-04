@@ -1293,10 +1293,16 @@ impl<'a> Interpreter<'a> {
                         &package.traits,
                         &BTreeMap::new(),
                         &mut trait_parameter_fuel,
-                        |_, _, _| false,
+                        |_, _, _| Ok(false),
                         Some(package),
                     )
-                    .map_err(|_| invalid())?;
+                    .map_err(|error| match error {
+                        nir::NominalAdmissionError::Budget => Error {
+                            kind: ErrorKind::StepsExhausted,
+                            source: None,
+                        },
+                        nir::NominalAdmissionError::Invalid(_) => invalid(),
+                    })?;
             }
             if concrete
                 && worlds
@@ -6703,17 +6709,19 @@ fn scoped_term_value_work_with_callables_in<'signature>(
                                     }
                                 })
                             },
-                            declared: &mut |value, domain, _| match value {
-                                Term::Rigid {
-                                    declaration,
-                                    sort: nir::Sort::ComptimeValue,
-                                } => value_parameters.get(declaration) == Some(domain),
-                                Term::Bound {
-                                    depth,
-                                    index,
-                                    sort: nir::Sort::ComptimeValue,
-                                } => bound_domains.get(&(*depth, *index)) == Some(domain),
-                                _ => false,
+                            declared: &mut |value, domain, _| {
+                                Ok(match value {
+                                    Term::Rigid {
+                                        declaration,
+                                        sort: nir::Sort::ComptimeValue,
+                                    } => value_parameters.get(declaration) == Some(domain),
+                                    Term::Bound {
+                                        depth,
+                                        index,
+                                        sort: nir::Sort::ComptimeValue,
+                                    } => bound_domains.get(&(*depth, *index)) == Some(domain),
+                                    _ => false,
+                                })
                             },
                             collection: &mut |domain, fuel| {
                                 let Term::NormalForm { head, .. } = domain else {

@@ -1,6 +1,138 @@
 use nir::{DeclarationId, Primitive, Sort, Term, program::Trait};
 
 #[test]
+fn trait_admission_preserves_nested_lookup_and_relation_failures() {
+    use nir::NominalAdmissionError as Error;
+    use std::collections::BTreeMap;
+    let id = |local| DeclarationId { package: 71, local };
+    let boolean = Term::Primitive(Primitive::Bool);
+    let symbol = Term::Rigid {
+        declaration: id(1),
+        sort: Sort::ComptimeValue,
+    };
+    let nominal = Term::Nominal {
+        declaration: id(2),
+        arguments: vec![],
+    };
+    let payload = Term::NominalValue {
+        ty: Box::new(nominal.clone()),
+        variant: None,
+        fields: vec![symbol.clone()],
+    };
+    let package = nir::program::Package {
+        structs: vec![nir::program::Struct {
+            declaration: id(2),
+            name: "Evidence".into(),
+            type_parameters: vec![],
+            parameter_types: vec![],
+            fields: vec![("flag".into(), boolean.clone())],
+            requirements: vec![],
+            capabilities: vec![],
+        }],
+        ..Default::default()
+    };
+    let optional = Term::Optional(Box::new(boolean.clone()));
+    let cases = [
+        (boolean.clone(), symbol.clone()),
+        (
+            Term::Record(vec![("flag".into(), boolean.clone())]),
+            Term::RecordValue(vec![("flag".into(), symbol.clone())]),
+        ),
+        (
+            optional.clone(),
+            Term::OptionalValue {
+                ty: Box::new(optional),
+                value: Some(Box::new(symbol)),
+            },
+        ),
+        (nominal.clone(), payload.clone()),
+        (
+            Term::Record(vec![("item".into(), nominal)]),
+            Term::RecordValue(vec![("item".into(), payload)]),
+        ),
+    ];
+    let mut owner = declaration();
+    owner.type_parameters = vec![id(1)];
+    owner.parameter_types = vec![boolean.clone()];
+    let declarations = [owner];
+    for (domain, argument) in cases {
+        let mut contract = declaration();
+        contract.type_parameters.truncate(1);
+        contract.parameter_types = vec![domain];
+        let validate = |fuel: &mut usize| {
+            contract.validate_arguments_with_layouts(
+                &boolean,
+                std::slice::from_ref(&argument),
+                &[],
+                &declarations,
+                &BTreeMap::new(),
+                fuel,
+                |_, _, _| Ok(false),
+                Some(&package),
+            )
+        };
+        let mut fuel = 10_000;
+        validate(&mut fuel).unwrap();
+        let cost = 10_000 - fuel;
+        let mut positive_remainder = false;
+        for steps in 0..cost {
+            let mut fuel = steps;
+            assert_eq!(
+                validate(&mut fuel),
+                Err(Error::Budget),
+                "steps {steps}, {argument}"
+            );
+            positive_remainder |= fuel > 0;
+        }
+        assert!(positive_remainder);
+        let mut exact = cost;
+        validate(&mut exact).unwrap();
+        assert_eq!(exact, 0);
+
+        // The caller's Type relation is fallible independently of the amount
+        // of fuel left. Do not turn that error into a disproved value domain.
+        let declared_type = Term::Rigid {
+            declaration: id(3),
+            sort: Sort::Type,
+        };
+        let domains = BTreeMap::from([(id(1), declared_type.clone())]);
+        for relation in [
+            Err(Error::Budget),
+            Err(Error::Invalid("unavailable evidence".into())),
+            Ok(false),
+            Ok(true),
+        ] {
+            let mut called = 0;
+            let mut fuel = 10_000;
+            let result = contract.validate_arguments_with_layouts(
+                &boolean,
+                std::slice::from_ref(&argument),
+                &[],
+                &[],
+                &domains,
+                &mut fuel,
+                |left, right, _| {
+                    called += 1;
+                    assert!(
+                        (left == &declared_type && right == &boolean)
+                            || (left == &boolean && right == &declared_type)
+                    );
+                    relation.clone()
+                },
+                Some(&package),
+            );
+            assert_eq!(called, 1);
+            assert!(fuel > 0);
+            match relation {
+                Err(error) => assert_eq!(result, Err(error)),
+                Ok(false) => assert!(matches!(result, Err(Error::Invalid(_)))),
+                Ok(true) => assert_eq!(result, Ok(())),
+            }
+        }
+    }
+}
+
+#[test]
 fn record_index_type_fields_are_domains_not_scalar_identities() {
     let mut contract = declaration();
     contract.type_parameters.truncate(1);
@@ -443,6 +575,7 @@ fn frozen_integer_indices_require_exact_declared_proxy_ranges() {
                 contract
                     .validate_arguments(&args, &[], &mut 1000)
                     .unwrap_err()
+                    .to_string()
                     .contains("outside its declared domain")
             );
         }
@@ -771,7 +904,7 @@ fn nominal_trait_indices_require_full_payload_layout_evidence() {
             &[],
             &domains,
             fuel,
-            |_, _, _| false,
+            |_, _, _| Ok(false),
             Some(package),
         )
     };
@@ -935,7 +1068,7 @@ fn symbolic_nominal_payloads_require_independent_field_domains() {
             &[],
             &domains,
             &mut 10000,
-            |_, _, _| false,
+            |_, _, _| Ok(false),
             Some(&package),
         );
         assert_eq!(result.is_ok(), accepted, "{result:?}");
@@ -1063,7 +1196,7 @@ fn record_error_nominal_payloads_require_layouts_and_reject_forged_fields() {
             &[],
             &Default::default(),
             fuel,
-            |_, _, _| false,
+            |_, _, _| Ok(false),
             Some(&package),
         )
     };
@@ -1104,7 +1237,7 @@ fn platform_trait_indices_use_layout_target_for_scalar_and_record_leaves() {
                     &[],
                     &BTreeMap::new(),
                     fuel,
-                    |_, _, _| false,
+                    |_, _, _| Ok(false),
                     Some(&package),
                 )
             };

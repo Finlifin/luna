@@ -12,9 +12,9 @@ impl Interpreter<'_> {
         check(&mut nir::value_admission::DomainQueries {
             layout: &mut |ty, variant, fuel| self.admitted_nominal_layout(ty, variant, fuel),
             declared: &mut |value, domain, _| {
-                matches!(value,
+                Ok(matches!(value,
                     Term::Rigid { declaration, sort: nir::Sort::ComptimeValue }
-                    if self.abstract_value_parameters.get(declaration) == Some(domain))
+                    if self.abstract_value_parameters.get(declaration) == Some(domain)))
             },
             collection: &mut |domain, fuel| self.admitted_collection_domain(domain, fuel),
             callable: &mut |value, frames, fuel| {
