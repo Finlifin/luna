@@ -774,3 +774,51 @@ fn function_specialization_separates_closed_signature_and_ordinary_input_frames(
     template.body.ty = Term::Primitive(P::Type);
     run(&template).unwrap();
 }
+
+#[test]
+fn callable_code_copy_bounds_retained_fields_and_preserves_shared_bodies() {
+    use nir::copy_budget::charge_callable_code as charge;
+    let mut definition = function();
+    definition.name = "unused".repeat(1000);
+    definition.defaults.push((0, large()));
+    definition.preconditions.push(large());
+    charge(&definition, &mut 128).unwrap();
+    definition.body = large();
+    assert_eq!(
+        charge(&definition, &mut 128),
+        Err(CopyBudgetExhausted::Steps)
+    );
+    definition.body = small();
+    definition.signature = Term::Function {
+        parameters: vec![],
+        result: Box::new(Term::Record(
+            (0..256)
+                .map(|i| (format!("field{i}"), Term::Primitive(P::Bool)))
+                .collect(),
+        )),
+    };
+    assert_eq!(
+        charge(&definition, &mut 128),
+        Err(CopyBudgetExhausted::Steps)
+    );
+    definition.signature = function().signature;
+    let body = std::sync::Arc::new(large());
+    definition.body = expr(K::Closure {
+        parameters: vec![],
+        captures: vec![],
+        body: body.clone(),
+    });
+    charge(&definition, &mut 128).unwrap();
+    let copy = definition.body.clone();
+    let K::Closure { body: copied, .. } = copy.kind else {
+        panic!("closure lost")
+    };
+    assert!(std::sync::Arc::ptr_eq(&body, &copied));
+    definition.parameters = (0..256)
+        .map(|index| nir::program::LocalId { owner: 1, index })
+        .collect();
+    assert_eq!(
+        charge(&definition, &mut 128),
+        Err(CopyBudgetExhausted::Steps)
+    );
+}

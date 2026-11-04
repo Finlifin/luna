@@ -31,6 +31,16 @@ pub fn charge_expression(value: &n::Expr, steps: &mut u64) -> Result<(), CopyBud
     charge_tree(value, steps, false)
 }
 
+/// Bound the owned payload retained by a callable closure. Unlike function
+/// specialization, this copies no declaration name, defaults or contracts and
+/// does not rewrite shared closure bodies. Admission stays with the caller.
+pub fn charge_callable_code(
+    function: &n::Function,
+    steps: &mut u64,
+) -> Result<(), CopyBudgetExhausted> {
+    charge_node(Node::CallableCode(function), steps, false, None)
+}
+
 pub fn charge_pattern_rewrite(
     value: &n::Pattern,
     steps: &mut u64,
@@ -128,6 +138,7 @@ pub fn charge_argument_type_rewrite(
 }
 enum Node<'a> {
     Function(&'a n::Function),
+    CallableCode(&'a n::Function),
     Predicate(&'a n::TypePredicate),
     Requirement(&'a n::TraitRequirement),
     Expr(&'a n::Expr),
@@ -354,6 +365,12 @@ fn charge_node_observed(
         }
         *steps -= 1;
         let size = match node {
+            Node::CallableCode(function) => {
+                charge_width(steps, function.parameters.len())?;
+                work.push((Node::Type(&function.signature), depth));
+                work.push((Node::Expr(&function.body), depth));
+                0
+            }
             Node::Function(function) => {
                 for width in [
                     function.name.len(),

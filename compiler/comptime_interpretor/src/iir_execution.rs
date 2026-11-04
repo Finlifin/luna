@@ -301,6 +301,19 @@ impl<'a> Interpreter<'a> {
     }
 
     fn iir_callable(&mut self, key: &iir::InstanceKey) -> Result<Value, Error> {
+        // External keys and warm cache queries must be bounded before any
+        // structural hash, including the graph's definition lookup.
+        let before_key = self.budget.steps;
+        self.charge_copy_work(None, |fuel| {
+            *fuel = fuel
+                .checked_sub(1)
+                .ok_or(nir::copy_budget::CopyBudgetExhausted::Steps)?;
+            for argument in key.arguments.iter() {
+                nir::copy_budget::charge_type_substitution(argument, &[], &[], fuel)?;
+            }
+            Ok(())
+        })?;
+        let key_work = before_key - self.budget.steps;
         let definition = self
             .iir_function_definition(key.declaration, &key.arguments)
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;
@@ -308,14 +321,6 @@ impl<'a> Interpreter<'a> {
         if let Some(callable) = self.instances.lookup(key.declaration, &key.arguments) {
             return Ok(Value::Closure(callable.clone()));
         }
-        let before_key = self.budget.steps;
-        self.charge_copy_work(Some(definition.body.source), |fuel| {
-            for argument in key.arguments.iter() {
-                nir::copy_budget::charge_type_substitution(argument, &[], &[], fuel)?;
-            }
-            Ok(())
-        })?;
-        let key_work = before_key - self.budget.steps;
         if let Some(callable) = self
             .prepared_instance_cache
             .lookup(
@@ -331,7 +336,10 @@ impl<'a> Interpreter<'a> {
         }
         let before_preparation = self.budget.steps;
         self.charge_copy_work(Some(definition.body.source), |fuel| {
-            nir::copy_budget::charge_function_substitution(definition, &[], &[], fuel)
+            let mut steps = *fuel as u64;
+            let result = nir::copy_budget::charge_callable_code(definition, &mut steps);
+            *fuel = steps as usize;
+            result
         })?;
         let callable = Arc::new(Closure {
             definition_source: None,
@@ -478,5 +486,116 @@ impl<'a> Interpreter<'a> {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         }
         Ok(value)
+    }
+}
+
+#[cfg(test)]
+mod callable_budget_tests {
+    use super::*;
+
+    fn graph(name: String) -> iir::Package {
+        let declaration = DeclarationId {
+            package: 97,
+            local: 1,
+        };
+        iir::Package {
+            functions: vec![iir::FunctionInstance {
+                key: iir::InstanceKey {
+                    declaration,
+                    arguments: vec![Term::Primitive(Primitive::Bool)].into(),
+                },
+                function: nir::program::Function {
+                    declaration,
+                    name,
+                    phase: nir::program::FunctionPhase::Runtime,
+                    inline: false,
+                    pure: false,
+                    is_unsafe: false,
+                    type_parameters: vec![],
+                    parameters: vec![],
+                    signature: Term::Function {
+                        parameters: vec![],
+                        result: Box::new(Term::Primitive(Primitive::Bool)),
+                    },
+                    body: Expr {
+                        source: SourceRange { start: 2, end: 9 },
+                        ty: Term::Primitive(Primitive::Bool),
+                        kind: K::Literal(Literal::Bool(true)),
+                    },
+                    defaults: vec![],
+                    preconditions: vec![],
+                    postconditions: vec![],
+                    requirements: vec![],
+                    capabilities: vec![],
+                    result_binding: None,
+                    entry_snapshots: vec![],
+                },
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn cached_iir_callables_still_charge_keys_before_lookup() {
+        let graph = graph("run".into());
+        let key = &graph.functions[0].key;
+        let mut vm = Interpreter::from_iir(&graph, Budget::default()).unwrap();
+        let Value::Closure(first) = vm.iir_callable(key).unwrap() else {
+            panic!("missing closure")
+        };
+        vm.budget.steps = 0;
+        assert_eq!(
+            vm.iir_callable(key).unwrap_err().kind,
+            ErrorKind::StepsExhausted
+        );
+        vm.budget.steps = 1000;
+        let Value::Closure(second) = vm.iir_callable(key).unwrap() else {
+            panic!("missing cached closure")
+        };
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(vm.budget.steps < 1000);
+        let unknown = iir::InstanceKey {
+            declaration: key.declaration,
+            arguments: vec![Term::Record(
+                (0..64)
+                    .map(|i| (format!("field{i}"), Term::Primitive(Primitive::Bool)))
+                    .collect(),
+            )]
+            .into(),
+        };
+        vm.budget.steps = 10;
+        assert_eq!(
+            vm.iir_callable(&unknown).unwrap_err().kind,
+            ErrorKind::StepsExhausted
+        );
+        vm.budget.steps = 10_000;
+        assert_eq!(
+            vm.iir_callable(&unknown).unwrap_err().kind,
+            ErrorKind::UnknownFunction
+        );
+        let mut deep = Term::Primitive(Primitive::Bool);
+        for _ in 0..160 {
+            deep = Term::Pointer(Box::new(deep));
+        }
+        let deep_key = iir::InstanceKey {
+            declaration: key.declaration,
+            arguments: vec![deep].into(),
+        };
+        assert_eq!(
+            vm.iir_callable(&deep_key).unwrap_err().kind,
+            ErrorKind::DepthExhausted
+        );
+        assert_eq!(vm.instances.len(), 1);
+        assert!(matches!(vm.iir_callable(key).unwrap(), Value::Closure(_)));
+    }
+
+    #[test]
+    fn iir_closures_copy_code_without_unused_declaration_names() {
+        let graph = graph("unused".repeat(1000));
+        let key = &graph.functions[0].key;
+        let mut vm = Interpreter::from_iir(&graph, Budget::default()).unwrap();
+        vm.budget.steps = 500;
+        assert!(matches!(vm.iir_callable(key).unwrap(), Value::Closure(_)));
+        assert_eq!(vm.invoke_instance(key, vec![]).unwrap(), Value::Bool(true));
     }
 }

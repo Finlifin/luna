@@ -1782,3 +1782,50 @@ invocation 结果都可以缓存。
 
 受影响 Rust 文件格式检查通过；未运行全 workspace 或性能基准。正式 docs 和
 原有工作区修改保持不变。
+
+
+## 34. IIR callable 查询与代码复制视图
+
+IIR 的 `iir_callable` 在取得函数定义、计算实例键 hash 或查询本地实例缓存之前，
+先检查键的结构成本与深度；无参数键也至少消耗一次查询预算。原来热缓存直接
+返回，零预算亦可成功；未知但很宽／很深的键则先经过 graph lookup，过晚才有
+机会检查。现在预算不足与结构深度失败先于查询，足额预算下不存在的键仍报告
+UnknownFunction；已缓存 closure 的 Arc 身份与合法重试保持不变。
+
+`copy_budget::charge_callable_code` 只预检 closure 真正拥有的签名、参数身份和
+主体。它不复制声明名称、默认模板或契约，嵌套 closure body 按 Arc clone 行为
+保留共享。IIR 的完整实例验证仍在 graph 接收边界，程序契约继续在 invocation
+路径检查；这个复制视图不是验证证据，也不改变 callable phase 或运行权限。
+
+两项新回归在 `ff7194b2` 基线上失败：热缓存零预算返回成功，长而未保留的声明
+名称耗尽代码复制预算；`/tmp/luna-tools-veiha0gl/result.json`，退出 101。修复后
+覆盖热缓存计费、宽／深未知键在 hash 前拒绝、足额未知键分类、失败后恢复、长
+名称下的正常调用，以及 signature／参数列表／主体的复制成本和共享 body 保留。
+
+其他 graph 查询仍有各自的准入与计费前置条件，源码实例路径也尚未形成统一的
+键查询证据对象。这次只闭合 IIR callable 生产入口，不能据此宣称所有 graph
+lookup、CodeSession 生命周期或整个预算系统已经统一。
+
+验证目录 `/home/fin/luna`，统一入口 `python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p nir --test copy_budget --no-fail-fast`：23 通过，退出 0；
+  `/tmp/luna-tools-wxaix7oy/result.json`。
+- `-p comptime_interpretor --lib --test instance_budget --test runtime_function_identities
+  --no-fail-fast`：库测试 455 通过，集成测试 51 通过、2 失败；退出 101，
+  `/tmp/luna-tools-4xbbuc7r/result.json`。
+- 补上深键检查后，`-p comptime_interpretor --lib iir_execution::callable_budget_tests
+  -- --nocapture`：2 通过，退出 0；`/tmp/luna-tools-6tbodrc4/result.json`。
+- `-p luna --test prepared_invocations --test staged_invocation_reuse --test default_calls
+  --test nominal_staging --test quote_functions --test newtypes --no-fail-fast`：
+  379 通过，退出 0；`/tmp/luna-tools-324detyv/result.json`。
+
+两个集成失败分别为 `declaration_tables_are_bounded_before_world_indexing_and_phase_validation`
+与 `source_session_constructor_rejects_duplicate_ids_in_another_snapshot`。它们期待
+PhaseMismatch，实际重复声明被拒绝并返回携带 `duplicate function declaration`
+诊断的 InvalidPhase。恢复本阶段修改前的两份实现文件，在 `ff7194b2` 基线上重跑
+这两个完整测试目标，仍为 51 通过、2 个相同失败；
+`/tmp/luna-tools-cn10fng6/result.json`，退出 101。随后恢复当前实现，未修改这两项
+测试或屏蔽诊断；其预期与现行错误协议仍需单独审查。
+
+格式检查通过；未运行全 workspace、native 或性能基准。正式 docs 与原有工作区
+修改保持不变。
