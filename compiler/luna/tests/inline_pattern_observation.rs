@@ -112,7 +112,24 @@ fn pending_clause_context_retains_the_failed_type_observation() {
         fn run() -> bool {{ const answer = choose<.value = null, if true {{ Marker }} else {{ bool }}>(); answer }}",
         "x".repeat(128),
     );
-    check_source_observation(&source, "required Type observation failed", 4096);
+    check_source_observation(&source, "required clause identity observation failed", 4096);
+}
+
+#[test]
+fn transitive_clause_identity_copy_is_bounded_and_recovers() {
+    let source = format!(
+        "typealias Type = .Type'builtin; typealias str = .str'builtin;
+        pure comptime fn Key<T, value: T> -> Type {{ bool }}
+        comptime fn choose() -> bool
+        where .T: Type = str, value: T, .item: ?Key<T, value> = null
+        {{ true }}
+        fn run() -> bool {{
+            const answer = choose<.item = null, \"{}\", .T = str>();
+            answer
+        }}",
+        "x".repeat(128),
+    );
+    check_source_observation(&source, "clause identity copy failed: Steps", 4096);
 }
 
 #[test]

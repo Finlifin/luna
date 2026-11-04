@@ -201,6 +201,23 @@ struct PendingClauseInput<'a, 'h> {
     spread: bool,
 }
 
+/// Invocation-local evidence for domain checking. Completing a check can make
+/// other inputs checkable, but never changes their source execution positions.
+#[derive(Default)]
+struct ClauseInputEvidence {
+    binders: Vec<nir::DeclarationParameter>,
+    values: Vec<Term>,
+    identities: BTreeMap<DeclarationId, Term>,
+    pending: BTreeSet<DeclarationId>,
+    failures: BTreeMap<DeclarationId, normal::observation::Failure>,
+}
+
+impl ClauseInputEvidence {
+    fn blocks(&self, domain: &Term) -> bool {
+        self.pending.iter().any(|id| domain.mentions_rigid(*id))
+    }
+}
+
 struct PreparedClauseInput {
     slot: usize,
     name: Option<hir::common::Ident>,
@@ -233,6 +250,72 @@ impl std::fmt::Display for PreparedClauseInput {
 }
 
 impl Checker<'_, '_> {
+    fn pending_clause_input_domain(
+        &mut self,
+        input: &PendingClauseInput<'_, '_>,
+        domains: &[Term],
+        collector_slot: Option<usize>,
+        evidence: &ClauseInputEvidence,
+        span: Span,
+    ) -> Result<Term, Error> {
+        let domain = self.instantiate_trait_domain(
+            &domains[input.slot],
+            &evidence.binders,
+            &evidence.values,
+            span,
+        )?;
+        if Some(input.slot) == collector_slot && input.name.is_none() && !input.spread {
+            self.list_element_type(&domain).cloned().ok_or_else(|| {
+                error(
+                    input.input.span,
+                    "variadic clause input requires a bound meta.List<T>",
+                )
+            })
+        } else {
+            Ok(domain)
+        }
+    }
+
+    fn observe_clause_input_identity(
+        &mut self,
+        value: &n::Expr,
+        parameter: DeclarationId,
+        evidence: &mut ClauseInputEvidence,
+        span: Span,
+    ) -> Result<Option<Term>, Error> {
+        let mut budget = comptime_runtime::Budget {
+            steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
+            max_limbs: 4096,
+        };
+        let before = budget.steps;
+        let observed = self.observe_normal_input_in(value, 0, &mut budget, &BTreeMap::new());
+        self.required_steps -= (before - budget.steps) as u64;
+        let known = match observed {
+            Ok(value) => Some(value),
+            Err(normal::observation::Failure::Unavailable) => None,
+            Err(failure) => {
+                evidence.failures.insert(parameter, failure);
+                None
+            }
+        };
+        if let Some(value) = &known {
+            evidence.binders.push(nir::DeclarationParameter {
+                declaration: parameter,
+                sort: value.sort(),
+            });
+            evidence
+                .values
+                .push(self.copy_clause_identity(value, span)?);
+            evidence
+                .identities
+                .insert(parameter, self.copy_clause_identity(value, span)?);
+            evidence.pending.remove(&parameter);
+        } else {
+            evidence.pending.insert(parameter);
+        }
+        Ok(known)
+    }
+
     pub(super) fn copy_clause_identity(&mut self, value: &Term, span: Span) -> Result<Term, Error> {
         let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
         let mut fuel = before;
@@ -339,10 +422,7 @@ impl Checker<'_, '_> {
             (0..args.len()).map(|_| Vec::new()).collect();
         let mut preparations: Vec<Vec<n::Expr>> = (0..args.len()).map(|_| Vec::new()).collect();
         let mut waiting = Vec::new();
-        let mut known_binders = Vec::new();
-        let mut known_values = Vec::new();
-        let mut identities = BTreeMap::new();
-        let mut failed_observations = BTreeMap::new();
+        let mut evidence = ClauseInputEvidence::default();
         let mut domain_dependencies = BTreeSet::new();
         for domain in domains {
             let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
@@ -357,7 +437,7 @@ impl Checker<'_, '_> {
                     .into_keys(),
             );
         }
-        let mut pending_domains = parameters
+        evidence.pending = parameters
             .iter()
             .zip(domains)
             .filter_map(|(parameter, domain)| {
@@ -368,7 +448,7 @@ impl Checker<'_, '_> {
         // Captured values can determine a nominal domain just like captured
         // Types. Concrete captures are already substituted by the projection;
         // any remaining dependency must wait for the selected instance.
-        pending_domains.extend(self.nominal_captures(owner, span)?);
+        evidence.pending.extend(self.nominal_captures(owner, span)?);
         for (argument_index, arg) in args.iter().enumerate() {
             let statements = &mut preparations[argument_index];
             if let Arg::Expand(input) = arg {
@@ -377,11 +457,11 @@ impl Checker<'_, '_> {
                 if Some(next_slot) == collector_slot {
                     let domain = self.instantiate_trait_domain(
                         &domains[next_slot],
-                        &known_binders,
-                        &known_values,
+                        &evidence.binders,
+                        &evidence.values,
                         span,
                     )?;
-                    let dependent = pending_domains.iter().any(|id| domain.mentions_rigid(*id));
+                    let dependent = evidence.blocks(&domain);
                     if dependent {
                         waiting.push(PendingClauseInput {
                             source_index: argument_index,
@@ -433,15 +513,15 @@ impl Checker<'_, '_> {
                         .ok_or_else(|| error(span, "type argument count mismatch"))?;
                     let domain = self.instantiate_trait_domain(
                         &domain,
-                        &known_binders,
-                        &known_values,
+                        &evidence.binders,
+                        &evidence.values,
                         span,
                     )?;
-                    if !pending_domains.iter().any(|id| domain.mentions_rigid(*id)) {
+                    if !evidence.blocks(&domain) {
                         self.require(&field, &domain, input.span)?;
                     }
                     if domains[slot] == p(P::Type) {
-                        pending_domains.insert(parameters[slot]);
+                        evidence.pending.insert(parameters[slot]);
                     }
                     let binding = self.spread_binding(input.span)?;
                     self.locals.insert(binding, field.clone());
@@ -490,7 +570,7 @@ impl Checker<'_, '_> {
                 .get(slot)
                 .ok_or_else(|| error(span, "type argument count mismatch"))?;
             let domain =
-                self.instantiate_trait_domain(&domain, &known_binders, &known_values, span)?;
+                self.instantiate_trait_domain(&domain, &evidence.binders, &evidence.values, span)?;
             let input_domain = if Some(slot) == collector_slot && name.is_none() {
                 self.list_element_type(&domain).cloned().ok_or_else(|| {
                     error(
@@ -501,9 +581,7 @@ impl Checker<'_, '_> {
             } else {
                 domain
             };
-            let dependent = pending_domains
-                .iter()
-                .any(|id| input_domain.mentions_rigid(*id));
+            let dependent = evidence.blocks(&input_domain);
             if dependent {
                 waiting.push(PendingClauseInput {
                     source_index: argument_index,
@@ -519,34 +597,7 @@ impl Checker<'_, '_> {
             let known = if domains[slot] == p(P::Type)
                 || (needed_for_domain && (Some(slot) != collector_slot || name.is_some()))
             {
-                let mut budget = comptime_runtime::Budget {
-                    steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
-                    max_limbs: 4096,
-                };
-                let before = budget.steps;
-                let observed =
-                    self.observe_normal_input_in(&value, 0, &mut budget, &BTreeMap::new());
-                self.required_steps -= (before - budget.steps) as u64;
-                let known = match observed {
-                    Ok(value) => Some(value),
-                    Err(normal::observation::Failure::Unavailable) => None,
-                    Err(failure) => {
-                        failed_observations.insert(parameters[slot], failure);
-                        None
-                    }
-                };
-                if let Some(ty) = &known {
-                    known_binders.push(nir::DeclarationParameter {
-                        declaration: parameters[slot],
-                        sort: ty.sort(),
-                    });
-                    known_values.push(self.copy_clause_identity(ty, span)?);
-                    identities.insert(parameters[slot], self.copy_clause_identity(ty, span)?);
-                    pending_domains.remove(&parameters[slot]);
-                } else {
-                    pending_domains.insert(parameters[slot]);
-                }
-                known
+                self.observe_clause_input_identity(&value, parameters[slot], &mut evidence, span)?
             } else {
                 None
             };
@@ -563,38 +614,52 @@ impl Checker<'_, '_> {
                 spread: false,
             });
         }
-        // Check each pending source once after collecting static input identities.
-        // Checking order never determines the order of generated preparations.
-        for pending in waiting {
-            let mut domain = self.instantiate_trait_domain(
-                &domains[pending.slot],
-                &known_binders,
-                &known_values,
+        // Prefer checks whose domains are now available. Their observations can
+        // release further checks in the same invocation. Each source is checked
+        // exactly once; a blocked source is never speculatively checked/retried.
+        // If no domain is ready, retain the ordinary independently-typed path.
+        while !waiting.is_empty() {
+            let mut selected = 0;
+            let mut domain = self.pending_clause_input_domain(
+                &waiting[0],
+                domains,
+                collector_slot,
+                &evidence,
                 span,
             )?;
-            if Some(pending.slot) == collector_slot && pending.name.is_none() && !pending.spread {
-                domain = self.list_element_type(&domain).cloned().ok_or_else(|| {
-                    error(
-                        pending.input.span,
-                        "variadic clause input requires a bound meta.List<T>",
-                    )
-                })?;
+            let mut dependent = evidence.blocks(&domain);
+            if dependent {
+                for (index, candidate) in waiting.iter().enumerate().skip(1) {
+                    let next = self.pending_clause_input_domain(
+                        candidate,
+                        domains,
+                        collector_slot,
+                        &evidence,
+                        span,
+                    )?;
+                    if !evidence.blocks(&next) {
+                        selected = index;
+                        domain = next;
+                        dependent = false;
+                        break;
+                    }
+                }
             }
-            let dependent = pending_domains.iter().any(|id| domain.mentions_rigid(*id));
+            let pending = waiting.remove(selected);
             let value = self
                 .expr(pending.input, (!dependent).then_some(&domain))
                 .map_err(|failure| {
                     // Observation is optional unless a check needs the missing domain.
                     // Do not replace unrelated errors or reject independently typed inputs.
                     if failure.needs_context {
-                        if let Some((_, observation)) = failed_observations
+                        if let Some((_, observation)) = evidence.failures
                             .iter()
                             .find(|(id, _)| domain.mentions_rigid(**id))
                         {
                             return error(
                                 pending.input.span,
                                 format!(
-                                    "{}; required Type observation failed: {observation}",
+                                    "{}; required clause identity observation failed: {observation}",
                                     failure.message
                                 ),
                             );
@@ -602,11 +667,28 @@ impl Checker<'_, '_> {
                     }
                     failure
                 })?;
-            let value = self.bind_type_input(
+            let known = if !pending.spread
+                && (domains[pending.slot] == p(P::Type)
+                    || (domain_dependencies.contains(&parameters[pending.slot])
+                        && (Some(pending.slot) != collector_slot || pending.name.is_some())))
+            {
+                self.observe_clause_input_identity(
+                    &value,
+                    parameters[pending.slot],
+                    &mut evidence,
+                    pending.input.span,
+                )?
+            } else {
+                None
+            };
+            let mut value = self.bind_type_input(
                 value,
                 &mut preparations[pending.source_index],
                 pending.input.span,
             )?;
+            if let Some(ty) = known.filter(|_| domains[pending.slot] == p(P::Type)) {
+                value.kind = K::TypeValue(ty);
+            }
             prepared[pending.source_index].push(PreparedClauseInput {
                 slot: pending.slot,
                 name: pending.name,
@@ -635,12 +717,19 @@ impl Checker<'_, '_> {
             }
         }
         if let Some(slot) = collector_slot {
-            let domain =
-                self.instantiate_trait_domain(&domains[slot], &known_binders, &known_values, span)?;
+            let domain = self.instantiate_trait_domain(
+                &domains[slot],
+                &evidence.binders,
+                &evidence.values,
+                span,
+            )?;
             let value = self.finish_clause_collection(collector, domain, statements, span)?;
             inputs.push((Some(clauses[slot].name), value));
         }
-        Ok(PreparedClauseInputs { inputs, identities })
+        Ok(PreparedClauseInputs {
+            inputs,
+            identities: evidence.identities,
+        })
     }
 
     fn finish_clause_collection(

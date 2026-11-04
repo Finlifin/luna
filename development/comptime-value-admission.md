@@ -3620,3 +3620,60 @@ packet；两种错误都在 elaboration 阶段拒绝。
   检查中过滤；第 37 节保留当时实际使用的命令，不将历史跳过改写成已执行。
 - 修改的四个 Rust 文件 rustfmt 检查：`/tmp/luna-tools-pv7_4hkx/result.json`，
   退出 0。未运行全 workspace 或性能测量。
+
+## 39. 静态域依赖沿待检查输入继续传播
+
+第 38 节解决了一层普通值身份的供应，但等待队列仍只按源码位置检查一遍，而且没有
+观察等待输入的结果。真实 sysroot 下，`T → value: T → meta.List<Key<T, value>>`
+全部可静态确定时，倒序供应仍让空列表缺少元素上下文。这是检查调度缺口，不需要
+执行 Type 生产函数，也不能据此要求用户按声明顺序提供具名输入。
+
+当前准备过程以 invocation 内的 `ClauseInputEvidence` 统一保存已知身份、代入项、
+未取得身份和观察失败。等待队列优先选择域已就绪的输入，仍使用普通表达式检查，
+成功后经同一个受预算静态观察入口取得身份，再允许其他依赖它的输入继续检查。
+选择过程只观察、代入域，不试跑表达式；每次从队列移除一个输入，每个源表达式仅
+检查一次。找不到域已就绪的输入时保留既有独立类型检查路径，不进行失败后重试。
+
+检查完成的先后顺序不决定求值顺序。产生的绑定仍写入各自的 source-index 槽，最后
+按源码次序组合。已观察的普通值仍由原操作数交付；提前返回不运行后续子句或普通
+实参。失败不发布部分 callable 实例。Type 与普通值的观察失败均保留原因，依赖该
+身份的上下文错误使用统一的 clause identity 诊断，不再误称所有失败都是 Type 观察。
+
+覆盖场景还包括四层依赖：一个普通 `meta.List<Key<T, value>>` 值参与下一层用户 NF
+的实参。它通过普通值身份进入代入，没有新增 Type-list 槽或按 Key/List 名称的识别。
+测试调用真实 sysroot 的 `meta.List.length`；错误标量域、u8 越界及 NF 头不能展开的
+拒绝边界均保留。
+
+**剩余边界。** 这里是调用准备阶段可静态确定的域依赖传播，尚不是可暂停 invocation
+或跨 region 的 waiter 协议。Type/值必须执行任意 producer 才能取得时，仍需通用
+ArgumentPlan。选择待检查项会扫描本地队列，域代入消费现有 invocation 预算；本轮
+没有声称实现线性复杂度的全局调度器，也没有删除 NF 旧 contextual 参数表示。
+
+验证证据（工作目录 `/home/fin/luna`）：
+
+- 原三层依赖正例在修改前失败于 `list literal requires an element type context`：
+  `/tmp/luna-tools-zjzz8xmo/result.json`，退出 101；修改后原源码通过：
+  `/tmp/luna-tools-bzefz45h/result.json`，退出 0。
+- `python3 -B development/check.py --timeout 900 -- test -p luna
+  --test ordinary_clause_collectors transitive -- --nocapture`：
+  `/tmp/luna-tools-pk3iky2t/result.json`，退出 0。三项测试包含三/四层依赖、不同供应
+  排列、源码副作用顺序和次数、提前返回以及错误域与不透明 NF 头的拒绝。
+- 八组集成检查：`/tmp/luna-tools-byh3zfjj/result.json`，退出 0，145 项通过，
+  1 项既有调用时 Type producer 用例显式忽略。命令为
+  `python3 -B development/check.py --timeout 900 -- test -p luna
+  --test ordinary_clause_collectors --test comptime_nominal_capabilities
+  --test comptime_clause_inputs --test normal_form_domains --test normal_input_plans
+  --test inline_pattern_observation --test dependent_list_collectors
+  --test library_protocols --no-fail-fast`。
+- 追加普通值身份复制的低预算/新尝试恢复检查：
+  `/tmp/luna-tools-9ris5kc4/stdout.log` 中
+  `transitive_clause_identity_copy_is_bounded_and_recovers` 通过。新测试最初把失败
+  位置固定为可选观察诊断（`/tmp/luna-tools-b2s8c65w/result.json`，退出 101），
+  实际先在受预算身份复制处拒绝；现明确检验该复制边界的额度错误，再以充足新预算
+  完成同一源码的检查和执行，没有改动实现以隐藏预算失败。
+- runtime callable 的四层供应补充用例单独通过：
+  `/tmp/luna-tools-xv8ykb8o/result.json`，退出 0。上述 9ris5kc4 整轮退出 101，
+  因这项新 fixture 错将 `Integer` 比较留在 runtime；修正为在 `const` 中比较后
+  单独重跑。未放宽 Integer 的阶段规则或修改生产实现。
+- 最后修改的三个 Rust 文件 rustfmt 检查：
+  `/tmp/luna-tools-dd7wca7_/result.json`，退出 0。未运行全 workspace 或性能基准。

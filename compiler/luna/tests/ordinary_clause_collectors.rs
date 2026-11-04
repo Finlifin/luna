@@ -465,6 +465,134 @@ fn pending_clause_domains_can_wait_for_a_type_producer() {
 }
 
 #[test]
+fn pending_clause_domains_follow_transitive_static_dependencies() {
+    assert_eq!(
+        run("
+        pure comptime fn Key<T, value: T> -> Type { bool }
+        comptime fn count() -> Integer
+        where .T: Type = bool, value: T, ...keys: meta.List<Key<T, value>>
+        {
+            keys.length()
+        }
+        fn run() -> bool {
+            const result = count<.keys = [], true, .T = bool>() == 0;
+            result
+        }
+    "),
+        Value::Bool(true)
+    );
+    for inputs in [
+        ".batches = [], .keys = [], true, .T = bool",
+        ".keys = [], .batches = [], true, .T = bool",
+        ".T = bool, true, .keys = [], .batches = []",
+    ] {
+        assert_eq!(
+            run(&format!(
+                "
+            pure comptime fn Key<T, value: T> -> Type {{ bool }}
+            comptime fn count() -> Integer
+            where .T: Type = bool, value: T,
+                  .keys: meta.List<Key<T, value>> = [],
+                  ...batches: meta.List<Key<meta.List<Key<T, value>>, keys>>
+            {{
+                batches.length()
+            }}
+            fn run() -> bool {{ const result = count<{inputs}>() == 0; result }}
+        "
+            )),
+            Value::Bool(true),
+            "{inputs}",
+        );
+    }
+}
+
+#[test]
+fn transitive_clause_checks_preserve_source_effects_and_early_return() {
+    for body in [
+        "let result = selected<
+             .batches = do { trace = trace * 10 + 1; [] },
+             .tag = do { trace = trace * 10 + 2; true },
+             true, .keys = [], .T = bool
+         >(do { trace = trace * 10 + 3; true });
+         result and trace == 123",
+        "selected<
+             .batches = do { trace = trace * 10 + 1; return trace == 1; },
+             .tag = do { trace = trace * 10 + 2; true },
+             true, .keys = [], .T = bool
+         >(do { trace = trace * 10 + 3; true });
+         false",
+    ] {
+        assert_eq!(
+            run(&format!(
+                "
+            pure comptime fn Key<T, value: T> -> Type {{ bool }}
+            comptime fn selected(argument: bool) -> bool
+            where .T: Type = bool, value: T,
+                  .keys: meta.List<Key<T, value>> = [], .tag: bool = true,
+                  ...batches: meta.List<Key<meta.List<Key<T, value>>, keys>>
+            {{
+                argument and tag and batches.length() == 0
+            }}
+            comptime fn check() -> bool {{ var trace: Integer = 0; {body} }}
+            fn run() -> bool {{ const result = check(); result }}
+        "
+            )),
+            Value::Bool(true),
+            "{body}",
+        );
+    }
+}
+
+#[test]
+fn runtime_callable_preparation_uses_transitive_clause_domains() {
+    assert_eq!(
+        run("
+        pure comptime fn Key<T, value: T> -> Type { bool }
+        fn selected(input: bool) -> bool
+        where .T: Type = bool, value: T,
+              .keys: meta.List<Key<T, value>> = [],
+              ...batches: meta.List<Key<meta.List<Key<T, value>>, keys>>
+        {
+            const empty = batches.length() == 0;
+            input and empty
+        }
+        fn run() -> bool {
+            selected<.batches = [], .keys = [], 255, .T = u8>(true)
+        }
+    "),
+        Value::Bool(true),
+    );
+}
+
+#[test]
+fn transitive_clause_checks_reject_bad_domains_without_unfolding_heads() {
+    for inputs in [
+        ".keys = [], true, .T = u8",
+        ".keys = [], 256, .T = u8",
+        ".keys = [true], true, .T = bool",
+        ".keys = [], true, .T = Identity<bool>",
+    ] {
+        let failure = compile(&format!(
+            "
+            pure comptime fn Identity<T> -> Type {{ T }}
+            pure comptime fn Key<T, value: T> -> Type {{ bool }}
+            comptime fn count() -> Integer
+            where .T: Type = bool, value: T, ...keys: meta.List<Key<T, value>>
+            {{
+                keys.length()
+            }}
+            fn run() -> bool {{ const result = count<{inputs}>() == 0; result }}
+        "
+        ))
+        .unwrap_err();
+        assert!(
+            failure.contains("elaboration failed"),
+            "{inputs}: {failure}"
+        );
+    }
+}
+
+#[test]
 fn pending_clause_checks_keep_mutable_callable_reads_at_the_source_position() {
     assert_eq!(
         run("
