@@ -213,8 +213,11 @@ impl<'e> Frame<'e> {
             .get(slot)
             .unwrap_or(&Term::Primitive(Primitive::Type));
         let expected = self.instantiate(vm, domain, self.arguments()[slot].source())?;
+        let source = self.arguments()[slot].source();
+        let inputs = vm.observe_input_dependencies(&expected, source)?;
+        vm.integer_operation(Some(source), |budget| budget.consume(self.parameters.len()))?;
         let unresolved = self.parameters.iter().enumerate().any(|(index, p)| {
-            !self.completed.contains(index) && expected.mentions_rigid(p.declaration)
+            !self.completed.contains(index) && inputs.declarations.contains_key(&p.declaration)
         });
         Ok((expected, unresolved))
     }

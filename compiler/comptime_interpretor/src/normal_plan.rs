@@ -329,10 +329,14 @@ impl<'a> Frame<'a> {
         let expected = self
             .bindings
             .instantiate(vm, &metadata.parameters[slot].ty, self.source)?;
+        let inputs = vm.observe_input_dependencies(&expected, self.source)?;
+        vm.integer_operation(Some(self.source), |budget| {
+            budget.consume(metadata.parameters.len())
+        })?;
         let unresolved = metadata
             .parameters
             .iter()
-            .any(|p| expected.mentions_rigid(p.declaration));
+            .any(|p| inputs.declarations.contains_key(&p.declaration));
         Ok((expected, unresolved))
     }
 

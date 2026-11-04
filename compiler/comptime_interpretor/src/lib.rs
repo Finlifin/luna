@@ -35,6 +35,7 @@ mod iir_execution;
 use iir_execution::ConcreteNominal;
 mod immutable_storage;
 mod input_bodies;
+mod input_dependencies;
 mod input_domains;
 mod invocation;
 mod invocation_contracts;
@@ -4169,61 +4170,6 @@ impl<'a> Interpreter<'a> {
         let result = self.run_type_plan(&mut frame, environment);
         normal_plan::InputPlan::cleanup(&frame, environment);
         result
-    }
-
-    fn instantiate_contextual_domain(
-        &mut self,
-        ty: &Term,
-        parameters: &[nir::DeclarationParameter],
-        types: &[Term],
-        source: SourceRange,
-    ) -> Result<Term, Error> {
-        let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
-        let mut remaining = before;
-        let result = (|| {
-            if parameters.len() != types.len() {
-                return Err(nir::type_computations::Error::Scope(
-                    nir::TypeError::ArgumentCount {
-                        expected: parameters.len(),
-                        actual: types.len(),
-                    },
-                ));
-            }
-            nir::type_computations::charge_term(ty, &mut remaining)?;
-            remaining = remaining
-                .checked_sub(parameters.len())
-                .ok_or(nir::type_computations::Error::Budget)?;
-            let referenced = ty
-                .rigid_parameters()
-                .map_err(nir::type_computations::Error::Scope)?;
-            let mut selected_parameters = Vec::new();
-            let mut selected_types = Vec::new();
-            for (parameter, value) in parameters.iter().zip(types) {
-                if referenced.contains_key(&parameter.declaration) {
-                    nir::type_computations::charge_term(value, &mut remaining)?;
-                    selected_parameters.push(parameter.clone());
-                    selected_types.push(value.clone());
-                }
-            }
-            nir::type_computations::instantiate_parameters_bounded(
-                ty,
-                &selected_parameters,
-                &selected_types,
-                &[],
-                &mut remaining,
-            )
-        })();
-        self.budget.steps -= (before - remaining) as u64;
-        result.map_err(|error| {
-            self.failure(
-                if matches!(error, nir::type_computations::Error::Budget) {
-                    ErrorKind::StepsExhausted
-                } else {
-                    ErrorKind::Type
-                },
-                Some(source),
-            )
-        })
     }
 
     #[inline(never)]

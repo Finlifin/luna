@@ -463,6 +463,47 @@ bool/u8，reference 与 IIR 两条路径实际执行。负例检查 runtime 输�
 本阶段清单、精确命令、源码哈希与原有修改核对保存在
 `/tmp/luna-staged-closure-inputs-8gkf2piw`。
 
+
+### 4.9 已接通：VM 输入域复用有界只读观察
+
+NF 与名义类型／alias 的输入计划在实际 invocation 中也需要判断域依赖。
+`instantiate_contextual_domain` 原先先给 Term 计费，再调用会重写并复制整棵类型的
+`rigid_parameters()`；现在改用同一 `nir::copy_budget::term_inputs`，只选择域确实
+引用的已完成输入。随后真正的代换仍使用有界 substitution，不把观察结果当作作用域、
+值域或形成证明。未选中的输入不因这次域观察被复制或提前检查；它们各自的接纳责任
+仍由原输入计划承担。
+
+NF 和名义输入的待定域判断分别保留原有参数集合和完成状态规则，但不再对每个参数
+调用 `mentions_rigid` 扫描整个域。每次先有界观察一次已代换的接收域，再对声明集合
+做查找；参数遍历也消耗 invocation 预算。结构遍历从按参数重复扫描，变为一次扫描
+加集合查询，不承诺整条类型构造或编译流程的复杂度与耗时。
+
+VM 错误适配与域替换收在 `input_dependencies`。观察失败保留 StepsExhausted、
+DepthExhausted 或 Type 分类，并携带消费位置；失败不变成空依赖集合，也不会交付
+部分结果。嵌套 callable 的本地 binder 不成为外层输入，closure snapshot 的实际
+参数仍被观察，NF 头与 factory 身份不被当成待供应参数，更不会因此执行它们。
+
+这一步没有新增跨 invocation 缓存，没有替换名义类型的证据接纳，也未消除 pending
+输入恢复中的所有重复观察。完整 ContextualExpr／ArgumentPlan 和动态 Type producer
+子句仍待接通；结构依赖观察本身不保存生产者进度或负责重新执行。
+
+
+
+验证在 `/home/fin/luna` 经 `development/check.py --timeout 900 -- test` 执行：
+
+| 范围 | 本轮证据 |
+| --- | --- |
+| VM 域观察、输入计划与失败恢复 | `-p comptime_interpretor --lib --no-fail-fast`，显式跳过既有 `normal_input_data_tests::clause_list_inputs_share_domain_scope_and_budget_validation` 后 446 项通过、退出 0；`/tmp/luna-tools-lg0x9nzf/result.json`。新增检查嵌套 binder／opaque 身份、预算／深度／sort 失败的源码位置和恢复、未选深层实参不被读取及真实代换结果。 |
+| 真实源码与 sysroot | NF 输入计划、开放 NF 输入、名义 staging／参数、NF 域、comptime 子句、普通收集器、模板局部定义、动态 trait 子句九组共 444 项通过、2 项既有 ignored，退出 0；`/tmp/luna-tools-ifv9ebuq/result.json` 含完整命令。既有 `memoized_value_indexed_keys_keep_declaration_and_value_arguments` 显式跳过。 |
+
+两个 skip 的基线失败及原诊断已在[输入值准入 §18](comptime-value-admission.md#18-invocation-已完成输入共用槽位存储)
+记录；本轮没有修改它们的预期，也未解除动态 Type producer 与默认值证明环境的
+两个 ignored。四个修改的 Rust 文件格式检查退出 0，证据
+`/tmp/luna-tools-e0qr31bc/result.json`；本次范围的 `git diff --check` 通过。
+清单、源码快照和受保护工作区哈希在 `/tmp/luna-vm-input-observation-04cuefwz`。
+正式 docs 与原有修改未动。未运行全 workspace、native 或性能基准。
+
+
 ## 5. 四个判断精确性是否正确的例子
 
 | 场景 | 应得依赖 | 错误实现 |
