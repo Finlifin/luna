@@ -162,6 +162,24 @@ pub fn expression_has_contextual_types(
     Ok(found)
 }
 
+/// Observe rigid declaration inputs in every embedded term, including value
+/// payloads, patterns, pending intrinsic bindings and shared closure bodies.
+/// This borrows the tree and never runs rewrite callbacks or copies Arc bodies.
+/// Accounting deliberately shares the conservative structural bounds used by
+/// copy preflight. An exhausted observation returns no partial input set.
+pub fn expression_declaration_inputs(
+    value: &n::Expr,
+    steps: &mut u64,
+) -> Result<std::collections::BTreeSet<crate::DeclarationId>, CopyBudgetExhausted> {
+    let mut inputs = std::collections::BTreeSet::new();
+    charge_node_observed(Node::Expr(value), steps, true, None, &mut |term| {
+        if let Term::Rigid { declaration, .. } = term {
+            inputs.insert(*declaration);
+        }
+    })?;
+    Ok(inputs)
+}
+
 fn charge_node_observed(
     root: Node<'_>,
     steps: &mut u64,

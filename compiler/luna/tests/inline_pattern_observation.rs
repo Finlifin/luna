@@ -199,3 +199,14 @@ fn clause_default_dependency_closure_reports_exhaustion_and_recovers() {
         4096,
     );
 }
+
+#[test]
+fn checked_default_observation_exhaustion_preserves_fresh_attempts() {
+    check_source_observation(
+        "typealias Type = .Type'builtin;
+        trait Accept where T, .U: Type = T {}
+        fn run() -> bool { true }",
+        "checked input dependency budget exhausted",
+        4096,
+    );
+}

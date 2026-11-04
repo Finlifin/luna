@@ -798,5 +798,25 @@ mod pending_dependency_tests {
         );
         assert!(crate::copy_budget::charge_expression(&expression, &mut 2).is_err());
         crate::copy_budget::charge_expression(&expression, &mut 100).unwrap();
+        let input = DeclarationId {
+            package: 1,
+            local: 10,
+        };
+        let mut expression = expression;
+        let crate::program::ExprKind::Intrinsic {
+            binding: Some(binding),
+            ..
+        } = &mut expression.kind
+        else {
+            panic!()
+        };
+        binding.signature = Signature::Pending(Term::Rigid {
+            declaration: input,
+            sort: crate::Sort::Type,
+        });
+        assert_eq!(
+            crate::copy_budget::expression_declaration_inputs(&expression, &mut 100).unwrap(),
+            std::collections::BTreeSet::from([input]),
+        );
     }
 }

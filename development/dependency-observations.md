@@ -251,6 +251,45 @@ readiness 返回值并靠 RefCell 回调收集子句读取；它使用完整的�
 `/tmp/luna-clause-source-inputs-1bwjh39w`；上一轮局部输入接线证据仍在
 `/tmp/luna-free-source-inputs-7l1s22ht`。
 
+### 4.7 已接通：检查后结构的依赖观察不改写代码
+
+源码自由输入与检查后结构中的输入是不同的观察。前者保存词法捕获和声明关系；
+后者读取 NIR 中已经形成的类型、值与元数据。两者都不授权执行 producer，
+也不能单独证明某个输入在当前阶段已经可用。
+
+`nir::copy_budget::expression_declaration_inputs` 复用现有完整的借用遍历，
+收集嵌入 Term 中的 rigid 声明身份。范围包括表达式类型、值载荷、pattern、
+调用实参身份、效应操作及签名、pending intrinsic 和共享闭包主体；
+不追进被引用的全局声明，也不展开 opaque normal-form 头。
+这个接口不调用 `rewrite_types`，不重分类 StagedValue，不用 `Arc::make_mut`
+复制共享主体。默认值检查需要的是依赖集合，不是一个仅用于观察的改写副本。
+
+类型默认值的自引用／后向引用检查、普通函数默认值的 typed 后备观察和 CMTT
+子句计划／恢复均使用该接口。CMTT 候选每次迭代分别观察声明签名的输入域与结果域，
+将是否等待未完成子句的判断用于实参证据和上下文约束；同一迭代不再对每个未完成
+绑定重复扫描同一类型，后续迭代仍重新判断，不跨候选缓存活动状态。
+
+表达式观察沿用 copy preflight 的保守结构成本与深度界限，包括集合和字符串宽度；
+这不是专门优化过的轻量成本模型。独立 Term 观察使用已有有界声明收集器。
+两者在失败时仍扣除已消耗预算，不公布部分依赖集，不把耗尽转成空集或 ready。
+相关调用点已经迁移，其他 `mentions_rigid` 和旧 readiness 入口仍需逐项清理；
+本阶段也没有把它升级成跨 world 的依赖缓存或发布协议。
+
+验证工作目录为 `/home/fin/luna`，入口为
+`python3 -B development/check.py --timeout 900 -- test`：
+
+| 范围 | 本阶段实际结果与证据 |
+| --- | --- |
+| NIR 观察、复制预算、改写与类型项遍历 | `-p nir --test declaration_input_observation --test copy_budget --test type_rewrite --test type_computations`，53 项通过、退出 0；`/tmp/luna-tools-3fw8cpyc/result.json`。验证共享主体身份、残余值节点、隐藏元数据、opaque 头、耗尽与重试。 |
+| pending intrinsic 私有元数据 | `-p nir --lib pending_dependency_tests`，1 项通过、退出 0；`/tmp/luna-tools-78z0d_h6/result.json`。 |
+| 默认值、子句、预算恢复与 trait 域 | `-p luna --test inline_pattern_observation --test default_calls --test comptime_clause_inputs --test trait_domain_substitution`，99 项通过、退出 0；`/tmp/luna-tools-p0_nbrx9/result.json`。新增用例在同一 HIR 上耗尽检查后依赖观察预算，再用充足预算完成检查与执行。 |
+| 捕获默认值与 CMTT | `clause_source_dependencies` 3 项通过；`cmtt` 588 项通过、6 项既有失败，整轮退出 101；`/tmp/luna-tools-dpd2n9sx/result.json`。6 项诊断及 span 与 §4.6 基线完全一致。该轮在 CMTT 失败后未执行的组已由上一行单独运行。 |
+
+六个修改的 Rust 文件通过 rustfmt check，退出 0，证据
+`/tmp/luna-tools-39ju6tdp/result.json`。清单、源码哈希与基线比较保存于
+`/tmp/luna-typed-input-observation-6n7s0z2x`。未运行全 workspace、native 或性能基准，
+不能据此宣称整体编译耗时的改善幅度。
+
 ## 5. 四个判断精确性是否正确的例子
 
 | 场景 | 应得依赖 | 错误实现 |

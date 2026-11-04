@@ -3,6 +3,50 @@ use super::*;
 use comptime_interpretor::Value;
 
 impl<'h> Checker<'_, 'h> {
+    /// Inspect embedded types and values without normalizing a private copy or
+    /// cloning shared closure bodies merely to discover their dependencies.
+    pub(super) fn checked_declaration_inputs(
+        &mut self,
+        value: &n::Expr,
+        span: Span,
+    ) -> Result<BTreeSet<DeclarationId>, Error> {
+        nir::copy_budget::expression_declaration_inputs(value, &mut self.required_steps).map_err(
+            |limit| {
+                error(
+                    span,
+                    match limit {
+                        nir::copy_budget::CopyBudgetExhausted::Steps => {
+                            "checked input dependency budget exhausted"
+                        }
+                        nir::copy_budget::CopyBudgetExhausted::Depth => {
+                            "checked input dependency depth exhausted"
+                        }
+                    },
+                )
+            },
+        )
+    }
+
+    pub(super) fn term_declaration_inputs(
+        &mut self,
+        value: &Term,
+        span: Span,
+    ) -> Result<BTreeSet<DeclarationId>, Error> {
+        let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let mut fuel = before;
+        let mut inputs = BTreeSet::new();
+        let result =
+            nir::type_computations::rigid_declarations_bounded(value, &mut fuel, &mut inputs);
+        self.required_steps -= (before - fuel) as u64;
+        result.map_err(|reason| {
+            error(
+                span,
+                format!("type input dependency observation failed: {reason}"),
+            )
+        })?;
+        Ok(inputs)
+    }
+
     fn type_packet_contexts(
         &mut self,
         args: &[Arg<'_>],
@@ -776,29 +820,22 @@ impl<'h> Checker<'_, 'h> {
                 // domain evidence.
                 let mut dependencies = self.expression_declaration_dependencies(owner, value)?;
                 let inferred_set = inferred.iter().copied().collect::<BTreeSet<_>>();
+                dependencies.extend(self.term_declaration_inputs(&domain, span)?);
                 dependencies.retain(|id| inferred_set.contains(id));
-                dependencies.extend(
-                    inferred
-                        .iter()
-                        .copied()
-                        .filter(|id| domain.mentions_rigid(*id)),
-                );
                 if !dependencies.is_empty() {
                     return Ok(dependencies.into_iter().collect());
                 }
             }
-            let mut checked = self.expr(value, Some(&domain))?;
+            let checked = self.expr(value, Some(&domain))?;
             let structural = self
                 .checked_normal_input_in(&checked, &BTreeMap::new(), span)?
                 .is_some();
             if structural {
                 return Ok(Vec::new());
             }
-            let mut dependencies = BTreeSet::new();
-            checked.rewrite_types(&mut |ty| {
-                dependencies.extend(inferred.iter().copied().filter(|id| ty.mentions_rigid(*id)));
-                self.copy_alias_type(ty, span)
-            })?;
+            let mut dependencies = self.checked_declaration_inputs(&checked, span)?;
+            let inferred = inferred.iter().copied().collect::<BTreeSet<_>>();
+            dependencies.retain(|id| inferred.contains(id));
             Ok(dependencies.into_iter().collect())
         })();
         self.signature_owner = saved_owner;
@@ -988,18 +1025,21 @@ impl<'h> Checker<'_, 'h> {
                 let hir::clause::ClauseParamKind::Optional(_, _, value) = clause.kind else {
                     continue;
                 };
-                let mut checked = self.expr(value, Some(&p(P::Type)))?;
+                let checked = self.expr(value, Some(&p(P::Type)))?;
                 let offset = self.type_parameters[&owner].len() - clauses.len();
-                let forbidden = self.type_parameters[&owner][offset + slot..].to_vec();
-                checked.rewrite_types(&mut |ty| {
-                    if forbidden.iter().any(|id| ty.mentions_rigid(*id)) {
-                        return Err(error(
-                            value.span,
-                            "type default references itself or a later parameter",
-                        ));
-                    }
-                    self.copy_alias_type(ty, value.span)
-                })?;
+                let forbidden = self.type_parameters[&owner][offset + slot..]
+                    .iter()
+                    .copied()
+                    .collect::<BTreeSet<_>>();
+                if !self
+                    .checked_declaration_inputs(&checked, value.span)?
+                    .is_disjoint(&forbidden)
+                {
+                    return Err(error(
+                        value.span,
+                        "type default references itself or a later parameter",
+                    ));
+                }
             }
             Ok(())
         })();

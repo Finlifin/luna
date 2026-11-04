@@ -73,7 +73,7 @@ impl Checker<'_, '_> {
                 .iter()
                 .filter(|slot| !completed.clauses.contains_key(slot))
                 .map(|slot| all[*slot])
-                .collect::<Vec<_>>();
+                .collect::<BTreeSet<_>>();
             let signature = self.copy_alias_type(&base.signature, span)?;
             // Inspect dependencies in declaration form; inference itself retains
             // one slot for every input, including value defaults.
@@ -95,21 +95,30 @@ impl Checker<'_, '_> {
             else {
                 unreachable!()
             };
+            // Observe the declared interface once per candidate iteration.
+            // Filtering and contextual evidence share these decisions; they do
+            // not normalize a copy or reuse a previous iteration's readiness.
+            let mut input_waits = Vec::with_capacity(inputs.len());
+            for input in inputs {
+                input_waits.push(
+                    !unavailable.is_empty()
+                        && !self
+                            .term_declaration_inputs(&input.ty, span)?
+                            .is_disjoint(&unavailable),
+                );
+            }
+            let result_waits = !unavailable.is_empty()
+                && !self
+                    .term_declaration_inputs(result, span)?
+                    .is_disjoint(&unavailable);
             // Other inputs can establish the Type needed by a default. Do not
             // reject an unresolved value index before that default can run.
             let evidence = evidence
                 .iter()
-                .zip(inputs)
-                .map(|(value, input)| {
-                    if unavailable.iter().any(|id| input.ty.mentions_rigid(*id)) {
-                        None
-                    } else {
-                        value.clone()
-                    }
-                })
+                .zip(&input_waits)
+                .map(|(value, waiting)| if *waiting { None } else { value.clone() })
                 .collect::<Vec<_>>();
-            let expected =
-                expected.filter(|_| !unavailable.iter().any(|id| result.mentions_rigid(*id)));
+            let expected = expected.filter(|_| !result_waits);
             let scheme = crate::calls::Scheme {
                 parameter_sorts: base.parameter_sorts.clone(),
                 type_parameters: base.type_parameters,
@@ -142,24 +151,14 @@ impl Checker<'_, '_> {
                     .constrain_type_argument(index, value, crate::ptc::Budget::default())
                     .map_err(|e| call_inference_error(span, e))?;
             }
-            let Term::Function {
-                parameters: inputs,
-                result,
-            } = declared.callable_signature()
-            else {
-                unreachable!()
-            };
             for (index, context) in partial.iter().enumerate() {
-                if !unavailable
-                    .iter()
-                    .any(|id| inputs[index].ty.mentions_rigid(*id))
-                {
+                if !input_waits[index] {
                     candidate
                         .constrain_parameter_context(index, context, crate::ptc::Budget::default())
                         .map_err(|e| call_inference_error(span, e))?;
                 }
             }
-            if !unavailable.iter().any(|id| result.mentions_rigid(*id)) {
+            if !result_waits {
                 if let Some(context) = expected_context {
                     candidate
                         .constrain_result_context(context, crate::ptc::Budget::default())
@@ -233,13 +232,10 @@ impl Checker<'_, '_> {
                             {
                                 return Ok(false);
                             }
-                            let mut checked = this.expr(expression, Some(domain))?;
-                            let mut dependent = false;
-                            checked.rewrite_types(&mut |ty| {
-                                dependent |= unknown.iter().any(|id| ty.mentions_rigid(*id));
-                                this.copy_alias_type(ty, span)
-                            })?;
-                            Ok(!dependent)
+                            let checked = this.expr(expression, Some(domain))?;
+                            Ok(this
+                                .checked_declaration_inputs(&checked, span)?
+                                .is_disjoint(&unknown))
                         },
                     )?;
                 if !ready {
@@ -324,7 +320,7 @@ impl Checker<'_, '_> {
                             &values,
                             true,
                             |this, expression, domain| {
-                                let mut checked = this.expr(expression, Some(domain))?;
+                                let checked = this.expr(expression, Some(domain))?;
                                 let mut budget = comptime_runtime::Budget {
                                     steps: this.required_steps as usize,
                                     max_limbs: 4096,
@@ -333,17 +329,18 @@ impl Checker<'_, '_> {
                                 this.required_steps = budget.steps as u64;
                                 // Structural Type aliases preserve their relationship
                                 // to earlier inputs without invoking a Type producer.
-                                if known.is_some_and(|value| {
-                                    *domain == p(P::Type)
-                                        || !waiting.iter().any(|id| value.mentions_rigid(*id))
-                                }) {
-                                    return Ok(false);
+                                if let Some(value) = known {
+                                    if *domain == p(P::Type)
+                                        || this
+                                            .term_declaration_inputs(&value, expression.span)?
+                                            .is_disjoint(&waiting)
+                                    {
+                                        return Ok(false);
+                                    }
                                 }
-                                let mut dependent = false;
-                                checked.rewrite_types(&mut |ty| {
-                                    dependent |= waiting.iter().any(|id| ty.mentions_rigid(*id));
-                                    this.copy_alias_type(ty, expression.span)
-                                })?;
+                                let mut dependent = !this
+                                    .checked_declaration_inputs(&checked, expression.span)?
+                                    .is_disjoint(&waiting);
                                 let mut fuel = this.required_steps as usize;
                                 let free = nir::free_bindings::collect(&checked, &mut fuel);
                                 this.required_steps = fuel as u64;
