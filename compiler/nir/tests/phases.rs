@@ -2045,3 +2045,45 @@ fn associated_contract_inputs_are_bounded_before_copying_even_when_unused() {
     interface.arguments[0] = Term::Symbol("small".into());
     nir::phases::validate(&package).unwrap();
 }
+
+#[test]
+fn duplicate_associated_identities_cannot_make_phase_lookup_order_dependent() {
+    let member = nir::program::AssociatedContract {
+        declaration: DeclarationId {
+            package: 55,
+            local: 1,
+        },
+        name: "value".into(),
+        phase: nir::program::TraitPhase::Comptime,
+        ty: Term::Primitive(Primitive::Bool),
+        default: None,
+    };
+    let mut package = Package {
+        traits: vec![nir::program::Trait {
+            declaration: DeclarationId {
+                package: 55,
+                local: 0,
+            },
+            self_parameter: DeclarationId {
+                package: 55,
+                local: 2,
+            },
+            name: "Interface".into(),
+            comptime_only: false,
+            parameter_types: vec![],
+            type_parameters: vec![],
+            requirements: vec![],
+            capabilities: vec![],
+            parents: vec![],
+            methods: vec![],
+            associated: vec![member.clone(), member],
+        }],
+        ..Default::default()
+    };
+    assert_eq!(
+        nir::phases::validate(&package).unwrap_err().message,
+        "duplicate associated member identity"
+    );
+    package.traits[0].associated.pop();
+    nir::phases::validate(&package).unwrap();
+}

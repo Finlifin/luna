@@ -2035,3 +2035,48 @@ opaque NF 身份的保留。
 
 格式检查 `/tmp/luna-tools-rk_jxo2m/result.json` 退出 0。未运行全 workspace 或性能
 基准。正式 docs 与已有工作区修改保持不变。
+
+
+### Trait phase 索引与 membership 额度
+
+phase pass 现在构造借用当前不可变 Package 的 trait/member 索引，关联值、trait
+method 和保留的 comptime method 身份查询均使用该索引，删除三条反复扫描整个
+trait/member 列表的生产路径。接口内的成员身份和 membership 名称映射分别保留，
+不把按名的实现阶段检查误作成员身份解析或 implementation selection。保留方法
+引用仍遵循此前的 package 顺序选择；本次不据此新增跨接口声明身份规则。
+
+membership 检查不再自行分配 100,000。trait 数量、成员数量、方法名比较及
+implementation 数量／方法名消耗共享 declaration allowance；参数目录、alias
+contracts 和 callable frames 也继续使用该额度。内部入口据此更名为 declaration
+budget，仍不是 VM 的总预算。生成 trait summary 的复制、其他 metadata validation
+及完整 body traversal 仍待接线。
+
+索引只保存借用，不复制成员的签名、默认值或契约。查询前单独计费，已有索引也
+不能在零预算下继续查询；缺失接口和错误成员归属保留各自诊断。索引构造完成后
+才返回，预算或重复身份失败不发布部分目录。重复 trait identity 及同一 trait
+内重复的 method／associated identity 被明确拒绝，避免元数据顺序选择不同结果。
+这些检查不改变成员 phase、pure comptime trait 或 quote 的规则。
+
+公共 phase 回归在 `0694a36b` 实现上得到 Ok，
+`/tmp/luna-tools-xgxav7k0/result.json` 退出 101；当前实现拒绝重复 associated
+identity，移除重复项后恢复。索引测试还覆盖宽名称预留失败时保留正余额、空接口
+集合的总成本、足额重试、一次查询的局部成本、跨接口拒绝与不同 Package 同号
+成员的不同类型观察。
+
+
+本批验证目录 `/home/fin/luna`，统一入口
+`python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p nir --lib --test phases --no-fail-fast`：61 通过，退出 0；
+  `/tmp/luna-tools-p8d3syym/result.json`。
+- `-p comptime_interpretor --lib --test instance_budget --test runtime_function_identities
+  --no-fail-fast`：508 通过，退出 0；`/tmp/luna-tools-2cy_9ice/result.json`。
+- `-p luna --test trait_phases --test quote_functions --test associated_signatures
+  --test associated_purity --test deferred_associated_values --test cmtt_type_inputs
+  --test sysroot_preludes --no-fail-fast`：237 通过，退出 0；
+  `/tmp/luna-tools-qw3ikfe1/result.json`。
+
+首次局部构建因新测试同时借用 vector 的元素和 push 接收者失败，已用局部 clone
+修正 fixture；`/tmp/luna-tools-341lsc60/result.json` 退出 101，不作为通过证据。
+格式检查 `/tmp/luna-tools-a43zfj65/result.json` 退出 0。未运行全 workspace 或性能
+基准。正式 docs 与用户原有工作区修改保持不变。

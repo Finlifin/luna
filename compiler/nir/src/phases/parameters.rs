@@ -249,7 +249,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let run = super::super::machine_arithmetic_functions_with_parameter_budget;
+        let run = super::super::machine_arithmetic_functions_with_declaration_budget;
         let mut fuel = 1000;
         run(&package, &mut fuel).unwrap();
         let cost = 1000 - fuel;

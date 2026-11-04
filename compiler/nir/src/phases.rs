@@ -9,6 +9,7 @@ mod member_types;
 mod parameters;
 mod storage_cache;
 mod storage_error;
+mod trait_index;
 pub use storage_error::StorageError;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,17 +30,17 @@ pub fn validate(package: &Package) -> Result<(), Error> {
 pub fn machine_arithmetic_functions(
     package: &Package,
 ) -> Result<std::collections::BTreeSet<crate::DeclarationId>, Error> {
-    machine_arithmetic_functions_with_parameter_budget(package, &mut 1_000_000)
+    machine_arithmetic_functions_with_declaration_budget(package, &mut 1_000_000)
 }
 
 // Other phase subservices still own separate allowances. Keep this argument
-// explicitly parameter-only until the remaining checks share caller fuel too.
-fn machine_arithmetic_functions_with_parameter_budget(
+// explicitly declaration-only until the remaining checks share caller fuel too.
+fn machine_arithmetic_functions_with_declaration_budget(
     package: &Package,
-    parameter_fuel: &mut usize,
+    declaration_fuel: &mut usize,
 ) -> Result<std::collections::BTreeSet<crate::DeclarationId>, Error> {
     let mut machine_owners = std::collections::BTreeSet::new();
-    let parameter_domains = parameters::domains(package, parameter_fuel)
+    let parameter_domains = parameters::domains(package, declaration_fuel)
         .map_err(parameters::Failure::into_diagnostic)?;
     for definition in &package.enums {
         definition
@@ -49,88 +50,11 @@ fn machine_arithmetic_functions_with_parameter_budget(
                 message,
             })?;
     }
-    let mut membership_fuel = 100_000usize;
-    let mut membership = BTreeMap::new();
-    let mut comptime_only = BTreeSet::new();
-    for interface in &package.traits {
-        if interface.comptime_only {
-            membership_fuel = membership_fuel
-                .checked_sub(
-                    interface
-                        .methods
-                        .len()
-                        .saturating_add(interface.associated.len())
-                        .saturating_add(1),
-                )
-                .ok_or(Error {
-                    source: SourceRange { start: 0, end: 0 },
-                    message: "trait phase validation budget exhausted",
-                })?;
-            comptime_only.insert(interface.declaration);
-            if interface
-                .methods
-                .iter()
-                .any(|member| member.phase != crate::program::TraitPhase::Comptime)
-                || interface
-                    .associated
-                    .iter()
-                    .any(|member| member.phase != crate::program::TraitPhase::Comptime)
-            {
-                return Err(Error {
-                    source: SourceRange { start: 0, end: 0 },
-                    message: "comptime-only trait contains runtime phase members",
-                });
-            }
-        }
-        let mut methods = BTreeMap::new();
-        for member in &interface.methods {
-            membership_fuel = membership_fuel
-                .checked_sub(1 + member.name.len())
-                .ok_or(Error {
-                    source: SourceRange { start: 0, end: 0 },
-                    message: "trait phase validation budget exhausted",
-                })?;
-            methods.insert(member.name.as_str(), member.phase);
-        }
-        membership.insert(interface.declaration, methods);
-    }
-    for definition in &package.implementations {
-        if definition.phases.runtime
-            && definition
-                .interface
-                .is_some_and(|id| comptime_only.contains(&id))
-        {
-            return Err(Error {
-                source: SourceRange { start: 0, end: 0 },
-                message: "comptime-only trait has a runtime implementation",
-            });
-        }
-        if (!definition.phases.runtime && !definition.phases.comptime)
-            || (definition.interface.is_none() && definition.phases.comptime)
-        {
-            return Err(Error {
-                source: SourceRange { start: 0, end: 0 },
-                message: "invalid implementation phase availability",
-            });
-        }
-        if let Some(members) = definition.interface.and_then(|id| membership.get(&id)) {
-            for (name, _) in &definition.methods {
-                membership_fuel = membership_fuel.checked_sub(1 + name.len()).ok_or(Error {
-                    source: SourceRange { start: 0, end: 0 },
-                    message: "trait phase validation budget exhausted",
-                })?;
-                if members
-                    .get(name.as_str())
-                    .is_some_and(|phase| !definition.phases.contains(*phase))
-                {
-                    return Err(Error {
-                        source: SourceRange { start: 0, end: 0 },
-                        message: "implementation method belongs to an unavailable trait phase",
-                    });
-                }
-            }
-        }
-    }
+    let trait_index =
+        trait_index::Index::new(package, declaration_fuel).map_err(|error| Error {
+            source: SourceRange { start: 0, end: 0 },
+            message: error.message(),
+        })?;
     // Identity membership is queried for every retained callable. Index once:
     // scanning function vectors here makes snapshot admission quadratic.
     let body_ids: BTreeSet<_> = package.functions.iter().map(|f| f.declaration).collect();
@@ -152,7 +76,7 @@ fn machine_arithmetic_functions_with_parameter_budget(
                 message: "invalid or duplicate quote template identity",
             });
         }
-        let parameters = parameters::validate_frame(template, true, parameter_fuel)
+        let parameters = parameters::validate_frame(template, true, declaration_fuel)
             .map_err(parameters::Failure::into_diagnostic)?;
         if parameters
             .iter()
@@ -181,7 +105,7 @@ fn machine_arithmetic_functions_with_parameter_budget(
         message,
     })?;
     for function in &package.functions {
-        parameters::validate_frame(function, false, parameter_fuel)
+        parameters::validate_frame(function, false, declaration_fuel)
             .map_err(parameters::Failure::into_diagnostic)?;
     }
     let functions: BTreeMap<_, _> = package
@@ -631,18 +555,9 @@ fn machine_arithmetic_functions_with_parameter_budget(
                             member,
                             subject,
                         } => {
-                            let contract = package
-                                .traits
-                                .iter()
-                                .find(|definition| definition.declaration == interface.declaration)
-                                .ok_or_else(|| {
-                                    error("associated value has no interface contract")
-                                })?;
-                            let member = contract
-                                .associated
-                                .iter()
-                                .find(|definition| definition.declaration == *member)
-                                .ok_or_else(|| error("associated value has no member contract"))?;
+                            let (contract, member) = trait_index
+                                .associated(interface.declaration, *member, &mut preparation_fuel)
+                                .map_err(|failure| error(failure.message()))?;
                             if interface.arguments.len() != contract.type_parameters.len() {
                                 return Err(error(
                                     "associated value interface argument count mismatch",
@@ -677,21 +592,14 @@ fn machine_arithmetic_functions_with_parameter_budget(
                             member,
                             subject,
                         } => {
-                            let contract = package
-                                .traits
-                                .iter()
-                                .find(|definition| definition.declaration == *interface)
-                                .ok_or_else(|| error("trait method has no interface contract"))?;
+                            let (contract, method) = trait_index
+                                .method(*interface, *member, &mut preparation_fuel)
+                                .map_err(|failure| error(failure.message()))?;
                             if contract.comptime_only && !ct {
                                 return Err(error(
                                     "comptime-only trait method requires comptime context",
                                 ));
                             }
-                            let method = contract
-                                .methods
-                                .iter()
-                                .find(|method| method.declaration == *member)
-                                .ok_or_else(|| error("trait method has no member contract"))?;
                             if method.is_quote && !_callee {
                                 return Err(error(
                                     "quote trait method cannot escape as a runtime function value",
@@ -1203,11 +1111,9 @@ fn machine_arithmetic_functions_with_parameter_budget(
                             declaration,
                             subject,
                         } => {
-                            let member = package
-                                .traits
-                                .iter()
-                                .flat_map(|interface| &interface.methods)
-                                .find(|member| member.declaration == *declaration);
+                            let member = trait_index
+                                .retained_method(*declaration, &mut preparation_fuel)
+                                .map_err(|failure| error(failure.message()))?;
                             let trait_target;
                             let target = if let Some(member) = member {
                                 trait_target = (
