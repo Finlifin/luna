@@ -2265,23 +2265,20 @@ impl Builder<'_> {
             crate::associated::charge_projection_copy(ty, &mut self.fuel)?;
             return Ok(ty.clone());
         }
-        let (view, remaining) = crate::capabilities::World {
+        let mut budget = Budget {
+            steps: self.fuel,
+            ..self.budget
+        };
+        let view = crate::capabilities::World {
             index: self.world.index(),
             implementations: &self.package.implementations,
             traits: &self.package.traits,
             assumptions: self.world.assumptions(),
             context: self.world.context(),
         }
-        .associated_type_view_cached(
-            ty,
-            Budget {
-                steps: self.fuel,
-                ..self.budget
-            },
-            &mut self.staging_views,
-        )?;
-        self.fuel = remaining;
-        Ok(view.value)
+        .associated_type_view_cached_metered(ty, &mut budget, &mut self.staging_views);
+        self.fuel = budget.steps;
+        Ok(view?.value)
     }
     fn ty(&mut self, ty: Term) -> Result<(), String> {
         if !self.types.insert(ty.clone()) {

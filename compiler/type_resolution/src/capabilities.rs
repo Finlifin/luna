@@ -469,7 +469,7 @@ impl World<'_> {
         name: &str,
         subject: &Term,
         budget: Budget,
-    ) -> Result<Resolution, String> {
+    ) -> Result<Resolution, QueryError> {
         let mut solver = Solver {
             world: self,
             scope: ResolutionScope::capture(self),
@@ -510,7 +510,13 @@ impl World<'_> {
                     (assessment, state)
                 },
             )
-            .map_err(|e| format!("inherent capability query: {e:?}"))?;
+            .map_err(|error| match error {
+                crate::implementation::Error::BudgetExhausted => QueryError::Budget,
+                crate::implementation::Error::UndeterminedPhaseRelationship(reason) => {
+                    QueryError::Unresolved(reason)
+                }
+                error => QueryError::Invalid(format!("inherent capability query: {error:?}")),
+            })?;
         qualification::check_selection(&types, &qualifications)?;
         Ok(Resolution {
             scope: solver.scope.clone(),

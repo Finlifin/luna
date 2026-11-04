@@ -3605,6 +3605,129 @@ fn nested_qualification_depth_failure_is_resource_failure_and_retryable() {
 }
 
 #[test]
+fn inherent_queries_preserve_resource_invalid_and_pending_failures() {
+    use nir::NominalAdmissionError as Failure;
+    use type_resolution::implementation::{InherentHead, InherentIndex};
+    let mut root = implementation(
+        20,
+        100,
+        boxed(var()),
+        vec![id(1)],
+        vec![requirement(500, var())],
+    );
+    root.interface = None;
+    let mut inherent = InherentIndex::default();
+    inherent
+        .insert(
+            InherentHead {
+                parameter_types: root.parameter_types.clone(),
+                declaration: root.declaration,
+                subject: root.subject.clone(),
+                type_parameters: root.type_parameters.clone(),
+                requirements: vec![],
+                members: ["read".into()].into_iter().collect(),
+            },
+            Budget::default(),
+        )
+        .unwrap();
+    let mut implementations = vec![root];
+    implementations.extend((0..12).map(|level| {
+        implementation(
+            400 + level,
+            500 + level,
+            Term::Primitive(Primitive::Bool),
+            vec![],
+            if level == 11 {
+                vec![]
+            } else {
+                vec![requirement(501 + level, Term::Primitive(Primitive::Bool))]
+            },
+        )
+    }));
+    let ix = index(&implementations[1..]);
+    let traits: Vec<_> = (500..512).map(marker).collect();
+    let context = context();
+    let resolve = |implementations: &[Implementation], subject: &Term, name: &str, budget| {
+        World {
+            index: &ix,
+            implementations,
+            traits: &traits,
+            assumptions: &[],
+            context: &context,
+        }
+        .resolve_inherent(&inherent, name, subject, budget)
+    };
+    let subject = boxed(Term::Primitive(Primitive::Bool));
+    for steps in [0, 1, 8, 16] {
+        assert!(matches!(
+            resolve(
+                &implementations,
+                &subject,
+                "read",
+                Budget {
+                    steps,
+                    ..Budget::default()
+                }
+            ),
+            Err(Failure::Budget)
+        ));
+    }
+    for max_depth in [4, 6, 8] {
+        assert!(matches!(
+            resolve(
+                &implementations,
+                &subject,
+                "read",
+                Budget {
+                    max_depth,
+                    ..Budget::default()
+                }
+            ),
+            Err(Failure::Budget)
+        ));
+    }
+    let mut invalid = implementations.clone();
+    invalid[0].capabilities = vec![requirement(500, Term::Bool(true))];
+    assert!(matches!(
+        resolve(&invalid, &subject, "read", Budget::default()),
+        Err(Failure::Invalid(_))
+    ));
+    let mut recursive = implementations.clone();
+    recursive.last_mut().unwrap().capabilities =
+        vec![requirement(500, Term::Primitive(Primitive::Bool))];
+    let pending = resolve(&recursive, &subject, "read", Budget::default()).unwrap();
+    assert!(matches!(
+        pending.types.selection,
+        Selection::Deferred { .. }
+    ));
+    assert!(matches!(
+        pending.qualifications[&id(20)],
+        Qualification::Pending(Failure::Unresolved(_))
+    ));
+    for (subject, name) in [
+        (&boxed(Term::Primitive(Primitive::Char)), "read"),
+        (&subject, "missing"),
+    ] {
+        assert_eq!(
+            resolve(&implementations, subject, name, Budget::default())
+                .unwrap()
+                .types
+                .selection,
+            Selection::NoApplicableCandidate
+        );
+    }
+    for _ in 0..2 {
+        assert_eq!(
+            resolve(&implementations, &subject, "read", Budget::default())
+                .unwrap()
+                .types
+                .selection,
+            Selection::Selected(id(20))
+        );
+    }
+}
+
+#[test]
 fn qualification_failure_priority_preserves_independent_exclusions() {
     use nir::NominalAdmissionError as Failure;
     let subject = Term::Primitive(Primitive::Bool);

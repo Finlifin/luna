@@ -2902,7 +2902,14 @@ PTC 的 verify_proof_metered 在成功、拒绝和耗尽时返还追踪到的余
 伪造证据拒绝和原证据重试；PTC 回归检查固定证明在成功、错误上下文、伪造目标和
 额度不足时都返还已追踪的余额。条件固有方法按额度扫描并验证恢复，真实 sysroot
 回归覆盖协议、meta.math、NF 方法和默认导入。计量仍针对现有结构及搜索步骤，
-不是完整 CPU／分配成本模型；关联投影失败的 owned-budget 边界仍未精确返还消耗。
+不是完整 CPU／分配成本模型。
+
+带缓存的定义侧关联类型视图统一使用 associated_type_view_cached_metered，成功和失败
+均通过调用者 Budget 返回已追踪的余额。条件支持重放与 materialization 的 staging
+视图在传播失败之前保存余额；原来只在成功时返回 `(view, remaining)` 的入口已删除。
+归约仍先放进查询私有缓存，整个视图成功才合入调用者缓存；失败不能发布已经完成的
+子投影，也不能删除此前成功提交的视图。定义侧可保留的抽象投影仍不进入 strict
+normalization 或作为完成的 IIR 证据使用。
 
 主体资格与重放迁移验证（工作目录 `/home/fin/luna`）：
 
@@ -2928,7 +2935,34 @@ PTC 的 verify_proof_metered 在成功、拒绝和耗尽时返还追踪到的余
 qualification 的封闭输入检查复用世界命题的 closed_inputs_metered，使用同一余额，
 不再给每个结构键刷新预算或将检查失败转换成“开放”。调用者已证明的结构等式可以
 建立封闭性；没有关系证据时仍不能从抽象主体推导不存在实现，也不展开 NF 的函数体。
-固有方法选择采用同一失败检查，但公开入口的字符串错误和独立预算尚未迁移。
+固有方法选择采用同一失败检查。World::resolve_inherent 与 elaboration 的查询适配器
+直接保留 QueryError：索引资源失败转为 Budget，未确定的关系保持 Unresolved，非法
+查询保持 Invalid；不再先格式化成字符串。递归资格仍通过 Deferred／Pending 保存，
+不能解释成成员不存在。该入口与头匹配仍有独立额度，尚未完成统一预算所有权；CMTT
+分类 hint 的可选观察入口也尚未迁移为可失败查询，不能据本次公开错误迁移声称所有
+方法消费者已经完整保留查询失败。
+
+固有查询与缓存视图边界验证（工作目录 `/home/fin/luna`）：
+
+- `python3 -B development/check.py --timeout 900 -- test -p type_resolution --lib
+  --test associated --test capabilities --test inherent --no-fail-fast`：115 项通过，
+  退出 0；`/tmp/luna-tools-cfuyjyqz/result.json`。
+- 同一入口 `test -p luna --test trait_query_failures --test normal_form_methods
+  --test library_protocols --test library_meta_math --test deferred_associated_values
+  --test associated_signatures --no-fail-fast`：64 项通过，退出 0；
+  `/tmp/luna-tools-yj4w915q/result.json`。
+- 加强重放失败分类断言后，同一入口 `test -p materialization -p type_resolution
+  -p luna --lib --test expansion_boundary --test cmtt_phase_boundaries
+  --test cmtt_type_inputs --no-fail-fast`：153 项通过，退出 0；
+  `/tmp/luna-tools-7j6ytzwg/result.json`。其中 type_resolution 单元组与首条重叠。
+- 八个修改的 Rust 文件通过 scoped rustfmt check，退出 0；
+  `/tmp/luna-tools-ml6aoggx/result.json`。git diff --check 通过。
+
+检查涵盖固有查询的索引／递归深度资源失败、非法资格前提、递归 Pending、真正无候选
+及重试；视图覆盖冷／热缓存、先完成子投影后失败、保留已提交条目及低额度扫描。
+伪造支持条目的重放测试比较直接视图查询与跨证据边界的余额，要求深度资源错误与
+非法成员错误均保留分类和消耗。真实 sysroot 用例执行带多层 trait 前提的固有方法，
+并检查关联项返回 meta.List<bool> 时保留 NF 头，失败不污染缓存。
 
 invocation 的 VM 创建／执行结果也保留资源分类：StepsExhausted 与 DepthExhausted
 转换为执行器的 BudgetExhausted，其他执行错误在现有诊断边界渲染。缓存的
@@ -2989,8 +3023,8 @@ PTC 会按当前预算为传播与学习分配额度，较小预算可能走更�
   for_comptime_in_budget 仍保守保留全部 reservation，尚非精确失败扣款。
 - 后续关联项／方法签名与 world capability 的部分实例化尚未有界。
 - 直接／projected trait resolution、世界命题、条件事实、Type 投影及普通关联值的
-  payload／initializer 校验及 qualification 已保留 typed 失败。inherent 查询的
-  公开入口、TypeAssessment 的部分内部原因仍有 String 或可选结果边界。
+  payload／initializer 校验、qualification 及 inherent 查询公开入口已保留 typed
+  失败。TypeAssessment 的部分内部原因和 CMTT 分类 hint 仍有 String 或可选结果边界。
   DeclarationWorld 的构建与完成类型查询已共用各自调用者的余额，构建失败不发布
   半成品，归约结果按外层事务发布；其他便利入口自行建立的预算仍待迁移。
   不能据 metered Type/value view 的

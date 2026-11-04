@@ -1351,3 +1351,125 @@ fn declaration_world_failed_retention_does_not_publish_completed_children() {
         .unwrap();
     assert!(warm_fuel > retry_fuel && warm_fuel < 100_000);
 }
+
+#[test]
+fn cached_type_views_charge_failed_queries_without_publishing_children() {
+    use nir::NominalAdmissionError as Failure;
+    use std::collections::HashMap;
+    let subject = holder(ty(P::Bool));
+    let valid = projection(subject.clone(), vec![]);
+    let mut invalid = valid.clone();
+    if let Term::AssociatedType { origin, .. } = &mut invalid {
+        origin.member = id(99);
+    }
+    let unresolved = projection(holder(ty(P::Char)), vec![]);
+    with_world(
+        &[contract()],
+        &[implementation(subject, ty(P::U8))],
+        |world| {
+            let mut fresh_budget = Budget::default();
+            let mut fresh_cache = HashMap::new();
+            assert_eq!(
+                world
+                    .associated_type_view_cached_metered(
+                        &valid,
+                        &mut fresh_budget,
+                        &mut fresh_cache
+                    )
+                    .unwrap()
+                    .value,
+                ty(P::U8)
+            );
+            assert!(fresh_budget.steps < Budget::default().steps);
+            assert!(!fresh_cache.is_empty());
+            for (tail, expect_invalid) in [(invalid, true), (unresolved, false)] {
+                let root = Term::Record(vec![
+                    ("first".into(), valid.clone()),
+                    ("later".into(), tail),
+                ]);
+                let mut cache = HashMap::new();
+                let mut budget = Budget::default();
+                let error = world
+                    .associated_type_view_cached_metered(&root, &mut budget, &mut cache)
+                    .unwrap_err();
+                assert!(
+                    if expect_invalid {
+                        matches!(error, Failure::Invalid(_))
+                    } else {
+                        matches!(error, Failure::Unresolved(_))
+                    },
+                    "{error:?}"
+                );
+                assert!(budget.steps > 0 && budget.steps < Budget::default().steps);
+                assert!(
+                    cache.is_empty(),
+                    "completed first child must remain private after failure"
+                );
+                let mut retry = Budget::default();
+                assert_eq!(
+                    world
+                        .associated_type_view_cached_metered(&valid, &mut retry, &mut cache)
+                        .unwrap()
+                        .value,
+                    ty(P::U8)
+                );
+                assert_eq!(
+                    retry.steps, fresh_budget.steps,
+                    "failed root did not warm the cache"
+                );
+
+                let original = cache.clone();
+                world
+                    .associated_type_view_cached_metered(&root, &mut Budget::default(), &mut cache)
+                    .unwrap_err();
+                assert_eq!(
+                    cache, original,
+                    "a failed query preserves earlier committed views"
+                );
+            }
+            let root = Term::Record(vec![
+                ("first".into(), valid.clone()),
+                ("again".into(), valid),
+            ]);
+            let mut succeeded = false;
+            let mut exhausted = false;
+            for steps in (0..4000).step_by(11) {
+                let mut budget = Budget {
+                    steps,
+                    ..Budget::default()
+                };
+                let mut cache = HashMap::new();
+                match world.associated_type_view_cached_metered(&root, &mut budget, &mut cache) {
+                    Ok(view) => {
+                        succeeded = true;
+                        assert_eq!(
+                            view.value,
+                            Term::Record(vec![
+                                ("first".into(), ty(P::U8)),
+                                ("again".into(), ty(P::U8))
+                            ])
+                        );
+                    }
+                    Err(Failure::Budget) => {
+                        exhausted = true;
+                        assert!(cache.is_empty());
+                    }
+                    error => panic!("steps {steps}: {error:?}"),
+                }
+                assert!(budget.steps <= steps);
+            }
+            assert!(succeeded && exhausted);
+            let mut budget = Budget {
+                max_depth: 1,
+                ..Budget::default()
+            };
+            let mut cache = HashMap::new();
+            assert!(matches!(
+                world.associated_type_view_cached_metered(&root, &mut budget, &mut cache),
+                Err(Failure::Budget)
+            ));
+            assert!(budget.steps > 0 && budget.steps < Budget::default().steps);
+            assert!(cache.is_empty());
+        },
+    );
+}

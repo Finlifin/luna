@@ -377,16 +377,18 @@ impl World<'_> {
             .map(|(value, _, _)| value)
     }
 
-    pub fn associated_type_view_cached(
+    /// Reuse completed views in one immutable world. Failed queries return
+    /// their remaining work but publish none of their newly completed children.
+    pub fn associated_type_view_cached_metered(
         &self,
         ty: &Term,
-        budget: Budget,
+        budget: &mut Budget,
         cache: &mut std::collections::HashMap<Term, Term>,
-    ) -> Result<(AssociatedTypeNormalization, usize), QueryError> {
-        let (value, remaining, completed) =
-            self.normalize_associated_types_mode(ty, &mut { budget }, true, Some(cache), None)?;
+    ) -> Result<AssociatedTypeNormalization, QueryError> {
+        let (value, _, completed) =
+            self.normalize_associated_types_mode(ty, budget, true, Some(cache), None)?;
         cache.extend(completed);
-        Ok((value, remaining))
+        Ok(value)
     }
 
     pub(crate) fn associated_type_view_for_selection(
@@ -1007,8 +1009,8 @@ mod view_tests {
         assert_eq!(view.value, callable);
         assert!(view.steps.is_empty());
         let mut view_cache = std::collections::HashMap::new();
-        let (cached, _) = without_givens
-            .associated_type_view_cached(&callable, Budget::default(), &mut view_cache)
+        let cached = without_givens
+            .associated_type_view_cached_metered(&callable, &mut Budget::default(), &mut view_cache)
             .unwrap();
         assert_eq!(cached.value, callable);
         assert!(
@@ -1033,8 +1035,8 @@ mod view_tests {
                 result: Box::new(outer_projection),
             }),
         };
-        let (nested_view, _) = without_givens
-            .associated_type_view_cached(&nested, Budget::default(), &mut view_cache)
+        let nested_view = without_givens
+            .associated_type_view_cached_metered(&nested, &mut Budget::default(), &mut view_cache)
             .unwrap();
         assert_eq!(nested_view.value, nested);
         assert!(nested_view.steps.is_empty());
@@ -1072,7 +1074,11 @@ mod view_tests {
         );
         assert!(
             without_givens
-                .associated_type_view_cached(&bad_member, Budget::default(), &mut view_cache)
+                .associated_type_view_cached_metered(
+                    &bad_member,
+                    &mut Budget::default(),
+                    &mut view_cache
+                )
                 .is_err()
         );
         assert!(view_cache.is_empty());

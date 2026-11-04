@@ -322,3 +322,178 @@ fn nested_source_capabilities_preserve_exhaustion_through_invocation() {
         assert_eq!(call.cached_results(), 0);
     }
 }
+
+#[test]
+fn source_inherent_queries_and_cached_type_views_keep_failure_boundaries() {
+    use nir::{AssociatedTypeOrigin, NominalAdmissionError as Failure};
+    use std::collections::HashMap;
+    use type_resolution::{
+        capabilities::World,
+        dispatch::DeclarationWorld,
+        implementation::{InherentHead, InherentIndex, Selection},
+        ptc::Budget,
+    };
+    let package = sysroot::compile(
+        "trait First {} trait Second {} trait Third {} trait Fourth {} trait Last {}
+        impl First for T where T :- Second {}
+        impl Second for T where T :- Third {}
+        impl Third for T where T :- Fourth {}
+        impl Fourth for T where T :- Last {}
+        impl Last for bool {}
+        trait Element { assoc Item: Type; }
+        impl Element for bool { assoc Item: Type = meta.List<bool>; }
+        struct Holder where T {}
+        impl Holder<T> where T :- First {
+            comptime fn enabled() -> bool { true }
+        }
+        comptime fn run() -> bool { Holder<bool>.enabled() }",
+    )
+    .unwrap();
+    let holder = package
+        .structs
+        .iter()
+        .find(|s| s.name == "Holder")
+        .unwrap()
+        .declaration;
+    let candidate = package
+        .implementations
+        .iter()
+        .find(|i| {
+            i.interface.is_none()
+                && matches!(&i.subject, Term::Nominal { declaration, .. } if *declaration == holder)
+        })
+        .unwrap();
+    assert!(!candidate.capabilities.is_empty());
+    let mut inherent = InherentIndex::for_builtin_packages(
+        package.target,
+        package.builtin_implementation_packages.iter().copied(),
+    );
+    inherent.set_nominal_layouts(
+        package.structs.clone(),
+        package.enums.clone(),
+        package.newtypes.clone(),
+    );
+    inherent.set_normal_form_metadata(package.normal_forms.clone());
+    inherent
+        .insert(
+            InherentHead {
+                parameter_types: candidate.parameter_types.clone(),
+                declaration: candidate.declaration,
+                subject: candidate.subject.clone(),
+                type_parameters: candidate.type_parameters.clone(),
+                requirements: candidate.requirements.clone(),
+                members: candidate
+                    .methods
+                    .iter()
+                    .map(|(name, _)| name.clone())
+                    .collect(),
+            },
+            Budget::default(),
+        )
+        .unwrap();
+    let (declarations, _) = DeclarationWorld::new(&package, Budget::default(), None).unwrap();
+    let world = World {
+        index: declarations.index(),
+        implementations: &package.implementations,
+        traits: &package.traits,
+        assumptions: declarations.assumptions(),
+        context: declarations.context(),
+    };
+    let subject = Term::Nominal {
+        declaration: holder,
+        arguments: vec![Term::Primitive(Primitive::Bool)],
+    };
+    for budget in [
+        Budget {
+            steps: 0,
+            ..Budget::default()
+        },
+        Budget {
+            max_depth: 4,
+            ..Budget::default()
+        },
+    ] {
+        assert!(matches!(
+            world.resolve_inherent(&inherent, "enabled", &subject, budget),
+            Err(Failure::Budget)
+        ));
+    }
+    let resolution = world
+        .resolve_inherent(&inherent, "enabled", &subject, Budget::default())
+        .unwrap();
+    assert_eq!(
+        resolution.types.selection,
+        Selection::Selected(candidate.declaration)
+    );
+    world
+        .verify_inherent_evidence(
+            &inherent,
+            "enabled",
+            &subject,
+            &resolution,
+            Budget::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        world
+            .resolve_inherent(
+                &inherent,
+                "enabled",
+                &Term::Nominal {
+                    declaration: holder,
+                    arguments: vec![Term::Primitive(Primitive::Char)],
+                },
+                Budget::default()
+            )
+            .unwrap()
+            .types
+            .selection,
+        Selection::NoApplicableCandidate
+    );
+
+    let element = package.traits.iter().find(|t| t.name == "Element").unwrap();
+    let projection = Term::AssociatedType {
+        origin: Box::new(AssociatedTypeOrigin {
+            interface: element.declaration,
+            member: element.associated[0].declaration,
+        }),
+        subject: Box::new(Term::Primitive(Primitive::Bool)),
+        arguments: vec![],
+    };
+    let mut cache = HashMap::new();
+    let mut budget = Budget::default();
+    let view = world
+        .associated_type_view_cached_metered(&projection, &mut budget, &mut cache)
+        .unwrap();
+    assert!(
+        matches!(view.value, Term::NormalForm { .. }),
+        "the List head remains opaque"
+    );
+    assert!(budget.steps < Budget::default().steps);
+    let before = cache.clone();
+    let mut bad = projection.clone();
+    if let Term::AssociatedType { origin, .. } = &mut bad {
+        origin.member = nir::DeclarationId {
+            package: u64::MAX,
+            local: u32::MAX,
+        };
+    }
+    let mut failed = Budget::default();
+    assert!(matches!(
+        world.associated_type_view_cached_metered(&bad, &mut failed, &mut cache),
+        Err(Failure::Invalid(_))
+    ));
+    assert!(failed.steps > 0 && failed.steps < Budget::default().steps);
+    assert_eq!(cache, before);
+    assert_eq!(
+        world
+            .associated_type_view_cached_metered(&projection, &mut failed, &mut cache)
+            .unwrap()
+            .value,
+        view.value
+    );
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 1_000_000).unwrap(),
+        Value::Bool(true)
+    );
+}

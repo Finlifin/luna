@@ -35,6 +35,84 @@ mod tests {
     use nir::{DeclarationId, Primitive};
 
     #[test]
+    fn rejected_projection_support_returns_query_work_before_propagating_failure() {
+        let id = |local| DeclarationId { package: 96, local };
+        let index = Index::default();
+        let context = Context::default();
+        let world = World {
+            index: &index,
+            context: &context,
+            traits: &[],
+            implementations: &[],
+            assumptions: &[],
+        };
+        let subject = Term::Primitive(Primitive::Bool);
+        let mut resolution = world.resolve(id(1), &subject, Budget::default()).unwrap();
+        let Outcome::Entailed(proof) = context.prove(Formula::True, Budget::default()) else {
+            panic!("True has a proof");
+        };
+        let source = Term::Pointer(Box::new(Term::AssociatedType {
+            origin: Box::new(nir::AssociatedTypeOrigin {
+                interface: id(1),
+                member: id(2),
+            }),
+            arguments: vec![],
+            subject: Box::new(subject.clone()),
+        }));
+        // Forge an extra support entry referencing an unregistered member.
+        // It must fail while rebuilding the view, before trusting its proof.
+        resolution.condition_support.insert(
+            id(3),
+            vec![ConditionSupport {
+                context: context.clone(),
+                facts: vec![],
+                proof,
+                projections: vec![ConditionProjection {
+                    source: source.clone(),
+                    value: subject,
+                }],
+            }],
+        );
+        for max_depth in [1, Budget::default().max_depth] {
+            let mut expected = Budget {
+                steps: Budget::default().steps - 1,
+                max_depth,
+            };
+            let error = world
+                .associated_type_view_cached_metered(
+                    &source,
+                    &mut expected,
+                    &mut std::collections::HashMap::new(),
+                )
+                .unwrap_err();
+            if max_depth == 1 {
+                assert!(matches!(error, QueryError::Budget));
+            } else {
+                assert!(matches!(error, QueryError::Invalid(_)));
+            }
+            let mut actual = Budget {
+                max_depth,
+                ..Budget::default()
+            };
+            assert_eq!(
+                world.verify_support_in_domain(&resolution, &mut actual, None),
+                Err(EvidenceError::Query(error))
+            );
+            assert_eq!(
+                actual.steps, expected.steps,
+                "the failed view's work must survive the evidence boundary"
+            );
+            assert!(actual.steps > 0 && actual.steps < Budget::default().steps - 1);
+        }
+        resolution.condition_support.clear();
+        let mut retry = Budget::default();
+        world
+            .verify_support_in_domain(&resolution, &mut retry, None)
+            .unwrap();
+        assert_eq!(retry.steps, Budget::default().steps - 1);
+    }
+
+    #[test]
     fn nested_condition_resolution_retains_recursion_and_budget_failures() {
         let contract = Trait {
             declaration: DeclarationId {
@@ -664,16 +742,17 @@ impl World<'_> {
                     }
                     let mut completed = std::collections::HashMap::new();
                     for projection in &support.projections {
-                        let allowance = Budget {
+                        let mut allowance = Budget {
                             steps: fuel,
                             ..*budget
                         };
-                        let (normalized, remaining) = self.associated_type_view_cached(
+                        let normalized = self.associated_type_view_cached_metered(
                             &projection.source,
-                            allowance,
+                            &mut allowance,
                             &mut completed,
-                        )?;
-                        fuel = remaining;
+                        );
+                        fuel = allowance.steps;
+                        let normalized = normalized?;
                         if normalized.value != projection.value {
                             return Err(ProofError::Invalid.into());
                         }

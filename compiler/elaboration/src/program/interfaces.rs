@@ -2821,7 +2821,7 @@ impl Checker<'_, '_> {
         name: &str,
         subject: &Term,
         budget: Budget,
-    ) -> Result<crate::capabilities::Resolution, String> {
+    ) -> Result<crate::capabilities::Resolution, nir::NominalAdmissionError> {
         let assumptions = self.capability_assumptions();
         crate::capabilities::World {
             index: &self.implementation_index,
