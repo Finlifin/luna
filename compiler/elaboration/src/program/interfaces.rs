@@ -3208,6 +3208,20 @@ impl Checker<'_, '_> {
         })
     }
 
+    /// Expression rewrites include staged values as well as Type annotations.
+    /// Preserve value terms for ordinary domain admission by the invocation.
+    pub(super) fn callable_argument_term_view(
+        &mut self,
+        term: &Term,
+        span: Span,
+    ) -> Result<Term, Error> {
+        if term.sort() == Sort::Type {
+            self.callable_input_view(term, span)
+        } else {
+            self.copy_alias_type(term, span)
+        }
+    }
+
     pub(super) fn callable_input_view(&self, signature: &Term, span: Span) -> Result<Term, Error> {
         self.callable_input_view_budgeted(signature, Budget::default(), span)
     }

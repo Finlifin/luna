@@ -182,7 +182,6 @@ fn clause_defaults_rebind_their_local_definitions() {
 }
 
 #[test]
-#[ignore = "local function telescopes still capture the enclosing unsupplied clause input"]
 fn local_comptime_calls_in_clause_defaults_need_precise_lexical_dependencies() {
     let source = "
         template fn choose(value: bool) -> bool
@@ -242,5 +241,155 @@ fn copied_default_helpers_keep_public_library_method_resolution() {
             "../../../development/examples/template-local-definitions.fl"
         )),
         Value::Bool(true)
+    );
+}
+
+fn assert_input_count(package: &nir::program::Package, name: &str, count: usize) {
+    let functions: Vec<_> = package
+        .functions
+        .iter()
+        .filter(|f| f.name == name)
+        .collect();
+    assert!(!functions.is_empty(), "missing function {name}");
+    for function in functions {
+        assert_eq!(function.type_parameters.len(), count, "inputs of {name}");
+    }
+}
+
+#[test]
+fn unused_lexical_inputs_are_removed_but_explicit_inputs_remain() {
+    let source = "
+        fn outer() -> bool where unused: bool {
+            fn independent() -> bool { true }
+            fn explicit() -> bool where unused: bool { true }
+            independent() and explicit<false>()
+        }
+        fn run() -> bool { outer<true>() and outer<false>() }
+    ";
+    let package = compile(source).unwrap();
+    assert_input_count(&package, "outer", 1);
+    assert_input_count(&package, "independent", 0);
+    assert_input_count(&package, "explicit", 1);
+    assert_eq!(run(source), Value::Bool(true));
+}
+
+#[test]
+fn callee_binders_do_not_capture_an_ancestor_invocations_inputs() {
+    let source = "
+        fn outer() -> bool {
+            fn parent(stop: bool) -> bool where value: bool {
+                fn child() -> bool { parent<false>(true) }
+                if stop { value } else { child() }
+            }
+            parent<true>(false)
+        }
+        fn run() -> bool { not outer() }
+    ";
+    let package = compile(source).unwrap();
+    assert_input_count(&package, "parent", 1);
+    assert_input_count(&package, "child", 0);
+    assert_eq!(run(source), Value::Bool(true));
+}
+
+#[test]
+fn mutual_callees_propagate_outer_reads_through_the_whole_group() {
+    let source = "
+        fn outer(comptime seed: bool) -> bool {
+            fn first(stop: bool) -> bool {
+                if stop { seed } else { second(true) }
+            }
+            fn second(stop: bool) -> bool {
+                if stop { first(true) } else { first(false) }
+            }
+            second(false)
+        }
+        fn run() -> bool { outer(true) and not outer(false) }
+    ";
+    let package = compile(source).unwrap();
+    assert_input_count(&package, "first", 1);
+    assert_input_count(&package, "second", 1);
+    assert_eq!(run(source), Value::Bool(true));
+}
+
+#[test]
+fn domain_prerequisites_and_default_only_reads_remain_inputs() {
+    let source = "
+        fn outer(comptime T: Type, comptime seed: T) -> bool
+        where flag: bool
+        {
+            fn read() -> bool { seed; true }
+            fn defaulted(.value: bool = flag) -> bool { value }
+            read() and defaulted()
+        }
+        fn run() -> bool {
+            outer<true>(bool, false) and outer<true>(u8, 7)
+                and not outer<false>(u8, 8)
+        }
+    ";
+    let package = compile(source).unwrap();
+    assert_input_count(&package, "read", 2);
+    assert_input_count(&package, "defaulted", 1);
+    assert_eq!(run(source), Value::Bool(true));
+}
+
+#[test]
+#[ignore = "copied defaults still freeze caller invocation slots instead of reifying reads"]
+fn staged_default_reads_require_caller_value_reification() {
+    let source = "
+        fn outer(comptime T: Type, comptime seed: T, comptime flag: bool) -> bool {
+            fn read() -> bool { seed; true }
+            fn defaulted(.value: bool = flag) -> bool { value }
+            read() and defaulted()
+        }
+        fn run() -> bool {
+            outer(bool, false, true) and outer(u8, 7, true)
+                and not outer(u8, 8, false)
+        }
+    ";
+    let package = compile(source).unwrap();
+    assert_input_count(&package, "read", 2);
+    assert_input_count(&package, "defaulted", 1);
+    assert_eq!(run(source), Value::Bool(true));
+}
+
+#[test]
+fn unused_descendants_keep_scope_without_forcing_parent_captures() {
+    let source = "
+        fn outer(comptime seed: bool) -> bool {
+            fn parent() -> bool {
+                fn unused() -> bool { seed }
+                true
+            }
+            parent()
+        }
+        fn run() -> bool { outer(false) }
+    ";
+    let package = compile(source).unwrap();
+    assert_input_count(&package, "parent", 0);
+    assert_input_count(&package, "unused", 1);
+    assert_eq!(run(source), Value::Bool(true));
+}
+
+#[test]
+fn signature_domains_and_inherited_proof_inputs_survive_selection() {
+    let source = "
+        fn outer(value: T) -> bool
+        where T, requires T == bool
+        {
+            fn domain_only(input: T) -> bool { true }
+            fn proof_only() -> bool { true }
+            domain_only(value) and proof_only()
+        }
+        fn run() -> bool { outer<bool>(true) }
+    ";
+    let package = compile(source).unwrap();
+    assert_input_count(&package, "domain_only", 1);
+    assert_input_count(&package, "proof_only", 1);
+    assert_eq!(run(source), Value::Bool(true));
+    let failure = compile(&source.replace("outer<bool>(true)", "outer<u8>(7)")).unwrap_err();
+    assert!(!failure.contains("parsing failed"), "{failure}");
+    assert!(
+        failure.contains("requirement") || failure.contains("constraint"),
+        "{failure}"
     );
 }

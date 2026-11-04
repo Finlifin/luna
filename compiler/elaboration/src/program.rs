@@ -476,6 +476,7 @@ fn elaborate_with_attributes(
         partial_staged_bindings: BTreeMap::new(),
         lexical_input_domains: BTreeMap::new(),
         lexical_input_plans: BTreeMap::new(),
+        lexical_dependency_steps: 1_000_000,
         callable_type_inputs: BTreeMap::new(),
         callable_value_inputs: BTreeMap::new(),
         value_input_bindings: BTreeMap::new(),
@@ -1662,6 +1663,7 @@ struct Checker<'a, 'h> {
     partial_staged_bindings: BTreeMap<n::LocalId, std::sync::Arc<constants::PartialStagedValue>>,
     lexical_input_domains: BTreeMap<DeclarationId, Term>,
     lexical_input_plans: BTreeMap<OwnerId, lexical_inputs::LexicalInputPlan>,
+    lexical_dependency_steps: usize,
     callable_type_inputs: BTreeMap<n::LocalId, Option<Term>>,
     callable_value_inputs: BTreeMap<n::LocalId, (Term, Term)>,
     // Ordinary comptime values retain both their bound identity and domain.
@@ -6648,7 +6650,7 @@ impl Checker<'_, '_> {
                         )
                     })
                     .map_err(|e| error(expr.span, e.to_string()))?;
-                value.rewrite_types(&mut |ty| self.callable_input_view(ty, expr.span))?;
+                value.rewrite_types(&mut |ty| self.callable_argument_term_view(ty, expr.span))?;
                 arguments.push(n::CallArgument {
                     passing: Default::default(),
                     parameter,
@@ -7076,16 +7078,8 @@ impl Checker<'_, '_> {
                     value
                         .rewrite_types(&mut |ty| call_binding.substitute(ty))
                         .map_err(|e| error(expr.span, e.to_string()))?;
-                    value.rewrite_types(&mut |ty| {
-                        // The traversal includes clause value terms as well as
-                        // annotations. A pending value is not a Type projection;
-                        // the selected comptime instance supplies it at invocation.
-                        if ty.sort() == Sort::Type {
-                            self.callable_input_view(ty, expr.span)
-                        } else {
-                            self.copy_alias_type(ty, expr.span)
-                        }
-                    })?;
+                    value
+                        .rewrite_types(&mut |ty| self.callable_argument_term_view(ty, expr.span))?;
                     value
                 };
                 arguments.push(n::CallArgument {

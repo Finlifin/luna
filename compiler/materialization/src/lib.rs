@@ -813,14 +813,15 @@ impl Builder<'_> {
         self.queue.push_back(Task::Type(function.signature.clone()));
         if self.instances.is_none()
             && matches!(function.signature.callable_signature(),Term::Function {parameters,..}
-                if parameters.iter().any(|parameter|parameter.sort==nir::Sort::Type))
+                if parameters.iter().any(|parameter|parameter.sort!=nir::Sort::Runtime))
         {
             if !self.retain_templates {
                 return Err(
-                    "requested dispatch function still requires ordinary Type input staging".into(),
+                    "requested dispatch function still requires ordinary invocation input staging"
+                        .into(),
                 );
             }
-            // An ordinary Type input is an invocation binder, not a closed
+            // An ordinary staged input is an invocation binder, not a closed
             // dispatch identity. Keep the template and its contracts in NIR;
             // input staging checks/materializes them after binding arguments.
             return Ok(());
@@ -2292,7 +2293,7 @@ impl Builder<'_> {
         }
         if self.instances.is_none()
             && matches!(&ty,Term::Function {parameters,..}
-                if parameters.iter().any(|parameter|parameter.sort==nir::Sort::Type))
+                if parameters.iter().any(|parameter|parameter.sort!=nir::Sort::Runtime))
         {
             // Do not enqueue a dependent child outside the telescope that
             // binds it. Validate the complete retained callable view instead;

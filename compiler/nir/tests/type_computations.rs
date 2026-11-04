@@ -1074,3 +1074,41 @@ fn signature_fragment_copy_budget_does_not_certify_its_enclosing_scope() {
     assert_eq!(fields.last(), Some(&outer));
     assert!(fields[..20].iter().all(|field| field == &arguments[0]));
 }
+
+#[test]
+fn lexical_observation_reads_opaque_arguments_in_all_sorts_with_a_budget() {
+    use nir::type_computations::rigid_declarations_bounded;
+    let ty = DeclarationId {
+        package: 3,
+        local: 1,
+    };
+    let value = DeclarationId {
+        package: 3,
+        local: 2,
+    };
+    let term = Term::NormalForm {
+        head: target(),
+        arguments: vec![
+            Term::Rigid {
+                declaration: ty,
+                sort: Sort::Type,
+            },
+            Term::Rigid {
+                declaration: value,
+                sort: Sort::ComptimeValue,
+            },
+        ],
+        sort: Sort::Type,
+    };
+    let mut found = std::collections::BTreeSet::new();
+    assert_eq!(
+        rigid_declarations_bounded(&term, &mut 0, &mut found),
+        Err(Error::Budget)
+    );
+    assert!(found.is_empty());
+    rigid_declarations_bounded(&term, &mut 100, &mut found).unwrap();
+    assert_eq!(found, [ty, value].into_iter().collect());
+    // The opaque declaration head is an identity, not a free input or a body
+    // to invoke while observing the supplied argument structure.
+    assert!(!found.contains(&target()));
+}

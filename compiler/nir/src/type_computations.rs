@@ -529,6 +529,20 @@ pub fn has_rigid_parameters_bounded(root: &Term, fuel: &mut usize) -> Result<boo
     Ok(found)
 }
 
+/// Observe declaration inputs structurally without cloning terms or unfolding
+/// opaque heads. The caller must discard the partial set if observation fails.
+pub fn rigid_declarations_bounded(
+    root: &Term,
+    fuel: &mut usize,
+    declarations: &mut BTreeSet<DeclarationId>,
+) -> Result<(), Error> {
+    visit_expanded_term(root, fuel, 128, &BTreeMap::new(), &mut |term| {
+        if let Term::Rigid { declaration, .. } = term {
+            declarations.insert(*declaration);
+        }
+    })
+}
+
 /// Collect nominal identities mentioned structurally, without unfolding opaque
 /// normal-form heads or substituting open parameters. The walk is budgeted.
 pub fn nominal_declarations_bounded(

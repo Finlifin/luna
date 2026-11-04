@@ -1,10 +1,11 @@
 //! Shared lexical input plans for declaration formation and caller supply.
 use super::*;
+mod dependencies;
 
 /// The implicit prefix of a local declaration's clause telescope. This is
 /// checker-local metadata over immutable HIR, not a persisted dependency summary.
-/// Selection still conservatively retains the enclosing telescope; precise
-/// dependency and proof closure must replace selection at this single producer.
+/// Select from the complete lexical scope using declaration-rooted reads,
+/// referenced declarations, inherited premises and input-domain prerequisites.
 #[derive(Clone, Default)]
 pub(super) struct LexicalInputPlan {
     inputs: Vec<LexicalInput>,
@@ -107,35 +108,93 @@ impl Checker<'_, '_> {
             return Ok(LexicalInputPlan::default());
         };
         self.ensure_signature(parent, span)?;
-        let parameters = self.type_parameters[&parent]
-            .iter()
-            .copied()
-            .chain(self.nominal_capture_ids(parent))
-            .collect::<Vec<_>>();
-        let mut inputs = self
-            .input_binders(&parameters)
-            .into_iter()
-            .map(|binder| LexicalInput {
-                declaration: binder.declaration,
-                sort: binder.sort,
-                supply: LexicalSupply::Declaration,
-            })
-            .collect::<Vec<_>>();
-        let staged = self.lexical_staged_inputs(parent, span)?;
-        for (binding, declaration, sort, _) in &staged {
-            if !inputs.iter().any(|input| input.declaration == *declaration) {
-                inputs.push(LexicalInput {
-                    declaration: *declaration,
-                    sort: *sort,
-                    supply: LexicalSupply::Staged(*binding),
-                });
+        // Scope availability and a declaration's captured prefix are distinct.
+        // An unused nested helper may read an ancestor that its parent does not
+        // itself capture; a caller of that helper acquires the dependency through
+        // the declaration-reference closure.
+        let mut ancestors = Vec::new();
+        let mut seen = BTreeSet::new();
+        let mut cursor = parent;
+        loop {
+            if !seen.insert(cursor) {
+                return Err(error(span, "cyclic lexical declaration ownership"));
+            }
+            ancestors.push(cursor);
+            let Some(next) = self.package.lexical_parents.get(&cursor).copied() else {
+                break;
+            };
+            cursor = next;
+        }
+        let mut inputs = Vec::<LexicalInput>::new();
+        let mut staged_domains = BTreeMap::new();
+        for parent in ancestors.into_iter().rev() {
+            let parameters = self.type_parameters[&parent]
+                .iter()
+                .copied()
+                .chain(self.nominal_capture_ids(parent))
+                .collect::<Vec<_>>();
+            for binder in self.input_binders(&parameters) {
+                if !inputs
+                    .iter()
+                    .any(|input| input.declaration == binder.declaration)
+                {
+                    inputs.push(LexicalInput {
+                        declaration: binder.declaration,
+                        sort: binder.sort,
+                        supply: LexicalSupply::Declaration,
+                    });
+                }
+            }
+            for (binding, declaration, sort, domain) in self.lexical_staged_inputs(parent, span)? {
+                if !inputs.iter().any(|input| input.declaration == declaration) {
+                    inputs.push(LexicalInput {
+                        declaration,
+                        sort,
+                        supply: LexicalSupply::Staged(binding),
+                    });
+                }
+                staged_domains.insert(declaration, domain);
             }
         }
-        // Publish domain metadata only after every staged domain was formed.
-        // The existing declaration-domain index remains its single authority.
-        for (_, declaration, _, domain) in staged {
-            self.lexical_input_domains.insert(declaration, domain);
-        }
+        let mut fuel = self.lexical_dependency_steps;
+        let selected = (|| {
+            let mut needed = dependencies::collect(self, owner, &mut fuel, span)?;
+            let mut observed = BTreeSet::new();
+            loop {
+                let mut changed = false;
+                for input in &inputs {
+                    fuel = fuel.checked_sub(1).ok_or_else(|| {
+                        error(span, "lexical input domain dependency budget exhausted")
+                    })?;
+                    if !needed.contains(&input.declaration) || !observed.insert(input.declaration) {
+                        continue;
+                    }
+                    changed = true;
+                    let domain = staged_domains
+                        .get(&input.declaration)
+                        .cloned()
+                        .or_else(|| self.trait_input_domain(input.declaration));
+                    if let Some(domain) = domain {
+                        nir::type_computations::rigid_declarations_bounded(
+                            &domain,
+                            &mut fuel,
+                            &mut needed,
+                        )
+                        .map_err(|e| error(span, e.to_string()))?;
+                    }
+                }
+                if !changed {
+                    break;
+                }
+            }
+            Ok::<_, Error>(needed)
+        })();
+        self.lexical_dependency_steps = fuel;
+        let needed = selected?;
+        inputs.retain(|input| needed.contains(&input.declaration));
+        // Domain metadata describes available lexical binders, including inputs
+        // required only by descendants. Publish it after observation succeeds.
+        self.lexical_input_domains.extend(staged_domains);
         let plan = LexicalInputPlan { inputs };
         self.lexical_input_plans.insert(owner, plan.clone());
         Ok(plan)

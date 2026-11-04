@@ -66,8 +66,9 @@ Unresolved 应区分预算、未支持片段、缺少前提、歧义和不允许
 
 ## 4. 精确词法输入分析
 
-当前 `program.rs::ensure_signature` 把父 type_parameters/captures 和 staged inputs
-保守加入局部声明，`lexical_function_arguments` 随之供应这些输入。
+审计基线的 `program.rs::ensure_signature` 把父 type_parameters/captures 和 staged inputs
+保守加入局部声明，`lexical_function_arguments` 随之供应这些输入。§5.4 已接通声明根依赖选择；
+下面仍是完整目标协议，不能把首步结构观察等同于全部 proof/world 迁移。
 `program/lexical_inputs.rs` 能提升部分输入域，也明确诊断缺少 invocation environment。
 新分析必须替换这些生产行为，而不是加一张只供 dump 的“精确依赖表”。
 
@@ -242,7 +243,7 @@ staged 域形成后才登记；签名构造失败时移除该声明的计划。�
 提供，没有另建一份可修改的域真相。递归调用仍优先使用已捕获输入，不把父函数的
 Bound 槽解释为当前函数的参数槽；模板克隆后按新身份重新生产计划。
 
-这是输入生产/供应协议的第一步，不是精确依赖完成：选择器仍保留全部外围输入，
+在 `15645a0e` 中，这是输入生产/供应协议的第一步：选择器当时保留全部外围输入，
 外围契约仍整体继承，required 的输入准备和 VM 准入没有放宽。§5.1 的正确正例仍
 保留 ignore；后续需在该单一生产入口接通实际引用、域与证明前提、间接调用和递归
 闭包。当前计划不是可持久化的依赖摘要，也没有实现跨 world 的缓存失效协议。
@@ -299,8 +300,8 @@ ApplicationError 会混合部分工作量限制与 InputType，不能仅凭剩�
 值准入时须替换带 Option/bool 回调的失败协议，明确 Budget/Unknown/Invalid 后一起
 迁移消费者，不能只改错误文本。该适配分支及 Tuple/List 的旧 Role 检查尚未退役。
 
-这项接线解决信息丢失，不等于 §4 的精确依赖选择已实现；默认 helper 正例继续保留
-ignore，不能将它改成一个期望拒绝的语言测试。
+`0d6ba379` 的这项接线解决信息丢失，当时尚未实现 §4 的依赖选择；默认 helper 正例
+当时保留 ignore，没有改成期望拒绝。当前实现见 §5.4。
 
 移除插桩后，用生产诊断重跑同一正例仍退出 101，已输出 slot 0、声明 `(0, 4)`、
 value 阶段和上述原始原因；证据为 `/tmp/luna-tools-8curxt4h/result.json` 及 stdout.log。
@@ -315,6 +316,56 @@ value 阶段和上述原始原因；证据为 `/tmp/luna-tools-8curxt4h/result.j
 BodyId 引用。不能把扁平节点索引当作完整 HIR 遍历。后续从声明/主体实际根进入结构
 遍历，分别处理域、默认、契约、属性、模式和已选择的调用/证明依赖；单扫函数体或
 节点索引都不能作为删除隐式输入的充分依据。
+
+### 5.4 声明根依赖选择与调用闭包已接通
+
+`lexical_inputs/dependencies.rs` 从声明签名、实际 BodyId、默认值、属性、契约、模式及
+代码上下文进入 HIR；不依赖模板克隆后不完整的 OwnerNodes。以声明身份收集输入，
+沿局部声明引用建立边，分 owner 扣除源码声明的 binder 后传播自由输入。互递归通过
+单调工作列表闭合；callee 的显式输入由 caller 的实参表达式提供，不能因为复用了声明
+身份就把另一次 invocation 的形参误算成 caller 的外层捕获。
+
+局部声明出现本身不等于调用：未引用 helper 的主体不强迫 parent 捕获。选择器从完整
+祖先作用域取得候选，而不是仅从 parent 已捕获的前缀取得候选，所以未使用的 descendant
+仍可独立检查自己的外层输入。选择结果继续闭合每个输入域中的 rigid 前置依赖，保留
+原 telescope 次序；显式参数和子句不参与删除。生产签名与调用供应继续使用同一个计划。
+普通值参数与 Type 参数使用相同观察机制，NF 头没有展开。
+
+观察与传播共享有界计数，表达式按 owner/节点身份去重；缺失接口、未形成来源或预算
+耗尽返回错误，不登记空计划或部分计划。域元数据和选择计划只在观察成功后发布。
+该计数目前为每个 checker 一百万步，尚未接入可配置的统一查询预算；大工程规模成本
+尚未测量，不能承诺分析线性或任意输入都在此预算内完成。
+
+真实 sysroot 回归恢复了原先 ignored 的默认 helper 正例，并检查 NIR 输入数量和执行：
+无用外层输入被删除、显式未用子句保留、callee 形参不污染外层捕获、互递归传播、域前置
+依赖、仅默认值引用的输入、未调用 descendant 的独立作用域，以及三层递归的 staged
+Type/值身份。相关调用接线还统一了两条默认参数路径对 Type/普通值的区分；dispatch
+保留 invocation 模板时同时识别 Type 和普通 comptime 参数，不提前物化未绑定的槽。
+
+这仍不是完整的按已选证明切片：外围契约和局部 impl/derive 的检查环境保守保留，
+尚未区分用途、控制条件或形成可跨 world 复用的稳定摘要；输入供应仍使用现有协议。
+它修复实际声明和调用的隐式前缀，但不能称为整套依赖/TypeRef/发布架构已经完成。
+
+新增 staged 默认值正例暴露了另一处既有缺口：将外层 invocation 参数复制到默认表达式
+时，当前路径把 Bound 值塞进 `K::ComptimeValue`，违反该节点的冻结表示约束。临时恢复
+全量捕获后问题仍存在（`/tmp/luna-tools-p4qdb0an/result.json`）；统一 Type/值规范化后，
+正确的拒绝变成 `captured comptime value contains an unbound invocation slot`
+（`/tmp/luna-tools-q43h17at/result.json`）。不能放宽冻结值验证来接受活动槽；后续需要在
+默认表达式重绑定时恢复正确的 caller 值读取。正例保留为
+`staged_default_reads_require_caller_value_reification`，暂时显式 ignore；它不是已交付能力，
+也没有改成期望拒绝。上述临时插桩和全量捕获对照已移除。
+
+本阶段命令均从 `/home/fin/luna` 运行，包含工作区原有资源分析改动；没有执行全量或
+native 验收。受影响检查及本机证据如下：
+
+| 检查 | 结果与证据 |
+| --- | --- |
+| `python3 -B development/check.py --timeout 900 -- test -p luna --test function_template_local_definitions --test comptime_clause_inputs` | 退出 0；局部定义 16 通过、上述 staged 默认正例 1 ignored，子句输入 46 通过；`/tmp/luna-tools-4_j_atwe/result.json` |
+| 同一局部定义入口过滤 `signature_domains_and_inherited_proof_inputs_survive_selection` | 追加的域/继承前提正例及不满足前提的拒绝例通过；退出 0；`/tmp/luna-tools-_6k_fgg7/result.json` |
+| `python3 -B development/check.py --timeout 900 -- test -p luna --test scoped_comptime_callables --test staged_invocation_reuse --test function_type_dependencies` | 退出 0；20、4、39 项分别通过；`/tmp/luna-tools-px47d9fc/result.json` |
+| `python3 -B development/check.py --timeout 900 -- test -p nir --test type_computations` | 退出 0；16 通过，包括普通值/Type 参数的有界观察和 opaque head 身份；`/tmp/luna-tools-zj3ed0_5/result.json` |
+| 局部定义入口过滤 `staged_default_reads_require_caller_value_reification -- --ignored` | 当前生产代码仍退出 101，原因仍为冻结值包含 invocation 槽；`/tmp/luna-tools-nkj5a52f/result.json`，不是通过证据 |
+| 修改过的 Rust 文件 `rustfmt --check` | 退出 0；完整命令见 `/tmp/luna-tools-mk3pubm6/result.json` |
 
 ## 6. 接口生产必须有可观察前缀
 
