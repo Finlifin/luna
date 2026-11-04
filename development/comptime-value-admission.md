@@ -838,10 +838,13 @@ HIR 上触发调用依赖映射耗尽，再给足预算完成编译及调用准�
 
 - [待定 Type 捕获](repros/pending-type-closure-annotation.fl)需要共同上下文表达式
   保存待定域、捕获和主体义务，不能伪造完整 Type。
-- [具名函数类型的动态域](repros/computed-named-callable-annotation.fl)仍走静态
-  telescope 检查，会过早取得局部闭包结果；不能把参数名删掉作为实现。
-- [NF 参数中的局部闭包](repros/closure-nf-annotation-arithmetic.fl)在当前准备
-  路径先报不可用局部输入，尚未走到完整范围证明；期望仍是定义侧算术拒绝。
+- 真正依赖自身参数 binder、同时又要计算外部动态域的 callable telescope，仍需
+  统一带作用域的 Type 值构造；不能伪造参数域，也不能删除真实的参数引用。
+
+之前列为缺口的两个复现已分别纳入回归：[具名但无自身参数依赖的动态函数类型](repros/computed-named-callable-annotation.fl)
+现在通过；[NF 参数中的局部闭包算术](repros/closure-nf-annotation-arithmetic.fl)
+已在上一阶段完整依赖接线后给出预期的范围证明错误，补充验证据此纠正旧状态。
+后者还有守卫成立和 255 边界的正例，且仍拒绝以 bool 替代 Index<10>，没有展开 NF 头。
 
 `signature_inputs_ready` 的其他 readiness 消费者，以及描述器中其他
 `describable_open_type` 用途尚未退役。完整 ContextualExpr/ArgumentPlan、动态
@@ -849,12 +852,39 @@ callable telescope 和 scoped delivered term 的映射仍需后续接通。具�
 [待定闭包设计](values-staging-and-publication.md#待定闭包需要保留可调用证据与主体不能伪造完整函数类型)。
 
 
-当前接线在 `/home/fin/luna` 使用 `development/check.py --timeout 900 -- test
--p luna` 验证：开放函数、标注行为、观察预算、comptime 子句、局部模板和普通收集器
-六组 500 项通过，证据 `/tmp/luna-tools-zxmjpoy8/result.json`；名义输入、CMTT
-类型输入、函数类型依赖、两类 NF 输入计划及展开六组 481 项通过，证据
-`/tmp/luna-tools-0c8k_mfz/result.json`。两轮均退出 0；2 项既有 ignored 和
-memoized value-indexed key 的 1 项显式 skip 未解除。四个修改的独立 Rust 文件
-rustfmt check 通过，旧大文件保持局部排版；`git diff --check` 通过。
-未运行全 workspace、native 或性能基准。正式 docs 与原有受保护修改未动；提交
-范围、原始来源和本机检查记录在 `/tmp/luna-signature-structure-0lp1k08n`。
+### 函数类型构造按 binder 依赖选择路径
+
+旧 `has_named_inputs` 仅看到参数名称就切换到 `type_expr` 的静态 telescope，导致
+`fn(value: Input(flag)) -> Output()` 不能作为普通 comptime Type 值计算，局部闭包
+的输入也会被过早索取。名称不是 callable identity 的组成部分；是否需要为后续
+类型建立参数 binder 才是这两个构造入口的实际差别。
+
+现在 `callable_type_needs_binders` 收集本 telescope 的具名参数身份，利用共同
+`source_may_use_bindings` 观察完整输入及结果表达式。确认没有自身参数依赖后，
+具名输入与位置输入一起生成已有 FunctionType/FunctionResultType 节点，复用静态
+观察及两种 VM 的 callable_types 构造服务。Type 生产者留在原表达式位置，参数
+类型与结果类型按源码顺序计算；命名没有引入第二套求值器，也没有删除原 HIR 名称。
+
+实际引用自身参数，或存在尚未映射的符号依赖时，仍保守使用 binder-aware 路径，
+保留 telescope 顺序、嵌套作用域、comptime 参数 sort、执行阶段及 unsafe 责任。
+不把“观察失败”当作无依赖证据；候选扫描和源码观察均消耗 preparation 预算。
+这尚未把真正依赖自身参数的动态 telescope 迁到共同 ContextualExpr，原静态入口
+仍有其明确消费者，不能宣称所有函数类型构造已经统一。
+
+真实 sysroot 测试既覆盖具名闭包标注的直接/推断调用，也检查执行轨迹：Build 的
+输入 Type 生产者失败时，结果 Type 生产者不执行；同一 VM 重试后严格按 Build、
+Input、Output 各一次完成，并与普通函数类型相等。树引擎和字节码引擎均验证。
+原函数类型依赖组继续检查嵌套 binder、依赖值索引、阶段及 unsafe 边界；新预算
+用例在同一 HIR 上耗尽后重新检查，不复用失败的无依赖结论。
+
+
+当前在 `/home/fin/luna` 通过 `development/check.py --timeout 900 -- test -p luna`
+检查：开放函数、标注行为、观察预算及局部模板四组 433 项通过，证据
+`/tmp/luna-tools-xtldocsm/result.json`；函数类型依赖、comptime 子句、名义参数、
+CMTT 类型输入及两类 NF 计划六组 435 项通过，证据
+`/tmp/luna-tools-f2kn4pfq/result.json`。均退出 0；本次覆盖中的 1 项既有 ignored
+及 memoized value-indexed key 的 1 项显式 skip 未解除。五个修改的 Rust 文件
+rustfmt check 退出 0，证据 `/tmp/luna-tools-9dyomqdw/result.json`；
+`git diff --check` 通过。没有执行全 workspace、native 或性能基准。
+正式 docs 与原有受保护修改未动，范围与本机证据在
+`/tmp/luna-nf-closure-region-5x1w2vx7`。

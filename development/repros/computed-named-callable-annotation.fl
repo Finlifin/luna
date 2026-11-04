@@ -1,7 +1,7 @@
 {-
     Intended positive example: a named callable parameter can receive a Type
-    computed by a local closure. The current static callable telescope tries
-    to invoke choose before its local binding has been prepared.
+    computed by a local closure. The parameter name is not referenced by later
+    types, so construction uses ordinary Type values without early invocation.
 -}
 fn identity(value: bool) -> bool { value }
 

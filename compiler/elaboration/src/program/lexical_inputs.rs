@@ -103,16 +103,27 @@ impl Checker<'_, '_> {
         if inputs.is_empty() {
             return Ok(false);
         }
-        let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-        let mut fuel = before;
-        let result = dependencies::expression_may_use_inputs(
-            self,
+        self.source_may_use_bindings(
             self.signature_owner
                 .ok_or_else(|| error(value.span, "annotation has no definition owner"))?,
             value,
             inputs,
-            &mut fuel,
-            value.span,
+        )
+    }
+
+    pub(super) fn source_may_use_bindings(
+        &mut self,
+        owner: OwnerId,
+        value: &Expr<'_>,
+        inputs: &BTreeSet<n::LocalId>,
+    ) -> Result<bool, Error> {
+        if inputs.is_empty() {
+            return Ok(false);
+        }
+        let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let mut fuel = before;
+        let result = dependencies::expression_may_use_inputs(
+            self, owner, value, inputs, &mut fuel, value.span,
         );
         self.required_steps -= (before - fuel) as u64;
         result

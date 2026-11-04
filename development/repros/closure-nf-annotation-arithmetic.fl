@@ -1,7 +1,7 @@
 {-
     This definition must reject n + 1 for lacking a range proof, even without
-    any invocation. Currently preparation reports an unavailable local closure
-    before the full annotation behavior reaches the arithmetic checker.
+    any invocation. This regression now reaches the full annotation arithmetic
+    checker; a missing-capture error must not replace the range obligation.
 -}
 pure comptime fn Index<n: u8> -> Type { bool }
 

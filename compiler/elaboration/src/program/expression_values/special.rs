@@ -510,7 +510,7 @@ impl Checker<'_, '_> {
                 }
             }
         }
-        if function_types::has_named_inputs(expr) {
+        if self.callable_type_needs_binders(expr)? {
             let value = self.type_expr(expr)?;
             if let Some(expected) = expected {
                 self.require_expression(&p(P::Type), expected, expr.span)?;
@@ -705,7 +705,9 @@ impl Checker<'_, '_> {
                             "function type parameter protocols are not implemented",
                         ));
                     }
-                    let TyParamKind::Positional(value) = parameter.kind else {
+                    let (TyParamKind::Positional(value)
+                    | TyParamKind::PositionalDependencyCatched(_, value)) = parameter.kind
+                    else {
                         return Err(error(
                             expr.span,
                             "function type parameter form is not implemented",

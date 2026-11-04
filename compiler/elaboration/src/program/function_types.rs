@@ -17,21 +17,40 @@ pub(super) fn normal_form_inputs<'a, 'h>(
     }
 }
 
-pub(super) fn has_named_inputs(expr: &Expr<'_>) -> bool {
-    let input = if let H::TyFnArrow(input, _) = &expr.kind {
-        *input
-    } else {
-        expr
-    };
-    match &input.kind {
-        H::TyFn(inputs) | H::TyComptimeFn(inputs) | H::TyModifiedFn(_, inputs) => inputs
-            .iter()
-            .any(|input| matches!(input.kind, TyParamKind::PositionalDependencyCatched(..))),
-        _ => false,
-    }
-}
-
 impl Checker<'_, '_> {
+    /// A name is not part of callable identity. Only actual references to this
+    /// telescope require its binders during construction; outer Type values
+    /// otherwise use the ordinary executable callable constructors.
+    pub(super) fn callable_type_needs_binders(&mut self, expr: &Expr<'_>) -> Result<bool, Error> {
+        let input = if let H::TyFnArrow(input, _) = expr.kind {
+            input
+        } else {
+            expr
+        };
+        let (H::TyFn(parameters) | H::TyComptimeFn(parameters) | H::TyModifiedFn(_, parameters)) =
+            input.kind
+        else {
+            return Ok(false);
+        };
+        self.required_steps = self
+            .required_steps
+            .checked_sub(parameters.len() as u64)
+            .ok_or_else(|| {
+                error(
+                    expr.span,
+                    "callable dependency observation budget exhausted",
+                )
+            })?;
+        let bindings = parameters
+            .iter()
+            .filter_map(|parameter| {
+                matches!(parameter.kind, TyParamKind::PositionalDependencyCatched(..))
+                    .then_some(local(parameter.hir_id))
+            })
+            .collect();
+        self.source_may_use_bindings(expr.hir_id.owner, expr, &bindings)
+    }
+
     pub(super) fn computed_callable_type(
         &mut self,
         inputs: Vec<Term>,

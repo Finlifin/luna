@@ -172,3 +172,16 @@ fn invocation_dependency_selection_exhaustion_preserves_fresh_attempts() {
         4096,
     );
 }
+
+#[test]
+fn callable_binder_observation_exhaustion_preserves_recovery() {
+    check_source_observation(
+        "typealias Type = .Type'builtin;
+        comptime fn Input(flag: bool) -> Type { if flag { bool } else { bool } }
+        comptime fn Build(flag: bool) -> Type { fn(value: Input(flag)) -> bool }
+        const signature = Build(true);
+        fn run() -> bool { true }",
+        "callable dependency observation budget exhausted",
+        4096,
+    );
+}
