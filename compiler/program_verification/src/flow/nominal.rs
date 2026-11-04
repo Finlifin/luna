@@ -1,5 +1,15 @@
 //! Nominal shapes come from package declarations, never inferred from payloads.
 use super::*;
+
+fn field_instantiation_failure(error: nir::type_computations::Error) -> Reason {
+    match error {
+        nir::type_computations::Error::Budget => {
+            Reason::Unknown(comptime_runtime::Error::BudgetExhausted.into())
+        }
+        _ => Reason::InvalidSignature,
+    }
+}
+
 impl Walker<'_> {
     pub(super) fn place_fields(
         &mut self,
@@ -110,30 +120,20 @@ impl Walker<'_> {
                 .iter()
                 .find(|d| d.declaration == expected)
                 .ok_or(Reason::InvalidSignature)?;
-            Term::Tuple(Vec::new())
-                .instantiate_types_in_scope(
-                    &definition.type_parameters,
-                    arguments,
-                    &self.input_frames,
-                )
-                .map_err(|_| Reason::InvalidSignature)?;
             let fields = &definition
                 .variants
                 .get(index)
                 .ok_or(Reason::InvalidSignature)?
                 .fields;
-            self.limits.step(fields.len())?;
-            fields
-                .iter()
-                .map(|ty| {
-                    ty.instantiate_types_in_scope(
-                        &definition.type_parameters,
-                        arguments,
-                        &self.input_frames,
-                    )
-                    .map_err(|_| Reason::InvalidSignature)
-                })
-                .collect()
+            nir::declaration_fields::instantiate(
+                &definition.type_parameters,
+                &definition.parameter_types,
+                arguments,
+                fields.iter(),
+                &self.input_frames,
+                &mut self.limits.arithmetic.steps,
+            )
+            .map_err(field_instantiation_failure)
         } else {
             self.limits.step(package.structs.len())?;
             let definition = package
@@ -141,11 +141,13 @@ impl Walker<'_> {
                 .iter()
                 .find(|d| d.declaration == expected)
                 .ok_or(Reason::InvalidSignature)?;
-            self.limits.step(definition.fields.len())?;
             definition
-                .instantiate_fields_in_scope(arguments, &self.input_frames)
-                .map(|fields| fields.into_iter().map(|(_, ty)| ty).collect())
-                .map_err(|_| Reason::InvalidSignature)
+                .instantiate_stored_fields(
+                    arguments,
+                    &self.input_frames,
+                    &mut self.limits.arithmetic.steps,
+                )
+                .map_err(field_instantiation_failure)
         }
     }
 }

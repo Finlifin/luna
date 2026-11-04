@@ -1289,7 +1289,8 @@ Struct／Enum 的 `instantiate_stored_fields` 仅交付字段类型，不复制�
 值准入的选中变体查询继续只代入选中字段，两种选择共用核心而不互相替代。
 
 NIR runtime／comptime 存储检查、VM 源声明存储检查，以及生成器的数据检查均已
-替换原来的无界命名字段／变体实例化路径。VM 的具体 IIR 路径继续观察保留的实例，
+替换原来的无界命名字段／变体实例化路径。程序流分析的 struct 字段及选中 enum
+载荷查询也已接入该核心，直接使用 flow 的共享工作预算。VM 的具体 IIR 路径继续观察保留的实例，
 不重新应用源声明参数。形成 predicate、目标布局、资源权利与缓存准入仍由各自
 消费者负责，取得字段类型不能代替这些检查。
 
@@ -1316,3 +1317,31 @@ NIR runtime／comptime 存储检查、VM 源声明存储检查，以及生成器
   `/tmp/luna-tools-yhr9c8na/result.json`。覆盖实际消费者和真实 sysroot 调用模板。
 
 未运行全 workspace、native 或性能基准；正式 docs 和原有工作区修改保持不变。
+
+
+程序流分析原先用 `instantiate_types_in_scope` 代入 enum，隐含所有声明参数均为
+Type；这与 struct 的普通值参数支持不一致。合法的 `Choice<bool, true>` 在显式
+`flow::analyze_in_package` 中被拒绝为 InvalidSignature，改动前复现证据为
+`/tmp/luna-tools-gt2m6elt/result.json`（退出 101）。现在按声明 parameter_types
+进行通用代入，选中空变体也核验完整参数帧；struct 路径则直接取得字段类型，
+不复制随后丢弃的名称。此查询不提供程序事实或调用 PTC 来证明内存规格。
+
+flow 接收端将代入 Budget 映射为 Unknown(Arithmetic(BudgetExhausted))，真正的
+域／scope 错误映射为 InvalidSignature。新增源码用例覆盖实际分析入口、递增
+预算直到默认上限内成功、伪造声明参数域拒绝、失败后恢复和 IIR 执行结果。
+测试没有假设完整流分析必须在固定 5000 单位预算内结束；初次该假设不成立，
+`/tmp/luna-tools-if3w06a_` 退出 101。最初测试调用 unwrap_err 要求成功值 Report
+实现 Debug，编译失败于 `/tmp/luna-tools-pvn7y8wb`；改用显式取得错误，未扩大生产 API。
+
+验证目录 `/home/fin/luna`，入口 `python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p luna --test nominal_value_parameters program_flow_accepts_enum_value_indices_and_preserves_query_failures
+  -- --exact`：1 通过，退出 0；`/tmp/luna-tools-ajgr8op1/result.json`。
+- `-p program_verification --test verification --test memory_type_budget --test associated_resources
+  --no-fail-fast`：5 通过，退出 0；`/tmp/luna-tools-37vysx26/result.json`。
+- `-p luna --test nominal_value_parameters --test newtypes --test nominal_staging
+  --test invocation_value_templates --no-fail-fast`：535 通过，退出 0；
+  `/tmp/luna-tools-01zlbjae/result.json`。包含真实 sysroot 调用模板与相关流分析回归。
+
+未运行全 workspace、native 或性能基准。materialization、cleanup 和覆盖检查等
+仍有需要完整字段或分支元数据的旧消费者，不能据此宣称全链路布局迁移完成。

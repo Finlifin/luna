@@ -6847,3 +6847,59 @@ fn contextual_data_calls_supply_generator_arguments_with_dependent_domains() {
     let wrong = source.replace("let value:Tagged<Type,bool>", "let value:Tagged<Type,Type>");
     assert!(support::compile_with_tuple_protocols(&wrong, &Default::default()).is_err());
 }
+
+#[test]
+fn program_flow_accepts_enum_value_indices_and_preserves_query_failures() {
+    use elaboration::verification::{Limits, Unknown, flow};
+    let source = "enum Choice where T,enabled:bool {none,some(T)}
+        fn read(value:Choice<bool,true>)->bool {
+            value match {.none=>false,.some(payload)=>payload}
+        }
+        fn run()->bool {read(.some(true))}";
+    let package = support::compile(source);
+    let read = package
+        .functions
+        .iter()
+        .find(|function| function.name == "read")
+        .unwrap();
+    flow::analyze_in_package(&package, read, &mut Limits::default()).unwrap();
+    let maximum = Limits::default().arithmetic.steps;
+    let mut allowance = 0;
+    loop {
+        let mut limits = Limits::default();
+        limits.arithmetic.steps = allowance;
+        match flow::analyze_in_package(&package, read, &mut limits) {
+            Ok(_) => break,
+            Err(error) => assert!(
+                matches!(
+                    error.reason,
+                    flow::Reason::Unknown(Unknown::Arithmetic(
+                        comptime_runtime::Error::BudgetExhausted
+                    ))
+                ),
+                "allowance {allowance}: {error}"
+            ),
+        }
+        assert!(
+            allowance < maximum,
+            "analysis did not recover within its default budget"
+        );
+        allowance = allowance.saturating_mul(2).max(1).min(maximum);
+    }
+    let mut invalid = package.clone();
+    let enumeration = invalid
+        .enums
+        .iter_mut()
+        .find(|definition| definition.name == "Choice")
+        .unwrap();
+    enumeration.parameter_types[1] = nir::Term::Primitive(nir::Primitive::Type);
+    assert_eq!(
+        flow::analyze_in_package(&invalid, read, &mut Limits::default())
+            .err()
+            .unwrap()
+            .reason,
+        flow::Reason::InvalidSignature
+    );
+    flow::analyze_in_package(&package, read, &mut Limits::default()).unwrap();
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+}
