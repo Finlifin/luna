@@ -2521,3 +2521,53 @@ premise 确实安装、未知接口仍拒绝、同内容副本必须支付新检
 所有重复观察。`for_comptime_in_budget` 的构造失败仍保守保留全部 reservation，
 不是精确失败扣款。PTC 的独立 metadata compatibility 入口、其他构造检查的资源
 分类及共享状态所有权仍需继续迁移。
+
+
+### VM 构造的 trait 前提闭包与共享额度
+
+`constructor_premises::expand` 接管 caller-established premises 的继承和 capability
+闭包。初始输入借用，工作队列按批次在分配前预留；键的复制与哈希前检查嵌套 Term，
+替换输入的第二份复制也计费。派生前提通过既有 `Trait::input_substitution` 和
+`DeclarationSubstitution` 的 bounded 接口生成，重复出现的替换载荷按展开结果计费。
+同一前提仍去重，原有 64 层展开上限保持；这些前提不提供方法实现，也不是 NF 展开
+或额外类型等式的依据。
+
+前提队列、声明参数域和后续 trait binder 检查现在共用同一份剩余额度，替代两份
+各自从完整余额起步、构造末尾才合账的计数器。成功构造只扣实际消耗，剩余额度
+交给执行器。后续五处 binder 消费改用 `binders_with_self_checked`，Budget 映射为
+StepsExhausted，结构／scope 错误仍映射为 InvalidCallPlan；不再先转换成 String
+而丢失分类。
+
+前提输入统一建立结构替换也修复了叶节点漏洞：没有父 trait 或 capability 的前提
+以前不会真正检查 Self／实参 sort。现在无论是否有后续边，都检查替换的作用域与
+sort，Type 参数不能接收 bool 值，bool 域可以接收普通 comptime bool 值，Self 必须
+是 Type。这不是完整的值域 admission；scalar range、用户 requirements 和方法
+可用性仍由原来的所属边界负责，不能用结构替换冒充这些证明。
+
+回归覆盖父 trait 与 capability 的不同参数替换、重复前提、重复循环终止、未知
+接口、参数数量／sort 错误、叶节点、宽输入与重复替换载荷。公开
+for_comptime_with_assumptions 在每个不足额度上都应返回 StepsExhausted，精确额度
+则成功；失败后重新构造得到相同闭包，原 Package 不变且没有执行事件。
+
+这一批没有完成构造器的全部预算迁移。具体 implementation 的
+validate_arguments_with_layouts 仍经过 String 错误接口；后续关联项／方法签名及
+world capability 的部分实例化尚未有界，需继续迁移。fresh phase pass 与 VM 构造
+仍未统一预算，失败 reservation 策略保持原状。正式 docs、已有源码与 library
+修改均不属于本次提交范围。
+
+本批在 `/home/fin/luna` 通过统一入口
+`python3 -B development/check.py --timeout 900 -- test` 验证最终源码：
+
+- `-p comptime_interpretor -p elaboration --lib --test instance_budget
+  --test invocation_budget --test generated_normal_forms --no-fail-fast`：645 通过，
+  退出 0；`/tmp/luna-tools-5zxvtjra/result.json`。
+- `-p luna --test trait_phases --test trait_domain_substitution
+  --test dynamic_trait_clauses --test comptime_bytecode_traits --test sysroot_preludes
+  --test library_list_equality --test normal_input_plans --test cmtt_type_inputs
+  --no-fail-fast`：148 通过，退出 0；`/tmp/luna-tools-p_927o_0/result.json`。
+- 修改文件的 rustfmt check：退出 0；`/tmp/luna-tools-j81zmuts/result.json`。
+
+最初的新拒绝例使用了 Integer 不支持的 From 转换，导致
+`/tmp/luna-tools-3vlsuo3s/result.json` 编译失败；改用普通 bool 值检验相同的 sort
+契约，最终检查已覆盖。早期版本的通过记录不替代上述最终源码验证。未跑全
+workspace 或性能基准；之前已记录的其他基线问题没有在本批宣称解决。

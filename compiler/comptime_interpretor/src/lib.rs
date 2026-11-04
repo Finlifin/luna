@@ -24,6 +24,7 @@ mod bit_writeback;
 mod callable_domains;
 mod comptime_domains;
 mod comptime_graph;
+mod constructor_premises;
 mod default_code;
 mod dynamic_instances;
 mod environment;
@@ -1199,20 +1200,8 @@ impl<'a> Interpreter<'a> {
                 }
             }
         }
-        let mut assumed_interfaces = HashSet::new();
-        if assumptions.len() as u64 > budget.steps {
-            return Err(Error {
-                kind: ErrorKind::StepsExhausted,
-                source: None,
-            });
-        }
-        let mut pending: Vec<_> = assumptions
-            .iter()
-            .cloned()
-            .map(|premise| (premise, 0usize))
-            .collect();
-        let mut premise_fuel = budget.steps;
-        let mut trait_parameter_fuel = usize::try_from(budget.steps).unwrap_or(usize::MAX);
+        let initial_trait_fuel = usize::try_from(budget.steps).unwrap_or(usize::MAX);
+        let mut trait_parameter_fuel = initial_trait_fuel;
         let (declaration_parameter_domains, declaration_parameter_sorts) =
             if let Some(index) = &positions {
                 (
@@ -1259,66 +1248,8 @@ impl<'a> Interpreter<'a> {
                 })
                 .collect::<Vec<_>>()
         };
-        while let Some((premise, depth)) = pending.pop() {
-            if depth >= 64 {
-                return Err(Error {
-                    kind: ErrorKind::DepthExhausted,
-                    source: None,
-                });
-            }
-            if premise_fuel == 0 {
-                return Err(Error {
-                    kind: ErrorKind::StepsExhausted,
-                    source: None,
-                });
-            }
-            premise_fuel -= 1;
-            let contract = traits.get(&premise.interface).ok_or_else(invalid)?;
-            if contract.type_parameters.len() != premise.interface_arguments.len() {
-                return Err(invalid());
-            }
-            if !assumed_interfaces.insert((premise.interface_instance(), premise.subject.clone())) {
-                continue;
-            }
-            let parameters = contract
-                .binders_with_self(&mut trait_parameter_fuel)
-                .map_err(|_| invalid())?;
-            let arguments: Vec<_> = std::iter::once(premise.subject.clone())
-                .chain(premise.interface_arguments)
-                .collect();
-            if pending
-                .len()
-                .saturating_add(contract.capabilities.len())
-                .saturating_add(contract.parents.len()) as u64
-                > premise_fuel
-            {
-                return Err(Error {
-                    kind: ErrorKind::StepsExhausted,
-                    source: None,
-                });
-            }
-            for capability in &contract.capabilities {
-                pending.push((
-                    capability
-                        .instantiate_parameters(&parameters, &arguments)
-                        .map_err(|_| invalid())?,
-                    depth + 1,
-                ));
-            }
-            for parent in &contract.parents {
-                let parent = parent
-                    .instantiate_parameters(&parameters, &arguments)
-                    .map_err(|_| invalid())?;
-                pending.push((
-                    nir::program::TraitRequirement {
-                        interface: parent.declaration,
-                        interface_arguments: parent.arguments,
-                        subject: premise.subject.clone(),
-                    },
-                    depth + 1,
-                ));
-            }
-        }
+        let assumed_interfaces =
+            constructor_premises::expand(assumptions, &traits, &mut trait_parameter_fuel)?;
         let mut method_bodies = HashMap::new();
         for interface in traits.values() {
             if interface
@@ -1571,8 +1502,8 @@ impl<'a> Interpreter<'a> {
                     .ty
                     .instantiate_parameters(
                         &contract
-                            .binders_with_self(&mut trait_parameter_fuel)
-                            .map_err(|_| invalid())?,
+                            .binders_with_self_checked(&mut trait_parameter_fuel)
+                            .map_err(constructor_premises::failure)?,
                         &inputs,
                     )
                     .map_err(|_| invalid())?;
@@ -1624,8 +1555,8 @@ impl<'a> Interpreter<'a> {
                     .ty
                     .instantiate_parameters(
                         &contract
-                            .binders_with_self(&mut trait_parameter_fuel)
-                            .map_err(|_| invalid())?,
+                            .binders_with_self_checked(&mut trait_parameter_fuel)
+                            .map_err(constructor_premises::failure)?,
                         &member_inputs,
                     )
                     .map_err(|_| invalid())?;
@@ -1770,8 +1701,8 @@ impl<'a> Interpreter<'a> {
                     .signature
                     .instantiate_parameters(
                         &contract
-                            .binders_with_self(&mut trait_parameter_fuel)
-                            .map_err(|_| invalid())?
+                            .binders_with_self_checked(&mut trait_parameter_fuel)
+                            .map_err(constructor_premises::failure)?
                             .into_iter()
                             .chain(input_binders(&member.type_parameters))
                             .collect::<Vec<_>>(),
@@ -1832,8 +1763,8 @@ impl<'a> Interpreter<'a> {
         for (interface, subject) in worlds.keys().chain(assumed_interfaces.iter()) {
             let contract = traits[&interface.declaration];
             let parameters = contract
-                .binders_with_self(&mut trait_parameter_fuel)
-                .map_err(|_| invalid())?;
+                .binders_with_self_checked(&mut trait_parameter_fuel)
+                .map_err(constructor_premises::failure)?;
             for capability in &contract.capabilities {
                 let capability = capability
                     .instantiate_parameters(
@@ -1884,8 +1815,8 @@ impl<'a> Interpreter<'a> {
         if positions.is_none() {
             for (interface_index, contract) in package.traits.iter().enumerate() {
                 let parameters = contract
-                    .binders_with_self(&mut trait_parameter_fuel)
-                    .map_err(|_| invalid())?;
+                    .binders_with_self_checked(&mut trait_parameter_fuel)
+                    .map_err(constructor_premises::failure)?;
                 for (member_index, member) in contract.methods.iter().enumerate() {
                     method_origins
                         .entry(member.declaration)
@@ -1915,12 +1846,7 @@ impl<'a> Interpreter<'a> {
                 .map(|index| index.method_contracts.clone())
                 .unwrap_or_else(|| Arc::new(method_contracts)),
         };
-        let remaining_steps = premise_fuel
-            .checked_sub(budget.steps.saturating_sub(trait_parameter_fuel as u64))
-            .ok_or(Error {
-                kind: ErrorKind::StepsExhausted,
-                source: None,
-            })?;
+        let remaining_steps = budget.steps - (initial_trait_fuel - trait_parameter_fuel) as u64;
         Self::from_source_state(
             package,
             Budget {
