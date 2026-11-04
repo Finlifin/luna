@@ -351,7 +351,7 @@ runtime 函数。动态 trait 的一次性求值测试原先使用 comptime 指�
 现改成 struct 的值引用 self 方法更新字段，仍断言子句生产者执行一次、普通实参随后
 读取更新值，没有更改预期结果或赋予 comptime 指针资格。
 
-尚未完成的部分仍包括：先供应字面量而元素域依赖后来的 Type 输入、通用自定义收集
+该阶段尚未完成的部分包括：先供应字面量而元素域依赖后来的 Type 输入、通用自定义收集
 协议、值相关 callable 签名，以及 trait/NF/普通输入的完整 ContextualExpr/ArgumentPlan
 合流。非收集器 required 参数目前仍有旧 trait 路由，不能把本次 packet 复用称为整个
 输入系统已经统一。任意 live comptime 环境中的 runtime callable 生成与传送也没有
@@ -369,3 +369,46 @@ runtime 函数。动态 trait 的一次性求值测试原先使用 comptime 指�
 迁移该 fixture 后重新执行上述动态 trait 组通过。修改文件的 rustfmt check 与
 `git diff --check` 均通过，格式证据 `/tmp/luna-tools-iz3x2t1_/result.json`；未运行全
 workspace、性能基准或 native 验收。
+
+
+## 13. 域检查顺序与源码求值顺序分离
+
+普通子句准备现在为每个源码输入保留独立 preparation 位置。接收域仍引用未提供的
+Type 参数时，`PendingClauseInput` 暂存已解析的 HIR 引用、目标槽、供应种类和源码
+序号；后面的显式 Type 输入提供静态身份后，只检查一次待定输入。生成的绑定与计算
+仍按原始源码位置组合，最后才收集列表并处理声明默认值。
+
+这不是新增一套字面量/分支解释器。列表、嵌套列表、数字、if、match、块及控制出口
+仍由普通 `expr` 检查并生成已有 NIR。pending 状态只在本次调用者检查环境中有效，
+保留已解析绑定，不是可以跨调用缓存或发布的闭合代码对象；`PendingClauseInput`
+和 `PreparedClauseInput` 均提供 S-expression Display。完整 ContextualExpr 所需的
+持久词法环境、等待理由与可恢复查询还没有由这些局部状态代替。
+
+Type 证据复用已有的静态值观察，因而后置的 `meta.List<bool>`、用户 NF 等也可以
+提供接收域。观察不调用 Type 生产函数、不展开 NF 头；即使取得静态身份，原生产者
+仍留在自己的 preparation 位置，不能因替换证据可用而删除执行或形成检查。
+只有声明域确为 Type 的参数才登记 Type 绑定。收集器里的 Type 元素仍属于那个
+普通列表值，不能把收集参数自身改成 Type sort。
+
+这一步同时用于普通 comptime callable 的 invocation 参数包和 runtime callable 的
+required 参数包；固定值子句也复用同一准备服务。覆盖范围包括静态后置 Type 的
+字面量上下文、空列表、嵌套域、数值范围、分支、源码求值顺序、可变 callable 读取、
+提前返回，以及 NF 头身份。旧的
+`clause_collectors_contextualize_literal_before_its_element_type_supply` 已取消 ignored。
+
+仍需区别两种“还不知道”：静态显式 Type 尚未检查，可以延后本次输入检查；Type
+只有执行生产函数才能得到，则不能为了先检查列表而提前执行它。后者保留
+`pending_clause_domains_can_wait_for_a_type_producer` 为期望成功的 ignored 用例，
+等待 comptime invocation 的域观察与通用参数计划。NF 的旧 contextual 参数树尚未
+退役；同一参数计划覆盖 NF、trait 与普通函数仍是迁移目标，而非本节已完成事项。
+
+本节在 `/home/fin/luna` 使用 `development/check.py --timeout 900 -- test -p luna`
+执行收集器、comptime 子句、名义输入、模板局部定义、动态 trait、NF 域/方法及依赖列表
+收集八组：420 项通过、2 项 ignored，既有 memoization staging 失败仍显式跳过，
+命令退出 0；证据 `/tmp/luna-tools-v8cnvlwl/result.json`。随后加强 opaque 头用例，
+令函数体比较收到的 T 与 `Identity<u8>`，单独执行通过：
+`/tmp/luna-tools-kr20npyt/result.json`，不是仅以空列表可构造来推断头身份正确。
+两个 ignored 为既有抽象 Copy 默认值与新的 invocation Type 生产者用例；后者显式执行
+仍以缺少列表元素上下文失败，退出 101，证据 `/tmp/luna-tools-byp6h53s/result.json`。
+格式检查退出 0：`/tmp/luna-tools-kj3a8iy5/result.json`；未跑全 workspace/native 或性能
+基准。这里没有把静态检查重排描述为任意动态域均已支持。

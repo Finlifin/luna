@@ -36,6 +36,47 @@ impl ClauseCollection {
     }
 }
 
+/// A pending check keeps resolved source bindings and its original execution
+/// position. It is not executable NIR and introduces no second expression tree.
+struct PendingClauseInput<'a, 'h> {
+    source_index: usize,
+    slot: usize,
+    name: Option<hir::common::Ident>,
+    input: &'a Expr<'h>,
+    spread: bool,
+}
+
+struct PreparedClauseInput {
+    slot: usize,
+    name: Option<hir::common::Ident>,
+    value: n::Expr,
+    spread: bool,
+}
+
+impl std::fmt::Display for PendingClauseInput<'_, '_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "(pending-clause-input (source-index {}) (slot {}) (name",
+            self.source_index, self.slot
+        )?;
+        if let Some(name) = self.name {
+            write!(f, " {:?}", name.name.as_str())?;
+        }
+        write!(f, ") (spread {}) {})", self.spread, source(self.input.span))
+    }
+}
+
+impl std::fmt::Display for PreparedClauseInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "(prepared-clause-input (slot {}) (name", self.slot)?;
+        if let Some(name) = self.name {
+            write!(f, " {:?}", name.name.as_str())?;
+        }
+        write!(f, ") (spread {}) {})", self.spread, self.value)
+    }
+}
+
 impl Checker<'_, '_> {
     pub(super) fn clause_has_collector(&self, owner: OwnerId) -> bool {
         self.type_clause_params(owner)
@@ -126,8 +167,10 @@ impl Checker<'_, '_> {
         }
         let clauses = self.type_clause_params(owner);
         let mut positional = 0;
-        let mut inputs = Vec::new();
-        let mut collector = ClauseCollection::default();
+        let mut prepared: Vec<Vec<PreparedClauseInput>> =
+            (0..args.len()).map(|_| Vec::new()).collect();
+        let mut preparations: Vec<Vec<n::Expr>> = (0..args.len()).map(|_| Vec::new()).collect();
+        let mut waiting = Vec::new();
         let mut known_binders = Vec::new();
         let mut known_values = Vec::new();
         let mut pending_types = parameters
@@ -140,11 +183,11 @@ impl Checker<'_, '_> {
         // any remaining dependency must wait for the selected instance.
         pending_types.extend(self.nominal_captures(owner, span)?);
         for (argument_index, arg) in args.iter().enumerate() {
+            let statements = &mut preparations[argument_index];
             if let Arg::Expand(input) = arg {
                 let mut next = positional;
                 let next_slot = Self::type_input_slot(&clauses, None, &mut next, span)?;
                 if Some(next_slot) == collector_slot {
-                    collector.check_append(input.span)?;
                     let domain = self.instantiate_trait_domain(
                         &domains[next_slot],
                         &known_binders,
@@ -152,9 +195,24 @@ impl Checker<'_, '_> {
                         span,
                     )?;
                     let dependent = pending_types.iter().any(|id| domain.mentions_rigid(*id));
-                    let value = self.expr(input, (!dependent).then_some(&domain))?;
-                    let value = self.bind_type_input(value, statements, input.span)?;
-                    collector.parts.push(CollectionPart::Spread(value));
+                    if dependent {
+                        waiting.push(PendingClauseInput {
+                            source_index: argument_index,
+                            slot: next_slot,
+                            name: None,
+                            input,
+                            spread: true,
+                        });
+                    } else {
+                        let value = self.expr(input, Some(&domain))?;
+                        let value = self.bind_type_input(value, statements, input.span)?;
+                        prepared[argument_index].push(PreparedClauseInput {
+                            slot: next_slot,
+                            name: None,
+                            value,
+                            spread: true,
+                        });
+                    }
                     positional = next;
                     continue;
                 }
@@ -204,14 +262,16 @@ impl Checker<'_, '_> {
                         binding,
                         inner: Box::new(n::Pattern::Wild),
                     });
-                    inputs.push((
-                        None,
-                        n::Expr {
+                    prepared[argument_index].push(PreparedClauseInput {
+                        slot,
+                        name: None,
+                        value: n::Expr {
                             source: packet.source,
                             ty: field,
                             kind: K::Local(binding),
                         },
-                    ));
+                        spread: false,
+                    });
                 }
                 // Destructure once even when the packet contains no fields:
                 // its producer's effects and early exits still belong here.
@@ -244,48 +304,117 @@ impl Checker<'_, '_> {
                 .ok_or_else(|| error(span, "type argument count mismatch"))?;
             let domain =
                 self.instantiate_trait_domain(&domain, &known_binders, &known_values, span)?;
-            if Some(slot) == collector_slot {
-                let whole = name.is_some();
-                if whole {
-                    collector.check_whole(input.span)?;
-                } else {
-                    collector.check_append(input.span)?;
-                }
-                let input_domain = if whole {
-                    domain.clone()
-                } else {
-                    self.list_element_type(&domain).cloned().ok_or_else(|| {
-                        error(
-                            input.span,
-                            "variadic clause input requires a bound meta.List<T>",
-                        )
-                    })?
-                };
-                let dependent = pending_types
-                    .iter()
-                    .any(|id| input_domain.mentions_rigid(*id));
-                let value = self.expr(input, (!dependent).then_some(&input_domain))?;
-                let value = self.bind_type_input(value, statements, input.span)?;
-                if whole {
-                    collector.whole = Some(value);
-                } else {
-                    collector.push_element(value);
-                }
+            let input_domain = if Some(slot) == collector_slot && name.is_none() {
+                self.list_element_type(&domain).cloned().ok_or_else(|| {
+                    error(
+                        input.span,
+                        "variadic clause input requires a bound meta.List<T>",
+                    )
+                })?
+            } else {
+                domain
+            };
+            let dependent = pending_types
+                .iter()
+                .any(|id| input_domain.mentions_rigid(*id));
+            if dependent {
+                waiting.push(PendingClauseInput {
+                    source_index: argument_index,
+                    slot,
+                    name,
+                    input,
+                    spread: false,
+                });
                 continue;
             }
-            let dependent = pending_types.iter().any(|id| domain.mentions_rigid(*id));
-            let value = self.expr(input, (!dependent).then_some(&domain))?;
-            if let K::TypeValue(ty) = &value.kind {
-                known_binders.push(nir::DeclarationParameter {
-                    declaration: parameters[slot],
-                    sort: Sort::Type,
-                });
-                known_values.push(ty.clone());
-                pending_types.remove(&parameters[slot]);
-            } else if domains[slot] == p(P::Type) {
-                pending_types.insert(parameters[slot]);
+            let value = self.expr(input, Some(&input_domain))?;
+            let known_type = if domains[slot] == p(P::Type) {
+                let mut budget = comptime_runtime::Budget {
+                    steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
+                    max_limbs: 4096,
+                };
+                let before = budget.steps;
+                let known = self
+                    .known_normal_input(&value, 0, &mut budget)
+                    .filter(|term| term.sort() == Sort::Type);
+                self.required_steps -= (before - budget.steps) as u64;
+                if let Some(ty) = &known {
+                    known_binders.push(nir::DeclarationParameter {
+                        declaration: parameters[slot],
+                        sort: Sort::Type,
+                    });
+                    known_values.push(ty.clone());
+                    pending_types.remove(&parameters[slot]);
+                } else {
+                    pending_types.insert(parameters[slot]);
+                }
+                known
+            } else {
+                None
+            };
+            let mut value = self.bind_type_input(value, statements, span)?;
+            if let Some(ty) = known_type {
+                // The source producer remains in its original preparation slot.
+                // Static identity evidence is not permission to erase execution.
+                value.kind = K::TypeValue(ty);
             }
-            inputs.push((name, self.bind_type_input(value, statements, span)?));
+            prepared[argument_index].push(PreparedClauseInput {
+                slot,
+                name,
+                value,
+                spread: false,
+            });
+        }
+        // Check each pending source once after collecting static Type evidence.
+        // Checking order never determines the order of generated preparations.
+        for pending in waiting {
+            let mut domain = self.instantiate_trait_domain(
+                &domains[pending.slot],
+                &known_binders,
+                &known_values,
+                span,
+            )?;
+            if Some(pending.slot) == collector_slot && pending.name.is_none() && !pending.spread {
+                domain = self.list_element_type(&domain).cloned().ok_or_else(|| {
+                    error(
+                        pending.input.span,
+                        "variadic clause input requires a bound meta.List<T>",
+                    )
+                })?;
+            }
+            let dependent = pending_types.iter().any(|id| domain.mentions_rigid(*id));
+            let value = self.expr(pending.input, (!dependent).then_some(&domain))?;
+            let value = self.bind_type_input(
+                value,
+                &mut preparations[pending.source_index],
+                pending.input.span,
+            )?;
+            prepared[pending.source_index].push(PreparedClauseInput {
+                slot: pending.slot,
+                name: pending.name,
+                value,
+                spread: pending.spread,
+            });
+        }
+        let mut inputs = Vec::new();
+        let mut collector = ClauseCollection::default();
+        for (values, mut preparation) in prepared.into_iter().zip(preparations) {
+            statements.append(&mut preparation);
+            for input in values {
+                if Some(input.slot) != collector_slot {
+                    inputs.push((input.name, input.value));
+                } else if input.name.is_some() {
+                    collector.check_whole(span)?;
+                    collector.whole = Some(input.value);
+                } else {
+                    collector.check_append(span)?;
+                    if input.spread {
+                        collector.parts.push(CollectionPart::Spread(input.value));
+                    } else {
+                        collector.push_element(input.value);
+                    }
+                }
+            }
         }
         if let Some(slot) = collector_slot {
             let domain =

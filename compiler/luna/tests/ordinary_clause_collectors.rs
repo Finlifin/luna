@@ -157,7 +157,6 @@ fn clause_collectors_reject_mixed_supply_wrong_domains_and_tuple_tails() {
 }
 
 #[test]
-#[ignore = "ordinary input preparation needs a contextual expression plan for later Type suppliers"]
 fn clause_collectors_contextualize_literal_before_its_element_type_supply() {
     assert_eq!(
         run("
@@ -352,5 +351,158 @@ fn required_collector_packets_still_reject_recursive_sources() {
     assert!(
         error.contains("cyclic") || error.contains("recursive"),
         "{error}"
+    );
+}
+
+#[test]
+fn pending_clause_checks_keep_their_source_evaluation_positions() {
+    assert_eq!(
+        run("
+        comptime fn verify() -> bool
+        where T, .tag: bool = true, ...values: meta.List<T>
+        {
+            tag and values.length() == 1
+        }
+        comptime fn check() -> bool {
+            var state = false;
+            let selected = verify<
+                .values = [do { state = not state; state }],
+                .tag = do { state = not state; not state },
+                bool
+            >();
+            selected and not state
+        }
+        fn run() -> bool { const result = check(); result }
+    "),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn pending_clause_checks_cover_nested_contexts_empty_lists_and_fixed_inputs() {
+    assert_eq!(
+        run("
+        comptime fn accepted() -> bool where .T: Type = bool, .value: meta.List<T> = [] { value.length() == 1 }
+        comptime fn count() -> Integer where T, ...values: meta.List<T> { values.length() }
+        comptime fn check() -> bool {
+            count<.values = [], u8>() == 0
+                and count<.values = [[true], []], meta.List<bool>>() == 2
+                and count<.values = [1, 255], u8>() == 2
+                and accepted<.value = [255], .T = u8>()
+        }
+        fn run() -> bool { const result = check(); result }
+    "),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn pending_clause_checks_do_not_erase_early_return_or_accept_wrong_elements() {
+    assert_eq!(
+        run("
+        comptime fn count() -> Integer where T, ...values: meta.List<T> { values.length() }
+        comptime fn choose() -> bool {
+            let result = count<.values = do { return true; [] }, bool>();
+            false
+        }
+        fn run() -> bool { const result = choose(); result }
+    "),
+        Value::Bool(true)
+    );
+    let wrong = "
+        comptime fn count() -> Integer where T, ...values: meta.List<T> { values.length() }
+        fn run() -> bool { const result = count<.values = [true], u8>() == 1; result }
+    ";
+    let error = compile(wrong).unwrap_err();
+    assert!(error.contains("type mismatch"), "{error}");
+}
+
+#[test]
+fn required_runtime_collector_checks_use_later_type_evidence() {
+    assert_eq!(
+        run("
+        fn selected(input: bool) -> bool where T, ...values: meta.List<T> {
+            const count = values.length();
+            const flip = count == 2;
+            if flip { not input } else { input }
+        }
+        fn run() -> bool {
+            selected<.values = [1, 255], u8>(false)
+                and selected<.values = [], bool>(true)
+        }
+    "),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn pending_clause_checks_contextualize_control_flow_without_a_second_expression_tree() {
+    assert_eq!(
+        run("
+        comptime fn count() -> Integer where T, ...values: meta.List<T> { values.length() }
+        comptime fn choose(flag: bool) -> bool {
+            let first = count<.values = if flag { [1, 255] } else { [] }, u8>();
+            let second = count<.values = flag match { true => [7], false => [] }, u8>();
+            first == 2 and second == 1
+        }
+        fn run() -> bool { const result = choose(true) and not choose(false); result }
+    "),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+#[ignore = "ordinary clause domains still need invocation-time Type observations"]
+fn pending_clause_domains_can_wait_for_a_type_producer() {
+    assert_eq!(
+        run("
+        comptime fn Byte() -> Type { u8 }
+        comptime fn count() -> Integer where T, ...values: meta.List<T> { values.length() }
+        fn run() -> bool { const result = count<.values = [1, 255], Byte()>() == 2; result }
+    "),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn pending_clause_checks_keep_mutable_callable_reads_at_the_source_position() {
+    assert_eq!(
+        run("
+        comptime fn yes() -> bool { true }
+        comptime fn no() -> bool { false }
+        comptime fn first() -> T
+        where T, .tag: bool = true, ...values: meta.List<T>
+        {
+            values[0]
+        }
+        comptime fn check() -> bool {
+            var action: comptime fn() -> bool = yes;
+            let selected = first<
+                .values = [action()],
+                .tag = do { action = no; true },
+                bool
+            >();
+            selected and not action()
+        }
+        fn run() -> bool { const result = check(); result }
+    "),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn pending_clause_type_observations_keep_opaque_head_identity() {
+    assert_eq!(
+        run("
+        pure comptime fn Identity<T> -> Type { T }
+        comptime fn empty() -> bool where T, ...values: meta.List<T> {
+            values.length() == 0 and T == Identity<u8>
+        }
+        fn run() -> bool {
+            const result = empty<.values = [], Identity<u8>>();
+            result
+        }
+    "),
+        Value::Bool(true)
     );
 }

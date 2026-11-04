@@ -63,6 +63,11 @@ ContextualExpr {
 迁移应从普通调用和用户定义 NF 的同一依赖参数例开始，同时覆盖 Tuple/List。
 仅把 NormalFormArgument 改名而保留第二套遍历器，不算消除。
 
+当前普通子句已先分离[检查顺序与源码求值位置](comptime-value-admission.md#13-域检查顺序与源码求值顺序分离)：
+静态 Type 尚未取得时保留 HIR 输入，在其域就绪后交回普通 expr 检查。它不增加新的
+表达式解释器，也不提前执行 Type 生产者；NF 的旧 contextual 参数树仍须后续退役。
+
+
 ## 4. 两种执行载体和一个语义服务层
 
 混合 interpretation 负责 elaboration 中必要的局部求值/观察；invocation engine
