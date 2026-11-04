@@ -2819,39 +2819,6 @@ impl Enum {
         }
         Ok(())
     }
-    pub fn instantiate_variants(
-        &self,
-        arguments: &[Term],
-    ) -> Result<Vec<Variant>, crate::TypeError> {
-        self.instantiate_variants_in_scope(arguments, &[])
-    }
-    /// Instantiate payloads in caller frames, preserving nested binder depths.
-    pub fn instantiate_variants_in_scope(
-        &self,
-        arguments: &[Term],
-        frames: &[Vec<crate::Sort>],
-    ) -> Result<Vec<Variant>, crate::TypeError> {
-        let substitution = crate::DeclarationSubstitution::new(
-            &self.type_parameters,
-            &self.parameter_types,
-            arguments,
-            frames,
-        )?;
-        self.variants
-            .iter()
-            .map(|variant| {
-                Ok(Variant {
-                    name: variant.name.clone(),
-                    shape: variant.shape.clone(),
-                    fields: variant
-                        .fields
-                        .iter()
-                        .map(|ty| substitution.instantiate(ty))
-                        .collect::<Result<_, _>>()?,
-                })
-            })
-            .collect()
-    }
 }
 impl fmt::Display for Enum {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -2940,29 +2907,6 @@ impl Struct {
 
     pub fn parameter_binders(&self) -> Result<Vec<crate::DeclarationParameter>, crate::TypeError> {
         crate::nominal_parameters::binders(&self.type_parameters, &self.parameter_types)
-    }
-    pub fn instantiate_fields(
-        &self,
-        arguments: &[Term],
-    ) -> Result<Vec<(String, Term)>, crate::TypeError> {
-        self.instantiate_fields_in_scope(arguments, &[])
-    }
-    /// Instantiate fields in caller frames; the closed entrypoint stays strict.
-    pub fn instantiate_fields_in_scope(
-        &self,
-        arguments: &[Term],
-        frames: &[Vec<crate::Sort>],
-    ) -> Result<Vec<(String, Term)>, crate::TypeError> {
-        let substitution = crate::DeclarationSubstitution::new(
-            &self.type_parameters,
-            &self.parameter_types,
-            arguments,
-            frames,
-        )?;
-        self.fields
-            .iter()
-            .map(|(name, ty)| Ok((name.clone(), substitution.instantiate(ty)?)))
-            .collect()
     }
 }
 impl fmt::Display for Struct {

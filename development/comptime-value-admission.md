@@ -1597,3 +1597,50 @@ Missing。额外检查了正余额下预留失败、合法空载荷、开放 Typ
 
 格式检查通过。未运行全 workspace、native 或性能基准；正式 docs、已有工作区
 修改与未迁移的构造器元数据入口保持原状。
+
+
+## 30. 具名字段查询退役与构造器预算
+
+构造器与具名模式需要字段名和变体 shape；存储观察只需要载荷，具体实例发布才
+需要完整声明。三种视图现在共享同一个 declaration substitution 内核，并分别
+承担实际复制的成本。`Struct::instantiate_fields_bounded` 与
+`Enum::instantiate_variants_bounded` 显式接收 caller frames 和 fuel；字段名、
+变体名、具名 shape 与代入后展开的字段都受预算约束，声明名称、groups、编码与
+契约不属于具名载荷视图。NF 头身份和已有 scope/domain 检查不变。
+
+删除 `instantiate_fields`、`instantiate_fields_in_scope`、`instantiate_variants`
+和 `instantiate_variants_in_scope` 四个无界入口；生产源码不再调用它们。既有
+名义参数、开放 scope 和反射测试迁移到强制预算接口，不保留默认无限预算包装。
+
+elaboration 的构造器、字段模式与 enum 成员观察扣减既有 `required_steps`。
+失败前已执行的工作也计入消耗，Budget 不等于余额必须为零。只验证 enum 参数和
+载荷时使用无名称的存储视图；真正路由变体时使用具名视图。选中变体直接从返回
+容器移出，不再索引后复制一份。struct 构造器不再复制整份声明，只在有界检查后
+保留默认字段代入所需的参数身份和域快照。
+
+这仍不是统一的全阶段预算所有权协议。默认字段表达式本身仍经过既有
+`instantiate_declaration_parameters_in_scope` 复制与重写，尚未迁移为有界表达式
+代入；成员选择等前置元数据操作也未全部纳入本轮。这里的载荷观察不替代完整值域
+准入、形成检查、资源证明或布局计划。
+
+新增检查覆盖长字段名／变体名／具名 shape 的正余额预留失败、无关声明元数据不
+进入载荷预算、64 次参数引用乘以 32 字段实参的展开限制，以及失败后足额预算
+恢复。构造器入口单独检查预算扣减与参数头保留。新增测试首次将匿名 record 的
+Rust 表示误写为纯 Term 列表，编译失败于 `/tmp/luna-tools-9dja_079/result.json`
+（退出 101）；改为具名字段对后重跑，未改生产规则来迎合测试。
+
+验证目录 `/home/fin/luna`，统一入口 `python3 -B development/check.py --timeout 900 -- test`：
+
+- `-p nir --test nominal_parameters --test scoped_contracts --no-fail-fast`：
+  38 通过，退出 0；`/tmp/luna-tools-1moa1h6c/result.json`。
+- `-p elaboration --lib --no-fail-fast`：170 通过，退出 0；
+  `/tmp/luna-tools-85er6__x/result.json`。
+- `-p comptime_interpretor --lib reflection::tests --no-fail-fast`：12 通过，退出 0；
+  `/tmp/luna-tools-3s5jpy1o/result.json`。
+- `-p luna --test newtypes --test nominal_value_parameters --test enum_groups
+  --test enum_configurations --test normal_patterns --test negated_nominal_patterns
+  --test invocation_value_templates --no-fail-fast`：613 通过，退出 0；
+  `/tmp/luna-tools-avu15l0k/result.json`。
+
+受影响 Rust 文件格式检查通过；未运行全 workspace 或性能基准。正式 docs 与
+原有工作区修改未纳入本次变更。

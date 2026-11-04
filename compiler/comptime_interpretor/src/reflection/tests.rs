@@ -190,7 +190,9 @@ fn concrete_iir_reflection_agrees_with_declaration_world() {
     let arguments = vec![p(Primitive::Bool)];
     let ty = nominal(arguments.clone());
     let mut definition = package.structs[0].clone();
-    definition.fields = definition.instantiate_fields(&arguments).unwrap();
+    definition.fields = definition
+        .instantiate_fields_bounded(&arguments, &[], &mut 100_000)
+        .unwrap();
     definition.type_parameters.clear();
     definition.parameter_types.clear();
     let graph = iir::Package {

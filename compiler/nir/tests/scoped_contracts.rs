@@ -215,20 +215,28 @@ fn nominal_fields_and_variants_instantiate_in_explicit_input_frames() {
     let frames = vec![vec![Sort::Type]];
     let arguments = vec![bound(0, 0, Sort::Type)];
     let actual = record
-        .instantiate_fields_in_scope(&arguments, &frames)
+        .instantiate_fields_bounded(&arguments, &frames, &mut 100_000)
         .unwrap();
     let Term::Function { parameters, result } = &actual[0].1 else {
         panic!()
     };
     assert_eq!(parameters[0].ty, bound(1, 0, Sort::Type));
     assert_eq!(**result, bound(1, 0, Sort::Type));
-    assert!(record.instantiate_fields(&arguments).is_err());
     assert!(
         record
-            .instantiate_fields_in_scope(&arguments, &[vec![Sort::Runtime]])
+            .instantiate_fields_bounded(&arguments, &[], &mut 100_000)
             .is_err()
     );
-    assert!(record.instantiate_fields_in_scope(&[], &frames).is_err());
+    assert!(
+        record
+            .instantiate_fields_bounded(&arguments, &[vec![Sort::Runtime]], &mut 100_000)
+            .is_err()
+    );
+    assert!(
+        record
+            .instantiate_fields_bounded(&[], &frames, &mut 100_000)
+            .is_err()
+    );
     let enumeration = nir::program::Enum {
         parameter_types: vec![],
         declaration: id(21),
@@ -248,12 +256,16 @@ fn nominal_fields_and_variants_instantiate_in_explicit_input_frames() {
     };
     assert_eq!(
         enumeration
-            .instantiate_variants_in_scope(&arguments, &frames)
+            .instantiate_variants_bounded(&arguments, &frames, &mut 100_000)
             .unwrap()[0]
             .fields[0],
         actual[0].1
     );
-    assert!(enumeration.instantiate_variants(&arguments).is_err());
+    assert!(
+        enumeration
+            .instantiate_variants_bounded(&arguments, &[], &mut 100_000)
+            .is_err()
+    );
 }
 
 #[test]

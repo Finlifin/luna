@@ -500,7 +500,11 @@ fn selected_field_instantiation_keeps_budget_and_domain_failures_distinct() {
 fn nominal_layout_substitution_preserves_value_indices_and_opaque_heads() {
     let record = record(vec![Term::Primitive(P::Type), Term::Primitive(P::Bool)]);
     let fields = record
-        .instantiate_fields(&[Term::Primitive(P::U8), Term::Bool(true)])
+        .instantiate_fields_bounded(
+            &[Term::Primitive(P::U8), Term::Bool(true)],
+            &[],
+            &mut 100_000,
+        )
         .unwrap();
     assert_eq!(fields[0].1, Term::Primitive(P::U8));
     assert_eq!(
@@ -512,7 +516,11 @@ fn nominal_layout_substitution_preserves_value_indices_and_opaque_heads() {
         }
     );
     let other = record
-        .instantiate_fields(&[Term::Primitive(P::U8), Term::Bool(false)])
+        .instantiate_fields_bounded(
+            &[Term::Primitive(P::U8), Term::Bool(false)],
+            &[],
+            &mut 100_000,
+        )
         .unwrap();
     assert_ne!(fields[1].1, other[1].1);
     let text = record.to_string();
@@ -528,12 +536,22 @@ fn nominal_domains_can_depend_on_earlier_type_parameters() {
     assert_eq!(binders[1].sort, Sort::ComptimeValue);
     assert!(
         record
-            .instantiate_fields(&[Term::Primitive(P::Bool), Term::Bool(true)])
+            .instantiate_fields_bounded(
+                &[Term::Primitive(P::Bool), Term::Bool(true)],
+                &[],
+                &mut 100_000
+            )
             .is_ok()
     );
     assert!(matches!(
-        record.instantiate_fields(&[Term::Primitive(P::Bool), Term::Primitive(P::Bool)]),
-        Err(TypeError::WrongSort { .. })
+        record.instantiate_fields_bounded(
+            &[Term::Primitive(P::Bool), Term::Primitive(P::Bool)],
+            &[],
+            &mut 100_000
+        ),
+        Err(nir::type_computations::Error::Scope(
+            TypeError::WrongSort { .. }
+        ))
     ));
 }
 
@@ -576,7 +594,11 @@ fn enum_payload_substitution_uses_the_same_value_binders() {
         symbol_encoding: None,
     };
     let variants = enumeration
-        .instantiate_variants(&[Term::Primitive(P::Bool), Term::Bool(false)])
+        .instantiate_variants_bounded(
+            &[Term::Primitive(P::Bool), Term::Bool(false)],
+            &[],
+            &mut 100_000,
+        )
         .unwrap();
     assert_eq!(
         variants[0].fields[1],
@@ -589,7 +611,11 @@ fn enum_payload_substitution_uses_the_same_value_binders() {
     assert!(enumeration.to_string().contains("(parameter-types"));
     assert!(
         enumeration
-            .instantiate_variants(&[Term::Bool(false), Term::Bool(false)])
+            .instantiate_variants_bounded(
+                &[Term::Bool(false), Term::Bool(false)],
+                &[],
+                &mut 100_000
+            )
             .is_err()
     );
 }
@@ -604,14 +630,22 @@ fn legacy_type_only_nominals_and_open_scope_substitution_remain_distinct() {
         sort: Sort::Type,
     };
     let arguments = [argument.clone(), Term::Primitive(P::Bool)];
-    assert!(record.instantiate_fields(&arguments).is_err());
+    assert!(
+        record
+            .instantiate_fields_bounded(&arguments, &[], &mut 100_000)
+            .is_err()
+    );
     let fields = record
-        .instantiate_fields_in_scope(&arguments, &[vec![Sort::Type]])
+        .instantiate_fields_bounded(&arguments, &[vec![Sort::Type]], &mut 100_000)
         .unwrap();
     assert_eq!(fields[0].1, argument);
     assert!(
         record
-            .instantiate_fields(&[Term::Primitive(P::Bool), Term::Bool(false)])
+            .instantiate_fields_bounded(
+                &[Term::Primitive(P::Bool), Term::Bool(false)],
+                &[],
+                &mut 100_000
+            )
             .is_err()
     );
 }
@@ -1163,7 +1197,9 @@ fn object_indices_validate_nested_domains_without_nominal_layout_guessing() {
 fn type_valued_dependent_indices_substitute_all_nominal_layouts() {
     let record = record(vec![Term::Primitive(P::Type), rigid(1, Sort::Type)]);
     let arguments = [Term::Primitive(P::Type), Term::Primitive(P::Bool)];
-    let fields = record.instantiate_fields(&arguments).unwrap();
+    let fields = record
+        .instantiate_fields_bounded(&arguments, &[], &mut 100_000)
+        .unwrap();
     assert_eq!(
         fields[1].1,
         Term::NormalForm {
@@ -1190,7 +1226,10 @@ fn type_valued_dependent_indices_substitute_all_nominal_layouts() {
         symbol_encoding: None,
     };
     assert_eq!(
-        enumeration.instantiate_variants(&arguments).unwrap()[0].fields[1],
+        enumeration
+            .instantiate_variants_bounded(&arguments, &[], &mut 100_000)
+            .unwrap()[0]
+            .fields[1],
         fields[1].1
     );
     let wrapper = nir::newtypes::Newtype {
@@ -1232,8 +1271,16 @@ fn type_valued_dependent_indices_substitute_all_nominal_layouts() {
         [Term::Primitive(P::Type), Term::Bool(true)],
         [Term::Primitive(P::Bool), Term::Primitive(P::Bool)],
     ] {
-        assert!(record.instantiate_fields(&wrong).is_err());
-        assert!(enumeration.instantiate_variants(&wrong).is_err());
+        assert!(
+            record
+                .instantiate_fields_bounded(&wrong, &[], &mut 100_000)
+                .is_err()
+        );
+        assert!(
+            enumeration
+                .instantiate_variants_bounded(&wrong, &[], &mut 100_000)
+                .is_err()
+        );
         assert!(
             wrapper
                 .representation_budgeted(&wrong, &[], &mut 10000)
@@ -1564,4 +1611,145 @@ fn all_variant_storage_fields_charge_empty_alternatives_and_validate_empty_frame
     definition
         .instantiate_variant_fields(&args, &[], &mut 1000)
         .unwrap();
+}
+
+#[test]
+fn named_payload_views_charge_labels_but_do_not_copy_declaration_metadata() {
+    use nir::type_computations::Error;
+    let mut definition = Struct {
+        declaration: id(2),
+        name: "unused".repeat(10_000),
+        type_parameters: vec![id(1)],
+        parameter_types: vec![Term::Primitive(P::Type)],
+        fields: vec![("field".repeat(1000), rigid(1, Sort::Type))],
+        requirements: vec![],
+        capabilities: vec![],
+    };
+    let arguments = [Term::Primitive(P::Bool)];
+    let mut fuel = 500;
+    assert_eq!(
+        definition.instantiate_fields_bounded(&arguments, &[], &mut fuel),
+        Err(Error::Budget)
+    );
+    assert!(fuel > 0 && fuel < 500);
+    assert_eq!(
+        definition
+            .instantiate_stored_fields(&arguments, &[], &mut 500)
+            .unwrap(),
+        arguments
+    );
+    definition.fields[0].0 = "value".into();
+    assert_eq!(
+        definition
+            .instantiate_fields_bounded(&arguments, &[], &mut 500)
+            .unwrap(),
+        vec![("value".into(), arguments[0].clone())]
+    );
+    let mut enumeration = Enum {
+        declaration: id(3),
+        name: definition.name.clone(),
+        type_parameters: definition.type_parameters,
+        parameter_types: definition.parameter_types,
+        requirements: vec![],
+        capabilities: vec![],
+        groups: vec!["unused".repeat(10_000)],
+        encoding: None,
+        symbol_encoding: None,
+        is_intrinsic: false,
+        variants: vec![Variant {
+            name: "branch".into(),
+            shape: VariantShape::Named(vec!["field".repeat(1000)]),
+            fields: vec![rigid(1, Sort::Type)],
+        }],
+    };
+    let mut fuel = 500;
+    assert_eq!(
+        enumeration.instantiate_variants_bounded(&arguments, &[], &mut fuel),
+        Err(Error::Budget)
+    );
+    assert!(fuel > 0 && fuel < 500);
+    enumeration.variants[0].shape = VariantShape::Named(vec!["value".into()]);
+    let result = enumeration
+        .instantiate_variants_bounded(&arguments, &[], &mut 500)
+        .unwrap();
+    assert_eq!(result[0].name, "branch");
+    assert_eq!(result[0].shape, enumeration.variants[0].shape);
+    assert_eq!(result[0].fields, arguments);
+    enumeration.variants[0].name = "branch".repeat(1000);
+    assert_eq!(
+        enumeration.instantiate_variants_bounded(&arguments, &[], &mut 500),
+        Err(Error::Budget)
+    );
+}
+
+#[test]
+fn named_payload_views_bound_expanded_arguments_and_recover() {
+    use nir::type_computations::Error;
+    let definition = Struct {
+        declaration: id(2),
+        name: "Container".into(),
+        type_parameters: vec![id(1)],
+        parameter_types: vec![Term::Primitive(P::Type)],
+        fields: vec![(
+            "value".into(),
+            Term::Record(
+                (0..64)
+                    .map(|i| (format!("f{i}"), rigid(1, Sort::Type)))
+                    .collect(),
+            ),
+        )],
+        requirements: vec![],
+        capabilities: vec![],
+    };
+    let arguments = [Term::Record(
+        (0..32)
+            .map(|i| (format!("a{i}"), Term::Primitive(P::Bool)))
+            .collect(),
+    )];
+    assert_eq!(
+        definition.instantiate_fields_bounded(&arguments, &[], &mut 2000),
+        Err(Error::Budget)
+    );
+    let fields = definition
+        .instantiate_fields_bounded(&arguments, &[], &mut 100_000)
+        .unwrap();
+    assert_eq!(
+        fields,
+        vec![(
+            "value".into(),
+            Term::Record(
+                (0..64)
+                    .map(|i| (format!("f{i}"), arguments[0].clone()))
+                    .collect()
+            )
+        )]
+    );
+    let enumeration = Enum {
+        declaration: id(3),
+        name: "Choices".into(),
+        type_parameters: definition.type_parameters,
+        parameter_types: definition.parameter_types,
+        requirements: vec![],
+        capabilities: vec![],
+        groups: vec![],
+        encoding: None,
+        symbol_encoding: None,
+        is_intrinsic: false,
+        variants: vec![Variant {
+            name: "branch".into(),
+            shape: VariantShape::Tuple,
+            fields: vec![definition.fields[0].1.clone()],
+        }],
+    };
+    assert_eq!(
+        enumeration.instantiate_variants_bounded(&arguments, &[], &mut 2000),
+        Err(Error::Budget)
+    );
+    assert_eq!(
+        enumeration
+            .instantiate_variants_bounded(&arguments, &[], &mut 100_000)
+            .unwrap()[0]
+            .fields,
+        vec![fields[0].1.clone()]
+    );
 }

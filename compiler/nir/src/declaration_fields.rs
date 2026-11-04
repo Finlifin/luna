@@ -44,6 +44,25 @@ fn prepare<'a>(
 }
 
 impl Struct {
+    /// Named payload view in caller frames. Contracts and declaration headers
+    /// are not copied; defaults and formation stay with the consumer.
+    pub fn instantiate_fields_bounded(
+        &self,
+        arguments: &[Term],
+        frames: &[Vec<Sort>],
+        fuel: &mut usize,
+    ) -> Result<Vec<(String, Term)>, Error> {
+        let substitution = prepare(
+            &self.type_parameters,
+            &self.parameter_types,
+            arguments,
+            frames,
+            self.fields.len(),
+            fuel,
+        )?;
+        named_fields(self, &substitution, fuel)
+    }
+
     /// Specialize a complete declaration without copying discarded generic
     /// fields or contracts. Formation and normalization remain with the caller.
     pub fn instantiate_definition_bounded(
@@ -61,14 +80,7 @@ impl Struct {
             fuel,
         )?;
         charge_text(&self.name, fuel)?;
-        let fields = self
-            .fields
-            .iter()
-            .map(|(name, ty)| {
-                charge_text(name, fuel)?;
-                Ok((name.clone(), substitution.instantiate_bounded(ty, fuel)?))
-            })
-            .collect::<Result<_, Error>>()?;
+        let fields = named_fields(self, &substitution, fuel)?;
         let (requirements, capabilities) =
             contracts(&substitution, &self.requirements, &self.capabilities, fuel)?;
         Ok(Self {
@@ -101,6 +113,18 @@ impl Struct {
 }
 
 impl Enum {
+    /// Named branch view for construction and pattern routing. Representation
+    /// plans and declaration contracts are outside this observation.
+    pub fn instantiate_variants_bounded(
+        &self,
+        arguments: &[Term],
+        frames: &[Vec<Sort>],
+        fuel: &mut usize,
+    ) -> Result<Vec<Variant>, Error> {
+        let substitution = self.prepare_stored_fields(arguments, frames, fuel)?;
+        named_variants(self, &substitution, fuel)
+    }
+
     /// Preserve representation metadata and logical branch positions while
     /// specializing payloads and contracts under the caller's shared budget.
     pub fn instantiate_definition_bounded(
@@ -139,25 +163,7 @@ impl Enum {
                 charge_text(&variant.value, fuel)?;
             }
         }
-        let variants = self
-            .variants
-            .iter()
-            .map(|variant| {
-                charge_text(&variant.name, fuel)?;
-                if let VariantShape::Named(names) = &variant.shape {
-                    charge_names(names, fuel)?;
-                }
-                Ok(Variant {
-                    name: variant.name.clone(),
-                    shape: variant.shape.clone(),
-                    fields: variant
-                        .fields
-                        .iter()
-                        .map(|ty| substitution.instantiate_bounded(ty, fuel))
-                        .collect::<Result<_, _>>()?,
-                })
-            })
-            .collect::<Result<_, Error>>()?;
+        let variants = named_variants(self, &substitution, fuel)?;
         let (requirements, capabilities) =
             contracts(&substitution, &self.requirements, &self.capabilities, fuel)?;
         Ok(Self {
@@ -301,4 +307,45 @@ fn contracts(
         .map(|r| substitution.instantiate_requirement_bounded(r, fuel))
         .collect::<Result<_, _>>()?;
     Ok((requirements, capabilities))
+}
+
+fn named_fields(
+    definition: &Struct,
+    substitution: &crate::DeclarationSubstitution<'_>,
+    fuel: &mut usize,
+) -> Result<Vec<(String, Term)>, Error> {
+    definition
+        .fields
+        .iter()
+        .map(|(name, ty)| {
+            charge_text(name, fuel)?;
+            Ok((name.clone(), substitution.instantiate_bounded(ty, fuel)?))
+        })
+        .collect()
+}
+
+fn named_variants(
+    definition: &Enum,
+    substitution: &crate::DeclarationSubstitution<'_>,
+    fuel: &mut usize,
+) -> Result<Vec<Variant>, Error> {
+    definition
+        .variants
+        .iter()
+        .map(|variant| {
+            charge_text(&variant.name, fuel)?;
+            if let VariantShape::Named(names) = &variant.shape {
+                charge_names(names, fuel)?;
+            }
+            Ok(Variant {
+                name: variant.name.clone(),
+                shape: variant.shape.clone(),
+                fields: variant
+                    .fields
+                    .iter()
+                    .map(|ty| substitution.instantiate_bounded(ty, fuel))
+                    .collect::<Result<_, _>>()?,
+            })
+        })
+        .collect()
 }

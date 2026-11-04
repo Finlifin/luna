@@ -14,11 +14,12 @@ mod expression_values;
 mod extended;
 mod function_templates;
 mod function_types;
-mod input_observation;
 mod inline_control;
 mod inline_loops;
 pub mod inlining;
+mod input_observation;
 mod intrinsics;
+mod nominal_fields;
 mod spreads;
 mod tactics;
 use arguments::route_arguments;
@@ -2296,7 +2297,10 @@ impl Checker<'_, '_> {
                 };
                 let ty = if parameter.ty.is_comptime() {
                     self.signature_parameter_domain(
-                        owner, ty, sig.clause_constraints, parameter.span,
+                        owner,
+                        ty,
+                        sig.clause_constraints,
+                        parameter.span,
                     )?
                 } else {
                     ty
@@ -2467,20 +2471,6 @@ impl Checker<'_, '_> {
             _ => Err(error(span, "optional operation requires an optional type")),
         }
     }
-    fn instantiated_variants(&self, ty: &Term, span: Span) -> Result<Vec<n::Variant>, Error> {
-        let Term::Nominal {
-            declaration,
-            arguments,
-        } = ty
-        else {
-            return Err(error(span, "variant requires an enum type"));
-        };
-        self.enums
-            .get(declaration)
-            .ok_or_else(|| error(span, "missing enum descriptor"))?
-            .instantiate_variants_in_scope(arguments, &self.call_input_frames())
-            .map_err(|e| error(span, e.to_string()))
-    }
     fn variant_target(
         &mut self,
         callee: &Expr<'_>,
@@ -2527,7 +2517,11 @@ impl Checker<'_, '_> {
             unreachable!()
         };
         let id = *id;
-        let variant = self.instantiated_variants(&ty, expr.span)?[index].clone();
+        let variant = self
+            .instantiated_variants(&ty, expr.span)?
+            .into_iter()
+            .nth(index)
+            .ok_or_else(|| error(expr.span, "enum variant index out of bounds"))?;
         let n::VariantShape::Named(names) = &variant.shape else {
             return Err(error(expr.span, "enum variant does not have named fields"));
         };
@@ -2929,7 +2923,11 @@ impl Checker<'_, '_> {
             unreachable!()
         };
         let declaration = *declaration;
-        let variant = self.instantiated_variants(&ty, expr.span)?[index].clone();
+        let variant = self
+            .instantiated_variants(&ty, expr.span)?
+            .into_iter()
+            .nth(index)
+            .ok_or_else(|| error(expr.span, "enum variant index out of bounds"))?;
         if variant.shape != n::VariantShape::Tuple {
             return Err(error(
                 expr.span,
@@ -2973,26 +2971,20 @@ impl Checker<'_, '_> {
             },
         })
     }
-    fn enum_variant(&self, ty: &Term, name: &str, span: Span) -> Result<n::Expr, Error> {
+    fn enum_variant(&mut self, ty: &Term, name: &str, span: Span) -> Result<n::Expr, Error> {
         let shape = self.structural_type(ty, span)?;
         let ty = &shape;
-        let Term::Nominal {
-            declaration,
-            arguments,
-        } = ty
-        else {
+        let Term::Nominal { declaration, .. } = ty else {
             return Err(incompatible_context(
                 span,
                 "variant requires a nominal enum context",
             ));
         };
+        self.validate_enum_payloads(ty, span)?;
         let definition = self
             .enums
             .get(declaration)
             .ok_or_else(|| error(span, "variant requires an enum type"))?;
-        definition
-            .instantiate_variants_in_scope(arguments, &self.call_input_frames())
-            .map_err(|e| error(span, e.to_string()))?;
         let index = definition
             .variants
             .iter()
@@ -3339,14 +3331,15 @@ impl Checker<'_, '_> {
                 "construction requires a supported struct type",
             ));
         };
+        let declaration = *id;
+        let frames = self.call_input_frames();
         let def = self
             .structs
             .get(id)
-            .ok_or_else(|| error(expr.span, "missing struct descriptor"))?
-            .clone();
-        let instantiated_fields = def
-            .instantiate_fields_in_scope(arguments, &self.call_input_frames())
-            .map_err(|e| error(expr.span, e.to_string()))?;
+            .ok_or_else(|| error(expr.span, "missing struct descriptor"))?;
+        let (instantiated_fields, type_parameters, parameter_types) =
+            nominal_fields::constructor_fields(def, arguments, &frames, &mut self.required_steps)
+                .map_err(|e| error(expr.span, e.to_string()))?;
         let owner = self.package.owners().find_map(|(owner, _)| {
             (matches_declaration(self.package, &self.package_identities, owner, *id))
                 .then_some(owner)
@@ -3356,8 +3349,7 @@ impl Checker<'_, '_> {
             let Arg::Named(name, value) = arg else {
                 return Err(error(expr.span, "struct fields must be fully named"));
             };
-            let index = def
-                .fields
+            let index = instantiated_fields
                 .iter()
                 .position(|(field, _)| field == name.name.as_str())
                 .ok_or_else(|| error(name.span, format!("unknown struct field {}", name.name)))?;
@@ -3375,15 +3367,15 @@ impl Checker<'_, '_> {
                     owner.ok_or_else(|| {
                         error(
                             expr.span,
-                            format!("missing struct field {}", def.fields[index].0),
+                            format!("missing struct field {}", instantiated_fields[index].0),
                         )
                     })?,
                     None,
                     index,
                 )?
                 .instantiate_declaration_parameters_in_scope(
-                    &def.type_parameters,
-                    &def.parameter_types,
+                    &type_parameters,
+                    &parameter_types,
                     arguments,
                     &self.call_input_frames(),
                 )
@@ -3402,7 +3394,7 @@ impl Checker<'_, '_> {
             ty: actual,
             source: source(expr.span),
             kind: K::Record {
-                declaration: def.declaration,
+                declaration,
                 fields,
             },
         })
@@ -3799,8 +3791,10 @@ impl Checker<'_, '_> {
                     .callable_type_input_expression(expr, local(*id), Some(&p(P::Type)))?
                     .expect("active callable input");
                 let K::TypeValue(ty) = value.kind else {
-                    return Err(error(expr.span,
-                        "function type dependency requires an earlier explicit comptime Type parameter"));
+                    return Err(error(
+                        expr.span,
+                        "function type dependency requires an earlier explicit comptime Type parameter",
+                    ));
                 };
                 Ok(ty)
             }
@@ -3987,25 +3981,41 @@ impl Checker<'_, '_> {
                 if let Some(owner) = self.normal_form_constant_target(head)?
                     && !matches!(head.kind, H::ResolvedDef { def_id, .. } if self.package.definition_owner(def_id) == Some(owner))
                 {
-                    let definition = self.package.owner_definition(owner).ok_or_else(|| error(expr.span, "normal-form callable has no declaration identity"))?;
+                    let definition = self.package.owner_definition(owner).ok_or_else(|| {
+                        error(
+                            expr.span,
+                            "normal-form callable has no declaration identity",
+                        )
+                    })?;
                     let target = Expr {
-                        kind: H::ResolvedDef { name: self.package.item(owner).unwrap().ident.name, has_clause_param: true, def_id: definition },
+                        kind: H::ResolvedDef {
+                            name: self.package.item(owner).unwrap().ident.name,
+                            has_clause_param: true,
+                            def_id: definition,
+                        },
                         ..(*head).clone()
                     };
-                    let application = Expr { kind: H::NFApplication(&target, args), ..expr.clone() };
+                    let application = Expr {
+                        kind: H::NFApplication(&target, args),
+                        ..expr.clone()
+                    };
                     return self.type_expr(&application);
                 }
                 let H::ResolvedDef { def_id, .. } = head.kind else {
                     return match self.required_value(expr, P::Type)? {
                         comptime_interpretor::Value::Type(ty) => Ok(ty),
-                        _ => Err(error(expr.span, "type application did not produce a completed Type")),
+                        _ => Err(error(
+                            expr.span,
+                            "type application did not produce a completed Type",
+                        )),
                     };
                 };
                 let owner = self
                     .package
                     .definition_owner(def_id)
                     .ok_or_else(|| error(expr.span, "type definition has no HIR owner"))?;
-                if self.normal_parameters.contains_key(&owner) || matches!(&self.package.item(owner).unwrap().kind,
+                if self.normal_parameters.contains_key(&owner)
+                    || matches!(&self.package.item(owner).unwrap().kind,
                     ItemKind::Fn(sig, _) if sig.modifiers.is_normal_form_head)
                 {
                     return self.normal_type_annotation(expr, owner, args);
@@ -4174,7 +4184,10 @@ impl Checker<'_, '_> {
                         "a type cannot have repeated nonempty closure qualification",
                     ));
                 }
-                if !matches!(body, Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_)) {
+                if !matches!(
+                    body,
+                    Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_)
+                ) {
                     return Err(error(
                         expr.span,
                         "non-callable closure-qualified bodies are not yet implemented",
@@ -4185,20 +4198,35 @@ impl Checker<'_, '_> {
                     signature: Box::new(body),
                 })
             }
-            H::TyModifiedFn(modifiers, params) => self.form_modified_callable_type(*modifiers, params, None, expr.span),
-            H::TyNFFn(params) => self.form_normal_form_callable_type(params, None, expr.span),
-            H::TyFn(params) | H::TyComptimeFn(params) => {
-                self.form_callable_type(params, None, matches!(expr.kind, H::TyComptimeFn(_)), expr.span)
+            H::TyModifiedFn(modifiers, params) => {
+                self.form_modified_callable_type(*modifiers, params, None, expr.span)
             }
+            H::TyNFFn(params) => self.form_normal_form_callable_type(params, None, expr.span),
+            H::TyFn(params) | H::TyComptimeFn(params) => self.form_callable_type(
+                params,
+                None,
+                matches!(expr.kind, H::TyComptimeFn(_)),
+                expr.span,
+            ),
             H::TyFnArrow(input, output) => {
                 if let H::TyNFFn(params) = &input.kind {
                     return self.form_normal_form_callable_type(params, Some(output), expr.span);
                 }
                 if let H::TyModifiedFn(modifiers, params) = &input.kind {
-                    return self.form_modified_callable_type(*modifiers, params, Some(output), expr.span);
+                    return self.form_modified_callable_type(
+                        *modifiers,
+                        params,
+                        Some(output),
+                        expr.span,
+                    );
                 }
                 if let H::TyFn(params) | H::TyComptimeFn(params) = &input.kind {
-                    return self.form_callable_type(params, Some(output), matches!(input.kind, H::TyComptimeFn(_)), expr.span);
+                    return self.form_callable_type(
+                        params,
+                        Some(output),
+                        matches!(input.kind, H::TyComptimeFn(_)),
+                        expr.span,
+                    );
                 }
 
                 let input = self.type_expr(input)?;
@@ -4215,7 +4243,10 @@ impl Checker<'_, '_> {
                 };
                 if let Some(value) = self.definition_input(declaration, expr.span)? {
                     let K::TypeValue(ty) = value.kind else {
-                        return Err(error(expr.span, "definition value input cannot be used as a Type"));
+                        return Err(error(
+                            expr.span,
+                            "definition value input cannot be used as a Type",
+                        ));
                     };
                     return Ok(ty);
                 }

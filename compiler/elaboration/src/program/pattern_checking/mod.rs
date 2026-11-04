@@ -705,29 +705,22 @@ impl Checker<'_, '_> {
                         fields: checked,
                     });
                 }
-                let Term::Nominal {
-                    declaration,
-                    arguments,
-                } = &shape
-                else {
+                let Term::Nominal { declaration, .. } = &shape else {
                     return Err(error(
                         pattern.span,
                         "record pattern requires a struct type; custom pattern view elaboration is not implemented",
                     ));
                 };
-                let definition = self
-                    .structs
-                    .get(declaration)
-                    .ok_or_else(|| error(pattern.span, "record pattern requires a struct type"))?;
+                if !self.structs.contains_key(declaration) {
+                    return Err(error(pattern.span, "record pattern requires a struct type"));
+                }
                 if *rest {
                     return Err(error(
                         pattern.span,
                         "record rest binding is not implemented",
                     ));
                 }
-                let declared = definition
-                    .instantiate_fields_in_scope(arguments, &self.call_input_frames())
-                    .map_err(|e| error(pattern.span, e.to_string()))?;
+                let declared = self.instantiated_fields(&shape, pattern.span)?;
                 let mut routed = vec![None; declared.len()];
                 let mut seen = BTreeSet::new();
                 for field in *fields {
@@ -771,8 +764,11 @@ impl Checker<'_, '_> {
                 let Term::Nominal { declaration, .. } = variant_type else {
                     unreachable!()
                 };
-                let variant =
-                    self.instantiated_variants(&variant_type, pattern.span)?[index].clone();
+                let variant = self
+                    .instantiated_variants(&variant_type, pattern.span)?
+                    .into_iter()
+                    .nth(index)
+                    .ok_or_else(|| error(pattern.span, "enum variant index out of bounds"))?;
                 let n::VariantShape::Named(names) = &variant.shape else {
                     return Err(error(
                         pattern.span,
@@ -826,8 +822,11 @@ impl Checker<'_, '_> {
                 let Term::Nominal { declaration, .. } = variant_type else {
                     unreachable!()
                 };
-                let variant =
-                    self.instantiated_variants(&variant_type, pattern.span)?[index].clone();
+                let variant = self
+                    .instantiated_variants(&variant_type, pattern.span)?
+                    .into_iter()
+                    .nth(index)
+                    .ok_or_else(|| error(pattern.span, "enum variant index out of bounds"))?;
                 if variant.shape != n::VariantShape::Tuple || fields.len() != variant.fields.len() {
                     return Err(error(pattern.span, "enum payload pattern arity mismatch"));
                 }

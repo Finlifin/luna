@@ -56,19 +56,13 @@ impl Checker<'_, '_> {
         let Some(ty) = target else { return Ok(None) };
         let ty = self.structural_type(&ty, expr.span)?;
         self.ensure_nominal_type(&ty, expr.span)?;
-        let Term::Nominal {
-            declaration,
-            arguments,
-        } = &ty
-        else {
+        let Term::Nominal { declaration, .. } = &ty else {
             return Ok(None);
         };
-        let Some(definition) = self.enums.get(declaration) else {
+        if !self.enums.contains_key(declaration) {
             return Ok(None);
-        };
-        definition
-            .instantiate_variants_in_scope(arguments, &self.call_input_frames())
-            .map_err(|failure| error(expr.span, failure.to_string()))?;
+        }
+        self.validate_enum_payloads(&ty, expr.span)?;
         names.reverse();
         Ok(Some((ty, names.join("."))))
     }
