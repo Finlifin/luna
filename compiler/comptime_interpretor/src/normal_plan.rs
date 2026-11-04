@@ -63,7 +63,7 @@ pub(super) struct Frame<'a> {
     preparation: usize,
     waiting: Option<Waiting>,
     pending: BTreeMap<usize, Pending>,
-    bindings: normal_types::Bindings,
+    bindings: input_bindings::Bindings,
     drain: bool,
     terminal: bool,
 }
@@ -149,7 +149,7 @@ impl<'a> Frame<'a> {
             preparation: 0,
             waiting: None,
             pending: BTreeMap::new(),
-            bindings: normal_types::Bindings::new(arguments.len()),
+            bindings: input_bindings::Bindings::new(arguments.len()),
             drain: false,
             terminal: false,
         }
@@ -203,7 +203,7 @@ impl<'a> Frame<'a> {
         Ok(Frame {
             head: *head,
             source: expression.source,
-            bindings: normal_types::Bindings::new(arguments.len()),
+            bindings: input_bindings::Bindings::new(arguments.len()),
             inputs: Inputs::Owned(expression),
             position: 0,
             preparation: 0,
@@ -276,7 +276,7 @@ impl<'a> Frame<'a> {
                 }
                 Request::Complete => {
                     let bindings =
-                        std::mem::replace(&mut self.bindings, normal_types::Bindings::new(0));
+                        std::mem::replace(&mut self.bindings, input_bindings::Bindings::new(0));
                     let arguments = bindings
                         .finish()
                         .ok_or_else(|| vm.failure(ErrorKind::Type, Some(self.source)))?;

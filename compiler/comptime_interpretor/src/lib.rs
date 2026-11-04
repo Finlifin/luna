@@ -47,6 +47,7 @@ mod nominal_plan;
 mod normal_inputs;
 mod retained_contracts;
 use normal_inputs::InputKey;
+mod input_bindings;
 mod normal_plan;
 mod normal_terms;
 mod normal_types;
@@ -3657,7 +3658,7 @@ impl<'a> Interpreter<'a> {
         if plan.is_some() {
             return self.eval_normal_plan(expr, environment);
         }
-        let mut bindings = normal_types::Bindings::new(arguments.len());
+        let mut bindings = input_bindings::Bindings::new(arguments.len());
         for (slot, argument) in arguments.iter().enumerate() {
             let expected =
                 bindings.instantiate(self, &metadata.parameters[slot].ty, expr.source)?;

@@ -1,119 +1,8 @@
 //! Invocation-local bindings and contextual normal-form construction.
 use super::*;
 
-/// Substitutions follow completion order; final arguments follow declaration order.
-/// Slots store indices rather than cloning potentially large comptime terms.
-pub(super) struct Bindings {
-    slots: Vec<Option<usize>>,
-    pub parameters: Vec<nir::DeclarationParameter>,
-    pub arguments: Vec<Term>,
-    domains: Vec<Term>,
-}
-impl Bindings {
-    pub fn new(count: usize) -> Self {
-        Self {
-            slots: vec![None; count],
-            parameters: vec![],
-            arguments: vec![],
-            domains: vec![],
-        }
-    }
-    pub fn instantiate(
-        &self,
-        vm: &mut Interpreter<'_>,
-        ty: &Term,
-        source: SourceRange,
-    ) -> Result<Term, Error> {
-        vm.integer_operation(Some(source), |budget| budget.consume(self.parameters.len()))?;
-        if self
-            .parameters
-            .iter()
-            .zip(&self.arguments)
-            .all(|(p, a)| p.sort == a.sort())
-        {
-            return vm.instantiate_contextual_domain(ty, &self.parameters, &self.arguments, source);
-        }
-        let before = usize::try_from(vm.budget.steps).unwrap_or(usize::MAX);
-        let mut remaining = before;
-        let ids = self
-            .parameters
-            .iter()
-            .map(|p| p.declaration)
-            .collect::<Vec<_>>();
-        let result = nir::DeclarationSubstitution::bounded(
-            &ids,
-            &self.domains,
-            &self.arguments,
-            &[],
-            &mut remaining,
-        )
-        .and_then(|substitution| substitution.instantiate_bounded(ty, &mut remaining));
-        vm.budget.steps -= (before - remaining) as u64;
-        result.map_err(|error| {
-            vm.failure(
-                if matches!(error, nir::type_computations::Error::Budget) {
-                    ErrorKind::StepsExhausted
-                } else {
-                    ErrorKind::Type
-                },
-                Some(source),
-            )
-        })
-    }
-    pub fn specialize(
-        &self,
-        vm: &mut Interpreter<'_>,
-        input: &mut nir::program::NormalFormArgument,
-    ) -> Result<(), Error> {
-        let source = input.source();
-        let mut rewrite = |ty: &Term| self.instantiate(vm, ty, source);
-        for pattern in input.patterns_mut() {
-            pattern.rewrite_types(&mut rewrite)?;
-        }
-        for expression in input.expressions_mut() {
-            expression.rewrite_types(&mut rewrite)?;
-        }
-        Ok(())
-    }
-    pub fn contains(&self, slot: usize) -> bool {
-        self.slots.get(slot).is_some_and(Option::is_some)
-    }
-    pub fn finish(self) -> Option<Vec<Term>> {
-        if self
-            .slots
-            .iter()
-            .enumerate()
-            .all(|(slot, index)| *index == Some(slot))
-        {
-            return Some(self.arguments);
-        }
-        let order = self.slots.into_iter().collect::<Option<Vec<_>>>()?;
-        let mut terms: Vec<_> = self.arguments.into_iter().map(Some).collect();
-        order
-            .into_iter()
-            .map(|index| terms.get_mut(index)?.take())
-            .collect()
-    }
-}
-impl fmt::Display for Bindings {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "(normal-bindings")?;
-        for (slot, index) in self.slots.iter().enumerate() {
-            write!(f, " (slot {slot}")?;
-            if let Some(index) = index {
-                write!(
-                    f,
-                    " (declaration {}) (value {})",
-                    self.parameters[*index].declaration, self.arguments[*index]
-                )?;
-            } else {
-                write!(f, " pending")?;
-            }
-            write!(f, ")")?;
-        }
-        write!(f, ")")
-    }
-}
+use input_bindings::Bindings;
+
 pub(super) struct Normal {
     pub head: DeclarationId,
     pub bindings: Bindings,
@@ -365,20 +254,12 @@ impl Interpreter<'_> {
         value: Value,
         source: SourceRange,
     ) -> Result<(), Error> {
-        if slot >= bindings.slots.len() || bindings.contains(slot) {
-            return Err(self.failure(ErrorKind::Type, Some(source)));
-        }
         let parameter = self
             .normal_forms
             .get(&head)
             .and_then(|head| head.parameters.get(slot))
             .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
-        let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
-        let mut remaining = before;
-        let charged = nir::type_computations::charge_term(&parameter.ty, &mut remaining);
-        self.budget.steps -= (before - remaining) as u64;
-        charged.map_err(|_| self.failure(ErrorKind::StepsExhausted, Some(source)))?;
-        let domain = parameter.ty.clone();
+        let domain = &parameter.ty;
         let parameter = nir::DeclarationParameter {
             declaration: parameter.declaration,
             sort: if parameter.kind == nir::normal_forms::Kind::Type {
@@ -387,12 +268,7 @@ impl Interpreter<'_> {
                 nir::Sort::ComptimeValue
             },
         };
-        let term = self.residual_input_term(value, source)?;
-        bindings.slots[slot] = Some(bindings.arguments.len());
-        bindings.parameters.push(parameter);
-        bindings.domains.push(domain);
-        bindings.arguments.push(term);
-        Ok(())
+        bindings.bind(self, slot, parameter, domain, value, source)
     }
 }
 

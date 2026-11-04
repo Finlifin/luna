@@ -360,7 +360,12 @@ impl Frame<'_, '_> {
                 Progress::InputsComplete => {}
                 progress => return Ok(progress),
             }
-            let (parameters, types) = self.inputs.take().unwrap().finish_parts();
+            let (parameters, types) = self
+                .inputs
+                .take()
+                .unwrap()
+                .finish_parts()
+                .ok_or_else(|| vm.failure(ErrorKind::Type, Some(self.expression.source)))?;
             match self
                 .contract
                 .finish(vm, &self.expression, parameters, types)?

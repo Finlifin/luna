@@ -10,8 +10,7 @@ pub(super) struct Frame<'e> {
     domains: Vec<Term>,
     alias: bool,
     source: SourceRange,
-    types: Vec<Term>,
-    ready: BTreeSet<usize>,
+    completed: input_bindings::Bindings,
     pending: BTreeMap<usize, normal_inputs::StagedNormalInput>,
     position: usize,
     preparation: usize,
@@ -38,14 +37,9 @@ impl fmt::Display for Frame<'_> {
             Some(Waiting::Stage(slot)) => write!(f, " (stage {slot})")?,
             None => {}
         }
-        write!(f, ") (inputs")?;
-        for (slot, ty) in self.types.iter().enumerate() {
-            write!(
-                f,
-                " (input {slot} (ready {}) (pending {}) {ty})",
-                self.ready.contains(&slot),
-                self.pending.contains_key(&slot)
-            )?;
+        write!(f, ") {} (pending", self.completed)?;
+        for slot in self.pending.keys() {
+            write!(f, " (slot {slot})")?;
         }
         write!(f, "))")
     }
@@ -63,17 +57,10 @@ impl<'e> Frame<'e> {
             specialized: specialize.then(|| arguments.to_vec()),
             alias: matches!(expression.kind, K::CheckTypeAlias { .. }),
             source: expression.source,
-            types: parameters
-                .iter()
-                .map(|parameter| Term::Rigid {
-                    declaration: parameter.declaration,
-                    sort: parameter.sort,
-                })
-                .collect(),
+            completed: input_bindings::Bindings::new(parameters.len()),
             expression,
             parameters,
             domains,
-            ready: BTreeSet::new(),
             pending: BTreeMap::new(),
             position: 0,
             preparation: 0,
@@ -113,12 +100,12 @@ impl<'e> Frame<'e> {
             _ => unreachable!(),
         }
     }
-    pub fn finish_parts(self) -> (Vec<nir::DeclarationParameter>, Vec<Term>) {
-        (self.parameters, self.types)
+    pub fn finish_parts(self) -> Option<(Vec<nir::DeclarationParameter>, Vec<Term>)> {
+        Some((self.parameters, self.completed.finish()?))
     }
     #[cfg(test)]
-    pub fn finish(self) -> Vec<Term> {
-        self.types
+    pub fn finish(self) -> Option<Vec<Term>> {
+        self.completed.finish()
     }
     fn input(&self, slot: usize) -> &A {
         self.specialized
@@ -131,33 +118,36 @@ impl<'e> Frame<'e> {
         term: &Term,
         source: SourceRange,
     ) -> Result<Term, Error> {
-        vm.integer_operation(Some(source), |budget| budget.consume(self.ready.len()))?;
+        vm.integer_operation(Some(source), |budget| budget.consume(self.completed.len()))?;
         if self
-            .ready
+            .completed
+            .parameters
             .iter()
-            .all(|&slot| self.parameters[slot].sort == self.types[slot].sort())
+            .zip(&self.completed.arguments)
+            .all(|(parameter, argument)| parameter.sort == argument.sort())
         {
-            return vm.instantiate_contextual_domain(term, &self.parameters, &self.types, source);
+            return vm.instantiate_contextual_domain(
+                term,
+                &self.completed.parameters,
+                &self.completed.arguments,
+                source,
+            );
         }
         let before = usize::try_from(vm.budget.steps).unwrap_or(usize::MAX);
         let mut remaining = before;
         let result = (|| -> Result<Term, nir::NominalAdmissionError> {
             remaining = remaining
-                .checked_sub(self.ready.len())
+                .checked_sub(self.completed.slot_count())
                 .ok_or(nir::NominalAdmissionError::Budget)?;
             let mut ids = Vec::new();
             let mut domains = Vec::new();
             let mut arguments = Vec::new();
-            for &slot in &self.ready {
-                let domain = self
-                    .domains
-                    .get(slot)
-                    .unwrap_or(&Term::Primitive(Primitive::Type));
+            for (parameter, domain, argument) in self.completed.completed() {
                 nir::type_computations::charge_term(domain, &mut remaining)?;
-                nir::type_computations::charge_term(&self.types[slot], &mut remaining)?;
-                ids.push(self.parameters[slot].declaration);
+                nir::type_computations::charge_term(argument, &mut remaining)?;
+                ids.push(parameter.declaration);
                 domains.push(domain.clone());
-                arguments.push(self.types[slot].clone());
+                arguments.push(argument.clone());
             }
             let admitted = nir::admit_declaration_arguments_with_evidence_in(
                 &ids,
@@ -224,7 +214,7 @@ impl<'e> Frame<'e> {
             .unwrap_or(&Term::Primitive(Primitive::Type));
         let expected = self.instantiate(vm, domain, self.arguments()[slot].source())?;
         let unresolved = self.parameters.iter().enumerate().any(|(index, p)| {
-            !self.ready.contains(&index) && expected.mentions_rigid(p.declaration)
+            !self.completed.contains(index) && expected.mentions_rigid(p.declaration)
         });
         Ok((expected, unresolved))
     }
@@ -255,11 +245,21 @@ impl<'e> Frame<'e> {
             .bindings()
             .map(|_| vm.checkpoint_representation(&value, source))
             .transpose()?;
-        self.types[slot] = vm.residual_input_term(value, source)?;
+        let domain = self
+            .domains
+            .get(slot)
+            .unwrap_or(&Term::Primitive(Primitive::Type));
+        self.completed.bind(
+            vm,
+            slot,
+            self.parameters[slot].clone(),
+            domain,
+            value,
+            source,
+        )?;
         if let Some(copy) = copy {
             environment.insert(self.bindings().unwrap()[slot], copy);
         }
-        self.ready.insert(slot);
         Ok(())
     }
     fn drain(
@@ -326,7 +326,7 @@ impl<'e> Frame<'e> {
                 }
             }
             if self.position == self.arguments().len() {
-                if self.ready.len() != self.arguments().len() {
+                if self.completed.len() != self.arguments().len() {
                     return Err(vm.failure(ErrorKind::Type, Some(self.source)));
                 }
                 return Ok(normal_plan::Progress::InputsComplete);
@@ -508,7 +508,7 @@ mod tests {
                 .is_none()
         );
         assert!(environment.is_empty());
-        assert!(frame.to_string().contains("(pending true)"));
+        assert!(frame.to_string().contains("(pending (slot 0))"));
         let mut frame = Box::new(frame);
         assert!(
             vm.run_nominal_inputs(&mut frame, &mut environment)
@@ -530,11 +530,108 @@ mod tests {
             ErrorKind::InvalidControlFlow
         );
         assert_eq!(
-            frame.finish(),
+            frame.finish().unwrap(),
             vec![
                 Term::Integer(comptime_runtime::Integer::from_u128(17)),
                 Term::Primitive(Primitive::U8)
             ]
         );
+    }
+
+    #[test]
+    fn completed_inputs_retain_dynamic_sort_admission_and_abstract_evidence() {
+        let source = SourceRange { start: 1, end: 2 };
+        let id = |local| DeclarationId { package: 92, local };
+        let rigid = |local, sort| Term::Rigid {
+            declaration: id(local),
+            sort,
+        };
+        let ty = Term::Primitive(Primitive::Type);
+        let boolean = Term::Primitive(Primitive::Bool);
+        let parameters = vec![
+            nir::DeclarationParameter {
+                declaration: id(1),
+                sort: nir::Sort::Type,
+            },
+            nir::DeclarationParameter {
+                declaration: id(2),
+                sort: nir::Sort::ComptimeValue,
+            },
+            nir::DeclarationParameter {
+                declaration: id(3),
+                sort: nir::Sort::ComptimeValue,
+            },
+        ];
+        let domains = vec![ty.clone(), rigid(1, nir::Sort::Type), boolean.clone()];
+        let expression = Arc::new(Expr {
+            source,
+            ty: ty.clone(),
+            kind: K::NominalType {
+                declaration: id(0),
+                preparations: vec![],
+                order: None,
+                bindings: None,
+                arguments: (0..3)
+                    .map(|_| {
+                        A::Value(Expr {
+                            source,
+                            ty: ty.clone(),
+                            kind: K::TypeValue(ty.clone()),
+                        })
+                    })
+                    .collect(),
+            },
+        });
+        let package = Package::default();
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        vm.authorize_abstract_value_parameters(&[(id(4), boolean.clone())])
+            .unwrap();
+        for valid in [false, true] {
+            let mut frame = Frame::new(
+                nominal_plan::Expression::Owned(expression.clone()),
+                parameters.clone(),
+                domains.clone(),
+                false,
+            );
+            let mut environment = Environment::new();
+            // Source completion order differs from the declaration telescope.
+            let value = if valid {
+                Value::AbstractValue {
+                    declaration: id(4),
+                    ty: boolean.clone(),
+                }
+            } else {
+                Value::UnsignedInteger(7)
+            };
+            frame.bind(&mut vm, &mut environment, 2, value).unwrap();
+            let (domain, unresolved) = frame.domain(&mut vm, 1).unwrap();
+            assert_eq!(domain, rigid(1, nir::Sort::Type));
+            assert!(unresolved);
+            frame
+                .bind(&mut vm, &mut environment, 0, Value::Type(ty.clone()))
+                .unwrap();
+            frame
+                .bind(
+                    &mut vm,
+                    &mut environment,
+                    1,
+                    Value::Type(Term::Primitive(Primitive::U8)),
+                )
+                .unwrap();
+            let result = frame.instantiate(&mut vm, &rigid(2, nir::Sort::ComptimeValue), source);
+            if valid {
+                assert_eq!(result.unwrap(), Term::Primitive(Primitive::U8));
+                assert_eq!(
+                    frame.finish().unwrap(),
+                    vec![
+                        ty.clone(),
+                        Term::Primitive(Primitive::U8),
+                        rigid(4, nir::Sort::ComptimeValue)
+                    ]
+                );
+            } else {
+                assert_eq!(result.unwrap_err().kind, ErrorKind::Type);
+            }
+        }
     }
 }

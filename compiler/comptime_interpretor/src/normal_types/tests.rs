@@ -1111,7 +1111,7 @@ fn normal_bindings_preserve_declaration_order_and_reject_duplicate_slots() {
     let package = container_package();
     let head = package.normal_forms[0].declaration;
     let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
-    let mut bindings = normal_types::Bindings::new(2);
+    let mut bindings = input_bindings::Bindings::new(2);
     vm.bind_normal_input(head, &mut bindings, 1, Value::Bool(true), SOURCE)
         .unwrap();
     assert!(bindings.contains(1));
@@ -1139,8 +1139,8 @@ fn normal_bindings_preserve_declaration_order_and_reject_duplicate_slots() {
         bindings.finish().unwrap(),
         vec![Term::Primitive(Primitive::Bool), Term::Bool(true)]
     );
-    assert!(normal_types::Bindings::new(1).finish().is_none());
-    assert_eq!(normal_types::Bindings::new(0).finish(), Some(vec![]));
+    assert!(input_bindings::Bindings::new(1).finish().is_none());
+    assert_eq!(input_bindings::Bindings::new(0).finish(), Some(vec![]));
 }
 
 #[test]

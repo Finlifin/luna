@@ -892,3 +892,54 @@ rustfmt check 退出 0，证据 `/tmp/luna-tools-9dyomqdw/result.json`；
 `git diff --check` 通过。没有执行全 workspace、native 或性能基准。
 正式 docs 与原有受保护修改未动，范围与本机证据在
 `/tmp/luna-nf-closure-region-5x1w2vx7`。
+
+
+## 18. invocation 已完成输入共用槽位存储
+
+NF 与名义类型／typealias 的输入帧现在共用 `input_bindings::Bindings`。它只存放
+实际完成的 declaration、声明域与 comptime Term，槽位保存完成序号；未完成槽位
+明确为空。名义类型不再预填与声明同名的 rigid，并另靠 ready 集合判断它是否是真实
+输入。完成先后与最终声明参数顺序分别保留，最终收集缺少任何槽位都会失败。
+S-expression dump 显示 pending 槽位及真实完成值，不把待定输入伪装成实参。
+
+域的受预算复制和值的 residual transport 都成功后，才一次发布绑定；重复或越界槽位
+拒绝发布。名义帧仍先取得局部值快照，再完成绑定，最后更新调用环境。资源耗尽或
+未获授权的抽象值不能留下可被后续替换读取的半完成槽位。
+
+共享的是输入所有权和完成状态，不是取消各消费者的接纳边界。NF 继续使用自己的
+域替换规则；名义类型在动态域导致实际 sort 与声明 sort 不同时，仍按声明顺序调用
+带 layout 与抽象值证据的 admission，再形成替换。已完成的 Type 参数可使后续数据
+参数实际接收 Type；不能因此放行其他参数中不符合域的值。未完成参数不进入替换
+实参表，仍由原计划等待后续供应并恢复。
+
+这只是通用 invocation 参数计划的基础。普通 comptime callable 的参数包目前要求
+Type 子句在准备时已知；`count<.values = [1, 255], Byte()>()` 一类调用同时受列表域
+准备和 callable 签名准备阻塞。不能提前执行 Byte() 越过源码位置来修补。原
+`pending_clause_domains_can_wait_for_a_type_producer` 仍保留 ignored；本轮显式执行
+在列表元素域缺失处失败，退出 101，证据 `/tmp/luna-tools-47jlkw01/result.json`。
+完整可恢复 callable 参数包、ContextualExpr 以及旧 NF 参数树退役都尚未完成。
+
+
+验证在 `/home/fin/luna` 使用 `development/check.py --timeout 900 -- test`：
+
+- `-p comptime_interpretor --lib --no-fail-fast -- --skip
+  normal_input_data_tests::clause_list_inputs_share_domain_scope_and_budget_validation`
+  443 项通过、1 项显式跳过，退出 0，证据 `/tmp/luna-tools-v44ctzs5/result.json`。
+  新增检查覆盖完成预算的逐边界失败／重试、未授权传输不破坏已有槽位，以及乱序
+  完成后的动态 sort admission 和抽象值证据。原有树解释／字节码检查继续通过。
+- 首次未跳过的 VM 检查为 440 通过、1 失败，退出 101，证据
+  `/tmp/luna-tools-t65ep9ap/result.json`。该项期望 Type 错误，实际为带参数与 Value
+  阶段原因的 FunctionInputRejected；用改动前 HEAD 源码单独执行仍为相同失败，
+  退出 101，证据 `/tmp/luna-tools-wwaxjwl3/result.json`。未改动其预期。
+- `-p luna --test normal_input_plans --test open_normal_input_plans --test nominal_staging
+  --test nominal_value_parameters --test normal_form_domains --test comptime_clause_inputs
+  --test ordinary_clause_collectors --no-fail-fast` 共 412 项通过、1 项失败、1 项 ignored，
+  整条命令退出 101，证据 `/tmp/luna-tools-gxt9_tqw/result.json`。失败仍为既有
+  `memoized_value_indexed_keys_keep_declaration_and_value_arguments`：dispatch 函数
+  仍需 ordinary invocation input staging。ignored 为上文的动态 Type 供应用例。
+
+未运行全 workspace、native 或性能基准。正式 docs、既有资源检查修改与 library
+README 的原有工作区内容保持不变。
+
+修改 Rust 文件的格式检查退出 0，证据 `/tmp/luna-tools-jz03jkgm/result.json`；
+本次范围的 `git diff --check` 通过。
