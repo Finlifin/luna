@@ -356,6 +356,40 @@ region 的可恢复检查，不能把此处 Pending 宣称为完整宿主等待�
 
 ## 6. 缓存分别回答不同问题
 
+### 关联 Type 观察不进入执行目录
+
+`selected_type_view` 的已观察 Type 值由本次查询的局部表持有，`Tracked` 查找仅在
+该次 normalize 中叠加这份表。重复投影可以复用本查询已取得的视图；查询触发的
+初始化器及其内部读取仍访问普通 VM 目录，不继承外层查询的临时值。错误、耗尽和
+正常返回都直接释放局部表，不再修改／恢复 `associated_values`，旧的仅供这种恢复
+使用的 `remove_owned` 已删除。正常 resolver 发布的已检查主体及常量目录保持。
+
+旧实现虽然在返回前删除临时值，但该值曾对嵌套程序可见：观察 A 后执行 B，B 的主体
+再次读取 A 时直接取了临时值。回归实际记录为 `Domain9, Domain10`，漏掉第二次
+`Domain9`。当前观察 `[A, B, A]` 的轨迹为 `Domain9, Domain10, Domain9`：最后一个
+外层 A 复用本查询结果，B 内的独立读取正常执行。连续三次独立查询均重新执行，树与
+字节码路径一致；缺失选择及错误结果域后，后续查询不继承失败查询的值。
+
+工作目录 `/home/fin/luna`：只加入回归、尚未改生产逻辑时，
+`python3 -B development/check.py --timeout 900 -- test -p comptime_interpretor
+--lib selected_types::observation_tests -- --nocapture` 在
+`/tmp/luna-tools-jt43d__1/result.json` 退出 101，嵌套执行次数回归失败、失败后重试用例
+通过。修复后同命令在 `/tmp/luna-tools-sp0vzbub/result.json` 退出 0，两项通过。
+初稿 fixture 未提供函数体关联读取所需的 trait 契约，已补齐合法元数据，未放宽阶段检查。
+
+扩大检查运行 `python3 -B development/check.py --timeout 900 -- test
+-p comptime_interpretor -p luna --lib --test deferred_associated_values
+--test associated_signatures --test associated_purity --test comptime_bytecode_traits
+--test library_protocols --test comptime_bytecode_observations --no-fail-fast`：
+`/tmp/luna-tools-bur0dqmj/result.json` 退出 0，636 项通过，包括 VM 全部 493 项、
+真实 sysroot 协议和关联值 LLVM O0/O3 路径。三份 Rust 文件 scoped rustfmt 检查
+`/tmp/luna-tools-ycozzwm6/result.json` 退出 0。未运行全 workspace 或性能基准。
+
+该改动没有提供跨查询结果缓存，也没有使类型观察本身可暂停；未来区域／会话接线须
+继续让观察表归查询所有，不能重新放回共享世界或 VM 目录。
+
+### 缓存职责
+
 | 缓存 | 键及依赖 | 可以省略什么 | 绝不能省略什么 |
 | --- | --- | --- | --- |
 | 声明索引/世界准备 | immutable world revision | 重建索引及固定校验 | 使用点契约、局部实例域 |

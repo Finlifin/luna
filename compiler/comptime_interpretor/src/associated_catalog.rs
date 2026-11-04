@@ -55,9 +55,6 @@ impl<'a> Catalog<'a> {
     pub(super) fn insert_owned(&mut self, key: Key, expression: Arc<Expr>) {
         self.owned.insert(key, expression);
     }
-    pub(super) fn remove_owned(&mut self, key: &Key) {
-        self.owned.remove(key);
-    }
     fn get_static(&self, key: &Key) -> Option<&'a Expr> {
         if let Some(value) = self.local.get(key) {
             return Some(*value);

@@ -2,6 +2,8 @@
 //! demand missing selections through the frozen compiler world; normal-form
 //! heads remain opaque and initialized Type observations stay query-local.
 use super::*;
+#[cfg(test)]
+mod observation_tests;
 type Values<'a> = associated_catalog::Catalog<'a>;
 
 type Key = (InterfaceInstance, Term, DeclarationId);
@@ -15,11 +17,12 @@ impl Lookup for Values<'_> {
 }
 struct Tracked<'v, 'p> {
     values: &'v Values<'p>,
+    observed: &'v HashMap<Key, Expr>,
     missing: std::cell::RefCell<Option<Key>>,
 }
 impl Lookup for Tracked<'_, '_> {
     fn get(&self, key: &Key) -> Option<&Expr> {
-        let value = self.values.get(key);
+        let value = self.observed.get(key).or_else(|| self.values.get(key));
         if value.is_none() {
             *self.missing.borrow_mut() = Some(key.clone());
         }
@@ -56,12 +59,16 @@ impl Interpreter<'_> {
         ty: &Term,
         source: Option<SourceRange>,
     ) -> Result<Term, Error> {
-        let mut temporary = Vec::new();
-        let result = (|| loop {
+        // These are observations of this type query, never entries in the VM's
+        // execution catalogue. Nested programs and independent domain queries
+        // must still execute their own reads, even while this query is active.
+        let mut observed = HashMap::new();
+        loop {
             let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
             let mut fuel = before;
             let tracked = Tracked {
                 values: &self.associated_values,
+                observed: &observed,
                 missing: Default::default(),
             };
             // normalize meters each node and variable-size payload before
@@ -85,9 +92,8 @@ impl Interpreter<'_> {
                 },
             };
             let value = self.eval_associated_value(&access)?;
-            // A program remains a program in the persistent catalogue. Retain
-            // its observed Type only for this normalization, including nested
-            // projections; subsequent observations execute it again.
+            // Repeated projections in this query can reuse its observed Type.
+            // Do not let that result shadow the program for any VM execution.
             if !self.associated_values.contains_key(&key) {
                 let value = match value {
                     Flow::Value(Value::Type(ty)) => ty,
@@ -97,21 +103,16 @@ impl Interpreter<'_> {
                     },
                     _ => return Err(self.failure(ErrorKind::Type, Some(source))),
                 };
-                self.associated_values.insert_owned(
-                    key.clone(),
-                    Arc::new(Expr {
+                observed.insert(
+                    key,
+                    Expr {
                         source,
                         ty: Term::Primitive(Primitive::Type),
                         kind: K::TypeValue(value),
-                    }),
+                    },
                 );
-                temporary.push(key);
             }
-        })();
-        for key in temporary {
-            self.associated_values.remove_owned(&key);
         }
-        result
     }
 }
 
