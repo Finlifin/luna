@@ -94,6 +94,85 @@ fn contextual_categories_use_implicit_capability_contracts_before_inherent_searc
 }
 
 #[test]
+fn explicit_contextual_classification_respects_associated_member_shadowing() {
+    for (signature, body) in [
+        ("comptime fn produce() -> <|- bool>", "'(false)"),
+        ("comptime fn produce() -> <bool -| value: bool>", "'<value>"),
+        ("comptime fn produce(code: <|- bool>) -> bool", "false"),
+    ] {
+        let source = format!(
+            "pure comptime trait Parent {{ {signature}; }}
+            pure comptime trait Child :- Parent {{
+                assoc produce: comptime fn() -> bool;
+            }}
+            comptime fn accept() -> bool {{ true }}
+            struct Flag {{}}
+            comptime impl Parent for Flag {{ {signature} {{ {body} }} }}
+            comptime impl Child for Flag {{
+                assoc produce: comptime fn() -> bool = accept;
+            }}
+            fn run() -> bool {{ const value = Flag.as(Child).produce(); value }}"
+        );
+        assert_eq!(sysroot::run(&source), Value::Bool(true), "{signature}");
+        let diamond = source
+            .replace(
+                "struct Flag",
+                "pure comptime trait Left :- Child {}
+                pure comptime trait Right :- Child {}
+                pure comptime trait Outer :- Left + Right {}
+                struct Flag",
+            )
+            .replace(
+                "fn run()",
+                "comptime impl Left for Flag {}
+                comptime impl Right for Flag {}
+                comptime impl Outer for Flag {}
+                fn run()",
+            )
+            .replace("Flag.as(Child)", "Flag.as(Outer)");
+        assert_eq!(sysroot::run(&diamond), Value::Bool(true), "{signature}");
+        let ordinary_method = source
+            .replace(
+                "assoc produce: comptime fn() -> bool;",
+                "comptime fn produce() -> bool;",
+            )
+            .replace(
+                "assoc produce: comptime fn() -> bool = accept;",
+                "comptime fn produce() -> bool { accept() }",
+            );
+        assert_eq!(
+            sysroot::run(&ordinary_method),
+            Value::Bool(true),
+            "{signature}"
+        );
+    }
+}
+
+#[test]
+fn contextual_category_deduplication_does_not_merge_interface_instances() {
+    let source = "pure comptime trait Parent where flag: bool {
+            comptime fn produce() -> <|- bool>;
+        }
+        pure comptime trait Left :- Parent<true> {}
+        pure comptime trait Right :- Parent<true> {}
+        pure comptime trait Child :- Left + Right {}
+        struct Flag {}
+        comptime impl Parent<flag> for Flag
+        where flag: bool
+        {
+            comptime fn produce() -> <|- bool> { '(flag) }
+        }
+        comptime impl Left for Flag {}
+        comptime impl Right for Flag {}
+        comptime impl Child for Flag {}
+        fn run() -> bool { ~<Flag.as(Child).produce()> }";
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let distinct = source.replace("Right :- Parent<true>", "Right :- Parent<false>");
+    let failure = sysroot::compile(&distinct).unwrap_err();
+    assert!(failure.contains("ambiguous inherited member"), "{failure}");
+}
+
+#[test]
 fn contextual_classification_keeps_comptime_capability_source_priority() {
     let source = "trait Ordinary { comptime fn produce() -> bool; }
         pure comptime trait Code { comptime fn produce() -> <|- bool>; }
@@ -253,7 +332,7 @@ fn inherited_pattern_outputs_do_not_merge_distinct_member_origins() {
         struct Flag {} impl Left for Flag {} impl Right for Flag {} impl Child for Flag {}
         fn run()->bool {let ~[value=value]<Flag.as(Child).pattern()> = true;value}";
     let failure = support::compile_with_protocols(source, &Default::default()).unwrap_err();
-    assert!(!failure.contains("parsing failed"), "{failure}");
+    assert!(failure.contains("ambiguous inherited member"), "{failure}");
 }
 
 #[test]

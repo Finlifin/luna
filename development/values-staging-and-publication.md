@@ -377,8 +377,23 @@ contextual_method_owner 现先复用 context_member_interface，遵守既有约�
 调用结束恢复这些映射。泛型主体检查仍只能使用已成立的公共契约；选择实际主体
 的要求没有因分类成功而放宽。
 
+显式 trait view 的分类只读取声明及父接口图，不通过 interface_expr_for 求值实参。
+本地方法和本地关联项都会截断该分支的继承搜索；关联函数值不能因为父接口恰有
+同名生成器就被当成 contextual 方法。菱形路径按声明身份合并类别观察，多个不同
+声明来源则报告 inherited-member 歧义，不能用没有分类来转入普通调用。
+这里只观察类别：同一声明的不同接口实参并未因此成为同一来源，实际调用仍通过
+完整 InterfaceInstance 和 inherited_member_source 检查来源、替换及证据。
+
+显式、隐式及固有路径取得声明后，共用 contextual_declaration_owner 判断其签名。
+已知普通成员返回没有 contextual 类别；所需 trait 契约或成员声明缺失则报错。
+这避免把观察所需数据不可用误当成“普通成员”的确定答案。
+
 真实 sysroot 回归覆盖三种类别的直接／继承来源和同层歧义，另检查 pure comptime
 trait 的优先级。既有泛型名义值 trait 实参转发用例保持原有成功及拒绝断言。
+显式视角另覆盖三种父方法被关联函数值遮蔽、关联项经菱形继承出现，以及普通方法
+遮蔽 contextual 父方法；不同来源的 pattern 回归要求准确的继承歧义诊断。
+同一 Parent 方法经两条 Parent<true> 路径可正常调用；把一条改为 Parent<false>
+则必须在完整接口来源检查时报歧义，不能因分类时声明相同而合并接口实例。
 独立查询预算与未决分类 waiter 仍未统一，限制同本节前述迁移边界。
 
 验证工作目录 `/home/fin/luna`：
@@ -395,6 +410,21 @@ trait 的优先级。既有泛型名义值 trait 实参转发用例保持原有�
 误将普通 trait 的 runtime-phase 成员实现放在 comptime impl 中，被阶段检查拒绝。
 最终按该 trait 的成员阶段使用普通 impl，保留 comptime 方法自身的执行阶段；
 没有修改 phase 检查。未运行全 workspace 或性能基准。
+
+显式视角清理的验证仍在 `/home/fin/luna` 使用同一 check.py 入口：
+
+- 新的关联项遮蔽用例在修改前报 unknown trait code method，退出 101；
+  `/tmp/luna-tools-3oszr9qx/result.json`。修复后 `test -p luna --test cmtt_methods
+  --test trait_phases --no-fail-fast -- --skip
+  code_method_parent_value_clauses_form_indexed_code_signatures` 为 230 项通过，
+  退出 0；`/tmp/luna-tools-sb49dfg6/result.json`。
+- 扩展菱形／普通方法遮蔽回归后，`test -p luna --test cmtt --test cmtt_methods
+  --no-fail-fast -- --skip code_method_parent_value_clauses_form_indexed_code_signatures`
+  为 753 项通过，退出 0；`/tmp/luna-tools-arhjyb2w/result.json`。
+- 最后补充的 contextual_category_deduplication_does_not_merge_interface_instances
+  精确测试通过，退出 0；`/tmp/luna-tools-s6jefsxx/result.json`。该次只增加测试，
+  生产源码与上述两组检查相同。两份修改 Rust 文件 scoped rustfmt check 退出 0，
+  `/tmp/luna-tools-ruml61pd/result.json`；git diff --check 通过。
 
 ## 9. DefinitionTransaction
 

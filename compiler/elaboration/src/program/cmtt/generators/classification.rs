@@ -261,34 +261,46 @@ impl Checker<'_, '_> {
                 if !seen.insert(id) {
                     continue;
                 }
-                let Some(interface) = self
+                let interface = self
                     .checked_traits
                     .iter()
                     .find(|item| item.declaration == id)
-                else {
-                    return Ok(None);
-                };
+                    .ok_or_else(|| {
+                        error(
+                            head.span,
+                            "contextual method source lacks its trait contract",
+                        )
+                    })?;
                 if let Some(member) = interface
                     .methods
                     .iter()
                     .find(|member| member.name == name.name.as_str())
                 {
                     members.insert(member.declaration);
+                } else if let Some(member) = interface
+                    .associated
+                    .iter()
+                    .find(|member| member.name == name.name.as_str())
+                {
+                    // A local associated value shadows the inherited method
+                    // just as it does during ordinary member resolution.
+                    members.insert(member.declaration);
                 } else {
                     pending.extend(interface.parents.iter().map(|parent| parent.declaration));
                 }
             }
-            if members.len() != 1 {
-                return Ok(None);
+            if members.len() > 1 {
+                return Err(error(
+                    head.span,
+                    "ambiguous inherited member; specify its interface source",
+                ));
             }
-            let member = *members.iter().next().unwrap();
-            return Ok(self.package.owners().find_map(|(owner, _)| {
-                (matches_declaration(self.package, &self.package_identities, owner, member)
-                    && (self.is_code_generator(owner)
-                        || self.is_pattern_generator(owner)
-                        || self.is_data_consumer(owner)))
-                .then_some(owner)
-            }));
+            return members
+                .into_iter()
+                .next()
+                .map(|member| self.contextual_declaration_owner(member, head.span))
+                .transpose()
+                .map(Option::flatten);
         }
         if let Some(owner) = self.computed_code_method_hint(base, head.hir_id)? {
             return Ok(Some(owner));
@@ -357,17 +369,7 @@ impl Checker<'_, '_> {
                 // Associated values use ordinary value/call elaboration.
                 return Ok(None);
             };
-            return Ok(self.package.owners().find_map(|(owner, _)| {
-                (matches_declaration(
-                    self.package,
-                    &self.package_identities,
-                    owner,
-                    method.declaration,
-                ) && (self.is_code_generator(owner)
-                    || self.is_pattern_generator(owner)
-                    || self.is_data_consumer(owner)))
-                .then_some(owner)
-            }));
+            return self.contextual_declaration_owner(method.declaration, span);
         }
         let resolution = self
             .resolve_inherent_capability(name, subject, Budget::default())
@@ -402,12 +404,27 @@ impl Checker<'_, '_> {
             .iter()
             .find(|(member, _)| member == name)
             .ok_or_else(|| error(span, "selected contextual method lacks its member body"))?;
-        Ok(self.package.owners().find_map(|(owner, _)| {
-            (matches_declaration(self.package, &self.package_identities, owner, *body)
-                && (self.is_code_generator(owner)
-                    || self.is_pattern_generator(owner)
-                    || self.is_data_consumer(owner)))
-            .then_some(owner)
-        }))
+        self.contextual_declaration_owner(*body, span)
+    }
+
+    // A known declaration with no contextual signature is ordinary data;
+    // a missing declaration is an incomplete observation, not that answer.
+    fn contextual_declaration_owner(
+        &self,
+        member: DeclarationId,
+        span: Span,
+    ) -> Result<Option<OwnerId>, Error> {
+        let owner = self
+            .package
+            .owners()
+            .find_map(|(owner, _)| {
+                matches_declaration(self.package, &self.package_identities, owner, member)
+                    .then_some(owner)
+            })
+            .ok_or_else(|| error(span, "contextual method declaration is unavailable"))?;
+        Ok((self.is_code_generator(owner)
+            || self.is_pattern_generator(owner)
+            || self.is_data_consumer(owner))
+        .then_some(owner))
     }
 }
