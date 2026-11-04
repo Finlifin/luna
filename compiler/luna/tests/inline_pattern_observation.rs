@@ -145,3 +145,17 @@ fn pending_annotation_dependency_failure_does_not_authorize_the_typed_path() {
         4096,
     );
 }
+
+#[test]
+fn signature_dependency_classification_reports_exhaustion_and_recovers() {
+    check_source_observation(
+        "typealias Type = .Type'builtin;
+        comptime fn Domain(flag: bool) -> Type { if flag { Type } else { bool } }
+        fn identity(value: bool) -> bool { value }
+        fn accept(comptime flag: bool, comptime T: defer Domain(flag),
+            callback: defer fn(T) -> T) -> bool { true }
+        fn run() -> bool { accept(true, bool, identity) }",
+        "signature input observation budget exhausted",
+        4096,
+    );
+}

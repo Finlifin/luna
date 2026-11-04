@@ -1872,25 +1872,29 @@ impl Checker<'_, '_> {
             if let Some(ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) =
                 self.package.item(owner).map(|item| &item.kind)
             {
-                let pending = std::cell::Cell::new(false);
-                required::signature_inputs_ready(value, 0, &|binding| {
-                    let missing = sig
-                        .params
-                        .iter()
-                        .position(|p| p.hir_id == binding)
-                        .and_then(|slot| self.signature_domains.get(&owner)?.get(slot))
-                        .is_some_and(|(sort, domain)| {
-                            ((*sort != Sort::Runtime || sig.modifiers.is_comptime)
-                                && domain.is_none())
-                                || (sig.modifiers.is_comptime
-                                    && *sort == Sort::Runtime
-                                    && domain.is_some()
-                                    && describable_open_type(value, 0))
-                        });
-                    pending.set(pending.get() || missing);
-                    !missing
-                })?;
-                if pending.get() {
+                // Use the same complete dependency observation as definition
+                // checking. An unsupported node in a partial readiness scan
+                // must not silently erase inputs captured inside its body.
+                self.required_steps = self
+                    .required_steps
+                    .checked_sub(sig.params.len() as u64)
+                    .ok_or_else(|| {
+                        error(expr.span, "signature input observation budget exhausted")
+                    })?;
+                let describe_values = sig.modifiers.is_comptime && describable_open_type(value, 0);
+                let pending_inputs = sig
+                    .params
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(slot, parameter)| {
+                        let (sort, domain) = self.signature_domains.get(&owner)?.get(slot)?;
+                        let missing = ((*sort != Sort::Runtime || sig.modifiers.is_comptime)
+                            && domain.is_none())
+                            || (describe_values && *sort == Sort::Runtime && domain.is_some());
+                        missing.then_some(local(parameter.hir_id))
+                    })
+                    .collect();
+                if self.annotation_may_use_pending_inputs(value, &pending_inputs)? {
                     let slot = (0..=sig.params.len())
                         .find(|slot| {
                             annotation_source(sig, *slot).is_some_and(|ty| ty.hir_id == expr.hir_id)

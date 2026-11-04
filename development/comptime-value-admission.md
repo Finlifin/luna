@@ -796,3 +796,34 @@ key 的 1 项显式 skip 未解除。四个已格式化 Rust 文件的 rustfmt c
 `git diff --check` 通过；原有受保护文件的哈希未变。清单、源码哈希、基线比较及
 本机检查证据在 `/tmp/luna-annotation-dependencies-fja2zljt`。未执行全 workspace、
 native 或性能基准，未把闭包待定 Type 的既有失败计入通过项。
+
+
+### 签名分类共享待定输入依赖观察
+
+`signature_annotation` 也已接入 `annotation_may_use_pending_inputs`。旧路径调用
+`signature_inputs_ready` 却丢弃其返回的 readiness，只读取回调设置的 Cell；遍历
+遇到尚未支持的节点时返回 false，却不一定访问内部捕获，于是可能错误地开始
+required preparation。现先按既有参数域规则形成候选输入，再由与定义检查共用
+的完整源码依赖查询决定是否保留 Suspended。函数声明、参数身份和原标注槽保持
+不变，不提前调用生产者，也不引入按库名称决定的路径。
+
+候选扫描记入共享 preparation 预算；扫描或依赖观察失败直接传播，不得当作
+无依赖或自动改走另一个求值入口。新的预算用例在同一份解析后的 HIR 上触发
+分类耗尽，再以充分预算重新检查并实际执行含待定签名的调用。
+
+这仍是分类依据的清理：`signature_inputs_ready` 的其他消费者尚在，普通 comptime
+已知域值的候选规则仍使用 `describable_open_type`。待定闭包域、动态 callee 和
+完整行为区域没有因这一接线而完成；后续表示与迁移边界见
+[待定闭包设计](values-staging-and-publication.md#待定闭包需要保留可调用证据与主体不能伪造完整函数类型)。
+
+
+在 `/home/fin/luna` 用 `development/check.py --timeout 900 -- test -p luna`
+检查：开放函数、标注行为、开放 NF 计划和观察预算四组 405 项通过，证据
+`/tmp/luna-tools-5gpte9eo/result.json`。补充预算恢复用例后，观察预算及六组相邻
+检查共 468 项通过，证据 `/tmp/luna-tools-3octmdco/result.json`；其中预算组从
+4 项增为 5 项。两轮均退出 0，重复覆盖不累计为独立测试数。2 项既有 ignored
+和 memoized value-indexed key 的 1 项显式 skip 保持未完成状态。
+修改的测试经 rustfmt 排版，旧大文件只整理本次代码块；`git diff --check` 通过。
+原有受保护修改的哈希未变，正式 docs 未动。提交清单及本机证据放在
+`/tmp/luna-signature-dependency-routing-q9imdni1`；未运行全 workspace、native
+或性能基准，不能据此宣称依赖查询的规模成本已经评估。
